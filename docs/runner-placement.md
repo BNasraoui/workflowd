@@ -501,6 +501,10 @@ Check: the daemon's loader accepts the file; this command, from the checkout, wr
 (set -a; . <daemon-environment-file>; bun -e 'import { loadConfig } from "./src/config.ts"; await loadConfig(process.env); console.log("valid")')
 ```
 
+The check reads only the environment file, so on a host where the daemon unit also gives values
+(`Environment=` or `LoadCredential=` lines, or a wrapper that adds secrets), give the check those
+values too, or the check fails for keys that your edit did not change.
+
 A fault stops the command, and the daemon's next start, with one of these errors:
 
 - a `runner` placement whose alias has no `actions-native` policy: `A runner placement needs an
