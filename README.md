@@ -124,6 +124,31 @@ install -Dm0644 deploy/systemd/opencode-server.service.d/10-disable-project-conf
 
 OpenCode loads agents and configuration only at startup. Restart `opencode-server.service` after independent verification to apply these files. `systemctl --user cat opencode-server.service` must show `Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1` before processing untrusted repositories.
 
+## Ticket Writing Skill
+
+Install the bundled `ticket-writing` skill for OpenCode through skills.sh:
+
+```bash
+npx skills add BNasraoui/workflowd --skill ticket-writing --agent opencode -y
+```
+
+Confirm that OpenCode discovers the installed skill:
+
+```bash
+opencode debug skill
+```
+
+The skill is model-invoked. Ask OpenCode to draft, refine, translate, or review a ticket
+for QRSPI readiness. For example:
+
+```text
+Refine workflowd-123 and update the Bead once it is ready for QRSPI.
+```
+
+The canonical ticket template lives in
+`skills/ticket-writing/references/ticket-template.md`; do not copy it into
+OpenCode configuration.
+
 ## Workflowd Unit
 
 Install, but do not enable or start, the Workflowd unit:
