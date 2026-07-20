@@ -28,8 +28,13 @@ function createProject(name: string, productionSource: string): string {
     }),
   )
   writeFileSync(join(root, "src", "contracts.ts"), productionSource)
-  writeFileSync(join(root, "test", "rule.test.ts"), "export {}\n")
   return root
+}
+
+function projectCase(projectRoot: string, path: string, code: string) {
+  const filename = join(projectRoot, path)
+  writeFileSync(filename, code)
+  return { filename, code }
 }
 
 function typedRuleTester(projectRoot: string): RuleTester {
@@ -74,8 +79,7 @@ typedRuleTester(alphaProject).run("no-test-contract-replacements (alpha)", contr
   valid: [
     {
       name: "allows unrelated contracts in tests",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "interface ScenarioInput {}",
+      ...projectCase(alphaProject, "test/unrelated-contract.test.ts", "interface ScenarioInput {}"),
     },
     {
       name: "does not report production declarations",
@@ -84,15 +88,13 @@ typedRuleTester(alphaProject).run("no-test-contract-replacements (alpha)", contr
     },
     {
       name: "does not leak names from another project",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "type Beta = {}",
+      ...projectCase(alphaProject, "test/other-project-name.test.ts", "type Beta = {}"),
     },
   ],
   invalid: [
     {
       name: "rejects a Port declaration in a test",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "type LocalPort = {}",
+      ...projectCase(alphaProject, "test/local-port.test.ts", "type LocalPort = {}"),
       errors: [
         {
           messageId: "replacementContract",
@@ -106,8 +108,11 @@ typedRuleTester(alphaProject).run("no-test-contract-replacements (alpha)", contr
     },
     {
       name: "rejects a Dependencies declaration in a test",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "interface LocalDependencies {}",
+      ...projectCase(
+        alphaProject,
+        "test/local-dependencies.test.ts",
+        "interface LocalDependencies {}",
+      ),
       errors: [
         {
           messageId: "replacementContract",
@@ -121,8 +126,7 @@ typedRuleTester(alphaProject).run("no-test-contract-replacements (alpha)", contr
     },
     {
       name: "rejects a production contract name",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "interface AlphaPort {}",
+      ...projectCase(alphaProject, "test/alpha-port.test.ts", "interface AlphaPort {}"),
       errors: [
         {
           messageId: "replacementContract",
@@ -136,8 +140,7 @@ typedRuleTester(alphaProject).run("no-test-contract-replacements (alpha)", contr
     },
     {
       name: "rejects a suffix-stripped production contract name",
-      filename: join(alphaProject, "test", "rule.test.ts"),
-      code: "type Alpha = {}",
+      ...projectCase(alphaProject, "test/alpha.test.ts", "type Alpha = {}"),
       errors: [
         {
           messageId: "replacementContract",
@@ -156,15 +159,13 @@ typedRuleTester(betaProject).run("no-test-contract-replacements (beta)", contrac
   valid: [
     {
       name: "isolates cached production names from an earlier project",
-      filename: join(betaProject, "test", "rule.test.ts"),
-      code: "type Alpha = {}",
+      ...projectCase(betaProject, "test/alpha.test.ts", "type Alpha = {}"),
     },
   ],
   invalid: [
     {
       name: "uses the current project's suffix-stripped contract names",
-      filename: join(betaProject, "test", "rule.test.ts"),
-      code: "type Beta = {}",
+      ...projectCase(betaProject, "test/beta.test.ts", "type Beta = {}"),
       errors: [
         {
           messageId: "replacementContract",
@@ -187,8 +188,11 @@ typedRuleTester(alphaProject).run(
     invalid: [
       {
         name: "keeps each project's cache stable across runs",
-        filename: join(alphaProject, "test", "rule.test.ts"),
-        code: "type Alpha = { rerun: true }",
+        ...projectCase(
+          alphaProject,
+          "test/alpha-cache-rerun.test.ts",
+          "type Alpha = { rerun: true }",
+        ),
         errors: [{ messageId: "replacementContract", data: { name: "Alpha" } }],
       },
     ],
@@ -331,7 +335,6 @@ syntaxRuleTester.run("no-double-assertion-through-unknown", doubleAssertionRule,
 
 const aliasedUnknownAssertion =
   "type UnknownAlias = unknown\nconst value = input as UnknownAlias as Target"
-writeFileSync(join(alphaProject, "test", "double-assertion.test.ts"), aliasedUnknownAssertion)
 
 typedRuleTester(alphaProject).run(
   "no-double-assertion-through-unknown (type-aware)",
@@ -340,15 +343,21 @@ typedRuleTester(alphaProject).run(
     valid: [
       {
         name: "allows aliases that do not resolve to unknown",
-        filename: join(alphaProject, "test", "double-assertion.test.ts"),
-        code: "type StringAlias = string\nconst value = input as StringAlias as Target",
+        ...projectCase(
+          alphaProject,
+          "test/string-alias-assertion.test.ts",
+          "type StringAlias = string\nconst value = input as StringAlias as Target",
+        ),
       },
     ],
     invalid: [
       {
         name: "rejects a local type alias that resolves to unknown",
-        filename: join(alphaProject, "test", "double-assertion.test.ts"),
-        code: aliasedUnknownAssertion,
+        ...projectCase(
+          alphaProject,
+          "test/unknown-alias-assertion.test.ts",
+          aliasedUnknownAssertion,
+        ),
         errors: [
           {
             messageId: "doubleAssertion",
@@ -397,8 +406,11 @@ typedRuleTester(effectProject).run("no-unknown-effect-channels", effectRule, {
     },
     {
       name: "does not enforce production Effect policy in tests",
-      filename: join(effectProject, "test", "rule.test.ts"),
-      code: 'import type { Effect } from "effect"\ntype TestEffect = Effect.Effect<unknown, unknown>',
+      ...projectCase(
+        effectProject,
+        "test/effect.test.ts",
+        'import type { Effect } from "effect"\ntype TestEffect = Effect.Effect<unknown, unknown>',
+      ),
     },
   ],
   invalid: [

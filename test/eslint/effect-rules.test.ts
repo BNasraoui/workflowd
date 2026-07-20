@@ -6,7 +6,9 @@ import effectPlugin from "../../eslint-rules/effect/index.mjs"
 
 RuleTester.describe = describe
 RuleTester.it = test
-RuleTester.itOnly = test.only
+RuleTester.itOnly = (name) => {
+  throw new Error(`Focused RuleTester test is disabled: ${name}`)
+}
 setDefaultTimeout(20_000)
 
 const ruleTester = new RuleTester({

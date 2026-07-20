@@ -37,6 +37,13 @@ function captureLogs<A, E, R>(
 async function git(cwd: string, ...args: ReadonlyArray<string>): Promise<string> {
   const process = Bun.spawn(["git", ...args], {
     cwd,
+    env: {
+      ...Bun.env,
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_AUTHOR_NAME: "Workflowd Test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "Workflowd Test",
+    },
     stderr: "pipe",
     stdout: "pipe",
   })
