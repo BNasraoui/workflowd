@@ -16,14 +16,17 @@ ticket that will require multistage work (i.e. QRSPI).
 2. For an existing ticket, run `bd show <id> --json`. Read and verify each source the user
    supplied and every reference in the ticket's `Sources` section. Done when you have read
    the ticket and its sources and resolved every citation.
-3. If a missing fact could change the ticket's meaning, ask the user and end the turn.
+3. For a review-only request, assess the ticket against the readiness rules below, report
+   whether it is ready and any missing product details, then stop. Do not draft changes or
+   write to Beads.
+4. If a missing fact could change the ticket's meaning, ask the user and end the turn.
    Draft only after they answer. Ask about desired behavior and scope; leave implementation
    choices to the coming QRSPI workflow.
-4. Write or revise the ticket. Keep its Beads type and the intent found in the user input
+5. Write or revise the ticket. Keep its Beads type and the intent found in the user input
    and sources. For QRSPI work, check every readiness rule below. For other work, check the
    user's request.
-5. Write to Beads when you and the user are happy with the ticket. Use `bd create` or `bd update`,
-   then run `bd show <id>`. Done when the saved ticket matches the draft.
+6. Only when the user explicitly asks to persist changes, write to Beads with `bd create` or
+   `bd update`, then run `bd show <id>`. Done when the saved ticket matches the draft.
 
 ## QRSPI readiness
 
