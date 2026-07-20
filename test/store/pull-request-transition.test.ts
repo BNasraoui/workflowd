@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
-import {
-  decodePullRequestEvent,
-  makeStoreLayer,
-  samplePullRequestEvent,
-} from "./harness"
+import { decodePullRequestEvent, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 describe("pull request transition storage", () => {
   test.each([

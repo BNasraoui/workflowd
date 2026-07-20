@@ -32,16 +32,14 @@ export class ScopedKeyedLock {
           }),
         )
         yield* restore(
-          entry.semaphore.withPermits(1)(
-            Deferred.succeed(acquired, undefined).pipe(
-              Effect.zipRight(Deferred.await(released)),
-            ),
-          ).pipe(Effect.forkScoped),
+          entry.semaphore
+            .withPermits(1)(
+              Deferred.succeed(acquired, undefined).pipe(Effect.zipRight(Deferred.await(released))),
+            )
+            .pipe(Effect.forkScoped),
         )
         yield* restore(Deferred.await(acquired))
-        yield* Effect.addFinalizer(() =>
-          Deferred.succeed(released, undefined).pipe(Effect.asVoid),
-        )
+        yield* Effect.addFinalizer(() => Deferred.succeed(released, undefined).pipe(Effect.asVoid))
       }),
     )
   }

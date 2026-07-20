@@ -1,15 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import type { RestEndpointMethodTypes } from "@octokit/rest"
 import { Effect, Schema } from "effect"
-import {
-  Publication,
-  type Publication as PublicationType,
-} from "../src/domain/publication"
-import {
-  GitHubAppAdapter,
-  GitHubClientError,
-  type GitHubPort,
-} from "../src/github"
+import { Publication, type Publication as PublicationType } from "../src/domain/publication"
+import { GitHubAppAdapter, GitHubClientError, type GitHubPort } from "../src/github"
 import type {
   GitHubCheckRun,
   GitHubInstallationAdapter,
@@ -19,6 +11,23 @@ import type {
 
 const headSha = "a".repeat(40)
 const alwaysCurrent = () => Effect.succeed(true)
+
+type RecordingInputs = {
+  readonly "pulls.get": Parameters<GitHubInstallationAdapter["getPullRequest"]>[0]
+  readonly "issues.listComments": Parameters<GitHubInstallationAdapter["listIssueCommentPages"]>[0]
+  readonly "issues.createComment": Parameters<GitHubInstallationAdapter["createIssueComment"]>[0]
+  readonly "issues.updateComment": Parameters<GitHubInstallationAdapter["updateIssueComment"]>[0]
+  readonly "checks.listForRef": Parameters<GitHubInstallationAdapter["listCheckRunPages"]>[0]
+  readonly "checks.create": Parameters<GitHubInstallationAdapter["createCheckRun"]>[0]
+  readonly "checks.update": Parameters<GitHubInstallationAdapter["updateCheckRun"]>[0]
+}
+
+type RecordingCall = {
+  readonly [Method in keyof RecordingInputs]: {
+    readonly method: Method
+    readonly input: RecordingInputs[Method]
+  }
+}[keyof RecordingInputs]
 
 function makePublication(summary = "No actionable findings."): PublicationType {
   return Schema.decodeUnknownSync(Publication)({
@@ -84,37 +93,37 @@ function makeRecordingClient(options?: {
   readonly commentPages?: ReadonlyArray<ReadonlyArray<GitHubIssueComment>>
   readonly checkRunPages?: ReadonlyArray<ReadonlyArray<GitHubCheckRun>>
 }) {
-  const calls: Array<{ readonly method: string; readonly input: object }> = []
-  const record = (method: string, input: object) => {
-    calls.push({ method, input })
+  const calls: Array<RecordingCall> = []
+  const record = (call: RecordingCall) => {
+    calls.push(call)
   }
   const adapter: GitHubInstallationAdapter = {
     getPullRequest: async (input) => {
-      record("pulls.get", input)
+      record({ method: "pulls.get", input })
       return options?.pullRequest ?? makePullRequestData()
     },
     listIssueCommentPages: (input) =>
       pages(options?.commentPages ?? [[]], (page) =>
-        record("issues.listComments", { ...input, page }),
+        record({ method: "issues.listComments", input: { ...input, page } }),
       ),
     createIssueComment: async (input) => {
-      record("issues.createComment", input)
+      record({ method: "issues.createComment", input })
       return 22
     },
     updateIssueComment: async (input) => {
-      record("issues.updateComment", input)
+      record({ method: "issues.updateComment", input })
       return 22
     },
     listCheckRunPages: (input) =>
       pages(options?.checkRunPages ?? [[]], (page) =>
-        record("checks.listForRef", { ...input, page }),
+        record({ method: "checks.listForRef", input: { ...input, page } }),
       ),
     createCheckRun: async (input) => {
-      record("checks.create", input)
+      record({ method: "checks.create", input })
       return 33
     },
     updateCheckRun: async (input) => {
-      record("checks.update", input)
+      record({ method: "checks.update", input })
       return 33
     },
   }
@@ -126,23 +135,48 @@ function makeRecordingClient(options?: {
   }
 }
 
-function callInput<T extends object>(
-  calls: ReadonlyArray<{ readonly method: string; readonly input: object }>,
-  method: string,
-): T {
-  const input = calls.find((call) => call.method === method)?.input
-  if (input === undefined) throw new Error(`Missing input for ${method}`)
-  return input as T
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "pulls.get",
+): RecordingInputs["pulls.get"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "issues.listComments",
+): RecordingInputs["issues.listComments"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "issues.createComment",
+): RecordingInputs["issues.createComment"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "issues.updateComment",
+): RecordingInputs["issues.updateComment"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "checks.listForRef",
+): RecordingInputs["checks.listForRef"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "checks.create",
+): RecordingInputs["checks.create"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: "checks.update",
+): RecordingInputs["checks.update"]
+function callInput(
+  calls: ReadonlyArray<RecordingCall>,
+  method: RecordingCall["method"],
+): RecordingInputs[keyof RecordingInputs] {
+  const call = calls.find((candidate) => candidate.method === method)
+  if (call === undefined) throw new Error(`Missing input for ${method}`)
+  return call.input
 }
 
 describe("GitHubAppAdapter.publishReview", () => {
   test("creates the sticky comment and per-SHA Check Run with valid abortable payloads", async () => {
     const recording = makeRecordingClient()
     const currentnessTimes: Array<Date> = []
-    const client: GitHubPort = new GitHubAppAdapter(
-      12_345,
-      recording.getClient,
-    )
+    const client: GitHubPort = new GitHubAppAdapter(12_345, recording.getClient)
     const publication: PublicationType = {
       ...makePublication(),
       review: {
@@ -187,9 +221,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       external_id: "review:42:7:1",
       head_sha: headSha,
     })
-    const comment = callInput<
-      RestEndpointMethodTypes["issues"]["createComment"]["parameters"]
-    >(recording.calls, "issues.createComment")
+    const comment = callInput(recording.calls, "issues.createComment")
     expect(comment.body).toContain("<!-- workflowd:review:42:7 -->")
     expect(comment.body).toContain(`Commit: \`${headSha}\``)
     expect(comment.body).toContain("**[HIGH] Retries duplicate the charge**")
@@ -218,9 +250,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       })
       const client = new GitHubAppAdapter(12_345, recording.getClient)
 
-      const result = await Effect.runPromise(
-        client.publishReview(makePublication(), alwaysCurrent),
-      )
+      const result = await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
       expect(result).toBe("stale")
       expect(recording.calls.map((call) => call.method)).toEqual(["pulls.get"])
@@ -242,9 +272,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       })
       const client = new GitHubAppAdapter(12_345, recording.getClient)
 
-      const result = await Effect.runPromise(
-        client.publishReview(makePublication(), alwaysCurrent),
-      )
+      const result = await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
       expect(result).toBe("stale")
       expect(recording.calls.map((call) => call.method)).toEqual(["pulls.get"])
@@ -260,10 +288,7 @@ describe("GitHubAppAdapter.publishReview", () => {
     )
 
     expect(result).toBe("stale")
-    expect(recording.calls.map((call) => call.method)).toEqual([
-      "pulls.get",
-      "issues.listComments",
-    ])
+    expect(recording.calls.map((call) => call.method)).toEqual(["pulls.get", "issues.listComments"])
   })
 
   test("suppresses a stale check after the comment and lets the latest publication reassert owned output", async () => {
@@ -323,9 +348,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       operationKey: "review:42:7:1:2",
       reviewRequestNumber: 2,
     })
-    const latestResult = await Effect.runPromise(
-      client.publishReview(latest, alwaysCurrent),
-    )
+    const latestResult = await Effect.runPromise(client.publishReview(latest, alwaysCurrent))
 
     expect(oldResult).toBe("stale")
     expect(latestResult).toBe("published")
@@ -347,26 +370,16 @@ describe("GitHubAppAdapter.publishReview", () => {
           },
         ],
       ],
-      checkRunPages: [
-        [{ id: 100, externalId: "review:42:7:1", appId: 999 }],
-      ],
+      checkRunPages: [[{ id: 100, externalId: "review:42:7:1", appId: 999 }]],
     })
     const client = new GitHubAppAdapter(12_345, recording.getClient)
 
     await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
-    expect(recording.calls.map((call) => call.method)).toContain(
-      "issues.createComment",
-    )
-    expect(recording.calls.map((call) => call.method)).not.toContain(
-      "issues.updateComment",
-    )
-    expect(recording.calls.map((call) => call.method)).toContain(
-      "checks.create",
-    )
-    expect(recording.calls.map((call) => call.method)).not.toContain(
-      "checks.update",
-    )
+    expect(recording.calls.map((call) => call.method)).toContain("issues.createComment")
+    expect(recording.calls.map((call) => call.method)).not.toContain("issues.updateComment")
+    expect(recording.calls.map((call) => call.method)).toContain("checks.create")
+    expect(recording.calls.map((call) => call.method)).not.toContain("checks.update")
   })
 
   test("stops each page iterator as soon as an owned result is found", async () => {
@@ -387,12 +400,8 @@ describe("GitHubAppAdapter.publishReview", () => {
 
     await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
-    expect(
-      recording.calls.filter((call) => call.method === "issues.listComments"),
-    ).toHaveLength(2)
-    expect(
-      recording.calls.filter((call) => call.method === "checks.listForRef"),
-    ).toHaveLength(2)
+    expect(recording.calls.filter((call) => call.method === "issues.listComments")).toHaveLength(2)
+    expect(recording.calls.filter((call) => call.method === "checks.listForRef")).toHaveLength(2)
     expect(callInput(recording.calls, "issues.updateComment")).toMatchObject({
       comment_id: 2,
     })
@@ -464,16 +473,12 @@ describe("GitHubAppAdapter.publishReview", () => {
     })
     await Effect.runPromise(client.publishReview(publication, alwaysCurrent))
 
-    const input = callInput<
-      RestEndpointMethodTypes["checks"]["create"]["parameters"]
-    >(recording.calls, "checks.create")
+    const input = callInput(recording.calls, "checks.create")
     expect(input.output?.summary).toBeString()
     expect(input.output?.text).toBeString()
     expect(input.output!.summary.length).toBeLessThanOrEqual(65_535)
     expect(input.output!.text!.length).toBeLessThanOrEqual(65_535)
-    expect(input.output?.text).toContain(
-      "<!-- workflowd:review:42:7 -->",
-    )
+    expect(input.output?.text).toContain("<!-- workflowd:review:42:7 -->")
     expect(input.output?.text).toContain(`Commit: \`${headSha}\``)
   })
 })

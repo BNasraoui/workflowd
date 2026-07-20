@@ -19,9 +19,7 @@ export function reviewMarker(publication: Publication): string {
 
 export function renderReviewComment(publication: Publication): string {
   const verdict =
-    publication.review.verdict === "pass"
-      ? "No changes requested"
-      : "Changes requested"
+    publication.review.verdict === "pass" ? "No changes requested" : "Changes requested"
   const findings = publication.review.findings
     .map((finding, index) => {
       const location = finding.path
@@ -54,8 +52,7 @@ export function presentReviewCheck(
   publication: Publication,
   comment: string,
 ): ReviewCheckPresentation {
-  const conclusion =
-    publication.review.verdict === "pass" ? "success" : "action_required"
+  const conclusion = publication.review.verdict === "pass" ? "success" : "action_required"
   return {
     conclusion,
     output: {

@@ -4,10 +4,7 @@ import type { WorkflowStorePort } from "./contracts"
 import type { makePullRequestTransition } from "./pull-requests"
 import type { makeSharedStoreOperations } from "./shared"
 
-type DeliveryOperations = Pick<
-  WorkflowStorePort,
-  "ingestPullRequest" | "recordDelivery"
->
+type DeliveryOperations = Pick<WorkflowStorePort, "ingestPullRequest" | "recordDelivery">
 
 export function makeDeliveryOperations(
   sql: SqlClient,
@@ -27,8 +24,8 @@ export function makeDeliveryOperations(
         })
       }).pipe(sql.withTransaction),
     recordDelivery: (delivery) =>
-      shared.insertDelivery(delivery).pipe(
-        Effect.map((rows) => (rows.length === 0 ? "duplicate" : "inserted")),
-      ),
+      shared
+        .insertDelivery(delivery)
+        .pipe(Effect.map((rows) => (rows.length === 0 ? "duplicate" : "inserted"))),
   }
 }

@@ -12,10 +12,7 @@ import {
 } from "../domain/identifiers"
 import { FixResult } from "../domain/fix-result"
 import { Publication } from "../domain/publication"
-import {
-  ChangesRequestedReviewResult,
-  ReviewResult,
-} from "../domain/review-result"
+import { ChangesRequestedReviewResult, ReviewResult } from "../domain/review-result"
 import { FixWork, ReviewWork, type Work } from "../domain/work"
 import { StoreDataError } from "./errors"
 import type { AgentCommand, PullRequestReconciliation } from "./model"
@@ -37,10 +34,7 @@ const workRowFields = {
   baseSha: column("base_sha", GitObjectId),
   expectedHeadSha: column("expected_head_sha", GitObjectId),
   headRef: column("head_ref", Schema.NonEmptyString),
-  headRepositoryFullName: column(
-    "head_repository_full_name",
-    Schema.NonEmptyString,
-  ),
+  headRepositoryFullName: column("head_repository_full_name", Schema.NonEmptyString),
   generation: GenerationNumber,
   reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
   workerId: column("lease_owner", WorkerId),
@@ -141,10 +135,7 @@ const PublicationStorageRow = Schema.Struct({
   baseSha: column("base_sha", GitObjectId),
   expectedHeadSha: column("expected_head_sha", GitObjectId),
   headRef: column("head_ref", Schema.NonEmptyString),
-  headRepositoryFullName: column(
-    "head_repository_full_name",
-    Schema.NonEmptyString,
-  ),
+  headRepositoryFullName: column("head_repository_full_name", Schema.NonEmptyString),
   generation: GenerationNumber,
   reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
   review: column("review_json", json(ReviewResult)),
@@ -214,38 +205,33 @@ const PublicationReviewRow = Schema.Struct({
   review: column("review_json", json(ReviewResult)),
 })
 
-const decodeRow = <A, I, R>(
-  schema: Schema.Schema<A, I, R>,
-  record: StoreDataError["record"],
-) => (row: unknown): Effect.Effect<A, StoreDataError, R> =>
-  Schema.decodeUnknown(schema)(row).pipe(
-    Effect.mapError((error) => {
-      const message = String(error)
-      return new StoreDataError({
-        record,
-        recordId: Option.getOrElse(
-          Schema.decodeUnknownOption(RowId)(row).pipe(Option.map(({ id }) => id)),
-          () => 0,
-        ),
-        field: message.includes("review_json")
-          ? "review_json"
-          : message.includes("fix_result_json")
-            ? "fix_result_json"
-            : "row",
-        message,
-      })
-    }),
-  )
+const decodeRow =
+  <A, I, R>(schema: Schema.Schema<A, I, R>, record: StoreDataError["record"]) =>
+  (row: unknown): Effect.Effect<A, StoreDataError, R> =>
+    Schema.decodeUnknown(schema)(row).pipe(
+      Effect.mapError((error) => {
+        const message = String(error)
+        return new StoreDataError({
+          record,
+          recordId: Option.getOrElse(
+            Schema.decodeUnknownOption(RowId)(row).pipe(Option.map(({ id }) => id)),
+            () => 0,
+          ),
+          field: message.includes("review_json")
+            ? "review_json"
+            : message.includes("fix_result_json")
+              ? "fix_result_json"
+              : "row",
+          message,
+        })
+      }),
+    )
 
-export const decodeCommandRow: (
-  row: unknown,
-) => Effect.Effect<AgentCommand, StoreDataError> = decodeRow(CommandRow, "command")
+export const decodeCommandRow: (row: unknown) => Effect.Effect<AgentCommand, StoreDataError> =
+  decodeRow(CommandRow, "command")
 export const decodeJobRow = decodeRow(WorkRow, "job")
 export const decodePublicationRow = decodeRow(PublicationRow, "publication")
-export const decodePublicationReviewRow = decodeRow(
-  PublicationReviewRow,
-  "publication",
-)
+export const decodePublicationReviewRow = decodeRow(PublicationReviewRow, "publication")
 export const decodeReconciliationRow: (
   row: unknown,
 ) => Effect.Effect<PullRequestReconciliation, StoreDataError> = decodeRow(

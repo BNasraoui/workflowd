@@ -16,7 +16,9 @@ const program = Effect.gen(function* () {
     try: () => mkdir(dirname(config.storage.databasePath), { recursive: true }),
     catch: (cause) => new Error(`Could not create state directory: ${String(cause)}`),
   })
-  const DatabaseLive = SqliteClient.layer({ filename: config.storage.databasePath })
+  const DatabaseLive = SqliteClient.layer({
+    filename: config.storage.databasePath,
+  })
   return yield* runHookService(config).pipe(
     Effect.provide(makeLiveLayer(config).pipe(Layer.provide(DatabaseLive))),
   )

@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test"
-import {
-  OctokitInstallationAdapter,
-  type OctokitClientPort,
-} from "../src/github/adapter"
+import { OctokitInstallationAdapter, type OctokitClientPort } from "../src/github/adapter"
 
 test("OctokitInstallationAdapter normalizes authoritative pull request data", async () => {
   const client = {

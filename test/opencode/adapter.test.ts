@@ -1,13 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import {
-  SdkOpenCodeAdapter,
-  type OpenCodeSdkClient,
-} from "../../src/opencode/adapter"
+import { SdkOpenCodeAdapter, type OpenCodeSdkClient } from "../../src/opencode/adapter"
 
-function availabilityAdapter(
-  agents: ReadonlyArray<string>,
-  models: ReadonlyArray<string>,
-) {
+function availabilityAdapter(agents: ReadonlyArray<string>, models: ReadonlyArray<string>) {
   const client = {
     createSession: async () => ({ id: "unused" }),
     promptSession: async () => undefined,
@@ -16,9 +10,7 @@ function availabilityAdapter(
     listSessionMessages: async () => [],
     abortSession: async () => true,
     listAgents: async () => agents,
-    listProviders: async () => [
-      { id: "anthropic", modelIDs: models },
-    ],
+    listProviders: async () => [{ id: "anthropic", modelIDs: models }],
   } satisfies OpenCodeSdkClient
   return new SdkOpenCodeAdapter(client)
 }
@@ -41,10 +33,7 @@ describe("OpenCodeAdapter.validateAvailability", () => {
   })
 
   test("reports every unavailable configured integration", async () => {
-    const adapter = availabilityAdapter(
-      ["pr-reviewer"],
-      ["claude-haiku-4-5"],
-    )
+    const adapter = availabilityAdapter(["pr-reviewer"], ["claude-haiku-4-5"])
 
     await expect(
       adapter.validateAvailability(requested, new AbortController().signal),

@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { FixResult } from "../../src/domain/fix-result"
 import { WorkflowStore } from "../../src/store/contracts"
-import {
-  changesRequestedReview,
-  makeStoreLayer,
-  samplePullRequestEvent,
-} from "./harness"
+import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 describe("durable fix state", () => {
   test("retains the validated FixResult across a durable retry", async () => {

@@ -10,11 +10,7 @@ test("bounded command output drains stdout while retaining only the configured b
   const result = await Effect.runPromise(
     runWorkspaceCommandBytes(
       "generate large output",
-      [
-        "bash",
-        "-c",
-        "dd if=/dev/zero bs=1048576 count=8 2>/dev/null; printf drained >&2",
-      ],
+      ["bash", "-c", "dd if=/dev/zero bs=1048576 count=8 2>/dev/null; printf drained >&2"],
       { maxStdoutBytes },
     ),
   )
@@ -50,9 +46,9 @@ test("an interrupted keyed-lock waiter does not release the holder or retain the
   const contenderEntered = Effect.runSync(Deferred.make<void>())
   const contender = Effect.runFork(
     Effect.scoped(
-      locks.acquire("worktree").pipe(
-        Effect.tap(() => Deferred.succeed(contenderEntered, undefined)),
-      ),
+      locks
+        .acquire("worktree")
+        .pipe(Effect.tap(() => Deferred.succeed(contenderEntered, undefined))),
     ),
   )
   await Effect.runPromise(Effect.yieldNow())
@@ -108,9 +104,7 @@ test("the local repository catalog refreshes a changed root after a cache miss",
   entries = ["appeared-later"]
   modifiedAt += 1
 
-  expect(await catalog.refreshChanged()).toContain(
-    join("/repositories", "appeared-later"),
-  )
+  expect(await catalog.refreshChanged()).toContain(join("/repositories", "appeared-later"))
 })
 
 test("the local repository catalog revalidates an expired snapshot", async () => {

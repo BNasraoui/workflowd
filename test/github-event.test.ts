@@ -45,9 +45,7 @@ const issueCommentPayload = {
 
 describe("decodeGitHubEvent", () => {
   test("normalizes an eligible pull request event", async () => {
-    const event = await Effect.runPromise(
-      decodeGitHubEvent("pull_request", pullRequestPayload),
-    )
+    const event = await Effect.runPromise(decodeGitHubEvent("pull_request", pullRequestPayload))
 
     expect(JSON.parse(JSON.stringify(event))).toEqual({
       _tag: "PullRequest",
@@ -121,9 +119,7 @@ describe("decodeGitHubEvent", () => {
       ...override,
     }
 
-    const error = await Effect.runPromise(
-      Effect.flip(decodeGitHubEvent("pull_request", malformed)),
-    )
+    const error = await Effect.runPromise(Effect.flip(decodeGitHubEvent("pull_request", malformed)))
 
     expect(error).toBeInstanceOf(InvalidGitHubEvent)
   })
@@ -149,9 +145,10 @@ describe("decodeGitHubEvent", () => {
               },
             }
 
-      await expect(
-        Effect.runPromise(decodeGitHubEvent(eventName, payload)),
-      ).resolves.toEqual({ _tag: "Ignored", reason: "missing-installation" })
+      await expect(Effect.runPromise(decodeGitHubEvent(eventName, payload))).resolves.toEqual({
+        _tag: "Ignored",
+        reason: "missing-installation",
+      })
     },
   )
 
@@ -184,10 +181,7 @@ describe("decodeGitHubEvent", () => {
   })
 
   test.each([
-    [
-      "installation ID",
-      { ...issueCommentPayload, installation: { id: 0 } },
-    ],
+    ["installation ID", { ...issueCommentPayload, installation: { id: 0 } }],
     [
       "repository ID",
       {
@@ -197,7 +191,10 @@ describe("decodeGitHubEvent", () => {
     ],
     [
       "pull request number",
-      { ...issueCommentPayload, issue: { ...issueCommentPayload.issue, number: 0 } },
+      {
+        ...issueCommentPayload,
+        issue: { ...issueCommentPayload.issue, number: 0 },
+      },
     ],
     [
       "comment ID",

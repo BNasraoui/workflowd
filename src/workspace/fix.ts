@@ -29,9 +29,7 @@ function recover(work: FixWork, directory: string, head: string) {
     return yield* Effect.fail(
       new WorkspaceError({
         operation: "recover fix publication",
-        cause: new Error(
-          `Remote branch is ${remote}, expected ${work.target.headSha} or ${head}`,
-        ),
+        cause: new Error(`Remote branch is ${remote}, expected ${work.target.headSha} or ${head}`),
       }),
     )
   })
@@ -85,9 +83,7 @@ function publish(
       )
     }
     if (remote === work.target.headSha) {
-      const now = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const now = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       if (!(yield* isCurrent(now))) {
         return yield* Effect.fail(
           new WorkspaceError({

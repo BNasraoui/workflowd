@@ -17,10 +17,7 @@ test("composes the four live ports from AppConfig and SqlClient", async () => {
   try {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
-    await writeFile(
-      privateKeyPath,
-      privateKey.export({ type: "pkcs8", format: "pem" }),
-    )
+    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",

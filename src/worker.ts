@@ -7,21 +7,13 @@ import { WorkflowStore } from "./store/contracts"
 import { Workspace } from "./workspace"
 import { WorkspaceError } from "./workspace/errors"
 
-class JobCancelled extends Data.TaggedError("JobCancelled")<{}> {}
+class JobCancelled extends Data.TaggedError("JobCancelled")<Record<never, never>> {}
 
 function interruptOnCancellation<A, E, R, CancellationError, CancellationRequirements>(
   operation: Effect.Effect<A, E, R>,
   pollIntervalMs: number,
-  shouldCancel: () => Effect.Effect<
-    boolean,
-    CancellationError,
-    CancellationRequirements
-  >,
-): Effect.Effect<
-  A,
-  E | JobCancelled | CancellationError,
-  R | CancellationRequirements
-> {
+  shouldCancel: () => Effect.Effect<boolean, CancellationError, CancellationRequirements>,
+): Effect.Effect<A, E | JobCancelled | CancellationError, R | CancellationRequirements> {
   const waitForCancellation: Effect.Effect<
     never,
     JobCancelled | CancellationError,
@@ -31,9 +23,7 @@ function interruptOnCancellation<A, E, R, CancellationError, CancellationRequire
       Effect.flatMap((cancel) =>
         cancel
           ? Effect.fail(new JobCancelled())
-          : Effect.sleep(pollIntervalMs).pipe(
-              Effect.andThen(waitForCancellation),
-            ),
+          : Effect.sleep(pollIntervalMs).pipe(Effect.andThen(waitForCancellation)),
       ),
     ),
   )
@@ -42,10 +32,7 @@ function interruptOnCancellation<A, E, R, CancellationError, CancellationRequire
 
 function leaseFailure<E>(cause: Cause.Cause<E>, attempt: number, now: () => Date) {
   const failedAt = now()
-  const delay = Math.min(
-    30_000 * 2 ** Math.max(0, attempt - 1),
-    15 * 60_000,
-  )
+  const delay = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 15 * 60_000)
   return {
     failedAt,
     runAt: new Date(failedAt.getTime() + delay),
@@ -72,16 +59,15 @@ function processReviewWork(
         baseSha: work.target.baseSha,
         headSha: work.target.headSha,
       })
-      const completedAt = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       return yield* store.completeReviewJob({
         jobId: work.id,
         workerId,
         completedAt,
         review,
         autoFix:
-          fixWorkEnabled && decideFixEligibility({
+          fixWorkEnabled &&
+          decideFixEligibility({
             agentBranchPrefixes,
             headRef: work.target.headRef,
             repositoryFullName: work.repositoryFullName,
@@ -110,9 +96,7 @@ function processFixWork(work: FixWork, workerId: string) {
           baseSha: work.target.baseSha,
           headSha: work.target.headSha,
         })
-        const recordedAt = new Date(
-          yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-        )
+        const recordedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
         const recorded = yield* store.recordFixResult({
           jobId: work.id,
           workerId,
@@ -132,9 +116,7 @@ function processFixWork(work: FixWork, workerId: string) {
           ),
         ),
       )
-      const completedAt = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       const disposition = yield* store.completeFixJob({
         jobId: work.id,
         workerId,
@@ -182,10 +164,8 @@ export function runJobIteration(options: {
           )
         : processFixWork(work, options.workerId)
     const exit = yield* Effect.exit(
-      interruptOnCancellation(
-        operation,
-        options.cancellationPollIntervalMs,
-        () => store.shouldCancelJob(work.id, options.workerId, options.now()),
+      interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
+        store.shouldCancelJob(work.id, options.workerId, options.now()),
       ).pipe(
         Effect.timeoutFail({
           duration: options.timeoutMs,
@@ -224,17 +204,12 @@ export function runPublicationIteration(options: {
     const exit = yield* Effect.exit(
       github
         .publishReview(publication, (now) =>
-          store.isPublicationCurrent(
-            publication.id,
-            options.workerId,
-            now,
-          ),
+          store.isPublicationCurrent(publication.id, options.workerId, now),
         )
         .pipe(
           Effect.timeoutFail({
             duration: options.timeoutMs,
-            onTimeout: () =>
-              new Error(`Publication ${publication.id} timed out`),
+            onTimeout: () => new Error(`Publication ${publication.id} timed out`),
           }),
         ),
     )
@@ -273,9 +248,7 @@ export function runCommandIteration(options: {
     })
     if (command === null) return "idle" as const
 
-    const authorized = options.commandUsers.includes(
-      command.commenter.toLowerCase(),
-    )
+    const authorized = options.commandUsers.includes(command.commenter.toLowerCase())
     const exit = yield* Effect.exit(
       store
         .executeCommand({
@@ -287,9 +260,7 @@ export function runCommandIteration(options: {
         })
         .pipe(
           Effect.tap((disposition) =>
-            Effect.logInfo(
-              `Command ${command.command} from ${command.commenter}: ${disposition}`,
-            ),
+            Effect.logInfo(`Command ${command.command} from ${command.commenter}: ${disposition}`),
           ),
         ),
     )

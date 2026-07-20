@@ -19,9 +19,7 @@ async function temporaryDirectory(prefix: string): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    [...temporaryDirectories].map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    [...temporaryDirectories].map((directory) => rm(directory, { recursive: true, force: true })),
   )
   temporaryDirectories.clear()
 })
@@ -33,13 +31,22 @@ function captureLogs<A, E, R>(
   const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
     logs.push({ level: logLevel.label, message })
   })
-  return effect.pipe(
-    Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
-  )
+  return effect.pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger)))
 }
 
 async function git(cwd: string, ...args: ReadonlyArray<string>): Promise<string> {
-  const process = Bun.spawn(["git", ...args], { cwd, stderr: "pipe", stdout: "pipe" })
+  const process = Bun.spawn(["git", ...args], {
+    cwd,
+    env: {
+      ...Bun.env,
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_AUTHOR_NAME: "Workflowd Test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "Workflowd Test",
+    },
+    stderr: "pipe",
+    stdout: "pipe",
+  })
   const [status, stdout, stderr] = await Promise.all([
     process.exited,
     new Response(process.stdout).text(),
@@ -103,8 +110,7 @@ function makeReviewJob(
       baseSha: overrides.baseSha ?? fixture.baseSha,
       headSha: overrides.expectedHeadSha ?? fixture.headSha,
       headRef: overrides.headRef ?? "feature",
-      headRepositoryFullName:
-        overrides.headRepositoryFullName ?? "example-owner/example",
+      headRepositoryFullName: overrides.headRepositoryFullName ?? "example-owner/example",
     },
     generation: overrides.generation ?? 1,
     reviewRequestNumber: 1,
@@ -150,9 +156,7 @@ function makeFixJob(
       summary: "One issue.",
       findings: [{ severity: "high", title: "Bug", body: "Fix it." }],
     },
-    ...(overrides.checkpoint === undefined
-      ? {}
-      : { checkpoint: overrides.checkpoint }),
+    ...(overrides.checkpoint === undefined ? {} : { checkpoint: overrides.checkpoint }),
   })
 }
 
@@ -172,12 +176,17 @@ function makeManager(
   })
 }
 
-const fixResult = (input: typeof FixResult.Encoded) =>
-  Schema.decodeUnknownSync(FixResult)(input)
+const fixResult = (input: typeof FixResult.Encoded) => Schema.decodeUnknownSync(FixResult)(input)
 
 async function waitForPath(path: string): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (await stat(path).then(() => true, () => false)) return
+    if (
+      await stat(path).then(
+        () => true,
+        () => false,
+      )
+    )
+      return
     await Bun.sleep(10)
   }
   throw new Error(`Timed out waiting for ${path}`)
@@ -279,10 +288,7 @@ describe("GitWorkspaceAdapter", () => {
               directory: workspace.directory,
               head: await git(workspace.directory, "rev-parse", "HEAD"),
               review: Schema.decodeUnknownSync(Schema.parseJson(ReviewResult))(
-                await readFile(
-                  join(workspace.directory, ".workflowd/review.json"),
-                  "utf8",
-                ),
+                await readFile(join(workspace.directory, ".workflowd/review.json"), "utf8"),
               ),
             })),
           ),
@@ -311,10 +317,7 @@ describe("GitWorkspaceAdapter", () => {
 
     await expect(
       Effect.runPromise(
-        captureLogs(
-          Effect.scoped(manager.prepareReview(makeReviewJob(fixture, { id: 12 }))),
-          logs,
-        ),
+        captureLogs(Effect.scoped(manager.prepareReview(makeReviewJob(fixture, { id: 12 }))), logs),
       ),
     ).rejects.toThrow()
     expect(await readFile(userFile, "utf8")).toBe("keep me\n")
@@ -383,9 +386,9 @@ describe("GitWorkspaceAdapter", () => {
     )
     await git(localRoot, "clone", "--branch", "feature", fixture.remote, appearedLater)
     const discovered = await Effect.runPromise(
-      Effect.scoped(
-        manager.prepareReview(makeReviewJob(fixture, { generation: 2 })),
-      ).pipe(Effect.map((workspace) => workspace.directory)),
+      Effect.scoped(manager.prepareReview(makeReviewJob(fixture, { generation: 2 }))).pipe(
+        Effect.map((workspace) => workspace.directory),
+      ),
     )
 
     expect(fallback).not.toBe(appearedLater)
@@ -442,9 +445,9 @@ describe("GitWorkspaceAdapter", () => {
       }),
     )
     const registered = await Effect.runPromise(
-      Effect.scoped(
-        manager.prepareReview(makeReviewJob(fixture, { generation: 2 })),
-      ).pipe(Effect.map((workspace) => workspace.directory)),
+      Effect.scoped(manager.prepareReview(makeReviewJob(fixture, { generation: 2 }))).pipe(
+        Effect.map((workspace) => workspace.directory),
+      ),
     )
 
     expect(fallback).not.toBe(worktree)
@@ -455,14 +458,7 @@ describe("GitWorkspaceAdapter", () => {
     const fixture = await createRepositoryFixture("workflowd-registry-state-")
     const runningWorktree = join(fixture.root, "running-worktree")
     const registry = join(fixture.root, "registry")
-    await git(
-      fixture.root,
-      "clone",
-      "--branch",
-      "feature",
-      fixture.remote,
-      runningWorktree,
-    )
+    await git(fixture.root, "clone", "--branch", "feature", fixture.remote, runningWorktree)
     await mkdir(registry)
     await writeFile(
       join(registry, "running.json"),
@@ -503,23 +499,12 @@ describe("GitWorkspaceAdapter", () => {
       }),
     )
     const holder = Bun.spawn(
-      [
-        "flock",
-        "--exclusive",
-        lock,
-        "bash",
-        "-c",
-        'printf locked > "$1"; sleep 300',
-        "_",
-        locked,
-      ],
+      ["flock", "--exclusive", lock, "bash", "-c", 'printf locked > "$1"; sleep 300', "_", locked],
       { detached: true, stderr: "pipe", stdout: "pipe" },
     )
     await waitForPath(locked)
     const manager = makeManager(fixture, [], registry)
-    const fiber = Effect.runFork(
-      Effect.scoped(manager.prepareReview(makeReviewJob(fixture))),
-    )
+    const fiber = Effect.runFork(Effect.scoped(manager.prepareReview(makeReviewJob(fixture))))
     await Bun.sleep(100)
     const beforeUnlock = await Effect.runPromise(Fiber.poll(fiber))
     killProcessGroup(holder.pid)
@@ -541,13 +526,7 @@ describe("GitWorkspaceAdapter", () => {
           Effect.flatMap((workspace) =>
             Effect.promise(async () => {
               await git(workspace.directory, "add", "-A")
-              return git(
-                workspace.directory,
-                "status",
-                "--porcelain",
-                "--",
-                ".workflowd",
-              )
+              return git(workspace.directory, "status", "--porcelain", "--", ".workflowd")
             }),
           ),
         ),
@@ -564,23 +543,19 @@ describe("GitWorkspaceAdapter", () => {
     const worktree = join(fixture.root, "worktree")
     await git(fixture.root, "clone", "--branch", "feature", fixture.remote, worktree)
     const manager = makeManager(fixture, [worktree])
-    const marker = join(
-      worktree,
-      ".workflowd",
-      ".managed-by-workflowd",
-    )
+    const marker = join(worktree, ".workflowd", ".managed-by-workflowd")
     const logs: Array<{ readonly level: string; readonly message: unknown }> = []
 
     await Effect.runPromise(
       captureLogs(
         Effect.scoped(
-          manager.prepareReview(makeReviewJob(fixture)).pipe(
-            Effect.flatMap((workspace) =>
-              Effect.promise(() =>
-                git(workspace.directory, "add", "-f", ".workflowd"),
+          manager
+            .prepareReview(makeReviewJob(fixture))
+            .pipe(
+              Effect.flatMap((workspace) =>
+                Effect.promise(() => git(workspace.directory, "add", "-f", ".workflowd")),
               ),
             ),
-          ),
         ),
         logs,
       ),
@@ -611,11 +586,7 @@ describe("GitWorkspaceAdapter", () => {
     const manager = makeManager(fixture, [worktree])
 
     await Effect.runPromise(
-      Effect.scoped(
-        manager.prepareReview(
-          makeReviewJob(fixture, { expectedHeadSha: headSha }),
-        ),
-      ),
+      Effect.scoped(manager.prepareReview(makeReviewJob(fixture, { expectedHeadSha: headSha }))),
     )
 
     await expect(stat(hookOutput)).rejects.toThrow()
@@ -624,13 +595,7 @@ describe("GitWorkspaceAdapter", () => {
 
   test("managed fallback fetches the same-repository head branch", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-fetch-")
-    const repository = join(
-      fixture.root,
-      "repositories",
-      "github.com",
-      "example-owner",
-      "example",
-    )
+    const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
     await mkdir(dirname(repository), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
     await git(repository, "update-ref", "-d", "refs/remotes/origin/feature")
@@ -643,33 +608,17 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1"))
-    expect(await git(repository, "rev-parse", "refs/remotes/origin/feature")).toBe(
-      fixture.headSha,
-    )
+    expect(await git(repository, "rev-parse", "refs/remotes/origin/feature")).toBe(fixture.headSha)
   })
 
   test("managed fallback recovers a missing controller worktree registration", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-recover-")
-    const repository = join(
-      fixture.root,
-      "repositories",
-      "github.com",
-      "example-owner",
-      "example",
-    )
+    const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
     const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
     await mkdir(dirname(repository), { recursive: true })
     await mkdir(dirname(directory), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
-    await git(
-      repository,
-      "worktree",
-      "add",
-      "-b",
-      "feature",
-      directory,
-      "origin/feature",
-    )
+    await git(repository, "worktree", "add", "-b", "feature", directory, "origin/feature")
     await rm(directory, { recursive: true, force: true })
     const manager = makeManager(fixture, [])
 
@@ -680,20 +629,12 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(preparedDirectory).toBe(directory)
-    expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(
-      directory,
-    )
+    expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(directory)
   })
 
   test("managed setup failure does not strand a worktree", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-failure-")
-    const repository = join(
-      fixture.root,
-      "repositories",
-      "github.com",
-      "example-owner",
-      "example",
-    )
+    const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
     const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
     await mkdir(dirname(repository), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
@@ -702,14 +643,10 @@ describe("GitWorkspaceAdapter", () => {
     const manager = makeManager(fixture, [])
 
     await expect(
-      Effect.runPromise(
-        Effect.scoped(manager.prepareReview(makeReviewJob(fixture))),
-      ),
+      Effect.runPromise(Effect.scoped(manager.prepareReview(makeReviewJob(fixture)))),
     ).rejects.toThrow()
 
-    expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(
-      directory,
-    )
+    expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(directory)
     await expect(stat(directory)).rejects.toThrow()
   })
 
@@ -717,10 +654,7 @@ describe("GitWorkspaceAdapter", () => {
     const fixture = await createRepositoryFixture("workflowd-large-diff-")
     const worktree = join(fixture.root, "worktree")
     const maxDiffBytes = 8_192
-    await writeFile(
-      join(fixture.source, "large.txt"),
-      "large diff line\n".repeat(250_000),
-    )
+    await writeFile(join(fixture.source, "large.txt"), "large diff line\n".repeat(250_000))
     await git(fixture.source, "add", "large.txt")
     await git(fixture.source, "commit", "-m", "large diff")
     await git(fixture.source, "push", "origin", "feature")
@@ -731,15 +665,13 @@ describe("GitWorkspaceAdapter", () => {
 
     const diff = await Effect.runPromise(
       Effect.scoped(
-        manager.prepareReview(
-          makeReviewJob(fixture, { expectedHeadSha: headSha }),
-        ).pipe(
-          Effect.flatMap((workspace) =>
-            Effect.promise(() =>
-              readFile(join(workspace.directory, ".workflowd/review.diff")),
+        manager
+          .prepareReview(makeReviewJob(fixture, { expectedHeadSha: headSha }))
+          .pipe(
+            Effect.flatMap((workspace) =>
+              Effect.promise(() => readFile(join(workspace.directory, ".workflowd/review.diff"))),
             ),
           ),
-        ),
       ),
     )
 
@@ -780,9 +712,7 @@ describe("GitWorkspaceAdapter", () => {
     const manager = makeManager(fixture, [worktree])
     const fiber = Effect.runFork(
       Effect.scoped(
-        manager.prepareReview(
-          makeReviewJob(fixture, { baseSha, expectedHeadSha: headSha }),
-        ),
+        manager.prepareReview(makeReviewJob(fixture, { baseSha, expectedHeadSha: headSha })),
       ),
     )
 
@@ -796,9 +726,7 @@ describe("GitWorkspaceAdapter", () => {
     if (processIsAlive(pid)) process.kill(pid, "SIGKILL")
 
     expect(contextExistsDuringCreation).toBe(false)
-    expect(
-      (await readdir(worktree)).filter((entry) => entry.startsWith(".workflowd")),
-    ).toEqual([])
+    expect((await readdir(worktree)).filter((entry) => entry.startsWith(".workflowd"))).toEqual([])
   })
 
   test("retains edits from a failed fix attempt for the next attempt", async () => {
@@ -814,13 +742,15 @@ describe("GitWorkspaceAdapter", () => {
 
     await Effect.runPromise(
       Effect.scoped(
-        manager.prepareFix(job).pipe(
-          Effect.flatMap((workspace) =>
-            Effect.promise(() =>
-              writeFile(join(workspace.directory, "app.ts"), "export const value = 3\n"),
+        manager
+          .prepareFix(job)
+          .pipe(
+            Effect.flatMap((workspace) =>
+              Effect.promise(() =>
+                writeFile(join(workspace.directory, "app.ts"), "export const value = 3\n"),
+              ),
             ),
           ),
-        ),
       ),
     )
     const recovered = await Effect.runPromise(
@@ -859,10 +789,7 @@ describe("GitWorkspaceAdapter", () => {
         manager.prepareFix(job).pipe(
           Effect.flatMap((workspace) =>
             Effect.promise(async () => {
-              await writeFile(
-                join(workspace.directory, "app.ts"),
-                "export const value = 3\n",
-              )
+              await writeFile(join(workspace.directory, "app.ts"), "export const value = 3\n")
               await git(workspace.directory, "add", "app.ts")
               await git(
                 workspace.directory,
@@ -890,9 +817,7 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(recovery).toBe("committed")
-    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(
-      commitSha,
-    )
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(commitSha)
   })
 
   test("recognizes the same job after push but before store completion", async () => {
@@ -913,10 +838,7 @@ describe("GitWorkspaceAdapter", () => {
           Effect.flatMap((workspace) =>
             Effect.gen(function* () {
               yield* Effect.promise(() =>
-                writeFile(
-                  join(workspace.directory, "app.ts"),
-                  "export const value = 4\n",
-                ),
+                writeFile(join(workspace.directory, "app.ts"), "export const value = 4\n"),
               )
               yield* Effect.promise(() => git(workspace.directory, "add", "app.ts"))
               yield* Effect.promise(() =>
@@ -927,9 +849,7 @@ describe("GitWorkspaceAdapter", () => {
                   `fix before crash\n\nWorkflowd-Job: ${job.id}`,
                 ),
               )
-              commitSha = yield* Effect.promise(() =>
-                git(workspace.directory, "rev-parse", "HEAD"),
-              )
+              commitSha = yield* Effect.promise(() => git(workspace.directory, "rev-parse", "HEAD"))
               yield* manager.publishFix(
                 job,
                 workspace,
@@ -960,9 +880,7 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(recovery).toBe("pushed")
-    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(
-      commitSha,
-    )
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(commitSha)
   })
 
   test("rejects a structured fix result with the wrong commit SHA", async () => {
@@ -982,10 +900,7 @@ describe("GitWorkspaceAdapter", () => {
           Effect.flatMap((workspace) =>
             Effect.gen(function* () {
               yield* Effect.promise(() =>
-                writeFile(
-                  join(workspace.directory, "app.ts"),
-                  "export const value = 5\n",
-                ),
+                writeFile(join(workspace.directory, "app.ts"), "export const value = 5\n"),
               )
               yield* Effect.promise(() => git(workspace.directory, "add", "app.ts"))
               yield* Effect.promise(() =>
@@ -1015,9 +930,7 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(exit._tag).toBe("Failure")
-    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(
-      fixture.headSha,
-    )
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
 
   test("does not push when durable Fix Work currentness is revoked", async () => {
@@ -1031,27 +944,14 @@ describe("GitWorkspaceAdapter", () => {
           Effect.flatMap((workspace) =>
             Effect.gen(function* () {
               yield* Effect.promise(() =>
-                writeFile(
-                  join(workspace.directory, "app.ts"),
-                  "export const value = 6\n",
-                ),
+                writeFile(join(workspace.directory, "app.ts"), "export const value = 6\n"),
               )
               yield* Effect.promise(() => git(workspace.directory, "add", "app.ts"))
               yield* Effect.promise(() =>
-                git(
-                  workspace.directory,
-                  "commit",
-                  "-m",
-                  `revoked fix\n\nWorkflowd-Job: ${job.id}`,
-                ),
+                git(workspace.directory, "commit", "-m", `revoked fix\n\nWorkflowd-Job: ${job.id}`),
               )
               return yield* Effect.exit(
-                manager.publishFix(
-                  job,
-                  workspace,
-                  undefined,
-                  () => Effect.succeed(false),
-                ),
+                manager.publishFix(job, workspace, undefined, () => Effect.succeed(false)),
               )
             }),
           ),
@@ -1060,9 +960,7 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(exit._tag).toBe("Failure")
-    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(
-      fixture.headSha,
-    )
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
 
   test("accepts NoChanges only while local and remote state are unchanged", async () => {
@@ -1094,21 +992,19 @@ describe("GitWorkspaceAdapter", () => {
 
     const changedExit = await Effect.runPromise(
       Effect.scoped(
-        manager.prepareFix(job).pipe(
-          Effect.flatMap((workspace) =>
-            Effect.promise(() =>
-              writeFile(join(workspace.directory, "app.ts"), "dirty\n"),
-            ).pipe(
-              Effect.andThen(
-                Effect.exit(
-                  manager.publishFix(job, workspace, noChanges, () =>
-                    Effect.succeed(true),
+        manager
+          .prepareFix(job)
+          .pipe(
+            Effect.flatMap((workspace) =>
+              Effect.promise(() => writeFile(join(workspace.directory, "app.ts"), "dirty\n")).pipe(
+                Effect.andThen(
+                  Effect.exit(
+                    manager.publishFix(job, workspace, noChanges, () => Effect.succeed(true)),
                   ),
                 ),
               ),
             ),
           ),
-        ),
       ),
     )
 

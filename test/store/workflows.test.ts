@@ -25,10 +25,7 @@ describe("WorkflowStore.recordDelivery", () => {
           receivedAt: new Date("2026-07-19T12:00:00.000Z"),
         } as const
 
-        return [
-          yield* store.recordDelivery(delivery),
-          yield* store.recordDelivery(delivery),
-        ]
+        return [yield* store.recordDelivery(delivery), yield* store.recordDelivery(delivery)]
       }).pipe(Effect.provide(TestLayer)),
     )
 
@@ -1049,7 +1046,10 @@ describe("WorkflowStore.executeCommand workflows", () => {
           decodePullRequestEvent({
             ...samplePullRequestEvent,
             action: "closed",
-            pullRequest: { ...samplePullRequestEvent.pullRequest, state: "closed" },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              state: "closed",
+            },
           }),
         )
         yield* store.ingestCommand(
@@ -1328,11 +1328,7 @@ describe("WorkflowStore.executeCommand workflows", () => {
             })
           })
 
-        const firstDisposition = yield* runFixCommand(
-          "delivery-requeue-fix-command-1",
-          2005,
-          5,
-        )
+        const firstDisposition = yield* runFixCommand("delivery-requeue-fix-command-1", 2005, 5)
         const firstFix = yield* store.claimNextJob({
           workerId: "fixer-requeue-1",
           now: new Date("2026-07-19T12:06:00.000Z"),
@@ -1347,11 +1343,7 @@ describe("WorkflowStore.executeCommand workflows", () => {
           error: "fix failed",
           maxAttempts: 1,
         })
-        const secondDisposition = yield* runFixCommand(
-          "delivery-requeue-fix-command-2",
-          2006,
-          7,
-        )
+        const secondDisposition = yield* runFixCommand("delivery-requeue-fix-command-2", 2006, 7)
         const secondFix = yield* store.claimNextJob({
           workerId: "fixer-requeue-2",
           now: new Date("2026-07-19T12:08:00.000Z"),
@@ -1433,8 +1425,9 @@ describe("WorkflowStore.executeCommand workflows", () => {
           completedAt: new Date("2026-07-19T12:06:59.999Z"),
         })
         const firstPublicationRows = yield* SqlClient.SqlClient.pipe(
-          Effect.flatMap((sql) =>
-            sql<{ readonly state: string }>`
+          Effect.flatMap(
+            (sql) =>
+              sql<{ readonly state: string }>`
               SELECT state FROM publications WHERE id = ${firstPublication.id}
             `,
           ),
@@ -1558,7 +1551,10 @@ describe("pull request eligibility", () => {
           decodePullRequestEvent({
             ...samplePullRequestEvent,
             action: "closed",
-            pullRequest: { ...samplePullRequestEvent.pullRequest, state: "closed" },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              state: "closed",
+            },
           }),
         )
         return yield* store.claimNextJob({
@@ -1794,7 +1790,10 @@ describe("pull request eligibility", () => {
           },
           {
             ...samplePullRequestEvent,
-            pullRequest: { ...samplePullRequestEvent.pullRequest, updatedAt: timestamp },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: timestamp,
+            },
           },
         )
         const disposition = yield* store.ingestPullRequest(
@@ -1964,7 +1963,10 @@ describe("pull request eligibility", () => {
           {
             ...samplePullRequestEvent,
             action: "closed",
-            pullRequest: { ...samplePullRequestEvent.pullRequest, state: "closed" },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              state: "closed",
+            },
           },
         )
         const disposition = yield* store.ingestPullRequest(

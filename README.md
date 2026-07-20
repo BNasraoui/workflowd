@@ -198,7 +198,16 @@ The health response is `{"status":"ok"}`. Confirm a GitHub test delivery receive
 
 ```bash
 bun install --frozen-lockfile
+./scripts/install-git-hooks.sh
 bun run check
 ```
+
+The hook checks each local branch pushed against
+`<ticket-type>/<ticket-id>-<slug>`, for example
+`feature/workflowd-0zr-add-pre-push-guard`. Supported ticket types are
+`feature`, `bug`, `task`, `chore`, and `epic`; the ticket must exist in Beads
+with the matching type. The installer changes only this repository's local
+`core.hooksPath`. Git's `--no-verify` option bypasses the check, so the hook is
+local feedback rather than a security boundary.
 
 The tested runtime baseline is Bun `1.3.14`, Effect `3.22.0`, and OpenCode/SDK `1.18.3`.

@@ -109,9 +109,7 @@ describe("domain schemas", () => {
         review: { verdict: "pass", summary: "Looks good.", findings: [] },
       }),
     ).rejects.toBeDefined()
-    await expect(
-      decode(Work, { ...fixWork, sourcePublicationId: undefined }),
-    ).rejects.toBeDefined()
+    await expect(decode(Work, { ...fixWork, sourcePublicationId: undefined })).rejects.toBeDefined()
   })
 
   test("uses truthful fix-result variants", async () => {

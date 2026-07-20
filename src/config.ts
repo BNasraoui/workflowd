@@ -124,9 +124,7 @@ function modelId(value: string): string {
 function branchPrefixes(value: string | undefined): ReadonlyArray<string> {
   const values = (value ?? "opencode/,plan/").split(",").map((item) => item.trim())
   if (values.length === 0 || values.some((item) => item === "")) {
-    throw new Error(
-      "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes",
-    )
+    throw new Error("WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes")
   }
   return values
 }
@@ -142,9 +140,7 @@ function commandUsers(value: string | undefined): ReadonlyArray<string> {
         item.includes("--"),
     )
   ) {
-    throw new Error(
-      "WORKFLOWD_COMMAND_USERS must contain valid GitHub users",
-    )
+    throw new Error("WORKFLOWD_COMMAND_USERS must contain valid GitHub users")
   }
   return values
 }
@@ -212,9 +208,7 @@ export async function loadConfig(
     "WORKFLOWD_JOB_LEASE_MS",
   )
   if (jobLeaseDurationMs <= jobTimeoutMs) {
-    throw new Error(
-      "WORKFLOWD_JOB_LEASE_MS must be greater than WORKFLOWD_JOB_TIMEOUT_MS",
-    )
+    throw new Error("WORKFLOWD_JOB_LEASE_MS must be greater than WORKFLOWD_JOB_TIMEOUT_MS")
   }
   const publicationTimeoutMs = positiveInteger(
     env.WORKFLOWD_PUBLICATION_TIMEOUT_MS,
@@ -251,21 +245,14 @@ export async function loadConfig(
       databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db"),
     },
     fixWork: {
-      enabled: booleanSetting(
-        env.WORKFLOWD_FIX_WORK_ENABLED,
-        "WORKFLOWD_FIX_WORK_ENABLED",
-      ),
+      enabled: booleanSetting(env.WORKFLOWD_FIX_WORK_ENABLED, "WORKFLOWD_FIX_WORK_ENABLED"),
     },
     workspace: {
-      repositoryRoot:
-        env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
-      worktreeRoot:
-        env.WORKFLOWD_WORKTREE_ROOT ?? join(cacheRoot, "worktrees"),
+      repositoryRoot: env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
+      worktreeRoot: env.WORKFLOWD_WORKTREE_ROOT ?? join(cacheRoot, "worktrees"),
       worktreeRegistry:
-        env.OPENCODE_WORKTREE_REGISTRY ??
-        join(home, ".local/share/opencode/worktree-jobs"),
-      localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ??
-        join(home, "Documents/repos"))
+        env.OPENCODE_WORKTREE_REGISTRY ?? join(home, ".local/share/opencode/worktree-jobs"),
+      localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ?? join(home, "Documents/repos"))
         .split(":")
         .filter(Boolean),
       maxDiffBytes: positiveInteger(
@@ -275,26 +262,20 @@ export async function loadConfig(
       ),
     },
     openCode: {
-      baseUrl: httpUrl(
-        env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
-        "OPENCODE_SERVER_URL",
-      ),
+      baseUrl: httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL"),
       username: required(
-        { OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode" },
+        {
+          OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode",
+        },
         "OPENCODE_SERVER_USERNAME",
       ),
       password: openCodePassword,
-      model: modelId(
-        env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol",
-      ),
+      model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
       reviewerAgent: agentId(
         env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
         "WORKFLOWD_REVIEWER_AGENT",
       ),
-      fixerAgent: agentId(
-        env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer",
-        "WORKFLOWD_FIXER_AGENT",
-      ),
+      fixerAgent: agentId(env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer", "WORKFLOWD_FIXER_AGENT"),
       pollIntervalMs: positiveInteger(
         env.WORKFLOWD_OPENCODE_POLL_INTERVAL_MS,
         1_000,
@@ -316,9 +297,7 @@ export async function loadConfig(
       jobLeaseDurationMs,
       publicationTimeoutMs,
       publicationLeaseDurationMs,
-      agentBranchPrefixes: branchPrefixes(
-        env.WORKFLOWD_AGENT_BRANCH_PREFIXES,
-      ),
+      agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
       commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
     },
   }

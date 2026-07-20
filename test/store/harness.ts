@@ -9,9 +9,7 @@ import { WorkflowStoreLive } from "../../src/store"
 export const sampleBaseSha = "d".repeat(40)
 export const sampleHeadSha = "a".repeat(40)
 
-export const decodePullRequestEvent = Schema.decodeUnknownSync(
-  PullRequestObservation,
-)
+export const decodePullRequestEvent = Schema.decodeUnknownSync(PullRequestObservation)
 
 export const samplePullRequestEvent = decodePullRequestEvent({
   _tag: "PullRequest",
@@ -94,10 +92,7 @@ export const makeFixWork = (
     target: { ...workInput.target, ...overrides.target },
   })
 
-export const sampleCommandEvent = (
-  command: "review" | "fix" | "status",
-  commentId: number,
-) =>
+export const sampleCommandEvent = (command: "review" | "fix" | "status", commentId: number) =>
   Schema.decodeUnknownSync(Command)({
     _tag: "Command",
     action: "created",
@@ -109,13 +104,14 @@ export const sampleCommandEvent = (
     repository: samplePullRequestEvent.repository,
   })
 
-export const makeDatabaseLayer = () =>
-  SqliteClient.layer({ filename: ":memory:" })
+export const makeDatabaseLayer = () => SqliteClient.layer({ filename: ":memory:" })
 
 export const makeStoreLayer = () => {
   const database = makeDatabaseLayer()
   return WorkflowStoreLive.pipe(Layer.provideMerge(database))
 }
 
-export const runWithStore = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())) as Effect.Effect<A, E>)
+type StoreServices = Layer.Layer.Success<ReturnType<typeof makeStoreLayer>>
+
+export const runWithStore = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())))
