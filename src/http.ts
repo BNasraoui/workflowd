@@ -33,15 +33,10 @@ export function handleGitHubWebhook(
     const eventName = request.headers.get("x-github-event")
     const signature = request.headers.get("x-hub-signature-256")
     if (deliveryId === null || eventName === null) {
-      return Response.json(
-        { error: "missing GitHub delivery headers" },
-        { status: 400 },
-      )
+      return Response.json({ error: "missing GitHub delivery headers" }, { status: 400 })
     }
 
-    const body = new Uint8Array(
-      yield* Effect.promise(() => request.arrayBuffer()),
-    )
+    const body = new Uint8Array(yield* Effect.promise(() => request.arrayBuffer()))
     if (body.byteLength > (options.maxBodyBytes ?? 1_048_576)) {
       return Response.json({ error: "payload too large" }, { status: 413 })
     }
@@ -65,9 +60,7 @@ export function handleGitHubWebhook(
 
     const decoded = yield* decodeGitHubEvent(eventName, payload).pipe(
       Effect.catchAll((error) =>
-        Effect.succeed(
-          Response.json({ error: error.message }, { status: 400 }),
-        ),
+        Effect.succeed(Response.json({ error: error.message }, { status: 400 })),
       ),
     )
     if (decoded instanceof Response) return decoded
@@ -107,9 +100,7 @@ export function handleGitHubWebhook(
   }).pipe(
     Effect.catchAllCause((cause) =>
       Effect.logError("Webhook ingestion failed", cause).pipe(
-        Effect.as(
-          Response.json({ error: "internal server error" }, { status: 500 }),
-        ),
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
     ),
   )

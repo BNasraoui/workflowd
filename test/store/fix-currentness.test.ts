@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
-import {
-  changesRequestedReview,
-  makeStoreLayer,
-  samplePullRequestEvent,
-} from "./harness"
+import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 const currentAt = new Date("2026-07-20T13:00:30.000Z")
 
@@ -57,11 +53,7 @@ const checkCurrentness = (mutation?: string, now = currentAt) =>
       })
       if (fix === null || fix._tag !== "FixWork") throw new Error("expected fix")
       if (mutation !== undefined) yield* sql.unsafe(mutation)
-      return yield* store.isJobCurrent(
-        fix.id,
-        "fix-currentness-worker",
-        now,
-      )
+      return yield* store.isJobCurrent(fix.id, "fix-currentness-worker", now)
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
@@ -88,26 +80,18 @@ describe("durable Fix Work currentness", () => {
     ["closed pull request", "UPDATE pull_requests SET state = 'closed'"],
     ["draft pull request", "UPDATE pull_requests SET draft = TRUE"],
     ["changed base ref", "UPDATE pull_requests SET base_ref = 'release'"],
-    [
-      "changed base SHA",
-      `UPDATE pull_requests SET base_sha = '${"b".repeat(40)}'`,
-    ],
+    ["changed base SHA", `UPDATE pull_requests SET base_sha = '${"b".repeat(40)}'`],
     ["changed head ref", "UPDATE pull_requests SET head_ref = 'other'"],
     [
       "changed head repository",
       "UPDATE pull_requests SET head_repository_full_name = 'other/repository'",
     ],
-    [
-      "changed head SHA",
-      `UPDATE pull_requests SET head_sha = '${"c".repeat(40)}'`,
-    ],
+    ["changed head SHA", `UPDATE pull_requests SET head_sha = '${"c".repeat(40)}'`],
   ])("rejects %s before push", async (_label, mutation) => {
     expect(await checkCurrentness(mutation)).toBe(false)
   })
 
   test("rejects the lease at exact expiry", async () => {
-    expect(
-      await checkCurrentness(undefined, new Date("2026-07-20T13:01:00.000Z")),
-    ).toBe(false)
+    expect(await checkCurrentness(undefined, new Date("2026-07-20T13:01:00.000Z"))).toBe(false)
   })
 })

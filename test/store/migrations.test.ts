@@ -20,9 +20,7 @@ const fixResultJson = JSON.stringify({
 })
 
 const runWithDatabase = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.runPromise(
-    effect.pipe(Effect.provide(makeStoreLayer())) as Effect.Effect<A, E>,
-  )
+  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())) as Effect.Effect<A, E>)
 
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.either, Effect.map(Either.isLeft))
@@ -130,9 +128,7 @@ describe("strict initial store schema", () => {
       }),
     )
 
-    expect(result.migrations).toEqual([
-      { migration_id: 1, name: "initial_schema" },
-    ])
+    expect(result.migrations).toEqual([{ migration_id: 1, name: "initial_schema" }])
     expect(result.tables).toHaveLength(6)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
@@ -146,17 +142,15 @@ describe("strict initial store schema", () => {
         yield* sql`PRAGMA foreign_keys = ON`
         yield* seedSchema
         return yield* Effect.all(
-          ["jobs", "publications", "commands", "reconciliations"].flatMap(
-            (table) => [
-              rejected(sql.unsafe(`UPDATE ${table} SET state = 'leased' WHERE id = 1`)),
-              rejected(
-                sql.unsafe(
-                  `UPDATE ${table} SET lease_owner = 'worker', lease_until = ? WHERE id = 1`,
-                  [timestamp],
-                ),
+          ["jobs", "publications", "commands", "reconciliations"].flatMap((table) => [
+            rejected(sql.unsafe(`UPDATE ${table} SET state = 'leased' WHERE id = 1`)),
+            rejected(
+              sql.unsafe(
+                `UPDATE ${table} SET lease_owner = 'worker', lease_until = ? WHERE id = 1`,
+                [timestamp],
               ),
-            ],
-          ),
+            ),
+          ]),
         )
       }),
     )
@@ -171,22 +165,16 @@ describe("strict initial store schema", () => {
         yield* sql`PRAGMA foreign_keys = ON`
         yield* seedSchema
         return yield* Effect.all(
-          ["jobs", "publications", "commands", "reconciliations"].flatMap(
-            (table) => [
-              rejected(sql.unsafe(`UPDATE ${table} SET attempts = -1 WHERE id = 1`)),
-              rejected(sql.unsafe(`UPDATE ${table} SET max_attempts = 0 WHERE id = 1`)),
-              rejected(
-                sql.unsafe(`UPDATE ${table} SET attempts = max_attempts + 1 WHERE id = 1`),
-              ),
-              rejected(
-                sql.unsafe(`UPDATE ${table} SET state = 'retry_scheduled' WHERE id = 1`),
-              ),
-              rejected(sql.unsafe(`UPDATE ${table} SET state = 'failed' WHERE id = 1`)),
-              rejected(sql.unsafe(`UPDATE ${table} SET state = 'data_error' WHERE id = 1`)),
-              rejected(sql.unsafe(`UPDATE ${table} SET last_error = 'stale' WHERE id = 1`)),
-              rejected(sql.unsafe(`UPDATE ${table} SET run_at = NULL WHERE id = 1`)),
-            ],
-          ),
+          ["jobs", "publications", "commands", "reconciliations"].flatMap((table) => [
+            rejected(sql.unsafe(`UPDATE ${table} SET attempts = -1 WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET max_attempts = 0 WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET attempts = max_attempts + 1 WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET state = 'retry_scheduled' WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET state = 'failed' WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET state = 'data_error' WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET last_error = 'stale' WHERE id = 1`)),
+            rejected(sql.unsafe(`UPDATE ${table} SET run_at = NULL WHERE id = 1`)),
+          ]),
         )
       }),
     )
@@ -428,9 +416,7 @@ describe("strict initial store schema", () => {
         const sql = yield* SqlClient.SqlClient
         yield* sql`PRAGMA foreign_keys = ON`
         yield* seedSchema
-        return yield* rejected(
-          sql`UPDATE jobs SET publication_id = 999 WHERE id = 2`,
-        )
+        return yield* rejected(sql`UPDATE jobs SET publication_id = 999 WHERE id = 2`)
       }),
     )
 
@@ -439,8 +425,8 @@ describe("strict initial store schema", () => {
 
   test("uses preserved indexes for production claim and identity queries", async () => {
     const plans = await runWithDatabase(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
         const currentness = makeCurrentnessPolicy(sql)
         const explainQueryPlan = sql.literal("EXPLAIN QUERY PLAN")
         const simpleClaims = yield* Effect.all([
@@ -459,8 +445,8 @@ describe("strict initial store schema", () => {
           WHERE repository_id = 42 AND pull_request_number = 7
           AND generation = 1 AND review_request_number < 3
         `
-        return [jobClaim, publicationClaim, ...simpleClaims, publicationIdentity].map(
-          (plan) => plan.flatMap(Object.values).map(String).join("\n"),
+        return [jobClaim, publicationClaim, ...simpleClaims, publicationIdentity].map((plan) =>
+          plan.flatMap(Object.values).map(String).join("\n"),
         )
       }),
     )

@@ -350,9 +350,7 @@ describe("persisted row decoding", () => {
         yield* sql`UPDATE publications SET review_json = ${JSON.stringify({
           verdict: "pass",
           summary: "A passing review cannot contain findings.",
-          findings: [
-            { severity: "high", title: "Contradiction", body: "Invalid." },
-          ],
+          findings: [{ severity: "high", title: "Contradiction", body: "Invalid." }],
         })}`
         yield* sql`PRAGMA ignore_check_constraints = OFF`
         yield* store.ingestCommand(

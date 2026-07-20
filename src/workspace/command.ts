@@ -34,11 +34,7 @@ function executeWorkspaceCommand<A>(
         stderr: "pipe",
       })
     } catch (cause) {
-      resume(
-        Effect.fail(
-          new WorkspaceError({ operation, cause: normalizeError(cause) }),
-        ),
-      )
+      resume(Effect.fail(new WorkspaceError({ operation, cause: normalizeError(cause) })))
       return
     }
 
@@ -55,11 +51,7 @@ function executeWorkspaceCommand<A>(
     void completion.then(
       (output) => resume(Effect.succeed(output)),
       (cause) =>
-        resume(
-          Effect.fail(
-            new WorkspaceError({ operation, cause: normalizeError(cause) }),
-          ),
-        ),
+        resume(Effect.fail(new WorkspaceError({ operation, cause: normalizeError(cause) }))),
     )
 
     const terminateGroup = (signalName: "SIGTERM" | "SIGKILL") => {
@@ -108,11 +100,8 @@ export function runWorkspaceCommand(
   command: ReadonlyArray<string>,
   options: WorkspaceCommandOptions = {},
 ): Effect.Effect<string, WorkspaceError> {
-  return executeWorkspaceCommand(
-    operation,
-    command,
-    options,
-    (stdout) => new Response(stdout).text(),
+  return executeWorkspaceCommand(operation, command, options, (stdout) =>
+    new Response(stdout).text(),
   ).pipe(Effect.map((stdout) => stdout.trimEnd()))
 }
 
@@ -141,9 +130,7 @@ export function runWorkspaceCommandBytes(
 
     return {
       stdout:
-        retainedBytes === retained.byteLength
-          ? retained
-          : retained.subarray(0, retainedBytes),
+        retainedBytes === retained.byteLength ? retained : retained.subarray(0, retainedBytes),
       truncated,
     }
   })

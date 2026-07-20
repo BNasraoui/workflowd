@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import {
-  FixEligibility,
-  decideFixEligibility,
-} from "../../src/domain/transaction-policy"
+import { FixEligibility, decideFixEligibility } from "../../src/domain/transaction-policy"
 import type { ReviewResult } from "../../src/domain/review-result"
 
 const actionableReview: ReviewResult = {
@@ -27,8 +24,16 @@ describe("transaction policy", () => {
   test("uses one fix policy for automatic and manual requests", () => {
     for (const [review, headRepositoryFullName, expected] of [
       [actionableReview, "OWNER/repository", FixEligibility.Eligible()],
-      [passingReview, "owner/repository", FixEligibility.Ineligible({ reason: "review-not-actionable" })],
-      [actionableReview, "contributor/repository", FixEligibility.Ineligible({ reason: "different-repository" })],
+      [
+        passingReview,
+        "owner/repository",
+        FixEligibility.Ineligible({ reason: "review-not-actionable" }),
+      ],
+      [
+        actionableReview,
+        "contributor/repository",
+        FixEligibility.Ineligible({ reason: "different-repository" }),
+      ],
     ] as const) {
       expect(
         decideFixEligibility({

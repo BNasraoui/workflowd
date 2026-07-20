@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import type { OpenCodeAdapter } from "../../src/opencode/adapter"
-import {
-  StructuredSession,
-  StructuredSessionError,
-} from "../../src/opencode/structured-session"
+import { StructuredSession, StructuredSessionError } from "../../src/opencode/structured-session"
 
 async function* events(
   ...values: ReadonlyArray<
@@ -18,9 +15,7 @@ async function* events(
   yield* values
 }
 
-function makeAdapter(
-  overrides: Partial<OpenCodeAdapter> = {},
-): OpenCodeAdapter {
+function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
     createSession: async () => ({ id: "ses_structured" }),
     promptSession: async () => undefined,
@@ -139,9 +134,7 @@ describe("StructuredSession", () => {
       },
     })
 
-    const execution = new StructuredSession(adapter, request, resultSchema).run(
-      controller.signal,
-    )
+    const execution = new StructuredSession(adapter, request, resultSchema).run(controller.signal)
     await prompted.promise
     controller.abort(new Error("job cancelled"))
 

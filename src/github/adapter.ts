@@ -13,9 +13,7 @@ export type GitHubIssueComment = {
   readonly id: IssueCommentResponse["id"]
   readonly body?: IssueCommentResponse["body"]
   readonly userType?: NonNullable<IssueCommentResponse["user"]>["type"]
-  readonly appId?: NonNullable<
-    IssueCommentResponse["performed_via_github_app"]
-  >["id"]
+  readonly appId?: NonNullable<IssueCommentResponse["performed_via_github_app"]>["id"]
 }
 
 export type GitHubCheckRun = {
@@ -152,9 +150,7 @@ function normalizePullRequest(
       headRepositoryFullName: pullRequest.head.repo.full_name,
       headSha: pullRequest.head.sha,
       state: pullRequest.state,
-      ...(pullRequest.updated_at === undefined
-        ? {}
-        : { updatedAt: pullRequest.updated_at }),
+      ...(pullRequest.updated_at === undefined ? {} : { updatedAt: pullRequest.updated_at }),
     },
   }
 }
@@ -166,9 +162,7 @@ async function* normalizeIssueCommentPages(
     yield page.map((comment) => ({
       id: comment.id,
       ...(comment.body === undefined ? {} : { body: comment.body }),
-      ...(comment.user?.type === undefined
-        ? {}
-        : { userType: comment.user.type }),
+      ...(comment.user?.type === undefined ? {} : { userType: comment.user.type }),
       ...(comment.performed_via_github_app?.id === undefined
         ? {}
         : { appId: comment.performed_via_github_app.id }),
@@ -182,9 +176,7 @@ async function* normalizeCheckRunPages(
   for await (const page of pages) {
     yield page.map((checkRun) => ({
       id: checkRun.id,
-      ...(checkRun.external_id === undefined
-        ? {}
-        : { externalId: checkRun.external_id }),
+      ...(checkRun.external_id === undefined ? {} : { externalId: checkRun.external_id }),
       ...(checkRun.app?.id === undefined ? {} : { appId: checkRun.app.id }),
     }))
   }
@@ -201,21 +193,14 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
         yield response.data
       }
     },
-    createIssueComment: async (input) =>
-      (await client.rest.issues.createComment(input)).data.id,
-    updateIssueComment: async (input) =>
-      (await client.rest.issues.updateComment(input)).data.id,
+    createIssueComment: async (input) => (await client.rest.issues.createComment(input)).data.id,
+    updateIssueComment: async (input) => (await client.rest.issues.updateComment(input)).data.id,
     listCheckRunPages: async function* (input) {
-      for await (const response of client.paginate.iterator(
-        client.rest.checks.listForRef,
-        input,
-      )) {
+      for await (const response of client.paginate.iterator(client.rest.checks.listForRef, input)) {
         yield response.data
       }
     },
-    createCheckRun: async (input) =>
-      (await client.rest.checks.create(input)).data.id,
-    updateCheckRun: async (input) =>
-      (await client.rest.checks.update(input)).data.id,
+    createCheckRun: async (input) => (await client.rest.checks.create(input)).data.id,
+    updateCheckRun: async (input) => (await client.rest.checks.update(input)).data.id,
   }
 }

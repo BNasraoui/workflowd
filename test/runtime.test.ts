@@ -32,9 +32,9 @@ describe("serveHookHttp", () => {
           scope,
         )
         const request = yield* Effect.fork(
-          Effect.tryPromise(() =>
-            fetch(`http://${server.hostname}:${server.port}/blocked`),
-          ).pipe(Effect.exit),
+          Effect.tryPromise(() => fetch(`http://${server.hostname}:${server.port}/blocked`)).pipe(
+            Effect.exit,
+          ),
         )
         yield* Deferred.await(started)
         yield* Scope.close(scope, Exit.void)
@@ -106,9 +106,7 @@ describe("runHookService startup", () => {
 
     const exit = await Effect.runPromise(
       Effect.exit(
-        runHookService(config).pipe(
-          Effect.provide(Layer.merge(StoreLive, TestAdapters)),
-        ),
+        runHookService(config).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
       ),
     )
 

@@ -3,15 +3,9 @@ import { AuthoritativePullRequestSnapshot } from "./domain/pull-request-transiti
 import type { Publication } from "./domain/publication"
 import { normalizeError } from "./errors"
 import type { GitHubInstallationAdapter } from "./github/adapter"
-import {
-  presentReviewCheck,
-  renderReviewComment,
-  reviewMarker,
-} from "./github/review-presentation"
+import { presentReviewCheck, renderReviewComment, reviewMarker } from "./github/review-presentation"
 
-type InstallationClientProvider = (
-  installationId: number,
-) => Promise<GitHubInstallationAdapter>
+type InstallationClientProvider = (installationId: number) => Promise<GitHubInstallationAdapter>
 
 type RepositoryName = {
   readonly owner: string
@@ -29,12 +23,9 @@ export type FetchPullRequestSnapshotInput = {
   readonly pullRequestNumber: number
 }
 
-export type PullRequestSnapshot =
-  typeof AuthoritativePullRequestSnapshot.Encoded
+export type PullRequestSnapshot = typeof AuthoritativePullRequestSnapshot.Encoded
 
-export type PublicationCurrentness<E, R> = (
-  now: Date,
-) => Effect.Effect<boolean, E, R>
+export type PublicationCurrentness<E, R> = (now: Date) => Effect.Effect<boolean, E, R>
 
 export type GitHubPort = {
   readonly publishReview: <E, R>(
@@ -79,9 +70,7 @@ export class GitHubAppAdapter implements GitHubPort {
     isCurrent: PublicationCurrentness<E, R>,
   ): Effect.Effect<"published" | "stale", GitHubClientError | E, R> =>
     Effect.gen(this, function* () {
-      const repository = yield* parseRepositoryName(
-        publication.repositoryFullName,
-      )
+      const repository = yield* parseRepositoryName(publication.repositoryFullName)
       const client = yield* this.client(publication.installationId)
       const pull = yield* this.attempt("get pull request", (signal) =>
         client.getPullRequest({
@@ -97,8 +86,7 @@ export class GitHubAppAdapter implements GitHubPort {
         pull.pullRequest.baseRef !== publication.target.baseRef ||
         pull.pullRequest.headSha !== publication.target.headSha ||
         pull.pullRequest.headRef !== publication.target.headRef ||
-        pull.pullRequest.headRepositoryFullName !==
-          publication.target.headRepositoryFullName
+        pull.pullRequest.headRepositoryFullName !== publication.target.headRepositoryFullName
       ) {
         return "stale" as const
       }
@@ -126,9 +114,7 @@ export class GitHubAppAdapter implements GitHubPort {
   private client(
     installationId: number,
   ): Effect.Effect<GitHubInstallationAdapter, GitHubClientError> {
-    return this.attempt("get installation client", () =>
-      this.getInstallationClient(installationId),
-    )
+    return this.attempt("get installation client", () => this.getInstallationClient(installationId))
   }
 
   private publishComment<E, R>(
@@ -139,11 +125,7 @@ export class GitHubAppAdapter implements GitHubPort {
     isCurrent: PublicationCurrentness<E, R>,
   ): Effect.Effect<"published" | "stale", GitHubClientError | E, R> {
     return Effect.gen(this, function* () {
-      const existing = yield* this.ownedComment(
-        client,
-        repository,
-        publication,
-      )
+      const existing = yield* this.ownedComment(client, repository, publication)
       const write =
         existing === undefined
           ? (signal: AbortSignal) =>
@@ -160,14 +142,9 @@ export class GitHubAppAdapter implements GitHubPort {
                 body,
                 request: { signal },
               })
-      const now = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const now = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       if (!(yield* isCurrent(now))) return "stale" as const
-      yield* this.attempt(
-        `${existing === undefined ? "create" : "update"} review comment`,
-        write,
-      )
+      yield* this.attempt(`${existing === undefined ? "create" : "update"} review comment`, write)
       return "published" as const
     })
   }
@@ -207,9 +184,7 @@ export class GitHubAppAdapter implements GitHubPort {
     return Effect.gen(this, function* () {
       const existing = yield* this.ownedCheck(client, repository, publication)
       const presentation = presentReviewCheck(publication, comment)
-      const now = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const now = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       if (!(yield* isCurrent(now))) return "stale" as const
       const check = {
         ...repository,
@@ -233,10 +208,7 @@ export class GitHubAppAdapter implements GitHubPort {
                 check_run_id: existing.id,
                 request: { signal },
               })
-      yield* this.attempt(
-        `${existing === undefined ? "create" : "update"} check run`,
-        write,
-      )
+      yield* this.attempt(`${existing === undefined ? "create" : "update"} check run`, write)
       return "published" as const
     })
   }
@@ -256,9 +228,7 @@ export class GitHubAppAdapter implements GitHubPort {
         request: { signal },
       })) {
         const found = page.find(
-          (check) =>
-            check.appId === this.appId &&
-            check.externalId === publication.operationKey,
+          (check) => check.appId === this.appId && check.externalId === publication.operationKey,
         )
         if (found !== undefined) return found
       }
@@ -272,8 +242,7 @@ export class GitHubAppAdapter implements GitHubPort {
   ): Effect.Effect<A, GitHubClientError> {
     return Effect.tryPromise({
       try: run,
-      catch: (cause) =>
-        new GitHubClientError({ operation, cause: normalizeError(cause) }),
+      catch: (cause) => new GitHubClientError({ operation, cause: normalizeError(cause) }),
     })
   }
 }

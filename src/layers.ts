@@ -5,10 +5,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { Effect, Layer } from "effect"
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter } from "./github"
-import {
-  makeOctokitClientPort,
-  OctokitInstallationAdapter,
-} from "./github/adapter"
+import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { Automation, OpenCodeAutomationAdapter } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
@@ -29,8 +26,7 @@ export const makeLiveLayer = (config: AppConfig) => {
       GitHub,
       Effect.tryPromise({
         try: () => readFile(config.github.privateKeyPath, "utf8"),
-        catch: (cause) =>
-          new Error(`Could not read GitHub App private key: ${String(cause)}`),
+        catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
       }).pipe(
         Effect.map((privateKey) => {
           const app = new App({
@@ -42,9 +38,7 @@ export const makeLiveLayer = (config: AppConfig) => {
             config.github.appId,
             async (installationId) =>
               new OctokitInstallationAdapter(
-                makeOctokitClientPort(
-                  await app.getInstallationOctokit(installationId),
-                ),
+                makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
               ),
           )
         }),

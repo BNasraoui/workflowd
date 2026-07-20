@@ -11,8 +11,7 @@ import type { makeSharedStoreOperations } from "./shared"
 type PullRequestTransitionInput = {
   readonly appliedAt: Date
   readonly snapshot:
-    | typeof PullRequestObservation.Encoded
-    | typeof AuthoritativePullRequestSnapshot.Encoded
+    typeof PullRequestObservation.Encoded | typeof AuthoritativePullRequestSnapshot.Encoded
 }
 
 type PullRequestRow = {
@@ -38,9 +37,7 @@ type PullRequestRow = {
 
 const decodeTracked = Schema.decodeUnknownSync(TrackedPullRequestState)
 const decodeObservation = Schema.decodeUnknownSync(PullRequestObservation)
-const decodeAuthoritative = Schema.decodeUnknownSync(
-  AuthoritativePullRequestSnapshot,
-)
+const decodeAuthoritative = Schema.decodeUnknownSync(AuthoritativePullRequestSnapshot)
 
 export function makePullRequestTransition(
   sql: SqlClient,
@@ -103,16 +100,13 @@ export function makePullRequestTransition(
                 headRepositoryFullName: row.head_repository_full_name,
                 headSha: row.head_sha,
                 state: row.state,
-                ...(row.github_updated_at === null
-                  ? {}
-                  : { updatedAt: row.github_updated_at }),
+                ...(row.github_updated_at === null ? {} : { updatedAt: row.github_updated_at }),
               },
               generation: row.generation,
               ...(row.latest_review_request_number === null
                 ? {}
                 : {
-                    latestReviewRequestNumber:
-                      row.latest_review_request_number,
+                    latestReviewRequestNumber: row.latest_review_request_number,
                   }),
               reviewRequestActive: Boolean(row.review_request_active),
             })
@@ -189,10 +183,7 @@ export function makePullRequestTransition(
             timestamp,
           })
         }
-        if (
-          intent._tag === "SupersedeReviewRequests" &&
-          intent.scope === "current-generation"
-        ) {
+        if (intent._tag === "SupersedeReviewRequests" && intent.scope === "current-generation") {
           yield* shared.supersedePullRequestWork({
             repositoryId: repository.id,
             pullRequestNumber: pullRequest.number,
@@ -263,9 +254,7 @@ export function makePullRequestTransition(
           updated_at = excluded.updated_at
       `
 
-      const queue = decision.intents.find(
-        (intent) => intent._tag === "QueueReview",
-      )
+      const queue = decision.intents.find((intent) => intent._tag === "QueueReview")
       if (queue === undefined || queue._tag !== "QueueReview") {
         return { status: "ignored", generation: decision.generation } as const
       }
@@ -316,8 +305,7 @@ export function makePullRequestTransition(
         reviewJob !== undefined &&
         decision.intents.some(
           (intent) =>
-            intent._tag === "SupersedeReviewRequests" &&
-            intent.scope === "earlier-review-requests",
+            intent._tag === "SupersedeReviewRequests" && intent.scope === "earlier-review-requests",
         )
       ) {
         yield* shared.supersedeOlderReviewWork({

@@ -5,10 +5,7 @@ import {
   OpenCodeAutomationAdapter,
   OpenCodeAutomationError,
 } from "../src/opencode"
-import type {
-  OpenCodeAdapter,
-  OpenCodeSessionEvent,
-} from "../src/opencode/adapter"
+import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
   ...values: ReadonlyArray<OpenCodeSessionEvent>
@@ -16,9 +13,7 @@ async function* events(
   yield* values
 }
 
-function makeAdapter(
-  overrides: Partial<OpenCodeAdapter> = {},
-): OpenCodeAdapter {
+function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
     createSession: async () => ({ id: "ses_default" }),
     promptSession: async () => undefined,

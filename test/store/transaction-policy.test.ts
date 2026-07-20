@@ -45,14 +45,8 @@ const runFixPath = (
       })
 
       let disposition:
-        | "automatic"
-        | "review"
-        | "fix"
-        | "status"
-        | "noop"
-        | "disabled"
-        | "denied"
-        | "stale" = "automatic"
+        "automatic" | "review" | "fix" | "status" | "noop" | "disabled" | "denied" | "stale" =
+        "automatic"
       if (mode === "manual") {
         yield* store.ingestCommand(
           {
@@ -119,12 +113,7 @@ describe("transaction policy integration", () => {
   })
 
   test("finishes a disabled manual fix command without durable Fix Work", async () => {
-    const result = await runFixPath(
-      "manual",
-      samplePullRequestEvent,
-      changesRequestedReview,
-      false,
-    )
+    const result = await runFixPath("manual", samplePullRequestEvent, changesRequestedReview, false)
 
     expect(result).toEqual({ count: 0, disposition: "disabled" })
   })

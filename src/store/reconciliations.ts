@@ -9,9 +9,7 @@ import type { makePullRequestTransition } from "./pull-requests"
 
 type ReconciliationOperations = Pick<
   WorkflowStorePort,
-  | "applyReconciliationSnapshot"
-  | "claimNextReconciliation"
-  | "rescheduleReconciliation"
+  "applyReconciliationSnapshot" | "claimNextReconciliation" | "rescheduleReconciliation"
 >
 
 export function makeReconciliationOperations(
@@ -68,10 +66,9 @@ export function makeReconciliationOperations(
           AND lease_until > ${input.completedAt.toISOString()}
           RETURNING id
         `
-        return completed.length === 0 ? "stale" as const : "completed" as const
+        return completed.length === 0 ? ("stale" as const) : ("completed" as const)
       }).pipe(sql.withTransaction),
     claimNextReconciliation: (input) => queue.claim(input),
-    rescheduleReconciliation: (input) =>
-      queue.reschedule({ ...input, id: input.reconciliationId }),
+    rescheduleReconciliation: (input) => queue.reschedule({ ...input, id: input.reconciliationId }),
   }
 }

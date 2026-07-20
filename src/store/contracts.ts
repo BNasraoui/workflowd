@@ -88,9 +88,7 @@ export type WorkflowStorePort = {
     delivery: DeliveryInput,
     event: CommandEvent,
   ) => Effect.Effect<{ readonly status: "duplicate" | "enqueued" }, SqlError>
-  readonly claimNextCommand: (
-    input: LeaseClaim,
-  ) => Effect.Effect<AgentCommand | null, SqlError>
+  readonly claimNextCommand: (input: LeaseClaim) => Effect.Effect<AgentCommand | null, SqlError>
   readonly executeCommand: (
     input: ExecuteCommandInput,
   ) => Effect.Effect<

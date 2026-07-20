@@ -9,9 +9,7 @@ import { WorkflowStoreLive } from "../../src/store"
 export const sampleBaseSha = "d".repeat(40)
 export const sampleHeadSha = "a".repeat(40)
 
-export const decodePullRequestEvent = Schema.decodeUnknownSync(
-  PullRequestObservation,
-)
+export const decodePullRequestEvent = Schema.decodeUnknownSync(PullRequestObservation)
 
 export const samplePullRequestEvent = decodePullRequestEvent({
   _tag: "PullRequest",
@@ -94,10 +92,7 @@ export const makeFixWork = (
     target: { ...workInput.target, ...overrides.target },
   })
 
-export const sampleCommandEvent = (
-  command: "review" | "fix" | "status",
-  commentId: number,
-) =>
+export const sampleCommandEvent = (command: "review" | "fix" | "status", commentId: number) =>
   Schema.decodeUnknownSync(Command)({
     _tag: "Command",
     action: "created",
@@ -109,8 +104,7 @@ export const sampleCommandEvent = (
     repository: samplePullRequestEvent.repository,
   })
 
-export const makeDatabaseLayer = () =>
-  SqliteClient.layer({ filename: ":memory:" })
+export const makeDatabaseLayer = () => SqliteClient.layer({ filename: ":memory:" })
 
 export const makeStoreLayer = () => {
   const database = makeDatabaseLayer()

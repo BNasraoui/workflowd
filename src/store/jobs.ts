@@ -11,9 +11,9 @@ type JobOperations = Pick<
   WorkflowStorePort,
   | "claimNextJob"
   | "completeFixJob"
-    | "completeReviewJob"
-    | "disableFixJob"
-    | "isJobCurrent"
+  | "completeReviewJob"
+  | "disableFixJob"
+  | "isJobCurrent"
   | "recordFixResult"
   | "rescheduleJob"
   | "shouldCancelJob"
@@ -21,10 +21,7 @@ type JobOperations = Pick<
 
 export function makeJobOperations(
   sql: SqlClient,
-  shared: Pick<
-    ReturnType<typeof makeSharedStoreOperations>,
-    "enqueueFixFromReview"
-  >,
+  shared: Pick<ReturnType<typeof makeSharedStoreOperations>, "enqueueFixFromReview">,
 ): JobOperations {
   const currentness = makeCurrentnessPolicy(sql)
   const queue = new SqlLeaseQueue<Work>(sql, {
@@ -85,9 +82,7 @@ export function makeJobOperations(
         AND lease_owner = ${input.workerId}
         AND lease_until > ${input.disabledAt.toISOString()}
         RETURNING id
-      `.pipe(
-        Effect.map((rows) => (rows.length === 0 ? "stale" : "disabled")),
-      ),
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "disabled"))),
     completeFixJob: (input) =>
       sql<{ readonly id: number }>`
         UPDATE jobs AS candidate
@@ -106,9 +101,7 @@ export function makeJobOperations(
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
         RETURNING id
-      `.pipe(
-        Effect.map((rows) => (rows.length === 0 ? "stale" : "completed")),
-      ),
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "completed"))),
     completeReviewJob: (input) =>
       Effect.gen(function* () {
         const timestamp = input.completedAt.toISOString()
@@ -225,9 +218,7 @@ export function makeJobOperations(
         AND lease_until > ${input.recordedAt.toISOString()}
         AND fix_result_json IS NULL
         RETURNING id
-      `.pipe(
-        Effect.map((rows) => (rows.length === 0 ? "stale" : "recorded")),
-      ),
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "recorded"))),
     rescheduleJob: (input) => queue.reschedule({ ...input, id: input.jobId }),
     shouldCancelJob: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`

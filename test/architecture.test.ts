@@ -25,24 +25,17 @@ const parsedConfig = ts.parseJsonConfigFileContent(
 const program = ts.createProgram(parsedConfig.fileNames, parsedConfig.options)
 const checker = program.getTypeChecker()
 
-type ArchitectureFixture = {
-  readonly sourcePath: string
-}
-
 const replacementContractName = /(?:Port|Dependencies)$/
 const productionContractNames = new Set<string>()
 for (const path of sourcePaths) {
   const source = program.getSourceFile(ts.sys.resolvePath(path))!
   for (const statement of source.statements) {
     if (
-      (ts.isTypeAliasDeclaration(statement) ||
-        ts.isInterfaceDeclaration(statement)) &&
+      (ts.isTypeAliasDeclaration(statement) || ts.isInterfaceDeclaration(statement)) &&
       replacementContractName.test(statement.name.text)
     ) {
       productionContractNames.add(statement.name.text)
-      productionContractNames.add(
-        statement.name.text.replace(replacementContractName, ""),
-      )
+      productionContractNames.add(statement.name.text.replace(replacementContractName, ""))
     }
   }
 }
@@ -63,9 +56,9 @@ describe("architecture type hygiene", () => {
         if (
           ts.isTypeReferenceNode(node) &&
           ["Effect", "Effect.Effect"].includes(node.typeName.getText(source)) &&
-          node.typeArguments?.slice(0, 2).some((channel) =>
-            isUnknownChannel(checker.getTypeFromTypeNode(channel)),
-          )
+          node.typeArguments
+            ?.slice(0, 2)
+            .some((channel) => isUnknownChannel(checker.getTypeFromTypeNode(channel)))
         ) {
           const position = source.getLineAndCharacterOfPosition(node.getStart(source))
           violations.push(`${path}:${position.line + 1}: ${node.getText(source)}`)
@@ -90,16 +83,11 @@ describe("architecture type hygiene", () => {
       const visit = (node: ts.Node): void => {
         if (ts.isTypeAliasDeclaration(node) || ts.isInterfaceDeclaration(node)) {
           const name = node.name.text
-          if (
-            !replacementContractName.test(name) &&
-            !productionContractNames.has(name)
-          ) {
+          if (!replacementContractName.test(name) && !productionContractNames.has(name)) {
             ts.forEachChild(node, visit)
             return
           }
-          const position = source.getLineAndCharacterOfPosition(
-            node.getStart(source),
-          )
+          const position = source.getLineAndCharacterOfPosition(node.getStart(source))
           violations.push(`${path}:${position.line + 1}: ${name}`)
         }
         ts.forEachChild(node, visit)

@@ -4,16 +4,8 @@ import { Effect } from "effect"
 import type { Work } from "../domain/work"
 import { runWorkspaceCommand } from "./command"
 import { WorkspaceError } from "./errors"
-import {
-  filesystemEffect,
-  filesystemTransition,
-  pathExists,
-} from "./filesystem"
-import type {
-  GitWorkspaceConfig,
-  ResolvedWorktree,
-  WorkspaceRemoteUrl,
-} from "./model"
+import { filesystemEffect, filesystemTransition, pathExists } from "./filesystem"
+import type { GitWorkspaceConfig, ResolvedWorktree, WorkspaceRemoteUrl } from "./model"
 
 function runGit(operation: string, directory: string, ...args: ReadonlyArray<string>) {
   return runWorkspaceCommand(operation, ["git", "-C", directory, ...args])
@@ -55,10 +47,7 @@ export class ManagedWorkspaceLifecycle {
   create(work: Work): Effect.Effect<ResolvedWorktree, WorkspaceError> {
     return Effect.gen(this, function* () {
       const parts = work.repositoryFullName.split("/")
-      if (
-        parts.length !== 2 ||
-        parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))
-      ) {
+      if (parts.length !== 2 || parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))) {
         return yield* Effect.fail(
           new WorkspaceError({
             operation: "validate repository name",
@@ -66,12 +55,7 @@ export class ManagedWorkspaceLifecycle {
           }),
         )
       }
-      const repository = join(
-        this.#config.repositoryRoot,
-        "github.com",
-        parts[0]!,
-        parts[1]!,
-      )
+      const repository = join(this.#config.repositoryRoot, "github.com", parts[0]!, parts[1]!)
       const directory = join(
         this.#config.worktreeRoot,
         String(work.repositoryId),
@@ -79,8 +63,7 @@ export class ManagedWorkspaceLifecycle {
         `${work.id}-${work.generation}`,
       )
       const sameRepository =
-        work.repositoryFullName.toLowerCase() ===
-        work.target.headRepositoryFullName.toLowerCase()
+        work.repositoryFullName.toLowerCase() === work.target.headRepositoryFullName.toLowerCase()
 
       yield* runWorkspaceCommand("validate head branch", [
         "git",
@@ -197,12 +180,7 @@ export class ManagedWorkspaceLifecycle {
         "add",
         ...(retainBranch
           ? [directory, work.target.headRef]
-          : [
-              "-B",
-              work.target.headRef,
-              directory,
-              pullRef,
-            ]),
+          : ["-B", work.target.headRef, directory, pullRef]),
       )
       if (!sameRepository) return
       yield* runGit(

@@ -1,0 +1,7 @@
+.agents/
+.beads/
+.claude/
+.codex/
+deploy/
+skills/
+*.md

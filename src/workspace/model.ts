@@ -12,9 +12,7 @@ export type FixWorkspace = ReviewWorkspace & {
   readonly markCompleted: () => void
 }
 
-export type DurableJobCurrentness = (
-  now: Date,
-) => Effect.Effect<boolean, WorkspaceError>
+export type DurableJobCurrentness = (now: Date) => Effect.Effect<boolean, WorkspaceError>
 
 export type GitWorkspaceConfig = {
   readonly localRepositories: ReadonlyArray<string>
@@ -29,9 +27,7 @@ export type WorkspacePort = {
   readonly prepareReview: (
     work: ReviewWork,
   ) => Effect.Effect<ReviewWorkspace, WorkspaceError, Scope.Scope>
-  readonly prepareFix: (
-    work: FixWork,
-  ) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
+  readonly prepareFix: (work: FixWork) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
   readonly publishFix: (
     work: FixWork,
     workspace: FixWorkspace,

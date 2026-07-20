@@ -29,9 +29,7 @@ function superviseWorker<A extends string, E, R>(
 ) {
   return Effect.forever(
     iteration.pipe(
-      Effect.tap((result) =>
-        result === "idle" ? Effect.sleep(pollIntervalMs) : Effect.void,
-      ),
+      Effect.tap((result) => (result === "idle" ? Effect.sleep(pollIntervalMs) : Effect.void)),
       Effect.catchAllCause((cause) =>
         Effect.logError(`${name} iteration failed`, cause).pipe(
           Effect.andThen(Effect.sleep(pollIntervalMs)),
@@ -70,19 +68,11 @@ export function serveHookHttp<R = WorkflowStorePort>(
               }).pipe(
                 Effect.catchAllCause(() =>
                   Effect.succeed(
-                    Response.json(
-                      { error: "service shutting down" },
-                      { status: 503 },
-                    ),
+                    Response.json({ error: "service shutting down" }, { status: 503 }),
                   ),
                 ),
               ),
-            ).catch(() =>
-              Response.json(
-                { error: "service shutting down" },
-                { status: 503 },
-              ),
-            ),
+            ).catch(() => Response.json({ error: "service shutting down" }, { status: 503 })),
         }),
       ),
       (server) =>
@@ -99,17 +89,19 @@ export function runHookService(config: AppConfig) {
     Effect.gen(function* () {
       const automation = yield* Automation
 
-      yield* automation.validateAvailability({
-        fixWorkEnabled: config.fixWork.enabled,
-      }).pipe(
-        Effect.mapError(
-          (error) =>
-            new Error(
-              `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-              { cause: error },
-            ),
-        ),
-      )
+      yield* automation
+        .validateAvailability({
+          fixWorkEnabled: config.fixWork.enabled,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new Error(
+                `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
+                { cause: error },
+              ),
+          ),
+        )
 
       for (let index = 0; index < config.worker.concurrency; index += 1) {
         const workerId = `${process.pid}:worker:${index}`
@@ -171,9 +163,7 @@ export function runHookService(config: AppConfig) {
         ...config.http,
         webhookSecret: config.github.webhookSecret,
       })
-      yield* Effect.logInfo(
-        `workflowd listening on http://${server.hostname}:${server.port}`,
-      )
+      yield* Effect.logInfo(`workflowd listening on http://${server.hostname}:${server.port}`)
 
       return yield* Effect.never
     }),

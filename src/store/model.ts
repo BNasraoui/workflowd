@@ -13,10 +13,7 @@ export type DeliveryInput = {
 
 export type DeliveryRecordResult = "inserted" | "duplicate"
 
-export type PullRequestEvent = Extract<
-  GitHubEvent,
-  { readonly _tag: "PullRequest" }
->
+export type PullRequestEvent = Extract<GitHubEvent, { readonly _tag: "PullRequest" }>
 
 export type CommandEvent = Extract<GitHubEvent, { readonly _tag: "Command" }>
 

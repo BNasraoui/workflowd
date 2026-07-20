@@ -59,7 +59,11 @@ describe("handleGitHubWebhook", () => {
           now: new Date("2026-07-19T12:01:00.000Z"),
           leaseDurationMs: 60_000,
         })
-        return { body: yield* Effect.promise(() => response.json()), job, response }
+        return {
+          body: yield* Effect.promise(() => response.json()),
+          job,
+          response,
+        }
       }).pipe(Effect.provide(TestLayer)),
     )
 
@@ -70,7 +74,10 @@ describe("handleGitHubWebhook", () => {
 
   test("rejects a webhook body above the configured limit", async () => {
     const secret = "webhook-secret"
-    const oversized = JSON.stringify({ action: "opened", padding: "x".repeat(200) })
+    const oversized = JSON.stringify({
+      action: "opened",
+      padding: "x".repeat(200),
+    })
     const signature = `sha256=${createHmac("sha256", secret).update(oversized).digest("hex")}`
     const request = new Request("http://localhost/hooks/github", {
       method: "POST",

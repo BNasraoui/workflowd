@@ -5,14 +5,8 @@ import {
   FixResultJsonSchema,
   type FixResult,
 } from "./domain/fix-result"
-import {
-  type OpenCodeAdapter,
-  type OpenCodeModel,
-} from "./opencode/adapter"
-import {
-  StructuredSession,
-  StructuredSessionError,
-} from "./opencode/structured-session"
+import { type OpenCodeAdapter, type OpenCodeModel } from "./opencode/adapter"
+import { StructuredSession, StructuredSessionError } from "./opencode/structured-session"
 import {
   ReviewResult as ReviewResultSchema,
   ReviewResultJsonSchema,
@@ -42,9 +36,7 @@ export type ValidateAutomationAvailabilityInput = {
   readonly fixWorkEnabled: boolean
 }
 
-export class OpenCodeAutomationError extends Data.TaggedError(
-  "OpenCodeAutomationError",
-)<{
+export class OpenCodeAutomationError extends Data.TaggedError("OpenCodeAutomationError")<{
   readonly operation: string
   readonly cause: Error
 }> {}
@@ -61,9 +53,7 @@ export type AutomationPort = {
   ) => Effect.Effect<FixResult, OpenCodeAutomationError>
 }
 
-export const Automation = Context.GenericTag<AutomationPort>(
-  "workflowd/Automation",
-)
+export const Automation = Context.GenericTag<AutomationPort>("workflowd/Automation")
 
 export class OpenCodeAutomationAdapter implements AutomationPort {
   constructor(
@@ -184,17 +174,11 @@ function parseModel(value: string): OpenCodeModel {
   }
 }
 
-function sessionTitle(
-  kind: AutomationKind,
-  input: RunPullRequestAutomationInput,
-): string {
+function sessionTitle(kind: AutomationKind, input: RunPullRequestAutomationInput): string {
   return `${kind}:${input.repositoryFullName}#${input.pullRequestNumber}@${input.headSha.slice(0, 12)}`
 }
 
-function automationPrompt(
-  kind: AutomationKind,
-  input: RunPullRequestAutomationInput,
-): string {
+function automationPrompt(kind: AutomationKind, input: RunPullRequestAutomationInput): string {
   if (kind === "review") {
     return `Review pull request ${input.repositoryFullName}#${input.pullRequestNumber} at head ${input.headSha} against base ${input.baseSha}. Read .workflowd/review.diff first, then inspect any relevant source and tests. Report only concrete correctness, security, regression, or missing-test findings. Do not modify files.`
   }
