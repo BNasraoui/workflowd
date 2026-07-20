@@ -6,6 +6,7 @@ import {
   TrackedPullRequestState,
   decidePullRequestTransition,
 } from "../domain/pull-request-transition"
+import { StoreDataError } from "./errors"
 import type { makeSharedStoreOperations } from "./shared"
 
 type PullRequestTransitionInput = {
@@ -35,9 +36,18 @@ type PullRequestRow = {
   readonly review_request_active: number
 }
 
-const decodeTracked = Schema.decodeUnknownSync(TrackedPullRequestState)
-const decodeObservation = Schema.decodeUnknownSync(PullRequestObservation)
-const decodeAuthoritative = Schema.decodeUnknownSync(AuthoritativePullRequestSnapshot)
+const decodeTracked = (row: unknown) =>
+  Schema.decodeUnknown(TrackedPullRequestState)(row).pipe(
+    Effect.mapError(
+      (error) =>
+        new StoreDataError({
+          record: "pull_request",
+          recordId: 0,
+          field: "row",
+          message: String(error),
+        }),
+    ),
+  )
 
 export function makePullRequestTransition(
   sql: SqlClient,
@@ -50,8 +60,10 @@ export function makePullRequestTransition(
     Effect.gen(function* () {
       const snapshot =
         input.snapshot._tag === "PullRequest"
-          ? decodeObservation(input.snapshot)
-          : decodeAuthoritative(input.snapshot)
+          ? yield* Schema.decodeUnknown(PullRequestObservation)(input.snapshot).pipe(Effect.orDie)
+          : yield* Schema.decodeUnknown(AuthoritativePullRequestSnapshot)(input.snapshot).pipe(
+              Effect.orDie,
+            )
       const { pullRequest, repository } = snapshot
       const existing = yield* sql<PullRequestRow>`
         SELECT
@@ -81,7 +93,7 @@ export function makePullRequestTransition(
       const current =
         row === undefined
           ? undefined
-          : decodeTracked({
+          : yield* decodeTracked({
               _tag: "TrackedPullRequestState",
               installationId: row.installation_id,
               repository: {

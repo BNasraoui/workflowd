@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Logger } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore } from "../src/store/contracts"
@@ -98,6 +98,44 @@ describe("handleGitHubWebhook", () => {
     )
 
     expect(response.status).toBe(413)
+  })
+
+  test("returns 500 when the webhook body cannot be read", async () => {
+    const logs: Array<{ readonly level: string; readonly message: unknown }> = []
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      logs.push({ level: logLevel.label, message })
+    })
+    class UnreadableRequest extends Request {
+      override readonly arrayBuffer = (): Promise<ArrayBuffer> =>
+        Promise.reject(new Error("body unavailable"))
+    }
+
+    const request = new UnreadableRequest("http://localhost/hooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-delivery": "delivery-http-unreadable",
+        "x-github-event": "pull_request",
+      },
+    })
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: "webhook-secret",
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(TestLayer),
+        Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
+      ),
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ error: "internal server error" })
+    expect(logs).toEqual([
+      {
+        level: "ERROR",
+        message: ["Webhook ingestion failed"],
+      },
+    ])
   })
 
   test("returns 400 for a malformed pull request domain identifier", async () => {

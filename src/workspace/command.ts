@@ -77,21 +77,30 @@ function executeWorkspaceCommand<A>(
       once: true,
     })
 
-    return Effect.promise(async () => {
-      terminateGroup("SIGTERM")
-      const completed = await Promise.race([
-        completion.then(
+    return Effect.tryPromise({
+      try: async () => {
+        terminateGroup("SIGTERM")
+        const completionSettled = completion.then(
           () => true,
           () => true,
-        ),
-        Bun.sleep(500).then(() => false),
-      ])
-      if (!completed || groupIsAlive()) terminateGroup("SIGKILL")
-      await completion.catch(() => undefined)
-      for (let attempt = 0; attempt < 50 && groupIsAlive(); attempt += 1) {
-        await Bun.sleep(10)
-      }
-    })
+        )
+        const completed = await Promise.race([completionSettled, Bun.sleep(500).then(() => false)])
+        if (!completed || groupIsAlive()) terminateGroup("SIGKILL")
+        await completionSettled
+        for (let attempt = 0; attempt < 50 && groupIsAlive(); attempt += 1) {
+          await Bun.sleep(10)
+        }
+        if (groupIsAlive()) {
+          throw new Error(`Process group ${child.pid} remained alive after cleanup`)
+        }
+      },
+      catch: normalizeError,
+    }).pipe(
+      Effect.tapError((cause) =>
+        Effect.logWarning("Workspace command cleanup failed", { operation, cause }),
+      ),
+      Effect.orDie,
+    )
   })
 }
 

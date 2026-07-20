@@ -36,7 +36,7 @@ export function handleGitHubWebhook(
       return Response.json({ error: "missing GitHub delivery headers" }, { status: 400 })
     }
 
-    const body = new Uint8Array(yield* Effect.promise(() => request.arrayBuffer()))
+    const body = new Uint8Array(yield* Effect.tryPromise(() => request.arrayBuffer()))
     if (body.byteLength > (options.maxBodyBytes ?? 1_048_576)) {
       return Response.json({ error: "payload too large" }, { status: 413 })
     }

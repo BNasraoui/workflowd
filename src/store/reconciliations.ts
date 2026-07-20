@@ -50,7 +50,7 @@ export function makeReconciliationOperations(
           snapshot: input.snapshot,
         })
         if (result.status === "reconciliation_enqueued") {
-          throw new Error("authoritative snapshot requested reconciliation")
+          return yield* Effect.dieMessage("authoritative snapshot requested reconciliation")
         }
         const completed = yield* sql<{ readonly id: number }>`
           UPDATE reconciliations

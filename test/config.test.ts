@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { loadConfig } from "../src/config"
 
-const requiredEnvironment = {
+const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
@@ -131,7 +131,7 @@ describe("loadConfig", () => {
     ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE"],
   ])("requires either %s or %s", async (direct, file) => {
     const environment = { ...requiredEnvironment }
-    delete environment[direct as keyof typeof environment]
+    delete environment[direct]
 
     await expect(loadConfig(environment, { home: "/home/test" })).rejects.toThrow(
       `Set exactly one of ${direct} or ${file}`,

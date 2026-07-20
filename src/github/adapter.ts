@@ -1,5 +1,4 @@
-import type { Octokit as OctokitClient } from "@octokit/rest"
-import type { RestEndpointMethodTypes } from "@octokit/rest"
+import type { Octokit as OctokitClient, RestEndpointMethodTypes } from "@octokit/rest"
 import { PullRequestData } from "../domain/pull-request-transition"
 
 type IssueCommentResponse =

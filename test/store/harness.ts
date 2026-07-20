@@ -111,5 +111,7 @@ export const makeStoreLayer = () => {
   return WorkflowStoreLive.pipe(Layer.provideMerge(database))
 }
 
-export const runWithStore = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())) as Effect.Effect<A, E>)
+type StoreServices = Layer.Layer.Success<ReturnType<typeof makeStoreLayer>>
+
+export const runWithStore = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())))

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope } from "effect"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
-import { runHookService, serveHookHttp } from "../src/runtime"
+import { HookHttpServerStartError, runHookService, serveHookHttp } from "../src/runtime"
 import { WorkflowStoreLive } from "../src/store"
 import { Workspace } from "../src/workspace"
 
@@ -46,6 +46,102 @@ describe("serveHookHttp", () => {
 
     expect(lifecycle.interrupted).toBe(true)
     expect(lifecycle.requestExit._tag).toBe("Failure")
+  })
+
+  test("fails shutdown after draining requests when stopping the listener rejects", async () => {
+    const logs: Array<{ readonly level: string; readonly message: unknown }> = []
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      logs.push({ level: logLevel.label, message })
+    })
+    const CapturingLogger = Logger.replace(Logger.defaultLogger, logger)
+    const started = await Effect.runPromise(Deferred.make<void>())
+    const interrupted = await Effect.runPromise(Deferred.make<void>())
+    const scope = await Effect.runPromise(Scope.make())
+    const server = await Effect.runPromise(
+      Scope.extend(
+        serveHookHttp(
+          {
+            host: "127.0.0.1",
+            port: 0,
+            maxWebhookBytes: 1_024,
+            webhookSecret: "secret",
+          },
+          () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+            ),
+        ),
+        scope,
+      ).pipe(Effect.provide(CapturingLogger)),
+    )
+    const stop = server.stop.bind(server)
+    server.stop = () => Promise.reject(new Error("stop failed before listener stopped"))
+
+    try {
+      const lifecycle = await Effect.runPromise(
+        Effect.gen(function* () {
+          const request = yield* Effect.fork(
+            Effect.tryPromise(() => fetch(`http://${server.hostname}:${server.port}/blocked`)).pipe(
+              Effect.exit,
+            ),
+          )
+          yield* Deferred.await(started)
+          const closeExit = yield* Scope.close(scope, Exit.void).pipe(Effect.exit)
+          const interruption = yield* Deferred.poll(interrupted)
+          const requestExit = yield* Fiber.join(request)
+          return { closeExit, interruption, requestExit }
+        }).pipe(Effect.provide(CapturingLogger)),
+      )
+
+      expect(lifecycle.closeExit._tag).toBe("Failure")
+      if (Exit.isFailure(lifecycle.closeExit)) {
+        expect(Array.from(Cause.defects(lifecycle.closeExit.cause))).toEqual([
+          expect.objectContaining({ _tag: "UnknownException" }),
+        ])
+      }
+      expect(lifecycle.interruption._tag).toBe("Some")
+      expect(lifecycle.requestExit._tag).toBe("Success")
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toMatchObject({
+        level: "ERROR",
+        message: ["Failed to stop webhook listener", { _tag: "UnknownException" }],
+      })
+    } finally {
+      await stop(true)
+    }
+  })
+
+  test("fails with a tagged error when the listener cannot be acquired", async () => {
+    const occupied = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("occupied"),
+    })
+    if (occupied.port === undefined) throw new Error("occupied listener has no port")
+    const occupiedPort = occupied.port
+
+    try {
+      const failure = await Effect.runPromise(
+        Effect.scoped(
+          serveHookHttp(
+            {
+              host: "127.0.0.1",
+              port: occupiedPort,
+              maxWebhookBytes: 1_024,
+              webhookSecret: "secret",
+            },
+            () => Effect.succeed(new Response("ok")),
+          ).pipe(Effect.flip),
+        ),
+      )
+
+      expect(failure).toBeInstanceOf(HookHttpServerStartError)
+      expect(failure._tag).toBe("HookHttpServerStartError")
+      expect(failure.cause).toBeInstanceOf(Error)
+    } finally {
+      await occupied.stop(true)
+    }
   })
 })
 

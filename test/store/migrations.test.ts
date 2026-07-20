@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
-import { Effect, Either } from "effect"
+import { Effect, Either, Layer } from "effect"
 import { makeCurrentnessPolicy } from "../../src/store/currentness"
 import {
   commandClaimCandidate,
@@ -19,8 +19,10 @@ const fixResultJson = JSON.stringify({
   summary: "No changes were needed.",
 })
 
-const runWithDatabase = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())) as Effect.Effect<A, E>)
+type StoreServices = Layer.Layer.Success<ReturnType<typeof makeStoreLayer>>
+
+const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())))
 
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.either, Effect.map(Either.isLeft))

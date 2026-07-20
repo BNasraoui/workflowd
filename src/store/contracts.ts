@@ -32,10 +32,10 @@ export type WorkflowStorePort = {
   readonly ingestPullRequest: (
     delivery: DeliveryInput,
     event: PullRequestEvent,
-  ) => Effect.Effect<IngestPullRequestResult, SqlError>
+  ) => Effect.Effect<IngestPullRequestResult, SqlError | StoreDataError>
   readonly applyReconciliationSnapshot: (
     input: ApplyReconciliationSnapshotInput,
-  ) => Effect.Effect<"completed" | "stale", SqlError>
+  ) => Effect.Effect<"completed" | "stale", SqlError | StoreDataError>
   readonly claimNextReconciliation: (
     input: LeaseClaim,
   ) => Effect.Effect<PullRequestReconciliation | null, SqlError>
