@@ -1,0 +1,14 @@
+node_modules/
+data/
+*.db
+*.db-shm
+*.db-wal
+coverage/
+.env
+.env.*
+!.env.example
+env
+*.pem
+*.key
+*webhook-secret*
+*server-password*

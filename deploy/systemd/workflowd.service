@@ -1,0 +1,25 @@
+[Unit]
+Description=Workflowd pull request automation controller
+After=network-online.target opencode-server.service
+Wants=network-online.target
+Requires=opencode-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/repos/workflowd
+Environment=HOME=%h
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/workflowd/env
+LoadCredential=github-webhook-secret:%h/.config/workflowd/github-webhook-secret
+LoadCredential=opencode-server-password:%h/.config/workflowd/opencode-server-password
+Environment=GITHUB_WEBHOOK_SECRET_FILE=%d/github-webhook-secret
+Environment=OPENCODE_SERVER_PASSWORD_FILE=%d/opencode-server-password
+ExecStart=%h/.bun/bin/bun run start
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

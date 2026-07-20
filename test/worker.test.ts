@@ -1,0 +1,880 @@
+import { describe, expect, test } from "bun:test"
+import { Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import { FixResult } from "../src/domain/fix-result"
+import { Publication } from "../src/domain/publication"
+import { GitHub, type GitHubPort } from "../src/github"
+import { Automation, type AutomationPort } from "../src/opencode"
+import {
+  runCommandIteration,
+  runJobIteration,
+  runPublicationIteration,
+  runReconciliationIteration,
+} from "../src/worker"
+import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
+import { Workspace, type WorkspacePort } from "../src/workspace"
+import {
+  makeFixWork,
+  makeReviewWork,
+  makeStoreLayer,
+  decodePullRequestEvent,
+  samplePullRequestEvent,
+} from "./store/harness"
+
+const makeStore = (
+  overrides: Partial<WorkflowStorePort> = {},
+): WorkflowStorePort => ({
+  recordDelivery: () => Effect.die("unused"),
+  ingestPullRequest: () => Effect.die("unused"),
+  applyReconciliationSnapshot: () => Effect.die("unused"),
+  claimNextReconciliation: () => Effect.succeed(null),
+  rescheduleReconciliation: () => Effect.die("unused"),
+  claimNextJob: () => Effect.succeed(null),
+  shouldCancelJob: () => Effect.succeed(false),
+  rescheduleJob: () => Effect.die("unused"),
+  completeReviewJob: () => Effect.die("unused"),
+  completeFixJob: () => Effect.die("unused"),
+  disableFixJob: () => Effect.die("unused"),
+  recordFixResult: () => Effect.die("unused"),
+  claimNextPublication: () => Effect.succeed(null),
+  isPublicationCurrent: () => Effect.succeed(false),
+  isJobCurrent: () => Effect.succeed(false),
+  completePublication: () => Effect.die("unused"),
+  reschedulePublication: () => Effect.die("unused"),
+  ingestCommand: () => Effect.die("unused"),
+  claimNextCommand: () => Effect.succeed(null),
+  executeCommand: () => Effect.die("unused"),
+  rescheduleCommand: () => Effect.die("unused"),
+  ...overrides,
+})
+
+const makeWorkerLayer = (options: {
+  readonly store?: Partial<WorkflowStorePort>
+  readonly github?: Partial<GitHubPort>
+  readonly automation?: Partial<AutomationPort>
+  readonly workspace?: Partial<WorkspacePort>
+}) =>
+  Layer.mergeAll(
+    Layer.succeed(WorkflowStore, makeStore(options.store)),
+    Layer.succeed(GitHub, {
+      publishReview: () => Effect.die("unused"),
+      fetchPullRequestSnapshot: () => Effect.die("unused"),
+      ...options.github,
+    }),
+    Layer.succeed(Automation, {
+      validateAvailability: () => Effect.die("unused"),
+      runReview: () => Effect.die("unused"),
+      runFix: () => Effect.die("unused"),
+      ...options.automation,
+    }),
+    Layer.succeed(Workspace, {
+      prepareReview: () => Effect.die("unused"),
+      prepareFix: () => Effect.die("unused"),
+      publishFix: () => Effect.die("unused"),
+      ...options.workspace,
+    }),
+  )
+
+const jobOptions = {
+  workerId: "worker-1",
+  leaseDurationMs: 60_000,
+  maxAttempts: 3,
+  timeoutMs: 10_000,
+  cancellationPollIntervalMs: 100,
+  agentBranchPrefixes: [] as ReadonlyArray<string>,
+  fixWorkEnabled: false,
+  now: () => new Date("2026-07-19T12:00:00.000Z"),
+}
+
+const makePublication = (id = 1) =>
+  Schema.decodeUnknownSync(Publication)({
+    id,
+    operationKey: "review:42:7:1",
+    installationId: 91,
+    repositoryId: 42,
+    repositoryFullName: "example-owner/example",
+    pullRequestNumber: 7,
+    target: {
+      baseSha: "d".repeat(40),
+      baseRef: "main",
+      headSha: "a".repeat(40),
+      headRef: "opencode/example-job",
+      headRepositoryFullName: "example-owner/example",
+    },
+    generation: 1,
+    reviewRequestNumber: 1,
+    review: {
+      verdict: "pass",
+      summary: "No findings.",
+      findings: [],
+    },
+    attempt: 1,
+  })
+
+describe("Review Work processing", () => {
+  test("reviews the scoped worktree and commits the structured result", async () => {
+    const actions: Array<string> = []
+    const job = makeReviewWork({ target: { headRef: "feature" } })
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            completeReviewJob: (input) =>
+              Effect.sync(() => {
+                actions.push(`complete:${input.review.verdict}`)
+                return "completed" as const
+              }),
+          },
+          automation: {
+            runReview: () =>
+              Effect.sync(() => {
+                actions.push("review")
+                return {
+                  verdict: "pass" as const,
+                  summary: "No actionable findings.",
+                  findings: [],
+                }
+              }),
+          },
+          workspace: {
+            prepareReview: () =>
+            Effect.acquireRelease(
+              Effect.sync(() => {
+                actions.push("workspace:acquire")
+                return {
+                  directory: "/tmp/review",
+                }
+              }),
+                () => Effect.sync(() => actions.push("workspace:release")),
+              ),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(actions).toEqual([
+      "workspace:acquire",
+      "review",
+      "complete:pass",
+      "workspace:release",
+    ])
+  })
+
+  test("queues a fixer after findings on an agent-owned PR", async () => {
+    const enqueued: Array<number> = []
+    const job = makeReviewWork({ author: "example-owner" })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            completeReviewJob: (input) =>
+              Effect.sync(() => {
+                if (input.autoFix) enqueued.push(input.jobId)
+                return "completed" as const
+              }),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+          },
+          automation: {
+            runReview: () =>
+              Effect.succeed({
+                verdict: "changes_requested",
+                summary: "One issue.",
+                findings: [
+                  { severity: "high", title: "Bug", body: "Fix the bug." },
+                ],
+              }),
+          },
+        })),
+      ),
+    )
+
+    expect(enqueued).toEqual([11])
+  })
+
+  test("does not queue Fix Work when the feature is disabled", async () => {
+    const autoFixValues: Array<boolean> = []
+    const job = makeReviewWork({ target: { headRef: "opencode/agent-work" } })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            completeReviewJob: (input) =>
+              Effect.sync(() => {
+                autoFixValues.push(input.autoFix)
+                return "completed" as const
+              }),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+          },
+          automation: {
+            runReview: () => Effect.succeed({
+              verdict: "changes_requested",
+              summary: "One issue.",
+              findings: [
+                { severity: "high", title: "Bug", body: "Fix the bug." },
+              ],
+            }),
+          },
+        })),
+      ),
+    )
+
+    expect(autoFixValues).toEqual([false])
+  })
+})
+
+describe("Fix Work processing", () => {
+  test("terminally disables claimed Fix Work without invoking OpenCode or Git", async () => {
+    const disabled: Array<number> = []
+    const job = makeFixWork({ id: 15 })
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            disableFixJob: (input) =>
+              Effect.sync(() => {
+                disabled.push(input.jobId)
+                return "disabled" as const
+              }),
+          },
+          automation: { runFix: () => Effect.die("must not run fixer") },
+          workspace: {
+            prepareFix: () => Effect.die("must not prepare fix workspace"),
+            publishFix: () => Effect.die("must not publish fix"),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("disabled")
+    expect(disabled).toEqual([15])
+  })
+
+  test("persists, verifies, and publishes the typed fixer result before completion", async () => {
+    const actions: Array<string> = []
+    const job = makeFixWork({
+      id: 12,
+      author: "example-owner",
+    })
+
+    const result = await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        workerId: "fixer-1",
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            recordFixResult: () =>
+              Effect.sync(() => {
+                actions.push("record")
+                return "recorded" as const
+              }),
+            completeFixJob: () =>
+              Effect.sync(() => {
+                actions.push("complete")
+                return "completed" as const
+              }),
+          },
+          automation: {
+            runFix: () =>
+              Effect.sync(() => {
+                actions.push("fix")
+                return Schema.decodeUnknownSync(FixResult)({
+                  _tag: "CommitPrepared" as const,
+                  summary: "Prepared the fix commit.",
+                  commitSha: "c".repeat(40),
+                })
+              }),
+          },
+          workspace: {
+            prepareFix: () =>
+              Effect.acquireRelease(
+                Effect.succeed({
+                  directory: "/tmp/fix",
+                  recovery: "none" as const,
+                  markCompleted: () => actions.push("mark"),
+                }),
+                () => Effect.sync(() => actions.push("workspace:release")),
+              ),
+            publishFix: () =>
+              Effect.sync(() => {
+                actions.push("publish")
+              }),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(actions).toEqual([
+      "fix",
+      "record",
+      "publish",
+      "complete",
+      "mark",
+      "workspace:release",
+    ])
+  })
+
+  test("passes Workspace a durable currentness capability before fix publication", async () => {
+    const checks: Array<string> = []
+    const job = makeFixWork({ id: 14 })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        workerId: "fixer-currentness",
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            recordFixResult: () => Effect.succeed("recorded"),
+            isJobCurrent: (jobId, workerId, now) =>
+              Effect.sync(() => {
+                checks.push(`${jobId}:${workerId}:${now.toISOString()}`)
+                return true
+              }),
+            completeFixJob: () => Effect.succeed("completed"),
+          },
+          automation: {
+            runFix: () =>
+              Effect.succeed(
+                Schema.decodeUnknownSync(FixResult)({
+                  _tag: "NoChanges",
+                  summary: "No changes.",
+                }),
+              ),
+          },
+          workspace: {
+            prepareFix: () =>
+              Effect.succeed({
+                directory: "/tmp/fix",
+                recovery: "none" as const,
+                markCompleted: () => undefined,
+              }),
+            publishFix: (_job, _workspace, _result, isCurrent) =>
+              isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(Effect.asVoid),
+          },
+        })),
+      ),
+    )
+
+    expect(checks).toEqual([
+      "14:fixer-currentness:2026-07-19T12:00:00.000Z",
+    ])
+  })
+
+  test("recovers an already-pushed job without invoking the fixer again", async () => {
+    const actions: Array<string> = []
+    const job = makeFixWork({
+      id: 12,
+      author: "example-owner",
+      attempt: 2,
+    })
+
+    const result = await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        workerId: "fixer-2",
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            recordFixResult: () =>
+              Effect.die("must not record a synthetic result"),
+            completeFixJob: () =>
+              Effect.sync(() => {
+                actions.push("complete")
+                return "completed" as const
+              }),
+          },
+          automation: { runFix: () => Effect.die("must not run fixer") },
+          workspace: {
+            prepareFix: () =>
+              Effect.succeed({
+                directory: "/tmp/fix",
+                recovery: "pushed" as const,
+                markCompleted: () => actions.push("mark"),
+              }),
+            publishFix: (_job, _workspace, fixResult) =>
+              Effect.sync(() => {
+                expect(fixResult).toBeUndefined()
+                actions.push("verify")
+              }),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(actions).toEqual(["verify", "complete", "mark"])
+  })
+})
+
+describe("runJobIteration", () => {
+  test("durably reschedules a failed worker attempt", async () => {
+    const calls: Array<string> = []
+    const job = makeReviewWork({ id: 12, author: "example-owner" })
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            rescheduleJob: (input) =>
+              Effect.sync(() => {
+                calls.push(input.error)
+                return "retry" as const
+              }),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+          },
+          automation: {
+            runReview: () => Effect.die(new Error("temporary failure")),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(calls[0]).toContain("temporary failure")
+  })
+})
+
+describe("runPublicationIteration", () => {
+  test("passes GitHub a durable currentness guard for the claimed Publication", async () => {
+    const calls: Array<string> = []
+    const publication = makePublication()
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-guarded",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextPublication: () => Effect.succeed(publication),
+            isPublicationCurrent: (publicationId, workerId) =>
+              Effect.sync(() => {
+                calls.push(`guard:${publicationId}:${workerId}`)
+                return true
+              }),
+            completePublication: () => Effect.succeed("completed"),
+          },
+          github: {
+            publishReview: (_publication, isCurrent) =>
+              isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(
+                Effect.as("published" as const),
+              ),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(calls).toEqual(["guard:1:publisher-guarded"])
+  })
+
+  test("publishes and durably completes an outbox item", async () => {
+    const calls: Array<string> = []
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-1",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextPublication: () => Effect.succeed(makePublication()),
+            completePublication: () =>
+              Effect.sync(() => {
+                calls.push("complete")
+                return "completed" as const
+              }),
+          },
+          github: {
+            publishReview: () =>
+              Effect.sync(() => {
+                calls.push("publish")
+                return "published" as const
+              }),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(calls).toEqual(["publish", "complete"])
+  })
+
+  test("propagates a stale GitHub outcome to durable completion", async () => {
+    const outcomes: Array<"published" | "stale"> = []
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-1",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextPublication: () => Effect.succeed(makePublication()),
+            completePublication: (input) =>
+              Effect.sync(() => {
+                outcomes.push(input.outcome)
+                return "stale" as const
+              }),
+          },
+          github: { publishReview: () => Effect.succeed("stale") },
+        })),
+      ),
+    )
+
+    expect(result).toBe("stale")
+    expect(outcomes).toEqual(["stale"])
+  })
+
+  test("interrupts a timed out publication before durably rescheduling it", async () => {
+    const actions: Array<string> = []
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-timeout",
+        leaseDurationMs: 70_000,
+        maxAttempts: 2,
+        timeoutMs: 10,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextPublication: () => Effect.succeed(makePublication(2)),
+            completePublication: () => Effect.die("must not complete"),
+            reschedulePublication: (input) =>
+              Effect.sync(() => {
+                actions.push(`reschedule:${input.maxAttempts}`)
+                return "retry" as const
+              }),
+          },
+          github: {
+            publishReview: () =>
+              Effect.never.pipe(
+                Effect.ensuring(
+                  Effect.sync(() => actions.push("publish:aborted")),
+                ),
+              ),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(actions).toEqual(["publish:aborted", "reschedule:2"])
+  })
+})
+
+describe("runCommandIteration", () => {
+  test("durably reschedules a failed command with bounded attempts", async () => {
+    const calls: Array<string> = []
+    const result = await Effect.runPromise(
+      runCommandIteration({
+        workerId: "commands-1",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        commandUsers: ["example-owner"],
+        fixWorkEnabled: false,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextCommand: () =>
+              Effect.succeed({
+                id: 3,
+                command: "review",
+                commentId: 99,
+                commenter: "Example-Owner",
+                installationId: 91,
+                repositoryId: 42,
+                repositoryFullName: "example-owner/example",
+                pullRequestNumber: 7,
+                attempts: 2,
+              }),
+            executeCommand: () =>
+              Effect.die(new Error("database unavailable")),
+            rescheduleCommand: (input) =>
+              Effect.sync(() => {
+                calls.push(`${input.maxAttempts}:${input.error}`)
+                return "retry" as const
+              }),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(calls[0]).toContain("3:Error: database unavailable")
+  })
+})
+
+describe("runReconciliationIteration", () => {
+  test("turns an ambiguous webhook into the authoritative review generation", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const updatedAt = "2026-07-19T12:00:00.000Z"
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "runtime-reconcile-initial",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            pullRequest: { ...samplePullRequestEvent.pullRequest, updatedAt },
+          }),
+        )
+        const original = yield* store.claimNextJob({
+          workerId: "runtime-original-review",
+          now: new Date("2026-07-19T12:00:02.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (original === null) throw new Error("expected original review")
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "runtime-reconcile-ambiguous",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:03.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+                headSha: "e".repeat(40),
+              updatedAt,
+            },
+          }),
+        )
+
+        const iteration = yield* runReconciliationIteration({
+          workerId: "reconciler-runtime",
+          leaseDurationMs: 60_000,
+          maxAttempts: 3,
+          now: () => new Date("2026-07-19T12:01:00.000Z"),
+        })
+        const review = yield* store.claimNextJob({
+          workerId: "runtime-authoritative-review",
+          now: new Date("2026-07-19T12:02:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        return { iteration, review }
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            makeStoreLayer(),
+            Layer.succeed(GitHub, {
+              publishReview: () => Effect.die("must not publish"),
+              fetchPullRequestSnapshot: () =>
+                Effect.succeed({
+                  _tag: "AuthoritativePullRequestSnapshot" as const,
+                  installationId: 91,
+                  repository: samplePullRequestEvent.repository,
+                  pullRequest: {
+                    ...samplePullRequestEvent.pullRequest,
+                    headSha: "b".repeat(40),
+                    updatedAt: "2026-07-19T12:00:04.000Z",
+                  },
+                }),
+            }),
+          ),
+        ),
+      ),
+    )
+
+    expect(result.iteration).toBe("completed")
+    expect(result.review).toMatchObject({
+      target: { headSha: "b".repeat(40) },
+      generation: 2,
+    })
+  })
+
+  test("does not apply worker A's response after worker B reclaims and completes", async () => {
+    const workerAFetched = Effect.runSync(Deferred.make<void>())
+    const releaseWorkerA = Effect.runSync(Deferred.make<void>())
+    let fetches = 0
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const observedAt = "2026-07-19T12:00:00.000Z"
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "worker-race-initial",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:00.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            pullRequest: { ...samplePullRequestEvent.pullRequest, updatedAt: observedAt },
+          }),
+        )
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "worker-race-ambiguous",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              headSha: "e".repeat(40),
+              updatedAt: observedAt,
+            },
+          }),
+        )
+
+        const workerA = yield* Effect.fork(
+          runReconciliationIteration({
+            workerId: "reconciler-a",
+            leaseDurationMs: 1_000,
+            maxAttempts: 3,
+            now: () => new Date("2026-07-19T12:01:00.000Z"),
+          }),
+        )
+        yield* Deferred.await(workerAFetched)
+        const workerB = yield* runReconciliationIteration({
+          workerId: "reconciler-b",
+          leaseDurationMs: 60_000,
+          maxAttempts: 3,
+          now: () => new Date("2026-07-19T12:01:02.000Z"),
+        })
+        yield* Deferred.succeed(releaseWorkerA, undefined)
+        const staleWorker = yield* Fiber.join(workerA)
+        const review = yield* store.claimNextJob({
+          workerId: "reviewer-after-race",
+          now: new Date("2026-07-19T12:02:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        return { review, staleWorker, workerB }
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            makeStoreLayer(),
+            Layer.succeed(GitHub, {
+              publishReview: () => Effect.die("must not publish"),
+              fetchPullRequestSnapshot: () =>
+                Effect.gen(function* () {
+                  fetches += 1
+                  if (fetches === 1) {
+                    yield* Deferred.succeed(workerAFetched, undefined)
+                    yield* Deferred.await(releaseWorkerA)
+                    return {
+                      _tag: "AuthoritativePullRequestSnapshot" as const,
+                      installationId: 91,
+                      repository: samplePullRequestEvent.repository,
+                      pullRequest: {
+                        ...samplePullRequestEvent.pullRequest,
+                        headSha: "c".repeat(40),
+                        updatedAt: "2026-07-19T12:00:01.000Z",
+                      },
+                    }
+                  }
+                  return {
+                    _tag: "AuthoritativePullRequestSnapshot" as const,
+                    installationId: 91,
+                    repository: samplePullRequestEvent.repository,
+                    pullRequest: {
+                      ...samplePullRequestEvent.pullRequest,
+                      headSha: "b".repeat(40),
+                      updatedAt: "2026-07-19T12:00:02.000Z",
+                    },
+                  }
+                }),
+            }),
+          ),
+        ),
+      ),
+    )
+
+    expect(result.workerB).toBe("completed")
+    expect(result.staleWorker).toBe("stale")
+    expect(result.review).toMatchObject({
+      generation: 2,
+      target: { headSha: "b".repeat(40) },
+    })
+  })
+})
+
+describe("job cancellation", () => {
+  test("interrupts the active job when its durable lease is superseded", async () => {
+    const actions: Array<string> = []
+    const started = Effect.runSync(Deferred.make<void>())
+    const job = makeReviewWork()
+
+    const result = await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        cancellationPollIntervalMs: 0,
+      }).pipe(
+        Effect.provide(makeWorkerLayer({
+          store: {
+            claimNextJob: () => Effect.succeed(job),
+            shouldCancelJob: () =>
+              Deferred.await(started).pipe(Effect.as(true)),
+            rescheduleJob: () => Effect.succeed("retry"),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+          },
+          automation: {
+            runReview: () =>
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(
+                  Effect.sync(() => actions.push("interrupted")),
+                ),
+              ),
+          },
+        })),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(actions).toEqual(["interrupted"])
+  })
+})
