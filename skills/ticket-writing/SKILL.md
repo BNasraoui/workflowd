@@ -13,9 +13,9 @@ ticket that will require multistage work (i.e. QRSPI).
 1. Establish whether the ticket will enter QRSPI. Use the full contract only when it will.
    For other work, use the chosen Beads type and the structure the user needs. Done when
    the type, purpose, and permission to write are clear.
-2. For an existing ticket, run `bd show <id> --json`. Read each source the user supplied
-   and check each Provenance reference. Done when you have read the ticket and its sources
-   and resolved every citation.
+2. For an existing ticket, run `bd show <id> --json`. Read and verify each source the user
+   supplied and every reference in the ticket's `Sources` section. Done when you have read
+   the ticket and its sources and resolved every citation.
 3. If a missing fact could change the ticket's meaning, ask the user and end the turn.
    Draft only after they answer. Ask about desired behavior and scope; leave implementation
    choices to the coming QRSPI workflow.
