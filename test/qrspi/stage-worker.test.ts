@@ -193,6 +193,24 @@ describe("StageProduce worker", () => {
         return fake.harness.prepare(definition, input, context)
       },
     }
+    const contextualLease: StageOperationLease = {
+      ...lease,
+      input: {
+        ...lease.input,
+        stepPosition: 2,
+        feedback: ["Explain how the rejected edge case is handled."],
+      },
+      predecessorSessionReferenceId: "prior-session-ref",
+      implementationCommits: [
+        {
+          position: 1,
+          commitSha: "d".repeat(40),
+          parentSha: lease.currentHeadSha,
+          changedPaths: ["src/previous.ts"],
+          operationId: "prior-publication",
+        },
+      ],
+    }
 
     const result = await Effect.runPromise(
       runStageProduceIterationWith({
@@ -204,7 +222,7 @@ describe("StageProduce worker", () => {
         randomId: () => lease.leaseToken,
         store: {
           ...fake.store,
-          claimStageOperation: () => Effect.succeed({ ...lease, stage: customStage }),
+          claimStageOperation: () => Effect.succeed({ ...contextualLease, stage: customStage }),
         },
         harness,
         catalog: fake.catalog,
@@ -229,6 +247,10 @@ describe("StageProduce worker", () => {
     })
     expect(prompt).toContain("product/specifications/workflowd-vs3.4/questions.adoc")
     expect(prompt).toContain("text/asciidoc")
+    expect(prompt).toContain("Explain how the rejected edge case is handled.")
+    expect(prompt).toContain("prior-session-ref")
+    expect(prompt).toContain("src/previous.ts")
+    expect(prompt).toContain('"stepPosition":2')
   })
 
   test("aborts and durably supersedes a recorded session before rescheduling", async () => {

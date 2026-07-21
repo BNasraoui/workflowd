@@ -259,6 +259,27 @@ type ImplementationQrspiHarnessDefinition = QrspiHarnessDefinition<
 
 const QRSPI_HARNESS_WRAPPER_BYTES = 208 * 1024
 
+function renderStageContext(input: unknown): string {
+  if (typeof input !== "object" || input === null) return ""
+  const record = Schema.decodeUnknownSync(
+    Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+  )(input)
+  const context: Record<string, unknown> = {}
+  for (const key of [
+    "sources",
+    "stepPosition",
+    "implementationCommits",
+    "predecessorSessionReferenceId",
+    "feedback",
+  ]) {
+    const value = record[key]
+    if (value !== undefined) context[key] = value
+  }
+  return Object.keys(context).length === 0
+    ? ""
+    : `\n\nDurable stage context:\n${JSON.stringify(context)}`
+}
+
 export function makeQrspiHarnessDefinitions(config: {
   readonly agent: string
   readonly model: string
@@ -289,10 +310,13 @@ export function makeQrspiHarnessDefinitions(config: {
     maxOutputBytes: MAX_AGENT_OUTPUT_BYTES,
     promptContract: `${name}-stage-contract`,
     title: (input) => `QRSPI ${input.contract.name}`,
-    prompt: (input) =>
-      input.expectedArtifact === undefined
-        ? input.task
-        : `${input.task}\n\nWrite the artifact at exactly ${input.expectedArtifact.path} with media type ${input.expectedArtifact.mediaType}. Do not change any other path.`,
+    prompt: (input) => {
+      const artifactInstruction =
+        input.expectedArtifact === undefined
+          ? ""
+          : `\n\nWrite the artifact at exactly ${input.expectedArtifact.path} with media type ${input.expectedArtifact.mediaType}. Do not change any other path.`
+      return `${input.task}${renderStageContext(input.input)}${artifactInstruction}`
+    },
     timeoutMs: config.timeoutMs,
     retryPolicy: {
       maxAttempts: config.maxAttempts ?? 3,

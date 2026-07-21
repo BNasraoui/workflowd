@@ -1043,7 +1043,15 @@ describe("WorkflowStart integration", () => {
           SELECT external_observation_json FROM workflow_operations
           WHERE kind = 'ArtifactPublish' AND state = 'succeeded' ORDER BY created_at
         `
-        return { duplicate, steps, revisions, generation, observations }
+        const finalization = yield* sql<{
+          readonly kind: string
+          readonly state: string
+          readonly input_json: string
+        }>`
+          SELECT kind, state, input_json FROM workflow_operations
+          WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish') ORDER BY kind
+        `
+        return { duplicate, steps, revisions, generation, observations, finalization }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
@@ -1062,8 +1070,22 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
     expect(state.revisions[0]!.state).toBe("accepted")
     expect(state.generation).toEqual([
-      { state: "completed", current_head_sha: secondCommit.commitSha },
+      { state: "finalizing", current_head_sha: secondCommit.commitSha },
     ])
+    expect(state.finalization.map(({ kind, state }) => ({ kind, state }))).toEqual([
+      { kind: "PrePullRequestVerify", state: "ready" },
+      { kind: "PullRequestPublish", state: "blocked" },
+    ])
+    for (const operation of state.finalization) {
+      expect(JSON.parse(operation.input_json)).toMatchObject({
+        workflowId,
+        generation: 1,
+        headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+        headSha: secondCommit.commitSha,
+        checkpoint,
+        preparedDeliveryEvidence: deliveryEvidence,
+      })
+    }
   })
 
   test("uses the documented branch format after sanitizing the ticket ID", async () => {
