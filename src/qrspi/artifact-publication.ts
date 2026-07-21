@@ -380,12 +380,11 @@ export const ArtifactPublication = {
           ),
         )
 
-      if (update === "conflict") {
-        return { _tag: "Conflict" as const, finalSha: publication.finalSha }
-      }
-
       const observed = yield* dependencies.repository.observeRef(input.headRef)
       if (observed !== publication.finalSha) {
+        if (update === "conflict") {
+          return { _tag: "Conflict" as const, finalSha: publication.finalSha }
+        }
         if (observed !== null && observed !== input.expectedOld) {
           return { _tag: "Conflict" as const, finalSha: publication.finalSha, observed }
         }

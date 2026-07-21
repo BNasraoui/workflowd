@@ -2647,86 +2647,13 @@ function activateNextStage(
     `
     const nextKey = nextRows[0]?.stage_key
     if (nextKey === undefined) {
-      const generationRows = yield* sql<{
-        readonly repository_json: string
-        readonly base_ref: string
-        readonly base_sha: string
-        readonly head_ref: string
-        readonly current_head_sha: string
-        readonly ticket_revision_sha256: string
-        readonly workflow_definition_sha256: string
-      }>`
-        SELECT repository_json, base_ref, base_sha, head_ref, current_head_sha,
-          ticket_revision_sha256, workflow_definition_sha256
-        FROM qrspi_generations
-        WHERE workflow_id = ${workflowId} AND generation = ${generation}
-          AND is_current = 1 AND state = 'running'
-      `
-      const generationRow = generationRows[0]
-      if (generationRow === undefined) return
-      const revisionRows = yield* sql<{
-        readonly published_reference_json: string | null
-        readonly prepared_result_json: string | null
-      }>`
-        SELECT published_reference_json, prepared_result_json
-        FROM qrspi_stage_revisions
-        WHERE workflow_id = ${workflowId} AND generation = ${generation}
-          AND stage_key = ${completedStageKey} AND state = 'accepted'
-        ORDER BY revision DESC LIMIT 1
-      `
-      const revisionRow = revisionRows[0]
-      if (revisionRow === undefined) return
       const stage = definition.stages.find(({ key }) => key === completedStageKey)
-      if (stage === undefined) return
-      const finalizationInput = {
-        workflowId,
-        generation,
-        repository: yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
-          generationRow.repository_json,
-        ),
-        baseRef: generationRow.base_ref,
-        baseSha: generationRow.base_sha,
-        headRef: generationRow.head_ref,
-        headSha: generationRow.current_head_sha,
-        ticketRevisionSha256: generationRow.ticket_revision_sha256,
-        workflowDefinitionSha256: generationRow.workflow_definition_sha256,
-        ...(stage.kind === "implementation" &&
-        revisionRow.published_reference_json !== null &&
-        revisionRow.prepared_result_json !== null
-          ? {
-              checkpoint: yield* Schema.decodeUnknown(
-                Schema.parseJson(ImplementationCheckpointReference),
-              )(revisionRow.published_reference_json),
-              preparedDeliveryEvidence: (yield* Schema.decodeUnknown(
-                Schema.parseJson(ImplementationStageResult),
-              )(revisionRow.prepared_result_json)).deliveryEvidence,
-            }
-          : {}),
-      }
-      yield* sql`
-        UPDATE qrspi_generations SET state = 'finalizing', updated_at = ${now.toISOString()}
-        WHERE workflow_id = ${workflowId} AND generation = ${generation}
-          AND is_current = 1 AND state = 'running'
-      `
-      for (const [kind, state] of [
-        ["PrePullRequestVerify", "ready"],
-        ["PullRequestPublish", "blocked"],
-      ] as const) {
-        const logical = `${workflowId}:${generation}:${kind}`
-        yield* insertOperation(sql, {
-          operationId: `${logical}:1`,
-          logicalOperationId: logical,
-          revision: 1,
-          retryOf: null,
-          kind,
-          scope: { _tag: "GenerationScope", workflowId, generation },
-          inputJson: JSON.stringify(finalizationInput),
-          inputSha256: canonicalSha256(finalizationInput),
-          state,
-          attempt: 0,
-          parentEffect: { success: "advance parent", failure: "fail Generation" },
-          now,
-        })
+      if (stage?.kind === "document") {
+        yield* sql`
+          UPDATE qrspi_generations SET state = 'completed', updated_at = ${now.toISOString()}
+          WHERE workflow_id = ${workflowId} AND generation = ${generation}
+            AND is_current = 1 AND state = 'running'
+        `
       }
       return
     }

@@ -691,7 +691,14 @@ describe("WorkflowStart integration", () => {
         const after = yield* sql<{ readonly state: string; readonly accepted_revision: number }>`
           SELECT state, accepted_revision FROM qrspi_stage_runs
         `
-        return { before, accepted, after }
+        const generation = yield* sql<{ readonly state: string }>`
+          SELECT state FROM qrspi_generations
+        `
+        const finalization = yield* sql<{ readonly kind: string }>`
+          SELECT kind FROM workflow_operations
+          WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish')
+        `
+        return { before, accepted, after, generation, finalization }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
@@ -699,6 +706,8 @@ describe("WorkflowStart integration", () => {
       before: [{ kind: "ReviewSynthesize", state: "waiting_human" }],
       accepted: "completed",
       after: [{ state: "succeeded", accepted_revision: 1 }],
+      generation: [{ state: "completed" }],
+      finalization: [],
     })
   })
 
@@ -1070,22 +1079,9 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
     expect(state.revisions[0]!.state).toBe("accepted")
     expect(state.generation).toEqual([
-      { state: "finalizing", current_head_sha: secondCommit.commitSha },
+      { state: "running", current_head_sha: secondCommit.commitSha },
     ])
-    expect(state.finalization.map(({ kind, state }) => ({ kind, state }))).toEqual([
-      { kind: "PrePullRequestVerify", state: "ready" },
-      { kind: "PullRequestPublish", state: "blocked" },
-    ])
-    for (const operation of state.finalization) {
-      expect(JSON.parse(operation.input_json)).toMatchObject({
-        workflowId,
-        generation: 1,
-        headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
-        headSha: secondCommit.commitSha,
-        checkpoint,
-        preparedDeliveryEvidence: deliveryEvidence,
-      })
-    }
+    expect(state.finalization).toEqual([])
   })
 
   test("uses the documented branch format after sanitizing the ticket ID", async () => {

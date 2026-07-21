@@ -2,7 +2,10 @@ import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { Effect } from "effect"
 import { runArtifactPublishIterationWith } from "../../src/qrspi/artifact-worker"
-import { type ArtifactPublicationRepository } from "../../src/qrspi/artifact-publication"
+import {
+  type ArtifactPublicationRepository,
+  GitArtifactPublicationRepository,
+} from "../../src/qrspi/artifact-publication"
 import type { StageOperationLease } from "../../src/qrspi/store"
 import { defaultQrspiWorkflowDefinition } from "../../src/qrspi/stages"
 import type { QrspiWorkspacePort } from "../../src/qrspi/workspace"
@@ -198,12 +201,19 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
     },
     rescheduleStageOperation: () => Effect.die("must not reschedule"),
   }
-  const repository: ArtifactPublicationRepository = {
-    finalizeDocument: () => Effect.die("must not sign another commit"),
-    updateRefExact: () => Effect.void,
-    observeRef: () => Effect.succeed(finalSha),
-    advanceLocalWorktree: () => Effect.void,
-  }
+  const commands: ReadonlyArray<string>[] = []
+  const repository = new GitArtifactPublicationRepository("/tmp/qrspi/workflow", "1".repeat(40), {
+    run: (_operation, command) => {
+      commands.push(command)
+      const args = command.slice(1)
+      if (args[0] === "rev-parse" && args[1] === "HEAD") return Effect.succeed(finalSha)
+      if (args[0] === "ls-remote") {
+        return Effect.succeed(`${finalSha}\trefs/heads/feature/ticket`)
+      }
+      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+    },
+    runBytes: () => Effect.die("must not read or sign another commit"),
+  })
 
   const result = await Effect.runPromise(
     runArtifactPublishIterationWith({
@@ -218,6 +228,8 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
 
   expect(result).toBe("Published")
   expect(completed).toBe(true)
+  expect(commands.filter((command) => command[1] === "ls-remote")).toHaveLength(2)
+  expect(commands.some((command) => command[1] === "push")).toBe(false)
 })
 
 test("records a stale document publication effect for reconciliation", async () => {
