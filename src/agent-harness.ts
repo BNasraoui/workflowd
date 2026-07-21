@@ -75,7 +75,15 @@ export const SessionReference = Schema.Struct({
   attempt: PositiveInt,
   leaseToken: LeaseToken,
   createdAt: IsoTimestamp,
-  state: Schema.Literal("created", "prompted", "succeeded", "failed", "superseded"),
+  state: Schema.Literal(
+    "created",
+    "prompted",
+    "succeeded",
+    "failed",
+    "superseded",
+    "aborted",
+    "expired",
+  ),
 })
 export type SessionReference = typeof SessionReference.Type
 

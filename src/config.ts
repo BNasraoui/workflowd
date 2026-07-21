@@ -34,6 +34,7 @@ interface WorkspaceConfig {
 
 interface OpenCodeConfig {
   readonly baseUrl: string
+  readonly attachUrl: string
   readonly serverId: string
   readonly endpointAlias: string
   readonly username: string
@@ -127,6 +128,15 @@ function httpUrl(value: string, name: string): string {
   } catch {
     throw new Error(`${name} must be an HTTP(S) URL`)
   }
+}
+
+function credentialFreeHttpUrl(value: string, name: string): string {
+  const normalized = httpUrl(value, name)
+  const parsed = new URL(normalized)
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error(`${name} must not include credentials`)
+  }
+  return normalized
 }
 
 function agentId(value: string, name: string): string {
@@ -259,6 +269,10 @@ export async function loadConfig(
   if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
   }
+  const openCodeBaseUrl = httpUrl(
+    env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
+    "OPENCODE_SERVER_URL",
+  )
 
   return {
     http: {
@@ -297,7 +311,11 @@ export async function loadConfig(
       ...(gitSigningKey === undefined ? {} : { gitSigningKey }),
     },
     openCode: {
-      baseUrl: httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL"),
+      baseUrl: openCodeBaseUrl,
+      attachUrl: credentialFreeHttpUrl(
+        required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
+        "WORKFLOWD_OPENCODE_ATTACH_URL",
+      ),
       serverId: agentId(
         env.WORKFLOWD_OPENCODE_SERVER_ID ?? "opencode-primary",
         "WORKFLOWD_OPENCODE_SERVER_ID",

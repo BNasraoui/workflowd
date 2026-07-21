@@ -60,7 +60,7 @@ export class ManagedWorkspaceLifecycle {
         this.#config.worktreeRoot,
         String(work.repositoryId),
         String(work.pullRequestNumber),
-        `${work.id}-${work.generation}`,
+        `${work.id}-${work.generation}-attempt-${work.attempt}`,
       )
       const sameRepository =
         work.repositoryFullName.toLowerCase() === work.target.headRepositoryFullName.toLowerCase()

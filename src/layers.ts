@@ -21,6 +21,7 @@ import { QrspiRepository, TicketSource } from "./qrspi/ports"
 import { QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
+import { SessionAccessResolver } from "./session-access"
 
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
@@ -45,6 +46,11 @@ export const makeLiveLayer = (config: AppConfig) => {
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
+  const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
+    serverId: config.openCode.serverId,
+    endpointAlias: config.openCode.endpointAlias,
+    attachUrl: config.openCode.attachUrl,
+  })
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
@@ -132,6 +138,9 @@ export const makeLiveLayer = (config: AppConfig) => {
               new OctokitInstallationAdapter(
                 makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
               ),
+            {
+              resolve: (reference) => sessionAccess.resolve(reference),
+            },
           )
         }),
       ),

@@ -608,14 +608,14 @@ describe("GitWorkspaceAdapter", () => {
       ),
     )
 
-    expect(directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1"))
+    expect(directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1"))
     expect(await git(repository, "rev-parse", "refs/remotes/origin/feature")).toBe(fixture.headSha)
   })
 
   test("managed fallback recovers a missing controller worktree registration", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-recover-")
     const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
-    const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
+    const directory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
     await mkdir(dirname(repository), { recursive: true })
     await mkdir(dirname(directory), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
@@ -636,7 +636,7 @@ describe("GitWorkspaceAdapter", () => {
   test("managed setup failure does not strand a worktree", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-failure-")
     const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
-    const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
+    const directory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
     await mkdir(dirname(repository), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
     await git(repository, "update-ref", "-d", "refs/remotes/origin/feature")

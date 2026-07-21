@@ -149,7 +149,12 @@ test("persists agent checkpoints in order and completes output with downstream r
           AND publication.review_request_number = job.review_request_number
         WHERE execution.session_reference_id = ${sessionReferenceId}
       `
-      return { beforeIntent, launch, afterLaunch, session, completed, durable }
+      const publication = yield* store.claimNextPublication({
+        workerId: "publication-worker",
+        now: new Date("2026-07-20T12:01:04.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      return { beforeIntent, launch, afterLaunch, session, completed, durable, publication }
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
@@ -167,6 +172,17 @@ test("persists agent checkpoints in order and completes output with downstream r
       session_reference_id: "22222222-2222-4222-8222-222222222222",
     },
   ])
+  expect(result.publication?.sessionReferenceId).toBe("22222222-2222-4222-8222-222222222222")
+  expect(result.publication?.sessionReference?.sessionReferenceId).toBe(
+    "22222222-2222-4222-8222-222222222222",
+  )
+  expect(result.publication?.sessionReference?.nativeSessionId).toBe("ses_1")
+  expect(result.publication?.sessionExecutionState).toBe("succeeded")
+  expect(result.publication?.sessionReference?.scope).toEqual({
+    _tag: "GenerationScope",
+    workflowId: "pr:42:7",
+    generation: 1,
+  })
 })
 
 test("persists a stale session reference for later cleanup", async () => {

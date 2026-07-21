@@ -32,6 +32,16 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         review_request_number,
         review_json,
         session_reference_id,
+        (
+          SELECT execution.session_reference_json
+          FROM agent_executions AS execution
+          WHERE execution.session_reference_id = publications.session_reference_id
+        ) AS session_reference_json,
+        (
+          SELECT execution.state
+          FROM agent_executions AS execution
+          WHERE execution.session_reference_id = publications.session_reference_id
+        ) AS session_execution_state,
         attempts
     `),
     decode: decodePublicationRow,

@@ -6,6 +6,7 @@ const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
+  WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
 }
 
 const qrspiDefinition = {
@@ -89,6 +90,7 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        attachUrl: "https://mint.example-tailnet.ts.net:4096",
         serverId: "opencode-primary",
         endpointAlias: "private-opencode",
         username: "opencode",
@@ -109,6 +111,32 @@ describe("loadConfig", () => {
         commandUsers: [],
       },
     })
+  })
+
+  test("configures a credential-free private URL for resumable session commands", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096/",
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.openCode.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_OPENCODE_ATTACH_URL: "https://user:secret@mint.example-tailnet.ts.net:4096",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_OPENCODE_ATTACH_URL must not include credentials")
+    const withoutAttachUrl = { ...requiredEnvironment }
+    delete withoutAttachUrl.WORKFLOWD_OPENCODE_ATTACH_URL
+    await expect(loadConfig(withoutAttachUrl, { home: "/home/test" })).rejects.toThrow(
+      "Missing required environment variable WORKFLOWD_OPENCODE_ATTACH_URL",
+    )
   })
 
   test("requires explicit opt-in before enabling Fix Work", async () => {
@@ -214,6 +242,7 @@ describe("loadConfig", () => {
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
         OPENCODE_SERVER_PASSWORD_FILE: "/run/credentials/opencode-password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       {
         home: "/home/test",

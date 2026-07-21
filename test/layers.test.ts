@@ -71,6 +71,7 @@ test("composes the reusable agent harness with the live ports", async () => {
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
         WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
         WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
         WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
@@ -122,6 +123,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       { home: directory },
     )
@@ -154,6 +156,7 @@ test("fails live composition when the configured GitHub key cannot be read", asy
         GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
         WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
         WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
         WORKFLOWD_QRSPI_REPOSITORY_ID: "42",

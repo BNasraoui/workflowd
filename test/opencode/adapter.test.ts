@@ -14,6 +14,7 @@ function availabilityAdapter(agents: ReadonlyArray<string>, models: ReadonlyArra
     promptSession: async () => undefined,
     subscribeEvents: async () => (async function* () {})(),
     getSessionStatuses: async () => ({}),
+    sessionExists: async () => true,
     listSessionMessages: async () => [],
     abortSession: async () => true,
     listAgents: async () => agents,
@@ -111,6 +112,10 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
       record("status", input, signal)
       return { ses_1: { type: "busy" as const } }
     },
+    sessionExists: async (input, signal) => {
+      record("exists", input, signal)
+      return true
+    },
     listSessionMessages: async (input, signal) => {
       record("messages", input, signal)
       return [assistant]
@@ -139,6 +144,7 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
   expect(await adapter.createSession(createInput, signal)).toEqual({ id: "ses_1" })
   await adapter.promptSession(promptInput, signal)
   expect(await adapter.getSessionStatus(sessionInput, signal)).toEqual({ type: "busy" })
+  expect(await adapter.sessionExists(sessionInput, signal)).toBe(true)
   expect(await adapter.listSessionMessages(sessionInput, signal)).toEqual([
     { role: "assistant", time: { created: 1, completed: 2 }, structured: { verdict: "pass" } },
   ])
@@ -163,6 +169,7 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
     { operation: "create", input: createInput, signal },
     { operation: "prompt", input: promptInput, signal },
     { operation: "status", input: { directory: "/repo" }, signal },
+    { operation: "exists", input: sessionInput, signal },
     { operation: "messages", input: sessionInput, signal },
     { operation: "subscribe", input: { directory: "/repo" }, signal },
     { operation: "abort", input: sessionInput, signal },
