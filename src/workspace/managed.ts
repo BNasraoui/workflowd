@@ -180,9 +180,11 @@ export class ManagedWorkspaceLifecycle {
         "core.hooksPath=/dev/null",
         "worktree",
         "add",
-        ...(retainBranch
-          ? [directory, work.target.headRef]
-          : ["-B", work.target.headRef, directory, pullRef]),
+        ...(!sameRepository
+          ? ["--detach", directory, pullRef]
+          : retainBranch
+            ? [directory, work.target.headRef]
+            : ["-B", work.target.headRef, directory, pullRef]),
       )
       if (!sameRepository) return
       yield* runGit(

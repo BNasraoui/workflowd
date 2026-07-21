@@ -306,6 +306,64 @@ describe("GitWorkspaceAdapter", () => {
     await expect(stat(join(worktree, ".workflowd"))).rejects.toThrow()
   })
 
+  test("falls back to a managed worktree when a fork branch collides with a base branch", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fork-collision-")
+    const collidingWorktree = join(fixture.root, "base-main")
+    const forkRemote = join(fixture.root, "fork.git")
+    const forkSource = join(fixture.root, "fork-source")
+    await git(fixture.root, "clone", "--branch", "main", fixture.remote, collidingWorktree)
+    await git(fixture.source, "switch", "main")
+    await writeFile(join(fixture.source, "base.ts"), "export const base = 2\n")
+    await git(fixture.source, "add", "base.ts")
+    await git(fixture.source, "commit", "-m", "advance base")
+    await git(fixture.source, "push", "origin", "main")
+    const baseSha = await git(fixture.source, "rev-parse", "HEAD")
+    await mkdir(forkRemote)
+    await git(forkRemote, "init", "--bare")
+    await git(fixture.root, "clone", "--branch", "main", fixture.remote, forkSource)
+    await git(forkSource, "remote", "set-url", "origin", forkRemote)
+    await writeFile(join(forkSource, "fork.ts"), "export const fork = true\n")
+    await git(forkSource, "add", "fork.ts")
+    await git(forkSource, "commit", "-m", "fork change")
+    await git(forkSource, "push", "-u", "origin", "main")
+    const forkHeadSha = await git(forkSource, "rev-parse", "HEAD")
+    await git(forkSource, "push", fixture.remote, "+HEAD:refs/pull/7/head")
+    const manager = new GitWorkspaceAdapter({
+      localRepositories: [collidingWorktree],
+      repositoryRoot: join(fixture.root, "repositories"),
+      worktreeRoot: join(fixture.root, "worktrees"),
+      remoteUrl: (repositoryFullName) =>
+        repositoryFullName === "fork-owner/example" ? forkRemote : fixture.remote,
+      maxDiffBytes: 1_000_000,
+    })
+
+    const prepared = await Effect.runPromise(
+      Effect.scoped(
+        manager
+          .prepareReview(
+            makeReviewJob(fixture, {
+              baseSha,
+              expectedHeadSha: forkHeadSha,
+              headRef: "main",
+              headRepositoryFullName: "fork-owner/example",
+            }),
+          )
+          .pipe(
+            Effect.flatMap((workspace) =>
+              Effect.promise(async () => ({
+                directory: workspace.directory,
+                head: await git(workspace.directory, "rev-parse", "HEAD"),
+              })),
+            ),
+          ),
+      ),
+    )
+
+    expect(prepared.directory).not.toBe(collidingWorktree)
+    expect(prepared.head).toBe(forkHeadSha)
+    expect(await git(collidingWorktree, "rev-parse", "HEAD")).toBe(fixture.baseSha)
+  })
+
   test("never deletes an unowned .workflowd directory", async () => {
     const fixture = await createRepositoryFixture("workflowd-owned-context-")
     const worktree = join(fixture.root, "worktree")

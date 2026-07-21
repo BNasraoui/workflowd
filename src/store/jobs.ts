@@ -295,6 +295,7 @@ export function makeJobOperations(
         AND candidate.cancel_requested = FALSE
         AND candidate.lease_owner = ${workerId}
         AND candidate.lease_until > ${now.toISOString()}
+        AND ${currentness.currentJob}
         AND ${currentness.currentPublication}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length > 0)),

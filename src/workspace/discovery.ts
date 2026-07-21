@@ -153,7 +153,7 @@ export class ExistingWorktreeDiscovery {
 
   discover(work: Work): Effect.Effect<ResolvedWorktree | null, WorkspaceError> {
     return Effect.gen(this, function* () {
-      const expectedRemote = normalizeRemote(this.#remoteUrl(work.repositoryFullName))
+      const expectedRemote = normalizeRemote(this.#remoteUrl(work.target.headRepositoryFullName))
       const registered = yield* this.#registryCandidates(work)
       const registeredMatch = yield* this.#inspect(work, expectedRemote, registered)
       if (registeredMatch !== null) return registeredMatch
@@ -191,7 +191,8 @@ export class ExistingWorktreeDiscovery {
         const value = decoded.value
         if (
           (value.state === undefined || value.state === "ready") &&
-          value.github_repository.toLowerCase() === work.repositoryFullName.toLowerCase() &&
+          value.github_repository.toLowerCase() ===
+            work.target.headRepositoryFullName.toLowerCase() &&
           value.branch === work.target.headRef &&
           value.worktree !== ""
         ) {

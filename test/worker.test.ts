@@ -185,7 +185,8 @@ const jobOptions = {
   maxAttempts: 3,
   timeoutMs: 10_000,
   cancellationPollIntervalMs: 100,
-  agentBranchPrefixes: [] as ReadonlyArray<string>,
+  agentBranchPrefixes: ["opencode/"] as ReadonlyArray<string>,
+  trustedAgentUsers: ["opencode-agent", "example-owner"] as ReadonlyArray<string>,
   fixWorkEnabled: false,
   now: () => new Date("2026-07-19T12:00:00.000Z"),
 }
@@ -680,6 +681,7 @@ describe("Review Work processing", () => {
       runJobIteration({
         ...jobOptions,
         agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["example-owner"],
         fixWorkEnabled: true,
       }).pipe(
         Effect.provide(
@@ -709,6 +711,49 @@ describe("Review Work processing", () => {
     )
 
     expect(enqueued).toEqual([11])
+  })
+
+  test("keeps an untrusted author's same-repository agent-prefixed branch review-only", async () => {
+    const autoFixValues: Array<boolean> = []
+    const job = makeReviewWork({
+      author: "untrusted-collaborator",
+      target: { headRef: "opencode/untrusted-change" },
+    })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["trusted-agent[bot]"],
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeReviewJob: (input) =>
+                Effect.sync(() => {
+                  autoFixValues.push(input.autoFix)
+                  return "completed" as const
+                }),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({
+                  verdict: "changes_requested",
+                  summary: "One issue.",
+                  findings: [{ severity: "high", title: "Bug", body: "Fix the bug." }],
+                }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(autoFixValues).toEqual([false])
   })
 
   test("does not queue Fix Work when the feature is disabled", async () => {
@@ -751,6 +796,31 @@ describe("Review Work processing", () => {
 })
 
 describe("Fix Work processing", () => {
+  test("disables previously queued Fix Work when its author is no longer trusted", async () => {
+    const disabled: Array<number> = []
+    const job = makeFixWork({ id: 14, author: "untrusted-collaborator" })
+
+    const result = await Effect.runPromise(
+      runJobIteration({ ...jobOptions, fixWorkEnabled: true }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              disableFixJob: (input) =>
+                Effect.sync(() => {
+                  disabled.push(input.jobId)
+                  return "disabled" as const
+                }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("disabled")
+    expect(disabled).toEqual([14])
+  })
+
   test("terminally disables claimed Fix Work without invoking OpenCode or Git", async () => {
     const disabled: Array<number> = []
     const job = makeFixWork({ id: 15 })

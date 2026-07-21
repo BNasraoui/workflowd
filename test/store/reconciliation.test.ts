@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
-import { Effect } from "effect"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Effect, Layer } from "effect"
+import { WorkflowStoreLive } from "../../src/store"
 import { WorkflowStore } from "../../src/store/contracts"
 import { decodePullRequestEvent, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 const TestLayer = makeStoreLayer()
+const persistentStoreLayer = (filename: string) =>
+  WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
 
 describe("durable pull request reconciliation", () => {
   test("deduplicates an ambiguous webhook and applies its authoritative generation", async () => {
@@ -413,6 +420,201 @@ describe("durable pull request reconciliation", () => {
       lease_owner: null,
       lease_until: null,
     })
+  })
+
+  test("revokes a leased reconciliation after a distinct same-time ambiguous observation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-reconciliation-"))
+    const filename = join(directory, "workflowd.db")
+    try {
+      const setup = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* WorkflowStore
+          const observedAt = "2026-07-19T12:00:00.000Z"
+          yield* store.ingestPullRequest(
+            {
+              deliveryId: "ambiguous-race-initial",
+              event: "pull_request",
+              action: "opened",
+              payload: "{}",
+              receivedAt: new Date(observedAt),
+            },
+            decodePullRequestEvent({
+              ...samplePullRequestEvent,
+              pullRequest: {
+                ...samplePullRequestEvent.pullRequest,
+                updatedAt: observedAt,
+              },
+            }),
+          )
+          yield* store.ingestPullRequest(
+            {
+              deliveryId: "ambiguous-race-first",
+              event: "pull_request",
+              action: "synchronize",
+              payload: "{}",
+              receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+            },
+            decodePullRequestEvent({
+              ...samplePullRequestEvent,
+              action: "synchronize",
+              pullRequest: {
+                ...samplePullRequestEvent.pullRequest,
+                headSha: "e".repeat(40),
+                updatedAt: observedAt,
+              },
+            }),
+          )
+          const first = yield* store.claimNextReconciliation({
+            workerId: "ambiguous-race-worker-a",
+            now: new Date("2026-07-19T12:01:00.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          if (first === null) throw new Error("expected first reconciliation")
+
+          const newer = yield* store.ingestPullRequest(
+            {
+              deliveryId: "ambiguous-race-second",
+              event: "pull_request",
+              action: "synchronize",
+              payload: "{}",
+              receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+            },
+            decodePullRequestEvent({
+              ...samplePullRequestEvent,
+              action: "synchronize",
+              pullRequest: {
+                ...samplePullRequestEvent.pullRequest,
+                headSha: "f".repeat(40),
+                updatedAt: observedAt,
+              },
+            }),
+          )
+          return { first, newer }
+        }).pipe(Effect.provide(persistentStoreLayer(filename))),
+      )
+
+      const resumed = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* WorkflowStore
+          const stale = yield* store.applyReconciliationSnapshot({
+            reconciliationId: setup.first.id,
+            workerId: "ambiguous-race-worker-a",
+            completedAt: new Date("2026-07-19T12:01:02.000Z"),
+            snapshot: {
+              _tag: "AuthoritativePullRequestSnapshot",
+              installationId: 91,
+              repository: samplePullRequestEvent.repository,
+              pullRequest: {
+                ...samplePullRequestEvent.pullRequest,
+                headSha: "b".repeat(40),
+                updatedAt: "2026-07-19T12:00:02.000Z",
+              },
+            },
+          })
+          const latest = yield* store.claimNextReconciliation({
+            workerId: "ambiguous-race-worker-b",
+            now: new Date("2026-07-19T12:01:03.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          return { latest, stale }
+        }).pipe(Effect.provide(persistentStoreLayer(filename))),
+      )
+
+      expect(setup.newer).toEqual({ status: "reconciliation_enqueued", generation: 1 })
+      expect(resumed.stale).toBe("stale")
+      expect(resumed.latest).toMatchObject({
+        id: setup.first.id,
+        attempts: 1,
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("does not revoke reconciliation for an older ambiguous observation ingested late", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const observedAt = "2026-07-19T12:00:00.000Z"
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-initial",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date(observedAt),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-newer",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:02.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              headSha: "f".repeat(40),
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        const reconciliation = yield* store.claimNextReconciliation({
+          workerId: "out-of-order-reconciler",
+          now: new Date("2026-07-19T12:01:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (reconciliation === null) throw new Error("expected reconciliation")
+
+        const older = yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-older",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              headSha: "e".repeat(40),
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        const completed = yield* store.applyReconciliationSnapshot({
+          reconciliationId: reconciliation.id,
+          workerId: "out-of-order-reconciler",
+          completedAt: new Date("2026-07-19T12:01:01.000Z"),
+          snapshot: {
+            _tag: "AuthoritativePullRequestSnapshot",
+            installationId: 91,
+            repository: samplePullRequestEvent.repository,
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: "2026-07-19T12:00:03.000Z",
+            },
+          },
+        })
+        return { completed, older }
+      }).pipe(Effect.provide(makeStoreLayer())),
+    )
+
+    expect(result.older).toEqual({ status: "reconciliation_enqueued", generation: 1 })
+    expect(result.completed).toBe("completed")
   })
 
   test("does not revoke reconciliation for an ignored older delivery", async () => {
