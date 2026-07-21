@@ -106,6 +106,7 @@ describe("loadConfig", () => {
         publicationTimeoutMs: 45_000,
         publicationLeaseDurationMs: 105_000,
         agentBranchPrefixes: ["opencode/", "plan/"],
+        trustedAgentUsers: [],
         commandUsers: [],
       },
     })
@@ -120,12 +121,14 @@ describe("loadConfig", () => {
         ...requiredEnvironment,
         WORKFLOWD_FIX_WORK_ENABLED: "true",
         WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
+        WORKFLOWD_TRUSTED_AGENT_USERS: "Trusted-Agent[bot]",
       },
       { home: "/home/test" },
     )
 
     expect(disabled.fixWork.enabled).toBe(false)
     expect(enabled.fixWork.enabled).toBe(true)
+    expect(enabled.worker.trustedAgentUsers).toEqual(["trusted-agent[bot]"])
     expect(enabled.workspace.gitSigningKey).toBe("a".repeat(40))
     await expect(
       loadConfig(
@@ -133,6 +136,16 @@ describe("loadConfig", () => {
         { home: "/home/test" },
       ),
     ).rejects.toThrow("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_FIX_WORK_ENABLED: "true",
+          WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_TRUSTED_AGENT_USERS is required when Fix Work is enabled")
     await expect(
       loadConfig(
         { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "yes" },

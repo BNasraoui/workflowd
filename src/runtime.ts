@@ -141,6 +141,7 @@ export function startHookService(
             timeoutMs: config.worker.jobTimeoutMs,
             cancellationPollIntervalMs: config.worker.pollIntervalMs,
             agentBranchPrefixes: config.worker.agentBranchPrefixes,
+            trustedAgentUsers: config.worker.trustedAgentUsers,
             fixWorkEnabled: config.fixWork.enabled,
             now: () => new Date(),
           }),

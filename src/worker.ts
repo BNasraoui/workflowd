@@ -54,6 +54,7 @@ function processReviewWork(
   work: ReviewWork,
   workerId: string,
   agentBranchPrefixes: ReadonlyArray<string>,
+  trustedAgentUsers: ReadonlyArray<string>,
   fixWorkEnabled: boolean,
   onPrepared: (intent: AgentFailureContext) => void,
   onAbortFailure: () => void,
@@ -136,6 +137,8 @@ function processReviewWork(
           fixWorkEnabled &&
           decideFixEligibility({
             agentBranchPrefixes,
+            trustedAgentUsers,
+            author: work.author,
             headRef: work.target.headRef,
             repositoryFullName: work.repositoryFullName,
             headRepositoryFullName: work.target.headRepositoryFullName,
@@ -289,6 +292,7 @@ export function runJobIteration(options: {
   readonly timeoutMs: number
   readonly cancellationPollIntervalMs: number
   readonly agentBranchPrefixes: ReadonlyArray<string>
+  readonly trustedAgentUsers: ReadonlyArray<string>
   readonly fixWorkEnabled: boolean
   readonly now: () => Date
 }) {
@@ -323,12 +327,23 @@ export function runJobIteration(options: {
       leaseDurationMs: options.leaseDurationMs,
     })
     if (work === null) return "idle" as const
-    if (work._tag === "FixWork" && !options.fixWorkEnabled) {
-      return yield* store.disableFixJob({
-        jobId: work.id,
-        workerId: options.workerId,
-        disabledAt: options.now(),
+    if (work._tag === "FixWork") {
+      const eligible = decideFixEligibility({
+        agentBranchPrefixes: options.agentBranchPrefixes,
+        trustedAgentUsers: options.trustedAgentUsers,
+        author: work.author,
+        headRef: work.target.headRef,
+        repositoryFullName: work.repositoryFullName,
+        headRepositoryFullName: work.target.headRepositoryFullName,
+        review: work.review,
       })
+      if (!options.fixWorkEnabled || eligible._tag === "Ineligible") {
+        return yield* store.disableFixJob({
+          jobId: work.id,
+          workerId: options.workerId,
+          disabledAt: options.now(),
+        })
+      }
     }
 
     let agentFailureContext: AgentFailureContext | undefined
@@ -342,6 +357,7 @@ export function runJobIteration(options: {
             work,
             options.workerId,
             options.agentBranchPrefixes,
+            options.trustedAgentUsers,
             options.fixWorkEnabled,
             captureAgentFailureContext,
             () => {
