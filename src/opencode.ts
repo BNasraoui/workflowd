@@ -85,6 +85,8 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
     outputSchema: ReviewResultSchema,
+    maxInputBytes: 26_363,
+    maxOutputBytes: 3_395_207,
     promptContract: "pr-review-prompt",
     title: (input) => sessionTitle("review", input),
     prompt: (input) => automationPrompt("review", input),
@@ -102,6 +104,8 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
     outputSchema: FixResultSchema,
+    maxInputBytes: 26_363,
+    maxOutputBytes: 24_117,
     promptContract: "pr-fix-prompt",
     title: (input) => sessionTitle("fix", input),
     prompt: (input) => automationPrompt("fix", input),
@@ -157,7 +161,10 @@ function toAutomationError(error: AgentHarnessError): OpenCodeAutomationError {
 }
 
 function sessionTitle(kind: AutomationKind, input: RunPullRequestAutomationInput): string {
-  return `${kind}:${input.repositoryFullName}#${input.pullRequestNumber}@${input.headSha.slice(0, 12)}`
+  const suffix = `#${input.pullRequestNumber}@${input.headSha.slice(0, 12)}`
+  const prefix = `${kind}:`
+  const repository = input.repositoryFullName.slice(0, 256 - prefix.length - suffix.length)
+  return `${prefix}${repository}${suffix}`
 }
 
 function automationPrompt(kind: AutomationKind, input: RunPullRequestAutomationInput): string {

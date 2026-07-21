@@ -134,6 +134,7 @@ describe("strict initial store schema", () => {
       { migration_id: 1, name: "initial_schema" },
       { migration_id: 2, name: "agent_harness" },
       { migration_id: 3, name: "agent_session_cleanup_leases" },
+      { migration_id: 4, name: "agent_session_recovery_and_payload_envelopes" },
     ])
     expect(result.tables).toHaveLength(7)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

@@ -1,5 +1,6 @@
 import { Migrator, SqlClient } from "@effect/sql"
 import { Effect } from "effect"
+import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -333,10 +334,59 @@ const agentSessionCleanupLeases = Effect.gen(function* () {
   `
 })
 
+const agentSessionRecoveryAndPayloadEnvelopes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    ALTER TABLE agent_executions ADD COLUMN cleanup_disposition TEXT
+      CHECK (cleanup_disposition IN ('operator_required', 'data_error'))
+  `
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_last_error TEXT`
+  const oversized = yield* sql<{ readonly count: number }>`
+    SELECT count(*) AS count
+    FROM agent_executions
+    WHERE length(CAST(launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        output_json IS NOT NULL
+        AND length(CAST(output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+  `
+  if (Number(oversized[0]?.count ?? 0) > 0) {
+    return yield* Effect.fail(
+      new Error("Existing agent execution payload exceeds the durable envelope"),
+    )
+  }
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_insert
+    BEFORE INSERT ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_update
+    BEFORE UPDATE OF launch_intent_json, output_json ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
     "0002_agent_harness": agentHarnessSchema,
     "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
+    "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
   }),
 })

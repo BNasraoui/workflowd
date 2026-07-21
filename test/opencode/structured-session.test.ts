@@ -40,11 +40,52 @@ const request = {
   },
   prompt: "Review the pull request.",
   pollIntervalMs: 0,
+  maxOutputBytes: 4 * 1024 * 1024,
 }
 
 const resultSchema = Schema.Struct({ verdict: Schema.Literal("pass") })
 
 describe("StructuredSession", () => {
+  test("rejects schema-valid structured output beyond the durable output envelope", async () => {
+    const adapter = makeAdapter({
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_structured",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: { value: "x".repeat(4 * 1024 * 1024) },
+          },
+        }),
+    })
+    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(5 * 1024 * 1024)) })
+
+    await expect(new StructuredSession(adapter, request, schema).run()).rejects.toThrow(
+      "decode structured session output",
+    )
+  })
+
+  test("rejects structured output beyond the trusted harness declaration", async () => {
+    const adapter = makeAdapter({
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_structured",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: { value: "x".repeat(100) },
+          },
+        }),
+    })
+    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(100)) })
+
+    await expect(
+      new StructuredSession(adapter, { ...request, maxOutputBytes: 50 }, schema).run(),
+    ).rejects.toThrow("decode structured session output")
+  })
+
   test("creates a native session without prompting until the caller resumes it", async () => {
     const actions: Array<string> = []
     const adapter = makeAdapter({

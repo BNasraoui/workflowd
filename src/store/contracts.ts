@@ -60,7 +60,7 @@ export type WorkflowStorePort = {
   ) => Effect.Effect<"superseded" | "stale", SqlError>
   readonly recordAgentSessionCleanupFailure: (
     input: RecordAgentSessionCleanupFailureInput,
-  ) => Effect.Effect<"pending" | "released" | "stale", SqlError>
+  ) => Effect.Effect<"pending" | "operator_required" | "stale", SqlError>
   readonly shouldCancelJob: (
     jobId: number,
     workerId: string,
