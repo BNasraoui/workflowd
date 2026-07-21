@@ -143,7 +143,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       const workflowId = workflowIdFor(request.repository, request.ticket)
       const proposedBranchName = branchName(
         ticket.issueType,
-        ticket.reference.nativeTicketId,
+        ticket.reference,
         checked.readyTicket.title,
       )
       const inspection = yield* repositories.inspect({
@@ -754,12 +754,12 @@ function sameTicket(left: typeof TicketReference.Type, right: typeof TicketRefer
   )
 }
 
-function branchName(issueType: string, ticketId: string, title: string) {
+function branchName(issueType: string, ticket: typeof TicketReference.Type, title: string) {
   const safeType = issueType
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
-  const safeTicket = ticketId
+  const safeTicket = ticket.nativeTicketId
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/\.+/g, ".")
@@ -771,5 +771,6 @@ function branchName(issueType: string, ticketId: string, title: string) {
     .replace(/^-|-$/g, "")
     .slice(0, 80)
     .replace(/-$/g, "")
-  return `${safeType}/${safeTicket}-${slug}`
+  const ticketIdentity = canonicalSha256(ticket).slice(0, 12)
+  return `${safeType}/${safeTicket}-${slug}-${ticketIdentity}`
 }

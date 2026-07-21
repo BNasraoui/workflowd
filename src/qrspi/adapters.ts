@@ -157,6 +157,16 @@ type QrspiOctokit = {
       readonly getBranch: (
         input: Parameters<RepositoriesApi["getBranch"]>[0],
       ) => Promise<{ readonly data: { readonly commit: { readonly sha: string } } }>
+      readonly getCommit?: (input: Parameters<RepositoriesApi["getCommit"]>[0]) => Promise<{
+        readonly data: {
+          readonly sha: string
+          readonly parents: ReadonlyArray<{ readonly sha: string }>
+          readonly commit: {
+            readonly message: string
+            readonly verification?: { readonly verified?: boolean } | null
+          }
+        }
+      }>
     }
     readonly pulls: {
       readonly list: (
@@ -169,11 +179,19 @@ type QrspiOctokit = {
   }
 }
 type OctokitProvider = (installationId: number) => Promise<QrspiOctokit>
+type TrustedPublicationVerifier = (input: {
+  readonly repository: RepositoryReference
+  readonly headRef: string
+  readonly jobId: number
+  readonly commitSha: string
+}) => Promise<boolean>
 
 export class GitHubQrspiRepository implements QrspiRepositoryPort {
   constructor(
     private readonly config: QrspiConfig,
     private readonly client: OctokitProvider,
+    private readonly isTrustedPublication: TrustedPublicationVerifier = () =>
+      Promise.resolve(false),
   ) {}
 
   readonly inspect: QrspiRepositoryPort["inspect"] = (input) =>
@@ -252,6 +270,21 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       ) {
         return { _tag: "Accepted", sha } as const
       }
+      if (
+        input.previousTrustedSha !== null &&
+        (await this.isAcceptedHistory(
+          client,
+          owner,
+          repo,
+          input.repository,
+          input.headRef,
+          input.previousTrustedSha,
+          sha,
+          signal,
+        ))
+      ) {
+        return { _tag: "Accepted", sha } as const
+      }
       return { _tag: "UnknownHistory", sha } as const
     })
 
@@ -277,6 +310,46 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       try: run,
       catch: (cause) => new QrspiRepositoryError({ operation, cause: normalizeError(cause) }),
     })
+  }
+
+  private async isAcceptedHistory(
+    client: QrspiOctokit,
+    owner: string,
+    repo: string,
+    repository: RepositoryReference,
+    headRef: string,
+    previousTrustedSha: string,
+    headSha: string,
+    signal: AbortSignal,
+  ) {
+    const visited = new Set<string>()
+    let currentSha = headSha
+    while (currentSha !== previousTrustedSha) {
+      if (client.rest.repos.getCommit === undefined) return false
+      if (visited.has(currentSha)) return false
+      visited.add(currentSha)
+      const response = await client.rest.repos.getCommit({
+        owner,
+        repo,
+        ref: currentSha,
+        request: { signal },
+      })
+      const commit = response.data
+      const jobIds = [...commit.commit.message.matchAll(/^Workflowd-Job: ([1-9]\d*)$/gm)]
+      const jobId = Number(jobIds[0]?.[1])
+      if (
+        commit.sha !== currentSha ||
+        commit.parents.length !== 1 ||
+        commit.commit.verification?.verified !== true ||
+        jobIds.length !== 1 ||
+        !Number.isSafeInteger(jobId) ||
+        !(await this.isTrustedPublication({ repository, headRef, jobId, commitSha: currentSha }))
+      ) {
+        return false
+      }
+      currentSha = commit.parents[0]!.sha
+    }
+    return true
   }
 }
 

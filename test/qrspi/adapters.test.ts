@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { QrspiConfig } from "../../src/config"
+import type { RepositoryReference } from "../../src/qrspi/domain"
 import {
   BeadsCliTicketSource,
   GitHubQrspiRepository,
@@ -201,19 +202,85 @@ describe("QRSPI external adapters", () => {
     expect(observation).toEqual({ _tag: "Accepted", sha: previousTrustedSha })
   })
 
-  test("rejects an unrecognized descendant of the previous trusted SHA", async () => {
+  test("accepts an advanced chain of signed commits linked to durable publications", async () => {
     const previousTrustedSha = "a".repeat(40)
     const advancedSha = "b".repeat(40)
-    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
-      rest: {
-        repos: {
-          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
-          getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+    const publications: Array<{
+      readonly repository: RepositoryReference
+      readonly headRef: string
+      readonly jobId: number
+      readonly commitSha: string
+    }> = []
+    const adapter = new GitHubQrspiRepository(
+      qrspiConfig,
+      async () => ({
+        rest: {
+          repos: {
+            get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+            getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+            getCommit: async () => ({
+              data: {
+                sha: advancedSha,
+                parents: [{ sha: previousTrustedSha }],
+                commit: {
+                  message: "Apply trusted fix\n\nWorkflowd-Job: 41",
+                  verification: { verified: true },
+                },
+              },
+            }),
+          },
+          pulls: { list: async () => ({ data: [] }) },
+          git: { createRef: async () => undefined },
         },
-        pulls: { list: async () => ({ data: [] }) },
-        git: { createRef: async () => undefined },
+      }),
+      async (publication) => {
+        publications.push(publication)
+        return true
       },
-    }))
+    )
+
+    const observation = await Effect.runPromise(
+      adapter.observeAcceptedBranch({
+        repository,
+        headRef: "feature/workflowd-vs3.3-start",
+        baseSha: "c".repeat(40),
+        previousTrustedSha,
+      }),
+    )
+
+    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
+    expect(publications).toEqual([
+      { repository, headRef: "feature/workflowd-vs3.3-start", jobId: 41, commitSha: advancedSha },
+    ])
+  })
+
+  test("rejects an unsigned descendant of the previous trusted SHA", async () => {
+    const previousTrustedSha = "a".repeat(40)
+    const advancedSha = "b".repeat(40)
+    const adapter = new GitHubQrspiRepository(
+      qrspiConfig,
+      async () => ({
+        rest: {
+          repos: {
+            get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+            getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+            getCommit: async () => ({
+              data: {
+                sha: advancedSha,
+                parents: [{ sha: previousTrustedSha }],
+                commit: {
+                  message: "Apply untrusted fix\n\nWorkflowd-Job: 41",
+                  verification: { verified: false },
+                },
+              },
+            }),
+          },
+          pulls: { list: async () => ({ data: [] }) },
+          git: { createRef: async () => undefined },
+        },
+      }),
+      async () => true,
+    )
 
     const observation = await Effect.runPromise(
       adapter.observeAcceptedBranch({

@@ -73,7 +73,27 @@ describe("durable fix state", () => {
           now: new Date("2026-07-19T12:06:00.000Z"),
           leaseDurationMs: 60_000,
         })
-        return { recorded, retried }
+        if (retried === null) throw new Error("expected retried fix")
+        yield* store.completeFixJob({
+          jobId: retried.id,
+          workerId: "fix-state-worker-2",
+          completedAt: new Date("2026-07-19T12:06:30.000Z"),
+        })
+        const trusted = yield* store.isTrustedBranchPublication({
+          repositoryId: String(fix.repositoryId),
+          repositoryFullName: fix.repositoryFullName,
+          headRef: fix.target.headRef,
+          jobId: fix.id,
+          commitSha: "c".repeat(40),
+        })
+        const wrongCommit = yield* store.isTrustedBranchPublication({
+          repositoryId: String(fix.repositoryId),
+          repositoryFullName: fix.repositoryFullName,
+          headRef: fix.target.headRef,
+          jobId: fix.id,
+          commitSha: "d".repeat(40),
+        })
+        return { recorded, retried, trusted, wrongCommit }
       }).pipe(Effect.provide(makeStoreLayer())),
     )
 
@@ -85,5 +105,7 @@ describe("durable fix state", () => {
         commitSha: "c".repeat(40),
       },
     })
+    expect(result.trusted).toBe(true)
+    expect(result.wrongCommit).toBe(false)
   })
 })

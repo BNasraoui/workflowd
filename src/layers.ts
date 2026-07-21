@@ -14,6 +14,7 @@ import {
 } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
+import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
@@ -72,23 +73,35 @@ export const makeLiveLayer = (config: AppConfig) => {
               ),
               Layer.effect(
                 QrspiRepository,
-                Effect.tryPromise({
-                  try: () => readFile(config.github.privateKeyPath, "utf8"),
-                  catch: (cause) =>
-                    new Error(`Could not read GitHub App private key: ${String(cause)}`),
-                }).pipe(
-                  Effect.map(
-                    (privateKey) =>
-                      new GitHubQrspiRepository(config.qrspi!, async (installationId) => {
-                        const app = new App({
-                          appId: config.github.appId,
-                          privateKey,
-                          Octokit,
-                        })
-                        return app.getInstallationOctokit(installationId)
-                      }),
-                  ),
-                ),
+                Effect.gen(function* () {
+                  const store = yield* WorkflowStore
+                  const privateKey = yield* Effect.tryPromise({
+                    try: () => readFile(config.github.privateKeyPath, "utf8"),
+                    catch: (cause) =>
+                      new Error(`Could not read GitHub App private key: ${String(cause)}`),
+                  })
+                  return new GitHubQrspiRepository(
+                    config.qrspi!,
+                    async (installationId) => {
+                      const app = new App({
+                        appId: config.github.appId,
+                        privateKey,
+                        Octokit,
+                      })
+                      return app.getInstallationOctokit(installationId)
+                    },
+                    (publication) =>
+                      Effect.runPromise(
+                        store.isTrustedBranchPublication({
+                          repositoryId: publication.repository.repositoryId,
+                          repositoryFullName: publication.repository.repositoryFullName,
+                          headRef: publication.headRef,
+                          jobId: publication.jobId,
+                          commitSha: publication.commitSha,
+                        }),
+                      ),
+                  )
+                }).pipe(Effect.provide(WorkflowStoreLive)),
               ),
             ),
           ),

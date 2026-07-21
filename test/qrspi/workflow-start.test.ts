@@ -305,7 +305,7 @@ describe("WorkflowStart integration", () => {
     expect(result).toMatchObject({
       _tag: "Started",
       generation: 1,
-      branchName: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+      branchName: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow-c00352bf4330",
       rootSha: baseSha,
     })
     expect(await counts(filename, fake)).toEqual([1, 3, 1])
@@ -337,23 +337,36 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("sanitizes consecutive dots in a valid ticket ID before creating the branch", async () => {
+  test("keeps colliding sanitized ticket IDs on distinct branches", async () => {
     const filename = await databasePath()
-    const dottedTicket = {
+    const firstTicket = {
       ...ticketReference,
       nativeTicketId: "workflowd..vs3.3",
     }
-    const fake = fakes({ ticket: { ...readyTicket, reference: dottedTicket } })
+    const secondTicket = {
+      ...ticketReference,
+      nativeTicketId: "workflowd.vs3.3",
+    }
+    const fake = fakes({ ticket: { ...readyTicket, reference: firstTicket } })
 
-    const result = await startWithOptions(filename, fake, options, {
+    const first = await startWithOptions(filename, fake, options, {
       repository,
-      ticket: dottedTicket,
+      ticket: firstTicket,
+    })
+    fake.setTicket({ ...readyTicket, reference: secondTicket })
+    const second = await startWithOptions(filename, fake, options, {
+      repository,
+      ticket: secondTicket,
     })
 
-    expect(result).toMatchObject({
-      _tag: "Started",
-      branchName: "feature/workflowd.vs3.3-kick-off-a-qrspi-workflow",
-    })
+    expect(first._tag).toBe("Started")
+    expect(second._tag).toBe("Started")
+    if (first._tag !== "Started" || second._tag !== "Started") {
+      throw new Error("Expected both workflows to start")
+    }
+    expect(first.branchName).not.toBe(second.branchName)
+    expect(first.branchName).toStartWith("feature/workflowd.vs3.3-kick-off-a-qrspi-workflow-")
+    expect(second.branchName).toStartWith("feature/workflowd.vs3.3-kick-off-a-qrspi-workflow-")
   })
 
   test("returns NeedsWork and creates zero technical work", async () => {
@@ -788,7 +801,7 @@ describe("WorkflowStart integration", () => {
       {
         state: "waiting_external",
         external_observation_json: JSON.stringify({
-          headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+          headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow-c00352bf4330",
           outcome: "unknown",
         }),
       },
