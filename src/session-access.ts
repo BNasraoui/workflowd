@@ -58,6 +58,9 @@ export class SessionAccessResolver {
     ) {
       return Effect.succeed(this.unavailable(reference, reference.state))
     }
+    if (reference.directoryCleanupScheduled === true) {
+      return Effect.succeed(this.unavailable(reference, "directory_missing"))
+    }
 
     return Effect.tryPromise(() => this.directoryExists(reference.directory)).pipe(
       Effect.catchAll(() => Effect.succeed(false)),

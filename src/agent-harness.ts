@@ -68,6 +68,7 @@ export const SessionReference = Schema.Struct({
   serverId: BoundedIdentifier,
   endpointAlias: BoundedIdentifier,
   directory: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4096)),
+  directoryCleanupScheduled: Schema.optional(Schema.Literal(true)),
   nativeSessionId: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
   scope: AgentExecutionScope,
   operationId: BoundedReference,

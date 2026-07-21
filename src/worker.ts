@@ -88,6 +88,10 @@ function processReviewWork(
         harness.createSession(prepared),
         (reference) =>
           Effect.gen(function* () {
+            const durableReference =
+              workspace.directoryCleanupScheduled === true
+                ? { ...reference, directoryCleanupScheduled: true as const }
+                : reference
             const referenceRecordedAt = new Date(
               yield* Effect.clockWith((clock) => clock.currentTimeMillis),
             )
@@ -95,9 +99,9 @@ function processReviewWork(
               jobId: work.id,
               workerId,
               recordedAt: referenceRecordedAt,
-              reference,
+              reference: durableReference,
             })
-            return { reference, session }
+            return { reference: durableReference, session }
           }),
         (reference, exit) =>
           Exit.isFailure(exit)

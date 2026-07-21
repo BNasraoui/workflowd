@@ -169,7 +169,10 @@ export class ReviewContextFiles {
         )
       }
       yield* this.#write(work, resolved.directory)
-      return { directory: resolved.directory } satisfies ReviewWorkspace
+      return {
+        directory: resolved.directory,
+        ...(resolved.managed ? { directoryCleanupScheduled: true as const } : {}),
+      } satisfies ReviewWorkspace
     })
   }
 

@@ -5,6 +5,7 @@ import type { WorkspaceError } from "./errors"
 
 export type ReviewWorkspace = {
   readonly directory: string
+  readonly directoryCleanupScheduled?: true
 }
 
 export type FixWorkspace = ReviewWorkspace & {

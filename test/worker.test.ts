@@ -13,6 +13,8 @@ import { Publication } from "../src/domain/publication"
 import { ReviewResult } from "../src/domain/review-result"
 import { GitHub, type GitHubPort } from "../src/github"
 import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
+import type { OpenCodeAdapter } from "../src/opencode/adapter"
+import { SessionAccessResolver } from "../src/session-access"
 import {
   runCommandIteration,
   runJobIteration,
@@ -468,6 +470,124 @@ const makePublication = (id = 1) =>
   })
 
 describe("Review Work processing", () => {
+  test("does not publish resumable access for a managed review worktree after scope release", async () => {
+    const job = makeReviewWork()
+    let reference: SessionReference | undefined
+    let released = false
+
+    const jobResult = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              recordAgentSessionReference: (input) =>
+                Effect.sync(() => {
+                  reference = input.reference
+                  return "recorded" as const
+                }),
+              completeAgentReviewJob: () => Effect.succeed("completed"),
+            },
+            workspace: {
+              prepareReview: () =>
+                Effect.acquireRelease(
+                  Effect.succeed({
+                    directory: "/tmp/managed-review",
+                    directoryCleanupScheduled: true as const,
+                  }),
+                  () =>
+                    Effect.sync(() => {
+                      released = true
+                    }),
+                ),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({ verdict: "pass" as const, summary: "No findings.", findings: [] }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(jobResult).toBe("completed")
+    expect(released).toBe(true)
+    if (reference === undefined) throw new Error("expected persisted session reference")
+
+    let probed = false
+    const openCode: OpenCodeAdapter = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeSessionEvents: async () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => ({ done: true as const, value: undefined }),
+        }),
+      }),
+      getSessionStatus: async () => ({ type: "idle" as const }),
+      sessionExists: async () => {
+        probed = true
+        return true
+      },
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      validateAvailability: async () => undefined,
+    }
+    const resolver = new SessionAccessResolver(
+      openCode,
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        attachUrl: "https://mint.tailnet.example:4096",
+      },
+      async () => true,
+    )
+    let resolvedAccess: unknown
+    const publication = {
+      ...makePublication(),
+      sessionReferenceId: reference.sessionReferenceId,
+      sessionReference: reference,
+      sessionExecutionState: "succeeded" as const,
+    }
+
+    const publicationResult = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-1",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: jobOptions.now,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextPublication: () => Effect.succeed(publication),
+              completePublication: () => Effect.succeed("completed"),
+            },
+            github: {
+              publishReview: (claimed) =>
+                resolver.resolve(claimed.sessionReference!).pipe(
+                  Effect.tap((access) =>
+                    Effect.sync(() => {
+                      resolvedAccess = access
+                    }),
+                  ),
+                  Effect.as("published" as const),
+                ),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(publicationResult).toBe("completed")
+    expect(resolvedAccess).toEqual({
+      _tag: "Unavailable",
+      sessionReferenceId: reference.sessionReferenceId,
+      reason: "directory_missing",
+    })
+    expect(probed).toBe(false)
+  })
+
   test("reviews the scoped worktree and commits the structured result", async () => {
     const actions: Array<string> = []
     const job = makeReviewWork({ target: { headRef: "feature" } })
