@@ -472,7 +472,68 @@ describe("QRSPI ticket boundary", () => {
           },
         ],
       }),
-    ).toThrow("runnable stage")
+    ).toThrow("StageProduce ready and ArtifactPublish blocked")
+  })
+
+  test("rejects reversed initial producer and publisher states", () => {
+    const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
+
+    expect(() =>
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...definition.stages[0],
+            initialOperations: requiredInitialOperations().map((operation) => ({
+              ...operation,
+              state: operation.kind === "StageProduce" ? ("blocked" as const) : ("ready" as const),
+            })),
+          },
+        ],
+      }),
+    ).toThrow("StageProduce ready and ArtifactPublish blocked")
+  })
+
+  test("enforces durable harness input and retry boundaries", () => {
+    const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
+    const stage = definition.stages[0]!
+    expect(() =>
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...stage,
+            inputContract: { ...stage.inputContract, maxEncodedBytes: 65_537 },
+          },
+        ],
+      }),
+    ).toThrow()
+    expect(() =>
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...stage,
+            producer: { ...stage.producer, retry: { ...stage.producer.retry, maxAttempts: 11 } },
+          },
+        ],
+      }),
+    ).toThrow()
+    expect(
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...stage,
+            inputContract: { ...stage.inputContract, maxEncodedBytes: 65_536 },
+            producer: { ...stage.producer, retry: { ...stage.producer.retry, maxAttempts: 10 } },
+          },
+        ],
+      }).stages[0],
+    ).toMatchObject({
+      inputContract: { maxEncodedBytes: 65_536 },
+      producer: { retry: { maxAttempts: 10 } },
+    })
   })
 
   test("rejects artifact stages without producer and publication operations", () => {

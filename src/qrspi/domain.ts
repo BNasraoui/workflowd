@@ -172,7 +172,7 @@ export type StageContractRef = typeof StageContractRef.Type
 export const StageInputContract = Schema.Struct({
   schemaId: ContractIdentifier,
   schemaVersion: PositiveVersion,
-  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_048_576)),
+  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(64 * 1024)),
 })
 
 export const StageProducerDefinition = Schema.Struct({
@@ -182,7 +182,7 @@ export const StageProducerDefinition = Schema.Struct({
   model: Schema.String.pipe(Schema.pattern(/^[^\s/]+\/[^\s/]+$/), Schema.maxLength(256)),
   timeoutMs: BoundedMilliseconds,
   retry: Schema.Struct({
-    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(10)),
     backoffMs: BoundedMilliseconds,
   }),
 })
@@ -292,12 +292,14 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
         `Workflow stage must declare StageProduce and ArtifactPublish operations: ${stage.key}`,
       )
     }
-    if (
-      (stage.activation.mode === "enabled" ||
-        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")) &&
-      !stage.initialOperations.some((operation) => operation.state === "ready")
-    ) {
-      throw new Error(`Workflow definition has no runnable stage operation: ${stage.key}`)
+    const producer = stage.initialOperations.find((operation) => operation.kind === "StageProduce")
+    const publisher = stage.initialOperations.find(
+      (operation) => operation.kind === "ArtifactPublish",
+    )
+    if (producer?.state !== "ready" || publisher?.state !== "blocked") {
+      throw new Error(
+        `Workflow stage must start with StageProduce ready and ArtifactPublish blocked: ${stage.key}`,
+      )
     }
     if (
       stage.reviewPolicy.mode === "automated" &&

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect, Either, Layer } from "effect"
+import { stageDefinitionSha256, workflowDefinitionSha256 } from "../../src/qrspi/domain"
+import { defaultQrspiWorkflowDefinition } from "../../src/qrspi/stages"
+import { runStoreMigrations } from "../../src/store/migrations"
 import { makeCurrentnessPolicy } from "../../src/store/currentness"
 import {
   commandClaimCandidate,
@@ -162,6 +165,116 @@ describe("strict initial store schema", () => {
     expect(primaryKey).toEqual([
       { name: "workflow_id", pk: 1 },
       { name: "ticket_revision_sha256", pk: 2 },
+    ])
+  })
+
+  test("backfills stage state for a running generation upgrading from 0006", async () => {
+    const result = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`DROP TABLE qrspi_implementation_steps`
+        yield* sql`DROP TABLE qrspi_stage_revisions`
+        yield* sql`DROP TABLE qrspi_stage_runs`
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 7`
+
+        const workflowId = "workflow-upgrade"
+        const ticketSha = "a".repeat(64)
+        const definitionSha = workflowDefinitionSha256(defaultQrspiWorkflowDefinition)
+        yield* sql`
+          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+          VALUES (${workflowId}, 'feature/upgrade', ${timestamp}, ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_ticket_revisions (
+            workflow_id, ticket_revision_sha256, revision_json, checked_at
+          ) VALUES (${workflowId}, ${ticketSha}, '{}', ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256, definition_json, created_at
+          ) VALUES (
+            ${definitionSha}, ${JSON.stringify(defaultQrspiWorkflowDefinition)}, ${timestamp}
+          )
+        `
+        yield* sql`
+          INSERT INTO qrspi_generations (
+            workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+            root_sha, current_head_sha, ticket_revision_sha256,
+            workflow_definition_sha256, state, is_current, created_at, updated_at
+          ) VALUES (
+            ${workflowId}, 1, '{}', 'main', ${"b".repeat(40)}, 'feature/upgrade',
+            ${"b".repeat(40)}, ${"b".repeat(40)}, ${ticketSha}, ${definitionSha},
+            'running', 1, ${timestamp}, ${timestamp}
+          )
+        `
+        for (const [kind, state] of [
+          ["StageProduce", "ready"],
+          ["ArtifactPublish", "blocked"],
+        ] as const) {
+          const operationId = `${workflowId}:1:${kind}:questions:1:1`
+          yield* sql`
+            INSERT INTO workflow_operations (
+              operation_id, logical_operation_id, operation_revision, retry_of, kind,
+              scope_json, input_json, input_sha256, output_json, state, is_current,
+              attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+              external_intent_json, external_observation_json, observation_attempts,
+              max_observation_attempts, parent_effect_json, last_error,
+              terminal_failure_reason, terminal_retry_policy, created_at, updated_at
+            ) VALUES (
+              ${operationId}, ${operationId.slice(0, -2)}, 1, NULL, ${kind},
+              ${JSON.stringify({ _tag: "GenerationScope", workflowId, generation: 1 })},
+              ${JSON.stringify({
+                stageKey: "questions",
+                stageKind: "document",
+                stageRevision: 1,
+                workflowDefinitionSha256: definitionSha,
+              })},
+              ${"c".repeat(64)}, NULL, ${state}, 1, 0, 3, NULL, NULL, NULL, ${timestamp},
+              NULL, NULL, 0, 5, '{}', NULL, NULL, NULL, ${timestamp}, ${timestamp}
+            )
+          `
+        }
+
+        yield* runStoreMigrations
+        const runs = yield* sql<{
+          readonly stage_key: string
+          readonly stage_definition_sha256: string
+          readonly state: string
+          readonly pending_revision: number | null
+        }>`
+          SELECT stage_key, stage_definition_sha256, state, pending_revision
+          FROM qrspi_stage_runs ORDER BY stage_position
+        `
+        const revisions = yield* sql`
+          SELECT stage_key, revision, revision_type, source_artifacts_json, state
+          FROM qrspi_stage_revisions
+        `
+        const operations = yield* sql`
+          SELECT kind, state FROM workflow_operations ORDER BY kind
+        `
+        return { runs, revisions, operations }
+      }),
+    )
+
+    expect(result.runs[0]).toEqual({
+      stage_key: "questions",
+      stage_definition_sha256: stageDefinitionSha256(defaultQrspiWorkflowDefinition.stages[0]!),
+      state: "active",
+      pending_revision: 1,
+    })
+    expect(result.runs.slice(1).every(({ state }) => state === "blocked")).toBe(true)
+    expect(result.revisions).toEqual([
+      {
+        stage_key: "questions",
+        revision: 1,
+        revision_type: "document",
+        source_artifacts_json: "[]",
+        state: "producing",
+      },
+    ])
+    expect(result.operations).toEqual([
+      { kind: "ArtifactPublish", state: "blocked" },
+      { kind: "StageProduce", state: "ready" },
     ])
   })
 

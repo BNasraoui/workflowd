@@ -384,7 +384,13 @@ describe("WorkflowStart integration", () => {
       ...options,
       workflowDefinition: {
         ...options.workflowDefinition,
-        stages: [options.workflowDefinition.stages[0], secondStage],
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            humanGatePolicy: { mode: "on_escalation" as const },
+          },
+          secondStage,
+        ],
       },
     }
     const started = await startWithOptions(filename, fake, stageOptions)
@@ -752,7 +758,7 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("persists implementation commits and checkpoint handoff separately from artifacts", async () => {
+  test("persists implementation commits and does not gate on_escalation success", async () => {
     const filename = await databasePath()
     const fake = fakes()
     const implementationOptions = {
@@ -764,6 +770,8 @@ describe("WorkflowStart integration", () => {
             ...options.workflowDefinition.stages[0],
             key: "implementation",
             kind: "implementation" as const,
+            reviewPolicy: { mode: "none" as const },
+            humanGatePolicy: { mode: "on_escalation" as const },
             outputContract: {
               _tag: "ImplementationCheckpoint" as const,
               contractId: "qrspi.checkpoint",

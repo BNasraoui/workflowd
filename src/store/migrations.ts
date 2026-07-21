@@ -1,6 +1,7 @@
 import { Migrator, SqlClient } from "@effect/sql"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
+import { WorkflowDefinition, stageDefinitionSha256 } from "../qrspi/domain"
 
 const initialSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -616,6 +617,66 @@ const qrspiStages = Effect.gen(function* () {
         REFERENCES qrspi_stage_revisions (workflow_id, generation, stage_key, revision)
     ) STRICT
   `
+
+  const activeGenerations = yield* sql<{
+    readonly workflow_id: string
+    readonly generation: number
+    readonly definition_json: string
+    readonly created_at: string
+    readonly updated_at: string
+  }>`
+    SELECT g.workflow_id, g.generation, d.definition_json, g.created_at, g.updated_at
+    FROM qrspi_generations g
+    JOIN qrspi_workflow_definitions d
+      ON d.definition_sha256 = g.workflow_definition_sha256
+    WHERE g.is_current = 1 AND g.state = 'running'
+    ORDER BY g.workflow_id, g.generation
+  `
+  for (const generation of activeGenerations) {
+    const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+      generation.definition_json,
+    )
+    const configuredStages = definition.stages.filter(
+      (stage) => stage.activation.mode !== "disabled",
+    )
+    const firstStage = configuredStages.find(
+      (stage) =>
+        stage.activation.mode === "enabled" ||
+        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
+    )
+    for (const [position, stage] of configuredStages.entries()) {
+      const skipped =
+        stage.activation.mode === "conditional" && stage.activation.decision === "disabled"
+      const active = stage === firstStage
+      yield* sql`
+        INSERT INTO qrspi_stage_runs (
+          workflow_id, generation, stage_key, stage_position, stage_definition_sha256,
+          state, published_revision, pending_revision, accepted_revision, skip_reason,
+          created_at, updated_at
+        ) VALUES (
+          ${generation.workflow_id}, ${generation.generation}, ${stage.key}, ${position},
+          ${stageDefinitionSha256(stage)},
+          ${skipped ? "skipped" : active ? "active" : "blocked"}, NULL,
+          ${active ? 1 : null}, NULL,
+          ${skipped ? `${stage.activation.policyId}@${stage.activation.policyVersion} disabled the stage` : null},
+          ${generation.created_at}, ${generation.updated_at}
+        )
+      `
+    }
+    if (firstStage !== undefined) {
+      yield* sql`
+        INSERT INTO qrspi_stage_revisions (
+          workflow_id, generation, stage_key, revision, revision_type,
+          source_artifacts_json, prepared_result_json, published_reference_json,
+          state, created_at, updated_at
+        ) VALUES (
+          ${generation.workflow_id}, ${generation.generation}, ${firstStage.key}, 1,
+          ${firstStage.kind}, '[]', NULL, NULL, 'producing',
+          ${generation.created_at}, ${generation.updated_at}
+        )
+      `
+    }
+  }
 })
 
 export const runStoreMigrations = Migrator.make({})({

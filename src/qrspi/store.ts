@@ -1618,7 +1618,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             )
           }
           const accepted =
-            stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode === "none"
+            stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode !== "required"
           const nextState = accepted
             ? "succeeded"
             : stage.reviewPolicy.mode === "automated"
@@ -2127,7 +2127,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               )
             }
             const accepted =
-              stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode === "none"
+              stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode !== "required"
             yield* sql`
               UPDATE qrspi_stage_revisions SET state = ${accepted ? "accepted" : "reviewing"},
                 published_reference_json = ${JSON.stringify(checkpoint)},
