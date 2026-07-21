@@ -13,6 +13,7 @@ import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkflowStart } from "../src/qrspi/workflow-start"
+import { StageCatalogService } from "../src/qrspi/stages"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -29,12 +30,12 @@ const qrspiDefinition = {
         maxEncodedBytes: 16_384,
       },
       producer: {
-        harnessId: "opencode",
-        harnessVersion: 1,
-        agent: "qrspi-questions",
-        model: "openai/gpt-5.6-sol",
-        timeoutMs: 60_000,
-        retry: { maxAttempts: 3, backoffMs: 1_000 },
+        harnessId: "trusted.custom-document",
+        harnessVersion: 7,
+        agent: "configured-producer",
+        model: "anthropic/claude-sonnet-4",
+        timeoutMs: 75_000,
+        retry: { maxAttempts: 5, backoffMs: 2_000 },
       },
       outputContract: {
         _tag: "Artifact",
@@ -78,6 +79,7 @@ test("composes the reusable agent harness with the live ports", async () => {
         WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
         WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
       },
       { home: directory },
     )
@@ -93,6 +95,7 @@ test("composes the reusable agent harness with the live ports", async () => {
         const agentHarness = yield* AgentHarness
         const workspace = yield* Workspace
         const workflowStart = yield* WorkflowStart
+        const stageCatalog = yield* StageCatalogService
         return [
           store.claimNextJob,
           github.publishReview,
@@ -100,6 +103,7 @@ test("composes the reusable agent harness with the live ports", async () => {
           agentHarness.createSession,
           workspace.prepareReview,
           workflowStart.start,
+          stageCatalog.resolve,
         ]
       }).pipe(Effect.provide(Live)),
     )
@@ -161,6 +165,7 @@ test("fails live composition when the configured GitHub key cannot be read", asy
         WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
         WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
       },
       { home: directory },
     )

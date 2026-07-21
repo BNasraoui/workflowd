@@ -21,6 +21,17 @@ import { QrspiRepository, TicketSource } from "./qrspi/ports"
 import { QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
+import {
+  ArtifactPublicationRepositoryService,
+  GitArtifactPublicationRepository,
+} from "./qrspi/artifact-publication"
+import {
+  BuiltInStageContracts,
+  StageCatalog,
+  StageCatalogService,
+  qrspiHarnessDefinitionsForWorkflows,
+  validateWorkflowDefinition,
+} from "./qrspi/stages"
 
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
@@ -36,9 +47,17 @@ export const makeLiveLayer = (config: AppConfig) => {
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
   })
+  const qrspiDefinitions =
+    config.qrspi === undefined
+      ? []
+      : qrspiHarnessDefinitionsForWorkflows([config.qrspi.workflowDefinition])
+  const stageCatalog = new StageCatalog(BuiltInStageContracts)
+  if (config.qrspi !== undefined) {
+    validateWorkflowDefinition(config.qrspi.workflowDefinition, stageCatalog, [...qrspiDefinitions])
+  }
   const agentHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
-    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix, ...qrspiDefinitions]),
     {
       serverId: config.openCode.serverId,
       endpointAlias: config.openCode.endpointAlias,
@@ -112,6 +131,16 @@ export const makeLiveLayer = (config: AppConfig) => {
             ),
           ),
         )
+  const artifactRepositoryLayer =
+    config.qrspi !== undefined && config.workspace.gitSigningKey !== undefined
+      ? Layer.succeed(
+          ArtifactPublicationRepositoryService,
+          new GitArtifactPublicationRepository(
+            config.qrspi.beadsWorkspace,
+            config.workspace.gitSigningKey,
+          ),
+        )
+      : Layer.empty
   return Layer.mergeAll(
     WorkflowStoreLive,
     Layer.effect(
@@ -139,6 +168,8 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
+    Layer.succeed(StageCatalogService, stageCatalog),
+    artifactRepositoryLayer,
     qrspiLayer,
   )
 }

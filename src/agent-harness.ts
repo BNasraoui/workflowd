@@ -249,37 +249,50 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
 
 export class TrustedAgentHarnessCatalog {
   readonly definitions: ReadonlyArray<HarnessRegistration>
-  readonly #byReference = new Map<string, RegisteredDefinition>()
+  readonly #byReference = new Map<string, RegisteredDefinition[]>()
 
   constructor(definitions: ReadonlyArray<HarnessRegistration>) {
     for (const definition of definitions) {
-      const runtime = decodeRuntimeDefinition(definition)
-      Schema.decodeUnknownSync(DefinitionMetadata)(runtime)
-      const key = referenceKey(runtime.ref)
-      if (runtime.maxInputBytes > MAX_AGENT_LAUNCH_INTENT_BYTES) {
-        throw new Error(
-          `AgentHarness ${key} input limit ${runtime.maxInputBytes} exceeds durable launch envelope ${MAX_AGENT_LAUNCH_INTENT_BYTES}`,
-        )
-      }
-      if (runtime.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES) {
-        throw new Error(
-          `AgentHarness ${key} output limit ${runtime.maxOutputBytes} exceeds durable output envelope ${MAX_AGENT_OUTPUT_BYTES}`,
-        )
-      }
-      const inputJsonSchema = JSONSchema.make(runtime.inputSchema)
-      const outputJsonSchema = JSONSchema.make(runtime.outputSchema)
-      if (this.#byReference.has(key)) {
+      const key = referenceKey(Schema.decodeUnknownSync(AgentHarnessRef)(definition.ref))
+      const variantsBefore = this.#byReference.get(key)?.length ?? 0
+      this.register(definition)
+      if ((this.#byReference.get(key)?.length ?? 0) === variantsBefore) {
         throw new Error(`Duplicate AgentHarness reference ${key}`)
       }
-      this.#byReference.set(key, {
-        source: definition,
-        definition: runtime,
-        definitionHash: definitionHash(runtime, inputJsonSchema, outputJsonSchema),
-        inputJsonSchema,
-        outputJsonSchema,
-      })
     }
     this.definitions = definitions
+  }
+
+  retain(definitions: ReadonlyArray<HarnessRegistration>): void {
+    for (const definition of definitions) this.register(definition)
+  }
+
+  private register(definition: HarnessRegistration): void {
+    const runtime = decodeRuntimeDefinition(definition)
+    Schema.decodeUnknownSync(DefinitionMetadata)(runtime)
+    const key = referenceKey(runtime.ref)
+    if (runtime.maxInputBytes > MAX_AGENT_LAUNCH_INTENT_BYTES) {
+      throw new Error(
+        `AgentHarness ${key} input limit ${runtime.maxInputBytes} exceeds durable launch envelope ${MAX_AGENT_LAUNCH_INTENT_BYTES}`,
+      )
+    }
+    if (runtime.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES) {
+      throw new Error(
+        `AgentHarness ${key} output limit ${runtime.maxOutputBytes} exceeds durable output envelope ${MAX_AGENT_OUTPUT_BYTES}`,
+      )
+    }
+    const inputJsonSchema = JSONSchema.make(runtime.inputSchema)
+    const outputJsonSchema = JSONSchema.make(runtime.outputSchema)
+    const registered = {
+      source: definition,
+      definition: runtime,
+      definitionHash: definitionHash(runtime, inputJsonSchema, outputJsonSchema),
+      inputJsonSchema,
+      outputJsonSchema,
+    }
+    const variants = this.#byReference.get(key) ?? []
+    if (variants.some((variant) => variant.definitionHash === registered.definitionHash)) return
+    this.#byReference.set(key, [...variants, registered])
   }
 
   definition(ref: AgentHarnessRef): HarnessRegistration {
@@ -289,7 +302,7 @@ export class TrustedAgentHarnessCatalog {
   registration(ref: AgentHarnessRef): RegisteredDefinition {
     const decoded = Schema.decodeUnknownSync(AgentHarnessRef)(ref)
     const key = referenceKey(decoded)
-    const registration = this.#byReference.get(key)
+    const registration = this.#byReference.get(key)?.[0]
     if (registration === undefined) {
       throw new Error(`Unknown AgentHarness reference ${key}`)
     }
@@ -297,8 +310,14 @@ export class TrustedAgentHarnessCatalog {
   }
 
   registrationFor(definition: HarnessRegistration): RegisteredDefinition {
-    const registration = this.registration(definition.ref)
-    if (registration.source !== definition) {
+    const runtime = decodeRuntimeDefinition(definition)
+    const inputJsonSchema = JSONSchema.make(runtime.inputSchema)
+    const outputJsonSchema = JSONSchema.make(runtime.outputSchema)
+    const hash = definitionHash(runtime, inputJsonSchema, outputJsonSchema)
+    const registration = this.#byReference
+      .get(referenceKey(runtime.ref))
+      ?.find((candidate) => candidate.definitionHash === hash)
+    if (registration === undefined) {
       throw new Error(`Untrusted AgentHarness definition ${referenceKey(definition.ref)}`)
     }
     return registration
@@ -308,8 +327,14 @@ export class TrustedAgentHarnessCatalog {
 export type AgentHarnessPort = {
   readonly validateAvailability: (input: {
     readonly refs: ReadonlyArray<AgentHarnessRef>
+    readonly policies?: ReadonlyArray<{
+      readonly ref: AgentHarnessRef
+      readonly agent: string
+      readonly model: string
+    }>
     readonly directory?: string
   }) => Effect.Effect<void, AgentHarnessError>
+  readonly retainDefinitions?: (definitions: ReadonlyArray<HarnessRegistration>) => void
   readonly prepare: <Input, InputEncoded, Output, OutputEncoded>(
     definition: AgentHarnessDefinition<Input, InputEncoded, Output, OutputEncoded>,
     input: InputEncoded,
@@ -340,24 +365,35 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
 
   readonly validateAvailability: AgentHarnessPort["validateAvailability"] = (input) =>
     Effect.forEach(
-      input.refs,
-      (ref) => {
-        const registration = this.resolve(ref, "select harness")
-        return Effect.flatMap(registration, ({ definition }) =>
-          this.attempt("validate OpenCode availability", true, (signal) =>
+      input.policies ?? input.refs.map((ref) => ({ ref })),
+      (policy) => {
+        const registration = this.resolve(policy.ref, "select harness")
+        return Effect.flatMap(registration, ({ definition }) => {
+          const selected =
+            "agent" in policy &&
+            "model" in policy &&
+            typeof policy.agent === "string" &&
+            typeof policy.model === "string"
+              ? { ...definition, agent: policy.agent, model: policy.model }
+              : definition
+          return this.attempt("validate OpenCode availability", true, (signal) =>
             this.adapter.validateAvailability(
               {
                 ...(input.directory === undefined ? {} : { directory: input.directory }),
-                agents: [definition.agent],
-                model: parseModel(definition.model),
+                agents: [selected.agent],
+                model: parseModel(selected.model),
               },
               signal,
             ),
-          ),
-        )
+          )
+        })
       },
       { concurrency: 1, discard: true },
     )
+
+  readonly retainDefinitions = (definitions: ReadonlyArray<HarnessRegistration>): void => {
+    this.catalog.retain(definitions)
+  }
 
   readonly prepare: AgentHarnessPort["prepare"] = (definition, input, context) =>
     Effect.gen(this, function* () {

@@ -163,6 +163,12 @@ const ContractIdentifier = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9][A-Za-
 const PositiveVersion = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_000_000))
 const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
 
+export const StageContractRef = Schema.Struct({
+  name: ContractIdentifier,
+  contractVersion: PositiveVersion,
+})
+export type StageContractRef = typeof StageContractRef.Type
+
 export const StageInputContract = Schema.Struct({
   schemaId: ContractIdentifier,
   schemaVersion: PositiveVersion,
@@ -222,6 +228,7 @@ export const StageActivationPolicy = Schema.Union(
 export const WorkflowStageDefinition = Schema.Struct({
   key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z0-9_-]{0,63}$/)),
   kind: Schema.Literal("document", "implementation"),
+  contract: Schema.optional(StageContractRef),
   activation: StageActivationPolicy,
   definitionVersion: PositiveVersion,
   inputContract: StageInputContract,
@@ -231,6 +238,8 @@ export const WorkflowStageDefinition = Schema.Struct({
   humanGatePolicy: StageHumanGatePolicy,
   initialOperations: Schema.Array(WorkflowInitialOperationDefinition).pipe(Schema.maxItems(16)),
 })
+export const StageDefinition = WorkflowStageDefinition
+export type StageDefinition = typeof StageDefinition.Type
 
 export const WorkflowDefinition = Schema.Struct({
   contractVersion: Schema.Literal(1),
@@ -243,6 +252,14 @@ export type SourceResolver = (source: string) => boolean
 export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
   return canonicalSha256({
     contractVersion: definition.contractVersion,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
+export function stageDefinitionSha256(definition: StageDefinition): string {
+  return canonicalSha256({
+    contractVersion: 1,
     normalizationVersion: "RFC8785-NFC-1",
     definition,
   })

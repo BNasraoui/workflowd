@@ -543,6 +543,81 @@ const fixPublicationSigningEvidence = Effect.gen(function* () {
   `
 })
 
+const qrspiStages = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE qrspi_stage_runs (
+      workflow_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      stage_position INTEGER NOT NULL CHECK (stage_position >= 0),
+      stage_definition_sha256 TEXT NOT NULL CHECK (length(stage_definition_sha256) = 64),
+      state TEXT NOT NULL CHECK (state IN (
+        'blocked', 'active', 'waiting_review', 'waiting_human', 'waiting_ticket',
+        'succeeded', 'skipped', 'rejected', 'failed', 'cancelled', 'superseded', 'data_error'
+      )),
+      published_revision INTEGER CHECK (published_revision IS NULL OR published_revision > 0),
+      pending_revision INTEGER CHECK (pending_revision IS NULL OR pending_revision > 0),
+      accepted_revision INTEGER CHECK (accepted_revision IS NULL OR accepted_revision > 0),
+      skip_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation, stage_key),
+      UNIQUE (workflow_id, generation, stage_position),
+      FOREIGN KEY (workflow_id, generation) REFERENCES qrspi_generations (workflow_id, generation),
+      CHECK ((state = 'skipped') = (skip_reason IS NOT NULL)),
+      CHECK (state NOT IN ('succeeded', 'skipped') OR pending_revision IS NULL)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_stage_revisions (
+      workflow_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      stage_key TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      revision_type TEXT NOT NULL CHECK (revision_type IN ('document', 'implementation')),
+      source_artifacts_json TEXT NOT NULL CHECK (
+        json_valid(source_artifacts_json) = 1 AND json_type(source_artifacts_json, '$') = 'array'
+      ),
+      prepared_result_json TEXT CHECK (prepared_result_json IS NULL OR json_valid(prepared_result_json) = 1),
+      published_reference_json TEXT CHECK (
+        published_reference_json IS NULL OR json_valid(published_reference_json) = 1
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'producing', 'publishing', 'reviewing', 'waiting_human',
+        'accepted', 'abandoned', 'failed', 'superseded'
+      )),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation, stage_key, revision),
+      FOREIGN KEY (workflow_id, generation, stage_key)
+        REFERENCES qrspi_stage_runs (workflow_id, generation, stage_key)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_implementation_steps (
+      workflow_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      stage_key TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      position INTEGER NOT NULL CHECK (position > 0),
+      produce_operation_id TEXT NOT NULL REFERENCES workflow_operations (operation_id),
+      publish_operation_id TEXT NOT NULL REFERENCES workflow_operations (operation_id),
+      session_reference_id TEXT NOT NULL CHECK (length(session_reference_id) > 0),
+      prepared_result_json TEXT NOT NULL CHECK (
+        json_valid(prepared_result_json) = 1 AND json_type(prepared_result_json, '$') = 'object'
+      ),
+      commit_reference_json TEXT NOT NULL CHECK (
+        json_valid(commit_reference_json) = 1 AND json_type(commit_reference_json, '$') = 'object'
+      ),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation, stage_key, revision, position),
+      FOREIGN KEY (workflow_id, generation, stage_key, revision)
+        REFERENCES qrspi_stage_revisions (workflow_id, generation, stage_key, revision)
+    ) STRICT
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -551,5 +626,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
     "0005_qrspi_workflow_start": qrspiWorkflowStart,
     "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
+    "0007_qrspi_stages": qrspiStages,
   }),
 })

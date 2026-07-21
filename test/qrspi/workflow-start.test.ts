@@ -19,6 +19,7 @@ import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
   WorkflowStartRequest,
+  canonicalSha256,
   workflowIdFor,
   type RepositoryReference,
 } from "../../src/qrspi/domain"
@@ -325,6 +326,19 @@ describe("WorkflowStart integration", () => {
       rootSha: baseSha,
     })
     expect(await counts(filename, fake)).toEqual([1, 3, 1])
+    const runs = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{
+          readonly stage_key: string
+          readonly state: string
+          readonly pending_revision: number | null
+        }>`
+          SELECT stage_key, state, pending_revision FROM qrspi_stage_runs ORDER BY stage_position
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(runs).toEqual([{ stage_key: "questions", state: "active", pending_revision: 1 }])
     expect(fake.counts()).toMatchObject({ createCalls: 1, pullRequestCalls: 2 })
     const definition = await Effect.runPromise(
       Effect.gen(function* () {
@@ -351,6 +365,509 @@ describe("WorkflowStart integration", () => {
       headRef: result.branchName,
       sha: baseSha,
     })
+  })
+
+  test("advances only from an authoritatively published accepted revision and passes it to the successor", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const secondStage = {
+      ...options.workflowDefinition.stages[0],
+      key: "research",
+      inputContract: { ...trustedStageSemantics.inputContract, schemaId: "qrspi.research.input" },
+      outputContract: {
+        _tag: "Artifact" as const,
+        pathTemplate: "docs/qrspi/{ticketId}/02-research.md",
+        mediaType: "text/markdown",
+      },
+    }
+    const stageOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [options.workflowDefinition.stages[0], secondStage],
+      },
+    }
+    const started = await startWithOptions(filename, fake, stageOptions)
+    if (started._tag !== "Started") throw new Error("Expected started workflow")
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const publication = {
+      repository,
+      workflowId,
+      generation: 1,
+      stageKey: "questions",
+      stageRevision: 1,
+      commitSha: "e".repeat(40),
+      path: "docs/qrspi/workflowd-vs3.3/questions.md",
+      blobSha: "f".repeat(40),
+      contentSha256: "1".repeat(64),
+      mediaType: "text/markdown",
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const produce = yield* store.claimStageOperation(
+          "StageProduce",
+          "stage-worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (produce === null) return yield* Effect.die("Expected producer work")
+        yield* store.completeStageProduce({
+          operationId: produce.operationId,
+          leaseToken: produce.leaseToken,
+          preparedResult: {
+            candidateSha: "c".repeat(40),
+            content: "# Questions",
+            summary: "Answered",
+          },
+          sessionReferenceId: "session-ref",
+          now: new Date("2026-07-21T05:01:01.000Z"),
+        })
+        const publish = yield* store.claimStageOperation(
+          "ArtifactPublish",
+          "publication-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:01:02.000Z"),
+        )
+        if (publish === null) return yield* Effect.die("Expected publication work")
+        yield* store.bindArtifactPublication({
+          operationId: publish.operationId,
+          leaseToken: publish.leaseToken,
+          expectedOld: baseSha,
+          finalSha: publication.commitSha,
+          artifact: publication,
+          now: new Date("2026-07-21T05:01:03.000Z"),
+        })
+        yield* store.completeArtifactPublication({
+          operationId: publish.operationId,
+          expectedOld: baseSha,
+          finalSha: publication.commitSha,
+          artifact: publication,
+          observedHeadSha: publication.commitSha,
+          now: new Date("2026-07-21T05:01:04.000Z"),
+        })
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const runs = yield* sql<{
+          readonly stage_key: string
+          readonly state: string
+          readonly accepted_revision: number | null
+        }>`SELECT stage_key, state, accepted_revision FROM qrspi_stage_runs ORDER BY stage_position`
+        const successor = yield* sql<{ readonly input_json: string }>`
+          SELECT input_json FROM workflow_operations
+          WHERE kind = 'StageProduce' AND json_extract(input_json, '$.stageKey') = 'research'
+        `
+        return { runs, successor }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(state.runs).toEqual([
+      { stage_key: "questions", state: "succeeded", accepted_revision: 1 },
+      { stage_key: "research", state: "active", accepted_revision: null },
+    ])
+    expect(JSON.parse(state.successor[0]!.input_json).sources).toEqual([publication])
+  })
+
+  test("creates durable review work and exposes an acceptance completion seam", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const reviewOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            reviewPolicy: {
+              mode: "automated" as const,
+              minimumContributions: 1,
+              maximumContributions: 2,
+              deadlineMs: 60_000,
+              maximumRevisions: 2,
+            },
+          },
+        ],
+      },
+    }
+    await startWithOptions(filename, fake, reviewOptions)
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const publication = {
+      repository,
+      workflowId,
+      generation: 1,
+      stageKey: "questions",
+      stageRevision: 1,
+      commitSha: "e".repeat(40),
+      path: "docs/qrspi/workflowd-vs3.3/questions.md",
+      blobSha: "f".repeat(40),
+      contentSha256: "1".repeat(64),
+      mediaType: "text/markdown",
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const produce = yield* store.claimStageOperation(
+          "StageProduce",
+          "producer",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (produce === null) return yield* Effect.die("Expected producer")
+        yield* store.completeStageProduce({
+          operationId: produce.operationId,
+          leaseToken: produce.leaseToken,
+          preparedResult: {
+            candidateSha: "c".repeat(40),
+            content: "# Questions",
+            summary: "Answered",
+          },
+          sessionReferenceId: "session-ref",
+          now: new Date("2026-07-21T05:01:01.000Z"),
+        })
+        const publish = yield* store.claimStageOperation(
+          "ArtifactPublish",
+          "publisher",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:01:02.000Z"),
+        )
+        if (publish === null) return yield* Effect.die("Expected publisher")
+        yield* store.bindArtifactPublication({
+          operationId: publish.operationId,
+          leaseToken: publish.leaseToken,
+          expectedOld: baseSha,
+          finalSha: publication.commitSha,
+          artifact: publication,
+          now: new Date("2026-07-21T05:01:03.000Z"),
+        })
+        yield* store.completeArtifactPublication({
+          operationId: publish.operationId,
+          expectedOld: baseSha,
+          finalSha: publication.commitSha,
+          artifact: publication,
+          observedHeadSha: publication.commitSha,
+          now: new Date("2026-07-21T05:01:04.000Z"),
+        })
+        const sql = yield* SqlClient.SqlClient
+        const before = yield* sql<{ readonly kind: string; readonly state: string }>`
+          SELECT kind, state FROM workflow_operations WHERE kind = 'ReviewSynthesize'
+        `
+        const accepted = yield* store.acceptStagePolicy({
+          workflowId,
+          generation: 1,
+          stageKey: "questions",
+          stageRevision: 1,
+          now: new Date("2026-07-21T05:01:05.000Z"),
+        })
+        const after = yield* sql<{ readonly state: string; readonly accepted_revision: number }>`
+          SELECT state, accepted_revision FROM qrspi_stage_runs
+        `
+        return { before, accepted, after }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      before: [{ kind: "ReviewSynthesize", state: "waiting_human" }],
+      accepted: "completed",
+      after: [{ state: "succeeded", accepted_revision: 1 }],
+    })
+  })
+
+  test("atomically replaces a pending document revision and rejects a stale revision outcome", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const reviewOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            reviewPolicy: {
+              mode: "automated" as const,
+              minimumContributions: 1,
+              maximumContributions: 2,
+              deadlineMs: 60_000,
+              maximumRevisions: 2,
+            },
+          },
+        ],
+      },
+    }
+    await startWithOptions(filename, fake, reviewOptions)
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const source = {
+      repository,
+      workflowId,
+      generation: 1,
+      stageKey: "questions",
+      stageRevision: 1,
+      commitSha: "e".repeat(40),
+      path: "docs/qrspi/workflowd-vs3.3/questions.md",
+      blobSha: "f".repeat(40),
+      contentSha256: "1".repeat(64),
+      mediaType: "text/markdown",
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE qrspi_stage_revisions SET state = 'reviewing',
+            published_reference_json = ${JSON.stringify(source)}
+          WHERE stage_key = 'questions' AND revision = 1
+        `
+        yield* sql`
+          UPDATE qrspi_stage_runs SET state = 'waiting_review', published_revision = 1
+          WHERE stage_key = 'questions'
+        `
+        yield* sql`
+          UPDATE workflow_operations SET state = 'succeeded'
+          WHERE kind IN ('StageProduce', 'ArtifactPublish')
+        `
+        const revised = yield* store.requestDocumentRevision({
+          workflowId,
+          generation: 1,
+          stageKey: "questions",
+          stageRevision: 1,
+          acceptedSources: [],
+          feedback: ["Clarify the rollback behavior", "Add failure-mode evidence"],
+          now: new Date("2026-07-21T05:02:00.000Z"),
+        })
+        const stale = yield* store.requestDocumentRevision({
+          workflowId,
+          generation: 1,
+          stageKey: "questions",
+          stageRevision: 1,
+          acceptedSources: [],
+          now: new Date("2026-07-21T05:02:01.000Z"),
+        })
+        const revisions = yield* sql<{
+          readonly revision: number
+          readonly state: string
+          readonly source_artifacts_json: string
+        }>`
+          SELECT revision, state, source_artifacts_json FROM qrspi_stage_revisions ORDER BY revision
+        `
+        const operations = yield* sql<{
+          readonly kind: string
+          readonly state: string
+          readonly input_json: string
+        }>`
+          SELECT kind, state, input_json FROM workflow_operations
+          WHERE json_extract(input_json, '$.stageRevision') = 2 ORDER BY kind
+        `
+        return { revised, stale, revisions, operations }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result.revised).toBe("completed")
+    expect(result.stale).toBe("stale")
+    expect(result.revisions.map(({ revision, state }) => ({ revision, state }))).toEqual([
+      { revision: 1, state: "abandoned" },
+      { revision: 2, state: "producing" },
+    ])
+    expect(JSON.parse(result.revisions[1]!.source_artifacts_json)).toEqual([])
+    expect(result.operations.map(({ kind, state }) => ({ kind, state }))).toEqual([
+      { kind: "ArtifactPublish", state: "blocked" },
+      { kind: "StageProduce", state: "ready" },
+    ])
+    expect(JSON.parse(result.operations[1]!.input_json).feedback).toEqual([
+      "Clarify the rollback behavior",
+      "Add failure-mode evidence",
+    ])
+  })
+
+  test("persists implementation commits and checkpoint handoff separately from artifacts", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const implementationOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            key: "implementation",
+            kind: "implementation" as const,
+            outputContract: {
+              _tag: "ImplementationCheckpoint" as const,
+              contractId: "qrspi.checkpoint",
+              contractVersion: 1,
+            },
+          },
+        ],
+      },
+    }
+    await startWithOptions(filename, fake, implementationOptions)
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const deliveryEvidence = {
+      summary: "Scenario passes",
+      scenarios: [{ scenario: 0, evidence: "focused tests pass" }],
+    }
+    const firstCommit = {
+      position: 1,
+      commitSha: "e".repeat(40),
+      parentSha: baseSha,
+      changedPaths: ["src/change.ts"],
+      operationId: `${workflowId}:1:ArtifactPublish:implementation:1:1`,
+    }
+    const secondCommit = {
+      position: 2,
+      commitSha: "f".repeat(40),
+      parentSha: firstCommit.commitSha,
+      changedPaths: ["test/change.test.ts"],
+      operationId: `${workflowId}:1:ArtifactPublish:implementation:1:step:2:1`,
+    }
+    const checkpoint = {
+      repository,
+      workflowId,
+      generation: 1,
+      stageKey: "implementation",
+      stageRevision: 1,
+      checkpointId: "checkpoint-1",
+      baseSha,
+      finalSha: secondCommit.commitSha,
+      commits: [firstCommit, secondCommit],
+      changedPaths: [...firstCommit.changedPaths, ...secondCommit.changedPaths],
+      preparedDeliveryEvidenceSha256: canonicalSha256(deliveryEvidence),
+    }
+
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const produce = yield* store.claimStageOperation(
+          "StageProduce",
+          "producer",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (produce === null) return yield* Effect.die("Expected implementation producer")
+        yield* store.completeStageProduce({
+          operationId: produce.operationId,
+          leaseToken: produce.leaseToken,
+          preparedResult: {
+            candidateSha: "c".repeat(40),
+            changedPaths: firstCommit.changedPaths,
+            final: false,
+          },
+          sessionReferenceId: "implementation-session",
+          now: new Date("2026-07-21T05:01:01.000Z"),
+        })
+        const publish = yield* store.claimStageOperation(
+          "ArtifactPublish",
+          "publisher",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:01:02.000Z"),
+        )
+        if (publish === null) return yield* Effect.die("Expected implementation publisher")
+        yield* store.bindImplementationPublication({
+          operationId: publish.operationId,
+          leaseToken: publish.leaseToken,
+          expectedOld: baseSha,
+          commit: firstCommit,
+          now: new Date("2026-07-21T05:01:03.000Z"),
+        })
+        yield* store.completeImplementationPublication({
+          operationId: publish.operationId,
+          expectedOld: baseSha,
+          commit: firstCommit,
+          observedHeadSha: firstCommit.commitSha,
+          now: new Date("2026-07-21T05:01:04.000Z"),
+        })
+        const duplicate = yield* store.completeImplementationPublication({
+          operationId: publish.operationId,
+          expectedOld: baseSha,
+          commit: firstCommit,
+          observedHeadSha: firstCommit.commitSha,
+          now: new Date("2026-07-21T05:01:05.000Z"),
+        })
+        const secondProduce = yield* store.claimStageOperation(
+          "StageProduce",
+          "producer",
+          "33333333-3333-4333-8333-333333333333",
+          60_000,
+          new Date("2026-07-21T05:01:06.000Z"),
+        )
+        if (secondProduce === null) return yield* Effect.die("Expected second producer")
+        yield* store.completeStageProduce({
+          operationId: secondProduce.operationId,
+          leaseToken: secondProduce.leaseToken,
+          preparedResult: {
+            candidateSha: "9".repeat(40),
+            changedPaths: secondCommit.changedPaths,
+            final: true,
+            deliveryEvidence,
+          },
+          sessionReferenceId: "implementation-session-2",
+          now: new Date("2026-07-21T05:01:07.000Z"),
+        })
+        const secondPublish = yield* store.claimStageOperation(
+          "ArtifactPublish",
+          "publisher",
+          "44444444-4444-4444-8444-444444444444",
+          60_000,
+          new Date("2026-07-21T05:01:08.000Z"),
+        )
+        if (secondPublish === null) return yield* Effect.die("Expected second publisher")
+        yield* store.bindImplementationPublication({
+          operationId: secondPublish.operationId,
+          leaseToken: secondPublish.leaseToken,
+          expectedOld: firstCommit.commitSha,
+          commit: secondCommit,
+          now: new Date("2026-07-21T05:01:09.000Z"),
+        })
+        yield* store.completeImplementationPublication({
+          operationId: secondPublish.operationId,
+          expectedOld: firstCommit.commitSha,
+          commit: secondCommit,
+          checkpoint,
+          observedHeadSha: secondCommit.commitSha,
+          now: new Date("2026-07-21T05:01:10.000Z"),
+        })
+        const sql = yield* SqlClient.SqlClient
+        const steps = yield* sql<{
+          readonly commit_reference_json: string
+          readonly session_reference_id: string
+        }>`SELECT commit_reference_json, session_reference_id FROM qrspi_implementation_steps`
+        const revisions = yield* sql<{
+          readonly state: string
+          readonly published_reference_json: string
+        }>`SELECT state, published_reference_json FROM qrspi_stage_revisions`
+        const generation = yield* sql<{
+          readonly state: string
+          readonly current_head_sha: string
+        }>`
+          SELECT state, current_head_sha FROM qrspi_generations
+        `
+        return { duplicate, steps, revisions, generation }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(state.duplicate).toBe("stale")
+    expect(
+      state.steps.map(({ commit_reference_json }) =>
+        Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(commit_reference_json),
+      ),
+    ).toEqual([firstCommit, secondCommit])
+    expect(state.steps[0]!.session_reference_id).toBe("implementation-session")
+    expect(state.steps[1]!.session_reference_id).toBe("implementation-session-2")
+    expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
+    expect(state.revisions[0]!.state).toBe("accepted")
+    expect(state.generation).toEqual([
+      { state: "completed", current_head_sha: secondCommit.commitSha },
+    ])
   })
 
   test("uses the documented branch format after sanitizing the ticket ID", async () => {
@@ -1083,6 +1600,122 @@ describe("WorkflowStart integration", () => {
       { kind: "ArtifactPublish", max_attempts: 3 },
       { kind: "StageProduce", max_attempts: 7 },
     ])
+  })
+
+  test("reclaims an expired StageProduce lease after restart with new fencing authority", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const reclaimed = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations SET state = 'leased', attempt = 1,
+            lease_owner = 'stopped-worker', lease_token = 'old-expired-lease-token',
+            lease_until = '2020-01-01T00:00:00.000Z'
+          WHERE kind = 'StageProduce'
+        `
+        const store = yield* QrspiStore
+        return yield* store.claimStageOperation(
+          "StageProduce",
+          "restarted-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:02:00.000Z"),
+        )
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(reclaimed).toMatchObject({
+      attempt: 2,
+      leaseToken: "22222222-2222-4222-8222-222222222222",
+      input: { stageKey: "questions", stageRevision: 1 },
+    })
+  })
+
+  test("gates an expired StageProduce with a recorded harness session instead of duplicating it", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, options)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const first = yield* store.claimStageOperation(
+          "StageProduce",
+          "stopped-worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (first === null) return yield* Effect.die("Expected StageProduce")
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET external_intent_json = ${JSON.stringify({
+            agentExecution: { sessionReference: { nativeSessionId: "native-session" } },
+          })}
+          WHERE operation_id = ${first.operationId}
+        `
+        const duplicate = yield* store.claimStageOperation(
+          "StageProduce",
+          "replacement-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:02:01.000Z"),
+        )
+        const operation = yield* sql<{ readonly state: string; readonly attempt: number }>`
+          SELECT state, attempt FROM workflow_operations WHERE operation_id = ${first.operationId}
+        `
+        const gates = yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operation_gates WHERE operation_id = ${first.operationId}
+        `
+        return { duplicate, operation, gates }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      duplicate: null,
+      operation: [{ state: "waiting_human", attempt: 1 }],
+      gates: [{ state: "pending" }],
+    })
+  })
+
+  test("terminally fails an expired StageProduce lease whose retry budget is exhausted", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations SET state = 'leased', attempt = max_attempts,
+            lease_owner = 'stopped-worker', lease_token = 'old-expired-lease-token',
+            lease_until = '2020-01-01T00:00:00.000Z'
+          WHERE kind = 'StageProduce'
+        `
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimStageOperation(
+          "StageProduce",
+          "restarted-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:02:00.000Z"),
+        )
+        const operations = yield* sql<{
+          readonly state: string
+          readonly lease_token: string | null
+        }>`SELECT state, lease_token FROM workflow_operations WHERE kind = 'StageProduce'`
+        const runs = yield* sql<{ readonly state: string }>`SELECT state FROM qrspi_stage_runs`
+        return { claimed, operations, runs }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(state).toEqual({
+      claimed: null,
+      operations: [{ state: "failed", lease_token: null }],
+      runs: [{ state: "failed" }],
+    })
   })
 
   test("returns typed currentness loss instead of dying during completion", async () => {

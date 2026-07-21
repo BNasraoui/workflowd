@@ -152,6 +152,7 @@ describe("loadConfig", () => {
         WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
         WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
       },
       { home: "/home/test" },
     )
@@ -169,7 +170,7 @@ describe("loadConfig", () => {
       baseRef: "main",
       repositoryOperationTimeoutMs: 30_000,
       operationCompletionMarginMs: 10_000,
-      leaseDurationMs: 60_000,
+      leaseDurationMs: 130_000,
       workflowDefinition: qrspiDefinition,
     })
   })
@@ -183,7 +184,7 @@ describe("loadConfig", () => {
     },
   )
 
-  test("requires the WorkflowStart lease to exceed repository timeout plus completion margin", async () => {
+  test("requires the QRSPI lease to cover repository and producer timeouts plus completion margin", async () => {
     await expect(
       loadConfig(
         {
@@ -202,7 +203,7 @@ describe("loadConfig", () => {
         { home: "/home/test" },
       ),
     ).rejects.toThrow(
-      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+      "WORKFLOWD_QRSPI_LEASE_MS must cover repository and producer timeouts plus completion margin",
     )
   })
 

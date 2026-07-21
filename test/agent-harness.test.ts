@@ -62,6 +62,23 @@ describe("TrustedAgentHarnessCatalog", () => {
     )
   })
 
+  test("retains an active policy variant across current configuration changes", () => {
+    const catalog = new TrustedAgentHarnessCatalog([fixtureDefinition])
+    const retained = {
+      ...fixtureDefinition,
+      model: "anthropic/claude-sonnet-4",
+      timeoutMs: 2_000,
+    }
+
+    catalog.retain([retained])
+
+    expect(catalog.registrationFor(retained).definition).toMatchObject({
+      model: "anthropic/claude-sonnet-4",
+      timeoutMs: 2_000,
+    })
+    expect(catalog.registrationFor(fixtureDefinition).definition.model).toBe("openai/gpt-5.6-sol")
+  })
+
   test("validates trusted definitions before they can be selected", () => {
     const invalidDefinitions = [
       { ...fixtureDefinition, agent: "invalid agent" },

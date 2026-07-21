@@ -10,6 +10,17 @@ import {
   runReconciliationIteration,
 } from "./worker"
 import { WorkflowStart } from "./qrspi/workflow-start"
+import {
+  StageCatalogService,
+  makeQrspiHarnessDefinitionsForStage,
+  qrspiHarnessDefinitionsForWorkflows,
+  validateWorkflowDefinition,
+} from "./qrspi/stages"
+import { runStageProduceIteration } from "./qrspi/stage-worker"
+import { runArtifactPublishIteration } from "./qrspi/artifact-worker"
+import { AgentHarness } from "./agent-harness"
+import { QrspiStore } from "./qrspi/store"
+import { ArtifactPublicationRepositoryService } from "./qrspi/artifact-publication"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -95,7 +106,8 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
+export type RuntimeWorkerName =
+  "job" | "publication" | "reconciliation" | "command" | "stage-produce" | "artifact-publish"
 
 export function startHookService(
   config: AppConfig,
@@ -108,9 +120,21 @@ export function startHookService(
 
   return Effect.gen(function* () {
     const automation = yield* Automation
+    const harness = yield* AgentHarness
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
+    const qrspiStore = yield* Effect.serviceOption(QrspiStore)
+    const stageCatalog = yield* Effect.serviceOption(StageCatalogService)
+    const artifactRepository = yield* Effect.serviceOption(ArtifactPublicationRepositoryService)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
+    }
+    if (
+      config.qrspi !== undefined &&
+      (Option.isNone(qrspiStore) ||
+        Option.isNone(stageCatalog) ||
+        Option.isNone(artifactRepository))
+    ) {
+      return yield* Effect.die(new Error("QRSPI is configured without its worker services"))
     }
 
     yield* automation
@@ -126,6 +150,80 @@ export function startHookService(
             ),
         ),
       )
+
+    if (config.qrspi !== undefined) {
+      const retainedDefinitions =
+        yield* Option.getOrThrow(qrspiStore).getActiveWorkflowDefinitions()
+      const activeDefinitions = [config.qrspi.workflowDefinition, ...retainedDefinitions]
+      const completionMarginMs = config.qrspi.operationCompletionMarginMs
+      const stageLeaseDurationMs = Math.max(
+        config.qrspi.leaseDurationMs,
+        ...activeDefinitions.flatMap((definition) =>
+          definition.stages.map((stage) => stage.producer.timeoutMs + completionMarginMs + 1),
+        ),
+      )
+      const retainedHarnesses = qrspiHarnessDefinitionsForWorkflows(activeDefinitions)
+      harness.retainDefinitions?.(retainedHarnesses)
+      for (const definition of activeDefinitions) {
+        yield* Effect.try({
+          try: () =>
+            validateWorkflowDefinition(definition, Option.getOrThrow(stageCatalog), [
+              ...retainedHarnesses,
+            ]),
+          catch: (cause) => new Error(`QRSPI startup catalog validation failed: ${String(cause)}`),
+        })
+      }
+      yield* harness.validateAvailability({
+        refs: [],
+        policies: activeDefinitions.flatMap((definition) =>
+          definition.stages
+            .filter((stage) => stage.activation.mode !== "disabled")
+            .map((stage) => ({
+              ref: {
+                name: stage.producer.harnessId,
+                version: stage.producer.harnessVersion,
+              },
+              agent: stage.producer.agent,
+              model: stage.producer.model,
+            })),
+        ),
+        directory: config.qrspi.beadsWorkspace,
+      })
+      yield* superviseWorker(
+        "QRSPI StageProduce worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "stage-produce",
+          runStageProduceIteration({
+            workerId: `${process.pid}:qrspi-stage-producer`,
+            leaseDurationMs: stageLeaseDurationMs,
+            directory: config.qrspi.beadsWorkspace,
+            harnessDefinitions: makeQrspiHarnessDefinitionsForStage,
+          }).pipe(
+            Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
+            Effect.provideService(StageCatalogService, Option.getOrThrow(stageCatalog)),
+            Effect.provideService(AgentHarness, harness),
+          ),
+        ),
+      )
+      yield* superviseWorker(
+        "QRSPI ArtifactPublish worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "artifact-publish",
+          runArtifactPublishIteration({
+            workerId: `${process.pid}:qrspi-artifact-publisher`,
+            leaseDurationMs: stageLeaseDurationMs,
+          }).pipe(
+            Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
+            Effect.provideService(
+              ArtifactPublicationRepositoryService,
+              Option.getOrThrow(artifactRepository),
+            ),
+          ),
+        ),
+      )
+    }
 
     for (let index = 0; index < config.worker.concurrency; index += 1) {
       const workerId = `${process.pid}:worker:${index}`

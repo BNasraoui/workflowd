@@ -122,7 +122,8 @@ describe("strict initial store schema", () => {
             'webhook_deliveries', 'pull_requests', 'jobs', 'publications',
             'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
-            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations'
+            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
+            'qrspi_stage_runs', 'qrspi_stage_revisions', 'qrspi_implementation_steps'
           )
           ORDER BY name
         `
@@ -139,8 +140,9 @@ describe("strict initial store schema", () => {
       { migration_id: 4, name: "agent_session_recovery_and_payload_envelopes" },
       { migration_id: 5, name: "qrspi_workflow_start" },
       { migration_id: 6, name: "fix_publication_signing_evidence" },
+      { migration_id: 7, name: "qrspi_stages" },
     ])
-    expect(result.tables).toHaveLength(13)
+    expect(result.tables).toHaveLength(16)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

@@ -1,5 +1,6 @@
 import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
+import type { ParseError } from "effect/ParseResult"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { runStoreMigrations } from "../store/migrations"
 import {
@@ -8,9 +9,19 @@ import {
   WorkflowStartInput,
   WorkflowStartOutput,
   canonicalSha256,
+  stageDefinitionSha256,
   workflowDefinitionSha256,
+  type StageDefinition,
   type TicketRevision,
 } from "./domain"
+import {
+  ArtifactReference,
+  ImplementationCheckpointReference,
+  ImplementationCommitReference,
+  ImplementationStageResult,
+} from "./stages"
+import type { BoundArtifactPublication } from "./artifact-publication"
+import type { AgentLaunchIntent, SessionReference } from "../agent-harness"
 
 const OperationState = Schema.Literal(
   "blocked",
@@ -133,6 +144,10 @@ type StoreError =
   SqlError | QrspiStoreDataError | WorkflowStartCurrentnessError | WorkflowStartRetryExhaustedError
 
 export type QrspiStorePort = {
+  readonly getActiveWorkflowDefinitions: () => Effect.Effect<
+    ReadonlyArray<WorkflowDefinition>,
+    SqlError | ParseError | Error
+  >
   readonly getCurrentCursor: (workflowId: string) => Effect.Effect<
     {
       readonly generation: number
@@ -214,6 +229,120 @@ export type QrspiStorePort = {
   readonly completeStart: (
     input: CompleteStartInput,
   ) => Effect.Effect<WorkflowStartOutput, StoreError>
+  readonly claimStageOperation: (
+    kind: "StageProduce" | "ArtifactPublish",
+    workerId: string,
+    leaseToken: string,
+    leaseDurationMs: number,
+    now: Date,
+  ) => Effect.Effect<StageOperationLease | null, SqlError | ParseError | Error>
+  readonly findArtifactPublicationRecovery: () => Effect.Effect<
+    | (
+        | (StageOperationLease & { readonly bound: BoundArtifactPublication })
+        | (StageOperationLease & {
+            readonly implementationCommit: typeof ImplementationCommitReference.Type
+          })
+      )
+    | null,
+    SqlError | ParseError | Error
+  >
+  readonly isStageOperationCurrent: (
+    operationId: string,
+    leaseToken: string,
+    now: Date,
+  ) => Effect.Effect<boolean, SqlError>
+  readonly recordStageAgentSession: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly launchIntent: AgentLaunchIntent<unknown>
+    readonly reference: SessionReference
+    readonly now: Date
+  }) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly rescheduleStageOperation: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly error: string
+    readonly runAt: Date
+    readonly now: Date
+  }) => Effect.Effect<"rescheduled" | "failed" | "stale", SqlError>
+  readonly recordArtifactPublicationOutcome: (input: {
+    readonly operationId: string
+    readonly outcome: "conflict" | "uncertain"
+    readonly observedHeadSha: string | null
+    readonly now: Date
+  }) => Effect.Effect<"waiting_external" | "waiting_human" | "stale", SqlError>
+  readonly completeStageProduce: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly preparedResult: unknown
+    readonly sessionReferenceId: string
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError | ParseError>
+  readonly bindArtifactPublication: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly expectedOld: string
+    readonly finalSha: string
+    readonly artifact: typeof ArtifactReference.Type
+    readonly now: Date
+  }) => Effect.Effect<"bound" | "conflict" | "stale", SqlError | ParseError>
+  readonly completeArtifactPublication: (input: {
+    readonly operationId: string
+    readonly expectedOld: string
+    readonly finalSha: string
+    readonly artifact: typeof ArtifactReference.Type
+    readonly observedHeadSha: string
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError | ParseError | WorkflowStartCurrentnessError>
+  readonly acceptStagePolicy: (input: {
+    readonly workflowId: string
+    readonly generation: number
+    readonly stageKey: string
+    readonly stageRevision: number
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError | ParseError>
+  readonly requestDocumentRevision: (input: {
+    readonly workflowId: string
+    readonly generation: number
+    readonly stageKey: string
+    readonly stageRevision: number
+    readonly acceptedSources: ReadonlyArray<typeof ArtifactReference.Type>
+    readonly feedback?: ReadonlyArray<string>
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError | ParseError>
+  readonly bindImplementationPublication: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly expectedOld: string
+    readonly commit: typeof ImplementationCommitReference.Type
+    readonly now: Date
+  }) => Effect.Effect<"bound" | "conflict" | "stale", SqlError | ParseError>
+  readonly completeImplementationPublication: (input: {
+    readonly operationId: string
+    readonly expectedOld: string
+    readonly commit: typeof ImplementationCommitReference.Type
+    readonly checkpoint?: typeof ImplementationCheckpointReference.Type
+    readonly observedHeadSha: string
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError | ParseError | WorkflowStartCurrentnessError>
+}
+
+export type StageOperationLease = {
+  readonly operationId: string
+  readonly operationRevision: number
+  readonly attempt: number
+  readonly leaseToken: string
+  readonly scope: typeof GenerationScope.Type
+  readonly input: typeof StageOperationInput.Type
+  readonly stage: StageDefinition
+  readonly repository: typeof RepositoryReference.Type
+  readonly headRef: string
+  readonly currentHeadSha: string
+  readonly preparedResult?: unknown
+  readonly ticketId: string
+  readonly sessionReferenceId?: string
+  readonly predecessorSessionReferenceId?: string
+  readonly implementationCommits?: ReadonlyArray<typeof ImplementationCommitReference.Type>
 }
 
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
@@ -264,6 +393,30 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    getActiveWorkflowDefinitions: () =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly definition_sha256: string
+          readonly definition_json: string
+        }>`
+          SELECT DISTINCT d.definition_sha256, d.definition_json
+          FROM qrspi_generations g
+          JOIN qrspi_workflow_definitions d
+            ON d.definition_sha256 = g.workflow_definition_sha256
+          WHERE g.is_current = 1 AND g.state IN (
+            'running', 'waiting_ticket', 'waiting_human', 'reconciling', 'finalizing'
+          )
+        `
+        return yield* Effect.forEach(rows, (row) =>
+          Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(row.definition_json).pipe(
+            Effect.filterOrFail(
+              (definition) => workflowDefinitionSha256(definition) === row.definition_sha256,
+              () =>
+                new Error(`Retained workflow definition hash mismatch: ${row.definition_sha256}`),
+            ),
+          ),
+        )
+      }),
     getCurrentCursor: (workflowId) =>
       sql<{
         readonly generation: number
@@ -791,11 +944,46 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               ${input.now.toISOString()}, ${input.now.toISOString()}
             )
           `
-          const firstStage = definition.stages.find(
+          const configuredStages = definition.stages.filter(
+            (stage) => stage.activation.mode !== "disabled",
+          )
+          const firstStage = configuredStages.find(
             (stage) =>
               stage.activation.mode === "enabled" ||
               (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
           )
+          for (const [position, stage] of configuredStages.entries()) {
+            const skipped =
+              stage.activation.mode === "conditional" && stage.activation.decision === "disabled"
+            const active = stage === firstStage
+            const state = skipped ? "skipped" : active ? "active" : "blocked"
+            const pendingRevision = active ? 1 : null
+            const skipReason = skipped
+              ? `${stage.activation.policyId}@${stage.activation.policyVersion} disabled the stage`
+              : null
+            yield* sql`
+              INSERT INTO qrspi_stage_runs (
+                workflow_id, generation, stage_key, stage_position, stage_definition_sha256,
+                state, published_revision, pending_revision, accepted_revision, skip_reason,
+                created_at, updated_at
+              ) VALUES (
+                ${input.workflowId}, ${generation}, ${stage.key}, ${position},
+                ${stageDefinitionSha256(stage)}, ${state}, NULL, ${pendingRevision}, NULL, ${skipReason},
+                ${input.now.toISOString()}, ${input.now.toISOString()}
+              )
+            `
+            if (active) {
+              yield* sql`
+                INSERT INTO qrspi_stage_revisions (
+                  workflow_id, generation, stage_key, revision, revision_type,
+                  source_artifacts_json, state, created_at, updated_at
+                ) VALUES (
+                  ${input.workflowId}, ${generation}, ${stage.key}, 1, ${stage.kind},
+                  '[]', 'producing', ${input.now.toISOString()}, ${input.now.toISOString()}
+                )
+              `
+            }
+          }
           if (firstStage !== undefined) {
             for (const initial of firstStage.initialOperations) {
               const logical = `${input.workflowId}:${generation}:${initial.kind}:${firstStage.key}:1`
@@ -804,6 +992,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 stageKind: firstStage.kind,
                 stageRevision: 1,
                 workflowDefinitionSha256: input.workflowDefinitionSha256,
+                ticketRevisionSha256: input.ticketRevisionSha256,
+                sources: [],
                 ...(initial.parameters === undefined ? {} : { parameters: initial.parameters }),
               }
               yield* insertOperation(sql, {
@@ -839,6 +1029,1091 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
       )
       return completion.pipe(Effect.catchTag("QrspiStoreDataError", quarantine))
     },
+
+    claimStageOperation: (kind, workerId, leaseToken, leaseDurationMs, now) =>
+      transaction(
+        Effect.gen(function* () {
+          const abandonedSessions = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations
+            SET state = 'waiting_human', terminal_failure_reason = 'recorded agent session lease expired',
+                terminal_retry_policy = 'operator_required', lease_owner = NULL, lease_token = NULL,
+                lease_until = NULL, updated_at = ${now.toISOString()}
+            WHERE kind = 'StageProduce' AND is_current = 1 AND state = 'leased'
+              AND lease_until <= ${now.toISOString()}
+              AND json_type(external_intent_json, '$.agentExecution.sessionReference') = 'object'
+            RETURNING operation_id
+          `
+          yield* Effect.forEach(
+            abandonedSessions,
+            ({ operation_id }) => sql`
+              INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+              VALUES (${operation_id}, 'pending', 'recorded agent session lease expired', ${now.toISOString()})
+              ON CONFLICT (operation_id) DO NOTHING
+            `,
+            { discard: true },
+          )
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = 'failed', last_error = 'retry budget exhausted after lease expiry',
+                terminal_failure_reason = 'retry budget exhausted after lease expiry',
+                terminal_retry_policy = 'retry_budget_exhausted',
+                lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${now.toISOString()}
+            WHERE kind = ${kind} AND is_current = 1 AND state = 'leased'
+              AND lease_until <= ${now.toISOString()} AND attempt >= max_attempts
+          `
+          yield* sql`
+            UPDATE qrspi_stage_runs SET state = 'failed', pending_revision = NULL,
+              updated_at = ${now.toISOString()}
+            WHERE state = 'active' AND EXISTS (
+              SELECT 1 FROM workflow_operations o
+              WHERE o.kind = ${kind} AND o.state = 'failed' AND o.is_current = 1
+                AND o.updated_at = ${now.toISOString()}
+                AND json_extract(o.scope_json, '$.workflowId') = qrspi_stage_runs.workflow_id
+                AND json_extract(o.scope_json, '$.generation') = qrspi_stage_runs.generation
+                AND json_extract(o.input_json, '$.stageKey') = qrspi_stage_runs.stage_key
+            )
+          `
+          const rows = yield* sql<{
+            readonly operation_id: string
+            readonly operation_revision: number
+            readonly attempt: number
+            readonly scope_json: string
+            readonly input_json: string
+            readonly definition_json: string
+            readonly repository_json: string
+            readonly head_ref: string
+            readonly current_head_sha: string
+            readonly prepared_result_json: string | null
+            readonly ticket_id: string
+            readonly produce_output_json: string | null
+            readonly implementation_commits_json: string
+            readonly predecessor_session_reference_id: string | null
+          }>`
+            UPDATE workflow_operations
+            SET state = 'leased', attempt = attempt + 1, lease_owner = ${workerId},
+                lease_token = ${leaseToken},
+                lease_until = ${new Date(now.getTime() + leaseDurationMs).toISOString()},
+                updated_at = ${now.toISOString()}
+            WHERE operation_id = (
+              SELECT operation_id FROM workflow_operations
+              WHERE kind = ${kind} AND is_current = 1
+                AND (state = 'ready' OR (state = 'leased' AND lease_until <= ${now.toISOString()}))
+                AND run_at <= ${now.toISOString()} AND attempt < max_attempts
+              ORDER BY run_at, operation_id LIMIT 1
+            )
+            RETURNING operation_id, operation_revision, attempt, scope_json, input_json,
+              (SELECT d.definition_json FROM qrspi_workflow_definitions d
+                JOIN qrspi_generations g ON g.workflow_definition_sha256 = d.definition_sha256
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS definition_json,
+              (SELECT g.repository_json FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS repository_json,
+              (SELECT g.head_ref FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS head_ref,
+              (SELECT g.current_head_sha FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS current_head_sha,
+              (SELECT r.prepared_result_json FROM qrspi_stage_revisions r
+                WHERE r.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND r.generation = json_extract(scope_json, '$.generation')
+                  AND r.stage_key = json_extract(input_json, '$.stageKey')
+                  AND r.revision = json_extract(input_json, '$.stageRevision')) AS prepared_result_json,
+              (SELECT json_extract(t.revision_json, '$.readyTicket.reference.nativeTicketId')
+                FROM qrspi_ticket_revisions t JOIN qrspi_generations g
+                  ON g.workflow_id = t.workflow_id
+                  AND g.ticket_revision_sha256 = t.ticket_revision_sha256
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS ticket_id,
+              (SELECT p.output_json FROM workflow_operations p
+                WHERE p.kind = 'StageProduce'
+                  AND json_extract(p.scope_json, '$.workflowId') = json_extract(scope_json, '$.workflowId')
+                  AND json_extract(p.scope_json, '$.generation') = json_extract(scope_json, '$.generation')
+                  AND json_extract(p.input_json, '$.stageKey') = json_extract(input_json, '$.stageKey')
+                  AND json_extract(p.input_json, '$.stageRevision') = json_extract(input_json, '$.stageRevision')
+                  AND coalesce(json_extract(p.input_json, '$.stepPosition'), 1) =
+                    coalesce(json_extract(input_json, '$.stepPosition'), 1)
+                  AND p.state = 'succeeded' AND p.is_current = 1) AS produce_output_json,
+              (SELECT coalesce(json_group_array(json(s.commit_reference_json)), '[]')
+                FROM qrspi_implementation_steps s
+                WHERE s.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND s.generation = json_extract(scope_json, '$.generation')
+                  AND s.stage_key = json_extract(input_json, '$.stageKey')
+                  AND s.revision = json_extract(input_json, '$.stageRevision')
+                ORDER BY s.position) AS implementation_commits_json,
+              (SELECT s.session_reference_id FROM qrspi_implementation_steps s
+                WHERE s.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND s.generation = json_extract(scope_json, '$.generation')
+                  AND s.stage_key = json_extract(input_json, '$.stageKey')
+                  AND s.revision = json_extract(input_json, '$.stageRevision')
+                ORDER BY s.position DESC LIMIT 1) AS predecessor_session_reference_id
+          `
+          const row = rows[0]
+          if (row === undefined) return null
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const operationInput = yield* decodeStageOperationInput(row.input_json)
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+            row.definition_json,
+          )
+          const stage = definition.stages.find(({ key }) => key === operationInput.stageKey)
+          if (stage === undefined)
+            return yield* Effect.fail(new Error("Retained stage definition is missing"))
+          const repository = yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
+            row.repository_json,
+          )
+          const preparedResult =
+            row.prepared_result_json === null
+              ? undefined
+              : yield* Schema.decodeUnknown(Schema.parseJson(Schema.Unknown))(
+                  row.prepared_result_json,
+                )
+          const produceOutput =
+            row.produce_output_json === null
+              ? undefined
+              : yield* Schema.decodeUnknown(
+                  Schema.parseJson(Schema.Struct({ sessionReferenceId: Schema.NonEmptyString })),
+                )(row.produce_output_json)
+          const implementationCommits = yield* Schema.decodeUnknown(
+            Schema.parseJson(Schema.Array(ImplementationCommitReference)),
+          )(row.implementation_commits_json)
+          return {
+            operationId: row.operation_id,
+            operationRevision: Number(row.operation_revision),
+            attempt: Number(row.attempt),
+            leaseToken,
+            scope,
+            input: operationInput,
+            stage,
+            repository,
+            headRef: row.head_ref,
+            currentHeadSha: row.current_head_sha,
+            ticketId: row.ticket_id,
+            ...(produceOutput === undefined
+              ? {}
+              : { sessionReferenceId: produceOutput.sessionReferenceId }),
+            ...(row.predecessor_session_reference_id === null
+              ? {}
+              : { predecessorSessionReferenceId: row.predecessor_session_reference_id }),
+            ...(preparedResult === undefined ? {} : { preparedResult }),
+            ...(operationInput.stageKind === "implementation" ? { implementationCommits } : {}),
+          }
+        }),
+      ),
+
+    recordStageAgentSession: (input) =>
+      sql<{ readonly operation_id: string }>`
+        UPDATE workflow_operations
+        SET external_intent_json = ${JSON.stringify({
+          agentExecution: {
+            launchIntent: input.launchIntent,
+            sessionReference: input.reference,
+          },
+        })}, updated_at = ${input.now.toISOString()}
+        WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
+          AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+          AND lease_until > ${input.now.toISOString()}
+        RETURNING operation_id
+      `.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale"))),
+
+    findArtifactPublicationRecovery: () =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly operation_id: string
+          readonly operation_revision: number
+          readonly attempt: number
+          readonly scope_json: string
+          readonly input_json: string
+          readonly definition_json: string
+          readonly repository_json: string
+          readonly head_ref: string
+          readonly current_head_sha: string
+          readonly prepared_result_json: string
+          readonly ticket_id: string
+          readonly produce_output_json: string
+          readonly external_intent_json: string
+          readonly implementation_commits_json: string
+        }>`
+          SELECT o.operation_id, o.operation_revision, o.attempt, o.scope_json, o.input_json,
+            d.definition_json, g.repository_json, g.head_ref, g.current_head_sha,
+            r.prepared_result_json,
+            json_extract(t.revision_json, '$.readyTicket.reference.nativeTicketId') AS ticket_id,
+            p.output_json AS produce_output_json, o.external_intent_json,
+            (SELECT coalesce(json_group_array(json(s.commit_reference_json)), '[]')
+              FROM qrspi_implementation_steps s
+              WHERE s.workflow_id = g.workflow_id AND s.generation = g.generation
+                AND s.stage_key = r.stage_key AND s.revision = r.revision
+              ORDER BY s.position) AS implementation_commits_json
+          FROM workflow_operations o
+          JOIN qrspi_generations g
+            ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+            AND g.generation = json_extract(o.scope_json, '$.generation')
+          JOIN qrspi_workflow_definitions d
+            ON d.definition_sha256 = g.workflow_definition_sha256
+          JOIN qrspi_stage_revisions r
+            ON r.workflow_id = g.workflow_id AND r.generation = g.generation
+            AND r.stage_key = json_extract(o.input_json, '$.stageKey')
+            AND r.revision = json_extract(o.input_json, '$.stageRevision')
+          JOIN qrspi_ticket_revisions t
+            ON t.workflow_id = g.workflow_id
+            AND t.ticket_revision_sha256 = g.ticket_revision_sha256
+          JOIN workflow_operations p
+            ON p.kind = 'StageProduce' AND p.state = 'succeeded' AND p.is_current = 1
+            AND json_extract(p.scope_json, '$.workflowId') = g.workflow_id
+            AND json_extract(p.scope_json, '$.generation') = g.generation
+            AND json_extract(p.input_json, '$.stageKey') = r.stage_key
+            AND json_extract(p.input_json, '$.stageRevision') = r.revision
+            AND coalesce(json_extract(p.input_json, '$.stepPosition'), 1) =
+              coalesce(json_extract(o.input_json, '$.stepPosition'), 1)
+          WHERE o.kind = 'ArtifactPublish' AND o.state = 'waiting_external'
+            AND o.is_current = 1 AND g.is_current = 1 AND g.state = 'running'
+          ORDER BY o.updated_at, o.operation_id LIMIT 1
+        `
+        const row = rows[0]
+        if (row === undefined) return null
+        const scope = yield* decodeGenerationScope(row.scope_json)
+        const operationInput = yield* decodeStageOperationInput(row.input_json)
+        const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+          row.definition_json,
+        )
+        const stage = definition.stages.find(({ key }) => key === operationInput.stageKey)
+        if (stage === undefined)
+          return yield* Effect.fail(new Error("Retained stage definition is missing"))
+        const repository = yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
+          row.repository_json,
+        )
+        const preparedResult = yield* Schema.decodeUnknown(Schema.parseJson(Schema.Unknown))(
+          row.prepared_result_json,
+        )
+        const produceOutput = yield* Schema.decodeUnknown(
+          Schema.parseJson(Schema.Struct({ sessionReferenceId: Schema.NonEmptyString })),
+        )(row.produce_output_json)
+        const implementationCommits = yield* Schema.decodeUnknown(
+          Schema.parseJson(Schema.Array(ImplementationCommitReference)),
+        )(row.implementation_commits_json)
+        const intent = yield* Schema.decodeUnknown(
+          Schema.parseJson(
+            Schema.Union(
+              Schema.Struct({
+                expectedOld: Schema.String,
+                finalSha: Schema.String,
+                artifact: ArtifactReference,
+              }),
+              Schema.Struct({
+                expectedOld: Schema.String,
+                commit: ImplementationCommitReference,
+              }),
+            ),
+          ),
+        )(row.external_intent_json)
+        const work = {
+          operationId: row.operation_id,
+          operationRevision: Number(row.operation_revision),
+          attempt: Number(row.attempt),
+          leaseToken: "authoritative-recovery",
+          scope,
+          input: operationInput,
+          stage,
+          repository,
+          headRef: row.head_ref,
+          currentHeadSha: row.current_head_sha,
+          preparedResult,
+          ticketId: row.ticket_id,
+          sessionReferenceId: produceOutput.sessionReferenceId,
+          ...(operationInput.stageKind === "implementation" ? { implementationCommits } : {}),
+        }
+        return "artifact" in intent
+          ? {
+              ...work,
+              bound: {
+                finalSha: intent.finalSha,
+                parentSha: intent.expectedOld,
+                artifact: intent.artifact,
+              },
+            }
+          : { ...work, implementationCommit: intent.commit }
+      }),
+
+    isStageOperationCurrent: (operationId, leaseToken, now) =>
+      sql<{ readonly operation_id: string }>`
+        SELECT o.operation_id FROM workflow_operations o
+        JOIN qrspi_generations g
+          ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+          AND g.generation = json_extract(o.scope_json, '$.generation')
+        JOIN qrspi_stage_runs r
+          ON r.workflow_id = g.workflow_id AND r.generation = g.generation
+          AND r.stage_key = json_extract(o.input_json, '$.stageKey')
+        WHERE o.operation_id = ${operationId} AND o.is_current = 1
+          AND ((o.state = 'leased' AND o.lease_token = ${leaseToken}
+            AND o.lease_until > ${now.toISOString()}) OR o.state = 'waiting_external')
+          AND g.is_current = 1 AND g.state = 'running' AND r.state = 'active'
+          AND r.pending_revision = json_extract(o.input_json, '$.stageRevision')
+      `.pipe(Effect.map((rows) => rows.length === 1)),
+
+    rescheduleStageOperation: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly attempt: number; readonly max_attempts: number }>`
+            SELECT attempt, max_attempts FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND state = 'leased' AND is_current = 1
+              AND lease_token = ${input.leaseToken}
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const failed = Number(row.attempt) >= Number(row.max_attempts)
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = ${failed ? "failed" : "ready"}, run_at = ${input.runAt.toISOString()},
+                last_error = ${input.error}, lease_owner = NULL, lease_token = NULL,
+                lease_until = NULL, terminal_failure_reason = ${failed ? input.error : null},
+                terminal_retry_policy = ${failed ? "retry_budget_exhausted" : null},
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          if (failed) {
+            yield* sql`
+              UPDATE qrspi_stage_runs SET state = 'failed', pending_revision = NULL,
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = json_extract((SELECT scope_json FROM workflow_operations
+                WHERE operation_id = ${input.operationId}), '$.workflowId')
+                AND generation = json_extract((SELECT scope_json FROM workflow_operations
+                WHERE operation_id = ${input.operationId}), '$.generation')
+                AND stage_key = json_extract((SELECT input_json FROM workflow_operations
+                WHERE operation_id = ${input.operationId}), '$.stageKey')
+            `
+          }
+          return failed ? ("failed" as const) : ("rescheduled" as const)
+        }),
+      ),
+
+    recordArtifactPublicationOutcome: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly state: "waiting_external" | "waiting_human" }>`
+            UPDATE workflow_operations
+            SET state = CASE
+                  WHEN ${input.outcome} = 'conflict'
+                    OR observation_attempts + 1 >= max_observation_attempts
+                  THEN 'waiting_human' ELSE 'waiting_external' END,
+                observation_attempts = observation_attempts + 1,
+                external_observation_json = ${JSON.stringify({
+                  outcome: input.outcome,
+                  observedHeadSha: input.observedHeadSha,
+                })},
+                terminal_failure_reason = CASE
+                  WHEN ${input.outcome} = 'conflict' THEN 'ticket ref exact-old conflict'
+                  WHEN observation_attempts + 1 >= max_observation_attempts
+                    THEN 'publication observation budget exhausted'
+                  ELSE terminal_failure_reason END,
+                terminal_retry_policy = CASE
+                  WHEN ${input.outcome} = 'conflict'
+                    OR observation_attempts + 1 >= max_observation_attempts
+                  THEN 'operator_required' ELSE terminal_retry_policy END,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state = 'waiting_external' AND is_current = 1
+            RETURNING state
+          `
+          const state = rows[0]?.state
+          if (state === undefined) return "stale" as const
+          if (state === "waiting_human") {
+            yield* sql`
+              INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+              VALUES (
+                ${input.operationId}, 'pending',
+                ${input.outcome === "conflict" ? "ticket ref exact-old conflict" : "publication observation budget exhausted"},
+                ${input.now.toISOString()}
+              ) ON CONFLICT (operation_id) DO NOTHING
+            `
+          }
+          return state
+        }),
+      ),
+
+    completeStageProduce: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const output = yield* Schema.decodeUnknown(
+            Schema.Record({ key: Schema.String, value: Schema.Unknown }),
+          )(input.preparedResult)
+          const rows = yield* sql<{
+            readonly operation_id: string
+            readonly scope_json: string
+            readonly input_json: string
+          }>`
+            SELECT operation_id, scope_json, input_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const operationInput = yield* decodeStageOperationInput(row.input_json)
+          const current = yield* isCurrentStageRevision(
+            sql,
+            scope.workflowId,
+            scope.generation,
+            operationInput.stageKey,
+            operationInput.stageRevision,
+          )
+          if (!current) return "stale" as const
+          yield* sql`
+            UPDATE qrspi_stage_revisions
+            SET prepared_result_json = ${JSON.stringify(output)}, state = 'publishing',
+                updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND stage_key = ${operationInput.stageKey}
+              AND revision = ${operationInput.stageRevision} AND state = 'producing'
+          `
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = 'succeeded', output_json = ${JSON.stringify({
+              preparedResult: output,
+              sessionReferenceId: input.sessionReferenceId,
+            })}, lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          yield* sql`
+            UPDATE workflow_operations SET state = 'ready', updated_at = ${input.now.toISOString()}
+            WHERE kind = 'ArtifactPublish' AND is_current = 1 AND state = 'blocked'
+              AND json_extract(input_json, '$.stageKey') = ${operationInput.stageKey}
+              AND json_extract(input_json, '$.stageRevision') = ${operationInput.stageRevision}
+              AND json_extract(scope_json, '$.workflowId') = ${scope.workflowId}
+              AND json_extract(scope_json, '$.generation') = ${scope.generation}
+          `
+          return "completed" as const
+        }),
+      ),
+
+    bindArtifactPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const artifact = yield* Schema.decodeUnknown(ArtifactReference)(input.artifact)
+          if (artifact.commitSha !== input.finalSha) return "conflict" as const
+          const existing = yield* sql<{ readonly external_intent_json: string | null }>`
+            SELECT external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish' AND is_current = 1
+          `
+          const intent = existing[0]?.external_intent_json
+          if (intent !== null && intent !== undefined) {
+            const decoded = yield* Schema.decodeUnknown(
+              Schema.parseJson(Schema.Struct({ finalSha: Schema.String })),
+            )(intent)
+            return decoded.finalSha === input.finalSha ? ("bound" as const) : ("conflict" as const)
+          }
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations
+            SET state = 'waiting_external', external_intent_json = ${JSON.stringify({
+              expectedOld: input.expectedOld,
+              finalSha: input.finalSha,
+              artifact,
+            })}, lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+            RETURNING operation_id
+          `
+          return rows.length === 1 ? ("bound" as const) : ("stale" as const)
+        }),
+      ),
+
+    completeArtifactPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const artifact = yield* Schema.decodeUnknown(ArtifactReference)(input.artifact)
+          if (input.observedHeadSha !== input.finalSha || artifact.commitSha !== input.finalSha) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "authoritative publication observation does not match the bound final SHA",
+              }),
+            )
+          }
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly input_json: string
+            readonly external_intent_json: string
+          }>`
+            SELECT scope_json, input_json, external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state = 'waiting_external' AND is_current = 1
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const intent = yield* Schema.decodeUnknown(
+            Schema.parseJson(
+              Schema.Struct({
+                expectedOld: Schema.String,
+                finalSha: Schema.String,
+                artifact: ArtifactReference,
+              }),
+            ),
+          )(row.external_intent_json)
+          if (
+            intent.expectedOld !== input.expectedOld ||
+            intent.finalSha !== input.finalSha ||
+            canonicalSha256(intent.artifact) !== canonicalSha256(artifact)
+          ) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "publication completion conflicts with the durable final SHA binding",
+              }),
+            )
+          }
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const operationInput = yield* decodeStageOperationInput(row.input_json)
+          const current = yield* isCurrentStageRevision(
+            sql,
+            scope.workflowId,
+            scope.generation,
+            operationInput.stageKey,
+            operationInput.stageRevision,
+          )
+          const cursors = yield* sql<{ readonly current_head_sha: string }>`
+            SELECT current_head_sha FROM qrspi_generations
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND is_current = 1 AND state = 'running'
+          `
+          if (!current || cursors[0]?.current_head_sha !== input.expectedOld)
+            return "stale" as const
+
+          const definitions = yield* sql<{ readonly definition_json: string }>`
+            SELECT d.definition_json FROM qrspi_workflow_definitions d
+            JOIN qrspi_generations g ON g.workflow_definition_sha256 = d.definition_sha256
+            WHERE g.workflow_id = ${scope.workflowId} AND g.generation = ${scope.generation}
+          `
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+            definitions[0]?.definition_json ?? "null",
+          )
+          const stage = definition.stages.find(({ key }) => key === operationInput.stageKey)
+          if (stage === undefined) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "stage is absent from the retained workflow definition",
+              }),
+            )
+          }
+          const accepted =
+            stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode === "none"
+          const nextState = accepted
+            ? "succeeded"
+            : stage.reviewPolicy.mode === "automated"
+              ? "waiting_review"
+              : "waiting_human"
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = 'succeeded', output_json = ${JSON.stringify({ artifact })},
+                external_observation_json = ${JSON.stringify({
+                  headRef: artifact.path,
+                  sha: input.observedHeadSha,
+                })}, updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          yield* sql`
+            UPDATE qrspi_stage_revisions
+            SET state = ${accepted ? "accepted" : "reviewing"},
+                published_reference_json = ${JSON.stringify(artifact)},
+                updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND stage_key = ${operationInput.stageKey}
+              AND revision = ${operationInput.stageRevision} AND state = 'publishing'
+          `
+          yield* sql`
+            UPDATE qrspi_stage_runs
+            SET state = ${nextState}, published_revision = ${operationInput.stageRevision},
+                accepted_revision = ${accepted ? operationInput.stageRevision : null},
+                pending_revision = ${accepted ? null : operationInput.stageRevision},
+                updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND stage_key = ${operationInput.stageKey} AND state = 'active'
+          `
+          yield* sql`
+            UPDATE qrspi_generations SET current_head_sha = ${input.finalSha},
+              updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+          `
+          if (!accepted) {
+            yield* createStagePolicyGate(sql, {
+              scope,
+              stage,
+              stageRevision: operationInput.stageRevision,
+              workflowDefinitionSha256: operationInput.workflowDefinitionSha256,
+              subject: artifact,
+              now: input.now,
+            })
+          }
+          if (accepted) {
+            yield* activateNextStage(
+              sql,
+              definition,
+              scope.workflowId,
+              scope.generation,
+              operationInput.stageKey,
+              input.now,
+            )
+          }
+          return "completed" as const
+        }),
+      ),
+
+    acceptStagePolicy: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const definitions = yield* sql<{ readonly definition_json: string }>`
+            SELECT d.definition_json FROM qrspi_workflow_definitions d
+            JOIN qrspi_generations g ON g.workflow_definition_sha256 = d.definition_sha256
+            JOIN qrspi_stage_runs r ON r.workflow_id = g.workflow_id AND r.generation = g.generation
+            WHERE r.workflow_id = ${input.workflowId} AND r.generation = ${input.generation}
+              AND r.stage_key = ${input.stageKey} AND r.published_revision = ${input.stageRevision}
+              AND r.pending_revision = ${input.stageRevision}
+              AND r.state IN ('waiting_review', 'waiting_human')
+              AND g.is_current = 1 AND g.state = 'running'
+          `
+          const json = definitions[0]?.definition_json
+          if (json === undefined) return "stale" as const
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(json)
+          yield* sql`
+            UPDATE qrspi_stage_revisions SET state = 'accepted', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+              AND stage_key = ${input.stageKey} AND revision = ${input.stageRevision}
+              AND state IN ('reviewing', 'waiting_human')
+          `
+          yield* sql`
+            UPDATE qrspi_stage_runs SET state = 'succeeded',
+              accepted_revision = ${input.stageRevision}, pending_revision = NULL,
+              updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+              AND stage_key = ${input.stageKey}
+              AND state IN ('waiting_review', 'waiting_human')
+          `
+          yield* sql`
+            UPDATE workflow_operation_gates SET state = 'answered'
+            WHERE state = 'pending' AND operation_id IN (
+              SELECT operation_id FROM workflow_operations
+              WHERE json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+                AND json_extract(scope_json, '$.generation') = ${input.generation}
+                AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+                AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+            )
+          `
+          yield* sql`
+            UPDATE workflow_operations SET state = 'succeeded',
+              output_json = ${JSON.stringify({ decision: "accepted" })},
+              updated_at = ${input.now.toISOString()}
+            WHERE kind IN ('ReviewSynthesize', 'GenericReviewHandoff') AND is_current = 1
+              AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+              AND json_extract(scope_json, '$.generation') = ${input.generation}
+              AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+              AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+              AND state IN ('ready', 'waiting_human')
+          `
+          yield* activateNextStage(
+            sql,
+            definition,
+            input.workflowId,
+            input.generation,
+            input.stageKey,
+            input.now,
+          )
+          return "completed" as const
+        }),
+      ),
+
+    requestDocumentRevision: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const sources = yield* Schema.decodeUnknown(Schema.Array(ArtifactReference))(
+            input.acceptedSources,
+          )
+          const feedback = yield* Schema.decodeUnknown(
+            Schema.Array(Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4_000))).pipe(
+              Schema.maxItems(20),
+            ),
+          )(input.feedback ?? [])
+          const rows = yield* sql<{
+            readonly definition_json: string
+            readonly workflow_definition_sha256: string
+            readonly ticket_revision_sha256: string
+            readonly source_artifacts_json: string
+          }>`
+            SELECT d.definition_json, g.workflow_definition_sha256, g.ticket_revision_sha256,
+              v.source_artifacts_json
+            FROM qrspi_stage_runs r
+            JOIN qrspi_generations g ON g.workflow_id = r.workflow_id AND g.generation = r.generation
+            JOIN qrspi_workflow_definitions d ON d.definition_sha256 = g.workflow_definition_sha256
+            JOIN qrspi_stage_revisions v ON v.workflow_id = r.workflow_id
+              AND v.generation = r.generation AND v.stage_key = r.stage_key
+              AND v.revision = r.pending_revision
+            WHERE r.workflow_id = ${input.workflowId} AND r.generation = ${input.generation}
+              AND r.stage_key = ${input.stageKey} AND r.pending_revision = ${input.stageRevision}
+              AND r.state IN ('waiting_review', 'waiting_human')
+              AND v.revision_type = 'document' AND v.state IN ('reviewing', 'waiting_human')
+              AND g.is_current = 1 AND g.state = 'running'
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const persistedSources = yield* Schema.decodeUnknown(
+            Schema.parseJson(Schema.Array(ArtifactReference)),
+          )(row.source_artifacts_json)
+          if (canonicalSha256(sources) !== canonicalSha256(persistedSources))
+            return "stale" as const
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+            row.definition_json,
+          )
+          const stage = definition.stages.find(({ key }) => key === input.stageKey)
+          if (stage === undefined || stage.kind !== "document") return "stale" as const
+          const nextRevision = input.stageRevision + 1
+          yield* sql`
+            UPDATE qrspi_stage_revisions SET state = 'abandoned', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+              AND stage_key = ${input.stageKey} AND revision = ${input.stageRevision}
+          `
+          yield* sql`
+            UPDATE workflow_operation_gates SET state = 'cancelled'
+            WHERE state = 'pending' AND operation_id IN (
+              SELECT operation_id FROM workflow_operations
+              WHERE json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+                AND json_extract(scope_json, '$.generation') = ${input.generation}
+                AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+                AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+            )
+          `
+          yield* sql`
+            UPDATE workflow_operations SET state = 'superseded', is_current = 0,
+              last_error = 'stage revision superseded', lease_owner = NULL, lease_token = NULL,
+              lease_until = NULL, updated_at = ${input.now.toISOString()}
+            WHERE is_current = 1
+              AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+              AND json_extract(scope_json, '$.generation') = ${input.generation}
+              AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+              AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+              AND state IN ('blocked', 'ready', 'leased', 'waiting_external', 'waiting_human')
+          `
+          yield* sql`
+            INSERT INTO qrspi_stage_revisions (
+              workflow_id, generation, stage_key, revision, revision_type,
+              source_artifacts_json, state, created_at, updated_at
+            ) VALUES (
+              ${input.workflowId}, ${input.generation}, ${input.stageKey}, ${nextRevision},
+              'document', ${JSON.stringify(sources)}, 'producing',
+              ${input.now.toISOString()}, ${input.now.toISOString()}
+            )
+          `
+          yield* sql`
+            UPDATE qrspi_stage_runs SET state = 'active', pending_revision = ${nextRevision},
+              updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+              AND stage_key = ${input.stageKey} AND pending_revision = ${input.stageRevision}
+          `
+          yield* createStageOperationPair(sql, {
+            workflowId: input.workflowId,
+            generation: input.generation,
+            stage,
+            stageRevision: nextRevision,
+            workflowDefinitionSha256: row.workflow_definition_sha256,
+            ticketRevisionSha256: row.ticket_revision_sha256,
+            sources,
+            feedback,
+            now: input.now,
+          })
+          return "completed" as const
+        }),
+      ),
+
+    bindImplementationPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const commit = yield* Schema.decodeUnknown(ImplementationCommitReference)(input.commit)
+          const existing = yield* sql<{ readonly external_intent_json: string | null }>`
+            SELECT external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish' AND is_current = 1
+          `
+          const intent = existing[0]?.external_intent_json
+          if (intent !== null && intent !== undefined) {
+            const decoded = yield* Schema.decodeUnknown(
+              Schema.parseJson(Schema.Struct({ commit: ImplementationCommitReference })),
+            )(intent)
+            return decoded.commit.commitSha === commit.commitSha
+              ? ("bound" as const)
+              : ("conflict" as const)
+          }
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations
+            SET state = 'waiting_external', external_intent_json = ${JSON.stringify({
+              expectedOld: input.expectedOld,
+              commit,
+            })}, lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+            RETURNING operation_id
+          `
+          return rows.length === 1 ? ("bound" as const) : ("stale" as const)
+        }),
+      ),
+
+    completeImplementationPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const commit = yield* Schema.decodeUnknown(ImplementationCommitReference)(input.commit)
+          if (
+            input.observedHeadSha !== commit.commitSha ||
+            commit.parentSha !== input.expectedOld
+          ) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "authoritative implementation observation does not match commit",
+              }),
+            )
+          }
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly input_json: string
+            readonly external_intent_json: string
+          }>`
+            SELECT scope_json, input_json, external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state = 'waiting_external' AND is_current = 1
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const intent = yield* Schema.decodeUnknown(
+            Schema.parseJson(
+              Schema.Struct({ expectedOld: Schema.String, commit: ImplementationCommitReference }),
+            ),
+          )(row.external_intent_json)
+          if (
+            intent.expectedOld !== input.expectedOld ||
+            canonicalSha256(intent.commit) !== canonicalSha256(commit)
+          ) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "implementation completion conflicts with durable SHA binding",
+              }),
+            )
+          }
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const operationInput = yield* decodeStageOperationInput(row.input_json)
+          if (
+            !(yield* isCurrentStageRevision(
+              sql,
+              scope.workflowId,
+              scope.generation,
+              operationInput.stageKey,
+              operationInput.stageRevision,
+            ))
+          )
+            return "stale" as const
+          const cursor = yield* sql<{ readonly current_head_sha: string }>`
+            SELECT current_head_sha FROM qrspi_generations
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND is_current = 1 AND state = 'running'
+          `
+          if (cursor[0]?.current_head_sha !== input.expectedOld) return "stale" as const
+          const prepared = yield* sql<{
+            readonly prepared_result_json: string
+            readonly definition_json: string
+            readonly produce_operation_id: string
+            readonly session_reference_id: string
+            readonly existing_steps: number
+          }>`
+            SELECT r.prepared_result_json, d.definition_json,
+              p.operation_id AS produce_operation_id,
+              json_extract(p.output_json, '$.sessionReferenceId') AS session_reference_id,
+              (SELECT count(*) FROM qrspi_implementation_steps s
+                WHERE s.workflow_id = r.workflow_id AND s.generation = r.generation
+                  AND s.stage_key = r.stage_key AND s.revision = r.revision) AS existing_steps
+            FROM qrspi_stage_revisions r
+            JOIN qrspi_generations g ON g.workflow_id = r.workflow_id AND g.generation = r.generation
+            JOIN qrspi_workflow_definitions d ON d.definition_sha256 = g.workflow_definition_sha256
+            JOIN workflow_operations p ON p.kind = 'StageProduce' AND p.state = 'succeeded'
+              AND json_extract(p.scope_json, '$.workflowId') = r.workflow_id
+              AND json_extract(p.scope_json, '$.generation') = r.generation
+              AND json_extract(p.input_json, '$.stageKey') = r.stage_key
+              AND json_extract(p.input_json, '$.stageRevision') = r.revision
+              AND coalesce(json_extract(p.input_json, '$.stepPosition'), 1) =
+                coalesce(json_extract(${row.input_json}, '$.stepPosition'), 1)
+            WHERE r.workflow_id = ${scope.workflowId} AND r.generation = ${scope.generation}
+              AND r.stage_key = ${operationInput.stageKey} AND r.revision = ${operationInput.stageRevision}
+          `
+          const preparedRow = prepared[0]
+          if (preparedRow === undefined) return "stale" as const
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+            preparedRow.definition_json,
+          )
+          const preparedResult = yield* Schema.decodeUnknown(
+            Schema.parseJson(ImplementationStageResult),
+          )(preparedRow.prepared_result_json)
+          const expectedPosition = Number(preparedRow.existing_steps) + 1
+          if (commit.position !== expectedPosition) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "implementation commit position is not contiguous",
+              }),
+            )
+          }
+          yield* sql`
+            INSERT INTO qrspi_implementation_steps (
+              workflow_id, generation, stage_key, revision, position, produce_operation_id,
+              publish_operation_id, session_reference_id, prepared_result_json,
+              commit_reference_json, created_at
+            ) VALUES (
+              ${scope.workflowId}, ${scope.generation}, ${operationInput.stageKey},
+              ${operationInput.stageRevision}, ${commit.position}, ${preparedRow.produce_operation_id},
+              ${input.operationId}, ${preparedRow.session_reference_id}, ${preparedRow.prepared_result_json},
+              ${JSON.stringify(commit)}, ${input.now.toISOString()}
+            )
+          `
+          yield* sql`
+            UPDATE workflow_operations SET state = 'succeeded',
+              output_json = ${JSON.stringify(
+                input.checkpoint === undefined ? { commit } : { checkpoint: input.checkpoint },
+              )},
+              external_observation_json = ${JSON.stringify({
+                headRef: operationInput.stageKey,
+                sha: input.observedHeadSha,
+              })}, updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          yield* sql`
+            UPDATE qrspi_generations SET current_head_sha = ${commit.commitSha},
+              updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+          `
+          const stage = definition.stages.find(({ key }) => key === operationInput.stageKey)
+          if (stage === undefined) return "stale" as const
+          if (!preparedResult.final) {
+            if (input.checkpoint !== undefined) {
+              return yield* Effect.fail(
+                new WorkflowStartCurrentnessError({
+                  operationId: input.operationId,
+                  reason: "non-final implementation step cannot include a checkpoint",
+                }),
+              )
+            }
+            yield* sql`
+              UPDATE qrspi_stage_revisions SET state = 'producing', prepared_result_json = NULL,
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+                AND stage_key = ${operationInput.stageKey} AND revision = ${operationInput.stageRevision}
+                AND state = 'publishing'
+            `
+            yield* createStageOperationPair(sql, {
+              workflowId: scope.workflowId,
+              generation: scope.generation,
+              stage,
+              stageRevision: operationInput.stageRevision,
+              workflowDefinitionSha256: operationInput.workflowDefinitionSha256,
+              ticketRevisionSha256: operationInput.ticketRevisionSha256!,
+              sources: operationInput.sources ?? [],
+              stepPosition: expectedPosition + 1,
+              now: input.now,
+            })
+          } else {
+            if (preparedResult.deliveryEvidence === undefined || input.checkpoint === undefined) {
+              return yield* Effect.fail(
+                new WorkflowStartCurrentnessError({
+                  operationId: input.operationId,
+                  reason: "final implementation step requires delivery evidence and checkpoint",
+                }),
+              )
+            }
+            const checkpoint = yield* Schema.decodeUnknown(ImplementationCheckpointReference)(
+              input.checkpoint,
+            )
+            const stepRows = yield* sql<{ readonly commit_reference_json: string }>`
+              SELECT commit_reference_json FROM qrspi_implementation_steps
+              WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+                AND stage_key = ${operationInput.stageKey} AND revision = ${operationInput.stageRevision}
+              ORDER BY position
+            `
+            const commits = yield* Effect.forEach(stepRows, (step) =>
+              Schema.decodeUnknown(Schema.parseJson(ImplementationCommitReference))(
+                step.commit_reference_json,
+              ),
+            )
+            const changedPaths = [...new Set(commits.flatMap((item) => item.changedPaths))]
+            const contiguous = commits.every(
+              (item, index) => index === 0 || item.parentSha === commits[index - 1]?.commitSha,
+            )
+            if (
+              !contiguous ||
+              canonicalSha256(checkpoint.commits) !== canonicalSha256(commits) ||
+              canonicalSha256(checkpoint.changedPaths) !== canonicalSha256(changedPaths) ||
+              checkpoint.workflowId !== scope.workflowId ||
+              checkpoint.generation !== scope.generation ||
+              checkpoint.stageKey !== operationInput.stageKey ||
+              checkpoint.stageRevision !== operationInput.stageRevision ||
+              checkpoint.baseSha !== commits[0]?.parentSha ||
+              checkpoint.finalSha !== commit.commitSha ||
+              checkpoint.preparedDeliveryEvidenceSha256 !==
+                canonicalSha256(preparedResult.deliveryEvidence)
+            ) {
+              return yield* Effect.fail(
+                new WorkflowStartCurrentnessError({
+                  operationId: input.operationId,
+                  reason: "implementation checkpoint does not cover contiguous persisted commits",
+                }),
+              )
+            }
+            const accepted =
+              stage.reviewPolicy.mode === "none" && stage.humanGatePolicy.mode === "none"
+            yield* sql`
+              UPDATE qrspi_stage_revisions SET state = ${accepted ? "accepted" : "reviewing"},
+                published_reference_json = ${JSON.stringify(checkpoint)},
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+                AND stage_key = ${operationInput.stageKey} AND revision = ${operationInput.stageRevision}
+                AND state = 'publishing'
+            `
+            yield* sql`
+              UPDATE qrspi_stage_runs SET state = ${
+                accepted
+                  ? "succeeded"
+                  : stage.reviewPolicy.mode === "automated"
+                    ? "waiting_review"
+                    : "waiting_human"
+              },
+                published_revision = ${operationInput.stageRevision},
+                accepted_revision = ${accepted ? operationInput.stageRevision : null},
+                pending_revision = ${accepted ? null : operationInput.stageRevision},
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+                AND stage_key = ${operationInput.stageKey} AND state = 'active'
+            `
+            if (accepted) {
+              yield* activateNextStage(
+                sql,
+                definition,
+                scope.workflowId,
+                scope.generation,
+                operationInput.stageKey,
+                input.now,
+              )
+            } else {
+              yield* createStagePolicyGate(sql, {
+                scope,
+                stage,
+                stageRevision: operationInput.stageRevision,
+                workflowDefinitionSha256: operationInput.workflowDefinitionSha256,
+                subject: checkpoint,
+                now: input.now,
+              })
+            }
+          }
+          return "completed" as const
+        }),
+      ),
   }
 
   function decodeRow(raw: Record<string, unknown>) {
@@ -911,16 +2186,267 @@ function toStartRecord(row: OperationRow, branchName: string) {
   })
 }
 
+const GenerationScope = Schema.Struct({
+  _tag: Schema.Literal("GenerationScope"),
+  workflowId: Schema.NonEmptyString,
+  generation: Schema.Int.pipe(Schema.positive()),
+})
+const StageOperationInput = Schema.Struct({
+  stageKey: Schema.NonEmptyString,
+  stageKind: Schema.Literal("document", "implementation"),
+  stageRevision: Schema.Int.pipe(Schema.positive()),
+  workflowDefinitionSha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  ticketRevisionSha256: Schema.optional(Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/))),
+  sources: Schema.optional(Schema.Array(ArtifactReference).pipe(Schema.maxItems(32))),
+  parameters: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+  stepPosition: Schema.optional(Schema.Int.pipe(Schema.positive())),
+  feedback: Schema.optional(
+    Schema.Array(Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4_000))).pipe(
+      Schema.maxItems(20),
+    ),
+  ),
+})
+
+const decodeGenerationScope = (json: string) =>
+  Schema.decodeUnknown(Schema.parseJson(GenerationScope))(json)
+const decodeStageOperationInput = (json: string) =>
+  Schema.decodeUnknown(Schema.parseJson(StageOperationInput))(json)
+
+function isCurrentStageRevision(
+  sql: SqlClient.SqlClient,
+  workflowId: string,
+  generation: number,
+  stageKey: string,
+  revision: number,
+) {
+  return sql<{ readonly stage_key: string }>`
+    SELECT r.stage_key FROM qrspi_stage_runs r
+    JOIN qrspi_generations g
+      ON g.workflow_id = r.workflow_id AND g.generation = r.generation
+    WHERE r.workflow_id = ${workflowId} AND r.generation = ${generation}
+      AND r.stage_key = ${stageKey} AND r.pending_revision = ${revision}
+      AND r.state = 'active' AND g.is_current = 1 AND g.state = 'running'
+  `.pipe(Effect.map((rows) => rows.length === 1))
+}
+
+function createStageOperationPair(
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly workflowId: string
+    readonly generation: number
+    readonly stage: StageDefinition
+    readonly stageRevision: number
+    readonly workflowDefinitionSha256: string
+    readonly ticketRevisionSha256: string
+    readonly sources: ReadonlyArray<typeof ArtifactReference.Type>
+    readonly stepPosition?: number
+    readonly feedback?: ReadonlyArray<string>
+    readonly now: Date
+  },
+) {
+  return Effect.gen(function* () {
+    for (const initial of input.stage.initialOperations) {
+      const stepSuffix = input.stepPosition === undefined ? "" : `:step:${input.stepPosition}`
+      const logical = `${input.workflowId}:${input.generation}:${initial.kind}:${input.stage.key}:${input.stageRevision}${stepSuffix}`
+      const childInput = {
+        stageKey: input.stage.key,
+        stageKind: input.stage.kind,
+        stageRevision: input.stageRevision,
+        workflowDefinitionSha256: input.workflowDefinitionSha256,
+        ticketRevisionSha256: input.ticketRevisionSha256,
+        sources: input.sources,
+        ...(input.stepPosition === undefined ? {} : { stepPosition: input.stepPosition }),
+        ...(input.feedback === undefined || input.feedback.length === 0
+          ? {}
+          : { feedback: input.feedback }),
+        ...(initial.parameters === undefined ? {} : { parameters: initial.parameters }),
+      }
+      yield* insertOperation(sql, {
+        operationId: `${logical}:1`,
+        logicalOperationId: logical,
+        revision: 1,
+        retryOf: null,
+        kind: initial.kind,
+        scope: {
+          _tag: "GenerationScope",
+          workflowId: input.workflowId,
+          generation: input.generation,
+        },
+        inputJson: JSON.stringify(childInput),
+        inputSha256: canonicalSha256(childInput),
+        state: initial.kind === "StageProduce" ? "ready" : "blocked",
+        attempt: 0,
+        maxAttempts: initial.kind === "StageProduce" ? input.stage.producer.retry.maxAttempts : 3,
+        parentEffect: initial.parentEffect,
+        now: input.now,
+      })
+    }
+  })
+}
+
+function createStagePolicyGate(
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly scope: typeof GenerationScope.Type
+    readonly stage: StageDefinition
+    readonly stageRevision: number
+    readonly workflowDefinitionSha256: string
+    readonly subject: unknown
+    readonly now: Date
+  },
+) {
+  return Effect.gen(function* () {
+    const policyKind =
+      input.stage.reviewPolicy.mode === "automated"
+        ? ("ReviewSynthesize" as const)
+        : ("GenericReviewHandoff" as const)
+    const logical = `${input.scope.workflowId}:${input.scope.generation}:${policyKind}:${input.stage.key}:${input.stageRevision}`
+    const policyInput = {
+      stageKey: input.stage.key,
+      stageKind: input.stage.kind,
+      stageRevision: input.stageRevision,
+      workflowDefinitionSha256: input.workflowDefinitionSha256,
+      subject: input.subject,
+    }
+    yield* insertOperation(sql, {
+      operationId: `${logical}:1`,
+      logicalOperationId: logical,
+      revision: 1,
+      retryOf: null,
+      kind: policyKind,
+      scope: input.scope,
+      inputJson: JSON.stringify(policyInput),
+      inputSha256: canonicalSha256(policyInput),
+      state: "waiting_human",
+      attempt: 0,
+      parentEffect: { success: "advance parent", failure: "audit only" },
+      now: input.now,
+    })
+    yield* sql`
+      INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+      VALUES (
+        ${`${logical}:1`}, 'pending',
+        ${policyKind === "ReviewSynthesize" ? "automated review consumer unavailable; operator review required" : "stage approval required"},
+        ${input.now.toISOString()}
+      )
+      ON CONFLICT (operation_id) DO NOTHING
+    `
+  })
+}
+
+function activateNextStage(
+  sql: SqlClient.SqlClient,
+  definition: WorkflowDefinition,
+  workflowId: string,
+  generation: number,
+  completedStageKey: string,
+  now: Date,
+) {
+  return Effect.gen(function* () {
+    const currentRows = yield* sql<{ readonly stage_position: number }>`
+      SELECT stage_position FROM qrspi_stage_runs
+      WHERE workflow_id = ${workflowId} AND generation = ${generation}
+        AND stage_key = ${completedStageKey}
+    `
+    const currentPosition = currentRows[0]?.stage_position
+    if (currentPosition === undefined) return
+    const nextRows = yield* sql<{ readonly stage_key: string }>`
+      SELECT stage_key FROM qrspi_stage_runs
+      WHERE workflow_id = ${workflowId} AND generation = ${generation}
+        AND stage_position > ${currentPosition} AND state = 'blocked'
+      ORDER BY stage_position LIMIT 1
+    `
+    const nextKey = nextRows[0]?.stage_key
+    if (nextKey === undefined) {
+      yield* sql`
+        UPDATE qrspi_generations SET state = 'completed', updated_at = ${now.toISOString()}
+        WHERE workflow_id = ${workflowId} AND generation = ${generation} AND is_current = 1
+      `
+      return
+    }
+    const stage = definition.stages.find(({ key }) => key === nextKey)
+    if (stage === undefined) return
+    const sourceRows = yield* sql<{ readonly published_reference_json: string }>`
+      SELECT v.published_reference_json FROM qrspi_stage_revisions v
+      JOIN qrspi_stage_runs r ON r.workflow_id = v.workflow_id AND r.generation = v.generation
+        AND r.stage_key = v.stage_key AND r.accepted_revision = v.revision
+      WHERE v.workflow_id = ${workflowId} AND v.generation = ${generation}
+        AND v.published_reference_json IS NOT NULL
+      ORDER BY r.stage_position
+    `
+    const sources = yield* Effect.forEach(sourceRows, (row) =>
+      Schema.decodeUnknown(Schema.parseJson(ArtifactReference))(row.published_reference_json),
+    )
+    const generationRows = yield* sql<{
+      readonly ticket_revision_sha256: string
+      readonly workflow_definition_sha256: string
+    }>`
+      SELECT ticket_revision_sha256, workflow_definition_sha256 FROM qrspi_generations
+      WHERE workflow_id = ${workflowId} AND generation = ${generation}
+    `
+    const generationRow = generationRows[0]
+    if (generationRow === undefined) return
+    yield* sql`
+      UPDATE qrspi_stage_runs SET state = 'active', pending_revision = 1,
+        updated_at = ${now.toISOString()}
+      WHERE workflow_id = ${workflowId} AND generation = ${generation} AND stage_key = ${nextKey}
+        AND state = 'blocked'
+    `
+    yield* sql`
+      INSERT INTO qrspi_stage_revisions (
+        workflow_id, generation, stage_key, revision, revision_type,
+        source_artifacts_json, state, created_at, updated_at
+      ) VALUES (
+        ${workflowId}, ${generation}, ${nextKey}, 1, ${stage.kind},
+        ${JSON.stringify(sources)}, 'producing', ${now.toISOString()}, ${now.toISOString()}
+      )
+    `
+    for (const initial of stage.initialOperations) {
+      const logical = `${workflowId}:${generation}:${initial.kind}:${stage.key}:1`
+      const childInput = {
+        stageKey: stage.key,
+        stageKind: stage.kind,
+        stageRevision: 1,
+        workflowDefinitionSha256: generationRow.workflow_definition_sha256,
+        ticketRevisionSha256: generationRow.ticket_revision_sha256,
+        sources,
+        ...(initial.parameters === undefined ? {} : { parameters: initial.parameters }),
+      }
+      yield* insertOperation(sql, {
+        operationId: `${logical}:1`,
+        logicalOperationId: logical,
+        revision: 1,
+        retryOf: null,
+        kind: initial.kind,
+        scope: { _tag: "GenerationScope", workflowId, generation },
+        inputJson: JSON.stringify(childInput),
+        inputSha256: canonicalSha256(childInput),
+        state: initial.kind === "StageProduce" ? "ready" : "blocked",
+        attempt: 0,
+        maxAttempts: initial.kind === "StageProduce" ? stage.producer.retry.maxAttempts : 3,
+        parentEffect: initial.parentEffect,
+        now,
+      })
+    }
+  })
+}
+
 type InsertOperationInput = {
   readonly operationId: string
   readonly logicalOperationId: string
   readonly revision: number
   readonly retryOf: string | null
-  readonly kind: "WorkflowStart" | "StageProduce" | "ArtifactPublish" | "TargetReconcile"
+  readonly kind:
+    | "WorkflowStart"
+    | "StageProduce"
+    | "ArtifactPublish"
+    | "ReviewSynthesize"
+    | "GenericReviewHandoff"
+    | "TargetReconcile"
   readonly scope: object
   readonly inputJson: string
   readonly inputSha256: string
-  readonly state: "ready" | "blocked" | "leased"
+  readonly state: "ready" | "blocked" | "leased" | "waiting_human"
   readonly attempt: number
   readonly maxAttempts?: number
   readonly leaseToken?: string
@@ -941,7 +2467,7 @@ function insertOperation(sql: SqlClient.SqlClient, input: InsertOperationInput) 
       ${input.operationId}, ${input.logicalOperationId}, ${input.revision}, ${input.retryOf},
       ${input.kind}, ${JSON.stringify(input.scope)}, ${input.inputJson}, ${input.inputSha256},
       NULL, ${input.state}, 1, ${input.attempt}, ${input.maxAttempts ?? 3},
-      ${input.state === "leased" ? "workflow-start-ingress" : null},
+       ${input.state === "leased" ? "workflow-start-ingress" : null},
       ${input.leaseToken ?? null}, ${input.leaseUntil?.toISOString() ?? null},
       ${input.now.toISOString()}, NULL, NULL, 0, 5, ${JSON.stringify(input.parentEffect)},
       NULL, ${input.now.toISOString()}, ${input.now.toISOString()}

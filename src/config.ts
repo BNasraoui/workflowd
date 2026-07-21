@@ -256,6 +256,9 @@ export async function loadConfig(
   if (fixWorkEnabled && gitSigningKey === undefined) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
   }
+  if (qrspi !== undefined && gitSigningKey === undefined) {
+    throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when QRSPI is enabled")
+  }
   if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
   }
@@ -393,14 +396,24 @@ function loadQrspiConfig(env: Record<string, string | undefined>): QrspiConfig |
     10_000,
     "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
   )
+  const maximumProducerTimeoutMs = Math.max(
+    ...workflowDefinition.stages
+      .filter((stage) => stage.activation.mode !== "disabled")
+      .map((stage) => stage.producer.timeoutMs),
+  )
   const leaseDurationMs = positiveInteger(
     env.WORKFLOWD_QRSPI_LEASE_MS,
-    60_000,
+    Math.max(repositoryOperationTimeoutMs, maximumProducerTimeoutMs) +
+      operationCompletionMarginMs +
+      60_000,
     "WORKFLOWD_QRSPI_LEASE_MS",
   )
-  if (leaseDurationMs <= repositoryOperationTimeoutMs + operationCompletionMarginMs) {
+  if (
+    leaseDurationMs <=
+    Math.max(repositoryOperationTimeoutMs, maximumProducerTimeoutMs) + operationCompletionMarginMs
+  ) {
     throw new Error(
-      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+      "WORKFLOWD_QRSPI_LEASE_MS must cover repository and producer timeouts plus completion margin",
     )
   }
   return {
