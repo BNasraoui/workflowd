@@ -55,6 +55,7 @@ function processReviewWork(
   workerId: string,
   agentBranchPrefixes: ReadonlyArray<string>,
   fixWorkEnabled: boolean,
+  onPrepared: (intent: AgentFailureContext) => void,
 ) {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -74,6 +75,7 @@ function processReviewWork(
         },
         agentExecutionContext(work, workspace.directory, requestedAt),
       )
+      onPrepared(prepared.launchIntent)
       const launch = yield* store.recordAgentLaunchIntent({
         jobId: work.id,
         workerId,
@@ -126,7 +128,11 @@ function processReviewWork(
   )
 }
 
-function processFixWork(work: FixWork, workerId: string) {
+function processFixWork(
+  work: FixWork,
+  workerId: string,
+  onPrepared: (intent: AgentFailureContext) => void,
+) {
   return Effect.scoped(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -148,6 +154,7 @@ function processFixWork(work: FixWork, workerId: string) {
           },
           agentExecutionContext(work, workspace.directory, requestedAt),
         )
+        onPrepared(prepared.launchIntent)
         const launch = yield* store.recordAgentLaunchIntent({
           jobId: work.id,
           workerId,
@@ -228,6 +235,12 @@ function agentExecutionContext(work: ReviewWork | FixWork, directory: string, re
   }
 }
 
+type AgentFailureContext = {
+  readonly attempt: number
+  readonly leaseToken: string
+  readonly retryPolicy: { readonly maxAttempts: number }
+}
+
 export function runJobIteration(options: {
   readonly workerId: string
   readonly leaseDurationMs: number
@@ -254,6 +267,10 @@ export function runJobIteration(options: {
       })
     }
 
+    let agentFailureContext: AgentFailureContext | undefined
+    const captureAgentFailureContext = (intent: AgentFailureContext) => {
+      agentFailureContext = intent
+    }
     const operation =
       work._tag === "ReviewWork"
         ? processReviewWork(
@@ -261,8 +278,9 @@ export function runJobIteration(options: {
             options.workerId,
             options.agentBranchPrefixes,
             options.fixWorkEnabled,
+            captureAgentFailureContext,
           )
-        : processFixWork(work, options.workerId)
+        : processFixWork(work, options.workerId, captureAgentFailureContext)
     const exit = yield* Effect.exit(
       interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
         store.shouldCancelJob(work.id, options.workerId, options.now()),
@@ -279,7 +297,17 @@ export function runJobIteration(options: {
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
-      maxAttempts: retryableFailure(exit.cause) ? options.maxAttempts : work.attempt,
+      maxAttempts: retryableFailure(exit.cause)
+        ? (agentFailureContext?.retryPolicy.maxAttempts ?? options.maxAttempts)
+        : work.attempt,
+      ...(agentFailureContext === undefined
+        ? {}
+        : {
+            execution: {
+              attempt: agentFailureContext.attempt,
+              leaseToken: agentFailureContext.leaseToken,
+            },
+          }),
     })
   })
 }

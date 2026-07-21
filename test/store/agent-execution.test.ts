@@ -307,6 +307,118 @@ test("restarts with a new session after either checkpoint and fences expired att
   ])
 })
 
+test("marks explicitly retried and terminally failed agent executions inactive", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "agent-failure-pr",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent({
+          ...samplePullRequestEvent,
+          pullRequest: {
+            ...samplePullRequestEvent.pullRequest,
+            updatedAt: "2026-07-20T12:00:00.000Z",
+          },
+        }),
+      )
+
+      const first = yield* store.claimNextJob({
+        workerId: "agent-worker-1",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (first === null) throw new Error("expected first attempt")
+      const firstExecution = makeExecution(
+        first,
+        "15555555-5555-4555-8555-555555555555",
+        "25555555-5555-4555-8555-555555555555",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: first.id,
+        workerId: "agent-worker-1",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: firstExecution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: first.id,
+        workerId: "agent-worker-1",
+        recordedAt: new Date("2026-07-20T12:01:02.000Z"),
+        reference: firstExecution.reference,
+      })
+      const retry = yield* store.rescheduleJob({
+        jobId: first.id,
+        workerId: "agent-worker-1",
+        failedAt: new Date("2026-07-20T12:01:03.000Z"),
+        runAt: new Date("2026-07-20T12:01:04.000Z"),
+        error: "retryable failure",
+        maxAttempts: 2,
+        execution: {
+          attempt: first.attempt,
+          leaseToken: firstExecution.intent.leaseToken,
+        },
+      })
+
+      const second = yield* store.claimNextJob({
+        workerId: "agent-worker-2",
+        now: new Date("2026-07-20T12:02:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (second === null) throw new Error("expected second attempt")
+      const secondExecution = makeExecution(
+        second,
+        "16666666-6666-4666-8666-666666666666",
+        "26666666-6666-4666-8666-666666666666",
+        "2026-07-20T12:02:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: second.id,
+        workerId: "agent-worker-2",
+        recordedAt: new Date("2026-07-20T12:02:01.000Z"),
+        intent: secondExecution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: second.id,
+        workerId: "agent-worker-2",
+        recordedAt: new Date("2026-07-20T12:02:02.000Z"),
+        reference: secondExecution.reference,
+      })
+      const failed = yield* store.rescheduleJob({
+        jobId: second.id,
+        workerId: "agent-worker-2",
+        failedAt: new Date("2026-07-20T12:02:03.000Z"),
+        runAt: new Date("2026-07-20T12:02:04.000Z"),
+        error: "terminal failure",
+        maxAttempts: 2,
+        execution: {
+          attempt: second.attempt,
+          leaseToken: secondExecution.intent.leaseToken,
+        },
+      })
+      const executions = yield* sql`
+        SELECT attempt, state FROM agent_executions ORDER BY attempt
+      `
+      return { retry, failed, executions }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result).toEqual({
+    retry: "retry",
+    failed: "failed",
+    executions: [
+      { attempt: 1, state: "superseded" },
+      { attempt: 2, state: "failed" },
+    ],
+  })
+})
+
 test("supersedes the session and rejects output from an older generation", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {

@@ -381,7 +381,23 @@ export function makeJobOperations(
         RETURNING session_reference_id
       `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
     },
-    rescheduleJob: (input) => queue.reschedule({ ...input, id: input.jobId }),
+    rescheduleJob: (input) =>
+      Effect.gen(function* () {
+        const disposition = yield* queue.reschedule({ ...input, id: input.jobId })
+        if (disposition === "stale" || input.execution === undefined) return disposition
+        yield* sql`
+          UPDATE agent_executions
+          SET
+            state = ${disposition === "retry" ? "superseded" : "failed"},
+            updated_at = ${input.failedAt.toISOString()}
+          WHERE job_id = ${input.jobId}
+          AND attempt = ${input.execution.attempt}
+          AND lease_token = ${input.execution.leaseToken}
+          AND attempt = (SELECT attempts FROM jobs WHERE id = ${input.jobId})
+          AND state IN ('launch_intent', 'session_ready')
+        `
+        return disposition
+      }).pipe(sql.withTransaction),
     shouldCancelJob: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`
         SELECT 1 AS current

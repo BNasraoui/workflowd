@@ -632,6 +632,56 @@ describe("runJobIteration", () => {
     expect(result).toBe("failed")
     expect(maxAttempts).toBe(2)
   })
+
+  test("uses the prepared harness retry limit instead of the worker limit", async () => {
+    const job = makeReviewWork({ id: 19 })
+    let maxAttempts = 0
+
+    const result = await Effect.runPromise(
+      runJobIteration({ ...jobOptions, maxAttempts: 5 }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              rescheduleJob: (input) =>
+                Effect.sync(() => {
+                  maxAttempts = input.maxAttempts
+                  return "failed" as const
+                }),
+            },
+            automation: {
+              prepareReview: (_input, context) => {
+                const prepared = preparedReview(context)
+                return Effect.succeed({
+                  ...prepared,
+                  launchIntent: {
+                    ...prepared.launchIntent,
+                    retryPolicy: { ...prepared.launchIntent.retryPolicy, maxAttempts: 1 },
+                  },
+                })
+              },
+            },
+            agentHarness: {
+              resumeSession: () =>
+                Effect.fail(
+                  new AgentHarnessError({
+                    operation: "run structured agent session",
+                    cause: new Error("temporary failure"),
+                    retryable: true,
+                  }),
+                ),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("failed")
+    expect(maxAttempts).toBe(1)
+  })
 })
 
 describe("runPublicationIteration", () => {

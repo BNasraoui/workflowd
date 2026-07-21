@@ -93,6 +93,10 @@ export type RescheduleJobInput = {
   readonly runAt: Date
   readonly error: string
   readonly maxAttempts: number
+  readonly execution?: {
+    readonly attempt: number
+    readonly leaseToken: string
+  }
 }
 
 export type ReschedulePublicationInput = {
