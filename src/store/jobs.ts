@@ -1,7 +1,7 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
 import { Effect } from "effect"
 import type { Work } from "../domain/work"
-import { decodeJobRow } from "./codecs"
+import { decodeAgentSessionReferenceRow, decodeJobRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import { SqlLeaseQueue } from "./lease"
@@ -10,6 +10,7 @@ import type { CompleteReviewJobInput, RecordFixResultInput } from "./model"
 
 type JobOperations = Pick<
   WorkflowStorePort,
+  | "claimExpiredAgentSession"
   | "claimNextJob"
   | "completeAgentReviewJob"
   | "completeFixJob"
@@ -22,6 +23,7 @@ type JobOperations = Pick<
   | "recordFixResult"
   | "rescheduleJob"
   | "shouldCancelJob"
+  | "supersedeAgentSession"
 >
 
 export function makeJobOperations(
@@ -35,7 +37,7 @@ export function makeJobOperations(
       sql`
         UPDATE agent_executions
         SET state = 'superseded', updated_at = ${claimedAt}
-        WHERE state IN ('launch_intent', 'session_ready')
+        WHERE state = 'launch_intent'
         AND job_id IN (
           SELECT id FROM jobs
           WHERE state = 'leased' AND lease_until <= ${claimedAt}
@@ -189,6 +191,23 @@ export function makeJobOperations(
     `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
 
   return {
+    claimExpiredAgentSession: (now) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{ readonly session_reference_json: string }>`
+          SELECT execution.session_reference_json
+          FROM agent_executions AS execution
+          JOIN jobs AS candidate ON candidate.id = execution.job_id
+          WHERE execution.state = 'session_ready'
+          AND candidate.state = 'leased'
+          AND candidate.lease_until <= ${now.toISOString()}
+          ORDER BY candidate.lease_until ASC, candidate.id ASC
+          LIMIT 1
+        `
+        const row = rows[0]
+        if (row === undefined) return null
+        const decoded = yield* decodeAgentSessionReferenceRow(row)
+        return decoded.sessionReference
+      }),
     claimNextJob: (input) => queue.claim(input),
     isJobCurrent: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`
@@ -410,5 +429,13 @@ export function makeJobOperations(
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length === 0)),
+    supersedeAgentSession: (sessionReferenceId, supersededAt) =>
+      sql<{ readonly session_reference_id: string }>`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${supersededAt.toISOString()}
+        WHERE session_reference_id = ${sessionReferenceId}
+        AND state = 'session_ready'
+        RETURNING session_reference_id
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "superseded"))),
   } satisfies JobOperations
 }

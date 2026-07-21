@@ -167,6 +167,79 @@ test("persists agent checkpoints in order and completes output with downstream r
   ])
 })
 
+test("persists every schema-valid review output larger than 64 KiB", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "large-agent-review",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent({
+          ...samplePullRequestEvent,
+          pullRequest: {
+            ...samplePullRequestEvent.pullRequest,
+            updatedAt: "2026-07-20T12:00:00.000Z",
+          },
+        }),
+      )
+      const work = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (work === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        work,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: execution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:02.000Z"),
+        reference: execution.reference,
+      })
+      const review = {
+        verdict: "changes_requested" as const,
+        summary: "Large valid review.",
+        findings: Array.from({ length: 7 }, (_, index) => ({
+          severity: "medium" as const,
+          title: `Finding ${index}`,
+          body: "x".repeat(10_000),
+        })),
+      }
+      const completed = yield* store.completeAgentReviewJob({
+        jobId: work.id,
+        workerId: "agent-worker",
+        sessionReferenceId: execution.reference.sessionReferenceId,
+        completedAt: new Date("2026-07-20T12:01:03.000Z"),
+        review,
+        autoFix: false,
+      })
+      const rows = yield* sql<{ readonly output_length: number }>`
+        SELECT length(output_json) AS output_length FROM agent_executions
+      `
+      return { completed, outputLength: rows[0]?.output_length }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.completed).toBe("completed")
+  expect(result.outputLength).toBeGreaterThan(65_536)
+})
+
 test("restarts with a new session after either checkpoint and fences expired attempts", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
@@ -240,6 +313,19 @@ test("restarts with a new session after either checkpoint and fences expired att
         reference: secondExecution.reference,
       })
 
+      const blockedByExpiredSession = yield* store.claimNextJob({
+        workerId: "agent-worker-3",
+        now: new Date("2026-07-20T12:03:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const expiredSession = yield* store.claimExpiredAgentSession(
+        new Date("2026-07-20T12:03:00.000Z"),
+      )
+      if (expiredSession === null) throw new Error("expected expired session")
+      yield* store.supersedeAgentSession(
+        expiredSession.sessionReferenceId,
+        new Date("2026-07-20T12:03:00.000Z"),
+      )
       const third = yield* store.claimNextJob({
         workerId: "agent-worker-3",
         now: new Date("2026-07-20T12:03:00.000Z"),
@@ -284,11 +370,21 @@ test("restarts with a new session after either checkpoint and fences expired att
         SELECT attempt, state FROM agent_executions ORDER BY attempt
       `
       const publications = yield* sql`SELECT review_json FROM publications`
-      return { orphanedReference, late, completed, executions, publications }
+      return {
+        blockedByExpiredSession,
+        expiredSession,
+        orphanedReference,
+        late,
+        completed,
+        executions,
+        publications,
+      }
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
   expect(result.orphanedReference).toBe("stale")
+  expect(result.blockedByExpiredSession).toBeNull()
+  expect(result.expiredSession.nativeSessionId).toBe("ses_2")
   expect(result.late).toBe("stale")
   expect(result.completed).toBe("completed")
   expect(result.executions).toEqual([

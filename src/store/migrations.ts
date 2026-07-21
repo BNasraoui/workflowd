@@ -293,7 +293,7 @@ const agentHarnessSchema = Effect.gen(function* () {
       ),
       output_json TEXT CHECK (
         output_json IS NULL OR (
-          json_valid(output_json) = 1 AND length(output_json) <= 65536
+          json_valid(output_json) = 1
         )
       ),
       state TEXT NOT NULL CHECK (state IN (

@@ -253,6 +253,13 @@ export function runJobIteration(options: {
 }) {
   return Effect.gen(function* () {
     const store = yield* WorkflowStore
+    const harness = yield* AgentHarness
+    while (true) {
+      const expiredSession = yield* store.claimExpiredAgentSession(options.now())
+      if (expiredSession === null) break
+      yield* harness.abortSession(expiredSession)
+      yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
+    }
     const work = yield* store.claimNextJob({
       workerId: options.workerId,
       now: options.now(),

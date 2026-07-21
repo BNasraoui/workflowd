@@ -35,7 +35,9 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   applyReconciliationSnapshot: () => Effect.die("unused"),
   claimNextReconciliation: () => Effect.succeed(null),
   rescheduleReconciliation: () => Effect.die("unused"),
+  claimExpiredAgentSession: () => Effect.succeed(null),
   claimNextJob: () => Effect.succeed(null),
+  supersedeAgentSession: () => Effect.die("unused"),
   shouldCancelJob: () => Effect.succeed(false),
   rescheduleJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
@@ -182,6 +184,66 @@ const jobOptions = {
   fixWorkEnabled: false,
   now: () => new Date("2026-07-19T12:00:00.000Z"),
 }
+
+test("aborts an expired native session before starting its replacement", async () => {
+  const actions: Array<string> = []
+  const oldReference = Schema.decodeUnknownSync(SessionReference)({
+    ...sessionReference(
+      preparedReview({
+        directory: "/tmp/review",
+        scope: { _tag: "GenerationScope", workflowId: "pr:42:7", generation: 1 },
+        operationId: "job:1",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-19T11:58:00.000Z"),
+      }),
+    ),
+    sessionReferenceId: "11111111-1111-4111-8111-111111111111",
+    nativeSessionId: "ses_expired",
+  })
+  let cleanupReturned = false
+
+  const result = await Effect.runPromise(
+    runJobIteration(jobOptions).pipe(
+      Effect.provide(
+        makeWorkerLayer({
+          store: {
+            claimExpiredAgentSession: () => {
+              if (cleanupReturned) return Effect.succeed(null)
+              cleanupReturned = true
+              return Effect.succeed(oldReference)
+            },
+            supersedeAgentSession: () => Effect.succeed("superseded"),
+            claimNextJob: () => {
+              actions.push("claim replacement")
+              return Effect.succeed(makeReviewWork())
+            },
+            completeAgentReviewJob: () => Effect.succeed("completed"),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+          },
+          automation: {
+            runReview: () =>
+              Effect.succeed({ verdict: "pass" as const, summary: "No findings.", findings: [] }),
+          },
+          agentHarness: {
+            abortSession: () => Effect.sync(() => actions.push("abort expired")),
+            createSession: (prepared) =>
+              Effect.sync(() => {
+                actions.push("create replacement")
+                return sessionReference(prepared)
+              }),
+          },
+        }),
+      ),
+    ),
+  )
+
+  expect(result).toBe("completed")
+  expect(actions).toEqual(["abort expired", "claim replacement", "create replacement"])
+})
 
 const makePublication = (id = 1) =>
   Schema.decodeUnknownSync(Publication)({

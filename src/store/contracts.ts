@@ -1,5 +1,6 @@
 import type { SqlError } from "@effect/sql/SqlError"
 import { Context, type Effect } from "effect"
+import type { SessionReference } from "../agent-harness"
 import type { Publication } from "../domain/publication"
 import type { Work } from "../domain/work"
 import type { StoreDataError } from "./errors"
@@ -49,6 +50,13 @@ export type WorkflowStorePort = {
   readonly claimNextJob: (
     input: LeaseClaim,
   ) => Effect.Effect<Work | null, SqlError | StoreDataError>
+  readonly claimExpiredAgentSession: (
+    now: Date,
+  ) => Effect.Effect<SessionReference | null, SqlError | StoreDataError>
+  readonly supersedeAgentSession: (
+    sessionReferenceId: string,
+    supersededAt: Date,
+  ) => Effect.Effect<"superseded" | "stale", SqlError>
   readonly shouldCancelJob: (
     jobId: number,
     workerId: string,
