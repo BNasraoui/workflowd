@@ -223,6 +223,7 @@ export function makeJobOperations(
         AND candidate.head_ref = ${input.headRef}
         AND json_extract(candidate.fix_result_json, '$._tag') = 'CommitPrepared'
         AND json_extract(candidate.fix_result_json, '$.commitSha') = ${input.commitSha}
+        AND candidate.controller_signing_fingerprint = ${input.controllerSigningFingerprint}
       `.pipe(Effect.map((rows) => rows[0]?.expected_head_sha ?? null)),
     claimExpiredAgentSession: (input) =>
       Effect.gen(function* () {
@@ -330,6 +331,7 @@ export function makeJobOperations(
         UPDATE jobs AS candidate
         SET
           state = 'succeeded',
+          controller_signing_fingerprint = ${input.controllerSigningFingerprint ?? null},
           lease_owner = NULL,
           lease_until = NULL,
           last_error = NULL,

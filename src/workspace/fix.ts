@@ -71,10 +71,15 @@ function publish(
           }),
         )
       }
-      return
+      return null
     }
 
-    yield* verifyCommit(work, workspace.directory, head, gitSigningKey)
+    const controllerSigningFingerprint = yield* verifyCommit(
+      work,
+      workspace.directory,
+      head,
+      gitSigningKey,
+    )
     if (result?._tag === "CommitPrepared" && result.commitSha !== head) {
       return yield* Effect.fail(
         new WorkspaceError({
@@ -121,6 +126,7 @@ function publish(
         }),
       )
     }
+    return controllerSigningFingerprint
   })
 }
 
@@ -211,7 +217,9 @@ function verifyCommit(work: FixWork, directory: string, head: string, gitSigning
           }),
         )
       }
+      return gitSigningKey.toLowerCase()
     }
+    return null
   })
 }
 

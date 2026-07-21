@@ -92,16 +92,20 @@ export const makeLiveLayer = (config: AppConfig) => {
                       })
                       return app.getInstallationOctokit(installationId)
                     },
-                    (publication) =>
-                      Effect.runPromise(
+                    (publication) => {
+                      const signingKey = config.workspace.gitSigningKey
+                      if (signingKey === undefined) return Promise.resolve(null)
+                      return Effect.runPromise(
                         store.isTrustedBranchPublication({
                           repositoryId: publication.repository.repositoryId,
                           repositoryFullName: publication.repository.repositoryFullName,
                           headRef: publication.headRef,
                           jobId: publication.jobId,
                           commitSha: publication.commitSha,
+                          controllerSigningFingerprint: signingKey.toLowerCase(),
                         }),
-                      ),
+                      )
+                    },
                   )
                 }).pipe(Effect.provide(WorkflowStoreLive)),
               ),

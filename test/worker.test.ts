@@ -683,8 +683,9 @@ describe("Fix Work processing", () => {
                   actions.push("record")
                   return "recorded" as const
                 }),
-              completeFixJob: () =>
+              completeFixJob: (input) =>
                 Effect.sync(() => {
+                  expect(input.controllerSigningFingerprint).toBe("e".repeat(40))
                   actions.push("complete")
                   return "completed" as const
                 }),
@@ -713,6 +714,7 @@ describe("Fix Work processing", () => {
               publishFix: () =>
                 Effect.sync(() => {
                   actions.push("publish")
+                  return "e".repeat(40)
                 }),
             },
           }),
@@ -763,7 +765,7 @@ describe("Fix Work processing", () => {
                   markCompleted: () => undefined,
                 }),
               publishFix: (_job, _workspace, _result, isCurrent) =>
-                isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(Effect.asVoid),
+                isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(Effect.as(null)),
             },
           }),
         ),
@@ -810,6 +812,7 @@ describe("Fix Work processing", () => {
                 Effect.sync(() => {
                   expect(fixResult).toBeUndefined()
                   actions.push("verify")
+                  return null
                 }),
             },
           }),

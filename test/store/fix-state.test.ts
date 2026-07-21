@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test"
+import { SqlClient } from "@effect/sql"
 import { Effect, Schema } from "effect"
 import { FixResult } from "../../src/domain/fix-result"
 import { WorkflowStore } from "../../src/store/contracts"
 import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 describe("durable fix state", () => {
-  test("retains the validated FixResult across a durable retry", async () => {
+  test("trusts only durable fix publications with matching controller signing evidence", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const store = yield* WorkflowStore
+        const sql = yield* SqlClient.SqlClient
         yield* store.ingestPullRequest(
           {
             deliveryId: "fix-state-pr",
@@ -78,6 +80,7 @@ describe("durable fix state", () => {
           jobId: retried.id,
           workerId: "fix-state-worker-2",
           completedAt: new Date("2026-07-19T12:06:30.000Z"),
+          controllerSigningFingerprint: "e".repeat(40),
         })
         const trustedParent = yield* store.isTrustedBranchPublication({
           repositoryId: String(fix.repositoryId),
@@ -85,15 +88,26 @@ describe("durable fix state", () => {
           headRef: fix.target.headRef,
           jobId: fix.id,
           commitSha: "c".repeat(40),
+          controllerSigningFingerprint: "e".repeat(40),
         })
-        const wrongCommit = yield* store.isTrustedBranchPublication({
+        const wrongSigner = yield* store.isTrustedBranchPublication({
           repositoryId: String(fix.repositoryId),
           repositoryFullName: fix.repositoryFullName,
           headRef: fix.target.headRef,
           jobId: fix.id,
-          commitSha: "d".repeat(40),
+          commitSha: "c".repeat(40),
+          controllerSigningFingerprint: "f".repeat(40),
         })
-        return { recorded, retried, trustedParent, wrongCommit }
+        yield* sql`UPDATE jobs SET controller_signing_fingerprint = NULL WHERE id = ${fix.id}`
+        const missingEvidence = yield* store.isTrustedBranchPublication({
+          repositoryId: String(fix.repositoryId),
+          repositoryFullName: fix.repositoryFullName,
+          headRef: fix.target.headRef,
+          jobId: fix.id,
+          commitSha: "c".repeat(40),
+          controllerSigningFingerprint: "e".repeat(40),
+        })
+        return { recorded, retried, trustedParent, wrongSigner, missingEvidence }
       }).pipe(Effect.provide(makeStoreLayer())),
     )
 
@@ -106,6 +120,7 @@ describe("durable fix state", () => {
       },
     })
     expect(result.trustedParent).toBe(samplePullRequestEvent.pullRequest.headSha)
-    expect(result.wrongCommit).toBeNull()
+    expect(result.wrongSigner).toBeNull()
+    expect(result.missingEvidence).toBeNull()
   })
 })

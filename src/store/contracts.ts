@@ -98,6 +98,7 @@ export type WorkflowStorePort = {
     readonly headRef: string
     readonly jobId: number
     readonly commitSha: string
+    readonly controllerSigningFingerprint: string
   }) => Effect.Effect<string | null, SqlError>
   readonly recordAgentLaunchIntent: <Input>(
     input: RecordAgentLaunchIntentInput<Input>,

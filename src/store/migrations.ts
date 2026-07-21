@@ -531,6 +531,18 @@ const qrspiWorkflowStart = Effect.gen(function* () {
   `
 })
 
+const fixPublicationSigningEvidence = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    ALTER TABLE jobs ADD COLUMN controller_signing_fingerprint TEXT CHECK (
+      controller_signing_fingerprint IS NULL OR (
+        length(controller_signing_fingerprint) IN (40, 64)
+        AND controller_signing_fingerprint NOT GLOB '*[^0-9a-fA-F]*'
+      )
+    )
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -538,5 +550,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
     "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
     "0005_qrspi_workflow_start": qrspiWorkflowStart,
+    "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
   }),
 })

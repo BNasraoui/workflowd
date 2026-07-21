@@ -34,7 +34,7 @@ export type WorkspacePort = {
     workspace: FixWorkspace,
     result: FixResult | undefined,
     isCurrent: DurableJobCurrentness,
-  ) => Effect.Effect<void, WorkspaceError>
+  ) => Effect.Effect<string | null, WorkspaceError>
 }
 
 export type ResolvedWorktree = {

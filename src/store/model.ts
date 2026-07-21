@@ -46,6 +46,7 @@ export type CompleteFixJobInput = {
   readonly jobId: number
   readonly workerId: string
   readonly completedAt: Date
+  readonly controllerSigningFingerprint?: string
 }
 
 export type DisableFixJobInput = {
