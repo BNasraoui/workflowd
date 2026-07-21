@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect, Schema } from "effect"
 import { type AgentLaunchIntent, SessionReference } from "../../src/agent-harness"
+import { MAX_AGENT_LAUNCH_INTENT_BYTES } from "../../src/agent-payload"
 import { WorkflowStore } from "../../src/store/contracts"
 import { decodePullRequestEvent, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
@@ -390,7 +391,7 @@ test("persists the maximum encoded built-in review output within the 4 MiB envel
   expect(result.outputLength).toBe(3_395_207)
 })
 
-test("rejects a durable launch intent larger than its 64 KiB envelope", async () => {
+test("rejects a durable launch intent larger than its configured envelope", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -430,7 +431,7 @@ test("rejects a durable launch intent larger than its 64 KiB envelope", async ()
           recordedAt: new Date("2026-07-20T12:01:01.000Z"),
           intent: {
             ...execution.intent,
-            input: { subject: "x".repeat(70_000) },
+            input: { subject: "x".repeat(MAX_AGENT_LAUNCH_INTENT_BYTES) },
           },
         }),
       )

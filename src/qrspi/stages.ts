@@ -7,6 +7,7 @@ import type {
   AgentLaunchIntent,
   SessionReference,
 } from "../agent-harness"
+import { boundedAgentPayload } from "../agent-payload"
 import {
   ReadyTicket,
   StageContractRef,
@@ -196,10 +197,25 @@ export const ImplementationStageRevision = Schema.TaggedStruct("ImplementationSt
 export const StageRevision = Schema.Union(DocumentStageRevision, ImplementationStageRevision)
 export type StageRevision = typeof StageRevision.Type
 
+const MAX_QRSPI_TASK_ENCODED_BYTES = 192 * 1024
+
 const QrspiHarnessInput = Schema.Struct({
   contract: StageContractRef,
-  task: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(32_768)),
+  task: Schema.String.pipe(
+    Schema.minLength(1),
+    Schema.filter((task) =>
+      Buffer.byteLength(JSON.stringify(task), "utf8") <= MAX_QRSPI_TASK_ENCODED_BYTES
+        ? true
+        : `Stage task exceeds ${MAX_QRSPI_TASK_ENCODED_BYTES} encoded UTF-8 bytes`,
+    ),
+  ),
   input: Schema.Unknown,
+  expectedArtifact: Schema.optional(
+    Schema.Struct({
+      path: RelativeArtifactPath,
+      mediaType: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+    }),
+  ),
 })
 const QrspiHarnessResult = Schema.Union(DocumentStageResult, ImplementationStageResult)
 type QrspiHarnessDefinition = AgentHarnessDefinition<
@@ -208,6 +224,8 @@ type QrspiHarnessDefinition = AgentHarnessDefinition<
   typeof QrspiHarnessResult.Type,
   typeof QrspiHarnessResult.Encoded
 >
+
+const QRSPI_HARNESS_WRAPPER_BYTES = 208 * 1024
 
 export function makeQrspiHarnessDefinitions(config: {
   readonly agent: string
@@ -231,11 +249,14 @@ export function makeQrspiHarnessDefinitions(config: {
     model: config.model,
     inputSchema: QrspiHarnessInput,
     outputSchema: QrspiHarnessResult,
-    maxInputBytes: Math.max(64 * 1024, config.maxInputBytes ?? 0),
+    maxInputBytes: (config.maxInputBytes ?? 64 * 1024) + QRSPI_HARNESS_WRAPPER_BYTES,
     maxOutputBytes: 1_048_576,
     promptContract: `${name}-stage-contract`,
     title: (input) => `QRSPI ${input.contract.name}`,
-    prompt: (input) => input.task,
+    prompt: (input) =>
+      input.expectedArtifact === undefined
+        ? input.task
+        : `${input.task}\n\nWrite the artifact at exactly ${input.expectedArtifact.path} with media type ${input.expectedArtifact.mediaType}. Do not change any other path.`,
     timeoutMs: config.timeoutMs,
     retryPolicy: {
       maxAttempts: config.maxAttempts ?? 3,
@@ -432,6 +453,7 @@ export function runStageContract(input: {
     readonly implementation: QrspiHarnessDefinition
   }
   readonly stage: StageDefinition
+  readonly ticketId: string
   readonly input: unknown
   readonly context: AgentExecutionContext
   readonly onSessionCreated?: (
@@ -452,7 +474,10 @@ export function runStageContract(input: {
         ),
       )
     }
-    const decodedInput = contract.decodeInput(input.input)
+    const encodedInput = yield* Schema.decodeUnknown(
+      boundedAgentPayload(input.stage.inputContract.maxEncodedBytes, "Stage contract input"),
+    )(input.input)
+    const decodedInput = contract.decodeInput(encodedInput)
     const definition =
       contract.kind === "document"
         ? input.harnessDefinitions.document
@@ -465,9 +490,15 @@ export function runStageContract(input: {
     ) {
       return yield* Effect.die(new Error(`Untrusted harness policy for stage ${input.stage.key}`))
     }
+    const expectedArtifact = resolveArtifactDestination(input.stage, input.ticketId)
     const prepared = yield* input.harness.prepare(
       definition,
-      { contract: contract.ref, task: contract.task(decodedInput), input: decodedInput },
+      {
+        contract: contract.ref,
+        task: contract.task(decodedInput),
+        input: decodedInput,
+        ...(expectedArtifact === undefined ? {} : { expectedArtifact }),
+      },
       input.context,
     )
     const sessionReference = yield* input.harness.createSession(prepared)
@@ -482,6 +513,21 @@ export function runStageContract(input: {
     const result = contract.decodeResult(harnessResult)
     return { result, sessionReference }
   })
+}
+
+export function resolveArtifactDestination(
+  stage: StageDefinition,
+  ticketId: string,
+): { readonly path: string; readonly mediaType: string } | undefined {
+  if (stage.outputContract._tag !== "Artifact") return undefined
+  return {
+    path: Schema.decodeUnknownSync(RelativeArtifactPath)(
+      stage.outputContract.pathTemplate
+        .replaceAll("{ticketId}", ticketId)
+        .replaceAll("{stageKey}", stage.key),
+    ),
+    mediaType: stage.outputContract.mediaType,
+  }
 }
 
 const initialOperations = [

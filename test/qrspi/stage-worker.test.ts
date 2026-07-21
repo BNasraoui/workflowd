@@ -70,6 +70,7 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
     | "completeStageProduce"
     | "rescheduleStageOperation"
     | "recordStageAgentSession"
+    | "requireStageSessionCleanup"
   > = {
     claimStageOperation: () => Effect.succeed(lease),
     isStageOperationCurrent: () => Effect.succeed(currentness[check++] ?? false),
@@ -79,6 +80,8 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
       Effect.sync(() => calls.push("reschedule")).pipe(Effect.as("rescheduled" as const)),
     recordStageAgentSession: () =>
       Effect.sync(() => calls.push("record-session")).pipe(Effect.as("recorded" as const)),
+    requireStageSessionCleanup: () =>
+      Effect.sync(() => calls.push("require-cleanup")).pipe(Effect.as("waiting_human" as const)),
   }
   const harness: AgentHarnessPort = {
     validateAvailability: () => Effect.void,
@@ -161,12 +164,24 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
 }
 
 describe("StageProduce worker", () => {
-  test("runs a generic retained stage without invoking any pull-request API", async () => {
+  test("runs a generic retained stage with its trusted artifact destination", async () => {
     const fake = fixture()
     let contractInput: unknown
+    let harnessInput: unknown
+    let prompt = ""
+    const customStage = {
+      ...lease.stage,
+      outputContract: {
+        _tag: "Artifact" as const,
+        pathTemplate: "product/specifications/{ticketId}/{stageKey}.adoc",
+        mediaType: "text/asciidoc",
+      },
+    }
     const harness: AgentHarnessPort = {
       ...fake.harness,
       prepare: (definition, input, context) => {
+        harnessInput = input
+        prompt = definition.prompt(Schema.decodeUnknownSync(definition.inputSchema)(input))
         contractInput = Schema.decodeUnknownSync(Schema.Struct({ input: StageContractInput }))(
           input,
         ).input
@@ -182,7 +197,10 @@ describe("StageProduce worker", () => {
         harnessDefinitions: fake.definitions,
         now: () => now,
         randomId: () => lease.leaseToken,
-        store: fake.store,
+        store: {
+          ...fake.store,
+          claimStageOperation: () => Effect.succeed({ ...lease, stage: customStage }),
+        },
         harness,
         catalog: fake.catalog,
       }),
@@ -197,6 +215,85 @@ describe("StageProduce worker", () => {
       "complete",
     ])
     expect(contractInput).toMatchObject({ readyTicket })
+    expect(harnessInput).toMatchObject({
+      expectedArtifact: {
+        path: "product/specifications/workflowd-vs3.4/questions.adoc",
+        mediaType: "text/asciidoc",
+      },
+    })
+    expect(prompt).toContain("product/specifications/workflowd-vs3.4/questions.adoc")
+    expect(prompt).toContain("text/asciidoc")
+  })
+
+  test("aborts and durably supersedes a recorded session before rescheduling", async () => {
+    const fake = fixture()
+    let rescheduleInput: unknown
+    const result = await Effect.runPromise(
+      runStageProduceIterationWith({
+        workerId: "stage-worker",
+        leaseDurationMs: 60_000,
+        workspace: fake.workspace,
+        harnessDefinitions: fake.definitions,
+        now: () => now,
+        randomId: () => lease.leaseToken,
+        store: {
+          ...fake.store,
+          rescheduleStageOperation: (input) => {
+            rescheduleInput = input
+            fake.calls.push("reschedule")
+            return Effect.succeed("rescheduled" as const)
+          },
+        },
+        harness: {
+          ...fake.harness,
+          resumeSession: () =>
+            Effect.sync(() => fake.calls.push("resume-session")).pipe(
+              Effect.andThen(Effect.die(new Error("resume failed"))),
+            ),
+          abortSession: () =>
+            Effect.sync(() => fake.calls.push("abort-session")).pipe(Effect.asVoid),
+        },
+        catalog: fake.catalog,
+      }),
+    )
+
+    expect(result).toBe("rescheduled")
+    expect(fake.calls).toEqual([
+      `workspace:workflow:${lease.currentHeadSha}`,
+      "create-session",
+      "record-session",
+      "resume-session",
+      "abort-session",
+      "reschedule",
+    ])
+    expect(rescheduleInput).toMatchObject({
+      confirmedAbortedSessionReferenceId: "session-ref",
+    })
+  })
+
+  test("retains fencing when recorded session cleanup is uncertain", async () => {
+    const fake = fixture()
+    const result = await Effect.runPromise(
+      runStageProduceIterationWith({
+        workerId: "stage-worker",
+        leaseDurationMs: 60_000,
+        workspace: fake.workspace,
+        harnessDefinitions: fake.definitions,
+        now: () => now,
+        randomId: () => lease.leaseToken,
+        store: fake.store,
+        harness: {
+          ...fake.harness,
+          resumeSession: () => Effect.die(new Error("resume failed")),
+          abortSession: () => Effect.die(new Error("abort uncertain")),
+        },
+        catalog: fake.catalog,
+      }),
+    )
+
+    expect(result).toBe("waiting_human")
+    expect(fake.calls).toContain("require-cleanup")
+    expect(fake.calls).not.toContain("reschedule")
   })
 
   test("yields the post-agent currentness check before durable completion", async () => {

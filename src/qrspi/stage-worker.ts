@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { Cause, Effect, Exit } from "effect"
-import { AgentHarness, type AgentHarnessPort } from "../agent-harness"
+import { AgentHarness, type AgentHarnessPort, type SessionReference } from "../agent-harness"
 import { QrspiStore, type QrspiStorePort, type StageOperationLease } from "./store"
 import { StageCatalogService, runStageContract, type StageCatalog } from "./stages"
 import { QrspiWorkspace, type QrspiWorkspacePort } from "./workspace"
@@ -47,6 +47,7 @@ export function runStageProduceIterationWith(options: {
     | "rescheduleStageOperation"
     | "completeStageProduce"
     | "recordStageAgentSession"
+    | "requireStageSessionCleanup"
   >
   readonly harness: AgentHarnessPort
   readonly catalog: StageCatalog
@@ -55,6 +56,7 @@ export function runStageProduceIterationWith(options: {
 }) {
   return Effect.gen(function* () {
     const { store, harness, catalog } = options
+    let recordedSession: SessionReference | undefined
     const work = yield* store.claimStageOperation(
       "StageProduce",
       options.workerId,
@@ -84,6 +86,7 @@ export function runStageProduceIterationWith(options: {
                 ? options.harnessDefinitions(work.stage)
                 : options.harnessDefinitions,
             stage: work.stage,
+            ticketId: work.ticketId,
             input: {
               ticketRevisionSha256: work.input.ticketRevisionSha256,
               readyTicket: work.readyTicket,
@@ -109,17 +112,37 @@ export function runStageProduceIterationWith(options: {
               requestedAt: options.now(),
             },
             onSessionCreated: (launchIntent, reference) =>
-              store.recordStageAgentSession({
-                operationId: work.operationId,
-                leaseToken: work.leaseToken,
-                launchIntent,
-                reference,
-                now: options.now(),
-              }),
+              store
+                .recordStageAgentSession({
+                  operationId: work.operationId,
+                  leaseToken: work.leaseToken,
+                  launchIntent,
+                  reference,
+                  now: options.now(),
+                })
+                .pipe(
+                  Effect.tap((disposition) =>
+                    disposition === "recorded"
+                      ? Effect.sync(() => void (recordedSession = reference))
+                      : Effect.void,
+                  ),
+                ),
           }),
       ),
     )
     if (Exit.isFailure(execution)) {
+      if (recordedSession !== undefined) {
+        const cleanup = yield* Effect.exit(harness.abortSession(recordedSession))
+        if (Exit.isFailure(cleanup)) {
+          return yield* store.requireStageSessionCleanup({
+            operationId: work.operationId,
+            leaseToken: work.leaseToken,
+            sessionReferenceId: recordedSession.sessionReferenceId,
+            error: "recorded agent session cleanup requires operator confirmation",
+            now: options.now(),
+          })
+        }
+      }
       const failedAt = options.now()
       return yield* store.rescheduleStageOperation({
         operationId: work.operationId,
@@ -127,6 +150,9 @@ export function runStageProduceIterationWith(options: {
         error: Cause.pretty(execution.cause),
         runAt: new Date(failedAt.getTime() + work.stage.producer.retry.backoffMs),
         now: failedAt,
+        ...(recordedSession === undefined
+          ? {}
+          : { confirmedAbortedSessionReferenceId: recordedSession.sessionReferenceId }),
       })
     }
     if (!(yield* store.isStageOperationCurrent(work.operationId, work.leaseToken, options.now()))) {

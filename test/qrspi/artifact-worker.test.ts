@@ -491,3 +491,81 @@ test("rejects a final implementation result without delivery evidence before rep
   ).rejects.toThrow("final delivery evidence")
   expect(mutated).toBe(false)
 })
+
+test("rejects an over-bound cumulative checkpoint before binding or updating refs", async () => {
+  const calls: string[] = []
+  const work = {
+    operationId: "implementation-publish:over-bound",
+    operationRevision: 1,
+    attempt: 1,
+    leaseToken: "11111111-1111-4111-8111-111111111111",
+    scope: { _tag: "GenerationScope" as const, workflowId: "workflow", generation: 1 },
+    input: {
+      stageKey: "implementation",
+      stageKind: "implementation" as const,
+      stageRevision: 1,
+      workflowDefinitionSha256: "a".repeat(64),
+      ticketRevisionSha256: "b".repeat(64),
+      sources: [],
+    },
+    stage: defaultQrspiWorkflowDefinition.stages[5]!,
+    repository: {
+      providerInstanceId: "github",
+      repositoryId: "42",
+      repositoryFullName: "owner/repo",
+    },
+    headRef: "feature/ticket",
+    currentHeadSha: "c".repeat(40),
+    ticketId: "workflowd-vs3.4",
+    readyTicket,
+    sessionReferenceId: "session-ref",
+    implementationCommits: [
+      {
+        position: 1,
+        commitSha: "d".repeat(40),
+        parentSha: "c".repeat(40),
+        changedPaths: Array.from({ length: 10_000 }, (_, index) => `src/prior-${index}.ts`),
+        operationId: "implementation-publish:prior",
+      },
+    ],
+    preparedResult: {
+      candidateSha: "e".repeat(40),
+      changedPaths: ["src/new.ts"],
+      final: true,
+      deliveryEvidence: {
+        summary: "Scenario passes",
+        scenarios: [{ scenario: 0, evidence: "bun test passes" }],
+      },
+    },
+  } satisfies StageOperationLease
+  const store = {
+    ...unusedStoreMethods,
+    claimStageOperation: () => Effect.succeed(work),
+    bindImplementationPublication: () =>
+      Effect.sync(() => calls.push("bind")).pipe(Effect.as("bound" as const)),
+  }
+  const repository: ArtifactPublicationRepository = {
+    finalizeDocument: () => Effect.die("unexpected document publication"),
+    finalizeImplementation: () =>
+      Effect.sync(() => calls.push("finalize")).pipe(
+        Effect.as({ finalSha: "f".repeat(40), parentSha: work.currentHeadSha }),
+      ),
+    advanceLocalWorktree: () => Effect.sync(() => calls.push("advance-local")),
+    updateRefExact: () => Effect.sync(() => calls.push("update-ref")),
+    observeRef: () => Effect.sync(() => calls.push("observe-ref")).pipe(Effect.as("f".repeat(40))),
+  }
+
+  await expect(
+    Effect.runPromise(
+      runArtifactPublishIterationWith({
+        workerId: "publisher",
+        leaseDurationMs: 60_000,
+        now: () => new Date("2026-07-22T12:00:00.000Z"),
+        randomId: () => work.leaseToken,
+        store,
+        repository,
+      }),
+    ),
+  ).rejects.toThrow()
+  expect(calls).toEqual(["finalize"])
+})

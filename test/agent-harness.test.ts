@@ -7,6 +7,7 @@ import {
   TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
 import { makePullRequestHarnessDefinitions } from "../src/opencode"
+import { makeQrspiHarnessDefinitions } from "../src/qrspi/stages"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
@@ -168,6 +169,46 @@ describe("TrustedAgentHarnessCatalog", () => {
     )
 
     expect(Buffer.byteLength(JSON.stringify(prepared.launchIntent))).toBeLessThanOrEqual(
+      MAX_AGENT_LAUNCH_INTENT_BYTES,
+    )
+  })
+
+  test("fits a maximum QRSPI stage input and escaped task inside both envelopes", async () => {
+    const definitions = makeQrspiHarnessDefinitions({
+      agent: "qrspi-producer",
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      maxInputBytes: 64 * 1024,
+    })
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog([definitions.document]),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    const stageInput = { text: `a${"é".repeat(32_762)}` }
+    const input = {
+      contract: { name: "Questions", contractVersion: 1 },
+      task: "\u0001".repeat(32_767),
+      input: stageInput,
+      expectedArtifact: { path: "docs/qrspi/ticket/questions.md", mediaType: "text/markdown" },
+    }
+
+    expect(Buffer.byteLength(JSON.stringify(stageInput), "utf8")).toBe(64 * 1024)
+    expect(Buffer.byteLength(JSON.stringify(input), "utf8")).toBeLessThanOrEqual(
+      definitions.document.maxInputBytes,
+    )
+    const prepared = await Effect.runPromise(
+      harness.prepare(definitions.document, input, {
+        directory: "/tmp/qrspi-worktree",
+        scope: { _tag: "GenerationScope", workflowId: "fixture-workflow", generation: 1 },
+        operationId: "fixture-operation",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+      }),
+    )
+    expect(Buffer.byteLength(JSON.stringify(prepared.launchIntent), "utf8")).toBeLessThanOrEqual(
       MAX_AGENT_LAUNCH_INTENT_BYTES,
     )
   })

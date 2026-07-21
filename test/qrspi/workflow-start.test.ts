@@ -1754,6 +1754,146 @@ describe("WorkflowStart integration", () => {
     })
   })
 
+  test("rejects rescheduling at the exact lease expiry", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, options)
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimStageOperation(
+          "StageProduce",
+          "worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (claimed === null) return yield* Effect.die("Expected StageProduce")
+        const disposition = yield* store.rescheduleStageOperation({
+          operationId: claimed.operationId,
+          leaseToken: claimed.leaseToken,
+          error: "late failure",
+          runAt: new Date("2026-07-21T05:03:00.000Z"),
+          now: new Date("2026-07-21T05:02:00.000Z"),
+        })
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{ readonly state: string; readonly lease_token: string | null }>`
+          SELECT state, lease_token FROM workflow_operations WHERE operation_id = ${claimed.operationId}
+        `
+        return { disposition, rows }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      disposition: "stale",
+      rows: [{ state: "leased", lease_token: "11111111-1111-4111-8111-111111111111" }],
+    })
+  })
+
+  test("durably supersedes a confirmed-aborted session before rescheduling", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, options)
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimStageOperation(
+          "StageProduce",
+          "worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (claimed === null) return yield* Effect.die("Expected StageProduce")
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations SET external_intent_json = ${JSON.stringify({
+            agentExecution: {
+              sessionReference: { sessionReferenceId: "session-ref", state: "created" },
+            },
+          })} WHERE operation_id = ${claimed.operationId}
+        `
+        const mismatched = yield* store.rescheduleStageOperation({
+          operationId: claimed.operationId,
+          leaseToken: claimed.leaseToken,
+          confirmedAbortedSessionReferenceId: "other-session",
+          error: "resume failed",
+          runAt: new Date("2026-07-21T05:03:00.000Z"),
+          now: new Date("2026-07-21T05:01:30.000Z"),
+        })
+        const rescheduled = yield* store.rescheduleStageOperation({
+          operationId: claimed.operationId,
+          leaseToken: claimed.leaseToken,
+          confirmedAbortedSessionReferenceId: "session-ref",
+          error: "resume failed",
+          runAt: new Date("2026-07-21T05:03:00.000Z"),
+          now: new Date("2026-07-21T05:01:30.000Z"),
+        })
+        const rows = yield* sql<{ readonly state: string; readonly session_state: string }>`
+          SELECT state, json_extract(external_intent_json,
+            '$.agentExecution.sessionReference.state') AS session_state
+          FROM workflow_operations WHERE operation_id = ${claimed.operationId}
+        `
+        return { mismatched, rescheduled, rows }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      mismatched: "stale",
+      rescheduled: "rescheduled",
+      rows: [{ state: "ready", session_state: "superseded" }],
+    })
+  })
+
+  test("moves uncertain recorded-session cleanup to an operator gate", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, options)
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimStageOperation(
+          "StageProduce",
+          "worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (claimed === null) return yield* Effect.die("Expected StageProduce")
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations SET external_intent_json = ${JSON.stringify({
+            agentExecution: { sessionReference: { sessionReferenceId: "session-ref" } },
+          })} WHERE operation_id = ${claimed.operationId}
+        `
+        const disposition = yield* store.requireStageSessionCleanup({
+          operationId: claimed.operationId,
+          leaseToken: claimed.leaseToken,
+          sessionReferenceId: "session-ref",
+          error: "cleanup requires operator confirmation",
+          now: new Date("2026-07-21T05:01:30.000Z"),
+        })
+        const operations = yield* sql<{
+          readonly state: string
+          readonly terminal_retry_policy: string | null
+        }>`
+          SELECT state, terminal_retry_policy FROM workflow_operations
+          WHERE operation_id = ${claimed.operationId}
+        `
+        const gates = yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operation_gates WHERE operation_id = ${claimed.operationId}
+        `
+        return { disposition, operations, gates }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      disposition: "waiting_human",
+      operations: [{ state: "waiting_human", terminal_retry_policy: "operator_required" }],
+      gates: [{ state: "pending" }],
+    })
+  })
+
   test("terminally fails an expired StageProduce lease whose retry budget is exhausted", async () => {
     const filename = await databasePath()
     const fake = fakes()

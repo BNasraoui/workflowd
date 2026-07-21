@@ -679,6 +679,32 @@ const qrspiStages = Effect.gen(function* () {
   }
 })
 
+const expandAgentLaunchIntentEnvelope = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`DROP TRIGGER agent_execution_payload_insert`
+  yield* sql`DROP TRIGGER agent_execution_payload_update`
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_insert
+    BEFORE INSERT ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES})
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_update
+    BEFORE UPDATE OF launch_intent_json, output_json ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES})
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -688,5 +714,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0005_qrspi_workflow_start": qrspiWorkflowStart,
     "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
     "0007_qrspi_stages": qrspiStages,
+    "0008_expand_agent_launch_intent_envelope": expandAgentLaunchIntentEnvelope,
   }),
 })

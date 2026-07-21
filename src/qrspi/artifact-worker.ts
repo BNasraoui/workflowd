@@ -7,7 +7,12 @@ import {
   ArtifactPublicationRepositoryFactoryService,
   type ArtifactPublicationRepository,
 } from "./artifact-publication"
-import { DocumentStageResult, ImplementationStageResult } from "./stages"
+import {
+  DocumentStageResult,
+  ImplementationCheckpointReference,
+  ImplementationStageResult,
+  resolveArtifactDestination,
+} from "./stages"
 import { canonicalSha256 } from "./domain"
 import { QrspiWorkspace, type QrspiWorkspacePort } from "./workspace"
 
@@ -117,6 +122,22 @@ export function runArtifactPublishIterationWith(options: {
             changedPaths: prepared.changedPaths,
             operationId: work.operationId,
           }
+          const commits = [...(work.implementationCommits ?? []), commit]
+          const checkpoint = prepared.final
+            ? yield* Schema.decodeUnknown(ImplementationCheckpointReference)({
+                repository: work.repository,
+                workflowId: work.scope.workflowId,
+                generation: work.scope.generation,
+                stageKey: work.stage.key,
+                stageRevision: work.input.stageRevision,
+                checkpointId: `checkpoint:${work.operationId}`,
+                baseSha: commits[0]!.parentSha,
+                finalSha: commit.commitSha,
+                commits,
+                changedPaths: [...new Set(commits.flatMap(({ changedPaths }) => changedPaths))],
+                preparedDeliveryEvidenceSha256: canonicalSha256(prepared.deliveryEvidence!),
+              })
+            : undefined
           if (recoveredCommit === undefined) {
             const binding = yield* store.bindImplementationPublication({
               operationId: work.operationId,
@@ -176,22 +197,6 @@ export function runArtifactPublishIterationWith(options: {
           ) {
             return "stale" as const
           }
-          const commits = [...(work.implementationCommits ?? []), commit]
-          const checkpoint = prepared.final
-            ? {
-                repository: work.repository,
-                workflowId: work.scope.workflowId,
-                generation: work.scope.generation,
-                stageKey: work.stage.key,
-                stageRevision: work.input.stageRevision,
-                checkpointId: `checkpoint:${work.operationId}`,
-                baseSha: commits[0]!.parentSha,
-                finalSha: commit.commitSha,
-                commits,
-                changedPaths: [...new Set(commits.flatMap(({ changedPaths }) => changedPaths))],
-                preparedDeliveryEvidenceSha256: canonicalSha256(prepared.deliveryEvidence!),
-              }
-            : undefined
           return yield* store.completeImplementationPublication({
             operationId: work.operationId,
             expectedOld: work.currentHeadSha,
@@ -205,9 +210,8 @@ export function runArtifactPublishIterationWith(options: {
           return yield* Effect.fail(new Error("Document stage must publish an artifact"))
         }
         const prepared = yield* Schema.decodeUnknown(DocumentStageResult)(work.preparedResult)
-        const path = work.stage.outputContract.pathTemplate
-          .replaceAll("{ticketId}", work.ticketId)
-          .replaceAll("{stageKey}", work.stage.key)
+        const destination = resolveArtifactDestination(work.stage, work.ticketId)!
+        const path = destination.path
         const contentSha256 = createHash("sha256").update(prepared.content).digest("hex")
         const publication = yield* Effect.exit(
           ArtifactPublication.publish(
@@ -225,7 +229,7 @@ export function runArtifactPublishIterationWith(options: {
                 stageKey: work.stage.key,
                 stageRevision: work.input.stageRevision,
                 path,
-                mediaType: work.stage.outputContract.mediaType,
+                mediaType: destination.mediaType,
               },
               trustedTrailers: [
                 ["Provenance-Version", "1"],

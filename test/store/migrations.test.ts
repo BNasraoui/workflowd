@@ -144,6 +144,7 @@ describe("strict initial store schema", () => {
       { migration_id: 5, name: "qrspi_workflow_start" },
       { migration_id: 6, name: "fix_publication_signing_evidence" },
       { migration_id: 7, name: "qrspi_stages" },
+      { migration_id: 8, name: "expand_agent_launch_intent_envelope" },
     ])
     expect(result.tables).toHaveLength(16)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
@@ -175,7 +176,7 @@ describe("strict initial store schema", () => {
         yield* sql`DROP TABLE qrspi_implementation_steps`
         yield* sql`DROP TABLE qrspi_stage_revisions`
         yield* sql`DROP TABLE qrspi_stage_runs`
-        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 7`
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 7`
 
         const workflowId = "workflow-upgrade"
         const ticketSha = "a".repeat(64)

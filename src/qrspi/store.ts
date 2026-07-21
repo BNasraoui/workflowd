@@ -259,12 +259,20 @@ export type QrspiStorePort = {
     readonly reference: SessionReference
     readonly now: Date
   }) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly requireStageSessionCleanup: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly sessionReferenceId: string
+    readonly error: string
+    readonly now: Date
+  }) => Effect.Effect<"waiting_human" | "stale", SqlError>
   readonly rescheduleStageOperation: (input: {
     readonly operationId: string
     readonly leaseToken: string
     readonly error: string
     readonly runAt: Date
     readonly now: Date
+    readonly confirmedAbortedSessionReferenceId?: string
   }) => Effect.Effect<"rescheduled" | "failed" | "stale", SqlError>
   readonly recordArtifactPublicationOutcome: (input: {
     readonly operationId: string
@@ -1230,6 +1238,34 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         RETURNING operation_id
       `.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale"))),
 
+    requireStageSessionCleanup: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations
+            SET state = 'waiting_human',
+                terminal_failure_reason = ${input.error},
+                terminal_retry_policy = 'operator_required',
+                lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+              AND json_extract(external_intent_json,
+                '$.agentExecution.sessionReference.sessionReferenceId') =
+                  ${input.sessionReferenceId}
+            RETURNING operation_id
+          `
+          if (rows.length !== 1) return "stale" as const
+          yield* sql`
+            INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+            VALUES (${input.operationId}, 'pending', ${input.error}, ${input.now.toISOString()})
+            ON CONFLICT (operation_id) DO NOTHING
+          `
+          return "waiting_human" as const
+        }),
+      ),
+
     findArtifactPublicationRecovery: () =>
       Effect.gen(function* () {
         const rows = yield* sql<{
@@ -1376,19 +1412,38 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             SELECT attempt, max_attempts FROM workflow_operations
             WHERE operation_id = ${input.operationId} AND state = 'leased' AND is_current = 1
               AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+              AND (
+                kind != 'StageProduce'
+                OR json_extract(external_intent_json,
+                  '$.agentExecution.sessionReference.sessionReferenceId') IS NULL
+                OR json_extract(external_intent_json,
+                  '$.agentExecution.sessionReference.sessionReferenceId') =
+                    ${input.confirmedAbortedSessionReferenceId ?? null}
+              )
           `
           const row = rows[0]
           if (row === undefined) return "stale" as const
           const failed = Number(row.attempt) >= Number(row.max_attempts)
-          yield* sql`
+          const updated = yield* sql<{ readonly operation_id: string }>`
             UPDATE workflow_operations
             SET state = ${failed ? "failed" : "ready"}, run_at = ${input.runAt.toISOString()},
                 last_error = ${input.error}, lease_owner = NULL, lease_token = NULL,
                 lease_until = NULL, terminal_failure_reason = ${failed ? input.error : null},
                 terminal_retry_policy = ${failed ? "retry_budget_exhausted" : null},
+                external_intent_json = CASE
+                  WHEN ${input.confirmedAbortedSessionReferenceId ?? null} IS NULL
+                    THEN external_intent_json
+                  ELSE json_set(external_intent_json,
+                    '$.agentExecution.sessionReference.state', 'superseded')
+                  END,
                 updated_at = ${input.now.toISOString()}
-            WHERE operation_id = ${input.operationId}
+            WHERE operation_id = ${input.operationId} AND state = 'leased' AND is_current = 1
+              AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+            RETURNING operation_id
           `
+          if (updated.length !== 1) return "stale" as const
           if (failed) {
             yield* sql`
               UPDATE qrspi_stage_runs SET state = 'failed', pending_revision = NULL,

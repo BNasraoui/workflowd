@@ -323,6 +323,7 @@ describe("StageCatalog", () => {
         harness,
         harnessDefinitions: definitions,
         stage: defaultQrspiWorkflowDefinition.stages[0]!,
+        ticketId: "workflowd-vs3.4",
         input: { ticketRevisionSha256: "a".repeat(64), readyTicket, sources: [] },
         context: {
           directory: "/tmp/qrspi-stage",
@@ -343,5 +344,65 @@ describe("StageCatalog", () => {
     })
     expect(output.sessionReference.nativeSessionId).toBe("native-session")
     expect(actions).toEqual(["prepare:qrspi.document", "create", "resume"])
+  })
+
+  test("rejects stage input over its encoded byte budget before harness preparation", async () => {
+    const fixture = {
+      ref: { name: "SmallInput", contractVersion: 1 },
+      kind: "document" as const,
+      inputSchema: Schema.Struct({ text: Schema.String }),
+      resultSchema: Schema.Struct({ content: Schema.String }),
+      task: ({ text }: { readonly text: string }) => text,
+    } satisfies StageContract<
+      { readonly text: string },
+      { readonly text: string },
+      { readonly content: string },
+      { readonly content: string }
+    >
+    const stage = {
+      ...defaultQrspiWorkflowDefinition.stages[0]!,
+      contract: fixture.ref,
+      inputContract: { schemaId: "small", schemaVersion: 1, maxEncodedBytes: 16 },
+    }
+    let prepared = false
+    const definitions = makeQrspiHarnessDefinitions({
+      agent: stage.producer.agent,
+      model: stage.producer.model,
+      timeoutMs: stage.producer.timeoutMs,
+      maxInputBytes: stage.inputContract.maxEncodedBytes,
+    })
+    const harness = {
+      validateAvailability: () => Effect.void,
+      prepare: () => {
+        prepared = true
+        return Effect.die("must not prepare")
+      },
+      createSession: () => Effect.die("must not create"),
+      resumeSession: () => Effect.die("must not resume"),
+      abortSession: () => Effect.void,
+    } satisfies AgentHarnessPort
+
+    await expect(
+      Effect.runPromise(
+        runStageContract({
+          catalog: new StageCatalog([fixture]),
+          harness,
+          harnessDefinitions: definitions,
+          stage,
+          ticketId: "ticket",
+          input: { text: "ééé" },
+          context: {
+            directory: "/tmp/qrspi-stage",
+            scope: { _tag: "GenerationScope", workflowId: "workflow", generation: 1 },
+            operationId: "operation",
+            operationRevision: 1,
+            attempt: 1,
+            leaseToken: "11111111-1111-4111-8111-111111111111",
+            requestedAt: new Date("2026-07-21T12:00:00.000Z"),
+          },
+        }),
+      ),
+    ).rejects.toThrow("encoded UTF-8 bytes")
+    expect(prepared).toBe(false)
   })
 })
