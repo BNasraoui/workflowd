@@ -250,8 +250,33 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
     ) {
       throw new Error(`Stage review minimum exceeds maximum: ${stage.key}`)
     }
+    if (
+      stage.outputContract._tag === "Artifact" &&
+      !isSafeArtifactPathTemplate(stage.outputContract.pathTemplate)
+    ) {
+      throw new Error(`Invalid artifact path template for stage: ${stage.key}`)
+    }
   }
   return definition
+}
+
+function isSafeArtifactPathTemplate(pathTemplate: string): boolean {
+  if (
+    pathTemplate.startsWith("/") ||
+    pathTemplate.includes("\\") ||
+    /^[A-Za-z]:/.test(pathTemplate)
+  ) {
+    return false
+  }
+  const segments = pathTemplate.split("/")
+  return segments.every(
+    (segment) =>
+      segment !== "" &&
+      segment !== "." &&
+      segment !== ".." &&
+      segment.toLowerCase() !== ".git" &&
+      /^(?:[A-Za-z0-9._-]|\{(?:ticketId|stageKey)\})+$/.test(segment),
+  )
 }
 
 export const WorkflowStartOutput = Schema.Struct({
@@ -283,11 +308,15 @@ function problem(code: TicketProblem["code"], message: string): TicketProblem {
   return { code, message }
 }
 
-function storyIsAppropriate(ticket: Ticket): boolean {
-  return ticket.issueType === "feature"
+export interface TicketReadinessJudgment {
+  readonly userStory: "required" | "optional" | "forbidden"
 }
 
-export function checkTicket(ticket: Ticket, checkedAt: Date): TicketCheck {
+export function checkTicket(
+  ticket: Ticket,
+  checkedAt: Date,
+  judgment: TicketReadinessJudgment,
+): TicketCheck {
   const problems: TicketProblem[] = []
   if (ticket.title === undefined || ticket.title.trim() === "")
     problems.push(problem("missing_title", "Add a title naming the change."))
@@ -301,11 +330,11 @@ export function checkTicket(ticket: Ticket, checkedAt: Date): TicketCheck {
     problems.push(
       problem("unclear_product_outcome", "Replace the placeholder with a product outcome."),
     )
-  if (storyIsAppropriate(ticket) && !ticket.userStory?.trim())
-    problems.push(problem("missing_user_story", "Add the feature actor, capability, and value."))
-  if (!storyIsAppropriate(ticket) && ticket.userStory?.trim())
+  if (judgment.userStory === "required" && !ticket.userStory?.trim())
+    problems.push(problem("missing_user_story", "Add the actor, capability, and value."))
+  if (judgment.userStory === "forbidden" && ticket.userStory?.trim())
     problems.push(
-      problem("inappropriate_user_story", "Remove the user story from non-feature work."),
+      problem("inappropriate_user_story", "Remove the user story when it does not help the work."),
     )
   if (ticket.acceptanceCriteria === undefined || ticket.acceptanceCriteria.length === 0)
     problems.push(problem("missing_acceptance_criteria", "Add observable acceptance criteria."))

@@ -14,6 +14,7 @@ const reference = {
   trackerInstanceId: "workspace-42",
   nativeTicketId: "workflowd-vs3.3",
 } as const
+const optionalStory = { userStory: "optional" } as const
 
 describe("QRSPI ticket boundary", () => {
   test("decodes an incomplete ticket and reports product problems without technical requirements", () => {
@@ -23,7 +24,9 @@ describe("QRSPI ticket boundary", () => {
       title: "Kick off QRSPI",
     })
 
-    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
+      userStory: "required",
+    })
 
     expect(result._tag).toBe("NeedsWork")
     if (result._tag === "NeedsWork") {
@@ -64,7 +67,7 @@ describe("QRSPI ticket boundary", () => {
       scenarios: [{ name: "Incomplete scenario" }],
     })
 
-    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
 
     expect(result._tag).toBe("NeedsWork")
     if (result._tag === "NeedsWork") {
@@ -72,18 +75,24 @@ describe("QRSPI ticket boundary", () => {
     }
   })
 
-  test("reports a user story as inappropriate for non-feature work", () => {
+  test("allows a feature without a story when the readiness judgment makes it optional", () => {
+    const { userStory: _, ...withoutStory } = readyTicket()
+    const ticket = Schema.decodeUnknownSync(Ticket)(withoutStory)
+
+    expect(
+      checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), { userStory: "optional" })._tag,
+    ).toBe("Ready")
+  })
+
+  test("allows a story for non-feature work when the readiness judgment makes it appropriate", () => {
     const ticket = Schema.decodeUnknownSync(Ticket)({
       ...readyTicket(),
-      issueType: "bug",
+      issueType: "task",
     })
 
-    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
-
-    expect(result._tag).toBe("NeedsWork")
-    if (result._tag === "NeedsWork") {
-      expect(result.problems.map(({ code }) => code)).toContain("inappropriate_user_story")
-    }
+    expect(
+      checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), { userStory: "optional" })._tag,
+    ).toBe("Ready")
   })
 
   test("excludes tracker observation metadata from the ticket revision hash", () => {
@@ -101,6 +110,7 @@ describe("QRSPI ticket boundary", () => {
         sourceRevision: "tracker-revision-1",
       }),
       new Date("2026-07-21T05:00:00.000Z"),
+      optionalStory,
     )
     expect(first._tag).toBe("Ready")
     if (first._tag === "Ready") {
@@ -110,6 +120,7 @@ describe("QRSPI ticket boundary", () => {
           sourceRevision: "tracker-revision-2",
         }),
         new Date("2026-07-22T05:00:00.000Z"),
+        optionalStory,
       )
       expect(second._tag).toBe("Ready")
       if (second._tag !== "Ready") throw new Error("Expected ready ticket")
@@ -165,7 +176,9 @@ describe("QRSPI ticket boundary", () => {
     })
 
     expect(ticket).not.toHaveProperty("readinessEvidence")
-    expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))._tag).toBe("Ready")
+    expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)._tag).toBe(
+      "Ready",
+    )
   })
 
   test("rejects source text that has no locally resolvable URL, file, or reference syntax", () => {
@@ -179,7 +192,7 @@ describe("QRSPI ticket boundary", () => {
       acceptanceCriteria: ["It starts."],
       scenarios: [{ name: "Start", given: "ready", when: "started", then: "running" }],
     })
-    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
 
     expect(result._tag).toBe("NeedsWork")
     if (result._tag === "NeedsWork") {
@@ -200,7 +213,7 @@ describe("QRSPI ticket boundary", () => {
         scenarios: [{ name: "Start", given: "ready", when: "started", then: "running" }],
       })
 
-      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
 
       expect(result._tag).toBe("NeedsWork")
       if (result._tag === "NeedsWork") {
@@ -223,7 +236,7 @@ describe("QRSPI ticket boundary", () => {
 
     for (const [field, value, expectedCode] of cases) {
       const ticket = Schema.decodeUnknownSync(Ticket)({ ...readyTicket(), [field]: value })
-      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
 
       expect(result._tag).toBe("NeedsWork")
       if (result._tag === "NeedsWork") {
@@ -238,7 +251,7 @@ describe("QRSPI ticket boundary", () => {
         ...readyTicket(),
         acceptanceCriteria: [criterion],
       })
-      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
       expect(result._tag).toBe("NeedsWork")
       if (result._tag === "NeedsWork") {
         expect(result.problems.map(({ code }) => code)).toContain(
@@ -258,7 +271,7 @@ describe("QRSPI ticket boundary", () => {
         ...base,
         scenarios: [{ ...base.scenarios[0], [field]: value }],
       })
-      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+      const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)
       expect(result._tag).toBe("NeedsWork")
       if (result._tag === "NeedsWork") {
         expect(result.problems.map(({ code }) => code)).toContain("invalid_scenario")
@@ -312,6 +325,21 @@ describe("QRSPI ticket boundary", () => {
     expect(normalized).toEqual(definition)
     expect(canonicalSha256(normalized)).toMatch(/^[0-9a-f]{64}$/)
   })
+
+  test("rejects unsafe artifact path templates during definition normalization", () => {
+    for (const pathTemplate of [
+      "/tmp/questions.md",
+      "../questions.md",
+      "docs/../questions.md",
+      "docs/.git/config",
+      "docs\\qrspi\\questions.md",
+      "C:/tmp/questions.md",
+    ]) {
+      expect(() => normalizeWorkflowDefinition(workflowDefinition(pathTemplate))).toThrow(
+        "artifact path template",
+      )
+    }
+  })
 })
 
 function readyTicket() {
@@ -329,6 +357,38 @@ function readyTicket() {
         given: "a ready ticket",
         when: "kickoff is requested",
         then: "a generation exists",
+      },
+    ],
+  }
+}
+
+function workflowDefinition(pathTemplate: string) {
+  return {
+    contractVersion: 1,
+    definitionVersion: 1,
+    stages: [
+      {
+        key: "questions",
+        kind: "document",
+        activation: { mode: "enabled" },
+        definitionVersion: 1,
+        inputContract: {
+          schemaId: "qrspi.questions.input",
+          schemaVersion: 1,
+          maxEncodedBytes: 16_384,
+        },
+        producer: {
+          harnessId: "opencode",
+          harnessVersion: 1,
+          agent: "qrspi-questions",
+          model: "openai/gpt-5.6-sol",
+          timeoutMs: 60_000,
+          retry: { maxAttempts: 1, backoffMs: 1_000 },
+        },
+        outputContract: { _tag: "Artifact", pathTemplate, mediaType: "text/markdown" },
+        reviewPolicy: { mode: "none" },
+        humanGatePolicy: { mode: "none" },
+        initialOperations: [],
       },
     ],
   }

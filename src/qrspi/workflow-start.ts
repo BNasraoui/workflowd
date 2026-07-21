@@ -137,7 +137,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
       const ticket = yield* readTicket(tickets, request.ticket)
-      const checked = checkTicket(ticket, now())
+      const checked = checkTicket(ticket, now(), { userStory: "optional" })
       if (checked._tag === "NeedsWork") return checked
 
       const workflowId = workflowIdFor(request.repository, request.ticket)
@@ -628,7 +628,7 @@ function finalRecheck(input: {
 }) {
   return Effect.gen(function* () {
     const finalTicket = yield* readTicket(input.tickets, input.request.ticket)
-    const finalCheck = checkTicket(finalTicket, input.now())
+    const finalCheck = checkTicket(finalTicket, input.now(), { userStory: "optional" })
     const finalInspection = yield* input.repositories.inspect({
       repository: input.request.repository,
       baseRef: input.inspection.baseRef,
