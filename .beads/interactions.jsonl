@@ -1,0 +1,1 @@
+{"id":"int-292d984d1b92c1345affd1dd94804bac","kind":"field_change","created_at":"2026-07-21T13:31:47.640796777Z","actor":"Ben","issue_id":"workflowd-6md","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Fixed and verified: newer ambiguous observations durably revoke active reconciliation authority and leave the latest reconciliation claimable."}}
