@@ -145,7 +145,32 @@ function parseScenarios(section: string | undefined) {
   }))
 }
 
-type QrspiOctokit = Pick<Octokit, "rest">
+type RepositoriesApi = Octokit["rest"]["repos"]
+type PullsApi = Octokit["rest"]["pulls"]
+type GitApi = Octokit["rest"]["git"]
+type QrspiOctokit = {
+  readonly rest: {
+    readonly repos: {
+      readonly get: (
+        input: Parameters<RepositoriesApi["get"]>[0],
+      ) => Promise<{ readonly data: { readonly id: number; readonly full_name: string } }>
+      readonly getBranch: (
+        input: Parameters<RepositoriesApi["getBranch"]>[0],
+      ) => Promise<{ readonly data: { readonly commit: { readonly sha: string } } }>
+      readonly compareCommits: (
+        input: Parameters<RepositoriesApi["compareCommits"]>[0],
+      ) => Promise<{ readonly data: { readonly status: string } }>
+    }
+    readonly pulls: {
+      readonly list: (
+        input: Parameters<PullsApi["list"]>[0],
+      ) => Promise<{ readonly data: ReadonlyArray<unknown> }>
+    }
+    readonly git: {
+      readonly createRef: (input: Parameters<GitApi["createRef"]>[0]) => Promise<unknown>
+    }
+  }
+}
 type OctokitProvider = (installationId: number) => Promise<QrspiOctokit>
 
 export class GitHubQrspiRepository implements QrspiRepositoryPort {
@@ -208,18 +233,40 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
     })
 
   readonly observeAcceptedBranch: QrspiRepositoryPort["observeAcceptedBranch"] = (input) =>
-    this.observeBranch(input).pipe(
-      Effect.map((observed) => {
-        if (observed === null) return { _tag: "Absent" } as const
-        if (
-          (input.previousTrustedSha === null && observed.sha === input.baseSha) ||
-          observed.sha === input.previousTrustedSha
-        ) {
-          return { _tag: "Accepted", sha: observed.sha } as const
-        }
-        return { _tag: "UnknownHistory", sha: observed.sha } as const
-      }),
-    )
+    this.attempt("observe accepted ticket branch", async (signal) => {
+      const { owner, repo } = repositoryName(input.repository)
+      const client = await this.client(this.config.installationId)
+      let sha: string
+      try {
+        const branch = await client.rest.repos.getBranch({
+          owner,
+          repo,
+          branch: input.headRef,
+          request: { signal },
+        })
+        sha = branch.data.commit.sha
+      } catch (cause) {
+        if (isNotFound(cause)) return { _tag: "Absent" } as const
+        throw cause
+      }
+      if (
+        (input.previousTrustedSha === null && sha === input.baseSha) ||
+        sha === input.previousTrustedSha
+      ) {
+        return { _tag: "Accepted", sha } as const
+      }
+      if (input.previousTrustedSha !== null) {
+        const comparison = await client.rest.repos.compareCommits({
+          owner,
+          repo,
+          base: input.previousTrustedSha,
+          head: sha,
+          request: { signal },
+        })
+        if (comparison.data.status === "ahead") return { _tag: "Accepted", sha } as const
+      }
+      return { _tag: "UnknownHistory", sha } as const
+    })
 
   readonly createBranch: QrspiRepositoryPort["createBranch"] = (input) =>
     this.attempt("create exact ticket branch", async (signal) => {

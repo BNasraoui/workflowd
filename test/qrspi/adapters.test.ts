@@ -1,12 +1,36 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { BeadsCliTicketSource, openPullRequestQuery } from "../../src/qrspi/adapters"
+import type { QrspiConfig } from "../../src/config"
+import {
+  BeadsCliTicketSource,
+  GitHubQrspiRepository,
+  openPullRequestQuery,
+} from "../../src/qrspi/adapters"
 
 const reference = {
   tracker: "beads",
   trackerInstanceId: "workspace-42",
   nativeTicketId: "workflowd-vs3.3",
 } as const
+
+const repository = {
+  providerInstanceId: "github-app-123",
+  repositoryId: "42",
+  repositoryFullName: "example-owner/example",
+} as const
+
+const qrspiConfig = {
+  token: "test-token",
+  installationId: 123,
+  repository,
+  trackerInstanceId: "workspace-42",
+  beadsWorkspace: "/srv/repository",
+  baseRef: "main",
+  repositoryOperationTimeoutMs: 30_000,
+  operationCompletionMarginMs: 10_000,
+  leaseDurationMs: 60_000,
+  workflowDefinition: { contractVersion: 1, definitionVersion: 1, stages: [] },
+} satisfies QrspiConfig
 
 describe("QRSPI external adapters", () => {
   test("reads Beads through its readonly bounded command envelope", async () => {
@@ -150,5 +174,39 @@ describe("QRSPI external adapters", () => {
       state: "open",
       head: "example-owner:feature/workflowd-vs3.3-start",
     })
+  })
+
+  test("accepts an advanced branch when the previous trusted SHA is its ancestor", async () => {
+    const previousTrustedSha = "a".repeat(40)
+    const advancedSha = "b".repeat(40)
+    const compareCalls: Array<{ readonly base: string; readonly head: string }> = []
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+          compareCommits: async (input) => {
+            if (input === undefined) throw new Error("compare parameters are required")
+            compareCalls.push({ base: input.base, head: input.head })
+            return { data: { status: "ahead" } }
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const observation = await Effect.runPromise(
+      adapter.observeAcceptedBranch({
+        repository,
+        headRef: "feature/workflowd-vs3.3-start",
+        baseSha: "c".repeat(40),
+        previousTrustedSha,
+      }),
+    )
+
+    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
+    expect(compareCalls).toHaveLength(1)
+    expect(compareCalls[0]).toMatchObject({ base: previousTrustedSha, head: advancedSha })
   })
 })

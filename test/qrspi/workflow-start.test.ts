@@ -16,7 +16,7 @@ import {
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
 import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
 import type { JsonValue } from "../../src/json"
-import { WorkflowStartInput, workflowIdFor } from "../../src/qrspi/domain"
+import { WorkflowStartInput, WorkflowStartRequest, workflowIdFor } from "../../src/qrspi/domain"
 
 const directories: string[] = []
 afterEach(async () => {
@@ -260,9 +260,10 @@ async function startWithOptions(
   filename: string,
   fake: ReturnType<typeof fakes>,
   startOptions: WorkflowStartOptions,
+  startRequest: typeof WorkflowStartRequest.Type = request,
 ) {
   const result = await Effect.runPromise(
-    makeWorkflowStart(startOptions)(request).pipe(
+    makeWorkflowStart(startOptions)(startRequest).pipe(
       Effect.provide(layer(filename, fake)),
       Effect.either,
     ),
@@ -325,6 +326,25 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(observations[0]!.external_observation_json)).toEqual({
       headRef: result.branchName,
       sha: baseSha,
+    })
+  })
+
+  test("sanitizes consecutive dots in a valid ticket ID before creating the branch", async () => {
+    const filename = await databasePath()
+    const dottedTicket = {
+      ...ticketReference,
+      nativeTicketId: "workflowd..vs3.3",
+    }
+    const fake = fakes({ ticket: { ...readyTicket, reference: dottedTicket } })
+
+    const result = await startWithOptions(filename, fake, options, {
+      repository,
+      ticket: dottedTicket,
+    })
+
+    expect(result).toMatchObject({
+      _tag: "Started",
+      branchName: "feature/workflowd.vs3.3-kick-off-a-qrspi-workflow",
     })
   })
 

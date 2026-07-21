@@ -762,6 +762,7 @@ function branchName(issueType: string, ticketId: string, title: string) {
   const safeTicket = ticketId
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/\.+/g, ".")
     .replace(/^[-.]|[-.]$/g, "")
   const slug = title
     .normalize("NFKD")
