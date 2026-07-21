@@ -52,6 +52,7 @@ interface WorkerConfig {
   readonly publicationTimeoutMs: number
   readonly publicationLeaseDurationMs: number
   readonly agentBranchPrefixes: ReadonlyArray<string>
+  readonly trustedAgentUsers: ReadonlyArray<string>
   readonly commandUsers: ReadonlyArray<string>
 }
 
@@ -167,6 +168,20 @@ function commandUsers(value: string | undefined): ReadonlyArray<string> {
   return values
 }
 
+function trustedAgentUsers(value: string | undefined): ReadonlyArray<string> {
+  if (value === undefined || value.trim() === "") return []
+  const values = value.split(",").map((item) => item.trim().toLowerCase())
+  if (
+    values.some(
+      (item) =>
+        !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?(?:\[bot\])?$/.test(item) || item.includes("--"),
+    )
+  ) {
+    throw new Error("WORKFLOWD_TRUSTED_AGENT_USERS must contain valid GitHub users")
+  }
+  return values
+}
+
 async function secret(
   env: Record<string, string | undefined>,
   directName: string,
@@ -252,9 +267,13 @@ export async function loadConfig(
     env.WORKFLOWD_FIX_WORK_ENABLED,
     "WORKFLOWD_FIX_WORK_ENABLED",
   )
+  const configuredTrustedAgentUsers = trustedAgentUsers(env.WORKFLOWD_TRUSTED_AGENT_USERS)
   const gitSigningKey = env.WORKFLOWD_GIT_SIGNING_KEY
   if (fixWorkEnabled && gitSigningKey === undefined) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
+  }
+  if (fixWorkEnabled && configuredTrustedAgentUsers.length === 0) {
+    throw new Error("WORKFLOWD_TRUSTED_AGENT_USERS is required when Fix Work is enabled")
   }
   if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
@@ -341,6 +360,7 @@ export async function loadConfig(
       publicationTimeoutMs,
       publicationLeaseDurationMs,
       agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
+      trustedAgentUsers: configuredTrustedAgentUsers,
       commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
     },
     ...(qrspi === undefined ? {} : { qrspi }),

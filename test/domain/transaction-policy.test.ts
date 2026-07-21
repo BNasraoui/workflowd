@@ -21,6 +21,20 @@ const passingReview: ReviewResult = {
 }
 
 describe("transaction policy", () => {
+  test("requires an explicitly trusted pull request author", () => {
+    expect(
+      decideFixEligibility({
+        repositoryFullName: "owner/repository",
+        headRepositoryFullName: "owner/repository",
+        headRef: "opencode/untrusted-change",
+        author: "untrusted-collaborator",
+        trustedAgentUsers: ["trusted-agent[bot]"],
+        review: actionableReview,
+        agentBranchPrefixes: ["opencode/"],
+      }),
+    ).toEqual(FixEligibility.Ineligible({ reason: "untrusted-author" }))
+  })
+
   test("uses one fix policy for automatic and manual requests", () => {
     for (const [review, headRepositoryFullName, expected] of [
       [actionableReview, "OWNER/repository", FixEligibility.Eligible()],
@@ -39,6 +53,8 @@ describe("transaction policy", () => {
         decideFixEligibility({
           repositoryFullName: "owner/repository",
           headRepositoryFullName,
+          author: "Trusted-Agent[bot]",
+          trustedAgentUsers: ["trusted-agent[bot]"],
           review,
         }),
       ).toEqual(expected)
@@ -48,6 +64,8 @@ describe("transaction policy", () => {
         repositoryFullName: "owner/repository",
         headRepositoryFullName: "owner/repository",
         headRef: "human/feature",
+        author: "trusted-agent[bot]",
+        trustedAgentUsers: ["trusted-agent[bot]"],
         review: actionableReview,
         agentBranchPrefixes: ["opencode/"],
       }),

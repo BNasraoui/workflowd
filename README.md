@@ -37,7 +37,8 @@ A managed checkout and temporary worktree are used only when no matching local w
 
 - Reviews run through the read-only `pr-reviewer` agent.
 - Fix Work is disabled by default. Reviews and `/agent fix` cannot enqueue or execute fixes unless `WORKFLOWD_FIX_WORK_ENABLED=true` is explicitly configured.
-- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only for same-repository branches beginning with `opencode/` or `plan/` by default. Existing eligibility and command authorization checks still apply.
+- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
+- The trusted identity is the PR author reported by GitHub and persisted with the current PR generation. It is not inferred from repository write access, branch name, branch creator, commit author, or organization membership. Therefore an unlisted collaborator's same-repository branch remains review-only even when its name has an eligible prefix. Command authorization is an additional check, not an override: `/agent fix` cannot run Fix Work for an unlisted author or ineligible branch.
 - The fixer verifies changes and commits without pushing. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
 - Enable Fix Work only for trusted agent-owned pull requests because fixer verification runs repository commands on this host.
 - A subsequent `pull_request.synchronize` webhook queues the follow-up review.
@@ -95,7 +96,10 @@ The required installed values are:
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_COMMAND_USERS`: comma-separated authorized GitHub usernames; an empty value disables commands
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
+- `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled
 - `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
+
+Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 
 All optional environment names, defaults, separators, timeout/lease settings, and development secret alternatives are documented in `deploy/workflowd.env.example`. Startup rejects invalid ports, URLs, model/agent identifiers, branch prefixes, GitHub users, and leases that do not outlast their timeout.
 

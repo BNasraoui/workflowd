@@ -1,7 +1,7 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Effect } from "effect"
-import { decideFixEligibility } from "../domain/transaction-policy"
+import { decideFixCandidate } from "../domain/transaction-policy"
 import { decodeCommandRow, decodePublicationReviewRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
@@ -278,7 +278,7 @@ export class SqlCommandStore implements CommandOperations {
       const row = reviews[0]
       if (row === undefined) return "noop" as const
       const review = yield* decodePublicationReviewRow(row)
-      const eligibility = decideFixEligibility({
+      const eligibility = decideFixCandidate({
         repositoryFullName: pullRequest.repository_full_name,
         headRepositoryFullName: pullRequest.head_repository_full_name,
         review: review.review,
