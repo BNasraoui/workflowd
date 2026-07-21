@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
-import type { AgentHarnessPort } from "../../src/agent-harness"
+import { TrustedAgentHarnessCatalog, type AgentHarnessPort } from "../../src/agent-harness"
+import { normalizeRetainedWorkflowDefinition } from "../../src/qrspi/domain"
 import {
   BuiltInStageContracts,
   StageCatalog,
@@ -197,6 +198,24 @@ describe("StageCatalog", () => {
         maxAttempts: 5,
       },
     ])
+  })
+
+  test("registers startup harnesses for retained retry policies above the current limit", () => {
+    const stage = defaultQrspiWorkflowDefinition.stages[0]!
+    const retained = normalizeRetainedWorkflowDefinition({
+      ...defaultQrspiWorkflowDefinition,
+      stages: [
+        {
+          ...stage,
+          producer: { ...stage.producer, retry: { ...stage.producer.retry, maxAttempts: 20 } },
+        },
+      ],
+    })
+    const harnesses = qrspiHarnessDefinitionsForWorkflows([retained])
+
+    expect(retained.stages[0]!.producer.retry.maxAttempts).toBe(20)
+    expect(harnesses[0]!.retryPolicy.maxAttempts).toBe(10)
+    expect(() => new TrustedAgentHarnessCatalog(harnesses)).not.toThrow()
   })
 
   test("deduplicates exact generated producer policies", () => {

@@ -320,7 +320,7 @@ export function makeQrspiHarnessDefinitions(config: {
     },
     timeoutMs: config.timeoutMs,
     retryPolicy: {
-      maxAttempts: config.maxAttempts ?? 3,
+      maxAttempts: Math.min(config.maxAttempts ?? 3, 10),
       structuredOutputRetryCount: 2,
       invalidOutput: "retry",
     },
