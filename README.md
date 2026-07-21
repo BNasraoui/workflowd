@@ -33,7 +33,7 @@ When it finds the PR branch locally, it:
 
 A managed checkout and temporary worktree are used only when no matching local worktree exists. Private repositories therefore require working local Git credentials for managed fallback.
 
-Managed worktree paths include the immutable job generation and attempt. Cleanup can therefore make an old session directory unavailable, but a later attempt never reuses that path for unrelated contents.
+Managed review worktree paths include the immutable job generation and attempt. Managed Fix Work paths remain stable across attempts so retries can recover retained edits. Cleanup can make an old session directory unavailable, but a later job generation never reuses that path for unrelated contents.
 
 ## Resumable OpenCode sessions
 

@@ -754,9 +754,13 @@ describe("GitWorkspaceAdapter", () => {
           ),
       ),
     )
+    const retryJob = makeFixJob(fixture, {
+      attempt: 2,
+      review: job.review,
+    })
     const recovered = await Effect.runPromise(
       Effect.scoped(
-        manager.prepareFix(job).pipe(
+        manager.prepareFix(retryJob).pipe(
           Effect.flatMap((workspace) =>
             Effect.promise(async () => ({
               contents: await readFile(join(workspace.directory, "app.ts"), "utf8"),
