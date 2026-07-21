@@ -208,6 +208,20 @@ describe("StageCatalog", () => {
     expect(variants).toHaveLength(1)
   })
 
+  test("retains document and implementation variants that share a producer policy", () => {
+    const document = defaultQrspiWorkflowDefinition.stages[0]!
+    const implementation = {
+      ...defaultQrspiWorkflowDefinition.stages[5]!,
+      producer: document.producer,
+    }
+    const variants = qrspiHarnessDefinitionsForWorkflows([
+      { ...defaultQrspiWorkflowDefinition, stages: [document, implementation] },
+    ])
+
+    expect(variants).toHaveLength(2)
+    expect(variants[0]!.outputSchema).not.toBe(variants[1]!.outputSchema)
+  })
+
   test("uses kind-specific schemas whose maximum field-sized outputs fit their byte envelopes", () => {
     const definitions = makeQrspiHarnessDefinitions({
       agent: "qrspi-producer",

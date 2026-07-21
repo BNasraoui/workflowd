@@ -58,6 +58,7 @@ export function runStageProduceIterationWith(options: {
   return Effect.gen(function* () {
     const { store, harness, catalog } = options
     let recordedSession: SessionReference | undefined
+    let confirmedAbortedSession: SessionReference | undefined
     let recordedLaunchIntentSessionReferenceId: string | undefined
     const work = yield* store.claimStageOperation(
       "StageProduce",
@@ -147,11 +148,17 @@ export function runStageProduceIterationWith(options: {
                       : Effect.void,
                   ),
                 ),
+            onSessionAborted: (reference) =>
+              Effect.sync(() => void (confirmedAbortedSession = reference)),
           }),
       ),
     )
     if (Exit.isFailure(execution)) {
-      if (recordedSession === undefined && recordedLaunchIntentSessionReferenceId !== undefined) {
+      if (
+        recordedSession === undefined &&
+        confirmedAbortedSession === undefined &&
+        recordedLaunchIntentSessionReferenceId !== undefined
+      ) {
         return yield* store.requireStageSessionCleanup({
           operationId: work.operationId,
           leaseToken: work.leaseToken,
@@ -179,9 +186,12 @@ export function runStageProduceIterationWith(options: {
         error: Cause.pretty(execution.cause),
         runAt: new Date(failedAt.getTime() + work.stage.producer.retry.backoffMs),
         now: failedAt,
-        ...(recordedSession === undefined
+        ...(confirmedAbortedSession === undefined && recordedSession === undefined
           ? {}
-          : { confirmedAbortedSessionReferenceId: recordedSession.sessionReferenceId }),
+          : {
+              confirmedAbortedSessionReferenceId:
+                confirmedAbortedSession?.sessionReferenceId ?? recordedSession!.sessionReferenceId,
+            }),
       })
     }
     if (!(yield* store.isStageOperationCurrent(work.operationId, work.leaseToken, options.now()))) {

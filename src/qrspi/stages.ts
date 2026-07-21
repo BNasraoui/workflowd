@@ -327,22 +327,26 @@ export function qrspiHarnessDefinitionsForWorkflows(
       .filter((stage) => stage.activation.mode !== "disabled")
       .map((stage) => {
         const variants = makeQrspiHarnessDefinitionsForStage(stage)
-        return stage.kind === "document" ? variants.document : variants.implementation
+        return {
+          kind: stage.kind,
+          definition: stage.kind === "document" ? variants.document : variants.implementation,
+        }
       }),
   )
-  const retained = new Map<string, (typeof variants)[number]>()
-  for (const variant of variants) {
+  const retained = new Map<string, (typeof variants)[number]["definition"]>()
+  for (const { kind, definition } of variants) {
     const key = JSON.stringify({
-      ref: variant.ref,
-      agent: variant.agent,
-      model: variant.model,
-      maxInputBytes: variant.maxInputBytes,
-      maxOutputBytes: variant.maxOutputBytes,
-      promptContract: variant.promptContract,
-      timeoutMs: variant.timeoutMs,
-      retryPolicy: variant.retryPolicy,
+      kind,
+      ref: definition.ref,
+      agent: definition.agent,
+      model: definition.model,
+      maxInputBytes: definition.maxInputBytes,
+      maxOutputBytes: definition.maxOutputBytes,
+      promptContract: definition.promptContract,
+      timeoutMs: definition.timeoutMs,
+      retryPolicy: definition.retryPolicy,
     })
-    if (!retained.has(key)) retained.set(key, variant)
+    if (!retained.has(key)) retained.set(key, definition)
   }
   return [...retained.values()]
 }
@@ -507,6 +511,7 @@ function runQrspiHarness<Result, ResultEncoded>(input: {
   readonly onSessionCreated?: (
     reference: SessionReference,
   ) => Effect.Effect<"recorded" | "stale", Error>
+  readonly onSessionAborted?: (reference: SessionReference) => Effect.Effect<void, never>
 }) {
   return Effect.gen(function* () {
     const prepared = yield* input.harness.prepare(
@@ -525,6 +530,7 @@ function runQrspiHarness<Result, ResultEncoded>(input: {
       const recorded = yield* input.onSessionCreated(sessionReference)
       if (recorded === "stale") {
         yield* input.harness.abortSession(sessionReference)
+        if (input.onSessionAborted !== undefined) yield* input.onSessionAborted(sessionReference)
         return yield* Effect.fail(new Error("Stage session lost durable fencing authority"))
       }
     }
@@ -550,6 +556,7 @@ export function runStageContract(input: {
   readonly onSessionCreated?: (
     reference: SessionReference,
   ) => Effect.Effect<"recorded" | "stale", Error>
+  readonly onSessionAborted?: (reference: SessionReference) => Effect.Effect<void, never>
 }) {
   return Effect.gen(function* () {
     const contractRef = input.stage.contract ?? {

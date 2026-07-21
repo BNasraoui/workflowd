@@ -278,6 +278,52 @@ describe("StageProduce worker", () => {
     })
   })
 
+  test("reschedules after a stale session write when the new session was aborted", async () => {
+    const fake = fixture()
+    let rescheduleInput: unknown
+    const result = await Effect.runPromise(
+      runStageProduceIterationWith({
+        workerId: "stage-worker",
+        leaseDurationMs: 60_000,
+        workspace: fake.workspace,
+        harnessDefinitions: fake.definitions,
+        now: () => now,
+        randomId: () => lease.leaseToken,
+        store: {
+          ...fake.store,
+          recordStageAgentSessionReference: () =>
+            Effect.sync(() => fake.calls.push("record-session-reference")).pipe(
+              Effect.as("stale" as const),
+            ),
+          rescheduleStageOperation: (input) => {
+            rescheduleInput = input
+            fake.calls.push("reschedule")
+            return Effect.succeed("rescheduled" as const)
+          },
+        },
+        harness: {
+          ...fake.harness,
+          abortSession: () =>
+            Effect.sync(() => fake.calls.push("abort-session")).pipe(Effect.asVoid),
+        },
+        catalog: fake.catalog,
+      }),
+    )
+
+    expect(result).toBe("rescheduled")
+    expect(fake.calls).toEqual([
+      `workspace:workflow:${lease.currentHeadSha}`,
+      "record-launch-intent",
+      "create-session",
+      "record-session-reference",
+      "abort-session",
+      "reschedule",
+    ])
+    expect(rescheduleInput).toMatchObject({
+      confirmedAbortedSessionReferenceId: "session-ref",
+    })
+  })
+
   test("retains fencing when recorded session cleanup is uncertain", async () => {
     const fake = fixture()
     const result = await Effect.runPromise(
