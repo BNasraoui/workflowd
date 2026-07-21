@@ -422,7 +422,7 @@ describe("durable pull request reconciliation", () => {
     })
   })
 
-  test("revokes a leased reconciliation after a newer ambiguous observation", async () => {
+  test("revokes a leased reconciliation after a distinct same-time ambiguous observation", async () => {
     const directory = await mkdtemp(join(tmpdir(), "workflowd-reconciliation-"))
     const filename = join(directory, "workflowd.db")
     try {
@@ -477,7 +477,7 @@ describe("durable pull request reconciliation", () => {
               event: "pull_request",
               action: "synchronize",
               payload: "{}",
-              receivedAt: new Date("2026-07-19T12:01:01.000Z"),
+              receivedAt: new Date("2026-07-19T12:00:01.000Z"),
             },
             decodePullRequestEvent({
               ...samplePullRequestEvent,

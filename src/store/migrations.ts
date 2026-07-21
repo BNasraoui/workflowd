@@ -552,6 +552,26 @@ const reconciliationObservationWatermark = Effect.gen(function* () {
   `
 })
 
+export const reconciliationObservationSequence = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE webhook_deliveries ADD COLUMN observation_sequence INTEGER`
+  yield* sql`UPDATE webhook_deliveries SET observation_sequence = rowid`
+  yield* sql`
+    CREATE UNIQUE INDEX webhook_deliveries_observation_sequence
+    ON webhook_deliveries (observation_sequence)
+  `
+  yield* sql`ALTER TABLE reconciliations ADD COLUMN observation_sequence INTEGER`
+  yield* sql`
+    UPDATE reconciliations
+    SET
+      observation_received_at = updated_at,
+      observation_sequence = COALESCE(
+        (SELECT MAX(observation_sequence) FROM webhook_deliveries),
+        0
+      )
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -561,5 +581,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0005_qrspi_workflow_start": qrspiWorkflowStart,
     "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
     "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
+    "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
   }),
 })
