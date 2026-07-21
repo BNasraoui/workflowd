@@ -657,6 +657,39 @@ describe("WorkflowStart integration", () => {
     expect(Number(states.gates[0]?.count)).toBe(1)
   })
 
+  test("cancels a waiting WorkflowStart gate when changed input supersedes it", async () => {
+    const filename = await databasePath()
+    const fake = fakes({ crashBeforeCreate: true })
+    await expect(start(filename, fake)).rejects.toThrow()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET state = 'waiting_external', lease_owner = NULL, lease_token = NULL,
+              lease_until = NULL, observation_attempts = 0, max_observation_attempts = 1
+          WHERE kind = 'WorkflowStart'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    await expect(start(filename, fake)).rejects.toMatchObject({
+      _tag: "WorkflowStartNeedsOperator",
+    })
+    fake.setTicket({ ...readyTicket, title: "Kick off changed gated input" })
+
+    await expect(start(filename, fake)).resolves.toMatchObject({ _tag: "Started", generation: 1 })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operation_gates ORDER BY created_at
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([{ state: "cancelled" }])
+  })
+
   test("preserves an operator-required wait when an open pull request exists", async () => {
     const filename = await databasePath()
     const fake = fakes({ crashBeforeCreate: true })

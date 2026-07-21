@@ -309,7 +309,18 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
     return Effect.tryPromise({
       try: run,
       catch: (cause) => new QrspiRepositoryError({ operation, cause: normalizeError(cause) }),
-    })
+    }).pipe(
+      Effect.timeoutFail({
+        duration: this.config.repositoryOperationTimeoutMs,
+        onTimeout: () =>
+          new QrspiRepositoryError({
+            operation,
+            cause: new Error(
+              `Repository operation timed out after ${this.config.repositoryOperationTimeoutMs}ms`,
+            ),
+          }),
+      }),
+    )
   }
 
   private async isAcceptedHistory(
@@ -340,7 +351,6 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       if (
         commit.sha !== currentSha ||
         commit.parents.length !== 1 ||
-        commit.commit.verification?.verified !== true ||
         jobIds.length !== 1 ||
         !Number.isSafeInteger(jobId) ||
         !(await this.isTrustedPublication({ repository, headRef, jobId, commitSha: currentSha }))

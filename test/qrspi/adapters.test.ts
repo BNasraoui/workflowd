@@ -202,7 +202,7 @@ describe("QRSPI external adapters", () => {
     expect(observation).toEqual({ _tag: "Accepted", sha: previousTrustedSha })
   })
 
-  test("accepts an advanced chain of signed commits linked to durable publications", async () => {
+  test("accepts an advanced chain only when every commit is linked to a durable publication", async () => {
     const previousTrustedSha = "a".repeat(40)
     const advancedSha = "b".repeat(40)
     const publications: Array<{
@@ -224,7 +224,7 @@ describe("QRSPI external adapters", () => {
                 parents: [{ sha: previousTrustedSha }],
                 commit: {
                   message: "Apply trusted fix\n\nWorkflowd-Job: 41",
-                  verification: { verified: true },
+                  verification: { verified: false },
                 },
               },
             }),
@@ -254,7 +254,7 @@ describe("QRSPI external adapters", () => {
     ])
   })
 
-  test("rejects an unsigned descendant of the previous trusted SHA", async () => {
+  test("rejects a GitHub-verified descendant without a durable publication", async () => {
     const previousTrustedSha = "a".repeat(40)
     const advancedSha = "b".repeat(40)
     const adapter = new GitHubQrspiRepository(
@@ -270,7 +270,7 @@ describe("QRSPI external adapters", () => {
                 parents: [{ sha: previousTrustedSha }],
                 commit: {
                   message: "Apply untrusted fix\n\nWorkflowd-Job: 41",
-                  verification: { verified: false },
+                  verification: { verified: true },
                 },
               },
             }),
@@ -279,7 +279,7 @@ describe("QRSPI external adapters", () => {
           git: { createRef: async () => undefined },
         },
       }),
-      async () => true,
+      async () => false,
     )
 
     const observation = await Effect.runPromise(
@@ -292,5 +292,21 @@ describe("QRSPI external adapters", () => {
     )
 
     expect(observation).toEqual({ _tag: "UnknownHistory", sha: advancedSha })
+  })
+
+  test("bounds a never-completing repository inspection", async () => {
+    const adapter = new GitHubQrspiRepository(
+      { ...qrspiConfig, repositoryOperationTimeoutMs: 10 },
+      async () => await new Promise(() => undefined),
+    )
+
+    const startedAt = Date.now()
+    const exit = await Effect.runPromiseExit(adapter.inspect({ repository, baseRef: "main" }))
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { _tag: "QrspiRepositoryError" } },
+    })
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
   })
 })

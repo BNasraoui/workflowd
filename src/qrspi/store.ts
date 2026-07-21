@@ -347,6 +347,10 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               `
             } else {
               yield* sql`
+                UPDATE workflow_operation_gates SET state = 'cancelled'
+                WHERE operation_id = ${existing.operation_id} AND state = 'pending'
+              `
+              yield* sql`
                 UPDATE workflow_operations
                 SET is_current = 0,
                     state = CASE WHEN state IN ('blocked', 'ready', 'leased', 'waiting_external',
