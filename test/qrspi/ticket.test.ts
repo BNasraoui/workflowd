@@ -4,10 +4,11 @@ import { Effect, Schema } from "effect"
 import {
   Ticket,
   canonicalSha256,
-  checkTicket,
+  checkTicket as checkTicketDomain,
   normalizeWorkflowDefinition,
   workflowIdFor,
 } from "../../src/qrspi/domain"
+import { makeWorkspaceSourceResolver } from "../../src/qrspi/source-resolver"
 
 const reference = {
   tracker: "beads",
@@ -25,6 +26,14 @@ const contradictoryDirection = {
   ...optionalStory,
   productDirection: "contradictory",
 } as const
+
+function checkTicket(
+  ticket: Parameters<typeof checkTicketDomain>[0],
+  checkedAt: Parameters<typeof checkTicketDomain>[1],
+  judgment: Parameters<typeof checkTicketDomain>[2],
+) {
+  return checkTicketDomain(ticket, checkedAt, judgment, () => true)
+}
 
 describe("QRSPI ticket boundary", () => {
   test("decodes an incomplete ticket and reports product problems without technical requirements", () => {
@@ -265,6 +274,24 @@ describe("QRSPI ticket boundary", () => {
     }
   })
 
+  test("rejects a well-formed repository path that the trusted resolver cannot resolve", () => {
+    const ticket = Schema.decodeUnknownSync(Ticket)({
+      ...readyTicket(),
+      sources: ["docs/does-not-exist.md"],
+    })
+    const result = checkTicketDomain(
+      ticket,
+      new Date("2026-07-21T05:00:00.000Z"),
+      optionalStory,
+      makeWorkspaceSourceResolver(process.cwd()),
+    )
+
+    expect(result._tag).toBe("NeedsWork")
+    if (result._tag === "NeedsWork") {
+      expect(result.problems.map(({ code }) => code)).toContain("unresolved_source")
+    }
+  })
+
   test("reports structural placeholder acceptance criteria as unobservable", () => {
     for (const criterion of ["TODO", "TBD", "unknown", "  todo: decide later  "]) {
       const ticket = Schema.decodeUnknownSync(Ticket)({
@@ -380,7 +407,7 @@ describe("QRSPI ticket boundary", () => {
             maximumRevisions: 2,
           },
           humanGatePolicy: { mode: "on_escalation" },
-          initialOperations: [],
+          initialOperations: requiredInitialOperations(),
         },
       ],
     } as const
@@ -404,6 +431,47 @@ describe("QRSPI ticket boundary", () => {
         "artifact path template",
       )
     }
+  })
+
+  test("rejects workflow definitions without an enabled runnable stage", () => {
+    expect(() =>
+      normalizeWorkflowDefinition({ contractVersion: 1, definitionVersion: 1, stages: [] }),
+    ).toThrow("runnable stage")
+  })
+
+  test("rejects an enabled stage whose initial operations are all blocked", () => {
+    const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
+
+    expect(() =>
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...definition.stages[0],
+            initialOperations: requiredInitialOperations().map((operation) => ({
+              ...operation,
+              state: "blocked" as const,
+            })),
+          },
+        ],
+      }),
+    ).toThrow("runnable stage")
+  })
+
+  test("rejects artifact stages without producer and publication operations", () => {
+    const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
+
+    expect(() =>
+      normalizeWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...definition.stages[0],
+            initialOperations: [requiredInitialOperations()[0]],
+          },
+        ],
+      }),
+    ).toThrow("StageProduce and ArtifactPublish")
   })
 })
 
@@ -453,8 +521,23 @@ function workflowDefinition(pathTemplate: string) {
         outputContract: { _tag: "Artifact", pathTemplate, mediaType: "text/markdown" },
         reviewPolicy: { mode: "none" },
         humanGatePolicy: { mode: "none" },
-        initialOperations: [],
+        initialOperations: requiredInitialOperations(),
       },
     ],
   }
+}
+
+function requiredInitialOperations() {
+  return [
+    {
+      kind: "StageProduce" as const,
+      state: "ready" as const,
+      parentEffect: { success: "advance parent" as const, failure: "fail Generation" as const },
+    },
+    {
+      kind: "ArtifactPublish" as const,
+      state: "blocked" as const,
+      parentEffect: { success: "advance parent" as const, failure: "fail Generation" as const },
+    },
+  ]
 }

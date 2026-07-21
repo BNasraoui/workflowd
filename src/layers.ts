@@ -19,6 +19,7 @@ import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
 import { QrspiStoreLive } from "./qrspi/store"
+import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 
 export const makeLiveLayer = (config: AppConfig) => {
@@ -60,6 +61,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           operationCompletionMarginMs: config.qrspi.operationCompletionMarginMs,
           leaseDurationMs: config.qrspi.leaseDurationMs,
           workflowDefinition: config.qrspi.workflowDefinition,
+          sourceResolver: makeWorkspaceSourceResolver(config.qrspi.beadsWorkspace),
         }).pipe(
           Layer.provideMerge(
             Layer.mergeAll(

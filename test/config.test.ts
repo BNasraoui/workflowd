@@ -37,7 +37,18 @@ const qrspiDefinition = {
       },
       reviewPolicy: { mode: "none" },
       humanGatePolicy: { mode: "none" },
-      initialOperations: [],
+      initialOperations: [
+        {
+          kind: "StageProduce",
+          state: "ready",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+        {
+          kind: "ArtifactPublish",
+          state: "blocked",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+      ],
     },
   ],
 } as const
@@ -183,11 +194,7 @@ describe("loadConfig", () => {
           WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
           WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
           WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
-          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
-            contractVersion: 1,
-            definitionVersion: 1,
-            stages: [],
-          }),
+          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
           WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS: "100",
           WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS: "50",
           WORKFLOWD_QRSPI_LEASE_MS: "150",

@@ -265,6 +265,7 @@ const options = {
   repositoryOperationTimeoutMs: 50,
   operationCompletionMarginMs: 25,
   leaseDurationMs: 100,
+  sourceResolver: () => true,
 } as const
 
 async function databasePath() {
@@ -1018,18 +1019,13 @@ describe("WorkflowStart integration", () => {
     expect(Number(workflows[0]?.count)).toBe(0)
   })
 
-  test("creates no initial stage operation when the trusted definition enables no stage", async () => {
-    const filename = await databasePath()
-    const fake = fakes()
-    const result = await Effect.runPromise(
+  test("rejects a trusted definition that cannot start runnable work", () => {
+    expect(() =>
       makeWorkflowStart({
         ...options,
         workflowDefinition: { contractVersion: 1, definitionVersion: 1, stages: [] },
-      })(request).pipe(Effect.provide(layer(filename, fake))),
-    )
-
-    expect(result).toMatchObject({ _tag: "Started" })
-    expect(await counts(filename, fake)).toEqual([1, 1, 1])
+      }),
+    ).toThrow("runnable stage")
   })
 
   test("creates only operations declared by the trusted workflow definition", async () => {
@@ -1053,6 +1049,11 @@ describe("WorkflowStart integration", () => {
                   state: "ready",
                   parentEffect: { success: "advance parent", failure: "fail Generation" },
                 },
+                {
+                  kind: "ArtifactPublish",
+                  state: "blocked",
+                  parentEffect: { success: "advance parent", failure: "fail Generation" },
+                },
               ],
             },
           ],
@@ -1060,7 +1061,7 @@ describe("WorkflowStart integration", () => {
       })(request).pipe(Effect.provide(layer(filename, fake))),
     )
 
-    expect(await counts(filename, fake)).toEqual([1, 2, 1])
+    expect(await counts(filename, fake)).toEqual([1, 3, 1])
   })
 
   test("uses the stage producer retry limit for StageProduce operations", async () => {

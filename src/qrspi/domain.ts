@@ -238,6 +238,7 @@ export const WorkflowDefinition = Schema.Struct({
   stages: Schema.Array(WorkflowStageDefinition).pipe(Schema.maxItems(32)),
 })
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
+export type SourceResolver = (source: string) => boolean
 
 export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
   return canonicalSha256({
@@ -249,6 +250,15 @@ export function workflowDefinitionSha256(definition: WorkflowDefinition): string
 
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
+  if (
+    !definition.stages.some(
+      (stage) =>
+        stage.activation.mode === "enabled" ||
+        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
+    )
+  ) {
+    throw new Error("Workflow definition must contain at least one runnable stage")
+  }
   const keys = new Set<string>()
   for (const stage of definition.stages) {
     if (keys.has(stage.key)) throw new Error(`Duplicate workflow stage key: ${stage.key}`)
@@ -259,6 +269,18 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
         throw new Error(`Duplicate initial ${operation.kind} operation for stage: ${stage.key}`)
       }
       operationKinds.add(operation.kind)
+    }
+    if (!operationKinds.has("StageProduce") || !operationKinds.has("ArtifactPublish")) {
+      throw new Error(
+        `Workflow stage must declare StageProduce and ArtifactPublish operations: ${stage.key}`,
+      )
+    }
+    if (
+      (stage.activation.mode === "enabled" ||
+        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")) &&
+      !stage.initialOperations.some((operation) => operation.state === "ready")
+    ) {
+      throw new Error(`Workflow definition has no runnable stage operation: ${stage.key}`)
     }
     if (
       stage.reviewPolicy.mode === "automated" &&
@@ -328,6 +350,7 @@ export function checkTicket(
   ticket: Ticket,
   checkedAt: Date,
   judgment: TicketReadinessJudgment,
+  resolveSource: SourceResolver = () => false,
 ): TicketCheck {
   const problems: TicketProblem[] = []
   if (ticket.title === undefined || ticket.title.trim() === "")
@@ -386,7 +409,7 @@ export function checkTicket(
   if (
     ticket.sources === undefined ||
     ticket.sources.length === 0 ||
-    ticket.sources.some((source) => !sourceCanResolveLocally(source))
+    ticket.sources.some((source) => !sourceCanResolveLocally(source, resolveSource))
   )
     problems.push(problem("unresolved_source", "Add at least one resolvable source reference."))
 
@@ -462,13 +485,15 @@ function isLowInformation(value: string | undefined): boolean {
   )
 }
 
-function sourceCanResolveLocally(source: string): boolean {
+function sourceCanResolveLocally(source: string, resolveSource: SourceResolver): boolean {
   const value = source.trim()
   const url = /https?:\/\/[^\s)>]+/.exec(value)?.[0]
   if (url !== undefined) {
     try {
       const parsed = new URL(url)
-      return parsed.protocol === "http:" || parsed.protocol === "https:"
+      return (
+        (parsed.protocol === "http:" || parsed.protocol === "https:") && resolveSource(parsed.href)
+      )
     } catch {
       return false
     }
@@ -481,9 +506,12 @@ function sourceCanResolveLocally(source: string): boolean {
     ) &&
     (fileSegments.length > 1 || fileSegments[0]?.includes(".") === true)
   ) {
-    return true
+    return resolveSource(fileReference)
   }
-  return /^(?:beads|provenance|ticket):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
+  return (
+    /^(?:beads|provenance|ticket):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) &&
+    resolveSource(value)
+  )
 }
 
 export function canonicalSha256(value: unknown): string {
