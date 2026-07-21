@@ -1090,6 +1090,77 @@ describe("WorkflowStart integration", () => {
     expect(targets[1]).toEqual({ base_sha: baseSha, root_sha: advancedSha })
   })
 
+  test("supersedes a leased predecessor operation when starting a successor", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET state = 'leased', attempt = 1, lease_owner = 'worker-1',
+              lease_token = 'lease-1', lease_until = '2026-07-21T05:01:00.000Z'
+          WHERE kind = 'StageProduce'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    fake.setBranch("c".repeat(40))
+    fake.setTicket({ ...readyTicket, title: "Kick off after leased planning work" })
+
+    await expect(start(filename, fake)).resolves.toMatchObject({ generation: 2 })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{
+          readonly state: string
+          readonly lease_owner: string | null
+          readonly lease_token: string | null
+          readonly lease_until: string | null
+        }>`
+          SELECT state, lease_owner, lease_token, lease_until
+          FROM workflow_operations
+          WHERE kind = 'StageProduce'
+          ORDER BY created_at
+          LIMIT 1
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([
+      { state: "superseded", lease_owner: null, lease_token: null, lease_until: null },
+    ])
+  })
+
+  test("cancels a predecessor operation gate when starting a successor", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE workflow_operations SET state = 'waiting_human' WHERE kind = 'StageProduce'`
+        yield* sql`
+          INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+          SELECT operation_id, 'pending', 'operator decision required', ${options.now().toISOString()}
+          FROM workflow_operations WHERE kind = 'StageProduce'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    fake.setBranch("c".repeat(40))
+    fake.setTicket({ ...readyTicket, title: "Kick off after gated planning work" })
+
+    await expect(start(filename, fake)).resolves.toMatchObject({ generation: 2 })
+
+    const gates = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly state: string }>`SELECT state FROM workflow_operation_gates`
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(gates).toEqual([{ state: "cancelled" }])
+  })
+
   for (const terminalState of ["completed", "rejected", "cancelled", "failed"] as const) {
     test(`preserves a ${terminalState} predecessor when starting a successor`, async () => {
       const filename = await databasePath()

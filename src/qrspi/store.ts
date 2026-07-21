@@ -756,8 +756,19 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             WHERE workflow_id = ${input.workflowId} AND is_current = 1
           `
           yield* sql`
+            UPDATE workflow_operation_gates SET state = 'cancelled'
+            WHERE state = 'pending' AND operation_id IN (
+              SELECT operation_id FROM workflow_operations
+              WHERE operation_id != ${input.operationId}
+                AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+                AND json_extract(scope_json, '$._tag') = 'GenerationScope'
+                AND state IN ('blocked', 'ready', 'leased', 'waiting_external', 'waiting_human')
+            )
+          `
+          yield* sql`
             UPDATE workflow_operations SET state = 'superseded', is_current = 0,
-              last_error = 'newer generation', updated_at = ${input.now.toISOString()}
+              last_error = 'newer generation', lease_owner = NULL, lease_token = NULL,
+              lease_until = NULL, updated_at = ${input.now.toISOString()}
             WHERE operation_id != ${input.operationId}
               AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
               AND json_extract(scope_json, '$._tag') = 'GenerationScope'
