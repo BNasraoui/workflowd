@@ -84,20 +84,35 @@ function processReviewWork(
         intent: prepared.launchIntent,
       })
       if (launch === "stale") return launch
-      const reference = yield* harness.createSession(prepared)
-      const referenceRecordedAt = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      const checkpoint = yield* Effect.acquireUseRelease(
+        harness.createSession(prepared),
+        (reference) =>
+          Effect.gen(function* () {
+            const referenceRecordedAt = new Date(
+              yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+            )
+            const session = yield* store.recordAgentSessionReference({
+              jobId: work.id,
+              workerId,
+              recordedAt: referenceRecordedAt,
+              reference,
+            })
+            return { reference, session }
+          }),
+        (reference, exit) =>
+          Exit.isFailure(exit)
+            ? Effect.exit(
+                harness
+                  .abortSession(reference)
+                  .pipe(Effect.tapError(() => Effect.sync(onAbortFailure))),
+              ).pipe(Effect.asVoid)
+            : Effect.void,
       )
+      const reference = checkpoint.reference
       const abortSession = () =>
         harness.abortSession(reference).pipe(Effect.tapError(() => Effect.sync(onAbortFailure)))
       const sessionResult = yield* Effect.gen(function* () {
-        const session = yield* store.recordAgentSessionReference({
-          jobId: work.id,
-          workerId,
-          recordedAt: referenceRecordedAt,
-          reference,
-        })
-        if (session === "stale") return { _tag: "Stale" } as const
+        if (checkpoint.session === "stale") return { _tag: "Stale" } as const
         const review = yield* harness.resumeSession(prepared, reference)
         return { _tag: "Completed", review } as const
       }).pipe(
@@ -166,20 +181,35 @@ function processFixWork(
           intent: prepared.launchIntent,
         })
         if (launch === "stale") return launch
-        const reference = yield* harness.createSession(prepared)
-        const referenceRecordedAt = new Date(
-          yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+        const checkpoint = yield* Effect.acquireUseRelease(
+          harness.createSession(prepared),
+          (reference) =>
+            Effect.gen(function* () {
+              const referenceRecordedAt = new Date(
+                yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+              )
+              const session = yield* store.recordAgentSessionReference({
+                jobId: work.id,
+                workerId,
+                recordedAt: referenceRecordedAt,
+                reference,
+              })
+              return { reference, session }
+            }),
+          (reference, exit) =>
+            Exit.isFailure(exit)
+              ? Effect.exit(
+                  harness
+                    .abortSession(reference)
+                    .pipe(Effect.tapError(() => Effect.sync(onAbortFailure))),
+                ).pipe(Effect.asVoid)
+              : Effect.void,
         )
+        const reference = checkpoint.reference
         const abortSession = () =>
           harness.abortSession(reference).pipe(Effect.tapError(() => Effect.sync(onAbortFailure)))
         const sessionResult = yield* Effect.gen(function* () {
-          const session = yield* store.recordAgentSessionReference({
-            jobId: work.id,
-            workerId,
-            recordedAt: referenceRecordedAt,
-            reference,
-          })
-          if (session === "stale") return { _tag: "Stale" } as const
+          if (checkpoint.session === "stale") return { _tag: "Stale" } as const
           const fixResult = yield* harness.resumeSession(prepared, reference)
           return { _tag: "Completed", fixResult } as const
         }).pipe(

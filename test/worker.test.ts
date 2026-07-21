@@ -1259,6 +1259,43 @@ describe("runReconciliationIteration", () => {
 })
 
 describe("job cancellation", () => {
+  test("aborts a session when interrupted immediately after creation", async () => {
+    const job = makeReviewWork()
+    let aborts = 0
+
+    const result = await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        timeoutMs: 1,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              rescheduleJob: () => Effect.succeed("retry"),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            agentHarness: {
+              createSession: (prepared) =>
+                Effect.uninterruptible(
+                  Effect.sleep(10).pipe(Effect.as(sessionReference(prepared))),
+                ),
+              abortSession: () =>
+                Effect.sync(() => {
+                  aborts += 1
+                }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(aborts).toBe(1)
+  })
+
   test("interrupts the active job when its durable lease is superseded", async () => {
     const actions: Array<string> = []
     const started = Effect.runSync(Deferred.make<void>())
