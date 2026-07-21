@@ -13,9 +13,17 @@ export type OpenCodeModel = {
 type OpenCodeCreateSessionInput = {
   readonly directory: string
   readonly title: string
+  readonly sessionCreationId?: string
 }
 
 type OpenCodeSession = { readonly id: string }
+type OpenCodeSessionRecord = OpenCodeSession & {
+  readonly metadata?: Readonly<Record<string, unknown>>
+}
+type OpenCodeFindSessionInput = {
+  readonly directory: string
+  readonly sessionCreationId: string
+}
 
 export type OpenCodePromptSessionInput = {
   readonly sessionID: string
@@ -79,6 +87,10 @@ type AdapterCall<Input, Output> = (input: Input, signal: AbortSignal) => Promise
 
 export type OpenCodeSdkClient = {
   readonly createSession: AdapterCall<OpenCodeCreateSessionInput, OpenCodeSession>
+  readonly listSessions?: AdapterCall<
+    OpenCodeSessionDirectoryInput,
+    ReadonlyArray<OpenCodeSessionRecord>
+  >
   readonly promptSession: AdapterCall<OpenCodePromptSessionInput, void>
   readonly subscribeEvents: AdapterCall<OpenCodeSessionDirectoryInput, AsyncIterable<Event>>
   readonly getSessionStatuses: AdapterCall<
@@ -96,6 +108,7 @@ export type OpenCodeSdkClient = {
 
 export type OpenCodeAdapter = {
   readonly createSession: AdapterCall<OpenCodeCreateSessionInput, OpenCodeSession>
+  readonly findSession?: AdapterCall<OpenCodeFindSessionInput, OpenCodeSession | undefined>
   readonly promptSession: AdapterCall<OpenCodePromptSessionInput, void>
   readonly subscribeSessionEvents: AdapterCall<
     OpenCodeSessionDirectoryInput,
@@ -150,6 +163,17 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     return this.client.createSession(input, signal)
   }
 
+  async findSession(
+    input: OpenCodeFindSessionInput,
+    signal: AbortSignal,
+  ): Promise<OpenCodeSession | undefined> {
+    if (this.client.listSessions === undefined) return undefined
+    const sessions = await this.client.listSessions({ directory: input.directory }, signal)
+    return sessions.find(
+      (session) => session.metadata?.workflowdSessionCreationId === input.sessionCreationId,
+    )
+  }
+
   async promptSession(input: OpenCodePromptSessionInput, signal: AbortSignal): Promise<void> {
     await this.client.promptSession(input, signal)
   }
@@ -193,11 +217,27 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
 export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient {
   return {
     createSession: async (input, signal) => {
-      const response = await client.session.create<true>(input, {
-        signal,
-        throwOnError: true,
-      })
+      const response = await client.session.create<true>(
+        {
+          directory: input.directory,
+          title: input.title,
+          ...(input.sessionCreationId === undefined
+            ? {}
+            : { metadata: { workflowdSessionCreationId: input.sessionCreationId } }),
+        },
+        {
+          signal,
+          throwOnError: true,
+        },
+      )
       return { id: response.data.id }
+    },
+    listSessions: async (input, signal) => {
+      const response = await client.session.list<true>(input, { signal, throwOnError: true })
+      return response.data.map((session) => ({
+        id: session.id,
+        ...(session.metadata === undefined ? {} : { metadata: session.metadata }),
+      }))
     },
     promptSession: async (input, signal) => {
       await client.session.promptAsync<true>(

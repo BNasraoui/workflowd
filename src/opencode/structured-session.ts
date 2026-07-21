@@ -12,6 +12,7 @@ export type StructuredSessionReference = Parameters<OpenCodeAdapter["getSessionS
 type StructuredSessionRequest = {
   readonly directory: string
   readonly title: string
+  readonly sessionCreationId?: string
   readonly agent: string
   readonly model: Parameters<OpenCodeAdapter["promptSession"]>[0]["model"]
   readonly format: {
@@ -54,7 +55,13 @@ export class StructuredSession<A, I> {
   async create(signal?: AbortSignal): Promise<StructuredSessionReference> {
     const execution = this.call("create session", (operationSignal) =>
       this.adapter.createSession(
-        { directory: this.request.directory, title: this.request.title },
+        {
+          directory: this.request.directory,
+          title: this.request.title,
+          ...(this.request.sessionCreationId === undefined
+            ? {}
+            : { sessionCreationId: this.request.sessionCreationId }),
+        },
         operationSignal,
       ),
     ).pipe(

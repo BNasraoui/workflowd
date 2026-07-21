@@ -38,6 +38,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   claimExpiredAgentSession: () => Effect.succeed(null),
   claimNextJob: () => Effect.succeed(null),
   supersedeAgentSession: () => Effect.die("unused"),
+  recordAgentSessionCleanupFailure: () => Effect.succeed("pending"),
   shouldCancelJob: () => Effect.succeed(false),
   rescheduleJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
@@ -115,6 +116,7 @@ const makeWorkerLayer = (options: {
 const preparedReview = (context: AgentExecutionContext) => ({
   launchIntent: {
     sessionReferenceId: "22222222-2222-4222-8222-222222222222",
+    sessionCreationId: "b".repeat(64),
     harness: { name: "opencode.pr-review", version: 1 },
     definitionHash: "a".repeat(64),
     agent: "pr-reviewer",
@@ -307,6 +309,74 @@ test("continues to unrelated work when aborting an expired session rejects", asy
   if (exit._tag === "Success") expect(exit.value).toBe("completed")
   expect(superseded).toBe(0)
   expect(jobClaims).toBe(1)
+})
+
+test("records failed expired-session cleanup so the store can bound retries", async () => {
+  const oldReference = Schema.decodeUnknownSync(SessionReference)({
+    ...sessionReference(
+      preparedReview({
+        directory: "/tmp/review",
+        scope: { _tag: "GenerationScope", workflowId: "pr:42:7", generation: 1 },
+        operationId: "job:1",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-19T11:58:00.000Z"),
+      }),
+    ),
+    sessionReferenceId: "11111111-1111-4111-8111-111111111111",
+    nativeSessionId: "ses_expired",
+  })
+  let cleanupReturned = false
+  const failures: Array<{ readonly sessionReferenceId: string; readonly workerId: string }> = []
+  const store = {
+    claimExpiredAgentSession: () =>
+      Effect.sync(() => {
+        if (cleanupReturned) return null
+        cleanupReturned = true
+        return oldReference
+      }),
+    recordAgentSessionCleanupFailure: (input: {
+      readonly sessionReferenceId: string
+      readonly workerId: string
+      readonly failedAt: Date
+      readonly error: string
+    }) =>
+      Effect.sync(() => {
+        failures.push({
+          sessionReferenceId: input.sessionReferenceId,
+          workerId: input.workerId,
+        })
+        return "pending" as const
+      }),
+  } as Partial<WorkflowStorePort>
+
+  await Effect.runPromise(
+    runJobIteration(jobOptions).pipe(
+      Effect.provide(
+        makeWorkerLayer({
+          store,
+          agentHarness: {
+            abortSession: () =>
+              Effect.fail(
+                new AgentHarnessError({
+                  operation: "abort session",
+                  cause: new Error("abort rejected"),
+                  retryable: true,
+                }),
+              ),
+          },
+        }),
+      ),
+    ),
+  )
+
+  expect(failures).toEqual([
+    {
+      sessionReferenceId: oldReference.sessionReferenceId,
+      workerId: jobOptions.workerId,
+    },
+  ])
 })
 
 test("retries cleanup after a stale session checkpoint abort fails", async () => {

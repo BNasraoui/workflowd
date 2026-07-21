@@ -19,6 +19,7 @@ type JobOperations = Pick<
   | "isJobCurrent"
   | "recordAgentFixResult"
   | "recordAgentLaunchIntent"
+  | "recordAgentSessionCleanupFailure"
   | "recordAgentSessionReference"
   | "recordFixResult"
   | "rescheduleJob"
@@ -435,6 +436,51 @@ export function makeJobOperations(
         return "stale" as const
       }).pipe(sql.withTransaction)
     },
+    recordAgentSessionCleanupFailure: (input) =>
+      Effect.gen(function* () {
+        const timestamp = input.failedAt.toISOString()
+        const executions = yield* sql<{
+          readonly job_id: number
+          readonly state: "session_ready" | "failed"
+        }>`
+          UPDATE agent_executions AS execution
+          SET
+            state = CASE
+              WHEN cleanup_attempts >= (
+                SELECT candidate.max_attempts FROM jobs AS candidate
+                WHERE candidate.id = execution.job_id
+              ) THEN 'failed'
+              ELSE state
+            END,
+            updated_at = ${timestamp}
+          WHERE execution.session_reference_id = ${input.sessionReferenceId}
+          AND execution.state = 'session_ready'
+          AND execution.cleanup_lease_owner = ${input.workerId}
+          AND execution.cleanup_lease_until > ${timestamp}
+          RETURNING job_id, state
+        `
+        const execution = executions[0]
+        if (execution === undefined) return "stale" as const
+        if (execution.state === "session_ready") return "pending" as const
+
+        yield* sql`
+          UPDATE jobs
+          SET
+            state = CASE
+              WHEN attempts >= max_attempts THEN 'failed'
+              ELSE 'retry_scheduled'
+            END,
+            run_at = ${timestamp},
+            lease_owner = NULL,
+            lease_until = NULL,
+            last_error = ${input.error},
+            updated_at = ${timestamp}
+          WHERE id = ${execution.job_id}
+          AND state = 'leased'
+          AND lease_until <= ${timestamp}
+        `
+        return "released" as const
+      }).pipe(sql.withTransaction),
     rescheduleJob: (input) =>
       Effect.gen(function* () {
         const disposition = yield* queue.reschedule({ ...input, id: input.jobId })

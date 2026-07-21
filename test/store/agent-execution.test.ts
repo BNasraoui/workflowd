@@ -19,6 +19,7 @@ const makeExecution = (
 ) => {
   const intent: AgentLaunchIntent<{ readonly subject: string }> = {
     sessionReferenceId,
+    sessionCreationId: "b".repeat(64),
     harness: { name: "opencode.pr-review", version: 1 },
     definitionHash: "a".repeat(64),
     agent: "pr-reviewer",
@@ -224,6 +225,83 @@ test("persists a stale session reference for later cleanup", async () => {
 
   expect(result.recorded).toBe("stale")
   expect(result.cleanup?.nativeSessionId).toBe("ses_1")
+})
+
+test("releases a job after session cleanup reaches its bounded attempt limit", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "bounded-session-cleanup",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent(samplePullRequestEvent),
+      )
+      const work = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (work === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        work,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: execution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:02.000Z"),
+        reference: execution.reference,
+      })
+
+      const cleanupResults: Array<string> = []
+      for (const minute of [2, 3, 4]) {
+        const failedAt = new Date(`2026-07-20T12:0${minute}:00.000Z`)
+        const claimed = yield* store.claimExpiredAgentSession({
+          workerId: "cleanup-worker",
+          now: failedAt,
+          leaseDurationMs: 1_000,
+        })
+        if (claimed === null) throw new Error("expected cleanup claim")
+        cleanupResults.push(
+          yield* store.recordAgentSessionCleanupFailure({
+            sessionReferenceId: claimed.sessionReferenceId,
+            workerId: "cleanup-worker",
+            failedAt,
+            error: "OpenCode unavailable",
+          }),
+        )
+      }
+      const replacement = yield* store.claimNextJob({
+        workerId: "replacement-worker",
+        now: new Date("2026-07-20T12:04:01.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const rows = yield* sql`
+        SELECT execution.state AS execution_state, job.state AS job_state
+        FROM agent_executions AS execution
+        JOIN jobs AS job ON job.id = execution.job_id
+      `
+      return { cleanupResults, replacement, rows }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.cleanupResults).toEqual(["pending", "pending", "released"])
+  expect(Number(result.replacement?.attempt)).toBe(2)
+  expect(result.rows).toEqual([{ execution_state: "failed", job_state: "leased" }])
 })
 
 test("persists every schema-valid review output larger than 64 KiB", async () => {

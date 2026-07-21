@@ -166,6 +166,71 @@ describe("OpenCodeAgentHarness", () => {
     expect(actions).toEqual(["create", "prompt"])
   })
 
+  test("recovers a remotely created session after the create response is lost", async () => {
+    let remoteSession: { readonly id: string } | undefined
+    let remoteSessionCreationId: string | undefined
+    let creates = 0
+    const adapter = {
+      ...makeAdapter(),
+      findSession: async (input: { readonly sessionCreationId: string }) =>
+        input.sessionCreationId === remoteSessionCreationId ? remoteSession : undefined,
+      createSession: async (input: { readonly sessionCreationId?: string }) => {
+        creates += 1
+        remoteSession = { id: "ses_recovered" }
+        remoteSessionCreationId = input.sessionCreationId
+        throw new Error("connection closed after create")
+      },
+    } as OpenCodeAdapter
+    const harness = new OpenCodeAgentHarness(
+      adapter,
+      new TrustedAgentHarnessCatalog([fixtureDefinition]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
+    )
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        fixtureDefinition,
+        { text: "A bounded fixture input." },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+      ),
+    )
+
+    const createFailure = await Effect.runPromise(harness.createSession(prepared).pipe(Effect.flip))
+    expect(createFailure.cause.message).toContain("connection closed after create")
+    const replacement = await Effect.runPromise(
+      harness.prepare(
+        fixtureDefinition,
+        { text: "A bounded fixture input." },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 2,
+          leaseToken: "22222222-2222-4222-8222-222222222222",
+          requestedAt: new Date("2026-07-20T12:02:00.000Z"),
+        },
+      ),
+    )
+    const recovered = await Effect.runPromise(harness.createSession(replacement))
+
+    expect(replacement.launchIntent.sessionCreationId).toBe(prepared.launchIntent.sessionCreationId)
+    expect(recovered.nativeSessionId).toBe("ses_recovered")
+    expect(recovered.attempt).toBe(2)
+    expect(creates).toBe(1)
+  })
+
   test("rejects persisted references for a different OpenCode endpoint", async () => {
     let prompted = 0
     let aborted = 0

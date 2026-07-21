@@ -91,6 +91,7 @@ export type AgentExecutionContext = {
 
 export type AgentLaunchIntent<Input> = {
   readonly sessionReferenceId: string
+  readonly sessionCreationId: string
   readonly harness: AgentHarnessRef
   readonly definitionHash: string
   readonly agent: string
@@ -328,6 +329,11 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       return {
         launchIntent: {
           sessionReferenceId: randomUUID(),
+          sessionCreationId: sessionCreationId(
+            registration.definition.ref,
+            registration.definitionHash,
+            decodedContext,
+          ),
           harness: definition.ref,
           definitionHash: registration.definitionHash,
           agent: definition.agent,
@@ -354,7 +360,28 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
 
   readonly createSession: AgentHarnessPort["createSession"] = (prepared) => {
     const session = this.structuredSession(prepared)
-    return this.attempt("create session", true, (signal) => session.create(signal)).pipe(
+    const create =
+      this.adapter.findSession === undefined
+        ? this.attempt("create session", true, (signal) => session.create(signal))
+        : this.attempt("find session", true, (signal) =>
+            this.adapter.findSession!(
+              {
+                directory: prepared.launchIntent.directory,
+                sessionCreationId: prepared.launchIntent.sessionCreationId,
+              },
+              signal,
+            ),
+          ).pipe(
+            Effect.flatMap((existing) =>
+              existing === undefined
+                ? this.attempt("create session", true, (signal) => session.create(signal))
+                : Effect.succeed({
+                    sessionID: existing.id,
+                    directory: prepared.launchIntent.directory,
+                  }),
+            ),
+          )
+    return create.pipe(
       Effect.flatMap((created) =>
         Schema.decodeUnknown(SessionReference)({
           sessionReferenceId: prepared.launchIntent.sessionReferenceId,
@@ -434,6 +461,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       {
         directory: prepared.launchIntent.directory,
         title: prepared.title,
+        sessionCreationId: prepared.launchIntent.sessionCreationId,
         agent: prepared.launchIntent.agent,
         model: prepared.model,
         format: {
@@ -482,6 +510,24 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   private error(operation: string, cause: unknown, retryable: boolean) {
     return new AgentHarnessError({ operation, cause: normalizeError(cause), retryable })
   }
+}
+
+function sessionCreationId(
+  harness: AgentHarnessRef,
+  definitionHash: string,
+  context: AgentExecutionContext,
+): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        harness,
+        definitionHash,
+        scope: context.scope,
+        operationId: context.operationId,
+        operationRevision: context.operationRevision,
+      }),
+    )
+    .digest("hex")
 }
 
 function parseModel(value: string): OpenCodeModel {

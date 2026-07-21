@@ -79,6 +79,13 @@ export type RecordAgentSessionReferenceInput = {
   readonly reference: SessionReference
 }
 
+export type RecordAgentSessionCleanupFailureInput = {
+  readonly sessionReferenceId: string
+  readonly workerId: string
+  readonly failedAt: Date
+  readonly error: string
+}
+
 export type CompletePublicationInput = {
   readonly publicationId: number
   readonly workerId: string

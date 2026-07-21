@@ -22,6 +22,7 @@ import type {
   PullRequestReconciliation,
   RecordAgentFixResultInput,
   RecordAgentLaunchIntentInput,
+  RecordAgentSessionCleanupFailureInput,
   RecordAgentSessionReferenceInput,
   RecordFixResultInput,
   RescheduleCommandInput,
@@ -57,6 +58,9 @@ export type WorkflowStorePort = {
     sessionReferenceId: string,
     supersededAt: Date,
   ) => Effect.Effect<"superseded" | "stale", SqlError>
+  readonly recordAgentSessionCleanupFailure: (
+    input: RecordAgentSessionCleanupFailureInput,
+  ) => Effect.Effect<"pending" | "released" | "stale", SqlError>
   readonly shouldCancelJob: (
     jobId: number,
     workerId: string,

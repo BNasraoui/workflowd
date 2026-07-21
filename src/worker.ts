@@ -299,6 +299,12 @@ export function runJobIteration(options: {
       if (expiredSession === null) break
       const cleanup = yield* Effect.exit(harness.abortSession(expiredSession))
       if (Exit.isFailure(cleanup)) {
+        yield* store.recordAgentSessionCleanupFailure({
+          sessionReferenceId: expiredSession.sessionReferenceId,
+          workerId: options.workerId,
+          failedAt: options.now(),
+          error: Cause.pretty(cleanup.cause),
+        })
         yield* Effect.logWarning(
           `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
         )
