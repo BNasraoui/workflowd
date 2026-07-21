@@ -169,6 +169,8 @@ type RuntimeDefinition = HarnessRegistration & {
   readonly maxInputBytes: number
   readonly maxOutputBytes: number
   readonly promptContract: string
+  readonly title: (input: unknown) => string
+  readonly prompt: (input: unknown) => string
   readonly timeoutMs: number
   readonly retryPolicy: AgentRetryPolicy
 }
@@ -217,6 +219,8 @@ const HarnessConfig = Schema.Struct({
 type HarnessConfig = typeof HarnessConfig.Type
 
 const referenceKey = (ref: AgentHarnessRef) => `${ref.name}@${ref.version}`
+const isStringRenderer = (value: unknown): value is (input: unknown) => string =>
+  typeof value === "function"
 
 function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefinition {
   const invalid = () => new Error(`Invalid AgentHarness definition ${referenceKey(definition.ref)}`)
@@ -233,6 +237,10 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
   }
   if (!("timeoutMs" in definition) || typeof definition.timeoutMs !== "number") throw invalid()
   if (!("retryPolicy" in definition)) throw invalid()
+  if (!("title" in definition) || !isStringRenderer(definition.title)) throw invalid()
+  if (!("prompt" in definition) || !isStringRenderer(definition.prompt)) throw invalid()
+  const title = definition.title
+  const prompt = definition.prompt
   return {
     ref: definition.ref,
     agent: definition.agent,
@@ -242,6 +250,8 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
     maxInputBytes: definition.maxInputBytes,
     maxOutputBytes: definition.maxOutputBytes,
     promptContract: definition.promptContract,
+    title: (input) => title(input),
+    prompt: (input) => prompt(input),
     timeoutMs: definition.timeoutMs,
     retryPolicy: Schema.decodeUnknownSync(AgentRetryPolicy)(definition.retryPolicy),
   }
@@ -316,7 +326,12 @@ export class TrustedAgentHarnessCatalog {
     const hash = definitionHash(runtime, inputJsonSchema, outputJsonSchema)
     const registration = this.#byReference
       .get(referenceKey(runtime.ref))
-      ?.find((candidate) => candidate.definitionHash === hash)
+      ?.find(
+        (candidate) =>
+          candidate.definitionHash === hash &&
+          candidate.definition.inputSchema === runtime.inputSchema &&
+          candidate.definition.outputSchema === runtime.outputSchema,
+      )
     if (registration === undefined) {
       throw new Error(`Untrusted AgentHarness definition ${referenceKey(definition.ref)}`)
     }
@@ -401,6 +416,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         try: () => this.catalog.registrationFor(definition),
         catch: (cause) => this.error("select harness", cause, false),
       })
+      const trustedDefinition = registration.definition
       const decodedContext = yield* Schema.decodeUnknown(ExecutionContextSchema)(context).pipe(
         Effect.mapError((cause) => this.error("validate agent execution context", cause, false)),
       )
@@ -408,24 +424,24 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         Effect.mapError((cause) => this.error("validate agent prompt input", cause, false)),
       )
       yield* Schema.decodeUnknown(
-        boundedAgentPayload(definition.maxInputBytes, "Agent harness input"),
+        boundedAgentPayload(trustedDefinition.maxInputBytes, "Agent harness input"),
       )(decodedInput).pipe(
         Effect.mapError((cause) => this.error("validate encoded agent prompt input", cause, false)),
       )
       const request = yield* Effect.try({
         try: () => ({
-          title: boundedText(definition.title(decodedInput), 256, "session title"),
-          prompt: boundedText(definition.prompt(decodedInput), 256 * 1024, "session prompt"),
+          title: boundedText(trustedDefinition.title(decodedInput), 256, "session title"),
+          prompt: boundedText(trustedDefinition.prompt(decodedInput), 256 * 1024, "session prompt"),
         }),
         catch: (cause) => this.error("prepare agent prompt", cause, false),
       })
       const directory = resolve(decodedContext.directory)
       const launchIntent = {
         sessionReferenceId: randomUUID(),
-        harness: definition.ref,
+        harness: trustedDefinition.ref,
         definitionHash: registration.definitionHash,
-        agent: definition.agent,
-        model: definition.model,
+        agent: trustedDefinition.agent,
+        model: trustedDefinition.model,
         input: decodedInput,
         scope: decodedContext.scope,
         operationId: decodedContext.operationId,
@@ -433,8 +449,8 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         attempt: decodedContext.attempt,
         leaseToken: decodedContext.leaseToken,
         directory,
-        timeoutMs: definition.timeoutMs,
-        retryPolicy: definition.retryPolicy,
+        timeoutMs: trustedDefinition.timeoutMs,
+        retryPolicy: trustedDefinition.retryPolicy,
         requestedAt: decodedContext.requestedAt.toISOString(),
       }
       yield* Schema.decodeUnknown(AgentLaunchIntentSchema)(launchIntent).pipe(
@@ -447,10 +463,10 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         launchIntent,
         title: request.title,
         prompt: request.prompt,
-        model: parseModel(definition.model),
+        model: parseModel(trustedDefinition.model),
         outputSchema: definition.outputSchema,
         outputJsonSchema: registration.outputJsonSchema,
-        maxOutputBytes: definition.maxOutputBytes,
+        maxOutputBytes: trustedDefinition.maxOutputBytes,
         pollIntervalMs: this.#config.pollIntervalMs,
       }
     })

@@ -80,6 +80,38 @@ describe("TrustedAgentHarnessCatalog", () => {
     expect(catalog.registrationFor(fixtureDefinition).definition.model).toBe("openai/gpt-5.6-sol")
   })
 
+  test("uses registered executable behavior for a matching definition hash", async () => {
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog([fixtureDefinition]),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    const copiedDefinition = {
+      ...fixtureDefinition,
+      title: () => "untrusted title",
+      prompt: () => "untrusted prompt",
+    }
+
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        copiedDefinition,
+        { text: "trusted input" },
+        {
+          directory: "/tmp/worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+      ),
+    )
+
+    expect(prepared.title).toBe("fixture summary")
+    expect(prepared.prompt).toBe("Summarize: trusted input")
+  })
+
   test("validates trusted definitions before they can be selected", () => {
     const invalidDefinitions = [
       { ...fixtureDefinition, agent: "invalid agent" },

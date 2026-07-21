@@ -2091,7 +2091,10 @@ describe("WorkflowStart integration", () => {
           readonly lease_token: string | null
         }>`SELECT state, lease_token FROM workflow_operations WHERE kind = 'StageProduce'`
         const runs = yield* sql<{ readonly state: string }>`SELECT state FROM qrspi_stage_runs`
-        return { claimed, operations, runs }
+        const generations = yield* sql<{ readonly state: string }>`
+          SELECT state FROM qrspi_generations WHERE is_current = 1
+        `
+        return { claimed, operations, runs, generations }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
@@ -2099,6 +2102,47 @@ describe("WorkflowStart integration", () => {
       claimed: null,
       operations: [{ state: "failed", lease_token: null }],
       runs: [{ state: "failed" }],
+      generations: [{ state: "failed" }],
+    })
+  })
+
+  test("terminally fails a generation when normal stage retries are exhausted", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations SET attempt = max_attempts - 1
+          WHERE kind = 'StageProduce'
+        `
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimStageOperation(
+          "StageProduce",
+          "worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (claimed === null) return yield* Effect.die("Expected StageProduce")
+        const disposition = yield* store.rescheduleStageOperation({
+          operationId: claimed.operationId,
+          leaseToken: claimed.leaseToken,
+          error: "producer failed",
+          runAt: new Date("2026-07-21T05:03:00.000Z"),
+          now: new Date("2026-07-21T05:01:30.000Z"),
+        })
+        const generations = yield* sql<{ readonly state: string }>`
+          SELECT state FROM qrspi_generations WHERE is_current = 1
+        `
+        return { disposition, generations }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(state).toEqual({
+      disposition: "failed",
+      generations: [{ state: "failed" }],
     })
   })
 

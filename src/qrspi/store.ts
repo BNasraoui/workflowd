@@ -1100,6 +1100,17 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 AND json_extract(o.input_json, '$.stageKey') = qrspi_stage_runs.stage_key
             )
           `
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'failed', updated_at = ${now.toISOString()}
+            WHERE state = 'running' AND EXISTS (
+              SELECT 1 FROM workflow_operations o
+              WHERE o.kind = ${kind} AND o.state = 'failed' AND o.is_current = 1
+                AND o.updated_at = ${now.toISOString()}
+                AND json_extract(o.parent_effect_json, '$.failure') = 'fail Generation'
+                AND json_extract(o.scope_json, '$.workflowId') = qrspi_generations.workflow_id
+                AND json_extract(o.scope_json, '$.generation') = qrspi_generations.generation
+            )
+          `
           const rows = yield* sql<{
             readonly operation_id: string
             readonly operation_revision: number
@@ -1486,6 +1497,16 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 WHERE operation_id = ${input.operationId}), '$.generation')
                 AND stage_key = json_extract((SELECT input_json FROM workflow_operations
                 WHERE operation_id = ${input.operationId}), '$.stageKey')
+            `
+            yield* sql`
+              UPDATE qrspi_generations SET state = 'failed', updated_at = ${input.now.toISOString()}
+              WHERE state = 'running'
+                AND workflow_id = json_extract((SELECT scope_json FROM workflow_operations
+                  WHERE operation_id = ${input.operationId}), '$.workflowId')
+                AND generation = json_extract((SELECT scope_json FROM workflow_operations
+                  WHERE operation_id = ${input.operationId}), '$.generation')
+                AND json_extract((SELECT parent_effect_json FROM workflow_operations
+                  WHERE operation_id = ${input.operationId}), '$.failure') = 'fail Generation'
             `
           }
           return failed ? ("failed" as const) : ("rescheduled" as const)
