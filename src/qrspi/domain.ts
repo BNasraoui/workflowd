@@ -119,6 +119,11 @@ export type TicketCheck = typeof TicketCheck.Type
 export const TicketReadinessJudgment = Schema.Struct({
   userStory: Schema.Literal("required", "optional", "forbidden"),
   productDirection: Schema.Literal("consistent", "contradictory"),
+  scenarioCoverage: Schema.Array(
+    Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
+      Schema.maxItems(100),
+    ),
+  ).pipe(Schema.maxItems(100)),
 })
 export type TicketReadinessJudgment = typeof TicketReadinessJudgment.Type
 
@@ -377,12 +382,13 @@ export function checkTicket(
 
   const criteria = ticket.acceptanceCriteria ?? []
   const scenarios = ticket.scenarios ?? []
+  const scenarioCoverage = criteria.map((_, criterion) =>
+    [...new Set(judgment.scenarioCoverage[criterion] ?? [])].filter(
+      (scenario) => scenarios[scenario] !== undefined,
+    ),
+  )
   for (let index = 0; index < criteria.length; index += 1) {
-    if (
-      !scenarios.some((scenario, scenarioIndex) =>
-        (scenario.covers ?? [scenarioIndex]).includes(index),
-      )
-    ) {
+    if (scenarioCoverage[index]?.length === 0) {
       problems.push(
         problem(
           "uncovered_acceptance_criterion",
@@ -398,11 +404,6 @@ export function checkTicket(
   }
 
   const readyTicket = Schema.decodeUnknownSync(ReadyTicket)(ticket)
-  const scenarioCoverage = criteria.map((_, criterion) =>
-    scenarios.flatMap((scenario, scenarioIndex) =>
-      (scenario.covers ?? [scenarioIndex]).includes(criterion) ? [scenarioIndex] : [],
-    ),
-  )
   const product = {
     issueType: readyTicket.issueType,
     title: readyTicket.title,

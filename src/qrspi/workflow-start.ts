@@ -285,12 +285,18 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
             observation: { headRef: operation.branchName, sha: branchHistory.sha },
             now: now(),
           })
-        }
-        if (operation.state !== "succeeded") {
-          yield* store.failStart(
+          if (operation.state !== "succeeded") {
+            yield* store.failStart(
+              operation.operationId,
+              "branch history is not trusted",
+              "operator_required",
+              now(),
+            )
+          }
+        } else if (operation.state !== "succeeded") {
+          yield* store.waitStartForOperator(
             operation.operationId,
             "branch history is not trusted",
-            "operator_required",
             now(),
           )
         }

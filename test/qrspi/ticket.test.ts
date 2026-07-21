@@ -14,10 +14,15 @@ const reference = {
   trackerInstanceId: "workspace-42",
   nativeTicketId: "workflowd-vs3.3",
 } as const
-const optionalStory = { userStory: "optional", productDirection: "consistent" } as const
+const optionalStory = {
+  userStory: "optional",
+  productDirection: "consistent",
+  scenarioCoverage: [[0]],
+} as const
 const contradictoryDirection = {
   userStory: "optional",
   productDirection: "contradictory",
+  scenarioCoverage: [[0]],
 } as const
 
 describe("QRSPI ticket boundary", () => {
@@ -31,6 +36,7 @@ describe("QRSPI ticket boundary", () => {
     const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
       userStory: "required",
       productDirection: "consistent",
+      scenarioCoverage: [],
     })
 
     expect(result._tag).toBe("NeedsWork")
@@ -87,6 +93,35 @@ describe("QRSPI ticket boundary", () => {
     expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)._tag).toBe(
       "Ready",
     )
+  })
+
+  test("accepts explicit coverage when one scenario covers multiple criteria", () => {
+    const base = readyTicket()
+    const ticket = Schema.decodeUnknownSync(Ticket)({
+      ...base,
+      acceptanceCriteria: [
+        "An authorized caller receives a durable running generation.",
+        "The generation remains recoverable after a restart.",
+      ],
+      scenarios: [
+        {
+          name: "Durable kickoff",
+          given: "a ready ticket and unchanged repository",
+          when: "the caller starts QRSPI and the service restarts",
+          then: "the same durable generation remains running",
+        },
+      ],
+    })
+
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
+      ...optionalStory,
+      scenarioCoverage: [[0], [0]],
+    })
+
+    expect(result._tag).toBe("Ready")
+    if (result._tag === "Ready") {
+      expect(result.ticketRevision.scenarioCoverage).toEqual([[0], [0]])
+    }
   })
 
   test("reports a trusted unresolved product contradiction", () => {

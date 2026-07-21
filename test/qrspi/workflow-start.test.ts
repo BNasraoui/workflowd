@@ -41,7 +41,11 @@ const ticketReference = {
 const request = {
   repository,
   ticket: ticketReference,
-  readinessJudgment: { userStory: "optional", productDirection: "consistent" },
+  readinessJudgment: {
+    userStory: "optional",
+    productDirection: "consistent",
+    scenarioCoverage: [[0]],
+  },
 } as const
 const baseSha = "d".repeat(40)
 const readyTicket = {
@@ -398,6 +402,7 @@ describe("WorkflowStart integration", () => {
     const result = await startWithOptions(filename, fake, options, {
       ...request,
       readinessJudgment: {
+        ...request.readinessJudgment,
         userStory: "optional",
         productDirection: "contradictory",
       },
@@ -939,13 +944,29 @@ describe("WorkflowStart integration", () => {
     await first
   })
 
-  test("rejects a conflicting existing branch", async () => {
+  test("gates a conflicting branch before the first generation", async () => {
     const filename = await databasePath()
     const fake = fakes({ initialBranchSha: "e".repeat(40) })
 
     await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
     expect(await counts(filename, fake)).toEqual([0, 1, 1])
     expect(fake.counts().createCalls).toBe(0)
+    const recovery = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const operations = yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operations WHERE kind = 'WorkflowStart'
+        `
+        const gates = yield* sql<{ readonly state: string; readonly reason: string }>`
+          SELECT state, reason FROM workflow_operation_gates
+        `
+        return { operations, gates }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(recovery).toEqual({
+      operations: [{ state: "waiting_human" }],
+      gates: [{ state: "pending", reason: "branch history is not trusted" }],
+    })
   })
 
   test("supersedes a start when the ticket changes during its final recheck", async () => {

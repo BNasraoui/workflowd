@@ -213,6 +213,11 @@ export type QrspiStorePort = {
     retryPolicy: WorkflowStartTerminalRetryPolicy,
     now: Date,
   ) => Effect.Effect<void, SqlError>
+  readonly waitStartForOperator: (
+    operationId: string,
+    reason: string,
+    now: Date,
+  ) => Effect.Effect<void, SqlError>
   readonly completeStart: (
     input: CompleteStartInput,
   ) => Effect.Effect<WorkflowStartOutput, StoreError>
@@ -667,6 +672,28 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         WHERE operation_id = ${operationId} AND state NOT IN
           ('succeeded', 'failed', 'cancelled', 'superseded', 'data_error')
       `.pipe(Effect.asVoid),
+
+    waitStartForOperator: (operationId, reason, now) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations SET state = 'waiting_human', last_error = ${reason},
+              terminal_failure_reason = ${reason}, terminal_retry_policy = 'operator_required',
+              lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+              updated_at = ${now.toISOString()}
+            WHERE operation_id = ${operationId} AND is_current = 1 AND state IN
+              ('blocked', 'ready', 'leased', 'waiting_external')
+            RETURNING operation_id
+          `
+          if (rows.length === 1) {
+            yield* sql`
+              INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+              VALUES (${operationId}, 'pending', ${reason}, ${now.toISOString()})
+              ON CONFLICT (operation_id) DO NOTHING
+            `
+          }
+        }),
+      ),
 
     completeStart: (input) => {
       const completion = transaction(
