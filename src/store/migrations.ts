@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { Migrator, SqlClient } from "@effect/sql"
 import { Effect, Schema } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
@@ -732,6 +733,22 @@ const expandAgentLaunchIntentEnvelope = Effect.gen(function* () {
   `)
 })
 
+const controllerIdentity = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE workflowd_controller (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      controller_id TEXT NOT NULL UNIQUE CHECK (
+        controller_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-4[0-9a-f][0-9a-f][0-9a-f]-[89ab][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
+      )
+    ) STRICT
+  `
+  yield* sql`
+    INSERT INTO workflowd_controller (singleton, controller_id)
+    VALUES (1, ${randomUUID()})
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -742,5 +759,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
     "0007_qrspi_stages": qrspiStages,
     "0008_expand_agent_launch_intent_envelope": expandAgentLaunchIntentEnvelope,
+    "0009_controller_identity": controllerIdentity,
   }),
 })

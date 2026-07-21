@@ -50,6 +50,7 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
   const finalSha = "f".repeat(40)
   const content = "# Questions"
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "publish:1",
     operationRevision: 1,
     attempt: 1,
@@ -87,9 +88,11 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
     rescheduleStageOperation: () => Effect.die("must not reschedule"),
   }
   let remote = work.currentHeadSha
+  let trustedTrailers: ReadonlyArray<readonly [string, string]> = []
   const repository: ArtifactPublicationRepository = {
     finalizeDocument: (input) => {
       calls.push("finalize")
+      trustedTrailers = input.trustedTrailers
       return Effect.succeed({
         finalSha,
         parentSha: input.expectedParentSha,
@@ -141,6 +144,10 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
   ])
   expect("createPullRequest" in repository).toBe(false)
   expect("updatePullRequest" in repository).toBe(false)
+  expect(trustedTrailers).toContainEqual([
+    "Workflowd-Job",
+    "11111111-2222-4333-8444-555555555555:publish:1",
+  ])
 })
 
 test("restart recovers a waiting_external publication from its durable SHA binding", async () => {
@@ -162,6 +169,7 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
     mediaType: "text/markdown",
   }
   const recovery = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "publish:1",
     operationRevision: 1,
     attempt: 1,
@@ -236,6 +244,7 @@ test("records a stale document publication effect for reconciliation", async () 
   const finalSha = "f".repeat(40)
   const content = "# Questions"
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "publish:stale-document",
     operationRevision: 1,
     attempt: 1,
@@ -315,6 +324,7 @@ test("records a stale document publication effect for reconciliation", async () 
 test("publishes an implementation commit as a durable checkpoint rather than a document artifact", async () => {
   const stage = defaultQrspiWorkflowDefinition.stages[5]!
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "implementation-publish:1",
     operationRevision: 1,
     attempt: 1,
@@ -398,6 +408,7 @@ test("publishes an implementation commit as a durable checkpoint rather than a d
 test("records a stale implementation publication effect for reconciliation", async () => {
   const finalSha = "f".repeat(40)
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "implementation-publish:stale",
     operationRevision: 1,
     attempt: 1,
@@ -471,6 +482,7 @@ test("records a stale implementation publication effect for reconciliation", asy
 
 test("durably binds the final implementation SHA before advancing local HEAD", async () => {
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "implementation-publish:crash",
     operationRevision: 1,
     attempt: 1,
@@ -538,6 +550,7 @@ test("durably binds the final implementation SHA before advancing local HEAD", a
 test("publishes a non-final implementation step without requiring delivery evidence", async () => {
   const stage = defaultQrspiWorkflowDefinition.stages[5]!
   const work: StageOperationLease = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "implementation-publish:1",
     operationRevision: 1,
     attempt: 1,
@@ -625,6 +638,7 @@ test.each([
   "reschedules a final implementation result %s before repository mutation",
   async (_case, ticket, deliveryEvidence) => {
     const work = {
+      controllerId: "11111111-2222-4333-8444-555555555555",
       operationId: "implementation-publish:final",
       operationRevision: 1,
       attempt: 1,
@@ -694,6 +708,7 @@ test.each([
 test("reschedules an over-bound cumulative checkpoint before binding or updating refs", async () => {
   const calls: string[] = []
   const work = {
+    controllerId: "11111111-2222-4333-8444-555555555555",
     operationId: "implementation-publish:over-bound",
     operationRevision: 1,
     attempt: 1,

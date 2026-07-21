@@ -85,7 +85,7 @@ export function runArtifactPublishIterationWith(options: {
           const trailers = [
             ["Provenance-Version", "1"],
             ["Ticket", work.ticketId],
-            ["Workflowd-Job", work.operationId],
+            ["Workflowd-Job", `${work.controllerId}:${work.operationId}`],
             ["Session", sessionReferenceId],
             ["Harness", `${work.stage.producer.harnessId}@${work.stage.producer.harnessVersion}`],
             ["Agent", work.stage.producer.agent],
@@ -268,7 +268,7 @@ export function runArtifactPublishIterationWith(options: {
               trustedTrailers: [
                 ["Provenance-Version", "1"],
                 ["Ticket", work.ticketId],
-                ["Workflowd-Job", work.operationId],
+                ["Workflowd-Job", `${work.controllerId}:${work.operationId}`],
                 ["Session", sessionReferenceId],
                 [
                   "Harness",

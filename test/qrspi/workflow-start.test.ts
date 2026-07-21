@@ -1053,11 +1053,15 @@ describe("WorkflowStart integration", () => {
           WHERE kind = 'ArtifactPublish' AND state = 'succeeded' ORDER BY created_at
         `
         const finalization = yield* sql<{
+          readonly operation_id: string
           readonly kind: string
           readonly state: string
           readonly input_json: string
+          readonly scope_json: string
+          readonly parent_effect_json: string
         }>`
-          SELECT kind, state, input_json FROM workflow_operations
+          SELECT operation_id, kind, state, input_json, scope_json, parent_effect_json
+          FROM workflow_operations
           WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish') ORDER BY kind
         `
         return { duplicate, steps, revisions, generation, observations, finalization }
@@ -1079,9 +1083,25 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
     expect(state.revisions[0]!.state).toBe("accepted")
     expect(state.generation).toEqual([
-      { state: "running", current_head_sha: secondCommit.commitSha },
+      { state: "finalizing", current_head_sha: secondCommit.commitSha },
     ])
-    expect(state.finalization).toEqual([])
+    expect(state.finalization).toEqual([
+      {
+        operation_id: `${workflowId}:1:PrePullRequestVerify:1`,
+        kind: "PrePullRequestVerify",
+        state: "ready",
+        input_json: JSON.stringify({
+          checkpoint,
+          headSha: secondCommit.commitSha,
+          preparedDeliveryEvidenceSha256: checkpoint.preparedDeliveryEvidenceSha256,
+        }),
+        scope_json: JSON.stringify({ _tag: "GenerationScope", workflowId, generation: 1 }),
+        parent_effect_json: JSON.stringify({
+          success: "advance parent",
+          failure: "fail Generation",
+        }),
+      },
+    ])
   })
 
   test("uses the documented branch format after sanitizing the ticket ID", async () => {

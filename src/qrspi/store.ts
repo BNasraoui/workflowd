@@ -350,6 +350,7 @@ export type QrspiStorePort = {
 }
 
 export type StageOperationLease = {
+  readonly controllerId: string
   readonly operationId: string
   readonly operationRevision: number
   readonly attempt: number
@@ -1112,6 +1113,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             )
           `
           const rows = yield* sql<{
+            readonly controller_id: string
             readonly operation_id: string
             readonly operation_revision: number
             readonly attempt: number
@@ -1140,7 +1142,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 AND run_at <= ${now.toISOString()} AND attempt < max_attempts
               ORDER BY run_at, operation_id LIMIT 1
             )
-            RETURNING operation_id, operation_revision, attempt, scope_json, input_json,
+            RETURNING (SELECT controller_id FROM workflowd_controller WHERE singleton = 1)
+                AS controller_id,
+              operation_id, operation_revision, attempt, scope_json, input_json,
               (SELECT d.definition_json FROM qrspi_workflow_definitions d
                 JOIN qrspi_generations g ON g.workflow_definition_sha256 = d.definition_sha256
                 WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
@@ -1226,6 +1230,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             Schema.parseJson(Schema.Struct({ readyTicket: ReadyTicket })),
           )(row.ticket_revision_json)
           return {
+            controllerId: row.controller_id,
             operationId: row.operation_id,
             operationRevision: Number(row.operation_revision),
             attempt: Number(row.attempt),
@@ -1312,6 +1317,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
     findArtifactPublicationRecovery: () =>
       Effect.gen(function* () {
         const rows = yield* sql<{
+          readonly controller_id: string
           readonly operation_id: string
           readonly operation_revision: number
           readonly attempt: number
@@ -1328,7 +1334,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           readonly external_intent_json: string
           readonly implementation_commits_json: string
         }>`
-          SELECT o.operation_id, o.operation_revision, o.attempt, o.scope_json, o.input_json,
+          SELECT c.controller_id, o.operation_id, o.operation_revision, o.attempt,
+            o.scope_json, o.input_json,
             d.definition_json, g.repository_json, g.head_ref, g.current_head_sha,
             r.prepared_result_json, t.revision_json AS ticket_revision_json,
             json_extract(t.revision_json, '$.readyTicket.reference.nativeTicketId') AS ticket_id,
@@ -1339,6 +1346,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 AND s.stage_key = r.stage_key AND s.revision = r.revision
               ORDER BY s.position) AS implementation_commits_json
           FROM workflow_operations o
+          CROSS JOIN workflowd_controller c
           JOIN qrspi_generations g
             ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
             AND g.generation = json_extract(o.scope_json, '$.generation')
@@ -1404,6 +1412,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           ),
         )(row.external_intent_json)
         const work = {
+          controllerId: row.controller_id,
           operationId: row.operation_id,
           operationRevision: Number(row.operation_revision),
           attempt: Number(row.attempt),
@@ -2651,6 +2660,66 @@ function activateNextStage(
       if (stage?.kind === "document") {
         yield* sql`
           UPDATE qrspi_generations SET state = 'completed', updated_at = ${now.toISOString()}
+          WHERE workflow_id = ${workflowId} AND generation = ${generation}
+            AND is_current = 1 AND state = 'running'
+        `
+      } else if (stage?.kind === "implementation") {
+        const checkpointRows = yield* sql<{
+          readonly current_head_sha: string
+          readonly published_reference_json: string
+        }>`
+          SELECT g.current_head_sha, v.published_reference_json
+          FROM qrspi_generations g
+          JOIN qrspi_stage_runs r
+            ON r.workflow_id = g.workflow_id AND r.generation = g.generation
+            AND r.stage_key = ${completedStageKey}
+          JOIN qrspi_stage_revisions v
+            ON v.workflow_id = r.workflow_id AND v.generation = r.generation
+            AND v.stage_key = r.stage_key AND v.revision = r.accepted_revision
+          WHERE g.workflow_id = ${workflowId} AND g.generation = ${generation}
+            AND g.is_current = 1 AND g.state = 'running'
+            AND r.state = 'succeeded' AND v.state = 'accepted'
+            AND NOT EXISTS (
+              SELECT 1 FROM qrspi_stage_runs pending
+              WHERE pending.workflow_id = g.workflow_id AND pending.generation = g.generation
+                AND pending.state NOT IN ('succeeded', 'skipped')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM workflow_operation_gates gate
+              JOIN workflow_operations operation ON operation.operation_id = gate.operation_id
+              WHERE gate.state = 'pending'
+                AND json_extract(operation.scope_json, '$.workflowId') = g.workflow_id
+                AND json_extract(operation.scope_json, '$.generation') = g.generation
+            )
+        `
+        const checkpointRow = checkpointRows[0]
+        if (checkpointRow === undefined) return
+        const checkpoint = yield* Schema.decodeUnknown(
+          Schema.parseJson(ImplementationCheckpointReference),
+        )(checkpointRow.published_reference_json)
+        if (checkpoint.finalSha !== checkpointRow.current_head_sha) return
+        const logical = `${workflowId}:${generation}:PrePullRequestVerify`
+        const verificationInput = {
+          checkpoint,
+          headSha: checkpointRow.current_head_sha,
+          preparedDeliveryEvidenceSha256: checkpoint.preparedDeliveryEvidenceSha256,
+        }
+        yield* insertOperation(sql, {
+          operationId: `${logical}:1`,
+          logicalOperationId: logical,
+          revision: 1,
+          retryOf: null,
+          kind: "PrePullRequestVerify",
+          scope: { _tag: "GenerationScope", workflowId, generation },
+          inputJson: JSON.stringify(verificationInput),
+          inputSha256: canonicalSha256(verificationInput),
+          state: "ready",
+          attempt: 0,
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+          now,
+        })
+        yield* sql`
+          UPDATE qrspi_generations SET state = 'finalizing', updated_at = ${now.toISOString()}
           WHERE workflow_id = ${workflowId} AND generation = ${generation}
             AND is_current = 1 AND state = 'running'
         `

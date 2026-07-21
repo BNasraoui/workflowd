@@ -35,6 +35,7 @@ const readyTicket = {
   ],
 }
 const lease: StageOperationLease = {
+  controllerId: "11111111-2222-4333-8444-555555555555",
   operationId: "workflow:1:StageProduce:questions:1:1",
   operationRevision: 1,
   attempt: 1,

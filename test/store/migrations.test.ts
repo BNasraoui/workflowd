@@ -130,13 +130,17 @@ describe("strict initial store schema", () => {
             'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
             'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
-            'qrspi_stage_runs', 'qrspi_stage_revisions', 'qrspi_implementation_steps'
+            'qrspi_stage_runs', 'qrspi_stage_revisions', 'qrspi_implementation_steps',
+            'workflowd_controller'
           )
           ORDER BY name
         `
         const foreignKeys = yield* sql`PRAGMA foreign_keys`
         const busyTimeout = yield* sql`PRAGMA busy_timeout`
-        return { busyTimeout, foreignKeys, migrations, tables }
+        const controllers = yield* sql<{ readonly controller_id: string }>`
+          SELECT controller_id FROM workflowd_controller
+        `
+        return { busyTimeout, controllers, foreignKeys, migrations, tables }
       }),
     )
 
@@ -149,9 +153,14 @@ describe("strict initial store schema", () => {
       { migration_id: 6, name: "fix_publication_signing_evidence" },
       { migration_id: 7, name: "qrspi_stages" },
       { migration_id: 8, name: "expand_agent_launch_intent_envelope" },
+      { migration_id: 9, name: "controller_identity" },
     ])
-    expect(result.tables).toHaveLength(16)
+    expect(result.tables).toHaveLength(17)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
+    expect(result.controllers).toHaveLength(1)
+    expect(result.controllers[0]!.controller_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
   })
@@ -182,6 +191,7 @@ describe("strict initial store schema", () => {
         yield* sql`DROP TABLE qrspi_implementation_steps`
         yield* sql`DROP TABLE qrspi_stage_revisions`
         yield* sql`DROP TABLE qrspi_stage_runs`
+        yield* sql`DROP TABLE workflowd_controller`
         yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 7`
 
         const workflowId = "workflow-upgrade"
