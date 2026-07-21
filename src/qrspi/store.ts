@@ -195,13 +195,6 @@ export type QrspiStorePort = {
     observationJson: string,
     now: Date,
   ) => Effect.Effect<"ready" | "waiting_human" | "stale", SqlError>
-  readonly reconcileCompletedStart: (input: {
-    readonly workflowId: string
-    readonly generation: number
-    readonly reason: string
-    readonly observation: object
-    readonly now: Date
-  }) => Effect.Effect<void, SqlError>
   readonly supersedeStart: (
     operationId: string,
     reason: string,
@@ -607,50 +600,6 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             `
           }
           return state ?? "stale"
-        }),
-      ),
-
-    reconcileCompletedStart: (input) =>
-      transaction(
-        Effect.gen(function* () {
-          const generations = yield* sql<{ readonly generation: number }>`
-            UPDATE qrspi_generations
-            SET state = 'reconciling', updated_at = ${input.now.toISOString()}
-            WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
-              AND is_current = 1 AND state IN ('running', 'reconciling')
-            RETURNING generation
-          `
-          if (generations.length !== 1) return
-          const logical = `target-reconcile:${input.workflowId}:${input.generation}`
-          const current = yield* sql<{ readonly operation_id: string }>`
-            SELECT operation_id FROM workflow_operations
-            WHERE logical_operation_id = ${logical} AND is_current = 1
-          `
-          if (current.length > 0) return
-          const operationInput = {
-            workflowId: input.workflowId,
-            generation: input.generation,
-            reason: input.reason,
-            observation: input.observation,
-          }
-          yield* insertOperation(sql, {
-            operationId: `${logical}:1`,
-            logicalOperationId: logical,
-            revision: 1,
-            retryOf: null,
-            kind: "TargetReconcile",
-            scope: {
-              _tag: "GenerationScope",
-              workflowId: input.workflowId,
-              generation: input.generation,
-            },
-            inputJson: JSON.stringify(operationInput),
-            inputSha256: canonicalSha256(operationInput),
-            state: "ready",
-            attempt: 0,
-            parentEffect: { success: "advance parent", failure: "audit only" },
-            now: input.now,
-          })
         }),
       ),
 

@@ -440,16 +440,17 @@ describe("WorkflowStart integration", () => {
     expect(fake.counts().createCalls).toBe(1)
   })
 
-  test("re-observes a succeeded duplicate and rejects changed authoritative state", async () => {
+  test("re-observes a succeeded duplicate without entering unconsumed reconciliation", async () => {
     const filename = await databasePath()
     const fake = fakes()
-    await start(filename, fake)
+    const first = await start(filename, fake)
     fake.setBranch("e".repeat(40))
 
     await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
 
     expect(fake.counts().createCalls).toBe(1)
-    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+    fake.setBranch(baseSha)
+    await expect(start(filename, fake)).resolves.toEqual(first)
     const reconciliation = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -463,8 +464,8 @@ describe("WorkflowStart integration", () => {
         return { generations, operations }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
-    expect(reconciliation.generations).toEqual([{ state: "reconciling" }])
-    expect(Number(reconciliation.operations[0]?.count)).toBe(1)
+    expect(reconciliation.generations).toEqual([{ state: "running" }])
+    expect(Number(reconciliation.operations[0]?.count)).toBe(0)
   })
 
   test("rejects any open pull request for the head before branch mutation", async () => {
@@ -529,7 +530,7 @@ describe("WorkflowStart integration", () => {
     expect(await counts(filename, fake)).toEqual([1, 4, 1])
   })
 
-  test("moves a completed generation to reconciliation when an open head PR appears", async () => {
+  test("does not enqueue unconsumed reconciliation when an open head PR appears", async () => {
     const filename = await databasePath()
     const fake = fakes()
     await start(filename, fake)
@@ -548,7 +549,7 @@ describe("WorkflowStart integration", () => {
         `
       }).pipe(Effect.provide(layer(filename, fake))),
     )
-    expect(rows).toEqual([{ generation_state: "reconciling", reconciliations: 1 }])
+    expect(rows).toEqual([{ generation_state: "running", reconciliations: 0 }])
   })
 
   test("records unknown accepted create outcome as waiting_external and recovers by observation", async () => {
@@ -1191,7 +1192,7 @@ describe("WorkflowStart integration", () => {
     expect(targets[1]).toEqual({ base_sha: baseSha, root_sha: advancedSha })
   })
 
-  test("requires reconciliation when the base advances but the branch remains at the cursor", async () => {
+  test("rejects an advanced base without entering unconsumed reconciliation", async () => {
     const filename = await databasePath()
     const fake = fakes()
     await start(filename, fake)
@@ -1208,10 +1209,10 @@ describe("WorkflowStart integration", () => {
         `
       }).pipe(Effect.provide(layer(filename, fake))),
     )
-    expect(rows).toEqual([{ generation: 1, state: "reconciling" }])
+    expect(rows).toEqual([{ generation: 1, state: "running" }])
   })
 
-  test("does not supersede a generation while target reconciliation is active", async () => {
+  test("starts a successor after the exact target is restored", async () => {
     const filename = await databasePath()
     const fake = fakes()
     await start(filename, fake)
@@ -1220,9 +1221,9 @@ describe("WorkflowStart integration", () => {
     await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
     fake.setBranch(baseSha)
     fake.setBranchHistoryTrusted(true)
-    fake.setTicket({ ...readyTicket, title: "Kick off while reconciliation is active" })
+    fake.setTicket({ ...readyTicket, title: "Kick off after the target is restored" })
 
-    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+    await expect(start(filename, fake)).resolves.toMatchObject({ generation: 2 })
 
     const rows = await Effect.runPromise(
       Effect.gen(function* () {
@@ -1232,7 +1233,10 @@ describe("WorkflowStart integration", () => {
         `
       }).pipe(Effect.provide(layer(filename, fake))),
     )
-    expect(rows).toEqual([{ generation: 1, state: "reconciling" }])
+    expect(rows).toEqual([
+      { generation: 1, state: "superseded" },
+      { generation: 2, state: "running" },
+    ])
   })
 
   test("supersedes a leased predecessor operation when starting a successor", async () => {
@@ -1334,7 +1338,7 @@ describe("WorkflowStart integration", () => {
     })
   }
 
-  test("reconciles rather than adopting an advanced branch with unknown history", async () => {
+  test("rejects an advanced branch with unknown history without queueing dead work", async () => {
     const filename = await databasePath()
     const fake = fakes()
     await start(filename, fake)
@@ -1352,8 +1356,8 @@ describe("WorkflowStart integration", () => {
         `
       }).pipe(Effect.provide(layer(filename, fake))),
     )
-    expect(rows).toEqual([{ state: "reconciling" }])
-    expect(await counts(filename, fake)).toEqual([1, 5, 2])
+    expect(rows).toEqual([{ state: "running" }])
+    expect(await counts(filename, fake)).toEqual([1, 4, 2])
   })
 
   test("quarantines a corrupt persisted WorkflowStart input as a typed data error", async () => {

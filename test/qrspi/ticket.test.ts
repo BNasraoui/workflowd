@@ -292,6 +292,18 @@ describe("QRSPI ticket boundary", () => {
     }
   })
 
+  test("accepts supported non-file references through the workspace resolver", () => {
+    const resolveSource = makeWorkspaceSourceResolver(process.cwd())
+
+    expect(resolveSource("https://example.test/contracts/qrspi")).toBe(true)
+    expect(resolveSource("http://example.test/contracts/qrspi")).toBe(true)
+    expect(resolveSource("beads:workflowd-vs3.3")).toBe(true)
+    expect(resolveSource("ticket:workflowd-vs3.3")).toBe(true)
+    expect(resolveSource("provenance:requirement-42")).toBe(true)
+    expect(resolveSource("https://")).toBe(false)
+    expect(resolveSource("beads:")).toBe(false)
+  })
+
   test("reports structural placeholder acceptance criteria as unobservable", () => {
     for (const criterion of ["TODO", "TBD", "unknown", "  todo: decide later  "]) {
       const ticket = Schema.decodeUnknownSync(Ticket)({

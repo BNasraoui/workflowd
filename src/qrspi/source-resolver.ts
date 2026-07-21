@@ -3,7 +3,17 @@ import { isAbsolute, relative, resolve } from "node:path"
 
 export function makeWorkspaceSourceResolver(workspace: string) {
   return (source: string): boolean => {
-    if (/^(?:https?:\/\/|beads:|provenance:|ticket:)/.test(source)) return false
+    if (/^(?:beads|provenance|ticket):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(source)) {
+      return true
+    }
+    try {
+      const url = new URL(source)
+      if ((url.protocol === "http:" || url.protocol === "https:") && url.hostname !== "") {
+        return true
+      }
+    } catch {
+      // Continue with workspace-relative path resolution.
+    }
     try {
       const root = realpathSync(workspace)
       const candidate = realpathSync(resolve(root, source))

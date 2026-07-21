@@ -174,13 +174,6 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         (currentCursor.baseRef !== inspection.baseRef ||
           currentCursor.baseSha !== inspection.baseSha)
       ) {
-        yield* store.reconcileCompletedStart({
-          workflowId,
-          generation: currentCursor.generation,
-          reason: "base target changed after WorkflowStart completed",
-          observation: { baseRef: inspection.baseRef, baseSha: inspection.baseSha },
-          now: now(),
-        })
         return yield* Effect.fail(
           new WorkflowStartConflict({ reason: "Base target requires reconciliation" }),
         )
@@ -216,15 +209,6 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           headRef: operation.branchName,
         })
       ) {
-        if (operation.state === "succeeded" && operation.output !== undefined) {
-          yield* store.reconcileCompletedStart({
-            workflowId,
-            generation: operation.output.generation,
-            reason: "open pull request appeared on completed-start branch",
-            observation: { headRef: operation.branchName, openPullRequest: true },
-            now: now(),
-          })
-        }
         if (
           operation.state === "blocked" ||
           operation.state === "ready" ||
@@ -280,13 +264,6 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         )
       if (branchHistory._tag === "UnknownHistory") {
         if (currentCursor !== null) {
-          yield* store.reconcileCompletedStart({
-            workflowId,
-            generation: currentCursor.generation,
-            reason: "branch contains unrecognized history after trusted cursor",
-            observation: { headRef: operation.branchName, sha: branchHistory.sha },
-            now: now(),
-          })
           if (operation.state !== "succeeded") {
             yield* store.failStart(
               operation.operationId,
@@ -382,18 +359,6 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           operation.output === undefined ||
           observed.sha !== operation.output.rootSha
         ) {
-          if (operation.output !== undefined) {
-            yield* store.reconcileCompletedStart({
-              workflowId,
-              generation: operation.output.generation,
-              reason: "completed-start branch drifted from stored root",
-              observation:
-                observed === null
-                  ? { headRef: operation.branchName, present: false }
-                  : { headRef: operation.branchName, sha: observed.sha },
-              now: now(),
-            })
-          }
           return yield* Effect.fail(
             new WorkflowStartConflict({
               reason: "Succeeded WorkflowStart effect is no longer present",
