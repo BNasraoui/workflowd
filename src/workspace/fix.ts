@@ -155,14 +155,22 @@ function verifyCommit(work: FixWork, directory: string, head: string, gitSigning
         }),
       )
     }
-    yield* runGit(
+    const parents = yield* runGit(
       "verify fix ancestry",
       directory,
-      "merge-base",
-      "--is-ancestor",
-      work.target.headSha,
+      "show",
+      "-s",
+      "--format=%P",
       head,
     )
+    if (parents !== work.target.headSha) {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          operation: "verify fix ancestry",
+          cause: new Error(`Commit ${head} must have sole parent ${work.target.headSha}`),
+        }),
+      )
+    }
     const message = yield* runGit(
       "verify fix commit ownership",
       directory,
@@ -171,7 +179,8 @@ function verifyCommit(work: FixWork, directory: string, head: string, gitSigning
       "--format=%B",
       head,
     )
-    if (!message.includes(`Workflowd-Job: ${work.id}`)) {
+    const jobIds = [...message.matchAll(/^Workflowd-Job: ([1-9]\d*)$/gm)]
+    if (jobIds.length !== 1 || Number(jobIds[0]?.[1]) !== work.id) {
       return yield* Effect.fail(
         new WorkspaceError({
           operation: "verify fix commit ownership",

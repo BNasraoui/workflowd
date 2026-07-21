@@ -529,7 +529,10 @@ function normalize(value: unknown): unknown {
   ) {
     throw new Error("Value is not valid JSON")
   }
-  if (typeof value === "string") return value.normalize("NFC")
+  if (typeof value === "string") {
+    assertNoLoneSurrogates(value)
+    return value.normalize("NFC")
+  }
   if (typeof value === "number" && (!Number.isFinite(value) || Object.is(value, -0))) {
     throw new Error("Canonical JSON rejects non-finite numbers and negative zero")
   }
@@ -538,6 +541,7 @@ function normalize(value: unknown): unknown {
     const entries: Array<readonly [string, unknown]> = []
     const keys = new Set<string>()
     for (const [key, item] of Object.entries(value)) {
+      assertNoLoneSurrogates(key)
       const normalizedKey = key.normalize("NFC")
       if (keys.has(normalizedKey)) throw new Error(`NFC normalization collision: ${normalizedKey}`)
       keys.add(normalizedKey)
@@ -546,6 +550,23 @@ function normalize(value: unknown): unknown {
     return Object.fromEntries(entries)
   }
   return value
+}
+
+function assertNoLoneSurrogates(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1
+        continue
+      }
+      throw new Error("Canonical JSON rejects lone surrogate code points")
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new Error("Canonical JSON rejects lone surrogate code points")
+    }
+  }
 }
 
 function canonicalJson(value: unknown): string {

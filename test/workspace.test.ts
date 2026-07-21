@@ -892,6 +892,65 @@ describe("GitWorkspaceAdapter", () => {
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
 
+  test("refuses to publish a multi-commit fix", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-multi-commit-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `first fix\n\nWorkflowd-Job: ${job.id}`)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 4\n")
+    await git(fixture.source, "commit", "-am", `second fix\n\nWorkflowd-Job: ${job.id}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Two commits.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix ancestry" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
+  test.each([
+    ["a mismatched trailer prefix", "Workflowd-Job: 110"],
+    ["duplicate trailers", "Workflowd-Job: 11\nWorkflowd-Job: 11"],
+  ])("refuses to publish a fix with %s", async (_description, trailers) => {
+    const fixture = await createRepositoryFixture("workflowd-fix-invalid-trailer-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `invalid trailer\n\n${trailers}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Invalid trailer.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix commit ownership" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
   test("recognizes the same job after push but before store completion", async () => {
     const fixture = await createRepositoryFixture("workflowd-fix-pushed-")
     const manager = makeManager(fixture, [])

@@ -211,6 +211,11 @@ describe("QRSPI ticket boundary", () => {
     expect(() => canonicalSha256(-0)).toThrow("negative zero")
   })
 
+  test.each(["\ud800", "\udc00"])("rejects the lone surrogate %p", (surrogate) => {
+    expect(() => canonicalSha256({ value: surrogate })).toThrow("lone surrogate")
+    expect(() => canonicalSha256({ [surrogate]: "value" })).toThrow("lone surrogate")
+  })
+
   test("uses an unambiguous bounded workflow identity", () => {
     const left = workflowIdFor(
       { providerInstanceId: "provider:a", repositoryId: "b", repositoryFullName: "o/r" },
