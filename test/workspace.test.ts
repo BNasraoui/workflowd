@@ -691,6 +691,38 @@ describe("GitWorkspaceAdapter", () => {
     expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(directory)
   })
 
+  test("managed review retry removes a worktree stranded by the previous attempt", async () => {
+    const fixture = await createRepositoryFixture("workflowd-managed-retry-")
+    const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
+    const previousDirectory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
+    await mkdir(dirname(repository), { recursive: true })
+    await mkdir(dirname(previousDirectory), { recursive: true })
+    await git(fixture.root, "clone", fixture.remote, repository)
+    await git(repository, "worktree", "add", "-b", "feature", previousDirectory, "origin/feature")
+    const manager = makeManager(fixture, [])
+
+    const prepared = await Effect.runPromise(
+      Effect.scoped(
+        manager.prepareReview(makeReviewJob(fixture, { attempt: 2 })).pipe(
+          Effect.flatMap((workspace) =>
+            Effect.promise(async () => ({
+              directory: workspace.directory,
+              registered: await git(repository, "worktree", "list", "--porcelain"),
+              previousExists: await stat(previousDirectory).then(
+                () => true,
+                () => false,
+              ),
+            })),
+          ),
+        ),
+      ),
+    )
+
+    expect(prepared.directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1-attempt-2"))
+    expect(prepared.registered).not.toContain(previousDirectory)
+    expect(prepared.previousExists).toBe(false)
+  })
+
   test("managed setup failure does not strand a worktree", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-failure-")
     const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")

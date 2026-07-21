@@ -109,6 +109,14 @@ export class ManagedWorkspaceLifecycle {
           repository,
         ])
       }
+      if (work._tag === "ReviewWork") {
+        for (let attempt = 1; attempt < work.attempt; attempt += 1) {
+          yield* this.remove(
+            repository,
+            join(dirname(directory), `${work.id}-${work.generation}-attempt-${attempt}`),
+          )
+        }
+      }
       const pullRef = `refs/workflowd/pull/${work.pullRequestNumber}`
       const refspecs = [
         `+refs/pull/${work.pullRequestNumber}/head:${pullRef}`,
