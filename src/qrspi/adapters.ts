@@ -157,9 +157,6 @@ type QrspiOctokit = {
       readonly getBranch: (
         input: Parameters<RepositoriesApi["getBranch"]>[0],
       ) => Promise<{ readonly data: { readonly commit: { readonly sha: string } } }>
-      readonly compareCommits: (
-        input: Parameters<RepositoriesApi["compareCommits"]>[0],
-      ) => Promise<{ readonly data: { readonly status: string } }>
     }
     readonly pulls: {
       readonly list: (
@@ -254,16 +251,6 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         sha === input.previousTrustedSha
       ) {
         return { _tag: "Accepted", sha } as const
-      }
-      if (input.previousTrustedSha !== null) {
-        const comparison = await client.rest.repos.compareCommits({
-          owner,
-          repo,
-          base: input.previousTrustedSha,
-          head: sha,
-          request: { signal },
-        })
-        if (comparison.data.status === "ahead") return { _tag: "Accepted", sha } as const
       }
       return { _tag: "UnknownHistory", sha } as const
     })

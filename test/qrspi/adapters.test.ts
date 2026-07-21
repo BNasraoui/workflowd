@@ -176,20 +176,13 @@ describe("QRSPI external adapters", () => {
     })
   })
 
-  test("accepts an advanced branch when the previous trusted SHA is its ancestor", async () => {
+  test("accepts the exact previously trusted branch head", async () => {
     const previousTrustedSha = "a".repeat(40)
-    const advancedSha = "b".repeat(40)
-    const compareCalls: Array<{ readonly base: string; readonly head: string }> = []
     const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
       rest: {
         repos: {
           get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
-          getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
-          compareCommits: async (input) => {
-            if (input === undefined) throw new Error("compare parameters are required")
-            compareCalls.push({ base: input.base, head: input.head })
-            return { data: { status: "ahead" } }
-          },
+          getBranch: async () => ({ data: { commit: { sha: previousTrustedSha } } }),
         },
         pulls: { list: async () => ({ data: [] }) },
         git: { createRef: async () => undefined },
@@ -205,8 +198,32 @@ describe("QRSPI external adapters", () => {
       }),
     )
 
-    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
-    expect(compareCalls).toHaveLength(1)
-    expect(compareCalls[0]).toMatchObject({ base: previousTrustedSha, head: advancedSha })
+    expect(observation).toEqual({ _tag: "Accepted", sha: previousTrustedSha })
+  })
+
+  test("rejects an unrecognized descendant of the previous trusted SHA", async () => {
+    const previousTrustedSha = "a".repeat(40)
+    const advancedSha = "b".repeat(40)
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const observation = await Effect.runPromise(
+      adapter.observeAcceptedBranch({
+        repository,
+        headRef: "feature/workflowd-vs3.3-start",
+        baseSha: "c".repeat(40),
+        previousTrustedSha,
+      }),
+    )
+
+    expect(observation).toEqual({ _tag: "UnknownHistory", sha: advancedSha })
   })
 })

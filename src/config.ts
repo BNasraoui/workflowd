@@ -338,6 +338,7 @@ function loadQrspiConfig(env: Record<string, string | undefined>): QrspiConfig |
   const token = env.WORKFLOWD_QRSPI_TOKEN
   const names = [
     "WORKFLOWD_QRSPI_INSTALLATION_ID",
+    "WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID",
     "WORKFLOWD_QRSPI_REPOSITORY_ID",
     "WORKFLOWD_QRSPI_REPOSITORY",
     "WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID",
@@ -346,6 +347,7 @@ function loadQrspiConfig(env: Record<string, string | undefined>): QrspiConfig |
     "WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS",
     "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
     "WORKFLOWD_QRSPI_LEASE_MS",
+    "WORKFLOWD_QRSPI_BASE_REF",
   ] as const
   if (token === undefined) {
     if (names.some((name) => env[name] !== undefined)) {

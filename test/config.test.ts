@@ -152,6 +152,15 @@ describe("loadConfig", () => {
     })
   })
 
+  test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
+    "requires the QRSPI token when %s is present",
+    async (name) => {
+      await expect(
+        loadConfig({ ...requiredEnvironment, [name]: "configured" }, { home: "/home/test" }),
+      ).rejects.toThrow("WORKFLOWD_QRSPI_TOKEN is required when QRSPI settings are present")
+    },
+  )
+
   test("requires the WorkflowStart lease to exceed repository timeout plus completion margin", async () => {
     await expect(
       loadConfig(
