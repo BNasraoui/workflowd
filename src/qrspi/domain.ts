@@ -119,6 +119,10 @@ export type TicketCheck = typeof TicketCheck.Type
 export const TicketReadinessJudgment = Schema.Struct({
   userStory: Schema.Literal("required", "optional", "forbidden"),
   productDirection: Schema.Literal("consistent", "contradictory"),
+  productOutcome: Schema.Literal("clear", "unclear"),
+  acceptanceCriteriaObservability: Schema.Array(Schema.Literal("observable", "unobservable")).pipe(
+    Schema.maxItems(100),
+  ),
   scenarioCoverage: Schema.Array(
     Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
       Schema.maxItems(100),
@@ -334,7 +338,7 @@ export function checkTicket(
     problems.push(
       problem("missing_description", "Describe current behavior and the desired outcome."),
     )
-  else if (isLowInformation(ticket.description))
+  else if (isLowInformation(ticket.description) || judgment.productOutcome === "unclear")
     problems.push(
       problem("unclear_product_outcome", "Replace the placeholder with a product outcome."),
     )
@@ -353,7 +357,13 @@ export function checkTicket(
     )
   if (ticket.acceptanceCriteria === undefined || ticket.acceptanceCriteria.length === 0)
     problems.push(problem("missing_acceptance_criteria", "Add observable acceptance criteria."))
-  else if (ticket.acceptanceCriteria.some(isUnobservableCriterion))
+  else if (
+    ticket.acceptanceCriteria.some(
+      (criterion, index) =>
+        isUnobservableCriterion(criterion) ||
+        judgment.acceptanceCriteriaObservability[index] !== "observable",
+    )
+  )
     problems.push(
       problem("unobservable_acceptance_criterion", "Make every acceptance criterion observable."),
     )

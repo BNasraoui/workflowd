@@ -17,12 +17,13 @@ const reference = {
 const optionalStory = {
   userStory: "optional",
   productDirection: "consistent",
+  productOutcome: "clear",
+  acceptanceCriteriaObservability: ["observable"],
   scenarioCoverage: [[0]],
 } as const
 const contradictoryDirection = {
-  userStory: "optional",
+  ...optionalStory,
   productDirection: "contradictory",
-  scenarioCoverage: [[0]],
 } as const
 
 describe("QRSPI ticket boundary", () => {
@@ -36,6 +37,8 @@ describe("QRSPI ticket boundary", () => {
     const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
       userStory: "required",
       productDirection: "consistent",
+      productOutcome: "clear",
+      acceptanceCriteriaObservability: [],
       scenarioCoverage: [],
     })
 
@@ -115,6 +118,7 @@ describe("QRSPI ticket boundary", () => {
 
     const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
       ...optionalStory,
+      acceptanceCriteriaObservability: ["observable", "observable"],
       scenarioCoverage: [[0], [0]],
     })
 
@@ -213,7 +217,7 @@ describe("QRSPI ticket boundary", () => {
     expect(left.length).toBeLessThanOrEqual(256)
   })
 
-  test("does not retain an extra readiness-evidence field in the Beads-owned Ticket", () => {
+  test("uses trusted semantic readiness judgments without retaining them in the Beads ticket", () => {
     const ticket = Schema.decodeUnknownSync(Ticket)({
       reference,
       issueType: "feature",
@@ -227,9 +231,19 @@ describe("QRSPI ticket boundary", () => {
     })
 
     expect(ticket).not.toHaveProperty("readinessEvidence")
-    expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)._tag).toBe(
-      "Ready",
-    )
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
+      ...optionalStory,
+      productOutcome: "unclear",
+      acceptanceCriteriaObservability: ["unobservable"],
+    })
+
+    expect(result._tag).toBe("NeedsWork")
+    if (result._tag === "NeedsWork") {
+      expect(result.problems.map(({ code }) => code)).toEqual([
+        "unclear_product_outcome",
+        "unobservable_acceptance_criterion",
+      ])
+    }
   })
 
   test("rejects source text that has no locally resolvable URL, file, or reference syntax", () => {

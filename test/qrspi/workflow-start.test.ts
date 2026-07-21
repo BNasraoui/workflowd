@@ -44,6 +44,8 @@ const request = {
   readinessJudgment: {
     userStory: "optional",
     productDirection: "consistent",
+    productOutcome: "clear",
+    acceptanceCriteriaObservability: ["observable"],
     scenarioCoverage: [[0]],
   },
 } as const
