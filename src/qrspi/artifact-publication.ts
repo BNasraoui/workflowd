@@ -73,6 +73,7 @@ export class ArtifactRefConflictError extends Data.TaggedError("ArtifactRefConfl
 
 export class GitArtifactPublicationRepository implements ArtifactPublicationRepository {
   readonly #gitEnvironment: NodeJS.ProcessEnv
+  readonly #authenticationHeaderKey: string
 
   constructor(
     private readonly directory: string,
@@ -82,7 +83,9 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
       readonly run: typeof runWorkspaceCommand
       readonly runBytes: typeof runWorkspaceCommandBytes
     } = { run: runWorkspaceCommand, runBytes: runWorkspaceCommandBytes },
+    private readonly installationToken?: () => Promise<string>,
   ) {
+    this.#authenticationHeaderKey = `http.${new URL(trustedRemoteUrl).origin}/.extraHeader`
     this.#gitEnvironment = {
       ...process.env,
       GIT_CONFIG: "/dev/null",
@@ -200,7 +203,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
         input.expectedOld,
         input.newSha,
       ])
-      yield* this.git("update exact ticket ref", [
+      yield* this.authenticatedGit("update exact ticket ref", [
         "push",
         `--force-with-lease=refs/heads/${input.headRef}:${input.expectedOld}`,
         this.trustedRemoteUrl,
@@ -209,7 +212,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     })
 
   readonly observeRef: ArtifactPublicationRepository["observeRef"] = (headRef) =>
-    this.git("observe ticket ref", [
+    this.authenticatedGit("observe ticket ref", [
       "ls-remote",
       "--heads",
       this.trustedRemoteUrl,
@@ -291,6 +294,30 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     return this.command
       .run(operation, ["git", ...args], { cwd: this.directory, env: this.#gitEnvironment })
       .pipe(Effect.mapError((cause) => new Error(`${operation}: ${String(cause)}`, { cause })))
+  }
+
+  private authenticatedGit(operation: string, args: ReadonlyArray<string>) {
+    if (this.installationToken === undefined) return this.git(operation, args)
+    return Effect.tryPromise({
+      try: this.installationToken,
+      catch: (cause) =>
+        new Error(`${operation}: could not obtain GitHub authentication`, { cause }),
+    }).pipe(
+      Effect.flatMap((token) =>
+        this.command.run(operation, ["git", ...args], {
+          cwd: this.directory,
+          env: {
+            ...this.#gitEnvironment,
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: this.#authenticationHeaderKey,
+            GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+          },
+        }),
+      ),
+      Effect.mapError((cause) =>
+        cause instanceof Error ? cause : new Error(`${operation}: ${String(cause)}`, { cause }),
+      ),
+    )
   }
 
   private gitBytes(operation: string, args: ReadonlyArray<string>) {

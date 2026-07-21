@@ -241,47 +241,59 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
   let remote = parentSha
   let commit = 0
   const commands: ReadonlyArray<string>[] = []
+  const remoteEnvironments: NodeJS.ProcessEnv[] = []
   const trustedRemote = "https://github.com/owner/repo.git"
-  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), trustedRemote, {
-    run: (_operation, command, options) => {
-      commands.push(command)
-      expect(options?.env).toMatchObject({
-        GIT_CONFIG: "/dev/null",
-        GIT_CONFIG_NOSYSTEM: "1",
-      })
-      const args = command.slice(1)
-      if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
-      if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
-      if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
-      if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
-      if (args[0] === "ls-tree") {
-        const path = String(args.at(-1))
-        return Effect.succeed(
-          path === artifact.path
-            ? `100644 blob ${artifact.blobSha}\t${path}`
-            : `040000 tree ${"7".repeat(40)}\t${path}`,
-        )
-      }
-      if (args[0] === "commit-tree") {
-        commit += 1
-        return Effect.succeed(commit === 1 ? finalSha : "9".repeat(40))
-      }
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return Effect.succeed("d".repeat(40))
-      if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
-      if (args[0] === "verify-commit" || args[0] === "merge-base") return Effect.succeed("")
-      if (args[0] === "ls-remote") {
-        return Effect.succeed(`${remote}\trefs/heads/feature/ticket`)
-      }
-      if (args[0] === "push") {
-        remote = String(args.at(-1)?.split(":")[0])
-        return Effect.succeed("")
-      }
-      if (args[0] === "update-ref") return Effect.succeed("")
-      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+  const installationToken = "github-installation-token"
+  const publisher = new GitArtifactPublicationRepository(
+    "/repo",
+    "1".repeat(40),
+    trustedRemote,
+    {
+      run: (_operation, command, options) => {
+        commands.push(command)
+        expect(options?.env).toMatchObject({
+          GIT_CONFIG: "/dev/null",
+          GIT_CONFIG_NOSYSTEM: "1",
+        })
+        const args = command.slice(1)
+        if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
+        if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
+        if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
+        if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
+        if (args[0] === "ls-tree") {
+          const path = String(args.at(-1))
+          return Effect.succeed(
+            path === artifact.path
+              ? `100644 blob ${artifact.blobSha}\t${path}`
+              : `040000 tree ${"7".repeat(40)}\t${path}`,
+          )
+        }
+        if (args[0] === "commit-tree") {
+          commit += 1
+          return Effect.succeed(commit === 1 ? finalSha : "9".repeat(40))
+        }
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return Effect.succeed("d".repeat(40))
+        if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
+        if (args[0] === "verify-commit" || args[0] === "merge-base") return Effect.succeed("")
+        if (args[0] === "ls-remote") {
+          if (options?.env === undefined) return Effect.die("Missing Git environment")
+          remoteEnvironments.push(options.env)
+          return Effect.succeed(`${remote}\trefs/heads/feature/ticket`)
+        }
+        if (args[0] === "push") {
+          if (options?.env === undefined) return Effect.die("Missing Git environment")
+          remoteEnvironments.push(options.env)
+          remote = String(args.at(-1)?.split(":")[0])
+          return Effect.succeed("")
+        }
+        if (args[0] === "update-ref") return Effect.succeed("")
+        return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+      },
+      runBytes: () =>
+        Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
     },
-    runBytes: () =>
-      Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
-  })
+    () => Promise.resolve(installationToken),
+  )
   const contentSha256 = createHash("sha256").update("# Questions").digest("hex")
   const identity = {
     repository: artifact.repository,
@@ -348,6 +360,15 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
   expect(commands.filter((command) => command.includes("ls-remote")).flat()).toContain(
     trustedRemote,
   )
+  expect(commands.flat().join(" ")).not.toContain(installationToken)
+  expect(remoteEnvironments).toHaveLength(3)
+  for (const environment of remoteEnvironments) {
+    expect(environment).toMatchObject({
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.https://github.com/.extraHeader",
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${installationToken}`).toString("base64")}`,
+    })
+  }
   expect(
     commands.some((command) =>
       command.join(" ").includes(`update-ref HEAD ${finalSha} ${"d".repeat(40)}`),

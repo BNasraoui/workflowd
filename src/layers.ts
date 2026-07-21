@@ -146,14 +146,32 @@ export const makeLiveLayer = (config: AppConfig) => {
         )
   const artifactRepositoryLayer =
     config.qrspi !== undefined && config.workspace.gitSigningKey !== undefined
-      ? Layer.succeed(ArtifactPublicationRepositoryFactoryService, {
-          forDirectory: (directory) =>
-            new GitArtifactPublicationRepository(
-              directory,
-              config.workspace.gitSigningKey!,
-              `https://github.com/${config.qrspi!.repository.repositoryFullName}.git`,
-            ),
-        })
+      ? Layer.effect(
+          ArtifactPublicationRepositoryFactoryService,
+          Effect.tryPromise({
+            try: () => readFile(config.github.privateKeyPath, "utf8"),
+            catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
+          }).pipe(
+            Effect.map((privateKey) => {
+              const app = new App({ appId: config.github.appId, privateKey, Octokit })
+              return {
+                forDirectory: (directory: string) =>
+                  new GitArtifactPublicationRepository(
+                    directory,
+                    config.workspace.gitSigningKey!,
+                    `https://github.com/${config.qrspi!.repository.repositoryFullName}.git`,
+                    undefined,
+                    async () => {
+                      const response = await app.octokit.rest.apps.createInstallationAccessToken({
+                        installation_id: config.qrspi!.installationId,
+                      })
+                      return response.data.token
+                    },
+                  ),
+              }
+            }),
+          ),
+        )
       : Layer.empty
   const qrspiWorkspaceLayer =
     config.qrspi === undefined
