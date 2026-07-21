@@ -134,7 +134,7 @@ describe("StructuredSession", () => {
     expect(messageLists).toBe(1)
   })
 
-  test("fails and aborts an idle async prompt without a terminal message", async () => {
+  test("leaves cleanup to the caller after an idle prompt fails", async () => {
     let aborts = 0
     const adapter = makeAdapter({
       subscribeSessionEvents: async () => {
@@ -150,10 +150,10 @@ describe("StructuredSession", () => {
     await expect(
       new StructuredSession(adapter, request, resultSchema).run(),
     ).rejects.toBeInstanceOf(StructuredSessionError)
-    expect(aborts).toBe(1)
+    expect(aborts).toBe(0)
   })
 
-  test("settles and aborts the session when the caller cancels waiting", async () => {
+  test("settles without taking over cleanup when the caller cancels waiting", async () => {
     const controller = new AbortController()
     const prompted = Promise.withResolvers<void>()
     let aborts = 0
@@ -173,7 +173,7 @@ describe("StructuredSession", () => {
     controller.abort(new Error("job cancelled"))
 
     await expect(execution).rejects.toBeInstanceOf(StructuredSessionError)
-    expect(aborts).toBe(1)
+    expect(aborts).toBe(0)
   })
 
   test("rejects malformed structured output at the session seam", async () => {

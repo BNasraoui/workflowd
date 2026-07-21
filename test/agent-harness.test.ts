@@ -254,6 +254,59 @@ describe("OpenCodeAgentHarness", () => {
     expect(failure.operation).toBe("abort session")
   })
 
+  test("leaves failed session cleanup to the harness lifecycle owner", async () => {
+    let aborts = 0
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter({
+        subscribeSessionEvents: async () =>
+          events({
+            type: "message.updated",
+            sessionID: "ses_fixture",
+            message: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              structured: { summary: 42 },
+            },
+          }),
+        abortSession: async () => {
+          aborts += 1
+          return aborts === 1
+        },
+      }),
+      new TrustedAgentHarnessCatalog([fixtureDefinition]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
+    )
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        fixtureDefinition,
+        { text: "A bounded fixture input." },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+      ),
+    )
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+
+    const failure = await Effect.runPromise(
+      harness.resumeSession(prepared, reference).pipe(Effect.flip),
+    )
+    await Effect.runPromise(harness.abortSession(reference))
+
+    expect(failure.operation).toBe("decode structured session output")
+    expect(failure.retryable).toBe(true)
+    expect(aborts).toBe(1)
+  })
+
   test("marks invalid structured output terminal when the trusted policy says fail", async () => {
     const definition = {
       ...fixtureDefinition,

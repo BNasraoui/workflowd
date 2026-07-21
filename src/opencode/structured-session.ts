@@ -1,4 +1,4 @@
-import { Effect, Exit, Fiber, Schema } from "effect"
+import { Effect, Fiber, Schema } from "effect"
 import { normalizeError } from "../errors"
 import type { OpenCodeAdapter } from "./adapter"
 
@@ -88,13 +88,7 @@ export class StructuredSession<A, I> {
         this.waitForEvents(Fiber.join(initialEvents)),
         this.pollForCompletion(),
       )
-    }).pipe(
-      Effect.onExit((exit) =>
-        Exit.isFailure(exit) && this.session !== undefined
-          ? this.abortSession(this.session)
-          : Effect.void,
-      ),
-    )
+    })
 
     return this.execute(execution, signal)
   }
@@ -227,13 +221,6 @@ export class StructuredSession<A, I> {
       try: run,
       catch: (cause) => new StructuredSessionError(operation, normalizeError(cause)),
     })
-  }
-
-  private abortSession(session: StructuredSessionReference): Effect.Effect<void> {
-    return Effect.tryPromise((signal) => this.adapter.abortSession(session, signal)).pipe(
-      Effect.timeout("5 seconds"),
-      Effect.ignore,
-    )
   }
 }
 
