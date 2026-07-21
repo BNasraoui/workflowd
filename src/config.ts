@@ -32,6 +32,8 @@ interface WorkspaceConfig {
 
 interface OpenCodeConfig {
   readonly baseUrl: string
+  readonly serverId: string
+  readonly endpointAlias: string
   readonly username: string
   readonly password: string
   readonly model: string
@@ -263,6 +265,14 @@ export async function loadConfig(
     },
     openCode: {
       baseUrl: httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL"),
+      serverId: agentId(
+        env.WORKFLOWD_OPENCODE_SERVER_ID ?? "opencode-primary",
+        "WORKFLOWD_OPENCODE_SERVER_ID",
+      ),
+      endpointAlias: agentId(
+        env.WORKFLOWD_OPENCODE_ENDPOINT_ALIAS ?? "private-opencode",
+        "WORKFLOWD_OPENCODE_ENDPOINT_ALIAS",
+      ),
       username: required(
         {
           OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode",

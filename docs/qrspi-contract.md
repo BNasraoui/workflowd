@@ -860,11 +860,24 @@ or process ID. Server, directory, and native ID select the native session. Title
 Workflowd stores session launch intent before calling OpenCode and stores the reference
 before prompting. Because OpenCode does not currently accept a client session ID, a
 crash after creation but before reference storage may leave an orphan. Recovery creates
-a new session and never guesses by title.
+a new session and never guesses by title or adopts a metadata match.
 
 Every operation attempt gets a new SessionReference, even when it reuses a native
 session. The predecessor remains fenced by its old lease token. Late output cannot
 publish for the replacement attempt.
+
+Durable agent launch intents and structured outputs use global UTF-8 encoded JSON byte
+envelopes large enough for the maximum valid built-in trusted schemas. Workflowd MUST
+validate each complete encoded envelope with Effect Schema before persistence. Every
+trusted harness definition declares maximum encoded input and output sizes, and startup
+MUST reject a definition whose declaration exceeds the corresponding global envelope.
+
+If cleanup cannot confirm that a native session stopped before its bounded attempt
+budget is exhausted, the SessionReference remains active for fencing and enters explicit
+operator-required cleanup. Its operation or job MUST NOT become retryable or release a
+replacement. A malformed persisted SessionReference with readable durable identity is
+quarantined as a cleanup data error, remains fenced, and MUST NOT prevent cleanup or job
+claims for unrelated work.
 
 Session transcripts are conversational context, not canonical artifacts, gate
 responses, or product decisions.
@@ -1028,8 +1041,12 @@ transcripts MUST NOT appear in commit trailers, gate projections, or public URLs
 - WorkflowStart adopts only its exact branch effect and rejects conflicts.
 - PullRequestPublish adopts only its exact PR and initial body hash.
 - GenericReviewHandoff replays idempotently after restart.
-- Missing OpenCode session state starts a replacement attempt; title is never used to
-  guess a session.
+- Missing OpenCode session state starts a replacement attempt; title or metadata is never
+  used to guess or adopt a session.
+- Unconfirmed OpenCode cleanup exhaustion remains durably fenced for operator recovery;
+  it never releases replacement work.
+- Malformed cleanup references with readable identity are quarantined without blocking
+  unrelated work.
 - Applicable WorkflowScope or GenerationScope currentness is rechecked before every
   state advance and external intent.
 

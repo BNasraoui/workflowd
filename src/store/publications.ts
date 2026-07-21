@@ -31,6 +31,7 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         generation,
         review_request_number,
         review_json,
+        session_reference_id,
         attempts
     `),
     decode: decodePublicationRow,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope } from "effect"
+import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
@@ -186,12 +187,20 @@ describe("runHookService startup", () => {
                 new OpenCodeAutomationError({
                   operation: "validate OpenCode availability",
                   cause: new Error("missing fixer agent"),
+                  retryable: false,
                 }),
               ),
             ),
           ),
-        runReview: () => Effect.die("must not review"),
-        runFix: () => Effect.die("must not fix"),
+        prepareReview: () => Effect.die("must not review"),
+        prepareFix: () => Effect.die("must not fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        validateAvailability: () => Effect.die("must not validate harness"),
+        prepare: () => Effect.die("must not prepare harness"),
+        createSession: () => Effect.die("must not create session"),
+        resumeSession: () => Effect.die("must not resume session"),
+        abortSession: () => Effect.void,
       }),
       Layer.succeed(Workspace, {
         prepareReview: () => Effect.die("must not prepare review"),

@@ -1,4 +1,5 @@
 import { Effect, Option, Schema } from "effect"
+import { SessionReference } from "../agent-harness"
 import {
   AttemptNumber,
   GenerationNumber,
@@ -139,6 +140,7 @@ const PublicationStorageRow = Schema.Struct({
   generation: GenerationNumber,
   reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
   review: column("review_json", json(ReviewResult)),
+  sessionReferenceId: column("session_reference_id", Schema.NullOr(Schema.NonEmptyString)),
   attempt: column("attempts", AttemptNumber),
 })
 const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
@@ -160,6 +162,7 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     generation: row.generation,
     reviewRequestNumber: row.reviewRequestNumber,
     review: row.review,
+    ...(row.sessionReferenceId === null ? {} : { sessionReferenceId: row.sessionReferenceId }),
     attempt: row.attempt,
   }),
   encode: (_, publication) => ({
@@ -177,6 +180,7 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     generation: publication.generation,
     reviewRequestNumber: publication.reviewRequestNumber,
     review: publication.review,
+    sessionReferenceId: publication.sessionReferenceId ?? null,
     attempt: publication.attempt,
   }),
 })
@@ -204,6 +208,9 @@ const PublicationReviewRow = Schema.Struct({
   id: column("publication_id", PublicationId),
   review: column("review_json", json(ReviewResult)),
 })
+const AgentSessionReferenceRow = Schema.Struct({
+  sessionReference: column("session_reference_json", json(SessionReference)),
+})
 
 const decodeRow =
   <A, I, R>(schema: Schema.Schema<A, I, R>, record: StoreDataError["record"]) =>
@@ -229,6 +236,7 @@ const decodeRow =
 
 export const decodeCommandRow: (row: unknown) => Effect.Effect<AgentCommand, StoreDataError> =
   decodeRow(CommandRow, "command")
+export const decodeAgentSessionReferenceRow = decodeRow(AgentSessionReferenceRow, "agent_execution")
 export const decodeJobRow = decodeRow(WorkRow, "job")
 export const decodePublicationRow = decodeRow(PublicationRow, "publication")
 export const decodePublicationReviewRow = decodeRow(PublicationReviewRow, "publication")

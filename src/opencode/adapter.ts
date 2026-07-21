@@ -193,10 +193,16 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
 export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient {
   return {
     createSession: async (input, signal) => {
-      const response = await client.session.create<true>(input, {
-        signal,
-        throwOnError: true,
-      })
+      const response = await client.session.create<true>(
+        {
+          directory: input.directory,
+          title: input.title,
+        },
+        {
+          signal,
+          throwOnError: true,
+        },
+      )
       return { id: response.data.id }
     },
     promptSession: async (input, signal) => {

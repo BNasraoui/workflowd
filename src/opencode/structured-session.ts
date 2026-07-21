@@ -1,4 +1,5 @@
-import { Effect, Exit, Fiber, Schema } from "effect"
+import { Effect, Fiber, Schema } from "effect"
+import { AgentOutputEnvelope, boundedAgentPayload } from "../agent-payload"
 import { normalizeError } from "../errors"
 import type { OpenCodeAdapter } from "./adapter"
 
@@ -7,7 +8,7 @@ type SessionEvent =
     ? Event
     : never
 type AssistantMessage = Extract<SessionEvent, { readonly type: "message.updated" }>["message"]
-type SessionInput = Parameters<OpenCodeAdapter["getSessionStatus"]>[0]
+export type StructuredSessionReference = Parameters<OpenCodeAdapter["getSessionStatus"]>[0]
 
 type StructuredSessionRequest = {
   readonly directory: string
@@ -21,6 +22,7 @@ type StructuredSessionRequest = {
   }
   readonly prompt: string
   readonly pollIntervalMs: number
+  readonly maxOutputBytes: number
 }
 
 type TerminalCandidate =
@@ -43,7 +45,7 @@ export class StructuredSessionError extends Error {
 }
 
 export class StructuredSession<A, I> {
-  private session: SessionInput | undefined
+  private session: StructuredSessionReference | undefined
 
   constructor(
     private readonly adapter: OpenCodeAdapter,
@@ -51,19 +53,28 @@ export class StructuredSession<A, I> {
     private readonly schema: Schema.Schema<A, I>,
   ) {}
 
-  async run(signal?: AbortSignal): Promise<A> {
-    const execution = Effect.gen(this, function* () {
-      const created = yield* this.call("create session", (operationSignal) =>
-        this.adapter.createSession(
-          { directory: this.request.directory, title: this.request.title },
-          operationSignal,
-        ),
-      )
-      this.session = {
+  async create(signal?: AbortSignal): Promise<StructuredSessionReference> {
+    const execution = this.call("create session", (operationSignal) =>
+      this.adapter.createSession(
+        {
+          directory: this.request.directory,
+          title: this.request.title,
+        },
+        operationSignal,
+      ),
+    ).pipe(
+      Effect.map((created) => ({
         sessionID: created.id,
         directory: this.request.directory,
-      }
+      })),
+    )
 
+    return this.execute(execution, signal)
+  }
+
+  async resume(session: StructuredSessionReference, signal?: AbortSignal): Promise<A> {
+    this.session = session
+    const execution = Effect.gen(this, function* () {
       const initialEvents = yield* Effect.fork(this.consumeEventSubscription())
       yield* this.call("prompt session", (operationSignal) =>
         this.adapter.promptSession(
@@ -82,14 +93,20 @@ export class StructuredSession<A, I> {
         this.waitForEvents(Fiber.join(initialEvents)),
         this.pollForCompletion(),
       )
-    }).pipe(
-      Effect.onExit((exit) =>
-        Exit.isFailure(exit) && this.session !== undefined
-          ? this.abortSession(this.session)
-          : Effect.void,
-      ),
-    )
+    })
 
+    return this.execute(execution, signal)
+  }
+
+  async run(signal?: AbortSignal): Promise<A> {
+    const session = await this.create(signal)
+    return this.resume(session, signal)
+  }
+
+  private async execute<A>(
+    execution: Effect.Effect<A, StructuredSessionError>,
+    signal?: AbortSignal,
+  ): Promise<A> {
     try {
       return await Effect.runPromise(execution, { signal })
     } catch (cause) {
@@ -192,7 +209,13 @@ export class StructuredSession<A, I> {
     candidate: TerminalCandidate,
   ): Effect.Effect<TerminalMessage<A>, StructuredSessionError> {
     if (candidate.type === "error") return Effect.succeed(candidate)
-    return Schema.decodeUnknown(this.schema)(candidate.message.structured).pipe(
+    return Schema.decodeUnknown(AgentOutputEnvelope)(candidate.message.structured).pipe(
+      Effect.flatMap((encoded) =>
+        Schema.decodeUnknown(
+          boundedAgentPayload(this.request.maxOutputBytes, "Agent harness output"),
+        )(encoded),
+      ),
+      Effect.flatMap((encoded) => Schema.decodeUnknown(this.schema)(encoded)),
       Effect.map((value) => ({ type: "result", value }) as const),
       Effect.mapError(
         (cause) =>
@@ -209,13 +232,6 @@ export class StructuredSession<A, I> {
       try: run,
       catch: (cause) => new StructuredSessionError(operation, normalizeError(cause)),
     })
-  }
-
-  private abortSession(session: SessionInput): Effect.Effect<void> {
-    return Effect.tryPromise((signal) => this.adapter.abortSession(session, signal)).pipe(
-      Effect.timeout("5 seconds"),
-      Effect.ignore,
-    )
   }
 }
 

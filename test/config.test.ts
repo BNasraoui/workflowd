@@ -44,6 +44,8 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
         username: "opencode",
         password: "server-password",
         model: "openai/gpt-5.6-sol",

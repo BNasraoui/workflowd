@@ -33,6 +33,23 @@ export function makeSharedStoreOperations(sql: SqlClient) {
   }) =>
     Effect.gen(function* () {
       yield* sql`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${input.timestamp}
+        WHERE state = 'launch_intent'
+        AND job_id IN (
+          SELECT id FROM jobs
+          WHERE kind = 'fix'
+          AND repository_id = ${input.repositoryId}
+          AND pull_request_number = ${input.pullRequestNumber}
+          AND generation = (
+            SELECT generation FROM jobs WHERE id = ${input.reviewJobId}
+          )
+          AND review_request_number < (
+            SELECT review_request_number FROM jobs WHERE id = ${input.reviewJobId}
+          )
+        )
+      `
+      yield* sql`
         UPDATE publications
         SET
           state = 'superseded',
@@ -81,6 +98,20 @@ export function makeSharedStoreOperations(sql: SqlClient) {
     readonly timestamp: string
   }) =>
     Effect.gen(function* () {
+      yield* sql`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${input.timestamp}
+        WHERE state = 'launch_intent'
+        AND job_id IN (
+          SELECT id FROM jobs
+          WHERE repository_id = ${input.repositoryId}
+          AND pull_request_number = ${input.pullRequestNumber}
+          AND (
+            generation < ${input.generation}
+            OR (${input.includeCurrentGeneration} AND generation = ${input.generation})
+          )
+        )
+      `
       yield* sql`
         UPDATE jobs
         SET
