@@ -22,7 +22,7 @@ type ScopedHookRouteHandler<R> = (
   options: WebhookHandlerOptions,
 ) => Effect.Effect<Response, never, R>
 
-function superviseWorker<A extends string, E, R>(
+export function superviseWorker<A extends string, E, R>(
   name: string,
   pollIntervalMs: number,
   iteration: Effect.Effect<A, E, R>,
@@ -94,88 +94,92 @@ export function serveHookHttp<R = WorkflowStorePort>(
   })
 }
 
-export function runHookService(config: AppConfig) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      const automation = yield* Automation
+export function startHookService(config: AppConfig) {
+  return Effect.gen(function* () {
+    const automation = yield* Automation
 
-      yield* automation.validateAvailability({
-        fixWorkEnabled: config.fixWork.enabled,
-      }).pipe(
-        Effect.mapError(
-          (error) =>
-            new Error(
-              `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-              { cause: error },
-            ),
-        ),
-      )
+    yield* automation.validateAvailability({
+      fixWorkEnabled: config.fixWork.enabled,
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new Error(
+            `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
+            { cause: error },
+          ),
+      ),
+    )
 
-      for (let index = 0; index < config.worker.concurrency; index += 1) {
-        const workerId = `${process.pid}:worker:${index}`
-        yield* superviseWorker(
-          "Job worker",
-          config.worker.pollIntervalMs,
-          runJobIteration({
-            workerId,
-            leaseDurationMs: config.worker.jobLeaseDurationMs,
-            maxAttempts: 3,
-            timeoutMs: config.worker.jobTimeoutMs,
-            cancellationPollIntervalMs: config.worker.pollIntervalMs,
-            agentBranchPrefixes: config.worker.agentBranchPrefixes,
-            fixWorkEnabled: config.fixWork.enabled,
-            now: () => new Date(),
-          }),
-        )
-      }
-
+    for (let index = 0; index < config.worker.concurrency; index += 1) {
+      const workerId = `${process.pid}:worker:${index}`
       yield* superviseWorker(
-        "Publisher",
+        "Job worker",
         config.worker.pollIntervalMs,
-        runPublicationIteration({
-          workerId: `${process.pid}:publisher`,
-          leaseDurationMs: config.worker.publicationLeaseDurationMs,
-          timeoutMs: config.worker.publicationTimeoutMs,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      )
-
-      yield* superviseWorker(
-        "Reconciliation",
-        config.worker.pollIntervalMs,
-        runReconciliationIteration({
-          workerId: `${process.pid}:reconciler`,
-          leaseDurationMs: 2 * 60_000,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      )
-
-      yield* superviseWorker(
-        "Command worker",
-        config.worker.pollIntervalMs,
-        runCommandIteration({
-          workerId: `${process.pid}:commands`,
-          leaseDurationMs: 60_000,
+        runJobIteration({
+          workerId,
+          leaseDurationMs: config.worker.jobLeaseDurationMs,
           maxAttempts: 3,
-          commandUsers: config.worker.commandUsers,
+          timeoutMs: config.worker.jobTimeoutMs,
+          cancellationPollIntervalMs: config.worker.pollIntervalMs,
+          agentBranchPrefixes: config.worker.agentBranchPrefixes,
           fixWorkEnabled: config.fixWork.enabled,
           now: () => new Date(),
         }),
       )
+    }
 
-      // Acquire the listener last so its finalizer stops acceptance and drains
-      // request fibers before worker and store scopes are released.
-      const server = yield* serveHookHttp({
-        ...config.http,
-        webhookSecret: config.github.webhookSecret,
-      })
-      yield* Effect.logInfo(
-        `workflowd listening on http://${server.hostname}:${server.port}`,
-      )
+    yield* superviseWorker(
+      "Publisher",
+      config.worker.pollIntervalMs,
+      runPublicationIteration({
+        workerId: `${process.pid}:publisher`,
+        leaseDurationMs: config.worker.publicationLeaseDurationMs,
+        timeoutMs: config.worker.publicationTimeoutMs,
+        maxAttempts: 5,
+        now: () => new Date(),
+      }),
+    )
 
-      return yield* Effect.never
-    }),
+    yield* superviseWorker(
+      "Reconciliation",
+      config.worker.pollIntervalMs,
+      runReconciliationIteration({
+        workerId: `${process.pid}:reconciler`,
+        leaseDurationMs: 2 * 60_000,
+        maxAttempts: 5,
+        now: () => new Date(),
+      }),
+    )
+
+    yield* superviseWorker(
+      "Command worker",
+      config.worker.pollIntervalMs,
+      runCommandIteration({
+        workerId: `${process.pid}:commands`,
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        commandUsers: config.worker.commandUsers,
+        fixWorkEnabled: config.fixWork.enabled,
+        now: () => new Date(),
+      }),
+    )
+
+    // Acquire the listener last so its finalizer stops acceptance and drains
+    // request fibers before worker and store scopes are released.
+    const server = yield* serveHookHttp({
+      ...config.http,
+      webhookSecret: config.github.webhookSecret,
+    })
+    yield* Effect.logInfo(
+      `workflowd listening on http://${server.hostname}:${server.port}`,
+    )
+
+    return server
+  })
+}
+
+export function runHookService(config: AppConfig) {
+  return Effect.scoped(
+    startHookService(config).pipe(Effect.andThen(Effect.never)),
   )
 }
