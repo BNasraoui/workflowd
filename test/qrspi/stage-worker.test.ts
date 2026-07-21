@@ -69,7 +69,8 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
     | "isStageOperationCurrent"
     | "completeStageProduce"
     | "rescheduleStageOperation"
-    | "recordStageAgentSession"
+    | "recordStageAgentLaunchIntent"
+    | "recordStageAgentSessionReference"
     | "requireStageSessionCleanup"
   > = {
     claimStageOperation: () => Effect.succeed(lease),
@@ -78,8 +79,12 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
       Effect.sync(() => calls.push("complete")).pipe(Effect.as("completed" as const)),
     rescheduleStageOperation: () =>
       Effect.sync(() => calls.push("reschedule")).pipe(Effect.as("rescheduled" as const)),
-    recordStageAgentSession: () =>
-      Effect.sync(() => calls.push("record-session")).pipe(Effect.as("recorded" as const)),
+    recordStageAgentLaunchIntent: () =>
+      Effect.sync(() => calls.push("record-launch-intent")).pipe(Effect.as("recorded" as const)),
+    recordStageAgentSessionReference: () =>
+      Effect.sync(() => calls.push("record-session-reference")).pipe(
+        Effect.as("recorded" as const),
+      ),
     requireStageSessionCleanup: () =>
       Effect.sync(() => calls.push("require-cleanup")).pipe(Effect.as("waiting_human" as const)),
   }
@@ -209,8 +214,9 @@ describe("StageProduce worker", () => {
     expect(result).toBe("completed")
     expect(fake.calls).toEqual([
       `workspace:workflow:${lease.currentHeadSha}`,
+      "record-launch-intent",
       "create-session",
-      "record-session",
+      "record-session-reference",
       "resume-session",
       "complete",
     ])
@@ -260,8 +266,9 @@ describe("StageProduce worker", () => {
     expect(result).toBe("rescheduled")
     expect(fake.calls).toEqual([
       `workspace:workflow:${lease.currentHeadSha}`,
+      "record-launch-intent",
       "create-session",
-      "record-session",
+      "record-session-reference",
       "resume-session",
       "abort-session",
       "reschedule",

@@ -199,6 +199,49 @@ describe("StageCatalog", () => {
     ])
   })
 
+  test("uses kind-specific schemas whose maximum field-sized outputs fit their byte envelopes", () => {
+    const definitions = makeQrspiHarnessDefinitions({
+      agent: "qrspi-producer",
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+    })
+    const document = {
+      candidateSha: "a".repeat(40),
+      content: "x".repeat(1_048_576),
+      summary: "s".repeat(4_000),
+    }
+    const implementation = {
+      candidateSha: "b".repeat(40),
+      changedPaths: Array.from({ length: 6_000 }, () => `${"p".repeat(510)}.t`),
+      final: true,
+      deliveryEvidence: {
+        summary: "s".repeat(20_000),
+        scenarios: Array.from({ length: 100 }, (_, scenario) => ({
+          scenario,
+          evidence: "e".repeat(8_000),
+        })),
+      },
+    }
+
+    expect(Schema.decodeUnknownSync(definitions.document.outputSchema)(document)).toEqual(document)
+    expect(
+      Buffer.byteLength(JSON.stringify(document), "utf8") <= definitions.document.maxOutputBytes,
+    ).toBe(true)
+    expect(
+      Schema.decodeUnknownSync(definitions.implementation.outputSchema)(implementation),
+    ).toEqual(implementation)
+    expect(
+      Buffer.byteLength(JSON.stringify(implementation), "utf8") <=
+        definitions.implementation.maxOutputBytes,
+    ).toBe(true)
+    expect(() =>
+      Schema.decodeUnknownSync(definitions.document.outputSchema)(implementation),
+    ).toThrow()
+    expect(() =>
+      Schema.decodeUnknownSync(definitions.implementation.outputSchema)(document),
+    ).toThrow()
+  })
+
   test("disabled stages are omitted while a conditional skip records its reason", () => {
     const catalog = new StageCatalog(BuiltInStageContracts)
     const definition = {

@@ -1754,6 +1754,54 @@ describe("WorkflowStart integration", () => {
     })
   })
 
+  test("gates an expired StageProduce after launch intent is recorded before session creation", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, options)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const first = yield* store.claimStageOperation(
+          "StageProduce",
+          "stopped-worker",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (first === null) return yield* Effect.die("Expected StageProduce")
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET external_intent_json = ${JSON.stringify({
+            agentExecution: { launchIntent: { sessionReferenceId: "session-ref" } },
+          })}
+          WHERE operation_id = ${first.operationId}
+        `
+        const duplicate = yield* store.claimStageOperation(
+          "StageProduce",
+          "replacement-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:02:01.000Z"),
+        )
+        const operation = yield* sql<{ readonly state: string; readonly attempt: number }>`
+          SELECT state, attempt FROM workflow_operations WHERE operation_id = ${first.operationId}
+        `
+        const gates = yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operation_gates WHERE operation_id = ${first.operationId}
+        `
+        return { duplicate, operation, gates }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      duplicate: null,
+      operation: [{ state: "waiting_human", attempt: 1 }],
+      gates: [{ state: "pending" }],
+    })
+  })
+
   test("rejects rescheduling at the exact lease expiry", async () => {
     const filename = await databasePath()
     const fake = fakes()

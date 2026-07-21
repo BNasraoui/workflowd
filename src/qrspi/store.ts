@@ -252,10 +252,15 @@ export type QrspiStorePort = {
     leaseToken: string,
     now: Date,
   ) => Effect.Effect<boolean, SqlError>
-  readonly recordStageAgentSession: (input: {
+  readonly recordStageAgentLaunchIntent: (input: {
     readonly operationId: string
     readonly leaseToken: string
     readonly launchIntent: AgentLaunchIntent<unknown>
+    readonly now: Date
+  }) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly recordStageAgentSessionReference: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
     readonly reference: SessionReference
     readonly now: Date
   }) => Effect.Effect<"recorded" | "stale", SqlError>
@@ -1050,7 +1055,10 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 lease_until = NULL, updated_at = ${now.toISOString()}
             WHERE kind = 'StageProduce' AND is_current = 1 AND state = 'leased'
               AND lease_until <= ${now.toISOString()}
-              AND json_type(external_intent_json, '$.agentExecution.sessionReference') = 'object'
+              AND (
+                json_type(external_intent_json, '$.agentExecution.launchIntent') = 'object'
+                OR json_type(external_intent_json, '$.agentExecution.sessionReference') = 'object'
+              )
             RETURNING operation_id
           `
           yield* Effect.forEach(
@@ -1223,18 +1231,31 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }),
       ),
 
-    recordStageAgentSession: (input) =>
+    recordStageAgentLaunchIntent: (input) =>
       sql<{ readonly operation_id: string }>`
         UPDATE workflow_operations
         SET external_intent_json = ${JSON.stringify({
           agentExecution: {
             launchIntent: input.launchIntent,
-            sessionReference: input.reference,
           },
         })}, updated_at = ${input.now.toISOString()}
         WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
           AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
           AND lease_until > ${input.now.toISOString()}
+        RETURNING operation_id
+      `.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale"))),
+
+    recordStageAgentSessionReference: (input) =>
+      sql<{ readonly operation_id: string }>`
+        UPDATE workflow_operations
+        SET external_intent_json = json_set(external_intent_json,
+              '$.agentExecution.sessionReference', json(${JSON.stringify(input.reference)})),
+            updated_at = ${input.now.toISOString()}
+        WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
+          AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+          AND lease_until > ${input.now.toISOString()}
+          AND json_extract(external_intent_json,
+            '$.agentExecution.launchIntent.sessionReferenceId') = ${input.reference.sessionReferenceId}
         RETURNING operation_id
       `.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale"))),
 
@@ -1251,9 +1272,12 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             WHERE operation_id = ${input.operationId} AND kind = 'StageProduce'
               AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
               AND lease_until > ${input.now.toISOString()}
-              AND json_extract(external_intent_json,
-                '$.agentExecution.sessionReference.sessionReferenceId') =
-                  ${input.sessionReferenceId}
+              AND (
+                json_extract(external_intent_json,
+                  '$.agentExecution.launchIntent.sessionReferenceId') = ${input.sessionReferenceId}
+                OR json_extract(external_intent_json,
+                  '$.agentExecution.sessionReference.sessionReferenceId') = ${input.sessionReferenceId}
+              )
             RETURNING operation_id
           `
           if (rows.length !== 1) return "stale" as const

@@ -46,7 +46,8 @@ export function runStageProduceIterationWith(options: {
     | "isStageOperationCurrent"
     | "rescheduleStageOperation"
     | "completeStageProduce"
-    | "recordStageAgentSession"
+    | "recordStageAgentLaunchIntent"
+    | "recordStageAgentSessionReference"
     | "requireStageSessionCleanup"
   >
   readonly harness: AgentHarnessPort
@@ -57,6 +58,7 @@ export function runStageProduceIterationWith(options: {
   return Effect.gen(function* () {
     const { store, harness, catalog } = options
     let recordedSession: SessionReference | undefined
+    let recordedLaunchIntentSessionReferenceId: string | undefined
     const work = yield* store.claimStageOperation(
       "StageProduce",
       options.workerId,
@@ -111,12 +113,30 @@ export function runStageProduceIterationWith(options: {
               leaseToken: work.leaseToken,
               requestedAt: options.now(),
             },
-            onSessionCreated: (launchIntent, reference) =>
+            onLaunchIntent: (launchIntent) =>
               store
-                .recordStageAgentSession({
+                .recordStageAgentLaunchIntent({
                   operationId: work.operationId,
                   leaseToken: work.leaseToken,
                   launchIntent,
+                  now: options.now(),
+                })
+                .pipe(
+                  Effect.tap((disposition) =>
+                    disposition === "recorded"
+                      ? Effect.sync(
+                          () =>
+                            void (recordedLaunchIntentSessionReferenceId =
+                              launchIntent.sessionReferenceId),
+                        )
+                      : Effect.void,
+                  ),
+                ),
+            onSessionCreated: (reference) =>
+              store
+                .recordStageAgentSessionReference({
+                  operationId: work.operationId,
+                  leaseToken: work.leaseToken,
                   reference,
                   now: options.now(),
                 })
@@ -131,6 +151,15 @@ export function runStageProduceIterationWith(options: {
       ),
     )
     if (Exit.isFailure(execution)) {
+      if (recordedSession === undefined && recordedLaunchIntentSessionReferenceId !== undefined) {
+        return yield* store.requireStageSessionCleanup({
+          operationId: work.operationId,
+          leaseToken: work.leaseToken,
+          sessionReferenceId: recordedLaunchIntentSessionReferenceId,
+          error: "agent session creation requires operator confirmation",
+          now: options.now(),
+        })
+      }
       if (recordedSession !== undefined) {
         const cleanup = yield* Effect.exit(harness.abortSession(recordedSession))
         if (Exit.isFailure(cleanup)) {

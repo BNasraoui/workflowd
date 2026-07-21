@@ -7,7 +7,7 @@ import type {
   AgentLaunchIntent,
   SessionReference,
 } from "../agent-harness"
-import { boundedAgentPayload } from "../agent-payload"
+import { MAX_AGENT_OUTPUT_BYTES, boundedAgentPayload } from "../agent-payload"
 import {
   ReadyTicket,
   StageContractRef,
@@ -82,7 +82,13 @@ export const DocumentStageResult = Schema.Struct({
   candidateSha: GitSha,
   content: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(1_048_576)),
   summary: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4_000)),
-})
+}).pipe(
+  Schema.filter((value) =>
+    Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_AGENT_OUTPUT_BYTES
+      ? true
+      : `Document stage result exceeds ${MAX_AGENT_OUTPUT_BYTES} encoded UTF-8 bytes`,
+  ),
+)
 
 export const PreparedDeliveryEvidence = Schema.Struct({
   summary: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(20_000)),
@@ -96,10 +102,16 @@ export const PreparedDeliveryEvidence = Schema.Struct({
 
 export const ImplementationStageResult = Schema.Struct({
   candidateSha: GitSha,
-  changedPaths: Schema.Array(RelativeArtifactPath).pipe(Schema.maxItems(10_000)),
+  changedPaths: Schema.Array(RelativeArtifactPath).pipe(Schema.maxItems(6_000)),
   final: Schema.Boolean,
   deliveryEvidence: Schema.optional(PreparedDeliveryEvidence),
-})
+}).pipe(
+  Schema.filter((value) =>
+    Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_AGENT_OUTPUT_BYTES
+      ? true
+      : `Implementation stage result exceeds ${MAX_AGENT_OUTPUT_BYTES} encoded UTF-8 bytes`,
+  ),
+)
 
 export const StageRunState = Schema.Literal(
   "blocked",
@@ -217,12 +229,19 @@ const QrspiHarnessInput = Schema.Struct({
     }),
   ),
 })
-const QrspiHarnessResult = Schema.Union(DocumentStageResult, ImplementationStageResult)
-type QrspiHarnessDefinition = AgentHarnessDefinition<
+type QrspiHarnessDefinition<Result, ResultEncoded> = AgentHarnessDefinition<
   typeof QrspiHarnessInput.Type,
   typeof QrspiHarnessInput.Encoded,
-  typeof QrspiHarnessResult.Type,
-  typeof QrspiHarnessResult.Encoded
+  Result,
+  ResultEncoded
+>
+type DocumentQrspiHarnessDefinition = QrspiHarnessDefinition<
+  typeof DocumentStageResult.Type,
+  typeof DocumentStageResult.Encoded
+>
+type ImplementationQrspiHarnessDefinition = QrspiHarnessDefinition<
+  typeof ImplementationStageResult.Type,
+  typeof ImplementationStageResult.Encoded
 >
 
 const QRSPI_HARNESS_WRAPPER_BYTES = 208 * 1024
@@ -236,11 +255,15 @@ export function makeQrspiHarnessDefinitions(config: {
   readonly kind?: "document" | "implementation"
   readonly maxInputBytes?: number
   readonly maxAttempts?: number
-}): { readonly document: QrspiHarnessDefinition; readonly implementation: QrspiHarnessDefinition } {
-  const definition = (
+}): {
+  readonly document: DocumentQrspiHarnessDefinition
+  readonly implementation: ImplementationQrspiHarnessDefinition
+} {
+  const definition = <Result, ResultEncoded>(
     kind: "document" | "implementation",
     name: "qrspi.document" | "qrspi.implementation",
-  ): QrspiHarnessDefinition => ({
+    outputSchema: Schema.Schema<Result, ResultEncoded, never>,
+  ): QrspiHarnessDefinition<Result, ResultEncoded> => ({
     ref:
       config.kind === kind && config.harnessId !== undefined
         ? { name: config.harnessId, version: config.harnessVersion ?? 1 }
@@ -248,9 +271,9 @@ export function makeQrspiHarnessDefinitions(config: {
     agent: config.agent,
     model: config.model,
     inputSchema: QrspiHarnessInput,
-    outputSchema: QrspiHarnessResult,
+    outputSchema,
     maxInputBytes: (config.maxInputBytes ?? 64 * 1024) + QRSPI_HARNESS_WRAPPER_BYTES,
-    maxOutputBytes: 1_048_576,
+    maxOutputBytes: MAX_AGENT_OUTPUT_BYTES,
     promptContract: `${name}-stage-contract`,
     title: (input) => `QRSPI ${input.contract.name}`,
     prompt: (input) =>
@@ -265,8 +288,8 @@ export function makeQrspiHarnessDefinitions(config: {
     },
   })
   return {
-    document: definition("document", "qrspi.document"),
-    implementation: definition("implementation", "qrspi.implementation"),
+    document: definition("document", "qrspi.document", DocumentStageResult),
+    implementation: definition("implementation", "qrspi.implementation", ImplementationStageResult),
   }
 }
 
@@ -285,7 +308,7 @@ export function makeQrspiHarnessDefinitionsForStage(stage: StageDefinition) {
 
 export function qrspiHarnessDefinitionsForWorkflows(
   definitions: ReadonlyArray<WorkflowDefinition>,
-): ReadonlyArray<QrspiHarnessDefinition> {
+): ReadonlyArray<DocumentQrspiHarnessDefinition | ImplementationQrspiHarnessDefinition> {
   return definitions.flatMap((definition) =>
     definition.stages
       .filter((stage) => stage.activation.mode !== "disabled")
@@ -445,19 +468,58 @@ export const BuiltInStageContracts = [
   ImplementationStageContract,
 ] as const
 
+function runQrspiHarness<Result, ResultEncoded>(input: {
+  readonly harness: AgentHarnessPort
+  readonly definition: QrspiHarnessDefinition<Result, ResultEncoded>
+  readonly harnessInput: typeof QrspiHarnessInput.Encoded
+  readonly context: AgentExecutionContext
+  readonly onLaunchIntent?: (
+    launchIntent: AgentLaunchIntent<unknown>,
+  ) => Effect.Effect<"recorded" | "stale", Error>
+  readonly onSessionCreated?: (
+    reference: SessionReference,
+  ) => Effect.Effect<"recorded" | "stale", Error>
+}) {
+  return Effect.gen(function* () {
+    const prepared = yield* input.harness.prepare(
+      input.definition,
+      input.harnessInput,
+      input.context,
+    )
+    if (input.onLaunchIntent !== undefined) {
+      const recorded = yield* input.onLaunchIntent(prepared.launchIntent)
+      if (recorded === "stale") {
+        return yield* Effect.fail(new Error("Stage launch intent lost durable fencing authority"))
+      }
+    }
+    const sessionReference = yield* input.harness.createSession(prepared)
+    if (input.onSessionCreated !== undefined) {
+      const recorded = yield* input.onSessionCreated(sessionReference)
+      if (recorded === "stale") {
+        yield* input.harness.abortSession(sessionReference)
+        return yield* Effect.fail(new Error("Stage session lost durable fencing authority"))
+      }
+    }
+    const result = yield* input.harness.resumeSession(prepared, sessionReference)
+    return { result, sessionReference }
+  })
+}
+
 export function runStageContract(input: {
   readonly catalog: StageCatalog
   readonly harness: AgentHarnessPort
   readonly harnessDefinitions: {
-    readonly document: QrspiHarnessDefinition
-    readonly implementation: QrspiHarnessDefinition
+    readonly document: DocumentQrspiHarnessDefinition
+    readonly implementation: ImplementationQrspiHarnessDefinition
   }
   readonly stage: StageDefinition
   readonly ticketId: string
   readonly input: unknown
   readonly context: AgentExecutionContext
-  readonly onSessionCreated?: (
+  readonly onLaunchIntent?: (
     launchIntent: AgentLaunchIntent<unknown>,
+  ) => Effect.Effect<"recorded" | "stale", Error>
+  readonly onSessionCreated?: (
     reference: SessionReference,
   ) => Effect.Effect<"recorded" | "stale", Error>
 }) {
@@ -491,27 +553,26 @@ export function runStageContract(input: {
       return yield* Effect.die(new Error(`Untrusted harness policy for stage ${input.stage.key}`))
     }
     const expectedArtifact = resolveArtifactDestination(input.stage, input.ticketId)
-    const prepared = yield* input.harness.prepare(
-      definition,
-      {
-        contract: contract.ref,
-        task: contract.task(decodedInput),
-        input: decodedInput,
-        ...(expectedArtifact === undefined ? {} : { expectedArtifact }),
-      },
-      input.context,
-    )
-    const sessionReference = yield* input.harness.createSession(prepared)
-    if (input.onSessionCreated !== undefined) {
-      const recorded = yield* input.onSessionCreated(prepared.launchIntent, sessionReference)
-      if (recorded === "stale") {
-        yield* input.harness.abortSession(sessionReference)
-        return yield* Effect.fail(new Error("Stage session lost durable fencing authority"))
-      }
+    const harnessInput = {
+      contract: contract.ref,
+      task: contract.task(decodedInput),
+      input: decodedInput,
+      ...(expectedArtifact === undefined ? {} : { expectedArtifact }),
     }
-    const harnessResult = yield* input.harness.resumeSession(prepared, sessionReference)
-    const result = contract.decodeResult(harnessResult)
-    return { result, sessionReference }
+    const execution =
+      contract.kind === "document"
+        ? yield* runQrspiHarness({
+            ...input,
+            definition: input.harnessDefinitions.document,
+            harnessInput,
+          })
+        : yield* runQrspiHarness({
+            ...input,
+            definition: input.harnessDefinitions.implementation,
+            harnessInput,
+          })
+    const result = contract.decodeResult(execution.result)
+    return { result, sessionReference: execution.sessionReference }
   })
 }
 
@@ -606,7 +667,10 @@ export function validateWorkflowDefinition(
   catalog: StageCatalog,
   availableHarnesses: ReadonlyArray<
     | AgentHarnessRef
-    | Pick<QrspiHarnessDefinition, "ref" | "agent" | "model" | "timeoutMs" | "maxInputBytes">
+    | Pick<
+        DocumentQrspiHarnessDefinition | ImplementationQrspiHarnessDefinition,
+        "ref" | "agent" | "model" | "timeoutMs" | "maxInputBytes"
+      >
   >,
 ): {
   readonly definition: WorkflowDefinition
