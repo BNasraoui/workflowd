@@ -35,7 +35,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
       yield* sql`
         UPDATE agent_executions
         SET state = 'superseded', updated_at = ${input.timestamp}
-        WHERE state IN ('launch_intent', 'session_ready')
+        WHERE state = 'launch_intent'
         AND job_id IN (
           SELECT id FROM jobs
           WHERE kind = 'fix'
@@ -101,7 +101,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
       yield* sql`
         UPDATE agent_executions
         SET state = 'superseded', updated_at = ${input.timestamp}
-        WHERE state IN ('launch_intent', 'session_ready')
+        WHERE state = 'launch_intent'
         AND job_id IN (
           SELECT id FROM jobs
           WHERE repository_id = ${input.repositoryId}

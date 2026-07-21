@@ -371,9 +371,11 @@ test("restarts with a new session after either checkpoint and fences expired att
         now: new Date("2026-07-20T12:03:00.000Z"),
         leaseDurationMs: 60_000,
       })
-      const expiredSession = yield* store.claimExpiredAgentSession(
-        new Date("2026-07-20T12:03:00.000Z"),
-      )
+      const expiredSession = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:03:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
       if (expiredSession === null) throw new Error("expected expired session")
       yield* store.supersedeAgentSession(
         expiredSession.sessionReferenceId,
@@ -640,13 +642,31 @@ test("supersedes the session and rejects output from an older generation", async
         review: { verdict: "pass", summary: "Stale output.", findings: [] },
         autoFix: false,
       })
+      const cleanup = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:01:04.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const concurrentlyClaimed = yield* store.claimExpiredAgentSession({
+        workerId: "other-cleanup-worker",
+        now: new Date("2026-07-20T12:01:04.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (cleanup !== null) {
+        yield* store.supersedeAgentSession(
+          cleanup.sessionReferenceId,
+          new Date("2026-07-20T12:01:05.000Z"),
+        )
+      }
       const executions = yield* sql`SELECT state FROM agent_executions`
       const publications = yield* sql`SELECT id FROM publications`
-      return { late, executions, publications }
+      return { cleanup, concurrentlyClaimed, late, executions, publications }
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
   expect(result.late).toBe("stale")
+  expect(result.cleanup?.nativeSessionId).toBe("ses_1")
+  expect(result.concurrentlyClaimed).toBeNull()
   expect(result.executions).toEqual([{ state: "superseded" }])
   expect(result.publications).toEqual([])
 })

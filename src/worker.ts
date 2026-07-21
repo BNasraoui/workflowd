@@ -56,6 +56,7 @@ function processReviewWork(
   agentBranchPrefixes: ReadonlyArray<string>,
   fixWorkEnabled: boolean,
   onPrepared: (intent: AgentFailureContext) => void,
+  onAbortFailure: () => void,
 ) {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -87,6 +88,8 @@ function processReviewWork(
       const referenceRecordedAt = new Date(
         yield* Effect.clockWith((clock) => clock.currentTimeMillis),
       )
+      const abortSession = () =>
+        harness.abortSession(reference).pipe(Effect.tapError(() => Effect.sync(onAbortFailure)))
       const sessionResult = yield* Effect.gen(function* () {
         const session = yield* store.recordAgentSessionReference({
           jobId: work.id,
@@ -99,11 +102,11 @@ function processReviewWork(
         return { _tag: "Completed", review } as const
       }).pipe(
         Effect.onExit((exit) =>
-          Exit.isFailure(exit) ? harness.abortSession(reference).pipe(Effect.ignore) : Effect.void,
+          Exit.isFailure(exit) ? Effect.exit(abortSession()).pipe(Effect.asVoid) : Effect.void,
         ),
       )
       if (sessionResult._tag === "Stale") {
-        yield* harness.abortSession(reference)
+        yield* abortSession()
         return "stale" as const
       }
       const review = sessionResult.review
@@ -132,6 +135,7 @@ function processFixWork(
   work: FixWork,
   workerId: string,
   onPrepared: (intent: AgentFailureContext) => void,
+  onAbortFailure: () => void,
 ) {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -166,6 +170,8 @@ function processFixWork(
         const referenceRecordedAt = new Date(
           yield* Effect.clockWith((clock) => clock.currentTimeMillis),
         )
+        const abortSession = () =>
+          harness.abortSession(reference).pipe(Effect.tapError(() => Effect.sync(onAbortFailure)))
         const sessionResult = yield* Effect.gen(function* () {
           const session = yield* store.recordAgentSessionReference({
             jobId: work.id,
@@ -178,13 +184,11 @@ function processFixWork(
           return { _tag: "Completed", fixResult } as const
         }).pipe(
           Effect.onExit((exit) =>
-            Exit.isFailure(exit)
-              ? harness.abortSession(reference).pipe(Effect.ignore)
-              : Effect.void,
+            Exit.isFailure(exit) ? Effect.exit(abortSession()).pipe(Effect.asVoid) : Effect.void,
           ),
         )
         if (sessionResult._tag === "Stale") {
-          yield* harness.abortSession(reference)
+          yield* abortSession()
           return "stale" as const
         }
         result = sessionResult.fixResult
@@ -257,9 +261,19 @@ export function runJobIteration(options: {
     const store = yield* WorkflowStore
     const harness = yield* AgentHarness
     while (true) {
-      const expiredSession = yield* store.claimExpiredAgentSession(options.now())
+      const expiredSession = yield* store.claimExpiredAgentSession({
+        workerId: options.workerId,
+        now: options.now(),
+        leaseDurationMs: options.leaseDurationMs,
+      })
       if (expiredSession === null) break
-      yield* harness.abortSession(expiredSession)
+      const cleanup = yield* Effect.exit(harness.abortSession(expiredSession))
+      if (Exit.isFailure(cleanup)) {
+        yield* Effect.logWarning(
+          `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
+        )
+        break
+      }
       yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
     }
     const work = yield* store.claimNextJob({
@@ -277,6 +291,7 @@ export function runJobIteration(options: {
     }
 
     let agentFailureContext: AgentFailureContext | undefined
+    let agentAbortFailed = false
     const captureAgentFailureContext = (intent: AgentFailureContext) => {
       agentFailureContext = intent
     }
@@ -288,8 +303,13 @@ export function runJobIteration(options: {
             options.agentBranchPrefixes,
             options.fixWorkEnabled,
             captureAgentFailureContext,
+            () => {
+              agentAbortFailed = true
+            },
           )
-        : processFixWork(work, options.workerId, captureAgentFailureContext)
+        : processFixWork(work, options.workerId, captureAgentFailureContext, () => {
+            agentAbortFailed = true
+          })
     const exit = yield* Effect.exit(
       interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
         store.shouldCancelJob(work.id, options.workerId, options.now()),
@@ -301,6 +321,7 @@ export function runJobIteration(options: {
       ),
     )
     if (Exit.isSuccess(exit)) return exit.value
+    if (agentAbortFailed) return "cleanup_pending" as const
 
     return yield* store.rescheduleJob({
       jobId: work.id,

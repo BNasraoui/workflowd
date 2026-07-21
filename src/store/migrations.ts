@@ -322,9 +322,21 @@ const agentHarnessSchema = Effect.gen(function* () {
   yield* sql`CREATE INDEX agent_executions_job ON agent_executions (job_id, attempt)`
 })
 
+const agentSessionCleanupLeases = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_owner TEXT`
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_until TEXT`
+  yield* sql`
+    ALTER TABLE agent_executions
+    ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0)
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
     "0002_agent_harness": agentHarnessSchema,
+    "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
   }),
 })

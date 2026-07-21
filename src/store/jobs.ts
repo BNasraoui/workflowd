@@ -191,17 +191,34 @@ export function makeJobOperations(
     `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
 
   return {
-    claimExpiredAgentSession: (now) =>
+    claimExpiredAgentSession: (input) =>
       Effect.gen(function* () {
+        const claimedAt = input.now.toISOString()
+        const claimedUntil = new Date(input.now.getTime() + input.leaseDurationMs).toISOString()
         const rows = yield* sql<{ readonly session_reference_json: string }>`
-          SELECT execution.session_reference_json
-          FROM agent_executions AS execution
-          JOIN jobs AS candidate ON candidate.id = execution.job_id
-          WHERE execution.state = 'session_ready'
-          AND candidate.state = 'leased'
-          AND candidate.lease_until <= ${now.toISOString()}
-          ORDER BY candidate.lease_until ASC, candidate.id ASC
-          LIMIT 1
+          UPDATE agent_executions
+          SET
+            cleanup_lease_owner = ${input.workerId},
+            cleanup_lease_until = ${claimedUntil},
+            cleanup_attempts = cleanup_attempts + 1,
+            updated_at = ${claimedAt}
+          WHERE session_reference_id = (
+            SELECT execution.session_reference_id
+            FROM agent_executions AS execution
+            JOIN jobs AS candidate ON candidate.id = execution.job_id
+            WHERE execution.state = 'session_ready'
+            AND (
+              execution.cleanup_lease_until IS NULL
+              OR execution.cleanup_lease_until <= ${claimedAt}
+            )
+            AND (
+              candidate.state <> 'leased'
+              OR candidate.lease_until <= ${claimedAt}
+            )
+            ORDER BY COALESCE(candidate.lease_until, execution.updated_at) ASC, candidate.id ASC
+            LIMIT 1
+          )
+          RETURNING session_reference_json
         `
         const row = rows[0]
         if (row === undefined) return null
@@ -246,7 +263,7 @@ export function makeJobOperations(
           UPDATE agent_executions
           SET state = 'superseded', updated_at = ${timestamp}
           WHERE job_id = ${input.jobId}
-          AND state IN ('launch_intent', 'session_ready')
+          AND state = 'launch_intent'
         `
         return "disabled" as const
       }).pipe(sql.withTransaction),

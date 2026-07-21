@@ -6,9 +6,7 @@ import {
   type AgentHarnessPort,
   type AgentExecutionContext,
   type AgentLaunchIntent,
-  OpenCodeAgentHarness,
   SessionReference,
-  TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
@@ -247,7 +245,7 @@ test("aborts an expired native session before starting its replacement", async (
   expect(actions).toEqual(["abort expired", "claim replacement", "create replacement"])
 })
 
-test("does not claim a replacement when aborting the expired session rejects", async () => {
+test("continues to unrelated work when aborting an expired session rejects", async () => {
   const oldReference = Schema.decodeUnknownSync(SessionReference)({
     ...sessionReference(
       preparedReview({
@@ -263,31 +261,10 @@ test("does not claim a replacement when aborting the expired session rejects", a
     sessionReferenceId: "11111111-1111-4111-8111-111111111111",
     nativeSessionId: "ses_expired",
   })
-  let replacementClaims = 0
+  const unrelatedJob = makeReviewWork({ id: 12, pullRequestNumber: 8 })
+  let jobClaims = 0
   let superseded = 0
   let cleanupClaims = 0
-  const harness = new OpenCodeAgentHarness(
-    {
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async () => undefined,
-      subscribeSessionEvents: async () => {
-        throw new Error("unused")
-      },
-      getSessionStatus: async () => ({ type: "idle" }),
-      listSessionMessages: async () => [],
-      abortSession: async () => {
-        throw new Error("abort rejected")
-      },
-      validateAvailability: async () => undefined,
-    },
-    new TrustedAgentHarnessCatalog([]),
-    {
-      serverId: "opencode-primary",
-      endpointAlias: "private-opencode",
-      pollIntervalMs: 1,
-    },
-  )
-
   const exit = await Effect.runPromise(
     runJobIteration(jobOptions).pipe(
       Effect.provide(
@@ -300,22 +277,36 @@ test("does not claim a replacement when aborting the expired session rejects", a
                 superseded += 1
                 return "superseded" as const
               }),
-            claimNextJob: () =>
-              Effect.sync(() => {
-                replacementClaims += 1
-                return null
-              }),
+            claimNextJob: () => Effect.sync(() => (jobClaims++ === 0 ? unrelatedJob : null)),
+            completeAgentReviewJob: () => Effect.succeed("completed"),
           },
-          agentHarness: harness,
+          agentHarness: {
+            abortSession: () =>
+              Effect.fail(
+                new AgentHarnessError({
+                  operation: "abort session",
+                  cause: new Error("abort rejected"),
+                  retryable: true,
+                }),
+              ),
+          },
+          workspace: {
+            prepareReview: () => Effect.succeed({ directory: "/tmp/unrelated-review" }),
+          },
+          automation: {
+            runReview: () =>
+              Effect.succeed({ verdict: "pass" as const, summary: "No findings.", findings: [] }),
+          },
         }),
       ),
       Effect.exit,
     ),
   )
 
-  expect(exit._tag).toBe("Failure")
+  expect(exit._tag).toBe("Success")
+  if (exit._tag === "Success") expect(exit.value).toBe("completed")
   expect(superseded).toBe(0)
-  expect(replacementClaims).toBe(0)
+  expect(jobClaims).toBe(1)
 })
 
 const makePublication = (id = 1) =>
@@ -1243,5 +1234,52 @@ describe("job cancellation", () => {
 
     expect(result).toBe("retry")
     expect(actions).toEqual(["interrupted", "abort"])
+  })
+
+  test("keeps the job fenced when aborting its active session fails", async () => {
+    const started = Effect.runSync(Deferred.make<void>())
+    const job = makeReviewWork()
+    let reschedules = 0
+
+    const result = await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        cancellationPollIntervalMs: 0,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              shouldCancelJob: () => Deferred.await(started).pipe(Effect.as(true)),
+              rescheduleJob: () =>
+                Effect.sync(() => {
+                  reschedules += 1
+                  return "retry" as const
+                }),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () =>
+                Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+            },
+            agentHarness: {
+              abortSession: () =>
+                Effect.fail(
+                  new AgentHarnessError({
+                    operation: "abort session",
+                    cause: new Error("abort rejected"),
+                    retryable: true,
+                  }),
+                ),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("cleanup_pending")
+    expect(reschedules).toBe(0)
   })
 })

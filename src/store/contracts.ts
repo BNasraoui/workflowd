@@ -51,7 +51,7 @@ export type WorkflowStorePort = {
     input: LeaseClaim,
   ) => Effect.Effect<Work | null, SqlError | StoreDataError>
   readonly claimExpiredAgentSession: (
-    now: Date,
+    input: LeaseClaim,
   ) => Effect.Effect<SessionReference | null, SqlError | StoreDataError>
   readonly supersedeAgentSession: (
     sessionReferenceId: string,
