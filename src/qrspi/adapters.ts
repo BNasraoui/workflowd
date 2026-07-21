@@ -351,7 +351,8 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         commit.sha !== currentSha ||
         commit.parents.length !== 1 ||
         jobIds.length !== 1 ||
-        !Number.isSafeInteger(jobId)
+        !Number.isSafeInteger(jobId) ||
+        commit.commit.verification?.verified !== true
       ) {
         return false
       }

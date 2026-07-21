@@ -29,6 +29,7 @@ interface WorkspaceConfig {
   readonly worktreeRegistry: string
   readonly localRepositories: ReadonlyArray<string>
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 interface OpenCodeConfig {
@@ -247,6 +248,17 @@ export async function loadConfig(
     )
   }
   const qrspi = loadQrspiConfig(env)
+  const fixWorkEnabled = booleanSetting(
+    env.WORKFLOWD_FIX_WORK_ENABLED,
+    "WORKFLOWD_FIX_WORK_ENABLED",
+  )
+  const gitSigningKey = env.WORKFLOWD_GIT_SIGNING_KEY
+  if (fixWorkEnabled && gitSigningKey === undefined) {
+    throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
+  }
+  if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
+    throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
+  }
 
   return {
     http: {
@@ -267,7 +279,7 @@ export async function loadConfig(
       databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db"),
     },
     fixWork: {
-      enabled: booleanSetting(env.WORKFLOWD_FIX_WORK_ENABLED, "WORKFLOWD_FIX_WORK_ENABLED"),
+      enabled: fixWorkEnabled,
     },
     workspace: {
       repositoryRoot: env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
@@ -282,6 +294,7 @@ export async function loadConfig(
         2_000_000,
         "WORKFLOWD_MAX_DIFF_BYTES",
       ),
+      ...(gitSigningKey === undefined ? {} : { gitSigningKey }),
     },
     openCode: {
       baseUrl: httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL"),

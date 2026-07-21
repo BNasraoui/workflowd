@@ -38,7 +38,11 @@ const ticketReference = {
   trackerInstanceId: "workspace-42",
   nativeTicketId: "workflowd-vs3.3",
 } as const
-const request = { repository, ticket: ticketReference } as const
+const request = {
+  repository,
+  ticket: ticketReference,
+  readinessJudgment: { userStory: "optional", productDirection: "consistent" },
+} as const
 const baseSha = "d".repeat(40)
 const readyTicket = {
   reference: ticketReference,
@@ -352,11 +356,13 @@ describe("WorkflowStart integration", () => {
     const first = await startWithOptions(filename, fake, options, {
       repository,
       ticket: firstTicket,
+      readinessJudgment: request.readinessJudgment,
     })
     fake.setTicket({ ...readyTicket, reference: secondTicket })
     const second = await startWithOptions(filename, fake, options, {
       repository,
       ticket: secondTicket,
+      readinessJudgment: request.readinessJudgment,
     })
 
     expect(first._tag).toBe("Started")
@@ -376,6 +382,26 @@ describe("WorkflowStart integration", () => {
     const result = await start(filename, fake)
 
     expect(result._tag).toBe("NeedsWork")
+    expect(await counts(filename, fake)).toEqual([0, 0, 0])
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
+  test("creates no branch or durable technical work for contradictory product direction", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+
+    const result = await startWithOptions(filename, fake, options, {
+      ...request,
+      readinessJudgment: {
+        userStory: "optional",
+        productDirection: "contradictory",
+      },
+    })
+
+    expect(result._tag).toBe("NeedsWork")
+    if (result._tag === "NeedsWork") {
+      expect(result.problems.map(({ code }) => code)).toContain("contradictory_product_direction")
+    }
     expect(await counts(filename, fake)).toEqual([0, 0, 0])
     expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
   })

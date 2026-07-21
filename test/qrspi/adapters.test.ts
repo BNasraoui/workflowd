@@ -202,7 +202,7 @@ describe("QRSPI external adapters", () => {
     expect(observation).toEqual({ _tag: "Accepted", sha: previousTrustedSha })
   })
 
-  test("accepts an advanced chain only when every commit is linked to a durable publication", async () => {
+  test("rejects an unsigned commit even when it is linked to a durable publication", async () => {
     const previousTrustedSha = "a".repeat(40)
     const advancedSha = "b".repeat(40)
     const publications: Array<{
@@ -248,10 +248,8 @@ describe("QRSPI external adapters", () => {
       }),
     )
 
-    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
-    expect(publications).toEqual([
-      { repository, headRef: "feature/workflowd-vs3.3-start", jobId: 41, commitSha: advancedSha },
-    ])
+    expect(observation).toEqual({ _tag: "UnknownHistory", sha: advancedSha })
+    expect(publications).toEqual([])
   })
 
   test("accepts every commit in a multi-commit durable publication", async () => {
@@ -271,7 +269,10 @@ describe("QRSPI external adapters", () => {
                   ? {
                       sha: advancedSha,
                       parents: [{ sha: intermediateSha }],
-                      commit: { message: "Finish fix\n\nWorkflowd-Job: 41" },
+                      commit: {
+                        message: "Finish fix\n\nWorkflowd-Job: 41",
+                        verification: { verified: true },
+                      },
                     }
                   : {
                       sha: intermediateSha,

@@ -14,7 +14,11 @@ const reference = {
   trackerInstanceId: "workspace-42",
   nativeTicketId: "workflowd-vs3.3",
 } as const
-const optionalStory = { userStory: "optional" } as const
+const optionalStory = { userStory: "optional", productDirection: "consistent" } as const
+const contradictoryDirection = {
+  userStory: "optional",
+  productDirection: "contradictory",
+} as const
 
 describe("QRSPI ticket boundary", () => {
   test("decodes an incomplete ticket and reports product problems without technical requirements", () => {
@@ -26,6 +30,7 @@ describe("QRSPI ticket boundary", () => {
 
     const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), {
       userStory: "required",
+      productDirection: "consistent",
     })
 
     expect(result._tag).toBe("NeedsWork")
@@ -79,9 +84,20 @@ describe("QRSPI ticket boundary", () => {
     const { userStory: _, ...withoutStory } = readyTicket()
     const ticket = Schema.decodeUnknownSync(Ticket)(withoutStory)
 
-    expect(
-      checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), { userStory: "optional" })._tag,
-    ).toBe("Ready")
+    expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)._tag).toBe(
+      "Ready",
+    )
+  })
+
+  test("reports a trusted unresolved product contradiction", () => {
+    const ticket = Schema.decodeUnknownSync(Ticket)(readyTicket())
+
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), contradictoryDirection)
+
+    expect(result._tag).toBe("NeedsWork")
+    if (result._tag === "NeedsWork") {
+      expect(result.problems.map(({ code }) => code)).toContain("contradictory_product_direction")
+    }
   })
 
   test("allows a story for non-feature work when the readiness judgment makes it appropriate", () => {
@@ -90,9 +106,9 @@ describe("QRSPI ticket boundary", () => {
       issueType: "task",
     })
 
-    expect(
-      checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), { userStory: "optional" })._tag,
-    ).toBe("Ready")
+    expect(checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"), optionalStory)._tag).toBe(
+      "Ready",
+    )
   })
 
   test("excludes tracker observation metadata from the ticket revision hash", () => {

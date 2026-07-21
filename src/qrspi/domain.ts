@@ -116,9 +116,16 @@ export const TicketCheck = Schema.Union(
 )
 export type TicketCheck = typeof TicketCheck.Type
 
+export const TicketReadinessJudgment = Schema.Struct({
+  userStory: Schema.Literal("required", "optional", "forbidden"),
+  productDirection: Schema.Literal("consistent", "contradictory"),
+})
+export type TicketReadinessJudgment = typeof TicketReadinessJudgment.Type
+
 export const WorkflowStartRequest = Schema.Struct({
   repository: RepositoryReference,
   ticket: TicketReference,
+  readinessJudgment: TicketReadinessJudgment,
 })
 export type WorkflowStartRequest = typeof WorkflowStartRequest.Type
 
@@ -308,10 +315,6 @@ function problem(code: TicketProblem["code"], message: string): TicketProblem {
   return { code, message }
 }
 
-export interface TicketReadinessJudgment {
-  readonly userStory: "required" | "optional" | "forbidden"
-}
-
 export function checkTicket(
   ticket: Ticket,
   checkedAt: Date,
@@ -335,6 +338,13 @@ export function checkTicket(
   if (judgment.userStory === "forbidden" && ticket.userStory?.trim())
     problems.push(
       problem("inappropriate_user_story", "Remove the user story when it does not help the work."),
+    )
+  if (judgment.productDirection === "contradictory")
+    problems.push(
+      problem(
+        "contradictory_product_direction",
+        "Resolve the contradictory product direction before starting technical work.",
+      ),
     )
   if (ticket.acceptanceCriteria === undefined || ticket.acceptanceCriteria.length === 0)
     problems.push(problem("missing_acceptance_criteria", "Add observable acceptance criteria."))

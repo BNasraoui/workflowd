@@ -12,6 +12,7 @@ import {
   workflowDefinitionSha256,
   workflowIdFor,
   type TicketCheck,
+  type TicketReadinessJudgment,
   type WorkflowDefinition,
   type WorkflowStartOutput,
 } from "./domain"
@@ -137,7 +138,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
       const ticket = yield* readTicket(tickets, request.ticket)
-      const checked = checkTicket(ticket, now(), { userStory: "optional" })
+      const checked = checkTicket(ticket, now(), request.readinessJudgment)
       if (checked._tag === "NeedsWork") return checked
 
       const workflowId = workflowIdFor(request.repository, request.ticket)
@@ -381,6 +382,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           workflowDefinition,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
           expectedRootSha: operation.output.rootSha,
+          readinessJudgment: request.readinessJudgment,
           now,
         })
         if (!(yield* store.isStartCurrent(operation.operationId, operation.inputSha256))) {
@@ -573,6 +575,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         workflowDefinition,
         previousTrustedSha: currentCursor?.currentHeadSha ?? null,
         expectedRootSha: observed.sha,
+        readinessJudgment: request.readinessJudgment,
         now,
         onChanged: () =>
           store.supersedeStart(operation.operationId, "authoritative input changed", now()),
@@ -623,12 +626,13 @@ function finalRecheck(input: {
   readonly workflowDefinition: WorkflowDefinition
   readonly previousTrustedSha: string | null
   readonly expectedRootSha: string
+  readonly readinessJudgment: TicketReadinessJudgment
   readonly now: () => Date
   readonly onChanged?: () => Effect.Effect<void, SqlError>
 }) {
   return Effect.gen(function* () {
     const finalTicket = yield* readTicket(input.tickets, input.request.ticket)
-    const finalCheck = checkTicket(finalTicket, input.now(), { userStory: "optional" })
+    const finalCheck = checkTicket(finalTicket, input.now(), input.readinessJudgment)
     const finalInspection = yield* input.repositories.inspect({
       repository: input.request.repository,
       baseRef: input.inspection.baseRef,

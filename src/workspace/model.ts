@@ -21,6 +21,7 @@ export type GitWorkspaceConfig = {
   readonly worktreeRoot: string
   readonly remoteUrl?: (repositoryFullName: string) => string
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 export type WorkspacePort = {
