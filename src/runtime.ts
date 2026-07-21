@@ -1,4 +1,4 @@
-import { Data, Effect, FiberSet } from "effect"
+import { Data, Effect, FiberSet, Option } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
@@ -9,6 +9,7 @@ import {
   runPublicationIteration,
   runReconciliationIteration,
 } from "./worker"
+import { WorkflowStart } from "./qrspi/workflow-start"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -94,10 +95,6 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-function serveDefaultHookHttp(config: HookHttpConfig) {
-  return serveHookHttpWithHandler(config, routeRequest)
-}
-
 export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
 
 export function startHookService(
@@ -111,6 +108,10 @@ export function startHookService(
 
   return Effect.gen(function* () {
     const automation = yield* Automation
+    const workflowStart = yield* Effect.serviceOption(WorkflowStart)
+    if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
+      return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
+    }
 
     yield* automation
       .validateAvailability({
@@ -194,10 +195,24 @@ export function startHookService(
 
     // Acquire the listener last so its finalizer stops acceptance and drains
     // request fibers before worker and store scopes are released.
-    const server = yield* serveDefaultHookHttp({
-      ...config.http,
-      webhookSecret: config.github.webhookSecret,
-    })
+    const server = yield* serveHookHttpWithHandler(
+      {
+        ...config.http,
+        webhookSecret: config.github.webhookSecret,
+      },
+      (request, options) =>
+        routeRequest(request, {
+          ...options,
+          ...(config.qrspi === undefined
+            ? {}
+            : {
+                qrspi: {
+                  token: config.qrspi.token,
+                  start: Option.getOrThrow(workflowStart).start,
+                },
+              }),
+        }),
+    )
     yield* Effect.logInfo(`workflowd listening on http://${server.hostname}:${server.port}`)
 
     return server

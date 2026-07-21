@@ -8,6 +8,51 @@ const requiredEnvironment: Record<string, string | undefined> = {
   OPENCODE_SERVER_PASSWORD: "server-password",
 }
 
+const qrspiDefinition = {
+  contractVersion: 1,
+  definitionVersion: 1,
+  stages: [
+    {
+      key: "questions",
+      kind: "document",
+      activation: { mode: "enabled" },
+      definitionVersion: 1,
+      inputContract: {
+        schemaId: "qrspi.questions.input",
+        schemaVersion: 1,
+        maxEncodedBytes: 16_384,
+      },
+      producer: {
+        harnessId: "opencode",
+        harnessVersion: 1,
+        agent: "qrspi-questions",
+        model: "openai/gpt-5.6-sol",
+        timeoutMs: 60_000,
+        retry: { maxAttempts: 3, backoffMs: 1_000 },
+      },
+      outputContract: {
+        _tag: "Artifact",
+        pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
+        mediaType: "text/markdown",
+      },
+      reviewPolicy: { mode: "none" },
+      humanGatePolicy: { mode: "none" },
+      initialOperations: [
+        {
+          kind: "StageProduce",
+          state: "ready",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+        {
+          kind: "ArtifactPublish",
+          state: "blocked",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+      ],
+    },
+  ],
+} as const
+
 describe("loadConfig", () => {
   test("groups validated settings by their runtime domain", async () => {
     const config = await loadConfig(
@@ -71,18 +116,94 @@ describe("loadConfig", () => {
       home: "/home/test",
     })
     const enabled = await loadConfig(
-      { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "true" },
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_FIX_WORK_ENABLED: "true",
+        WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
+      },
       { home: "/home/test" },
     )
 
     expect(disabled.fixWork.enabled).toBe(false)
     expect(enabled.fixWork.enabled).toBe(true)
+    expect(enabled.workspace.gitSigningKey).toBe("a".repeat(40))
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "true" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
     await expect(
       loadConfig(
         { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "yes" },
         { home: "/home/test" },
       ),
     ).rejects.toThrow("WORKFLOWD_FIX_WORK_ENABLED must be true or false")
+  })
+
+  test("enables trusted QRSPI ingress only with a complete repository and Beads binding", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.qrspi).toEqual({
+      token: "kickoff-secret",
+      installationId: 91,
+      repository: {
+        providerInstanceId: "github-app-123",
+        repositoryId: "42",
+        repositoryFullName: "example-owner/example",
+      },
+      trackerInstanceId: "workspace-42",
+      beadsWorkspace: "/srv/example",
+      baseRef: "main",
+      repositoryOperationTimeoutMs: 30_000,
+      operationCompletionMarginMs: 10_000,
+      leaseDurationMs: 60_000,
+      workflowDefinition: qrspiDefinition,
+    })
+  })
+
+  test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
+    "requires the QRSPI token when %s is present",
+    async (name) => {
+      await expect(
+        loadConfig({ ...requiredEnvironment, [name]: "configured" }, { home: "/home/test" }),
+      ).rejects.toThrow("WORKFLOWD_QRSPI_TOKEN is required when QRSPI settings are present")
+    },
+  )
+
+  test("requires the WorkflowStart lease to exceed repository timeout plus completion margin", async () => {
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+          WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+          WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+          WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
+          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+          WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS: "100",
+          WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS: "50",
+          WORKFLOWD_QRSPI_LEASE_MS: "150",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow(
+      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+    )
   })
 
   test("loads secrets from files and removes one trailing line ending", async () => {

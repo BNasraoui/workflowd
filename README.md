@@ -95,6 +95,7 @@ The required installed values are:
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_COMMAND_USERS`: comma-separated authorized GitHub usernames; an empty value disables commands
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
+- `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
 
 All optional environment names, defaults, separators, timeout/lease settings, and development secret alternatives are documented in `deploy/workflowd.env.example`. Startup rejects invalid ports, URLs, model/agent identifiers, branch prefixes, GitHub users, and leases that do not outlast their timeout.
 

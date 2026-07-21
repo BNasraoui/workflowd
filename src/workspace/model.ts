@@ -21,6 +21,7 @@ export type GitWorkspaceConfig = {
   readonly worktreeRoot: string
   readonly remoteUrl?: (repositoryFullName: string) => string
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 export type WorkspacePort = {
@@ -33,7 +34,7 @@ export type WorkspacePort = {
     workspace: FixWorkspace,
     result: FixResult | undefined,
     isCurrent: DurableJobCurrentness,
-  ) => Effect.Effect<void, WorkspaceError>
+  ) => Effect.Effect<string | null, WorkspaceError>
 }
 
 export type ResolvedWorktree = {

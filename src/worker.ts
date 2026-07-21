@@ -232,22 +232,27 @@ function processFixWork(
         })
         if (recorded === "stale") return "stale" as const
       }
-      yield* workspaces.publishFix(work, workspace, result, (now) =>
-        store.isJobCurrent(work.id, workerId, now).pipe(
-          Effect.mapError(
-            (cause) =>
-              new WorkspaceError({
-                operation: "check durable Fix Work currentness",
-                cause,
-              }),
+      const controllerSigningFingerprint = yield* workspaces.publishFix(
+        work,
+        workspace,
+        result,
+        (now) =>
+          store.isJobCurrent(work.id, workerId, now).pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceError({
+                  operation: "check durable Fix Work currentness",
+                  cause,
+                }),
+            ),
           ),
-        ),
       )
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       const disposition = yield* store.completeFixJob({
         jobId: work.id,
         workerId,
         completedAt,
+        ...(controllerSigningFingerprint === null ? {} : { controllerSigningFingerprint }),
       })
       if (disposition === "completed") workspace.markCompleted()
       return disposition

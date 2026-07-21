@@ -8,6 +8,7 @@ import { ReviewResult } from "../src/domain/review-result"
 import { FixWork, ReviewWork } from "../src/domain/work"
 import { GitWorkspaceAdapter } from "../src/workspace"
 import { runWorkspaceCommand } from "../src/workspace/command"
+import { makeFixPublication } from "../src/workspace/fix"
 
 const temporaryDirectories = new Set<string>()
 
@@ -818,6 +819,136 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(recovery).toBe("committed")
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(commitSha)
+  })
+
+  test("configures fixer signing only for the fix scope", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-signing-")
+    const signingKey = "a".repeat(40)
+    const previousKey = "b".repeat(40)
+    await git(fixture.source, "config", "extensions.worktreeConfig", "true")
+    await git(fixture.source, "config", "--worktree", "commit.gpgSign", "false")
+    await git(fixture.source, "config", "--worktree", "gpg.format", "ssh")
+    await git(fixture.source, "config", "--worktree", "user.signingKey", previousKey)
+    const manager = new GitWorkspaceAdapter({
+      localRepositories: [fixture.source],
+      repositoryRoot: join(fixture.root, "repositories"),
+      worktreeRoot: join(fixture.root, "worktrees"),
+      remoteUrl: () => fixture.remote,
+      maxDiffBytes: 1_000_000,
+      gitSigningKey: signingKey,
+    })
+    const job = makeFixJob(fixture)
+
+    const configured = await Effect.runPromise(
+      Effect.scoped(
+        manager.prepareFix(job).pipe(
+          Effect.flatMap((workspace) =>
+            Effect.promise(async () => ({
+              enabled: await git(workspace.directory, "config", "--worktree", "commit.gpgSign"),
+              format: await git(workspace.directory, "config", "--worktree", "gpg.format"),
+              key: await git(workspace.directory, "config", "--worktree", "user.signingKey"),
+            })),
+          ),
+        ),
+      ),
+    )
+
+    expect(configured).toEqual({ enabled: "true", format: "openpgp", key: signingKey })
+    expect({
+      enabled: await git(fixture.source, "config", "--worktree", "commit.gpgSign"),
+      format: await git(fixture.source, "config", "--worktree", "gpg.format"),
+      key: await git(fixture.source, "config", "--worktree", "user.signingKey"),
+    }).toEqual({ enabled: "false", format: "ssh", key: previousKey })
+  })
+
+  test("refuses to publish an unsigned fix when controller signing is configured", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-unsigned-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `unsigned fix\n\nWorkflowd-Job: ${job.id}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+    const publication = makeFixPublication("a".repeat(40))
+
+    const exit = await Effect.runPromiseExit(
+      publication.publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Unsigned fix.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: {
+        _tag: "Fail",
+        error: { operation: "verify controller fix signature" },
+      },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
+  test("refuses to publish a multi-commit fix", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-multi-commit-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `first fix\n\nWorkflowd-Job: ${job.id}`)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 4\n")
+    await git(fixture.source, "commit", "-am", `second fix\n\nWorkflowd-Job: ${job.id}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Two commits.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix ancestry" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
+  test.each([
+    ["a mismatched trailer prefix", "Workflowd-Job: 110"],
+    ["duplicate trailers", "Workflowd-Job: 11\nWorkflowd-Job: 11"],
+  ])("refuses to publish a fix with %s", async (_description, trailers) => {
+    const fixture = await createRepositoryFixture("workflowd-fix-invalid-trailer-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `invalid trailer\n\n${trailers}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Invalid trailer.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix commit ownership" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
 
   test("recognizes the same job after push but before store completion", async () => {

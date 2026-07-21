@@ -5,7 +5,7 @@ import { ReviewContextFiles } from "./workspace/context"
 import { ExistingWorktreeDiscovery, LocalRepositoryCatalog } from "./workspace/discovery"
 import { ManagedWorkspaceLifecycle } from "./workspace/managed"
 import { ScopedKeyedLock } from "./workspace/locks"
-import { fixPublication } from "./workspace/fix"
+import { makeFixPublication } from "./workspace/fix"
 import type {
   GitWorkspaceConfig,
   WorkspacePort,
@@ -42,8 +42,8 @@ export class GitWorkspaceAdapter implements WorkspacePort {
     })
     this.#discovery = new ExistingWorktreeDiscovery(config, remoteUrl, this.#catalog)
     this.#managed = new ManagedWorkspaceLifecycle(config, remoteUrl)
-    this.#fixes = fixPublication
-    this.#context = new ReviewContextFiles(config.maxDiffBytes, this.#fixes)
+    this.#fixes = makeFixPublication(config.gitSigningKey)
+    this.#context = new ReviewContextFiles(config.maxDiffBytes, this.#fixes, config.gitSigningKey)
   }
 
   prepareReview(work: ReviewWork) {
