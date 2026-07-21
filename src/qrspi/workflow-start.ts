@@ -162,6 +162,27 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       }
       const authorizedRequest = { ...request, repository: inspection.repository }
       const currentCursor = yield* store.getCurrentCursor(workflowId)
+      if (currentCursor?.state === "reconciling") {
+        return yield* Effect.fail(
+          new WorkflowStartConflict({ reason: "Target reconciliation is still active" }),
+        )
+      }
+      if (
+        currentCursor !== null &&
+        (currentCursor.baseRef !== inspection.baseRef ||
+          currentCursor.baseSha !== inspection.baseSha)
+      ) {
+        yield* store.reconcileCompletedStart({
+          workflowId,
+          generation: currentCursor.generation,
+          reason: "base target changed after WorkflowStart completed",
+          observation: { baseRef: inspection.baseRef, baseSha: inspection.baseSha },
+          now: now(),
+        })
+        return yield* Effect.fail(
+          new WorkflowStartConflict({ reason: "Base target requires reconciliation" }),
+        )
+      }
       const selectedBranchName = yield* store.resolveBranch(workflowId, proposedBranchName, now())
       const input = {
         contractVersion: 1 as const,

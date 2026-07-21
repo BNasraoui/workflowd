@@ -138,6 +138,9 @@ export type QrspiStorePort = {
       readonly generation: number
       readonly currentHeadSha: string
       readonly headRef: string
+      readonly baseRef: string
+      readonly baseSha: string
+      readonly state: string
     } | null,
     SqlError
   >
@@ -268,8 +271,12 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         readonly generation: number
         readonly current_head_sha: string
         readonly head_ref: string
+        readonly base_ref: string
+        readonly base_sha: string
+        readonly state: string
       }>`
-        SELECT generation, current_head_sha, head_ref FROM qrspi_generations
+        SELECT generation, current_head_sha, head_ref, base_ref, base_sha, state
+        FROM qrspi_generations
         WHERE workflow_id = ${workflowId} AND is_current = 1
       `.pipe(
         Effect.map((rows) => {
@@ -280,6 +287,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 generation: Number(row.generation),
                 currentHeadSha: row.current_head_sha,
                 headRef: row.head_ref,
+                baseRef: row.base_ref,
+                baseSha: row.base_sha,
+                state: row.state,
               }
         }),
       ),

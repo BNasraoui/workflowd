@@ -80,6 +80,7 @@ type FakeOptions = {
   readonly createDelayMs?: number
   readonly createNever?: boolean
   readonly inspectError?: Error
+  readonly inspectedBaseSha?: string
 }
 
 function fakes(options: FakeOptions = {}) {
@@ -91,6 +92,7 @@ function fakes(options: FakeOptions = {}) {
   let crashed = false
   let lostCreatedBranch = false
   let branchHistoryTrusted = true
+  let inspectedBaseSha = options.inspectedBaseSha ?? baseSha
   const authorityTokens: Array<string | undefined> = []
   const tickets: TicketSourcePort = {
     read: () =>
@@ -116,7 +118,7 @@ function fakes(options: FakeOptions = {}) {
         ? Effect.succeed({
             repository: options.inspectedRepository ?? repository,
             baseRef: "main",
-            baseSha,
+            baseSha: inspectedBaseSha,
             headRepository: options.inspectedRepository ?? repository,
           })
         : Effect.fail(
@@ -176,6 +178,9 @@ function fakes(options: FakeOptions = {}) {
     },
     setBranch: (sha: string) => {
       branchSha = sha
+    },
+    setBase: (sha: string) => {
+      inspectedBaseSha = sha
     },
     setOpenPullRequest: (value: boolean) => {
       openPullRequest = value
@@ -1160,6 +1165,50 @@ describe("WorkflowStart integration", () => {
       }).pipe(Effect.provide(layer(filename, fake))),
     )
     expect(targets[1]).toEqual({ base_sha: baseSha, root_sha: advancedSha })
+  })
+
+  test("requires reconciliation when the base advances but the branch remains at the cursor", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    fake.setBase("e".repeat(40))
+    fake.setTicket({ ...readyTicket, title: "Kick off after the base advances" })
+
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly generation: number; readonly state: string }>`
+          SELECT generation, state FROM qrspi_generations ORDER BY generation
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([{ generation: 1, state: "reconciling" }])
+  })
+
+  test("does not supersede a generation while target reconciliation is active", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    fake.setBranch("e".repeat(40))
+    fake.setBranchHistoryTrusted(false)
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+    fake.setBranch(baseSha)
+    fake.setBranchHistoryTrusted(true)
+    fake.setTicket({ ...readyTicket, title: "Kick off while reconciliation is active" })
+
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly generation: number; readonly state: string }>`
+          SELECT generation, state FROM qrspi_generations ORDER BY generation
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([{ generation: 1, state: "reconciling" }])
   })
 
   test("supersedes a leased predecessor operation when starting a successor", async () => {
