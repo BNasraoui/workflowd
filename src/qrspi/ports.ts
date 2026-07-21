@@ -91,6 +91,9 @@ export type QrspiRepositoryPort = {
   readonly observeFinalPullRequest: (
     input: FinalPullRequestIntent,
   ) => Effect.Effect<FinalPullRequestObservation | null, QrspiRepositoryError>
+  readonly observeFinalPullRequestReference: (
+    reference: FinalPullRequestObservation["reference"],
+  ) => Effect.Effect<FinalPullRequestObservation, QrspiRepositoryError>
 }
 export const QrspiRepository = Context.GenericTag<QrspiRepositoryPort>(
   "workflowd/qrspi/QrspiRepository",

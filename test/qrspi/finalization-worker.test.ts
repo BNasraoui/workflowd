@@ -89,6 +89,11 @@ const repository = (calls: string[]) => ({
       calls.push("observe")
       return calls.includes("create") ? observation : null
     }),
+  observeFinalPullRequestReference: () =>
+    Effect.sync(() => {
+      calls.push("observe-reference")
+      return observation
+    }),
 })
 
 test("PullRequestPublish does not create a PR after its generation is superseded", async () => {
@@ -103,6 +108,7 @@ test("PullRequestPublish does not create a PR after its generation is superseded
         findPullRequestPublicationRecovery: () => Effect.succeed(null),
         claimFinalizationOperation: () => Effect.succeed(work),
         bindPullRequestPublication: () => Effect.succeed("bound" as const),
+        bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
         isFinalizationOperationCurrent: () => Effect.succeed(false),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
         recordStalePullRequestPublicationEffect: () => Effect.die("unexpected stale effect"),
@@ -128,6 +134,11 @@ test("PullRequestPublish durably reconciles a PR created as currentness is lost"
         findPullRequestPublicationRecovery: () => Effect.succeed(null),
         claimFinalizationOperation: () => Effect.succeed(work),
         bindPullRequestPublication: () => Effect.succeed("bound" as const),
+        bindPullRequestPublicationReference: ({ reference }) =>
+          Effect.sync(() => {
+            calls.push(`bind-reference:${reference.number}`)
+            return "bound" as const
+          }),
         isFinalizationOperationCurrent: () => Effect.succeed(current),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
         recordStalePullRequestPublicationEffect: ({ reference }) =>
@@ -149,7 +160,13 @@ test("PullRequestPublish durably reconciles a PR created as currentness is lost"
   )
 
   expect(result).toBe("reconciling")
-  expect(calls).toEqual(["observe", "create", "observe", "reconcile:17"])
+  expect(calls).toEqual([
+    "observe",
+    "create",
+    "bind-reference:17",
+    "observe-reference",
+    "reconcile:17",
+  ])
 })
 
 test("PullRequestPublish reconciles when completion discovers supersession", async () => {
@@ -164,6 +181,7 @@ test("PullRequestPublish reconciles when completion discovers supersession", asy
         findPullRequestPublicationRecovery: () => Effect.succeed(null),
         claimFinalizationOperation: () => Effect.succeed(work),
         bindPullRequestPublication: () => Effect.succeed("bound" as const),
+        bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
         isFinalizationOperationCurrent: () => Effect.succeed(true),
         completePullRequestPublication: () => Effect.succeed("stale" as const),
         recordStalePullRequestPublicationEffect: ({ reference }) =>
@@ -178,4 +196,51 @@ test("PullRequestPublish reconciles when completion discovers supersession", asy
 
   expect(result).toBe("reconciling")
   expect(calls).toEqual(["create", "observe", "reconcile:17"])
+})
+
+test("PullRequestPublish records a created PR whose branch advanced during creation", async () => {
+  const calls: string[] = []
+  const changed = { ...observation, headSha: "e".repeat(40) }
+  const result = await Effect.runPromise(
+    runPullRequestPublishIterationWith({
+      workerId: "publisher",
+      leaseDurationMs: 60_000,
+      now: () => new Date("2026-07-22T00:00:00.000Z"),
+      randomId: () => "22222222-2222-4222-8222-222222222222",
+      store: {
+        findPullRequestPublicationRecovery: () => Effect.succeed(null),
+        claimFinalizationOperation: () => Effect.succeed(work),
+        bindPullRequestPublication: () => Effect.succeed("bound" as const),
+        bindPullRequestPublicationReference: ({ reference }) =>
+          Effect.sync(() => {
+            calls.push(`bind-reference:${reference.number}`)
+            return "bound" as const
+          }),
+        isFinalizationOperationCurrent: () => Effect.succeed(true),
+        completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordStalePullRequestPublicationEffect: ({ reference, observation }) =>
+          Effect.sync(() => {
+            calls.push(`reconcile:${reference.number}:${observation?.headSha}`)
+            return "reconciling" as const
+          }),
+      },
+      repository: {
+        ...repository(calls),
+        observeFinalPullRequestReference: () =>
+          Effect.sync(() => {
+            calls.push("observe-reference")
+            return changed
+          }),
+      },
+    }),
+  )
+
+  expect(result).toBe("reconciling")
+  expect(calls).toEqual([
+    "observe",
+    "create",
+    "bind-reference:17",
+    "observe-reference",
+    `reconcile:17:${changed.headSha}`,
+  ])
 })

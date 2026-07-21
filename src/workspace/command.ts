@@ -4,6 +4,7 @@ import { WorkspaceError } from "./errors"
 
 type WorkspaceCommandOptions = {
   readonly cwd?: string
+  readonly env?: NodeJS.ProcessEnv
 }
 
 type BoundedWorkspaceCommandOptions = WorkspaceCommandOptions & {
@@ -27,7 +28,7 @@ function executeWorkspaceCommand<A>(
       child = Bun.spawn([...command], {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         detached: true,
-        env: process.env,
+        env: options.env ?? process.env,
         signal,
         stdin: "ignore",
         stdout: "pipe",

@@ -210,18 +210,23 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
     rescheduleStageOperation: () => Effect.die("must not reschedule"),
   }
   const commands: ReadonlyArray<string>[] = []
-  const repository = new GitArtifactPublicationRepository("/tmp/qrspi/workflow", "1".repeat(40), {
-    run: (_operation, command) => {
-      commands.push(command)
-      const args = command.slice(1)
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return Effect.succeed(finalSha)
-      if (args[0] === "ls-remote") {
-        return Effect.succeed(`${finalSha}\trefs/heads/feature/ticket`)
-      }
-      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+  const repository = new GitArtifactPublicationRepository(
+    "/tmp/qrspi/workflow",
+    "1".repeat(40),
+    "https://github.com/owner/repo.git",
+    {
+      run: (_operation, command) => {
+        commands.push(command)
+        const args = command.slice(1)
+        if (args[0] === "rev-parse" && args[1] === "HEAD") return Effect.succeed(finalSha)
+        if (args[0] === "ls-remote") {
+          return Effect.succeed(`${finalSha}\trefs/heads/feature/ticket`)
+        }
+        return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+      },
+      runBytes: () => Effect.die("must not read or sign another commit"),
     },
-    runBytes: () => Effect.die("must not read or sign another commit"),
-  })
+  )
 
   const result = await Effect.runPromise(
     runArtifactPublishIterationWith({

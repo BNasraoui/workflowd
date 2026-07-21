@@ -203,6 +203,17 @@ function fakes(options: FakeOptions = {}) {
               url: "https://example.test/example-owner/example/pull/17",
             },
       ),
+    observeFinalPullRequestReference: (reference) =>
+      Effect.succeed({
+        reference,
+        baseRef: finalPullRequest?.baseRef ?? "main",
+        headRef: finalPullRequest?.headRef ?? "feature/ticket",
+        headSha: finalPullRequest?.headSha ?? "f".repeat(40),
+        draft: false,
+        body: finalPullRequest?.body ?? "",
+        bodySha256: finalPullRequest?.bodySha256 ?? "0".repeat(64),
+        url: `https://example.test/example-owner/example/pull/${reference.number}`,
+      }),
   } satisfies QrspiRepositoryPort
   return {
     tickets,

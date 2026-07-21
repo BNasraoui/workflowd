@@ -380,6 +380,11 @@ export type QrspiStorePort = {
     readonly intent: FinalPullRequestIntent
     readonly now: Date
   }) => Effect.Effect<"bound" | "conflict" | "stale", SqlError | ParseError>
+  readonly bindPullRequestPublicationReference: (input: {
+    readonly operationId: string
+    readonly reference: FinalPullRequestObservation["reference"]
+    readonly now: Date
+  }) => Effect.Effect<"bound" | "stale", SqlError | ParseError>
   readonly isFinalizationOperationCurrent: (
     operationId: string,
     now: Date,
@@ -434,6 +439,7 @@ export type FinalizationOperationLease = {
   readonly kind: "PrePullRequestVerify" | "PullRequestPublish"
   readonly input: unknown
   readonly intent?: FinalPullRequestIntent
+  readonly publicationReference?: FinalPullRequestObservation["reference"]
   readonly repository: typeof RepositoryReference.Type
   readonly baseRef: string
   readonly headRef: string
@@ -2607,13 +2613,15 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           readonly scope_json: string
           readonly input_json: string
           readonly external_intent_json: string
+          readonly external_observation_json: string | null
           readonly repository_json: string
           readonly base_ref: string
           readonly head_ref: string
           readonly current_head_sha: string
         }>`
           SELECT o.operation_id, o.operation_revision, o.attempt, o.scope_json, o.input_json,
-            o.external_intent_json, g.repository_json, g.base_ref, g.head_ref, g.current_head_sha
+            o.external_intent_json, o.external_observation_json, g.repository_json, g.base_ref,
+            g.head_ref, g.current_head_sha
           FROM workflow_operations o JOIN qrspi_generations g
             ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
             AND g.generation = json_extract(o.scope_json, '$.generation')
@@ -2635,6 +2643,17 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           intent: yield* Schema.decodeUnknown(Schema.parseJson(FinalPullRequestIntentSchema))(
             row.external_intent_json,
           ),
+          ...(row.external_observation_json === null
+            ? {}
+            : {
+                publicationReference: yield* Schema.decodeUnknown(
+                  Schema.parseJson(
+                    Schema.Struct({
+                      reference: FinalPullRequestObservationSchema.fields.reference,
+                    }),
+                  ),
+                )(row.external_observation_json).pipe(Effect.map(({ reference }) => reference)),
+              }),
           repository: yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
             row.repository_json,
           ),
@@ -2797,6 +2816,23 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }),
       ),
 
+    bindPullRequestPublicationReference: (input) =>
+      Effect.gen(function* () {
+        const reference = yield* Schema.decodeUnknown(
+          FinalPullRequestObservationSchema.fields.reference,
+        )(input.reference)
+        const rows = yield* sql<{ readonly operation_id: string }>`
+          UPDATE workflow_operations
+          SET external_observation_json = ${JSON.stringify({ reference })},
+            updated_at = ${input.now.toISOString()}
+          WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+            AND state = 'waiting_external' AND is_current = 1
+            AND external_observation_json IS NULL
+          RETURNING operation_id
+        `
+        return rows.length === 1 ? ("bound" as const) : ("stale" as const)
+      }),
+
     isFinalizationOperationCurrent: (operationId, now) =>
       sql<{ readonly operation_id: string }>`
         SELECT o.operation_id FROM workflow_operations o
@@ -2924,12 +2960,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             canonicalSha256(intent) !== canonicalSha256(suppliedIntent) ||
             canonicalSha256(reference.repository) !== canonicalSha256(intent.repository) ||
             (observation !== undefined &&
-              (observation.draft ||
-                canonicalSha256(observation.reference) !== canonicalSha256(reference) ||
-                observation.headSha !== intent.headSha ||
-                observation.headRef !== intent.headRef ||
-                observation.baseRef !== intent.baseRef ||
-                observation.bodySha256 !== intent.bodySha256))
+              canonicalSha256(observation.reference) !== canonicalSha256(reference))
           ) {
             return "stale" as const
           }

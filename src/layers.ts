@@ -148,7 +148,11 @@ export const makeLiveLayer = (config: AppConfig) => {
     config.qrspi !== undefined && config.workspace.gitSigningKey !== undefined
       ? Layer.succeed(ArtifactPublicationRepositoryFactoryService, {
           forDirectory: (directory) =>
-            new GitArtifactPublicationRepository(directory, config.workspace.gitSigningKey!),
+            new GitArtifactPublicationRepository(
+              directory,
+              config.workspace.gitSigningKey!,
+              `https://github.com/${config.qrspi!.repository.repositoryFullName}.git`,
+            ),
         })
       : Layer.empty
   const qrspiWorkspaceLayer =

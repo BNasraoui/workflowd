@@ -129,6 +129,7 @@ export function runPullRequestPublishIterationWith(options: {
     | "claimFinalizationOperation"
     | "findPullRequestPublicationRecovery"
     | "bindPullRequestPublication"
+    | "bindPullRequestPublicationReference"
     | "isFinalizationOperationCurrent"
     | "completePullRequestPublication"
     | "recordStalePullRequestPublicationEffect"
@@ -167,14 +168,32 @@ export function runPullRequestPublishIterationWith(options: {
       })
       if (binding !== "bound") return binding
     }
-    let observed = yield* options.repository.observeFinalPullRequest(intent)
+    let observed =
+      work.publicationReference === undefined
+        ? yield* options.repository.observeFinalPullRequest(intent)
+        : yield* options.repository.observeFinalPullRequestReference(work.publicationReference)
     let created: FinalPullRequestObservation["reference"] | undefined
     if (observed === null) {
       if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
         return "stale" as const
       }
       created = yield* options.repository.createFinalPullRequest(intent)
-      const observation = yield* Effect.exit(options.repository.observeFinalPullRequest(intent))
+      const referenceBinding = yield* options.store.bindPullRequestPublicationReference({
+        operationId: work.operationId,
+        reference: created,
+        now: options.now(),
+      })
+      if (referenceBinding !== "bound") {
+        return yield* options.store.recordStalePullRequestPublicationEffect({
+          operationId: work.operationId,
+          intent,
+          reference: created,
+          now: options.now(),
+        })
+      }
+      const observation = yield* Effect.exit(
+        options.repository.observeFinalPullRequestReference(created),
+      )
       if (Exit.isFailure(observation)) {
         if (
           !(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))
@@ -204,6 +223,15 @@ export function runPullRequestPublishIterationWith(options: {
       }
       return yield* Effect.fail(new Error("final pull request was not observable after creation"))
     }
+    if (!matchesIntent(observed, intent)) {
+      return yield* options.store.recordStalePullRequestPublicationEffect({
+        operationId: work.operationId,
+        intent,
+        reference: observed.reference,
+        observation: observed,
+        now: options.now(),
+      })
+    }
     if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
       return yield* options.store.recordStalePullRequestPublicationEffect({
         operationId: work.operationId,
@@ -227,4 +255,17 @@ export function runPullRequestPublishIterationWith(options: {
       now: options.now(),
     })
   })
+}
+
+function matchesIntent(
+  observation: FinalPullRequestObservation,
+  intent: FinalPullRequestIntent,
+): boolean {
+  return (
+    !observation.draft &&
+    observation.headSha === intent.headSha &&
+    observation.headRef === intent.headRef &&
+    observation.baseRef === intent.baseRef &&
+    observation.bodySha256 === intent.bodySha256
+  )
 }

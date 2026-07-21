@@ -183,6 +183,16 @@ type QrspiOctokit = {
       readonly create?: (input: Parameters<PullsApi["create"]>[0]) => Promise<{
         readonly data: { readonly number: number }
       }>
+      readonly get?: (input: Parameters<PullsApi["get"]>[0]) => Promise<{
+        readonly data: {
+          readonly number: number
+          readonly draft?: boolean | null
+          readonly body?: string | null
+          readonly html_url: string
+          readonly base: { readonly ref: string }
+          readonly head: { readonly ref: string; readonly sha: string }
+        }
+      }>
     }
     readonly git: {
       readonly createRef: (input: Parameters<GitApi["createRef"]>[0]) => Promise<unknown>
@@ -199,6 +209,30 @@ type TrustedPublicationVerifier = (
     { readonly jobId: number } | { readonly controllerId: string; readonly operationId: string }
   ),
 ) => Promise<string | null>
+
+function finalPullRequestObservation(
+  repository: RepositoryReference,
+  pull: {
+    readonly number: number
+    readonly draft?: boolean | null
+    readonly body?: string | null
+    readonly html_url: string
+    readonly base: { readonly ref: string }
+    readonly head: { readonly ref: string; readonly sha: string }
+  },
+) {
+  const body = pull.body ?? ""
+  return {
+    reference: { repository, number: pull.number },
+    baseRef: pull.base.ref,
+    headRef: pull.head.ref,
+    headSha: pull.head.sha,
+    draft: pull.draft === true,
+    body,
+    bodySha256: createHash("sha256").update(body).digest("hex"),
+    url: pull.html_url,
+  }
+}
 
 export class GitHubQrspiRepository implements QrspiRepositoryPort {
   constructor(
@@ -365,18 +399,24 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
             .digest("hex") === input.bodySha256,
       )
       if (pull === undefined) return null
-      const body = pull.body ?? ""
-      return {
-        reference: { repository: input.repository, number: pull.number },
-        baseRef: pull.base.ref,
-        headRef: pull.head.ref,
-        headSha: pull.head.sha,
-        draft: pull.draft === true,
-        body,
-        bodySha256: createHash("sha256").update(body).digest("hex"),
-        url: pull.html_url,
-      }
+      return finalPullRequestObservation(input.repository, pull)
     })
+
+  readonly observeFinalPullRequestReference: QrspiRepositoryPort["observeFinalPullRequestReference"] =
+    (reference) =>
+      this.attempt("observe final pull request reference", async (signal) => {
+        const { owner, repo } = repositoryName(reference.repository)
+        const client = await this.client(this.config.installationId)
+        if (client.rest.pulls.get === undefined)
+          throw new Error("Pull request observation unavailable")
+        const pull = await client.rest.pulls.get({
+          owner,
+          repo,
+          pull_number: reference.number,
+          request: { signal },
+        })
+        return finalPullRequestObservation(reference.repository, pull.data)
+      })
 
   private attempt<A>(operation: string, run: (signal: AbortSignal) => Promise<A>) {
     return Effect.tryPromise({

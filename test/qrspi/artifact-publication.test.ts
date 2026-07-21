@@ -241,9 +241,14 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
   let remote = parentSha
   let commit = 0
   const commands: ReadonlyArray<string>[] = []
-  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), {
-    run: (_operation, command) => {
+  const trustedRemote = "https://github.com/owner/repo.git"
+  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), trustedRemote, {
+    run: (_operation, command, options) => {
       commands.push(command)
+      expect(options?.env).toMatchObject({
+        GIT_CONFIG: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+      })
       const args = command.slice(1)
       if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
       if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
@@ -338,6 +343,11 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
       command.includes(`--force-with-lease=refs/heads/feature/ticket:${parentSha}`),
     ),
   ).toBe(true)
+  expect(commands.some((command) => command.includes("origin"))).toBe(false)
+  expect(commands.filter((command) => command.includes("push")).flat()).toContain(trustedRemote)
+  expect(commands.filter((command) => command.includes("ls-remote")).flat()).toContain(
+    trustedRemote,
+  )
   expect(
     commands.some((command) =>
       command.join(" ").includes(`update-ref HEAD ${finalSha} ${"d".repeat(40)}`),
@@ -350,30 +360,35 @@ test("Git publisher reads valid multibyte document content within the output env
   const content = "é".repeat(600_000)
   const encoded = new TextEncoder().encode(content)
   let requestedBytes = 0
-  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), {
-    run: (_operation, command) => {
-      const args = command.slice(1)
-      if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
-      if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
-      if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
-      if (args[0] === "ls-tree") {
-        const path = String(args.at(-1))
-        return Effect.succeed(
-          path === artifact.path
-            ? `100644 blob ${artifact.blobSha}\t${path}`
-            : `040000 tree ${"7".repeat(40)}\t${path}`,
-        )
-      }
-      if (args[0] === "commit-tree") return Effect.succeed(finalSha)
-      if (args[0] === "verify-commit") return Effect.succeed("")
-      if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
-      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+  const publisher = new GitArtifactPublicationRepository(
+    "/repo",
+    "1".repeat(40),
+    "https://github.com/owner/repo.git",
+    {
+      run: (_operation, command) => {
+        const args = command.slice(1)
+        if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
+        if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
+        if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
+        if (args[0] === "ls-tree") {
+          const path = String(args.at(-1))
+          return Effect.succeed(
+            path === artifact.path
+              ? `100644 blob ${artifact.blobSha}\t${path}`
+              : `040000 tree ${"7".repeat(40)}\t${path}`,
+          )
+        }
+        if (args[0] === "commit-tree") return Effect.succeed(finalSha)
+        if (args[0] === "verify-commit") return Effect.succeed("")
+        if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
+        return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+      },
+      runBytes: (_operation, _command, options) => {
+        requestedBytes = options.maxStdoutBytes
+        return Effect.succeed({ stdout: encoded, truncated: encoded.byteLength >= requestedBytes })
+      },
     },
-    runBytes: (_operation, _command, options) => {
-      requestedBytes = options.maxStdoutBytes
-      return Effect.succeed({ stdout: encoded, truncated: encoded.byteLength >= requestedBytes })
-    },
-  })
+  )
 
   await expect(
     Effect.runPromise(
@@ -407,29 +422,35 @@ test.each([
   ["gitlink ancestor", "docs/qrspi", "160000", "commit"],
 ] as const)("rejects a %s before signing", async (_description, unsafePath, mode, type) => {
   let signed = false
-  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), {
-    run: (_operation, command) => {
-      const args = command.slice(1)
-      if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
-      if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
-      if (args[0] === "ls-tree") {
-        const path = String(args.at(-1))
-        if (path === unsafePath) return Effect.succeed(`${mode} ${type} ${"7".repeat(40)}\t${path}`)
-        return Effect.succeed(
-          path === artifact.path
-            ? `100644 blob ${artifact.blobSha}\t${path}`
-            : `040000 tree ${"7".repeat(40)}\t${path}`,
-        )
-      }
-      if (args[0] === "commit-tree") {
-        signed = true
-        return Effect.succeed(finalSha)
-      }
-      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+  const publisher = new GitArtifactPublicationRepository(
+    "/repo",
+    "1".repeat(40),
+    "https://github.com/owner/repo.git",
+    {
+      run: (_operation, command) => {
+        const args = command.slice(1)
+        if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
+        if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
+        if (args[0] === "ls-tree") {
+          const path = String(args.at(-1))
+          if (path === unsafePath)
+            return Effect.succeed(`${mode} ${type} ${"7".repeat(40)}\t${path}`)
+          return Effect.succeed(
+            path === artifact.path
+              ? `100644 blob ${artifact.blobSha}\t${path}`
+              : `040000 tree ${"7".repeat(40)}\t${path}`,
+          )
+        }
+        if (args[0] === "commit-tree") {
+          signed = true
+          return Effect.succeed(finalSha)
+        }
+        return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+      },
+      runBytes: () =>
+        Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
     },
-    runBytes: () =>
-      Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
-  })
+  )
 
   await expect(
     Effect.runPromise(

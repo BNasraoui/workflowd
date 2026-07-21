@@ -72,14 +72,29 @@ export class ArtifactRefConflictError extends Data.TaggedError("ArtifactRefConfl
 }> {}
 
 export class GitArtifactPublicationRepository implements ArtifactPublicationRepository {
+  readonly #gitEnvironment: NodeJS.ProcessEnv
+
   constructor(
     private readonly directory: string,
     private readonly signingKey: string,
+    private readonly trustedRemoteUrl: string,
     private readonly command: {
       readonly run: typeof runWorkspaceCommand
       readonly runBytes: typeof runWorkspaceCommandBytes
     } = { run: runWorkspaceCommand, runBytes: runWorkspaceCommandBytes },
-  ) {}
+  ) {
+    this.#gitEnvironment = {
+      ...process.env,
+      GIT_CONFIG: "/dev/null",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_AUTHOR_NAME: "workflowd",
+      GIT_AUTHOR_EMAIL: "workflowd@localhost",
+      GIT_COMMITTER_NAME: "workflowd",
+      GIT_COMMITTER_EMAIL: "workflowd@localhost",
+    }
+  }
 
   readonly finalizeDocument: ArtifactPublicationRepository["finalizeDocument"] = (input) =>
     Effect.gen(this, function* () {
@@ -188,7 +203,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
       yield* this.git("update exact ticket ref", [
         "push",
         `--force-with-lease=refs/heads/${input.headRef}:${input.expectedOld}`,
-        "origin",
+        this.trustedRemoteUrl,
         `${input.newSha}:refs/heads/${input.headRef}`,
       ])
     })
@@ -197,7 +212,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     this.git("observe ticket ref", [
       "ls-remote",
       "--heads",
-      "origin",
+      this.trustedRemoteUrl,
       `refs/heads/${headRef}`,
     ]).pipe(Effect.map((output) => output.split(/\s+/)[0] || null))
 
@@ -274,7 +289,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
 
   private git(operation: string, args: ReadonlyArray<string>) {
     return this.command
-      .run(operation, ["git", ...args], { cwd: this.directory })
+      .run(operation, ["git", ...args], { cwd: this.directory, env: this.#gitEnvironment })
       .pipe(Effect.mapError((cause) => new Error(`${operation}: ${String(cause)}`, { cause })))
   }
 
@@ -282,6 +297,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     return this.command
       .runBytes(operation, ["git", ...args], {
         cwd: this.directory,
+        env: this.#gitEnvironment,
         maxStdoutBytes: MAX_AGENT_OUTPUT_BYTES + 1,
       })
       .pipe(
