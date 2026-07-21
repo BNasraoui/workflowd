@@ -294,6 +294,14 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       }
       const { owner, repo } = repositoryName(input.repository)
       const client = await this.client(this.config.installationId)
+      if (
+        input.authority.leaseUntil.getTime() <=
+        Date.now() +
+          this.config.repositoryOperationTimeoutMs +
+          this.config.operationCompletionMarginMs
+      ) {
+        throw new Error("WorkflowStart lease cannot cover repository mutation")
+      }
       await client.rest.git.createRef({
         owner,
         repo,

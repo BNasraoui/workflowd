@@ -177,30 +177,7 @@ export class ReviewContextFiles {
     return Effect.gen(this, function* () {
       yield* this.#cleanupExisting(resolved.directory)
       if (this.#gitSigningKey !== undefined) {
-        yield* runGit(
-          "configure controller commit signing",
-          resolved.directory,
-          "config",
-          "--worktree",
-          "gpg.format",
-          "openpgp",
-        )
-        yield* runGit(
-          "configure controller commit signing",
-          resolved.directory,
-          "config",
-          "--worktree",
-          "user.signingKey",
-          this.#gitSigningKey,
-        )
-        yield* runGit(
-          "configure controller commit signing",
-          resolved.directory,
-          "config",
-          "--worktree",
-          "commit.gpgSign",
-          "true",
-        )
+        yield* this.#configureSigning(resolved.directory, this.#gitSigningKey)
       }
       const initialStatus = yield* this.#fixes.worktreeStatus(resolved.directory)
       if (resolved.pull && initialStatus === "") yield* this.#pull(resolved.directory)
@@ -219,6 +196,48 @@ export class ReviewContextFiles {
         FixWorkspace,
         "markCompleted"
       >
+    })
+  }
+
+  #configureSigning(directory: string, signingKey: string) {
+    const settings = [
+      ["gpg.format", "openpgp"],
+      ["user.signingKey", signingKey],
+      ["commit.gpgSign", "true"],
+    ] as const
+    return Effect.gen(function* () {
+      const previous = yield* Effect.forEach(settings, ([name]) =>
+        runGit(
+          "read fixer signing configuration",
+          directory,
+          "config",
+          "--worktree",
+          "--get",
+          name,
+        ).pipe(Effect.option),
+      )
+      yield* Effect.addFinalizer(() =>
+        Effect.forEach(settings, ([name], index) => {
+          const value = previous[index]!
+          const args =
+            value._tag === "Some"
+              ? ["config", "--worktree", name, value.value]
+              : ["config", "--worktree", "--unset-all", name]
+          return runGit("restore fixer signing configuration", directory, ...args).pipe(
+            Effect.ignore,
+          )
+        }).pipe(Effect.asVoid),
+      )
+      yield* Effect.forEach(settings, ([name, value]) =>
+        runGit(
+          "configure controller commit signing",
+          directory,
+          "config",
+          "--worktree",
+          name,
+          value,
+        ),
+      )
     })
   }
 

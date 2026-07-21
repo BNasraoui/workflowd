@@ -355,4 +355,44 @@ describe("QRSPI external adapters", () => {
     })
     expect(Date.now() - startedAt).toBeLessThan(1_000)
   })
+
+  test("does not create a branch when client acquisition crosses lease expiry", async () => {
+    let mutations = 0
+    const adapter = new GitHubQrspiRepository(
+      { ...qrspiConfig, repositoryOperationTimeoutMs: 500 },
+      async () => {
+        await Bun.sleep(75)
+        return {
+          rest: {
+            repos: {
+              get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+              getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+            },
+            pulls: { list: async () => ({ data: [] }) },
+            git: {
+              createRef: async () => {
+                mutations += 1
+              },
+            },
+          },
+        }
+      },
+    )
+
+    const exit = await Effect.runPromiseExit(
+      adapter.createBranch({
+        repository,
+        headRef: "feature/workflowd-vs3.3-start",
+        expectedBaseSha: "a".repeat(40),
+        authority: {
+          operationId: "operation-1",
+          leaseToken: "lease-1",
+          leaseUntil: new Date(Date.now() + 50),
+        },
+      }),
+    )
+
+    expect(exit._tag).toBe("Failure")
+    expect(mutations).toBe(0)
+  })
 })

@@ -821,11 +821,16 @@ describe("GitWorkspaceAdapter", () => {
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(commitSha)
   })
 
-  test("configures fixer commits to use the controller signing key", async () => {
+  test("configures fixer signing only for the fix scope", async () => {
     const fixture = await createRepositoryFixture("workflowd-fix-signing-")
     const signingKey = "a".repeat(40)
+    const previousKey = "b".repeat(40)
+    await git(fixture.source, "config", "extensions.worktreeConfig", "true")
+    await git(fixture.source, "config", "--worktree", "commit.gpgSign", "false")
+    await git(fixture.source, "config", "--worktree", "gpg.format", "ssh")
+    await git(fixture.source, "config", "--worktree", "user.signingKey", previousKey)
     const manager = new GitWorkspaceAdapter({
-      localRepositories: [],
+      localRepositories: [fixture.source],
       repositoryRoot: join(fixture.root, "repositories"),
       worktreeRoot: join(fixture.root, "worktrees"),
       remoteUrl: () => fixture.remote,
@@ -849,6 +854,11 @@ describe("GitWorkspaceAdapter", () => {
     )
 
     expect(configured).toEqual({ enabled: "true", format: "openpgp", key: signingKey })
+    expect({
+      enabled: await git(fixture.source, "config", "--worktree", "commit.gpgSign"),
+      format: await git(fixture.source, "config", "--worktree", "gpg.format"),
+      key: await git(fixture.source, "config", "--worktree", "user.signingKey"),
+    }).toEqual({ enabled: "false", format: "ssh", key: previousKey })
   })
 
   test("refuses to publish an unsigned fix when controller signing is configured", async () => {
