@@ -39,6 +39,7 @@ const unusedStoreMethods = {
   completeImplementationPublication: () => Effect.die("unexpected implementation completion"),
   rescheduleStageOperation: () => Effect.die("unexpected reschedule"),
   recordArtifactPublicationOutcome: () => Effect.die("unexpected publication outcome"),
+  recordStaleArtifactPublicationEffect: () => Effect.die("unexpected stale publication effect"),
 }
 
 test("ArtifactPublish publishes the ticket branch directly and has no pull-request capability", async () => {
@@ -219,6 +220,86 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
   expect(completed).toBe(true)
 })
 
+test("records a stale document publication effect for reconciliation", async () => {
+  const finalSha = "f".repeat(40)
+  const content = "# Questions"
+  const work: StageOperationLease = {
+    operationId: "publish:stale-document",
+    operationRevision: 1,
+    attempt: 1,
+    leaseToken: "11111111-1111-4111-8111-111111111111",
+    scope: { _tag: "GenerationScope", workflowId: "workflow", generation: 1 },
+    input: {
+      stageKey: "questions",
+      stageKind: "document",
+      stageRevision: 1,
+      workflowDefinitionSha256: "a".repeat(64),
+      ticketRevisionSha256: "b".repeat(64),
+      sources: [],
+    },
+    stage: defaultQrspiWorkflowDefinition.stages[0]!,
+    repository: {
+      providerInstanceId: "github",
+      repositoryId: "42",
+      repositoryFullName: "owner/repo",
+    },
+    headRef: "feature/ticket",
+    currentHeadSha: "c".repeat(40),
+    ticketId: "workflowd-vs3.4",
+    readyTicket,
+    sessionReferenceId: "session-ref",
+    preparedResult: { candidateSha: "d".repeat(40), content, summary: "Answered" },
+  }
+  let currentChecks = 0
+  let staleEffect: unknown
+  const store = {
+    ...unusedStoreMethods,
+    claimStageOperation: () => Effect.succeed(work),
+    isStageOperationCurrent: () => Effect.succeed(++currentChecks < 3),
+    bindArtifactPublication: () => Effect.succeed("bound" as const),
+    recordStaleArtifactPublicationEffect: (input: unknown) => {
+      staleEffect = input
+      return Effect.succeed("reconciling" as const)
+    },
+  }
+  let remote = work.currentHeadSha
+  const repository: ArtifactPublicationRepository = {
+    finalizeDocument: (input) =>
+      Effect.succeed({
+        finalSha,
+        parentSha: input.expectedParentSha,
+        artifact: {
+          ...input.artifactIdentity,
+          commitSha: finalSha,
+          blobSha: "e".repeat(40),
+          contentSha256: input.expectedContentSha256,
+        },
+      }),
+    updateRefExact: ({ newSha }) => Effect.sync(() => void (remote = newSha)),
+    observeRef: () => Effect.succeed(remote),
+    advanceLocalWorktree: () => Effect.void,
+  }
+
+  await expect(
+    Effect.runPromise(
+      runArtifactPublishIterationWith({
+        workerId: "publisher",
+        leaseDurationMs: 60_000,
+        now: () => new Date("2026-07-22T12:00:00.000Z"),
+        randomId: () => work.leaseToken,
+        store,
+        repository,
+      }),
+    ),
+  ).resolves.toBe("reconciling")
+  expect(staleEffect).toMatchObject({
+    operationId: work.operationId,
+    expectedOld: work.currentHeadSha,
+    finalSha,
+    observedHeadSha: finalSha,
+  })
+})
+
 test("publishes an implementation commit as a durable checkpoint rather than a document artifact", async () => {
   const stage = defaultQrspiWorkflowDefinition.stages[5]!
   const work: StageOperationLease = {
@@ -300,6 +381,80 @@ test("publishes an implementation commit as a durable checkpoint rather than a d
     commits: [{ changedPaths: ["src/change.ts"] }],
   })
   expect(checkpoint).not.toHaveProperty("path")
+})
+
+test("records a stale implementation publication effect for reconciliation", async () => {
+  const finalSha = "f".repeat(40)
+  const work: StageOperationLease = {
+    operationId: "implementation-publish:stale",
+    operationRevision: 1,
+    attempt: 1,
+    leaseToken: "11111111-1111-4111-8111-111111111111",
+    scope: { _tag: "GenerationScope", workflowId: "workflow", generation: 1 },
+    input: {
+      stageKey: "implementation",
+      stageKind: "implementation",
+      stageRevision: 1,
+      workflowDefinitionSha256: "a".repeat(64),
+      ticketRevisionSha256: "b".repeat(64),
+      sources: [],
+    },
+    stage: defaultQrspiWorkflowDefinition.stages[5]!,
+    repository: {
+      providerInstanceId: "github",
+      repositoryId: "42",
+      repositoryFullName: "owner/repo",
+    },
+    headRef: "feature/ticket",
+    currentHeadSha: "c".repeat(40),
+    ticketId: "workflowd-vs3.4",
+    readyTicket,
+    sessionReferenceId: "session-ref",
+    preparedResult: {
+      candidateSha: "d".repeat(40),
+      changedPaths: ["src/change.ts"],
+      final: false,
+    },
+  }
+  let currentChecks = 0
+  let staleEffect: unknown
+  const store = {
+    ...unusedStoreMethods,
+    claimStageOperation: () => Effect.succeed(work),
+    isStageOperationCurrent: () => Effect.succeed(++currentChecks < 2),
+    bindImplementationPublication: () => Effect.succeed("bound" as const),
+    recordStaleArtifactPublicationEffect: (input: unknown) => {
+      staleEffect = input
+      return Effect.succeed("reconciling" as const)
+    },
+  }
+  let remote = work.currentHeadSha
+  const repository: ArtifactPublicationRepository = {
+    finalizeDocument: () => Effect.die("must not use document publication"),
+    finalizeImplementation: () => Effect.succeed({ finalSha, parentSha: work.currentHeadSha }),
+    updateRefExact: ({ newSha }) => Effect.sync(() => void (remote = newSha)),
+    observeRef: () => Effect.succeed(remote),
+    advanceLocalWorktree: () => Effect.void,
+  }
+
+  await expect(
+    Effect.runPromise(
+      runArtifactPublishIterationWith({
+        workerId: "publisher",
+        leaseDurationMs: 60_000,
+        now: () => new Date("2026-07-22T12:00:00.000Z"),
+        randomId: () => work.leaseToken,
+        store,
+        repository,
+      }),
+    ),
+  ).resolves.toBe("reconciling")
+  expect(staleEffect).toMatchObject({
+    operationId: work.operationId,
+    expectedOld: work.currentHeadSha,
+    finalSha,
+    observedHeadSha: finalSha,
+  })
 })
 
 test("durably binds the final implementation SHA before advancing local HEAD", async () => {

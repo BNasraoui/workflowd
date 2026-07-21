@@ -54,6 +54,7 @@ export function runArtifactPublishIterationWith(options: {
     | "completeImplementationPublication"
     | "rescheduleStageOperation"
     | "recordArtifactPublicationOutcome"
+    | "recordStaleArtifactPublicationEffect"
   >
   readonly repository?: ArtifactPublicationRepository
   readonly workspace?: QrspiWorkspacePort
@@ -222,7 +223,13 @@ export function runArtifactPublishIterationWith(options: {
               options.now(),
             ))
           ) {
-            return "stale" as const
+            return yield* store.recordStaleArtifactPublicationEffect({
+              operationId: work.operationId,
+              expectedOld: work.currentHeadSha,
+              finalSha: commit.commitSha,
+              observedHeadSha: observed,
+              now: options.now(),
+            })
           }
           return yield* store.completeImplementationPublication({
             operationId: work.operationId,
@@ -307,6 +314,15 @@ export function runArtifactPublishIterationWith(options: {
               outcome: publication.value._tag === "Conflict" ? "conflict" : "uncertain",
               observedHeadSha:
                 publication.value._tag === "WaitingExternal" ? publication.value.observed : null,
+              now: options.now(),
+            })
+          }
+          if (publication.value._tag === "StaleEffect") {
+            return yield* store.recordStaleArtifactPublicationEffect({
+              operationId: work.operationId,
+              expectedOld: work.currentHeadSha,
+              finalSha: publication.value.finalSha,
+              observedHeadSha: publication.value.finalSha,
               now: options.now(),
             })
           }

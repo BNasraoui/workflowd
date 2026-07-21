@@ -286,6 +286,13 @@ export type QrspiStorePort = {
     readonly observedHeadSha: string | null
     readonly now: Date
   }) => Effect.Effect<"waiting_external" | "waiting_human" | "stale", SqlError>
+  readonly recordStaleArtifactPublicationEffect: (input: {
+    readonly operationId: string
+    readonly expectedOld: string
+    readonly finalSha: string
+    readonly observedHeadSha: string
+    readonly now: Date
+  }) => Effect.Effect<"reconciling" | "stale", SqlError | ParseError>
   readonly completeStageProduce: (input: {
     readonly operationId: string
     readonly leaseToken: string
@@ -1529,6 +1536,101 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }),
       ),
 
+    recordStaleArtifactPublicationEffect: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          if (input.observedHeadSha !== input.finalSha) return "stale" as const
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly external_intent_json: string
+          }>`
+            SELECT scope_json, external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state IN ('waiting_external', 'superseded')
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const intent = yield* Schema.decodeUnknown(
+            Schema.parseJson(
+              Schema.Union(
+                Schema.Struct({
+                  expectedOld: Schema.String,
+                  finalSha: Schema.String,
+                  artifact: ArtifactReference,
+                }),
+                Schema.Struct({
+                  expectedOld: Schema.String,
+                  commit: ImplementationCommitReference,
+                }),
+              ),
+            ),
+          )(row.external_intent_json)
+          const boundFinalSha = "finalSha" in intent ? intent.finalSha : intent.commit.commitSha
+          if (intent.expectedOld !== input.expectedOld || boundFinalSha !== input.finalSha) {
+            return "stale" as const
+          }
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const generations = yield* sql<{ readonly head_ref: string }>`
+            SELECT head_ref FROM qrspi_generations
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+          `
+          const headRef = generations[0]?.head_ref
+          if (headRef === undefined) return "stale" as const
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = 'superseded', is_current = 0,
+                external_observation_json = ${JSON.stringify({
+                  headRef,
+                  sha: input.observedHeadSha,
+                  outcome: "stale_effect",
+                })}, last_error = 'external publication completed after currentness was lost',
+                lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'ArtifactPublish'
+              AND state IN ('waiting_external', 'superseded')
+          `
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'reconciling', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND is_current = 1
+              AND state NOT IN ('completed', 'rejected', 'cancelled', 'failed', 'superseded')
+          `
+          const reconciliationIdentity = canonicalSha256({
+            staleOperationId: input.operationId,
+            expectedOld: input.expectedOld,
+            observedHeadSha: input.observedHeadSha,
+          })
+          const logical = `${scope.workflowId}:TargetReconcile:${reconciliationIdentity}`
+          const existing = yield* sql<{ readonly operation_id: string }>`
+            SELECT operation_id FROM workflow_operations
+            WHERE logical_operation_id = ${logical} AND is_current = 1
+          `
+          if (existing.length === 0) {
+            const reconciliationInput = {
+              staleOperationId: input.operationId,
+              generation: scope.generation,
+              headRef,
+              expectedOld: input.expectedOld,
+              observedHeadSha: input.observedHeadSha,
+            }
+            yield* insertOperation(sql, {
+              operationId: `${logical}:1`,
+              logicalOperationId: logical,
+              revision: 1,
+              retryOf: null,
+              kind: "TargetReconcile",
+              scope: { _tag: "WorkflowScope", workflowId: scope.workflowId },
+              inputJson: JSON.stringify(reconciliationInput),
+              inputSha256: canonicalSha256(reconciliationInput),
+              state: "ready",
+              attempt: 0,
+              parentEffect: { success: "audit only", failure: "open operation-scoped gate" },
+              now: input.now,
+            })
+          }
+          return "reconciling" as const
+        }),
+      ),
+
     completeStageProduce: (input) =>
       transaction(
         Effect.gen(function* () {
@@ -1672,8 +1774,11 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             operationInput.stageKey,
             operationInput.stageRevision,
           )
-          const cursors = yield* sql<{ readonly current_head_sha: string }>`
-            SELECT current_head_sha FROM qrspi_generations
+          const cursors = yield* sql<{
+            readonly current_head_sha: string
+            readonly head_ref: string
+          }>`
+            SELECT current_head_sha, head_ref FROM qrspi_generations
             WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
               AND is_current = 1 AND state = 'running'
           `
@@ -1708,7 +1813,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             UPDATE workflow_operations
             SET state = 'succeeded', output_json = ${JSON.stringify({ artifact })},
                 external_observation_json = ${JSON.stringify({
-                  headRef: artifact.path,
+                  headRef: cursors[0].head_ref,
                   sha: input.observedHeadSha,
                 })}, updated_at = ${input.now.toISOString()}
             WHERE operation_id = ${input.operationId}
@@ -2053,8 +2158,11 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             ))
           )
             return "stale" as const
-          const cursor = yield* sql<{ readonly current_head_sha: string }>`
-            SELECT current_head_sha FROM qrspi_generations
+          const cursor = yield* sql<{
+            readonly current_head_sha: string
+            readonly head_ref: string
+          }>`
+            SELECT current_head_sha, head_ref FROM qrspi_generations
             WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
               AND is_current = 1 AND state = 'running'
           `
@@ -2140,7 +2248,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 input.checkpoint === undefined ? { commit } : { checkpoint: input.checkpoint },
               )},
               external_observation_json = ${JSON.stringify({
-                headRef: operationInput.stageKey,
+                headRef: cursor[0].head_ref,
                 sha: input.observedHeadSha,
               })}, updated_at = ${input.now.toISOString()}
             WHERE operation_id = ${input.operationId}

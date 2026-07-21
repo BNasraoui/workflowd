@@ -470,7 +470,11 @@ describe("WorkflowStart integration", () => {
           SELECT input_json FROM workflow_operations
           WHERE kind = 'StageProduce' AND json_extract(input_json, '$.stageKey') = 'research'
         `
-        return { runs, successor }
+        const publicationOperation = yield* sql<{ readonly external_observation_json: string }>`
+          SELECT external_observation_json FROM workflow_operations
+          WHERE kind = 'ArtifactPublish' AND state = 'succeeded'
+        `
+        return { runs, successor, publicationOperation }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
     expect(state.runs).toEqual([
@@ -478,6 +482,117 @@ describe("WorkflowStart integration", () => {
       { stage_key: "research", state: "active", accepted_revision: null },
     ])
     expect(JSON.parse(state.successor[0]!.input_json).sources).toEqual([publication])
+    expect(JSON.parse(state.publicationOperation[0]!.external_observation_json)).toEqual({
+      headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+      sha: publication.commitSha,
+    })
+  })
+
+  test("records a stale publication effect and queues target reconciliation without advancing the stage", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const finalSha = "e".repeat(40)
+
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const sql = yield* SqlClient.SqlClient
+        const produce = yield* store.claimStageOperation(
+          "StageProduce",
+          "producer",
+          "11111111-1111-4111-8111-111111111111",
+          60_000,
+          new Date("2026-07-21T05:01:00.000Z"),
+        )
+        if (produce === null) return yield* Effect.die("Expected producer")
+        yield* store.completeStageProduce({
+          operationId: produce.operationId,
+          leaseToken: produce.leaseToken,
+          preparedResult: {
+            candidateSha: "c".repeat(40),
+            content: "# Questions",
+            summary: "Answered",
+          },
+          sessionReferenceId: "session-ref",
+          now: new Date("2026-07-21T05:01:01.000Z"),
+        })
+        const publish = yield* store.claimStageOperation(
+          "ArtifactPublish",
+          "publisher",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          new Date("2026-07-21T05:01:02.000Z"),
+        )
+        if (publish === null) return yield* Effect.die("Expected publisher")
+        const artifact = {
+          repository,
+          workflowId: publish.scope.workflowId,
+          generation: publish.scope.generation,
+          stageKey: "questions",
+          stageRevision: 1,
+          commitSha: finalSha,
+          path: "docs/qrspi/workflowd-vs3.3/questions.md",
+          blobSha: "f".repeat(40),
+          contentSha256: "1".repeat(64),
+          mediaType: "text/markdown",
+        }
+        yield* store.bindArtifactPublication({
+          operationId: publish.operationId,
+          leaseToken: publish.leaseToken,
+          expectedOld: baseSha,
+          finalSha,
+          artifact,
+          now: new Date("2026-07-21T05:01:03.000Z"),
+        })
+        yield* sql`
+          UPDATE qrspi_stage_revisions SET state = 'abandoned'
+          WHERE workflow_id = ${publish.scope.workflowId} AND generation = 1
+            AND stage_key = 'questions' AND revision = 1
+        `
+        const recorded = yield* store.recordStaleArtifactPublicationEffect({
+          operationId: publish.operationId,
+          expectedOld: baseSha,
+          finalSha,
+          observedHeadSha: finalSha,
+          now: new Date("2026-07-21T05:01:04.000Z"),
+        })
+        const generation = yield* sql<{ readonly state: string }>`
+          SELECT state FROM qrspi_generations WHERE is_current = 1
+        `
+        const run = yield* sql<{
+          readonly state: string
+          readonly published_revision: number | null
+        }>`SELECT state, published_revision FROM qrspi_stage_runs WHERE stage_key = 'questions'`
+        const operations = yield* sql<{
+          readonly kind: string
+          readonly state: string
+          readonly external_observation_json: string | null
+        }>`
+          SELECT kind, state, external_observation_json FROM workflow_operations
+          WHERE operation_id = ${publish.operationId} OR kind = 'TargetReconcile' ORDER BY kind
+        `
+        return { recorded, generation, run, operations }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(state).toEqual({
+      recorded: "reconciling",
+      generation: [{ state: "reconciling" }],
+      run: [{ state: "active", published_revision: null }],
+      operations: [
+        {
+          kind: "ArtifactPublish",
+          state: "superseded",
+          external_observation_json: JSON.stringify({
+            headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+            sha: finalSha,
+            outcome: "stale_effect",
+          }),
+        },
+        { kind: "TargetReconcile", state: "ready", external_observation_json: null },
+      ],
+    })
   })
 
   test("creates durable review work and exposes an acceptance completion seam", async () => {
@@ -924,7 +1039,11 @@ describe("WorkflowStart integration", () => {
         }>`
           SELECT state, current_head_sha FROM qrspi_generations
         `
-        return { duplicate, steps, revisions, generation }
+        const observations = yield* sql<{ readonly external_observation_json: string }>`
+          SELECT external_observation_json FROM workflow_operations
+          WHERE kind = 'ArtifactPublish' AND state = 'succeeded' ORDER BY created_at
+        `
+        return { duplicate, steps, revisions, generation, observations }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
@@ -936,6 +1055,10 @@ describe("WorkflowStart integration", () => {
     ).toEqual([firstCommit, secondCommit])
     expect(state.steps[0]!.session_reference_id).toBe("implementation-session")
     expect(state.steps[1]!.session_reference_id).toBe("implementation-session-2")
+    expect(JSON.parse(state.observations[0]!.external_observation_json)).toEqual({
+      headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+      sha: firstCommit.commitSha,
+    })
     expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
     expect(state.revisions[0]!.state).toBe("accepted")
     expect(state.generation).toEqual([
