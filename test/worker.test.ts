@@ -43,7 +43,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   rescheduleJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
   completeFixJob: () => Effect.die("unused"),
-  isTrustedBranchPublication: () => Effect.succeed(false),
+  isTrustedBranchPublication: () => Effect.succeed(null),
   disableFixJob: () => Effect.die("unused"),
   recordFixResult: () => Effect.die("unused"),
   completeAgentReviewJob: (input) => overrides.completeReviewJob?.(input) ?? Effect.die("unused"),

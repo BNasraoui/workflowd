@@ -184,14 +184,13 @@ type TrustedPublicationVerifier = (input: {
   readonly headRef: string
   readonly jobId: number
   readonly commitSha: string
-}) => Promise<boolean>
+}) => Promise<string | null>
 
 export class GitHubQrspiRepository implements QrspiRepositoryPort {
   constructor(
     private readonly config: QrspiConfig,
     private readonly client: OctokitProvider,
-    private readonly isTrustedPublication: TrustedPublicationVerifier = () =>
-      Promise.resolve(false),
+    private readonly isTrustedPublication: TrustedPublicationVerifier = () => Promise.resolve(null),
   ) {}
 
   readonly inspect: QrspiRepositoryPort["inspect"] = (input) =>
@@ -352,12 +351,33 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         commit.sha !== currentSha ||
         commit.parents.length !== 1 ||
         jobIds.length !== 1 ||
-        !Number.isSafeInteger(jobId) ||
-        !(await this.isTrustedPublication({ repository, headRef, jobId, commitSha: currentSha }))
+        !Number.isSafeInteger(jobId)
       ) {
         return false
       }
-      currentSha = commit.parents[0]!.sha
+      const expectedParentSha = await this.isTrustedPublication({
+        repository,
+        headRef,
+        jobId,
+        commitSha: currentSha,
+      })
+      if (expectedParentSha === null) return false
+      let rangeCommit = commit
+      while (currentSha !== expectedParentSha) {
+        if (rangeCommit.sha !== currentSha || rangeCommit.parents.length !== 1) return false
+        currentSha = rangeCommit.parents[0]!.sha
+        if (currentSha === expectedParentSha) break
+        if (visited.has(currentSha)) return false
+        visited.add(currentSha)
+        rangeCommit = (
+          await client.rest.repos.getCommit({
+            owner,
+            repo,
+            ref: currentSha,
+            request: { signal },
+          })
+        ).data
+      }
     }
     return true
   }

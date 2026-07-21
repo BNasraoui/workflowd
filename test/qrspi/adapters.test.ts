@@ -235,7 +235,7 @@ describe("QRSPI external adapters", () => {
       }),
       async (publication) => {
         publications.push(publication)
-        return true
+        return previousTrustedSha
       },
     )
 
@@ -252,6 +252,51 @@ describe("QRSPI external adapters", () => {
     expect(publications).toEqual([
       { repository, headRef: "feature/workflowd-vs3.3-start", jobId: 41, commitSha: advancedSha },
     ])
+  })
+
+  test("accepts every commit in a multi-commit durable publication", async () => {
+    const previousTrustedSha = "a".repeat(40)
+    const intermediateSha = "b".repeat(40)
+    const advancedSha = "c".repeat(40)
+    const adapter = new GitHubQrspiRepository(
+      qrspiConfig,
+      async () => ({
+        rest: {
+          repos: {
+            get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+            getBranch: async () => ({ data: { commit: { sha: advancedSha } } }),
+            getCommit: async (input) => ({
+              data:
+                input?.ref === advancedSha
+                  ? {
+                      sha: advancedSha,
+                      parents: [{ sha: intermediateSha }],
+                      commit: { message: "Finish fix\n\nWorkflowd-Job: 41" },
+                    }
+                  : {
+                      sha: intermediateSha,
+                      parents: [{ sha: previousTrustedSha }],
+                      commit: { message: "Start fix" },
+                    },
+            }),
+          },
+          pulls: { list: async () => ({ data: [] }) },
+          git: { createRef: async () => undefined },
+        },
+      }),
+      async () => previousTrustedSha,
+    )
+
+    const observation = await Effect.runPromise(
+      adapter.observeAcceptedBranch({
+        repository,
+        headRef: "feature/workflowd-vs3.3-start",
+        baseSha: "d".repeat(40),
+        previousTrustedSha,
+      }),
+    )
+
+    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
   })
 
   test("rejects a GitHub-verified descendant without a durable publication", async () => {
@@ -279,7 +324,7 @@ describe("QRSPI external adapters", () => {
           git: { createRef: async () => undefined },
         },
       }),
-      async () => false,
+      async () => null,
     )
 
     const observation = await Effect.runPromise(

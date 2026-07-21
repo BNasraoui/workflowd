@@ -79,9 +79,9 @@ describe("durable fix state", () => {
           workerId: "fix-state-worker-2",
           completedAt: new Date("2026-07-19T12:06:30.000Z"),
         })
-        const trusted = yield* store.isTrustedBranchPublication({
+        const trustedParent = yield* store.isTrustedBranchPublication({
           repositoryId: String(fix.repositoryId),
-          repositoryFullName: fix.repositoryFullName,
+          repositoryFullName: "renamed-owner/renamed-repository",
           headRef: fix.target.headRef,
           jobId: fix.id,
           commitSha: "c".repeat(40),
@@ -93,7 +93,7 @@ describe("durable fix state", () => {
           jobId: fix.id,
           commitSha: "d".repeat(40),
         })
-        return { recorded, retried, trusted, wrongCommit }
+        return { recorded, retried, trustedParent, wrongCommit }
       }).pipe(Effect.provide(makeStoreLayer())),
     )
 
@@ -105,7 +105,7 @@ describe("durable fix state", () => {
         commitSha: "c".repeat(40),
       },
     })
-    expect(result.trusted).toBe(true)
-    expect(result.wrongCommit).toBe(false)
+    expect(result.trustedParent).toBe(samplePullRequestEvent.pullRequest.headSha)
+    expect(result.wrongCommit).toBeNull()
   })
 })

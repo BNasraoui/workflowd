@@ -212,21 +212,18 @@ export function makeJobOperations(
 
   return {
     isTrustedBranchPublication: (input) =>
-      sql<{ readonly trusted: number }>`
-        SELECT EXISTS (
-          SELECT 1
-          FROM jobs AS candidate
-          WHERE candidate.id = ${input.jobId}
-          AND candidate.kind = 'fix'
-          AND candidate.state = 'succeeded'
-          AND CAST(candidate.repository_id AS TEXT) = ${input.repositoryId}
-          AND candidate.repository_full_name = ${input.repositoryFullName}
-          AND candidate.head_repository_full_name = ${input.repositoryFullName}
-          AND candidate.head_ref = ${input.headRef}
-          AND json_extract(candidate.fix_result_json, '$._tag') = 'CommitPrepared'
-          AND json_extract(candidate.fix_result_json, '$.commitSha') = ${input.commitSha}
-        ) AS trusted
-      `.pipe(Effect.map((rows) => rows[0]?.trusted === 1)),
+      sql<{ readonly expected_head_sha: string }>`
+        SELECT candidate.expected_head_sha
+        FROM jobs AS candidate
+        WHERE candidate.id = ${input.jobId}
+        AND candidate.kind = 'fix'
+        AND candidate.state = 'succeeded'
+        AND CAST(candidate.repository_id AS TEXT) = ${input.repositoryId}
+        AND candidate.repository_full_name = candidate.head_repository_full_name
+        AND candidate.head_ref = ${input.headRef}
+        AND json_extract(candidate.fix_result_json, '$._tag') = 'CommitPrepared'
+        AND json_extract(candidate.fix_result_json, '$.commitSha') = ${input.commitSha}
+      `.pipe(Effect.map((rows) => rows[0]?.expected_head_sha ?? null)),
     claimExpiredAgentSession: (input) =>
       Effect.gen(function* () {
         const claimedAt = input.now.toISOString()
