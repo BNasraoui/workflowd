@@ -777,6 +777,5 @@ function branchName(issueType: string, ticket: typeof TicketReference.Type, titl
     .replace(/^-|-$/g, "")
     .slice(0, 80)
     .replace(/-$/g, "")
-  const ticketIdentity = canonicalSha256(ticket).slice(0, 12)
-  return `${safeType}/${safeTicket}-${slug}-${ticketIdentity}`
+  return `${safeType}/${safeTicket}-${slug}`
 }

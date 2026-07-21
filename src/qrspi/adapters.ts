@@ -370,23 +370,8 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         jobId,
         commitSha: currentSha,
       })
-      if (expectedParentSha === null) return false
-      let rangeCommit = commit
-      while (currentSha !== expectedParentSha) {
-        if (rangeCommit.sha !== currentSha || rangeCommit.parents.length !== 1) return false
-        currentSha = rangeCommit.parents[0]!.sha
-        if (currentSha === expectedParentSha) break
-        if (visited.has(currentSha)) return false
-        visited.add(currentSha)
-        rangeCommit = (
-          await client.rest.repos.getCommit({
-            owner,
-            repo,
-            ref: currentSha,
-            request: { signal },
-          })
-        ).data
-      }
+      if (expectedParentSha === null || commit.parents[0]!.sha !== expectedParentSha) return false
+      currentSha = expectedParentSha
     }
     return true
   }

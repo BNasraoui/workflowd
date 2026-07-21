@@ -252,7 +252,7 @@ describe("QRSPI external adapters", () => {
     expect(publications).toEqual([])
   })
 
-  test("accepts every commit in a multi-commit durable publication", async () => {
+  test("rejects unsigned intermediate commits in a durable publication", async () => {
     const previousTrustedSha = "a".repeat(40)
     const intermediateSha = "b".repeat(40)
     const advancedSha = "c".repeat(40)
@@ -297,7 +297,7 @@ describe("QRSPI external adapters", () => {
       }),
     )
 
-    expect(observation).toEqual({ _tag: "Accepted", sha: advancedSha })
+    expect(observation).toEqual({ _tag: "UnknownHistory", sha: advancedSha })
   })
 
   test("rejects a GitHub-verified descendant without a durable publication", async () => {
