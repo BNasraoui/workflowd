@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Effect } from "effect"
 import {
   ArtifactPublication,
@@ -256,6 +259,13 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
           GIT_CONFIG_NOSYSTEM: "1",
         })
         const args = command.slice(1)
+        if (args[0] === "update-ref" || (args[0] === "rev-parse" && args[1] === "HEAD")) {
+          expect(options?.cwd).toBe("/repo")
+          expect(options?.env?.GIT_DIR).toBeUndefined()
+        } else {
+          expect(options?.cwd).not.toBe("/repo")
+          expect(options?.env?.GIT_DIR).not.toBeUndefined()
+        }
         if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
         if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
         if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
@@ -289,8 +299,11 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
         if (args[0] === "update-ref") return Effect.succeed("")
         return Effect.die(`Unexpected git command: ${args.join(" ")}`)
       },
-      runBytes: () =>
-        Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
+      runBytes: (_operation, _command, options) => {
+        expect(options.cwd).not.toBe("/repo")
+        expect(options.env?.GIT_DIR).not.toBeUndefined()
+        return Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false })
+      },
     },
     () => Promise.resolve(installationToken),
   )
@@ -375,6 +388,53 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
     ),
   ).toBe(true)
   expect(commands.some((command) => command.includes("reset"))).toBe(false)
+})
+
+test("Git publisher ignores producer-controlled repository URL and GPG configuration", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-artifact-producer-"))
+  try {
+    await mkdir(join(directory, ".git", "objects"), { recursive: true })
+    await writeFile(
+      join(directory, ".git", "config"),
+      [
+        "[core]",
+        "\trepositoryformatversion = 0",
+        '[url "https://attacker.invalid/"]',
+        "\tinsteadOf = https://github.com/",
+        "[gpg]",
+        "\tprogram = /attacker-controlled-gpg",
+      ].join("\n"),
+    )
+    const publisher = new GitArtifactPublicationRepository(
+      directory,
+      "1".repeat(40),
+      "https://github.com/owner/repo.git",
+      {
+        run: (_operation, command, options) => {
+          if (options?.cwd === undefined || options.env === undefined) {
+            return Effect.die("Missing isolated Git execution options")
+          }
+          const configured = Bun.spawnSync(["git", "config", "--get-regexp", "^(url\\.|gpg\\.)"], {
+            cwd: options.cwd,
+            env: options.env,
+            stdout: "pipe",
+            stderr: "pipe",
+          })
+          expect(configured.exitCode).toBe(1)
+          expect(configured.stdout.toString()).toBe("")
+          expect(options.cwd).not.toBe(directory)
+          expect(options.env.GIT_DIR).not.toBeUndefined()
+          expect(command).toContain("https://github.com/owner/repo.git")
+          return Effect.succeed("")
+        },
+        runBytes: () => Effect.die("Unexpected byte command"),
+      },
+    )
+
+    expect(await Effect.runPromise(publisher.observeRef("feature/ticket"))).toBeNull()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test("Git publisher reads valid multibyte document content within the output envelope", async () => {

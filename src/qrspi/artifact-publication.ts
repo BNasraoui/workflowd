@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { Context, Data, Effect, Schema } from "effect"
 import { MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 import { runWorkspaceCommand, runWorkspaceCommandBytes } from "../workspace/command"
@@ -72,8 +75,9 @@ export class ArtifactRefConflictError extends Data.TaggedError("ArtifactRefConfl
 }> {}
 
 export class GitArtifactPublicationRepository implements ArtifactPublicationRepository {
-  readonly #gitEnvironment: NodeJS.ProcessEnv
+  readonly #baseGitEnvironment: NodeJS.ProcessEnv
   readonly #authenticationHeaderKey: string
+  readonly #producerObjectDirectory: string
 
   constructor(
     private readonly directory: string,
@@ -86,7 +90,8 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     private readonly installationToken?: () => Promise<string>,
   ) {
     this.#authenticationHeaderKey = `http.${new URL(trustedRemoteUrl).origin}/.extraHeader`
-    this.#gitEnvironment = {
+    this.#producerObjectDirectory = producerObjectDirectory(directory)
+    this.#baseGitEnvironment = {
       ...process.env,
       GIT_CONFIG: "/dev/null",
       GIT_CONFIG_GLOBAL: "/dev/null",
@@ -221,14 +226,14 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
 
   readonly advanceLocalWorktree: ArtifactPublicationRepository["advanceLocalWorktree"] = (input) =>
     Effect.gen(this, function* () {
-      const head = yield* this.git("read local worktree head", ["rev-parse", "HEAD"])
+      const head = yield* this.worktreeGit("read local worktree head", ["rev-parse", "HEAD"])
       if (head === input.finalSha) return
       if (head !== input.candidateSha) {
         return yield* Effect.fail(
           new Error("Local worktree HEAD is neither the candidate nor signed final SHA"),
         )
       }
-      yield* this.git("advance local worktree branch", [
+      yield* this.worktreeGit("advance local worktree branch", [
         "update-ref",
         "HEAD",
         input.finalSha,
@@ -291,8 +296,14 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     })
 
   private git(operation: string, args: ReadonlyArray<string>) {
+    return this.isolatedGit(operation, args, {}).pipe(
+      Effect.mapError((cause) => new Error(`${operation}: ${String(cause)}`, { cause })),
+    )
+  }
+
+  private worktreeGit(operation: string, args: ReadonlyArray<string>) {
     return this.command
-      .run(operation, ["git", ...args], { cwd: this.directory, env: this.#gitEnvironment })
+      .run(operation, ["git", ...args], { cwd: this.directory, env: this.#baseGitEnvironment })
       .pipe(Effect.mapError((cause) => new Error(`${operation}: ${String(cause)}`, { cause })))
   }
 
@@ -304,14 +315,10 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
         new Error(`${operation}: could not obtain GitHub authentication`, { cause }),
     }).pipe(
       Effect.flatMap((token) =>
-        this.command.run(operation, ["git", ...args], {
-          cwd: this.directory,
-          env: {
-            ...this.#gitEnvironment,
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: this.#authenticationHeaderKey,
-            GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
-          },
+        this.isolatedGit(operation, args, {
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: this.#authenticationHeaderKey,
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
         }),
       ),
       Effect.mapError((cause) =>
@@ -321,22 +328,89 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
   }
 
   private gitBytes(operation: string, args: ReadonlyArray<string>) {
-    return this.command
-      .runBytes(operation, ["git", ...args], {
-        cwd: this.directory,
-        env: this.#gitEnvironment,
+    return this.withIsolatedGit((cwd, env) =>
+      this.command.runBytes(operation, ["git", ...args], {
+        cwd,
+        env,
         maxStdoutBytes: MAX_AGENT_OUTPUT_BYTES + 1,
-      })
-      .pipe(
-        Effect.flatMap((result) =>
-          result.truncated
-            ? Effect.fail(new Error(`${operation}: output exceeded artifact bound`))
-            : Effect.succeed(result.stdout),
-        ),
-        Effect.mapError((cause) =>
-          cause instanceof Error ? cause : new Error(`${operation}: ${String(cause)}`, { cause }),
-        ),
-      )
+      }),
+    ).pipe(
+      Effect.flatMap((result) =>
+        result.truncated
+          ? Effect.fail(new Error(`${operation}: output exceeded artifact bound`))
+          : Effect.succeed(result.stdout),
+      ),
+      Effect.mapError((cause) =>
+        cause instanceof Error ? cause : new Error(`${operation}: ${String(cause)}`, { cause }),
+      ),
+    )
+  }
+
+  private isolatedGit(
+    operation: string,
+    args: ReadonlyArray<string>,
+    extraEnvironment: NodeJS.ProcessEnv,
+  ) {
+    return this.withIsolatedGit((cwd, env) =>
+      this.command.run(operation, ["git", ...args], {
+        cwd,
+        env: { ...env, ...extraEnvironment },
+      }),
+    )
+  }
+
+  private withIsolatedGit<A, E>(
+    use: (cwd: string, env: NodeJS.ProcessEnv) => Effect.Effect<A, E>,
+  ): Effect.Effect<A, E | Error> {
+    return Effect.acquireUseRelease(
+      Effect.try({
+        try: () => {
+          const root = mkdtempSync(join(tmpdir(), "workflowd-publication-"))
+          const gitDirectory = join(root, "repository.git")
+          mkdirSync(gitDirectory, { mode: 0o700 })
+          writeFileSync(
+            join(gitDirectory, "config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = true\n",
+            { mode: 0o600 },
+          )
+          return {
+            root,
+            env: {
+              ...this.#baseGitEnvironment,
+              GIT_DIR: gitDirectory,
+              GIT_OBJECT_DIRECTORY: this.#producerObjectDirectory,
+            },
+          }
+        },
+        catch: (cause) => new Error("Could not create isolated publication repository", { cause }),
+      }),
+      ({ root, env }) => use(root, env),
+      ({ root }) =>
+        Effect.sync(() => {
+          rmSync(root, { recursive: true, force: true })
+        }),
+    )
+  }
+}
+
+function producerObjectDirectory(directory: string): string {
+  const dotGit = join(directory, ".git")
+  try {
+    const gitDirectory = statSync(dotGit).isDirectory()
+      ? dotGit
+      : resolve(
+          directory,
+          readFileSync(dotGit, "utf8")
+            .replace(/^gitdir:\s*/, "")
+            .trim(),
+        )
+    const commonDirectoryFile = join(gitDirectory, "commondir")
+    const commonDirectory = statSync(commonDirectoryFile).isFile()
+      ? resolve(gitDirectory, readFileSync(commonDirectoryFile, "utf8").trim())
+      : gitDirectory
+    return join(commonDirectory, "objects")
+  } catch {
+    return join(dotGit, "objects")
   }
 }
 
