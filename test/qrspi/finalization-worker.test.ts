@@ -64,6 +64,8 @@ const work: FinalizationOperationLease = {
 }
 const observation: FinalPullRequestObservation = {
   reference: { repository: repositoryReference, number: 17 },
+  state: "open",
+  title: intent.title,
   baseRef: intent.baseRef,
   headRef: intent.headRef,
   headSha: intent.headSha,
@@ -72,6 +74,47 @@ const observation: FinalPullRequestObservation = {
   bodySha256: intent.bodySha256,
   url: "https://example.test/owner/repo/pull/17",
 }
+
+test.each([
+  ["closed", { state: "closed" as const }],
+  ["retitled", { title: "Different title" }],
+])("PullRequestPublish reconciles a %s referenced PR during recovery", async (_case, change) => {
+  const calls: string[] = []
+  const changed = { ...observation, ...change }
+  const result = await Effect.runPromise(
+    runPullRequestPublishIterationWith({
+      workerId: "publisher",
+      leaseDurationMs: 60_000,
+      now: () => new Date("2026-07-22T00:00:00.000Z"),
+      randomId: () => "22222222-2222-4222-8222-222222222222",
+      store: {
+        findPullRequestPublicationRecovery: () =>
+          Effect.succeed({ ...work, publicationReference: observation.reference }),
+        claimFinalizationOperation: () => Effect.die("unexpected claim"),
+        bindPullRequestPublication: () => Effect.die("unexpected publication binding"),
+        bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
+        isFinalizationOperationCurrent: () => Effect.succeed(true),
+        completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordStalePullRequestPublicationEffect: ({ reference }) =>
+          Effect.sync(() => {
+            calls.push(`reconcile:${reference.number}`)
+            return "reconciling" as const
+          }),
+      },
+      repository: {
+        ...repository(calls),
+        observeFinalPullRequestReference: () =>
+          Effect.sync(() => {
+            calls.push("observe-reference")
+            return changed
+          }),
+      },
+    }),
+  )
+
+  expect(result).toBe("reconciling")
+  expect(calls).toEqual(["observe-reference", "reconcile:17"])
+})
 
 const repository = (calls: string[]) => ({
   inspect: () => Effect.die("unexpected inspect"),

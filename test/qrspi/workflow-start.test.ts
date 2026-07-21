@@ -194,6 +194,8 @@ function fakes(options: FakeOptions = {}) {
           ? null
           : {
               reference: { repository: input.repository, number: 17 },
+              state: "open",
+              title: finalPullRequest.title,
               baseRef: finalPullRequest.baseRef,
               headRef: finalPullRequest.headRef,
               headSha: finalPullRequest.headSha,
@@ -206,6 +208,8 @@ function fakes(options: FakeOptions = {}) {
     observeFinalPullRequestReference: (reference) =>
       Effect.succeed({
         reference,
+        state: "open",
+        title: finalPullRequest?.title ?? "Final pull request",
         baseRef: finalPullRequest?.baseRef ?? "main",
         headRef: finalPullRequest?.headRef ?? "feature/ticket",
         headSha: finalPullRequest?.headSha ?? "f".repeat(40),

@@ -47,6 +47,8 @@ export type FinalPullRequestIntent = {
 
 export type FinalPullRequestObservation = {
   readonly reference: { readonly repository: RepositoryReference; readonly number: number }
+  readonly state: string
+  readonly title: string
   readonly baseRef: string
   readonly headRef: string
   readonly headSha: string

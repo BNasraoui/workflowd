@@ -262,6 +262,8 @@ function matchesIntent(
   intent: FinalPullRequestIntent,
 ): boolean {
   return (
+    observation.state === "open" &&
+    observation.title === intent.title &&
     !observation.draft &&
     observation.headSha === intent.headSha &&
     observation.headRef === intent.headRef &&

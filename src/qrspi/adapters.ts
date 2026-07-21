@@ -173,6 +173,8 @@ type QrspiOctokit = {
       readonly list: (input: Parameters<PullsApi["list"]>[0]) => Promise<{
         readonly data: ReadonlyArray<{
           readonly number: number
+          readonly state: string
+          readonly title: string
           readonly draft?: boolean | null
           readonly body?: string | null
           readonly html_url: string
@@ -186,6 +188,8 @@ type QrspiOctokit = {
       readonly get?: (input: Parameters<PullsApi["get"]>[0]) => Promise<{
         readonly data: {
           readonly number: number
+          readonly state: string
+          readonly title: string
           readonly draft?: boolean | null
           readonly body?: string | null
           readonly html_url: string
@@ -214,6 +218,8 @@ function finalPullRequestObservation(
   repository: RepositoryReference,
   pull: {
     readonly number: number
+    readonly state: string
+    readonly title: string
     readonly draft?: boolean | null
     readonly body?: string | null
     readonly html_url: string
@@ -224,6 +230,8 @@ function finalPullRequestObservation(
   const body = pull.body ?? ""
   return {
     reference: { repository, number: pull.number },
+    state: pull.state,
+    title: pull.title,
     baseRef: pull.base.ref,
     headRef: pull.head.ref,
     headSha: pull.head.sha,

@@ -183,6 +183,8 @@ describe("QRSPI external adapters", () => {
     let pull:
       | {
           readonly number: number
+          readonly state: string
+          readonly title: string
           readonly draft: boolean
           readonly body: string
           readonly html_url: string
@@ -203,6 +205,8 @@ describe("QRSPI external adapters", () => {
             expect(input.draft).toBe(false)
             pull = {
               number: 17,
+              state: "open",
+              title: input.title ?? "",
               draft: false,
               body: input.body ?? "",
               html_url: "https://github.test/example-owner/example/pull/17",
@@ -231,6 +235,8 @@ describe("QRSPI external adapters", () => {
 
     expect(observed).toMatchObject({
       reference: { repository, number: 17 },
+      state: "open",
+      title: intent.title,
       baseRef: "main",
       headRef: intent.headRef,
       headSha: intent.headSha,
