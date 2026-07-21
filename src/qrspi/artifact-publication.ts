@@ -8,6 +8,7 @@ import { runWorkspaceCommand, runWorkspaceCommandBytes } from "../workspace/comm
 import { ArtifactReference, type ArtifactReference as ArtifactReferenceValue } from "./stages"
 
 const GitSha = Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/))
+const MAX_ARTIFACT_PATH_UTF8_BYTES = 512 * 3
 const TrustedTrailerNames = [
   "Provenance-Version",
   "Ticket",
@@ -115,14 +116,17 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
       if (parent !== input.expectedParentSha) {
         return yield* Effect.fail(new Error("Candidate commit does not have the exact parent"))
       }
-      const changed = (yield* this.git("read candidate paths", [
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "-r",
-        input.candidateSha,
-      ]))
-        .split("\n")
+      const changed = new TextDecoder()
+        .decode(
+          yield* this.gitBytes(
+            "read candidate paths",
+            ["diff-tree", "--no-commit-id", "--name-only", "-z", "-r", input.candidateSha],
+            pathListingByteLimit(1),
+            "path listing exceeded bound",
+          ),
+        )
+        .trimEnd()
+        .split("\0")
         .filter(Boolean)
       if (changed.length !== 1 || changed[0] !== input.expectedPath) {
         return yield* Effect.fail(new Error("Candidate commit changes paths outside the artifact"))
@@ -258,14 +262,17 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
       if (parent !== input.expectedParentSha) {
         return yield* Effect.fail(new Error("Implementation commit does not have the exact parent"))
       }
-      const changed = (yield* this.git("read implementation paths", [
-        "diff-tree",
-        "--no-commit-id",
-        "--name-only",
-        "-r",
-        input.candidateSha,
-      ]))
-        .split("\n")
+      const changed = new TextDecoder()
+        .decode(
+          yield* this.gitBytes(
+            "read implementation paths",
+            ["diff-tree", "--no-commit-id", "--name-only", "-z", "-r", input.candidateSha],
+            pathListingByteLimit(input.expectedChangedPaths.length),
+            "path listing exceeded bound",
+          ),
+        )
+        .trimEnd()
+        .split("\0")
         .filter(Boolean)
         .sort()
       if (JSON.stringify(changed) !== JSON.stringify([...input.expectedChangedPaths].sort())) {
@@ -327,17 +334,22 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     )
   }
 
-  private gitBytes(operation: string, args: ReadonlyArray<string>) {
+  private gitBytes(
+    operation: string,
+    args: ReadonlyArray<string>,
+    maxStdoutBytes = MAX_AGENT_OUTPUT_BYTES + 1,
+    boundError = "output exceeded artifact bound",
+  ) {
     return this.withIsolatedGit((cwd, env) =>
       this.command.runBytes(operation, ["git", ...args], {
         cwd,
         env,
-        maxStdoutBytes: MAX_AGENT_OUTPUT_BYTES + 1,
+        maxStdoutBytes,
       }),
     ).pipe(
       Effect.flatMap((result) =>
         result.truncated
-          ? Effect.fail(new Error(`${operation}: output exceeded artifact bound`))
+          ? Effect.fail(new Error(`${operation}: ${boundError}`))
           : Effect.succeed(result.stdout),
       ),
       Effect.mapError((cause) =>
@@ -391,6 +403,10 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
         }),
     )
   }
+}
+
+function pathListingByteLimit(allowedPathCount: number): number {
+  return Math.max(1, allowedPathCount) * (MAX_ARTIFACT_PATH_UTF8_BYTES + 1)
 }
 
 function producerObjectDirectory(directory: string): string {

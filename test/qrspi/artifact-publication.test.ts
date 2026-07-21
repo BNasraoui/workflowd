@@ -299,10 +299,15 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
         if (args[0] === "update-ref") return Effect.succeed("")
         return Effect.die(`Unexpected git command: ${args.join(" ")}`)
       },
-      runBytes: (_operation, _command, options) => {
+      runBytes: (_operation, command, options) => {
         expect(options.cwd).not.toBe("/repo")
         expect(options.env?.GIT_DIR).not.toBeUndefined()
-        return Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false })
+        return Effect.succeed({
+          stdout: new TextEncoder().encode(
+            command.includes("diff-tree") ? artifact.path : "# Questions",
+          ),
+          truncated: false,
+        })
       },
     },
     () => Promise.resolve(installationToken),
@@ -464,8 +469,14 @@ test("Git publisher reads valid multibyte document content within the output env
         if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
         return Effect.die(`Unexpected git command: ${args.join(" ")}`)
       },
-      runBytes: (_operation, _command, options) => {
+      runBytes: (_operation, command, options) => {
         requestedBytes = options.maxStdoutBytes
+        if (command.includes("diff-tree")) {
+          return Effect.succeed({
+            stdout: new TextEncoder().encode(artifact.path),
+            truncated: false,
+          })
+        }
         return Effect.succeed({ stdout: encoded, truncated: encoded.byteLength >= requestedBytes })
       },
     },
@@ -494,6 +505,70 @@ test("Git publisher reads valid multibyte document content within the output env
   ).resolves.toMatchObject({ finalSha })
   expect(requestedBytes).toBeGreaterThan(encoded.byteLength)
 })
+
+test.each(["document", "implementation"] as const)(
+  "rejects a truncated %s path listing before signing",
+  async (kind) => {
+    let signed = false
+    let requestedBytes = 0
+    const publisher = new GitArtifactPublicationRepository(
+      "/repo",
+      "1".repeat(40),
+      "https://github.com/owner/repo.git",
+      {
+        run: (_operation, command) => {
+          const args = command.slice(1)
+          if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
+          if (args[0] === "diff-tree") return Effect.die("path listing must use bounded output")
+          if (args[0] === "commit-tree") {
+            signed = true
+            return Effect.succeed(finalSha)
+          }
+          return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+        },
+        runBytes: (_operation, command, options) => {
+          expect(command).toContain("diff-tree")
+          requestedBytes = options.maxStdoutBytes
+          return Effect.succeed({
+            stdout: new Uint8Array(options.maxStdoutBytes),
+            truncated: true,
+          })
+        },
+      },
+    )
+
+    const result =
+      kind === "document"
+        ? publisher.finalizeDocument({
+            operationId: "publish:oversized-document",
+            candidateSha: "d".repeat(40),
+            expectedParentSha: parentSha,
+            expectedPath: artifact.path,
+            expectedContentSha256: artifact.contentSha256,
+            artifactIdentity: {
+              repository: artifact.repository,
+              workflowId: artifact.workflowId,
+              generation: artifact.generation,
+              stageKey: artifact.stageKey,
+              stageRevision: artifact.stageRevision,
+              path: artifact.path,
+              mediaType: artifact.mediaType,
+            },
+            trustedTrailers: input.trustedTrailers,
+          })
+        : publisher.finalizeImplementation({
+            operationId: "publish:oversized-implementation",
+            candidateSha: "d".repeat(40),
+            expectedParentSha: parentSha,
+            expectedChangedPaths: [artifact.path],
+            trustedTrailers: input.trustedTrailers,
+          })
+
+    await expect(Effect.runPromise(result)).rejects.toThrow("path listing exceeded bound")
+    expect(requestedBytes).toBeGreaterThan(0)
+    expect(signed).toBe(false)
+  },
+)
 
 test.each([
   ["symlink artifact", artifact.path, "120000", "blob"],
@@ -528,8 +603,13 @@ test.each([
         }
         return Effect.die(`Unexpected git command: ${args.join(" ")}`)
       },
-      runBytes: () =>
-        Effect.succeed({ stdout: new TextEncoder().encode("# Questions"), truncated: false }),
+      runBytes: (_operation, command) =>
+        Effect.succeed({
+          stdout: new TextEncoder().encode(
+            command.includes("diff-tree") ? artifact.path : "# Questions",
+          ),
+          truncated: false,
+        }),
     },
   )
 

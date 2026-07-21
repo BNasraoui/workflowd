@@ -646,7 +646,7 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("creates durable review work and exposes an acceptance completion seam", async () => {
+  test("requires human acceptance after automated document review acceptance", async () => {
     const filename = await databasePath()
     const fake = fakes()
     const reviewOptions = {
@@ -663,6 +663,7 @@ describe("WorkflowStart integration", () => {
               deadlineMs: 60_000,
               maximumRevisions: 2,
             },
+            humanGatePolicy: { mode: "required" as const },
           },
         ],
       },
@@ -739,6 +740,23 @@ describe("WorkflowStart integration", () => {
           stageRevision: 1,
           now: new Date("2026-07-21T05:01:05.000Z"),
         })
+        const afterReview = yield* sql<{
+          readonly state: string
+          readonly accepted_revision: number | null
+        }>`
+          SELECT state, accepted_revision FROM qrspi_stage_runs
+        `
+        const gates = yield* sql<{ readonly kind: string; readonly state: string }>`
+          SELECT kind, state FROM workflow_operations
+          WHERE kind IN ('ReviewSynthesize', 'GenericReviewHandoff') ORDER BY kind
+        `
+        const humanAccepted = yield* store.acceptStagePolicy({
+          workflowId,
+          generation: 1,
+          stageKey: "questions",
+          stageRevision: 1,
+          now: new Date("2026-07-21T05:01:06.000Z"),
+        })
         const after = yield* sql<{ readonly state: string; readonly accepted_revision: number }>`
           SELECT state, accepted_revision FROM qrspi_stage_runs
         `
@@ -749,13 +767,28 @@ describe("WorkflowStart integration", () => {
           SELECT kind FROM workflow_operations
           WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish')
         `
-        return { before, accepted, after, generation, finalization }
+        return {
+          before,
+          accepted,
+          afterReview,
+          gates,
+          humanAccepted,
+          after,
+          generation,
+          finalization,
+        }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(result).toEqual({
       before: [{ kind: "ReviewSynthesize", state: "waiting_human" }],
       accepted: "completed",
+      afterReview: [{ state: "waiting_human", accepted_revision: null }],
+      gates: [
+        { kind: "GenericReviewHandoff", state: "waiting_human" },
+        { kind: "ReviewSynthesize", state: "succeeded" },
+      ],
+      humanAccepted: "completed",
       after: [{ state: "succeeded", accepted_revision: 1 }],
       generation: [{ state: "completed" }],
       finalization: [],
@@ -933,7 +966,7 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("workers verify and publish a terminal implementation through completed generation", async () => {
+  test("requires human acceptance after automated implementation review acceptance", async () => {
     const filename = await databasePath()
     const fake = fakes()
     const implementationOptions = {
@@ -945,8 +978,14 @@ describe("WorkflowStart integration", () => {
             ...options.workflowDefinition.stages[0],
             key: "implementation",
             kind: "implementation" as const,
-            reviewPolicy: { mode: "none" as const },
-            humanGatePolicy: { mode: "on_escalation" as const },
+            reviewPolicy: {
+              mode: "automated" as const,
+              minimumContributions: 1,
+              maximumContributions: 2,
+              deadlineMs: 60_000,
+              maximumRevisions: 2,
+            },
+            humanGatePolicy: { mode: "required" as const },
             outputContract: {
               _tag: "ImplementationCheckpoint" as const,
               contractId: "qrspi.checkpoint",
@@ -1084,6 +1123,29 @@ describe("WorkflowStart integration", () => {
           observedHeadSha: secondCommit.commitSha,
           now: new Date("2026-07-21T05:01:10.000Z"),
         })
+        const reviewAccepted = yield* store.acceptStagePolicy({
+          workflowId,
+          generation: 1,
+          stageKey: "implementation",
+          stageRevision: 1,
+          now: new Date("2026-07-21T05:01:10.100Z"),
+        })
+        const sql = yield* SqlClient.SqlClient
+        const afterReview = yield* sql<{
+          readonly state: string
+          readonly accepted_revision: number | null
+        }>`SELECT state, accepted_revision FROM qrspi_stage_runs`
+        const stageGates = yield* sql<{ readonly kind: string; readonly state: string }>`
+          SELECT kind, state FROM workflow_operations
+          WHERE kind IN ('ReviewSynthesize', 'GenericReviewHandoff') ORDER BY kind
+        `
+        const humanAccepted = yield* store.acceptStagePolicy({
+          workflowId,
+          generation: 1,
+          stageKey: "implementation",
+          stageRevision: 1,
+          now: new Date("2026-07-21T05:01:10.200Z"),
+        })
         const beforeVerification = yield* store.getCurrentCursor(workflowId)
         fake.setBranch(secondCommit.commitSha)
         const verified = yield* runPrePullRequestVerifyIteration({
@@ -1099,7 +1161,6 @@ describe("WorkflowStart integration", () => {
           now: () => new Date("2026-07-21T05:01:12.000Z"),
           randomId: () => "66666666-6666-4666-8666-666666666666",
         })
-        const sql = yield* SqlClient.SqlClient
         const steps = yield* sql<{
           readonly commit_reference_json: string
           readonly session_reference_id: string
@@ -1136,6 +1197,10 @@ describe("WorkflowStart integration", () => {
         `
         return {
           duplicate,
+          reviewAccepted,
+          afterReview,
+          stageGates,
+          humanAccepted,
           beforeVerification,
           verified,
           afterVerification,
@@ -1150,6 +1215,13 @@ describe("WorkflowStart integration", () => {
     )
 
     expect(state.duplicate).toBe("stale")
+    expect(state.reviewAccepted).toBe("completed")
+    expect(state.afterReview).toEqual([{ state: "waiting_human", accepted_revision: null }])
+    expect(state.stageGates).toEqual([
+      { kind: "GenericReviewHandoff", state: "waiting_human" },
+      { kind: "ReviewSynthesize", state: "succeeded" },
+    ])
+    expect(state.humanAccepted).toBe("completed")
     expect(state.beforeVerification?.state).toBe("running")
     expect(state.verified).toBe("verified")
     expect(state.afterVerification?.state).toBe("finalizing")
@@ -1171,6 +1243,7 @@ describe("WorkflowStart integration", () => {
       { state: "completed", current_head_sha: secondCommit.commitSha },
     ])
     expect(state.finalization.map(({ kind, state }) => ({ kind, state }))).toEqual([
+      { kind: "GenericReviewHandoff", state: "succeeded" },
       { kind: "GenericReviewHandoff", state: "ready" },
       { kind: "PrePullRequestVerify", state: "succeeded" },
       { kind: "PullRequestPublish", state: "succeeded" },
@@ -1198,7 +1271,10 @@ describe("WorkflowStart integration", () => {
     }
     expect(JSON.parse(publication!.output_json!)).toEqual({ pullRequest })
     expect(JSON.parse(publication!.external_observation_json!)).toEqual(pullRequest)
-    const handoff = state.finalization.find(({ kind }) => kind === "GenericReviewHandoff")
+    const handoff = state.finalization.find(
+      ({ kind, input_json }) =>
+        kind === "GenericReviewHandoff" && "pullRequest" in JSON.parse(input_json),
+    )
     expect(JSON.parse(handoff!.input_json)).toMatchObject({ pullRequest })
     expect(fake.counts().finalPullRequestCalls).toBe(1)
   })

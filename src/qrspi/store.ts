@@ -1998,28 +1998,50 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
     acceptStagePolicy: (input) =>
       transaction(
         Effect.gen(function* () {
-          const definitions = yield* sql<{ readonly definition_json: string }>`
-            SELECT d.definition_json FROM qrspi_workflow_definitions d
+          const definitions = yield* sql<{
+            readonly definition_json: string
+            readonly workflow_definition_sha256: string
+            readonly published_reference_json: string
+            readonly run_state: "waiting_review" | "waiting_human"
+          }>`
+            SELECT d.definition_json, g.workflow_definition_sha256,
+              v.published_reference_json, r.state AS run_state
+            FROM qrspi_workflow_definitions d
             JOIN qrspi_generations g ON g.workflow_definition_sha256 = d.definition_sha256
             JOIN qrspi_stage_runs r ON r.workflow_id = g.workflow_id AND r.generation = g.generation
+            JOIN qrspi_stage_revisions v ON v.workflow_id = r.workflow_id
+              AND v.generation = r.generation AND v.stage_key = r.stage_key
+              AND v.revision = r.pending_revision
             WHERE r.workflow_id = ${input.workflowId} AND r.generation = ${input.generation}
               AND r.stage_key = ${input.stageKey} AND r.published_revision = ${input.stageRevision}
               AND r.pending_revision = ${input.stageRevision}
               AND r.state IN ('waiting_review', 'waiting_human')
               AND g.is_current = 1 AND g.state = 'running'
           `
-          const json = definitions[0]?.definition_json
-          if (json === undefined) return "stale" as const
-          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(json)
+          const row = definitions[0]
+          if (row === undefined) return "stale" as const
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+            row.definition_json,
+          )
+          const stage = definition.stages.find(({ key }) => key === input.stageKey)
+          if (stage === undefined) return "stale" as const
+          const requiresHumanAcceptance =
+            row.run_state === "waiting_review" &&
+            stage.reviewPolicy.mode === "automated" &&
+            stage.humanGatePolicy.mode === "required"
+          const acceptedPolicyKind =
+            row.run_state === "waiting_review" ? "ReviewSynthesize" : "GenericReviewHandoff"
           yield* sql`
-            UPDATE qrspi_stage_revisions SET state = 'accepted', updated_at = ${input.now.toISOString()}
+            UPDATE qrspi_stage_revisions SET state = ${requiresHumanAcceptance ? "waiting_human" : "accepted"},
+              updated_at = ${input.now.toISOString()}
             WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
               AND stage_key = ${input.stageKey} AND revision = ${input.stageRevision}
               AND state IN ('reviewing', 'waiting_human')
           `
           yield* sql`
-            UPDATE qrspi_stage_runs SET state = 'succeeded',
-              accepted_revision = ${input.stageRevision}, pending_revision = NULL,
+            UPDATE qrspi_stage_runs SET state = ${requiresHumanAcceptance ? "waiting_human" : "succeeded"},
+              accepted_revision = ${requiresHumanAcceptance ? null : input.stageRevision},
+              pending_revision = ${requiresHumanAcceptance ? input.stageRevision : null},
               updated_at = ${input.now.toISOString()}
             WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
               AND stage_key = ${input.stageKey}
@@ -2039,21 +2061,40 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             UPDATE workflow_operations SET state = 'succeeded',
               output_json = ${JSON.stringify({ decision: "accepted" })},
               updated_at = ${input.now.toISOString()}
-            WHERE kind IN ('ReviewSynthesize', 'GenericReviewHandoff') AND is_current = 1
+            WHERE kind = ${acceptedPolicyKind}
+              AND is_current = 1
               AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
               AND json_extract(scope_json, '$.generation') = ${input.generation}
               AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
               AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
               AND state IN ('ready', 'waiting_human')
           `
-          yield* activateNextStage(
-            sql,
-            definition,
-            input.workflowId,
-            input.generation,
-            input.stageKey,
-            input.now,
-          )
+          if (requiresHumanAcceptance) {
+            yield* createStagePolicyGate(sql, {
+              scope: {
+                _tag: "GenerationScope",
+                workflowId: input.workflowId,
+                generation: input.generation,
+              },
+              stage,
+              stageRevision: input.stageRevision,
+              workflowDefinitionSha256: row.workflow_definition_sha256,
+              subject: yield* Schema.decodeUnknown(Schema.parseJson(Schema.Unknown))(
+                row.published_reference_json,
+              ),
+              policyKind: "GenericReviewHandoff",
+              now: input.now,
+            })
+          } else {
+            yield* activateNextStage(
+              sql,
+              definition,
+              input.workflowId,
+              input.generation,
+              input.stageKey,
+              input.now,
+            )
+          }
           return "completed" as const
         }),
       ),
@@ -3267,14 +3308,16 @@ function createStagePolicyGate(
     readonly stageRevision: number
     readonly workflowDefinitionSha256: string
     readonly subject: unknown
+    readonly policyKind?: "ReviewSynthesize" | "GenericReviewHandoff"
     readonly now: Date
   },
 ) {
   return Effect.gen(function* () {
     const policyKind =
-      input.stage.reviewPolicy.mode === "automated"
+      input.policyKind ??
+      (input.stage.reviewPolicy.mode === "automated"
         ? ("ReviewSynthesize" as const)
-        : ("GenericReviewHandoff" as const)
+        : ("GenericReviewHandoff" as const))
     const logical = `${input.scope.workflowId}:${input.scope.generation}:${policyKind}:${input.stage.key}:${input.stageRevision}`
     const policyInput = {
       stageKey: input.stage.key,
