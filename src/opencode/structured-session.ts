@@ -1,4 +1,5 @@
 import { Effect, Fiber, Schema } from "effect"
+import { AgentOutputEnvelope, boundedAgentPayload } from "../agent-payload"
 import { normalizeError } from "../errors"
 import type { OpenCodeAdapter } from "./adapter"
 
@@ -12,7 +13,6 @@ export type StructuredSessionReference = Parameters<OpenCodeAdapter["getSessionS
 type StructuredSessionRequest = {
   readonly directory: string
   readonly title: string
-  readonly sessionCreationId?: string
   readonly agent: string
   readonly model: Parameters<OpenCodeAdapter["promptSession"]>[0]["model"]
   readonly format: {
@@ -22,6 +22,7 @@ type StructuredSessionRequest = {
   }
   readonly prompt: string
   readonly pollIntervalMs: number
+  readonly maxOutputBytes: number
 }
 
 type TerminalCandidate =
@@ -58,9 +59,6 @@ export class StructuredSession<A, I> {
         {
           directory: this.request.directory,
           title: this.request.title,
-          ...(this.request.sessionCreationId === undefined
-            ? {}
-            : { sessionCreationId: this.request.sessionCreationId }),
         },
         operationSignal,
       ),
@@ -211,7 +209,13 @@ export class StructuredSession<A, I> {
     candidate: TerminalCandidate,
   ): Effect.Effect<TerminalMessage<A>, StructuredSessionError> {
     if (candidate.type === "error") return Effect.succeed(candidate)
-    return Schema.decodeUnknown(this.schema)(candidate.message.structured).pipe(
+    return Schema.decodeUnknown(AgentOutputEnvelope)(candidate.message.structured).pipe(
+      Effect.flatMap((encoded) =>
+        Schema.decodeUnknown(
+          boundedAgentPayload(this.request.maxOutputBytes, "Agent harness output"),
+        )(encoded),
+      ),
+      Effect.flatMap((encoded) => Schema.decodeUnknown(this.schema)(encoded)),
       Effect.map((value) => ({ type: "result", value }) as const),
       Effect.mapError(
         (cause) =>

@@ -19,7 +19,6 @@ const makeExecution = (
 ) => {
   const intent: AgentLaunchIntent<{ readonly subject: string }> = {
     sessionReferenceId,
-    sessionCreationId: "b".repeat(64),
     harness: { name: "opencode.pr-review", version: 1 },
     definitionHash: "a".repeat(64),
     agent: "pr-reviewer",
@@ -120,16 +119,18 @@ test("persists agent checkpoints in order and completes output with downstream r
         recordedAt: new Date("2026-07-20T12:01:02.000Z"),
         reference,
       })
+      const reviewWithExcess = {
+        verdict: "pass" as const,
+        summary: "No findings.",
+        findings: [],
+        unexpected: "must not cross the durable boundary",
+      }
       const completed = yield* store.completeAgentReviewJob({
         jobId: work.id,
         workerId: "agent-worker",
         sessionReferenceId,
         completedAt: new Date("2026-07-20T12:01:03.000Z"),
-        review: {
-          verdict: "pass",
-          summary: "No findings.",
-          findings: [],
-        },
+        review: reviewWithExcess,
         autoFix: false,
       })
       const durable = yield* sql`
@@ -227,7 +228,7 @@ test("persists a stale session reference for later cleanup", async () => {
   expect(result.cleanup?.nativeSessionId).toBe("ses_1")
 })
 
-test("releases a job after session cleanup reaches its bounded attempt limit", async () => {
+test("keeps replacement work fenced after session cleanup reaches its attempt limit", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -291,7 +292,10 @@ test("releases a job after session cleanup reaches its bounded attempt limit", a
         leaseDurationMs: 60_000,
       })
       const rows = yield* sql`
-        SELECT execution.state AS execution_state, job.state AS job_state
+        SELECT execution.state AS execution_state,
+          execution.cleanup_disposition,
+          execution.cleanup_last_error,
+          job.state AS job_state
         FROM agent_executions AS execution
         JOIN jobs AS job ON job.id = execution.job_id
       `
@@ -299,12 +303,19 @@ test("releases a job after session cleanup reaches its bounded attempt limit", a
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
-  expect(result.cleanupResults).toEqual(["pending", "pending", "released"])
-  expect(Number(result.replacement?.attempt)).toBe(2)
-  expect(result.rows).toEqual([{ execution_state: "failed", job_state: "leased" }])
+  expect(result.cleanupResults).toEqual(["pending", "pending", "operator_required"])
+  expect(result.replacement).toBeNull()
+  expect(result.rows).toEqual([
+    {
+      execution_state: "session_ready",
+      cleanup_disposition: "operator_required",
+      cleanup_last_error: "OpenCode unavailable",
+      job_state: "leased",
+    },
+  ])
 })
 
-test("persists every schema-valid review output larger than 64 KiB", async () => {
+test("persists the maximum encoded built-in review output within the 4 MiB envelope", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -351,11 +362,13 @@ test("persists every schema-valid review output larger than 64 KiB", async () =>
       })
       const review = {
         verdict: "changes_requested" as const,
-        summary: "Large valid review.",
-        findings: Array.from({ length: 7 }, (_, index) => ({
-          severity: "medium" as const,
-          title: `Finding ${index}`,
-          body: "x".repeat(10_000),
+        summary: "\u0001".repeat(4_000),
+        findings: Array.from({ length: 50 }, () => ({
+          severity: "critical" as const,
+          title: "\u0001".repeat(200),
+          body: "\u0001".repeat(10_000),
+          path: "\u0001".repeat(1_024),
+          line: Number.MAX_SAFE_INTEGER,
         })),
       }
       const completed = yield* store.completeAgentReviewJob({
@@ -374,10 +387,10 @@ test("persists every schema-valid review output larger than 64 KiB", async () =>
   )
 
   expect(result.completed).toBe("completed")
-  expect(result.outputLength).toBeGreaterThan(65_536)
+  expect(result.outputLength).toBe(3_395_207)
 })
 
-test("persists every schema-valid launch intent larger than 64 KiB", async () => {
+test("rejects a durable launch intent larger than its 64 KiB envelope", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -410,15 +423,17 @@ test("persists every schema-valid launch intent larger than 64 KiB", async () =>
         "22222222-2222-4222-8222-222222222222",
         "2026-07-20T12:01:01.000Z",
       )
-      const recorded = yield* store.recordAgentLaunchIntent({
-        jobId: work.id,
-        workerId: "agent-worker",
-        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
-        intent: {
-          ...execution.intent,
-          input: { subject: "x".repeat(70_000) },
-        },
-      })
+      const recorded = yield* Effect.either(
+        store.recordAgentLaunchIntent({
+          jobId: work.id,
+          workerId: "agent-worker",
+          recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+          intent: {
+            ...execution.intent,
+            input: { subject: "x".repeat(70_000) },
+          },
+        }),
+      )
       const rows = yield* sql<{ readonly launch_intent_length: number }>`
         SELECT length(launch_intent_json) AS launch_intent_length FROM agent_executions
       `
@@ -426,8 +441,106 @@ test("persists every schema-valid launch intent larger than 64 KiB", async () =>
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
-  expect(result.recorded).toBe("recorded")
-  expect(result.launchIntentLength).toBeGreaterThan(65_536)
+  expect(result.recorded._tag).toBe("Left")
+  expect(result.launchIntentLength).toBeUndefined()
+})
+
+test("quarantines malformed cleanup rows and continues to unrelated jobs", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "malformed-cleanup-row",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent(samplePullRequestEvent),
+      )
+      const poisonedWork = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (poisonedWork === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        poisonedWork,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: poisonedWork.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: execution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: poisonedWork.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:02.000Z"),
+        reference: execution.reference,
+      })
+      yield* sql`
+        UPDATE agent_executions SET session_reference_json = '{}'
+        WHERE session_reference_id = ${execution.reference.sessionReferenceId}
+      `
+
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "unrelated-valid-job",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:01:30.000Z"),
+        },
+        decodePullRequestEvent({
+          ...samplePullRequestEvent,
+          repository: {
+            ...samplePullRequestEvent.repository,
+            id: 43,
+            fullName: "example-owner/unrelated",
+            name: "unrelated",
+          },
+          pullRequest: {
+            ...samplePullRequestEvent.pullRequest,
+            number: 8,
+            headRepositoryFullName: "example-owner/unrelated",
+          },
+        }),
+      )
+
+      const cleanup = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:02:01.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const unrelated = yield* store.claimNextJob({
+        workerId: "unrelated-worker",
+        now: new Date("2026-07-20T12:02:01.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const rows = yield* sql<{
+        readonly cleanup_disposition: string | null
+        readonly cleanup_last_error: string | null
+        readonly state: string
+      }>`
+        SELECT cleanup_disposition, cleanup_last_error, state FROM agent_executions
+      `
+      return { cleanup, unrelated, rows }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.cleanup).toBeNull()
+  expect(Number(result.unrelated?.pullRequestNumber)).toBe(8)
+  expect(result.rows[0]).toMatchObject({
+    cleanup_disposition: "data_error",
+    state: "session_ready",
+  })
+  expect(result.rows[0]?.cleanup_last_error).toContain("session_reference_json")
 })
 
 test("restarts with a new session after either checkpoint and fences expired attempts", async () => {

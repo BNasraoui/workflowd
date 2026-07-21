@@ -1,5 +1,10 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
-import { Effect } from "effect"
+import { SqlError } from "@effect/sql/SqlError"
+import { Effect, Schema } from "effect"
+import { AgentLaunchIntentEnvelope, AgentOutputEnvelope } from "../agent-payload"
+import { AgentLaunchIntentSchema } from "../agent-harness"
+import { FixResult } from "../domain/fix-result"
+import { ReviewResult } from "../domain/review-result"
 import type { Work } from "../domain/work"
 import { decodeAgentSessionReferenceRow, decodeJobRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
@@ -26,6 +31,19 @@ type JobOperations = Pick<
   | "shouldCancelJob"
   | "supersedeAgentSession"
 >
+
+const encodeDurablePayload = <A, I>(
+  schema: Schema.Schema<A, I, never>,
+  envelope: Schema.Schema<unknown>,
+  value: unknown,
+) =>
+  Schema.decodeUnknown(schema)(value).pipe(
+    Effect.flatMap((decoded) => Schema.decodeUnknown(envelope)(decoded)),
+    Effect.map((decoded) => ({ decoded: decoded as A, json: JSON.stringify(decoded) })),
+    Effect.mapError(
+      (cause) => new SqlError({ cause, message: "Agent payload exceeds its durable envelope" }),
+    ),
+  )
 
 export function makeJobOperations(
   sql: SqlClient,
@@ -196,36 +214,61 @@ export function makeJobOperations(
       Effect.gen(function* () {
         const claimedAt = input.now.toISOString()
         const claimedUntil = new Date(input.now.getTime() + input.leaseDurationMs).toISOString()
-        const rows = yield* sql<{ readonly session_reference_json: string }>`
-          UPDATE agent_executions
-          SET
-            cleanup_lease_owner = ${input.workerId},
-            cleanup_lease_until = ${claimedUntil},
-            cleanup_attempts = cleanup_attempts + 1,
-            updated_at = ${claimedAt}
-          WHERE session_reference_id = (
-            SELECT execution.session_reference_id
-            FROM agent_executions AS execution
-            JOIN jobs AS candidate ON candidate.id = execution.job_id
-            WHERE execution.state = 'session_ready'
-            AND (
-              execution.cleanup_lease_until IS NULL
-              OR execution.cleanup_lease_until <= ${claimedAt}
+        while (true) {
+          const rows = yield* sql<{
+            readonly session_reference_id: string
+            readonly session_reference_json: string
+          }>`
+            UPDATE agent_executions
+            SET
+              cleanup_lease_owner = ${input.workerId},
+              cleanup_lease_until = ${claimedUntil},
+              cleanup_attempts = cleanup_attempts + 1,
+              updated_at = ${claimedAt}
+            WHERE session_reference_id = (
+              SELECT execution.session_reference_id
+              FROM agent_executions AS execution
+              JOIN jobs AS candidate ON candidate.id = execution.job_id
+              WHERE execution.state = 'session_ready'
+              AND execution.cleanup_disposition IS NULL
+              AND (
+                execution.cleanup_lease_until IS NULL
+                OR execution.cleanup_lease_until <= ${claimedAt}
+              )
+              AND (
+                candidate.state <> 'leased'
+                OR candidate.lease_until <= ${claimedAt}
+              )
+              ORDER BY COALESCE(candidate.lease_until, execution.updated_at) ASC, candidate.id ASC
+              LIMIT 1
             )
-            AND (
-              candidate.state <> 'leased'
-              OR candidate.lease_until <= ${claimedAt}
-            )
-            ORDER BY COALESCE(candidate.lease_until, execution.updated_at) ASC, candidate.id ASC
-            LIMIT 1
-          )
-          RETURNING session_reference_json
-        `
-        const row = rows[0]
-        if (row === undefined) return null
-        const decoded = yield* decodeAgentSessionReferenceRow(row)
-        return decoded.sessionReference
-      }),
+            RETURNING session_reference_id, session_reference_json
+          `
+          const row = rows[0]
+          if (row === undefined) return null
+          const decoded = yield* Effect.either(decodeAgentSessionReferenceRow(row))
+          const mismatch =
+            decoded._tag === "Right" &&
+            decoded.right.sessionReference.sessionReferenceId !== row.session_reference_id
+          if (decoded._tag === "Right" && !mismatch) return decoded.right.sessionReference
+
+          const message =
+            decoded._tag === "Left"
+              ? decoded.left.message
+              : `Stored SessionReference identity ${decoded.right.sessionReference.sessionReferenceId} does not match ${row.session_reference_id}`
+          yield* sql`
+            UPDATE agent_executions
+            SET cleanup_disposition = 'data_error',
+              cleanup_last_error = ${message.slice(0, 8_192)},
+              cleanup_lease_owner = NULL,
+              cleanup_lease_until = NULL,
+              updated_at = ${claimedAt}
+            WHERE session_reference_id = ${row.session_reference_id}
+            AND state = 'session_ready'
+            AND cleanup_lease_owner = ${input.workerId}
+          `
+        }
+      }).pipe(sql.withTransaction),
     claimNextJob: (input) => queue.claim(input),
     isJobCurrent: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`
@@ -308,13 +351,14 @@ export function makeJobOperations(
           AND ${currentness.latestReviewRequest}
         `
         if (executions.length === 0) return "stale" as const
-        const completed = yield* completeReviewJob(input)
+        const output = yield* encodeDurablePayload(ReviewResult, AgentOutputEnvelope, input.review)
+        const completed = yield* completeReviewJob({ ...input, review: output.decoded })
         if (completed === "stale") return completed
         yield* sql`
           UPDATE agent_executions
           SET
             state = 'succeeded',
-            output_json = ${JSON.stringify(input.review)},
+            output_json = ${output.json},
             updated_at = ${timestamp}
           WHERE session_reference_id = ${input.sessionReferenceId}
           AND state = 'session_ready'
@@ -342,54 +386,62 @@ export function makeJobOperations(
           AND ${currentness.latestReviewRequest}
         `
         if (executions.length === 0) return "stale" as const
-        const recorded = yield* recordFixResult(input)
+        const output = yield* encodeDurablePayload(FixResult, AgentOutputEnvelope, input.result)
+        const recorded = yield* recordFixResult({ ...input, result: output.decoded })
         if (recorded === "stale") return recorded
         yield* sql`
           UPDATE agent_executions
           SET
             state = 'succeeded',
-            output_json = ${JSON.stringify(input.result)},
+            output_json = ${output.json},
             updated_at = ${timestamp}
           WHERE session_reference_id = ${input.sessionReferenceId}
           AND state = 'session_ready'
         `
         return "recorded" as const
       }).pipe(sql.withTransaction),
-    recordAgentLaunchIntent: (input) => {
-      const timestamp = input.recordedAt.toISOString()
-      return sql<{ readonly session_reference_id: string }>`
-        INSERT INTO agent_executions (
-          session_reference_id,
-          job_id,
-          attempt,
-          lease_token,
-          launch_intent_json,
-          state,
-          created_at,
-          updated_at
+    recordAgentLaunchIntent: (input) =>
+      Effect.gen(function* () {
+        const timestamp = input.recordedAt.toISOString()
+        const launchIntent = yield* encodeDurablePayload(
+          AgentLaunchIntentSchema,
+          AgentLaunchIntentEnvelope,
+          input.intent,
         )
-        SELECT
-          ${input.intent.sessionReferenceId},
-          candidate.id,
-          candidate.attempts,
-          ${input.intent.leaseToken},
-          ${JSON.stringify(input.intent)},
-          'launch_intent',
-          ${timestamp},
-          ${timestamp}
-        FROM jobs AS candidate
-        WHERE candidate.id = ${input.jobId}
-        AND candidate.state = 'leased'
-        AND candidate.cancel_requested = FALSE
-        AND candidate.lease_owner = ${input.workerId}
-        AND candidate.lease_until > ${timestamp}
-        AND candidate.attempts = ${input.intent.attempt}
-        AND ${currentness.currentJob}
-        AND ${currentness.latestReviewRequest}
-        ON CONFLICT DO NOTHING
-        RETURNING session_reference_id
-      `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
-    },
+        const rows = yield* sql<{ readonly session_reference_id: string }>`
+          INSERT INTO agent_executions (
+            session_reference_id,
+            job_id,
+            attempt,
+            lease_token,
+            launch_intent_json,
+            state,
+            created_at,
+            updated_at
+          )
+          SELECT
+            ${input.intent.sessionReferenceId},
+            candidate.id,
+            candidate.attempts,
+            ${input.intent.leaseToken},
+            ${launchIntent.json},
+            'launch_intent',
+            ${timestamp},
+            ${timestamp}
+          FROM jobs AS candidate
+          WHERE candidate.id = ${input.jobId}
+          AND candidate.state = 'leased'
+          AND candidate.cancel_requested = FALSE
+          AND candidate.lease_owner = ${input.workerId}
+          AND candidate.lease_until > ${timestamp}
+          AND candidate.attempts = ${input.intent.attempt}
+          AND ${currentness.currentJob}
+          AND ${currentness.latestReviewRequest}
+          ON CONFLICT DO NOTHING
+          RETURNING session_reference_id
+        `
+        return rows.length === 0 ? ("stale" as const) : ("recorded" as const)
+      }),
     recordAgentSessionReference: (input) => {
       const timestamp = input.recordedAt.toISOString()
       const referenceJson = JSON.stringify(input.reference)
@@ -440,46 +492,40 @@ export function makeJobOperations(
       Effect.gen(function* () {
         const timestamp = input.failedAt.toISOString()
         const executions = yield* sql<{
-          readonly job_id: number
-          readonly state: "session_ready" | "failed"
+          readonly cleanup_disposition: "operator_required" | null
         }>`
           UPDATE agent_executions AS execution
           SET
-            state = CASE
+            cleanup_disposition = CASE
               WHEN cleanup_attempts >= (
                 SELECT candidate.max_attempts FROM jobs AS candidate
                 WHERE candidate.id = execution.job_id
-              ) THEN 'failed'
-              ELSE state
+              ) THEN 'operator_required'
+              ELSE cleanup_disposition
             END,
+            cleanup_last_error = ${input.error},
+            cleanup_lease_owner = CASE
+              WHEN cleanup_attempts >= (
+                SELECT candidate.max_attempts FROM jobs AS candidate
+                WHERE candidate.id = execution.job_id
+              ) THEN NULL ELSE cleanup_lease_owner END,
+            cleanup_lease_until = CASE
+              WHEN cleanup_attempts >= (
+                SELECT candidate.max_attempts FROM jobs AS candidate
+                WHERE candidate.id = execution.job_id
+              ) THEN NULL ELSE cleanup_lease_until END,
             updated_at = ${timestamp}
           WHERE execution.session_reference_id = ${input.sessionReferenceId}
           AND execution.state = 'session_ready'
           AND execution.cleanup_lease_owner = ${input.workerId}
           AND execution.cleanup_lease_until > ${timestamp}
-          RETURNING job_id, state
+          RETURNING cleanup_disposition
         `
         const execution = executions[0]
         if (execution === undefined) return "stale" as const
-        if (execution.state === "session_ready") return "pending" as const
-
-        yield* sql`
-          UPDATE jobs
-          SET
-            state = CASE
-              WHEN attempts >= max_attempts THEN 'failed'
-              ELSE 'retry_scheduled'
-            END,
-            run_at = ${timestamp},
-            lease_owner = NULL,
-            lease_until = NULL,
-            last_error = ${input.error},
-            updated_at = ${timestamp}
-          WHERE id = ${execution.job_id}
-          AND state = 'leased'
-          AND lease_until <= ${timestamp}
-        `
-        return "released" as const
+        return execution.cleanup_disposition === "operator_required"
+          ? ("operator_required" as const)
+          : ("pending" as const)
       }).pipe(sql.withTransaction),
     rescheduleJob: (input) =>
       Effect.gen(function* () {

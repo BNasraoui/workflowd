@@ -116,7 +116,6 @@ const makeWorkerLayer = (options: {
 const preparedReview = (context: AgentExecutionContext) => ({
   launchIntent: {
     sessionReferenceId: "22222222-2222-4222-8222-222222222222",
-    sessionCreationId: "b".repeat(64),
     harness: { name: "opencode.pr-review", version: 1 },
     definitionHash: "a".repeat(64),
     agent: "pr-reviewer",
@@ -147,6 +146,7 @@ const preparedReview = (context: AgentExecutionContext) => ({
   model: { providerID: "openai", modelID: "gpt-5.6-sol" },
   outputSchema: ReviewResult,
   outputJsonSchema: { type: "object" },
+  maxOutputBytes: 3_395_207,
   pollIntervalMs: 1,
 })
 

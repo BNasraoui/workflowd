@@ -1,9 +1,22 @@
 import { createHash, randomUUID } from "node:crypto"
 import { resolve } from "node:path"
 import { Context, Data, Effect, JSONSchema, Schema } from "effect"
+import {
+  AgentLaunchIntentEnvelope,
+  MAX_AGENT_LAUNCH_INTENT_BYTES,
+  MAX_AGENT_OUTPUT_BYTES,
+  boundedAgentPayload,
+} from "./agent-payload"
 import { normalizeError } from "./errors"
 import type { OpenCodeAdapter, OpenCodeModel } from "./opencode/adapter"
 import { StructuredSession, StructuredSessionError } from "./opencode/structured-session"
+
+export {
+  AgentLaunchIntentEnvelope,
+  AgentOutputEnvelope,
+  MAX_AGENT_LAUNCH_INTENT_BYTES,
+  MAX_AGENT_OUTPUT_BYTES,
+} from "./agent-payload"
 
 const BoundedIdentifier = Schema.String.pipe(
   Schema.minLength(1),
@@ -72,6 +85,8 @@ export type AgentHarnessDefinition<Input, InputEncoded, Output, OutputEncoded> =
   readonly model: string
   readonly inputSchema: Schema.Schema<Input, InputEncoded, never>
   readonly outputSchema: Schema.Schema<Output, OutputEncoded, never>
+  readonly maxInputBytes: number
+  readonly maxOutputBytes: number
   readonly promptContract: string
   readonly title: (input: Input) => string
   readonly prompt: (input: Input) => string
@@ -91,7 +106,6 @@ export type AgentExecutionContext = {
 
 export type AgentLaunchIntent<Input> = {
   readonly sessionReferenceId: string
-  readonly sessionCreationId: string
   readonly harness: AgentHarnessRef
   readonly definitionHash: string
   readonly agent: string
@@ -108,6 +122,24 @@ export type AgentLaunchIntent<Input> = {
   readonly requestedAt: string
 }
 
+export const AgentLaunchIntentSchema = Schema.Struct({
+  sessionReferenceId: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  harness: AgentHarnessRef,
+  definitionHash: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  agent: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64)),
+  model: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
+  input: Schema.Unknown,
+  scope: AgentExecutionScope,
+  operationId: BoundedReference,
+  operationRevision: PositiveInt,
+  attempt: PositiveInt,
+  leaseToken: LeaseToken,
+  directory: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4096)),
+  timeoutMs: PositiveInt.pipe(Schema.lessThanOrEqualTo(86_400_000)),
+  retryPolicy: AgentRetryPolicy,
+  requestedAt: IsoTimestamp,
+})
+
 export type PreparedAgentWork<Input, Output, OutputEncoded> = {
   readonly launchIntent: AgentLaunchIntent<Input>
   readonly title: string
@@ -115,6 +147,7 @@ export type PreparedAgentWork<Input, Output, OutputEncoded> = {
   readonly model: OpenCodeModel
   readonly outputSchema: Schema.Schema<Output, OutputEncoded, never>
   readonly outputJsonSchema: object
+  readonly maxOutputBytes: number
   readonly pollIntervalMs: number
 }
 
@@ -133,6 +166,8 @@ type RuntimeDefinition = HarnessRegistration & {
   readonly model: string
   readonly inputSchema: Schema.Schema<unknown, unknown, unknown>
   readonly outputSchema: Schema.Schema<unknown, unknown, unknown>
+  readonly maxInputBytes: number
+  readonly maxOutputBytes: number
   readonly promptContract: string
   readonly timeoutMs: number
   readonly retryPolicy: AgentRetryPolicy
@@ -160,6 +195,8 @@ const DefinitionMetadata = Schema.Struct({
   promptContract: BoundedIdentifier,
   timeoutMs: PositiveInt.pipe(Schema.lessThanOrEqualTo(86_400_000)),
   retryPolicy: AgentRetryPolicy,
+  maxInputBytes: PositiveInt,
+  maxOutputBytes: PositiveInt,
 })
 
 const ExecutionContextSchema = Schema.Struct({
@@ -187,6 +224,10 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
   if (!("model" in definition) || typeof definition.model !== "string") throw invalid()
   if (!("inputSchema" in definition) || !Schema.isSchema(definition.inputSchema)) throw invalid()
   if (!("outputSchema" in definition) || !Schema.isSchema(definition.outputSchema)) throw invalid()
+  if (!("maxInputBytes" in definition) || typeof definition.maxInputBytes !== "number")
+    throw invalid()
+  if (!("maxOutputBytes" in definition) || typeof definition.maxOutputBytes !== "number")
+    throw invalid()
   if (!("promptContract" in definition) || typeof definition.promptContract !== "string") {
     throw invalid()
   }
@@ -198,6 +239,8 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
     model: definition.model,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
+    maxInputBytes: definition.maxInputBytes,
+    maxOutputBytes: definition.maxOutputBytes,
     promptContract: definition.promptContract,
     timeoutMs: definition.timeoutMs,
     retryPolicy: Schema.decodeUnknownSync(AgentRetryPolicy)(definition.retryPolicy),
@@ -212,9 +255,19 @@ export class TrustedAgentHarnessCatalog {
     for (const definition of definitions) {
       const runtime = decodeRuntimeDefinition(definition)
       Schema.decodeUnknownSync(DefinitionMetadata)(runtime)
+      const key = referenceKey(runtime.ref)
+      if (runtime.maxInputBytes > MAX_AGENT_LAUNCH_INTENT_BYTES) {
+        throw new Error(
+          `AgentHarness ${key} input limit ${runtime.maxInputBytes} exceeds durable launch envelope ${MAX_AGENT_LAUNCH_INTENT_BYTES}`,
+        )
+      }
+      if (runtime.maxOutputBytes > MAX_AGENT_OUTPUT_BYTES) {
+        throw new Error(
+          `AgentHarness ${key} output limit ${runtime.maxOutputBytes} exceeds durable output envelope ${MAX_AGENT_OUTPUT_BYTES}`,
+        )
+      }
       const inputJsonSchema = JSONSchema.make(runtime.inputSchema)
       const outputJsonSchema = JSONSchema.make(runtime.outputSchema)
-      const key = referenceKey(runtime.ref)
       if (this.#byReference.has(key)) {
         throw new Error(`Duplicate AgentHarness reference ${key}`)
       }
@@ -318,6 +371,11 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       const decodedInput = yield* Schema.decodeUnknown(definition.inputSchema)(input).pipe(
         Effect.mapError((cause) => this.error("validate agent prompt input", cause, false)),
       )
+      yield* Schema.decodeUnknown(
+        boundedAgentPayload(definition.maxInputBytes, "Agent harness input"),
+      )(decodedInput).pipe(
+        Effect.mapError((cause) => this.error("validate encoded agent prompt input", cause, false)),
+      )
       const request = yield* Effect.try({
         try: () => ({
           title: boundedText(definition.title(decodedInput), 256, "session title"),
@@ -326,61 +384,44 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         catch: (cause) => this.error("prepare agent prompt", cause, false),
       })
       const directory = resolve(decodedContext.directory)
+      const launchIntent = {
+        sessionReferenceId: randomUUID(),
+        harness: definition.ref,
+        definitionHash: registration.definitionHash,
+        agent: definition.agent,
+        model: definition.model,
+        input: decodedInput,
+        scope: decodedContext.scope,
+        operationId: decodedContext.operationId,
+        operationRevision: decodedContext.operationRevision,
+        attempt: decodedContext.attempt,
+        leaseToken: decodedContext.leaseToken,
+        directory,
+        timeoutMs: definition.timeoutMs,
+        retryPolicy: definition.retryPolicy,
+        requestedAt: decodedContext.requestedAt.toISOString(),
+      }
+      yield* Schema.decodeUnknown(AgentLaunchIntentSchema)(launchIntent).pipe(
+        Effect.flatMap((decoded) => Schema.decodeUnknown(AgentLaunchIntentEnvelope)(decoded)),
+        Effect.mapError((cause) =>
+          this.error("validate durable agent launch intent", cause, false),
+        ),
+      )
       return {
-        launchIntent: {
-          sessionReferenceId: randomUUID(),
-          sessionCreationId: sessionCreationId(
-            registration.definition.ref,
-            registration.definitionHash,
-            decodedContext,
-          ),
-          harness: definition.ref,
-          definitionHash: registration.definitionHash,
-          agent: definition.agent,
-          model: definition.model,
-          input: decodedInput,
-          scope: decodedContext.scope,
-          operationId: decodedContext.operationId,
-          operationRevision: decodedContext.operationRevision,
-          attempt: decodedContext.attempt,
-          leaseToken: decodedContext.leaseToken,
-          directory,
-          timeoutMs: definition.timeoutMs,
-          retryPolicy: definition.retryPolicy,
-          requestedAt: decodedContext.requestedAt.toISOString(),
-        },
+        launchIntent,
         title: request.title,
         prompt: request.prompt,
         model: parseModel(definition.model),
         outputSchema: definition.outputSchema,
         outputJsonSchema: registration.outputJsonSchema,
+        maxOutputBytes: definition.maxOutputBytes,
         pollIntervalMs: this.#config.pollIntervalMs,
       }
     })
 
   readonly createSession: AgentHarnessPort["createSession"] = (prepared) => {
     const session = this.structuredSession(prepared)
-    const create =
-      this.adapter.findSession === undefined
-        ? this.attempt("create session", true, (signal) => session.create(signal))
-        : this.attempt("find session", true, (signal) =>
-            this.adapter.findSession!(
-              {
-                directory: prepared.launchIntent.directory,
-                sessionCreationId: prepared.launchIntent.sessionCreationId,
-              },
-              signal,
-            ),
-          ).pipe(
-            Effect.flatMap((existing) =>
-              existing === undefined
-                ? this.attempt("create session", true, (signal) => session.create(signal))
-                : Effect.succeed({
-                    sessionID: existing.id,
-                    directory: prepared.launchIntent.directory,
-                  }),
-            ),
-          )
+    const create = this.attempt("create session", true, (signal) => session.create(signal))
     return create.pipe(
       Effect.flatMap((created) =>
         Schema.decodeUnknown(SessionReference)({
@@ -461,7 +502,6 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       {
         directory: prepared.launchIntent.directory,
         title: prepared.title,
-        sessionCreationId: prepared.launchIntent.sessionCreationId,
         agent: prepared.launchIntent.agent,
         model: prepared.model,
         format: {
@@ -471,6 +511,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         },
         prompt: prepared.prompt,
         pollIntervalMs: prepared.pollIntervalMs,
+        maxOutputBytes: prepared.maxOutputBytes,
       },
       prepared.outputSchema,
     )
@@ -510,24 +551,6 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   private error(operation: string, cause: unknown, retryable: boolean) {
     return new AgentHarnessError({ operation, cause: normalizeError(cause), retryable })
   }
-}
-
-function sessionCreationId(
-  harness: AgentHarnessRef,
-  definitionHash: string,
-  context: AgentExecutionContext,
-): string {
-  return createHash("sha256")
-    .update(
-      canonicalJson({
-        harness,
-        definitionHash,
-        scope: context.scope,
-        operationId: context.operationId,
-        operationRevision: context.operationRevision,
-      }),
-    )
-    .digest("hex")
 }
 
 function parseModel(value: string): OpenCodeModel {
@@ -585,6 +608,8 @@ function definitionHash(
         promptContract: definition.promptContract,
         timeoutMs: definition.timeoutMs,
         retryPolicy: definition.retryPolicy,
+        maxInputBytes: definition.maxInputBytes,
+        maxOutputBytes: definition.maxOutputBytes,
         inputSchema: inputJsonSchema,
         outputSchema: outputJsonSchema,
       }),

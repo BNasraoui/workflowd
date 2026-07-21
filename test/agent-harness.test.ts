@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
-import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../src/agent-harness"
+import {
+  MAX_AGENT_LAUNCH_INTENT_BYTES,
+  MAX_AGENT_OUTPUT_BYTES,
+  OpenCodeAgentHarness,
+  TrustedAgentHarnessCatalog,
+} from "../src/agent-harness"
+import { makePullRequestHarnessDefinitions } from "../src/opencode"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
@@ -28,6 +34,8 @@ const fixtureDefinition = {
   model: "openai/gpt-5.6-sol",
   inputSchema: Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) }),
   outputSchema: Schema.Struct({ summary: Schema.String.pipe(Schema.maxLength(100)) }),
+  maxInputBytes: 611,
+  maxOutputBytes: 614,
   promptContract: "fixture-summary-prompt",
   title: () => "fixture summary",
   prompt: (input: { readonly text: string }) => `Summarize: ${input.text}`,
@@ -77,9 +85,107 @@ describe("TrustedAgentHarnessCatalog", () => {
       expect(() => new TrustedAgentHarnessCatalog([definition])).toThrow()
     }
   })
+
+  test("rejects trusted definitions whose declared limits exceed durable envelopes", () => {
+    const oversizedInput = {
+      ...fixtureDefinition,
+      maxInputBytes: MAX_AGENT_LAUNCH_INTENT_BYTES + 1,
+    }
+    const oversizedOutput = {
+      ...fixtureDefinition,
+      maxOutputBytes: MAX_AGENT_OUTPUT_BYTES + 1,
+    }
+    expect(() => new TrustedAgentHarnessCatalog([oversizedInput])).toThrow("input limit")
+    expect(() => new TrustedAgentHarnessCatalog([oversizedOutput])).toThrow("output limit")
+  })
+
+  test("registers maximum valid built-in trusted payload declarations", () => {
+    const definitions = makePullRequestHarnessDefinitions({
+      reviewerAgent: "pr-reviewer",
+      fixerAgent: "pr-fixer",
+      model: "openai/gpt-5.6-sol",
+      pollIntervalMs: 1,
+      timeoutMs: 1_000,
+    })
+
+    expect(definitions.review.maxInputBytes).toBe(26_363)
+    expect(definitions.review.maxOutputBytes).toBe(3_395_207)
+    expect(definitions.fix.maxOutputBytes).toBe(24_117)
+    expect(() => new TrustedAgentHarnessCatalog(Object.values(definitions))).not.toThrow()
+  })
+
+  test("accepts the maximum valid built-in input inside the launch envelope", async () => {
+    const definitions = makePullRequestHarnessDefinitions({
+      reviewerAgent: "pr-reviewer",
+      fixerAgent: "pr-fixer",
+      model: "openai/gpt-5.6-sol",
+      pollIntervalMs: 1,
+      timeoutMs: 1_000,
+    })
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog(Object.values(definitions)),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    const escaped = "\u0001"
+    const input = {
+      jobId: Number.MAX_SAFE_INTEGER,
+      directory: `/${escaped.repeat(4_095)}`,
+      repositoryFullName: escaped.repeat(256),
+      pullRequestNumber: Number.MAX_SAFE_INTEGER,
+      baseSha: "a".repeat(64),
+      headSha: "b".repeat(64),
+    }
+
+    expect(Buffer.byteLength(JSON.stringify(input))).toBe(26_363)
+    const prepared = await Effect.runPromise(
+      harness.prepare(definitions.review, input, {
+        directory: "/tmp/worktree",
+        scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+        operationId: "fixture-operation",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+      }),
+    )
+
+    expect(Buffer.byteLength(JSON.stringify(prepared.launchIntent))).toBeLessThanOrEqual(
+      MAX_AGENT_LAUNCH_INTENT_BYTES,
+    )
+  })
 })
 
 describe("OpenCodeAgentHarness", () => {
+  test("enforces trusted per-harness input limits below the global envelope", async () => {
+    const definition = { ...fixtureDefinition, maxInputBytes: 10 }
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog([definition]),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+
+    const failure = await Effect.runPromise(
+      harness
+        .prepare(
+          definition,
+          { text: "This input exceeds ten encoded bytes." },
+          {
+            directory: "/tmp/fixture-worktree",
+            scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+            operationId: "fixture-operation",
+            operationRevision: 1,
+            attempt: 1,
+            leaseToken: "11111111-1111-4111-8111-111111111111",
+            requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+          },
+        )
+        .pipe(Effect.flip),
+    )
+
+    expect(failure.operation).toBe("validate encoded agent prompt input")
+  })
+
   test("executes non-PR typed work through explicit durable session phases", async () => {
     const actions: Array<string> = []
     const harness = new OpenCodeAgentHarness(
@@ -166,19 +272,15 @@ describe("OpenCodeAgentHarness", () => {
     expect(actions).toEqual(["create", "prompt"])
   })
 
-  test("recovers a remotely created session after the create response is lost", async () => {
-    let remoteSession: { readonly id: string } | undefined
-    let remoteSessionCreationId: string | undefined
+  test("orphans a session whose create response is lost and creates a replacement", async () => {
     let creates = 0
     const adapter = {
       ...makeAdapter(),
-      findSession: async (input: { readonly sessionCreationId: string }) =>
-        input.sessionCreationId === remoteSessionCreationId ? remoteSession : undefined,
-      createSession: async (input: { readonly sessionCreationId?: string }) => {
+      findSession: async () => ({ id: "ses_orphaned" }),
+      createSession: async () => {
         creates += 1
-        remoteSession = { id: "ses_recovered" }
-        remoteSessionCreationId = input.sessionCreationId
-        throw new Error("connection closed after create")
+        if (creates === 1) throw new Error("connection closed after create")
+        return { id: "ses_replacement" }
       },
     } as OpenCodeAdapter
     const harness = new OpenCodeAgentHarness(
@@ -225,10 +327,9 @@ describe("OpenCodeAgentHarness", () => {
     )
     const recovered = await Effect.runPromise(harness.createSession(replacement))
 
-    expect(replacement.launchIntent.sessionCreationId).toBe(prepared.launchIntent.sessionCreationId)
-    expect(recovered.nativeSessionId).toBe("ses_recovered")
+    expect(recovered.nativeSessionId).toBe("ses_replacement")
     expect(recovered.attempt).toBe(2)
-    expect(creates).toBe(1)
+    expect(creates).toBe(2)
   })
 
   test("rejects persisted references for a different OpenCode endpoint", async () => {
