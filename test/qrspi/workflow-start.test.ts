@@ -191,6 +191,7 @@ function fakes(options: FakeOptions = {}) {
         finalPullRequest = input
         return { repository: input.repository, number: 17 }
       }),
+    closeFinalPullRequest: () => Effect.void,
     observeFinalPullRequest: (input) =>
       Effect.succeed(
         finalPullRequest === undefined
@@ -2362,6 +2363,80 @@ describe("WorkflowStart integration", () => {
       operations: [{ state: "failed", lease_token: null }],
       runs: [{ state: "failed" }],
       generations: [{ state: "failed" }],
+    })
+  })
+
+  test("opens a gate for an expired GenericReviewHandoff lease whose retry budget is exhausted", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const now = new Date("2026-07-21T05:02:00.000Z")
+    const state = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const pullRequest = {
+          reference: { repository, number: 17 },
+          state: "open",
+          title: "Complete QRSPI",
+          baseRef: "main",
+          headRef: "feature/workflowd-vs3.3-start",
+          headSha: "f".repeat(40),
+          draft: false,
+          body: "Delivery evidence",
+          bodySha256: "a".repeat(64),
+          url: "https://example.test/example-owner/example/pull/17",
+        }
+        yield* sql`
+          INSERT INTO workflow_operations (
+            operation_id, logical_operation_id, operation_revision, retry_of, kind,
+            scope_json, input_json, input_sha256, output_json, state, is_current,
+            attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+            external_intent_json, external_observation_json, observation_attempts,
+            max_observation_attempts, parent_effect_json, last_error, created_at, updated_at
+          ) VALUES (
+            'handoff:1', 'handoff', 1, NULL, 'GenericReviewHandoff',
+            ${JSON.stringify({ _tag: "WorkflowScope", workflowId: "workflow" })},
+            ${JSON.stringify({ pullRequest })}, ${"a".repeat(64)}, NULL, 'leased', 1,
+            3, 3, 'stopped-worker', 'old-expired-lease-token',
+            '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z',
+            NULL, NULL, 0, 5,
+            ${JSON.stringify({ success: "audit only", failure: "open operation-scoped gate" })},
+            NULL, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z'
+          )
+        `
+        const store = yield* QrspiStore
+        const claimed = yield* store.claimGenericReviewHandoff(
+          "restarted-worker",
+          "22222222-2222-4222-8222-222222222222",
+          60_000,
+          now,
+        )
+        const operations = yield* sql<{
+          readonly state: string
+          readonly attempt: number
+          readonly lease_token: string | null
+          readonly terminal_retry_policy: string | null
+        }>`
+          SELECT state, attempt, lease_token, terminal_retry_policy
+          FROM workflow_operations WHERE operation_id = 'handoff:1'
+        `
+        const gates = yield* sql<{ readonly state: string }>`
+          SELECT state FROM workflow_operation_gates WHERE operation_id = 'handoff:1'
+        `
+        return { claimed, operations, gates }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(state).toEqual({
+      claimed: null,
+      operations: [
+        {
+          state: "waiting_human",
+          attempt: 3,
+          lease_token: null,
+          terminal_retry_policy: "retry_budget_exhausted",
+        },
+      ],
+      gates: [{ state: "pending" }],
     })
   })
 

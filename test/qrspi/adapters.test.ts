@@ -257,6 +257,37 @@ describe("QRSPI external adapters", () => {
     })
   })
 
+  test("closes a final pull request by durable reference", async () => {
+    const updates: unknown[] = []
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "f".repeat(40) } } }),
+        },
+        pulls: {
+          list: async () => ({ data: [] }),
+          update: async (input) => {
+            updates.push(input)
+            return { data: {} }
+          },
+        },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    await Effect.runPromise(adapter.closeFinalPullRequest({ repository, number: 17 }))
+
+    expect(updates).toEqual([
+      expect.objectContaining({
+        owner: "example-owner",
+        repo: "example",
+        pull_number: 17,
+        state: "closed",
+      }),
+    ])
+  })
+
   test("ignores an older closed pull request from a previous generation on the same branch", async () => {
     const oldMarker = `<!-- workflowd-pull-request:${"a".repeat(64)} -->`
     const currentMarker = `<!-- workflowd-pull-request:${"b".repeat(64)} -->`

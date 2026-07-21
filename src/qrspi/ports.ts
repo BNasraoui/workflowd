@@ -90,6 +90,9 @@ export type QrspiRepositoryPort = {
   readonly createFinalPullRequest: (
     input: FinalPullRequestIntent,
   ) => Effect.Effect<FinalPullRequestObservation["reference"], QrspiRepositoryError>
+  readonly closeFinalPullRequest: (
+    reference: FinalPullRequestObservation["reference"],
+  ) => Effect.Effect<void, QrspiRepositoryError>
   readonly observeFinalPullRequest: (
     input: FinalPullRequestIntent,
   ) => Effect.Effect<FinalPullRequestObservation | null, QrspiRepositoryError>

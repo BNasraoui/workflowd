@@ -189,6 +189,26 @@ export function runPullRequestPublishIterationWith(options: {
       if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
         return "stale" as const
       }
+      const branch = yield* Effect.either(
+        options.repository.observeBranch({
+          repository: intent.repository,
+          headRef: intent.headRef,
+        }),
+      )
+      if (Either.isLeft(branch)) {
+        return yield* options.store.recordPullRequestPublicationFailure({
+          operationId: work.operationId,
+          error: Cause.pretty(Cause.fail(branch.left)),
+          now: options.now(),
+        })
+      }
+      if (branch.right?.sha !== intent.headSha) {
+        return yield* options.store.recordPullRequestPublicationFailure({
+          operationId: work.operationId,
+          error: "ticket branch advanced after pre-pull-request verification",
+          now: options.now(),
+        })
+      }
       const creation = yield* Effect.either(options.repository.createFinalPullRequest(intent))
       if (Either.isLeft(creation)) {
         return yield* options.store.recordPullRequestPublicationFailure({
@@ -252,6 +272,9 @@ export function runPullRequestPublishIterationWith(options: {
       })
     }
     if (!matchesIntent(observed, intent)) {
+      if (created !== undefined && observed.headSha !== intent.headSha) {
+        yield* Effect.either(options.repository.closeFinalPullRequest(created))
+      }
       return yield* options.store.recordStalePullRequestPublicationEffect({
         operationId: work.operationId,
         intent,

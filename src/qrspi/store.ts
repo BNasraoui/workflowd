@@ -3178,33 +3178,56 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
       ),
 
     claimGenericReviewHandoff: (workerId, leaseToken, leaseDurationMs, now) =>
-      Effect.gen(function* () {
-        const rows = yield* sql<{
-          readonly operation_id: string
-          readonly input_json: string
-        }>`
-          UPDATE workflow_operations
-          SET state = 'leased', attempt = attempt + 1, lease_owner = ${workerId},
-            lease_token = ${leaseToken},
-            lease_until = ${new Date(now.getTime() + leaseDurationMs).toISOString()},
-            updated_at = ${now.toISOString()}
-          WHERE operation_id = (
-            SELECT operation_id FROM workflow_operations
-            WHERE kind = 'GenericReviewHandoff' AND is_current = 1
-              AND json_type(input_json, '$.pullRequest') = 'object'
-              AND (state = 'ready' OR (state = 'leased' AND lease_until <= ${now.toISOString()}))
-              AND run_at <= ${now.toISOString()}
-            ORDER BY run_at, operation_id LIMIT 1
+      transaction(
+        Effect.gen(function* () {
+          const exhausted = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations SET state = 'waiting_human',
+              last_error = 'retry budget exhausted after lease expiry',
+              terminal_failure_reason = 'retry budget exhausted after lease expiry',
+              terminal_retry_policy = 'retry_budget_exhausted', lease_owner = NULL,
+              lease_token = NULL, lease_until = NULL, updated_at = ${now.toISOString()}
+            WHERE kind = 'GenericReviewHandoff' AND is_current = 1 AND state = 'leased'
+              AND lease_until <= ${now.toISOString()} AND attempt >= max_attempts
+            RETURNING operation_id
+          `
+          yield* Effect.forEach(
+            exhausted,
+            ({ operation_id }) => sql`
+              INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+              VALUES (
+                ${operation_id}, 'pending', 'retry budget exhausted after lease expiry',
+                ${now.toISOString()}
+              ) ON CONFLICT (operation_id) DO NOTHING
+            `,
+            { discard: true },
           )
-          RETURNING operation_id, input_json
-        `
-        const row = rows[0]
-        if (row === undefined) return null
-        const handoff = yield* Schema.decodeUnknown(Schema.parseJson(GenericReviewHandoffInput))(
-          row.input_json,
-        )
-        return { operationId: row.operation_id, leaseToken, pullRequest: handoff.pullRequest }
-      }),
+          const rows = yield* sql<{
+            readonly operation_id: string
+            readonly input_json: string
+          }>`
+            UPDATE workflow_operations
+            SET state = 'leased', attempt = attempt + 1, lease_owner = ${workerId},
+              lease_token = ${leaseToken},
+              lease_until = ${new Date(now.getTime() + leaseDurationMs).toISOString()},
+              updated_at = ${now.toISOString()}
+            WHERE operation_id = (
+              SELECT operation_id FROM workflow_operations
+              WHERE kind = 'GenericReviewHandoff' AND is_current = 1
+                AND json_type(input_json, '$.pullRequest') = 'object'
+                AND (state = 'ready' OR (state = 'leased' AND lease_until <= ${now.toISOString()}))
+                AND run_at <= ${now.toISOString()} AND attempt < max_attempts
+              ORDER BY run_at, operation_id LIMIT 1
+            )
+            RETURNING operation_id, input_json
+          `
+          const row = rows[0]
+          if (row === undefined) return null
+          const handoff = yield* Schema.decodeUnknown(Schema.parseJson(GenericReviewHandoffInput))(
+            row.input_json,
+          )
+          return { operationId: row.operation_id, leaseToken, pullRequest: handoff.pullRequest }
+        }),
+      ),
 
     isGenericReviewHandoffCurrent: (operationId, leaseToken, now) =>
       sql<{ readonly operation_id: string }>`

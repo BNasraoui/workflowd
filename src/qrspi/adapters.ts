@@ -185,6 +185,7 @@ type QrspiOctokit = {
       readonly create?: (input: Parameters<PullsApi["create"]>[0]) => Promise<{
         readonly data: { readonly number: number }
       }>
+      readonly update?: (input: Parameters<PullsApi["update"]>[0]) => Promise<unknown>
       readonly get?: (input: Parameters<PullsApi["get"]>[0]) => Promise<{
         readonly data: {
           readonly number: number
@@ -385,6 +386,21 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       return { repository: input.repository, number: created.data.number }
+    })
+
+  readonly closeFinalPullRequest: QrspiRepositoryPort["closeFinalPullRequest"] = (reference) =>
+    this.attempt("close final pull request", async (signal) => {
+      const { owner, repo } = repositoryName(reference.repository)
+      const client = await this.client(this.config.installationId)
+      if (client.rest.pulls.update === undefined)
+        throw new Error("Pull request closure unavailable")
+      await client.rest.pulls.update({
+        owner,
+        repo,
+        pull_number: reference.number,
+        state: "closed",
+        request: { signal },
+      })
     })
 
   readonly observeFinalPullRequest: QrspiRepositoryPort["observeFinalPullRequest"] = (input) =>

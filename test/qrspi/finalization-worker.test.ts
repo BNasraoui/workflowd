@@ -128,7 +128,7 @@ test.each([
 const repository = (calls: string[]) => ({
   inspect: () => Effect.die("unexpected inspect"),
   hasOpenPullRequest: () => Effect.die("unexpected pull request check"),
-  observeBranch: () => Effect.die("unexpected branch observation"),
+  observeBranch: () => Effect.succeed({ sha: intent.headSha }),
   observeAcceptedBranch: () => Effect.die("unexpected accepted branch observation"),
   createBranch: () => Effect.die("unexpected branch creation"),
   createFinalPullRequest: () =>
@@ -136,6 +136,7 @@ const repository = (calls: string[]) => ({
       calls.push("create")
       return observation.reference
     }),
+  closeFinalPullRequest: () => Effect.void,
   observeFinalPullRequest: () =>
     Effect.sync(() => {
       calls.push("observe")
@@ -282,6 +283,10 @@ test("PullRequestPublish records a created PR whose branch advanced during creat
       },
       repository: {
         ...repository(calls),
+        closeFinalPullRequest: ({ number }) =>
+          Effect.sync(() => {
+            calls.push(`close:${number}`)
+          }),
         observeFinalPullRequestReference: () =>
           Effect.sync(() => {
             calls.push("observe-reference")
@@ -297,7 +302,50 @@ test("PullRequestPublish records a created PR whose branch advanced during creat
     "create",
     "bind-reference:17",
     "observe-reference",
+    "close:17",
     `reconcile:17:${changed.headSha}`,
+  ])
+})
+
+test("PullRequestPublish refuses creation when the branch advanced after verification", async () => {
+  const calls: string[] = []
+  const changedHeadSha = "e".repeat(40)
+  const result = await Effect.runPromise(
+    runPullRequestPublishIterationWith({
+      workerId: "publisher",
+      leaseDurationMs: 60_000,
+      now: () => new Date("2026-07-22T00:00:00.000Z"),
+      randomId: () => "22222222-2222-4222-8222-222222222222",
+      store: {
+        findPullRequestPublicationRecovery: () => Effect.succeed(null),
+        claimFinalizationOperation: () => Effect.succeed(work),
+        bindPullRequestPublication: () => Effect.succeed("bound" as const),
+        bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
+        isFinalizationOperationCurrent: () => Effect.succeed(true),
+        completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordStalePullRequestPublicationEffect: () => Effect.die("unexpected stale effect"),
+        recordPullRequestPublicationFailure: ({ error }) =>
+          Effect.sync(() => {
+            calls.push(`record:${error}`)
+            return "waiting_external" as const
+          }),
+      },
+      repository: {
+        ...repository(calls),
+        observeBranch: () =>
+          Effect.sync(() => {
+            calls.push("observe-branch")
+            return { sha: changedHeadSha }
+          }),
+      },
+    }),
+  )
+
+  expect(result).toBe("waiting_external")
+  expect(calls).toEqual([
+    "observe",
+    "observe-branch",
+    "record:ticket branch advanced after pre-pull-request verification",
   ])
 })
 
