@@ -2727,11 +2727,16 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             ({ scenario, evidence }) =>
               `- **${ticketRevision.readyTicket.scenarios[scenario]!.name}**: ${evidence}`,
           )
+          const logical = `${scope.workflowId}:${scope.generation}:PullRequestPublish`
+          const publicationOperationId = `${logical}:1`
+          const marker = `<!-- workflowd-pull-request:${createHash("sha256").update(publicationOperationId).digest("hex")} -->`
           const body = [
             prepared.deliveryEvidence.summary,
             "",
             "## Delivery evidence",
             ...evidenceLines,
+            "",
+            marker,
           ].join("\n")
           const bodySha256 = createHash("sha256").update(body).digest("hex")
           const publishInput = {
@@ -2763,9 +2768,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               updated_at = ${input.now.toISOString()}
             WHERE operation_id = ${input.operationId}
           `
-          const logical = `${scope.workflowId}:${scope.generation}:PullRequestPublish`
           yield* insertOperation(sql, {
-            operationId: `${logical}:1`,
+            operationId: publicationOperationId,
             logicalOperationId: logical,
             revision: 1,
             retryOf: null,

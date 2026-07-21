@@ -107,6 +107,7 @@ export function validatePreparedDeliveryEvidence(
 ): void {
   const scenarios = new Set(evidence.scenarios.map(({ scenario }) => scenario))
   if (
+    scenarios.size !== evidence.scenarios.length ||
     scenarios.size !== readyTicket.scenarios.length ||
     [...scenarios].some((scenario) => scenario >= readyTicket.scenarios.length)
   ) {

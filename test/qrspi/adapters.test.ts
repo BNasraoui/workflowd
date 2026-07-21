@@ -178,7 +178,8 @@ describe("QRSPI external adapters", () => {
   })
 
   test("recovers a closed final pull request created before durable binding", async () => {
-    const body = "Implementation complete\n\n## Delivery evidence\n- Scenario passes"
+    const marker = `<!-- workflowd-pull-request:${"a".repeat(64)} -->`
+    const body = `Implementation complete\n\n## Delivery evidence\n- Scenario passes\n\n${marker}`
     const bodySha256 = createHash("sha256").update(body).digest("hex")
     let pull:
       | {
@@ -240,7 +241,8 @@ describe("QRSPI external adapters", () => {
 
     await Effect.runPromise(adapter.createFinalPullRequest(intent))
     if (pull === undefined) throw new Error("pull request was not created")
-    pull = { ...pull, state: "closed", body: "Edited and closed after creation" }
+    const editedBody = `Edited and closed after creation\n\n${marker}`
+    pull = { ...pull, state: "closed", body: editedBody }
     const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
 
     expect(observed).toMatchObject({
@@ -251,8 +253,64 @@ describe("QRSPI external adapters", () => {
       headRef: intent.headRef,
       headSha: intent.headSha,
       draft: false,
-      bodySha256: createHash("sha256").update("Edited and closed after creation").digest("hex"),
+      bodySha256: createHash("sha256").update(editedBody).digest("hex"),
     })
+  })
+
+  test("ignores an older closed pull request from a previous generation on the same branch", async () => {
+    const oldMarker = `<!-- workflowd-pull-request:${"a".repeat(64)} -->`
+    const currentMarker = `<!-- workflowd-pull-request:${"b".repeat(64)} -->`
+    const intent = {
+      repository,
+      baseRef: "main",
+      headRef: "feature/workflowd-vs3.3-start",
+      headSha: "f".repeat(40),
+      title: "Complete current generation",
+      body: `Current delivery evidence\n\n${currentMarker}`,
+      bodySha256: createHash("sha256")
+        .update(`Current delivery evidence\n\n${currentMarker}`)
+        .digest("hex"),
+      draft: false as const,
+    }
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: intent.headSha } } }),
+        },
+        pulls: {
+          list: async () => ({
+            data: [
+              {
+                number: 17,
+                state: "closed",
+                title: "Complete previous generation",
+                draft: false,
+                body: `Old delivery evidence\n\n${oldMarker}`,
+                html_url: "https://github.test/example-owner/example/pull/17",
+                base: { ref: intent.baseRef },
+                head: { ref: intent.headRef, sha: "e".repeat(40) },
+              },
+              {
+                number: 18,
+                state: "open",
+                title: intent.title,
+                draft: false,
+                body: intent.body,
+                html_url: "https://github.test/example-owner/example/pull/18",
+                base: { ref: intent.baseRef },
+                head: { ref: intent.headRef, sha: intent.headSha },
+              },
+            ],
+          }),
+        },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
+
+    expect(observed?.reference.number).toBe(18)
   })
 
   test("accepts the exact previously trusted branch head", async () => {

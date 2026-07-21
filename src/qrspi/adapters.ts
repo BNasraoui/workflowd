@@ -391,6 +391,8 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
     this.attempt("observe final pull request", async (signal) => {
       const { owner, repo } = repositoryName(input.repository)
       const client = await this.client(this.config.installationId)
+      const marker = /<!-- workflowd-pull-request:[0-9a-f]{64} -->/.exec(input.body)?.[0]
+      if (marker === undefined) return null
       const pulls = await client.rest.pulls.list({
         ...openPullRequestQuery(owner, repo, input.headRef),
         state: "all",
@@ -398,7 +400,8 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       const pull = pulls.data.find(
-        ({ base, head }) => base.ref === input.baseRef && head.ref === input.headRef,
+        ({ base, head, body }) =>
+          base.ref === input.baseRef && head.ref === input.headRef && body?.includes(marker),
       )
       if (pull === undefined) return null
       return finalPullRequestObservation(input.repository, pull)

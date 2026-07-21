@@ -10,6 +10,7 @@ import {
   makeQrspiHarnessDefinitions,
   qrspiHarnessDefinitionsForWorkflows,
   runStageContract,
+  validatePreparedDeliveryEvidence,
   type StageContract,
 } from "../../src/qrspi/stages"
 
@@ -36,6 +37,18 @@ const readyTicket = {
 }
 
 describe("StageCatalog", () => {
+  test("rejects duplicate evidence for one ticket scenario", () => {
+    expect(() =>
+      validatePreparedDeliveryEvidence(readyTicket, {
+        summary: "Duplicated evidence",
+        scenarios: [
+          { scenario: 0, evidence: "first entry" },
+          { scenario: 0, evidence: "duplicate entry" },
+        ],
+      }),
+    ).toThrow("Delivery evidence must cover every ticket scenario exactly")
+  })
+
   test("registers the six versioned built-in contracts in deterministic order", () => {
     const catalog = new StageCatalog(BuiltInStageContracts)
 
