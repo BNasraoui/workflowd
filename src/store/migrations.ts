@@ -282,7 +282,6 @@ const agentHarnessSchema = Effect.gen(function* () {
       launch_intent_json TEXT NOT NULL CHECK (
         json_valid(launch_intent_json) = 1
           AND json_type(launch_intent_json, '$') = 'object'
-          AND length(launch_intent_json) <= 65536
       ),
       session_reference_json TEXT CHECK (
         session_reference_json IS NULL OR (

@@ -240,6 +240,59 @@ test("persists every schema-valid review output larger than 64 KiB", async () =>
   expect(result.outputLength).toBeGreaterThan(65_536)
 })
 
+test("persists every schema-valid launch intent larger than 64 KiB", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "large-agent-launch-intent",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent({
+          ...samplePullRequestEvent,
+          pullRequest: {
+            ...samplePullRequestEvent.pullRequest,
+            updatedAt: "2026-07-20T12:00:00.000Z",
+          },
+        }),
+      )
+      const work = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (work === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        work,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "2026-07-20T12:01:01.000Z",
+      )
+      const recorded = yield* store.recordAgentLaunchIntent({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: {
+          ...execution.intent,
+          input: { subject: "x".repeat(70_000) },
+        },
+      })
+      const rows = yield* sql<{ readonly launch_intent_length: number }>`
+        SELECT length(launch_intent_json) AS launch_intent_length FROM agent_executions
+      `
+      return { recorded, launchIntentLength: rows[0]?.launch_intent_length }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.recorded).toBe("recorded")
+  expect(result.launchIntentLength).toBeGreaterThan(65_536)
+})
+
 test("restarts with a new session after either checkpoint and fences expired attempts", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
