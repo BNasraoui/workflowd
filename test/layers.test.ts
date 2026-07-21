@@ -12,6 +12,7 @@ import { makeLiveLayer } from "../src/layers"
 import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
+import { WorkflowStart } from "../src/qrspi/workflow-start"
 
 test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))
@@ -25,6 +26,17 @@ test("composes the reusable agent harness with the live ports", async () => {
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
+          contractVersion: 1,
+          definitionVersion: 1,
+          stages: [],
+        }),
       },
       { home: directory },
     )
@@ -39,12 +51,14 @@ test("composes the reusable agent harness with the live ports", async () => {
         const automation = yield* Automation
         const agentHarness = yield* AgentHarness
         const workspace = yield* Workspace
+        const workflowStart = yield* WorkflowStart
         return [
           store.claimNextJob,
           github.publishReview,
           automation.prepareReview,
           agentHarness.createSession,
           workspace.prepareReview,
+          workflowStart.start,
         ]
       }).pipe(Effect.provide(Live)),
     )

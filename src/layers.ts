@@ -15,6 +15,10 @@ import {
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
+import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
+import { QrspiRepository, TicketSource } from "./qrspi/ports"
+import { QrspiStoreLive } from "./qrspi/store"
+import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
@@ -39,6 +43,56 @@ export const makeLiveLayer = (config: AppConfig) => {
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
+  const qrspiLayer =
+    config.qrspi === undefined
+      ? Layer.succeed(WorkflowStart, {
+          start: () =>
+            Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
+        })
+      : WorkflowStartLive({
+          binding: {
+            repository: config.qrspi.repository,
+            trackerInstanceId: config.qrspi.trackerInstanceId,
+          },
+          baseRef: config.qrspi.baseRef,
+          repositoryOperationTimeoutMs: config.qrspi.repositoryOperationTimeoutMs,
+          operationCompletionMarginMs: config.qrspi.operationCompletionMarginMs,
+          leaseDurationMs: config.qrspi.leaseDurationMs,
+          workflowDefinition: config.qrspi.workflowDefinition,
+        }).pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              QrspiStoreLive,
+              Layer.succeed(
+                TicketSource,
+                new BeadsCliTicketSource(
+                  config.qrspi.beadsWorkspace,
+                  config.qrspi.trackerInstanceId,
+                ),
+              ),
+              Layer.effect(
+                QrspiRepository,
+                Effect.tryPromise({
+                  try: () => readFile(config.github.privateKeyPath, "utf8"),
+                  catch: (cause) =>
+                    new Error(`Could not read GitHub App private key: ${String(cause)}`),
+                }).pipe(
+                  Effect.map(
+                    (privateKey) =>
+                      new GitHubQrspiRepository(config.qrspi!, async (installationId) => {
+                        const app = new App({
+                          appId: config.github.appId,
+                          privateKey,
+                          Octokit,
+                        })
+                        return app.getInstallationOctokit(installationId)
+                      }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        )
   return Layer.mergeAll(
     WorkflowStoreLive,
     Layer.effect(
@@ -66,5 +120,6 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
+    qrspiLayer,
   )
 }

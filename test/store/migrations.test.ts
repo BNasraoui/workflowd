@@ -120,7 +120,9 @@ describe("strict initial store schema", () => {
           FROM pragma_table_list
           WHERE name IN (
             'webhook_deliveries', 'pull_requests', 'jobs', 'publications',
-            'commands', 'reconciliations', 'agent_executions'
+            'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
+            'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
+            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations'
           )
           ORDER BY name
         `
@@ -135,11 +137,29 @@ describe("strict initial store schema", () => {
       { migration_id: 2, name: "agent_harness" },
       { migration_id: 3, name: "agent_session_cleanup_leases" },
       { migration_id: 4, name: "agent_session_recovery_and_payload_envelopes" },
+      { migration_id: 5, name: "qrspi_workflow_start" },
     ])
-    expect(result.tables).toHaveLength(7)
+    expect(result.tables).toHaveLength(13)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
+  })
+
+  test("scopes identical ticket revision hashes to their owning workflow", async () => {
+    const primaryKey = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly name: string; readonly pk: number }>`
+          SELECT name, pk FROM pragma_table_info('qrspi_ticket_revisions')
+          WHERE pk > 0 ORDER BY pk
+        `
+      }),
+    )
+
+    expect(primaryKey).toEqual([
+      { name: "workflow_id", pk: 1 },
+      { name: "ticket_revision_sha256", pk: 2 },
+    ])
   })
 
   test("rejects invalid leased and non-leased Work State rows", async () => {

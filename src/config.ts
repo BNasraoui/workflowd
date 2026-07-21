@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/domain"
 
 interface HttpConfig {
   readonly host: string
@@ -53,6 +54,23 @@ interface WorkerConfig {
   readonly commandUsers: ReadonlyArray<string>
 }
 
+export interface QrspiConfig {
+  readonly token: string
+  readonly installationId: number
+  readonly repository: {
+    readonly providerInstanceId: string
+    readonly repositoryId: string
+    readonly repositoryFullName: string
+  }
+  readonly trackerInstanceId: string
+  readonly beadsWorkspace: string
+  readonly baseRef: string
+  readonly repositoryOperationTimeoutMs: number
+  readonly operationCompletionMarginMs: number
+  readonly leaseDurationMs: number
+  readonly workflowDefinition: WorkflowDefinition
+}
+
 export interface AppConfig {
   readonly http: HttpConfig
   readonly github: GitHubConfig
@@ -61,6 +79,7 @@ export interface AppConfig {
   readonly workspace: WorkspaceConfig
   readonly openCode: OpenCodeConfig
   readonly worker: WorkerConfig
+  readonly qrspi?: QrspiConfig
 }
 
 export interface ConfigLoadOptions {
@@ -227,6 +246,7 @@ export async function loadConfig(
       "WORKFLOWD_PUBLICATION_LEASE_MS must be greater than WORKFLOWD_PUBLICATION_TIMEOUT_MS",
     )
   }
+  const qrspi = loadQrspiConfig(env)
 
   return {
     http: {
@@ -310,5 +330,82 @@ export async function loadConfig(
       agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
       commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
     },
+    ...(qrspi === undefined ? {} : { qrspi }),
+  }
+}
+
+function loadQrspiConfig(env: Record<string, string | undefined>): QrspiConfig | undefined {
+  const token = env.WORKFLOWD_QRSPI_TOKEN
+  const names = [
+    "WORKFLOWD_QRSPI_INSTALLATION_ID",
+    "WORKFLOWD_QRSPI_REPOSITORY_ID",
+    "WORKFLOWD_QRSPI_REPOSITORY",
+    "WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID",
+    "WORKFLOWD_QRSPI_BEADS_WORKSPACE",
+    "WORKFLOWD_QRSPI_DEFINITION_JSON",
+    "WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS",
+    "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
+    "WORKFLOWD_QRSPI_LEASE_MS",
+  ] as const
+  if (token === undefined) {
+    if (names.some((name) => env[name] !== undefined)) {
+      throw new Error("WORKFLOWD_QRSPI_TOKEN is required when QRSPI settings are present")
+    }
+    return undefined
+  }
+  if (token.length < 8) throw new Error("WORKFLOWD_QRSPI_TOKEN must contain at least 8 characters")
+  const repositoryFullName = required(env, "WORKFLOWD_QRSPI_REPOSITORY")
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repositoryFullName)) {
+    throw new Error("WORKFLOWD_QRSPI_REPOSITORY must use owner/name syntax")
+  }
+  const definitionJson = required(env, "WORKFLOWD_QRSPI_DEFINITION_JSON")
+  let workflowDefinition: WorkflowDefinition
+  try {
+    workflowDefinition = normalizeWorkflowDefinition(JSON.parse(definitionJson))
+  } catch (cause) {
+    throw new Error("WORKFLOWD_QRSPI_DEFINITION_JSON must be a valid workflow definition", {
+      cause,
+    })
+  }
+  const appId = positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID")
+  const repositoryOperationTimeoutMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS,
+    30_000,
+    "WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS",
+  )
+  const operationCompletionMarginMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS,
+    10_000,
+    "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
+  )
+  const leaseDurationMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_LEASE_MS,
+    60_000,
+    "WORKFLOWD_QRSPI_LEASE_MS",
+  )
+  if (leaseDurationMs <= repositoryOperationTimeoutMs + operationCompletionMarginMs) {
+    throw new Error(
+      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+    )
+  }
+  return {
+    token,
+    installationId: positiveInteger(
+      required(env, "WORKFLOWD_QRSPI_INSTALLATION_ID"),
+      0,
+      "WORKFLOWD_QRSPI_INSTALLATION_ID",
+    ),
+    repository: {
+      providerInstanceId: env.WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID ?? `github-app-${appId}`,
+      repositoryId: required(env, "WORKFLOWD_QRSPI_REPOSITORY_ID"),
+      repositoryFullName,
+    },
+    trackerInstanceId: required(env, "WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID"),
+    beadsWorkspace: required(env, "WORKFLOWD_QRSPI_BEADS_WORKSPACE"),
+    baseRef: env.WORKFLOWD_QRSPI_BASE_REF ?? "main",
+    repositoryOperationTimeoutMs,
+    operationCompletionMarginMs,
+    leaseDurationMs,
+    workflowDefinition,
   }
 }
