@@ -159,7 +159,6 @@ export function makePullRequestTransition(
             lease_until = NULL,
             last_error = NULL,
             updated_at = excluded.updated_at
-          WHERE reconciliations.state IN ('succeeded', 'failed', 'data_error')
         `
         return {
           status: "reconciliation_enqueued",
