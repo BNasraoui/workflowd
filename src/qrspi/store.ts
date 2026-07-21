@@ -256,6 +256,13 @@ export type QrspiStorePort = {
     leaseToken: string,
     now: Date,
   ) => Effect.Effect<boolean, SqlError>
+  readonly isTrustedArtifactPublication: (input: {
+    readonly repository: typeof RepositoryReference.Type
+    readonly headRef: string
+    readonly controllerId: string
+    readonly operationId: string
+    readonly commitSha: string
+  }) => Effect.Effect<string | null, SqlError>
   readonly recordStageAgentLaunchIntent: (input: {
     readonly operationId: string
     readonly leaseToken: string
@@ -373,11 +380,22 @@ export type QrspiStorePort = {
     readonly intent: FinalPullRequestIntent
     readonly now: Date
   }) => Effect.Effect<"bound" | "conflict" | "stale", SqlError | ParseError>
+  readonly isFinalizationOperationCurrent: (
+    operationId: string,
+    now: Date,
+  ) => Effect.Effect<boolean, SqlError>
   readonly completePullRequestPublication: (input: {
     readonly operationId: string
     readonly observation: FinalPullRequestObservation
     readonly now: Date
   }) => Effect.Effect<"published" | "stale", SqlError | ParseError>
+  readonly recordStalePullRequestPublicationEffect: (input: {
+    readonly operationId: string
+    readonly intent: FinalPullRequestIntent
+    readonly reference: FinalPullRequestObservation["reference"]
+    readonly observation?: FinalPullRequestObservation
+    readonly now: Date
+  }) => Effect.Effect<"reconciling" | "stale", SqlError | ParseError>
   readonly rescheduleFinalizationOperation: (input: {
     readonly operationId: string
     readonly leaseToken: string
@@ -1509,6 +1527,29 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           AND g.is_current = 1 AND g.state = 'running' AND r.state = 'active'
           AND r.pending_revision = json_extract(o.input_json, '$.stageRevision')
       `.pipe(Effect.map((rows) => rows.length === 1)),
+
+    isTrustedArtifactPublication: (input) =>
+      sql<{ readonly expected_old: string }>`
+        SELECT json_extract(o.external_intent_json, '$.expectedOld') AS expected_old
+        FROM workflow_operations o
+        CROSS JOIN workflowd_controller c
+        JOIN qrspi_generations g
+          ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+          AND g.generation = json_extract(o.scope_json, '$.generation')
+        WHERE c.controller_id = ${input.controllerId}
+          AND o.operation_id = ${input.operationId}
+          AND o.kind = 'ArtifactPublish'
+          AND o.external_intent_json IS NOT NULL
+          AND json_extract(g.repository_json, '$.providerInstanceId') = ${input.repository.providerInstanceId}
+          AND json_extract(g.repository_json, '$.repositoryId') = ${input.repository.repositoryId}
+          AND json_extract(g.repository_json, '$.repositoryFullName') = ${input.repository.repositoryFullName}
+          AND g.head_ref = ${input.headRef}
+          AND coalesce(
+            json_extract(o.external_intent_json, '$.finalSha'),
+            json_extract(o.external_intent_json, '$.commit.commitSha')
+          ) = ${input.commitSha}
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0]?.expected_old ?? null)),
 
     rescheduleStageOperation: (input) =>
       transaction(
@@ -2756,6 +2797,19 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }),
       ),
 
+    isFinalizationOperationCurrent: (operationId, now) =>
+      sql<{ readonly operation_id: string }>`
+        SELECT o.operation_id FROM workflow_operations o
+        JOIN qrspi_generations g
+          ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+          AND g.generation = json_extract(o.scope_json, '$.generation')
+        WHERE o.operation_id = ${operationId} AND o.kind = 'PullRequestPublish'
+          AND o.state = 'waiting_external' AND o.is_current = 1
+          AND o.updated_at <= ${now.toISOString()}
+          AND g.is_current = 1 AND g.state = 'finalizing'
+          AND g.current_head_sha = json_extract(o.external_intent_json, '$.headSha')
+      `.pipe(Effect.map((rows) => rows.length === 1)),
+
     completePullRequestPublication: (input) =>
       transaction(
         Effect.gen(function* () {
@@ -2837,6 +2891,98 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             now: input.now,
           })
           return "published" as const
+        }),
+      ),
+
+    recordStalePullRequestPublicationEffect: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const suppliedIntent = yield* Schema.decodeUnknown(FinalPullRequestIntentSchema)(
+            input.intent,
+          )
+          const reference = yield* Schema.decodeUnknown(
+            FinalPullRequestObservationSchema.fields.reference,
+          )(input.reference)
+          const observation =
+            input.observation === undefined
+              ? undefined
+              : yield* Schema.decodeUnknown(FinalPullRequestObservationSchema)(input.observation)
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly external_intent_json: string
+          }>`
+            SELECT scope_json, external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+              AND state IN ('waiting_external', 'superseded')
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const intent = yield* Schema.decodeUnknown(
+            Schema.parseJson(FinalPullRequestIntentSchema),
+          )(row.external_intent_json)
+          if (
+            canonicalSha256(intent) !== canonicalSha256(suppliedIntent) ||
+            canonicalSha256(reference.repository) !== canonicalSha256(intent.repository) ||
+            (observation !== undefined &&
+              (observation.draft ||
+                canonicalSha256(observation.reference) !== canonicalSha256(reference) ||
+                observation.headSha !== intent.headSha ||
+                observation.headRef !== intent.headRef ||
+                observation.baseRef !== intent.baseRef ||
+                observation.bodySha256 !== intent.bodySha256))
+          ) {
+            return "stale" as const
+          }
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          yield* sql`
+            UPDATE workflow_operations
+            SET state = 'superseded', is_current = 0,
+                external_observation_json = ${JSON.stringify({
+                  reference,
+                  ...(observation === undefined ? {} : { observation }),
+                  outcome: "stale_effect",
+                })}, last_error = 'pull request created after currentness was lost',
+                lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+              AND state IN ('waiting_external', 'superseded')
+          `
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'reconciling', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND is_current = 1
+              AND state NOT IN ('completed', 'rejected', 'cancelled', 'failed', 'superseded')
+          `
+          const reconciliationIdentity = canonicalSha256({
+            staleOperationId: input.operationId,
+            pullRequest: reference,
+          })
+          const logical = `${scope.workflowId}:TargetReconcile:${reconciliationIdentity}`
+          const existing = yield* sql<{ readonly operation_id: string }>`
+            SELECT operation_id FROM workflow_operations
+            WHERE logical_operation_id = ${logical} AND is_current = 1
+          `
+          if (existing.length === 0) {
+            const reconciliationInput = {
+              staleOperationId: input.operationId,
+              generation: scope.generation,
+              pullRequest: observation ?? { reference, intent },
+            }
+            yield* insertOperation(sql, {
+              operationId: `${logical}:1`,
+              logicalOperationId: logical,
+              revision: 1,
+              retryOf: null,
+              kind: "TargetReconcile",
+              scope: { _tag: "WorkflowScope", workflowId: scope.workflowId },
+              inputJson: JSON.stringify(reconciliationInput),
+              inputSha256: canonicalSha256(reconciliationInput),
+              state: "ready",
+              attempt: 0,
+              parentEffect: { success: "audit only", failure: "open operation-scoped gate" },
+              now: input.now,
+            })
+          }
+          return "reconciling" as const
         }),
       ),
 

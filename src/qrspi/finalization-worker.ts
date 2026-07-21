@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto"
 import { Cause, Effect, Exit, Schema } from "effect"
 import { RepositoryReference } from "./domain"
-import { QrspiRepository, type FinalPullRequestIntent } from "./ports"
+import {
+  QrspiRepository,
+  type FinalPullRequestIntent,
+  type FinalPullRequestObservation,
+} from "./ports"
 import { QrspiStore, type QrspiStorePort } from "./store"
 import { ImplementationCheckpointReference, PreparedDeliveryEvidence } from "./stages"
 
@@ -125,7 +129,9 @@ export function runPullRequestPublishIterationWith(options: {
     | "claimFinalizationOperation"
     | "findPullRequestPublicationRecovery"
     | "bindPullRequestPublication"
+    | "isFinalizationOperationCurrent"
     | "completePullRequestPublication"
+    | "recordStalePullRequestPublicationEffect"
   >
   readonly repository: typeof QrspiRepository.Service
 }) {
@@ -162,15 +168,61 @@ export function runPullRequestPublishIterationWith(options: {
       if (binding !== "bound") return binding
     }
     let observed = yield* options.repository.observeFinalPullRequest(intent)
+    let created: FinalPullRequestObservation["reference"] | undefined
     if (observed === null) {
-      yield* options.repository.createFinalPullRequest(intent)
-      observed = yield* options.repository.observeFinalPullRequest(intent)
+      if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
+        return "stale" as const
+      }
+      created = yield* options.repository.createFinalPullRequest(intent)
+      const observation = yield* Effect.exit(options.repository.observeFinalPullRequest(intent))
+      if (Exit.isFailure(observation)) {
+        if (
+          !(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))
+        ) {
+          return yield* options.store.recordStalePullRequestPublicationEffect({
+            operationId: work.operationId,
+            intent,
+            reference: created,
+            now: options.now(),
+          })
+        }
+        return yield* Effect.failCause(observation.cause)
+      }
+      observed = observation.value
     }
     if (observed === null) {
+      if (
+        created !== undefined &&
+        !(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))
+      ) {
+        return yield* options.store.recordStalePullRequestPublicationEffect({
+          operationId: work.operationId,
+          intent,
+          reference: created,
+          now: options.now(),
+        })
+      }
       return yield* Effect.fail(new Error("final pull request was not observable after creation"))
     }
-    return yield* options.store.completePullRequestPublication({
+    if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
+      return yield* options.store.recordStalePullRequestPublicationEffect({
+        operationId: work.operationId,
+        intent,
+        reference: observed.reference,
+        observation: observed,
+        now: options.now(),
+      })
+    }
+    const completion = yield* options.store.completePullRequestPublication({
       operationId: work.operationId,
+      observation: observed,
+      now: options.now(),
+    })
+    if (completion !== "stale") return completion
+    return yield* options.store.recordStalePullRequestPublicationEffect({
+      operationId: work.operationId,
+      intent,
+      reference: observed.reference,
       observation: observed,
       now: options.now(),
     })

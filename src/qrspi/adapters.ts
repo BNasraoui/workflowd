@@ -190,12 +190,15 @@ type QrspiOctokit = {
   }
 }
 type OctokitProvider = (installationId: number) => Promise<QrspiOctokit>
-type TrustedPublicationVerifier = (input: {
-  readonly repository: RepositoryReference
-  readonly headRef: string
-  readonly jobId: number
-  readonly commitSha: string
-}) => Promise<string | null>
+type TrustedPublicationVerifier = (
+  input: {
+    readonly repository: RepositoryReference
+    readonly headRef: string
+    readonly commitSha: string
+  } & (
+    { readonly jobId: number } | { readonly controllerId: string; readonly operationId: string }
+  ),
+) => Promise<string | null>
 
 export class GitHubQrspiRepository implements QrspiRepositoryPort {
   constructor(
@@ -416,13 +419,22 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       const commit = response.data
-      const jobIds = [...commit.commit.message.matchAll(/^Workflowd-Job: ([1-9]\d*)$/gm)]
-      const jobId = Number(jobIds[0]?.[1])
+      const jobs = [...commit.commit.message.matchAll(/^Workflowd-Job: (\S+)$/gm)]
+      const identity = jobs[0]?.[1]
+      const legacy = identity === undefined ? undefined : /^([1-9]\d*)$/.exec(identity)
+      const qrspi =
+        identity === undefined
+          ? undefined
+          : /^([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):(.+)$/i.exec(
+              identity,
+            )
+      const jobId = Number(legacy?.[1])
       if (
         commit.sha !== currentSha ||
         commit.parents.length !== 1 ||
-        jobIds.length !== 1 ||
-        !Number.isSafeInteger(jobId) ||
+        jobs.length !== 1 ||
+        (legacy == null && qrspi == null) ||
+        (legacy != null && !Number.isSafeInteger(jobId)) ||
         commit.commit.verification?.verified !== true
       ) {
         return false
@@ -430,7 +442,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       const expectedParentSha = await this.isTrustedPublication({
         repository,
         headRef,
-        jobId,
+        ...(legacy == null ? { controllerId: qrspi![1]!, operationId: qrspi![2]! } : { jobId }),
         commitSha: currentSha,
       })
       if (expectedParentSha === null || commit.parents[0]!.sha !== expectedParentSha) return false

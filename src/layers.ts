@@ -18,7 +18,7 @@ import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
-import { QrspiStoreLive } from "./qrspi/store"
+import { QrspiStore, QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 import {
@@ -97,6 +97,7 @@ export const makeLiveLayer = (config: AppConfig) => {
                 QrspiRepository,
                 Effect.gen(function* () {
                   const store = yield* WorkflowStore
+                  const qrspiStore = yield* QrspiStore
                   const privateKey = yield* Effect.tryPromise({
                     try: () => readFile(config.github.privateKeyPath, "utf8"),
                     catch: (cause) =>
@@ -115,6 +116,17 @@ export const makeLiveLayer = (config: AppConfig) => {
                     (publication) => {
                       const signingKey = config.workspace.gitSigningKey
                       if (signingKey === undefined) return Promise.resolve(null)
+                      if ("controllerId" in publication) {
+                        return Effect.runPromise(
+                          qrspiStore.isTrustedArtifactPublication({
+                            repository: publication.repository,
+                            headRef: publication.headRef,
+                            controllerId: publication.controllerId,
+                            operationId: publication.operationId,
+                            commitSha: publication.commitSha,
+                          }),
+                        )
+                      }
                       return Effect.runPromise(
                         store.isTrustedBranchPublication({
                           repositoryId: publication.repository.repositoryId,
@@ -127,7 +139,7 @@ export const makeLiveLayer = (config: AppConfig) => {
                       )
                     },
                   )
-                }).pipe(Effect.provide(WorkflowStoreLive)),
+                }).pipe(Effect.provide(Layer.merge(WorkflowStoreLive, QrspiStoreLive))),
               ),
             ),
           ),

@@ -436,7 +436,7 @@ describe("WorkflowStart integration", () => {
       mediaType: "text/markdown",
     }
 
-    await Effect.runPromise(
+    const trustedParent = await Effect.runPromise(
       Effect.gen(function* () {
         const store = yield* QrspiStore
         const produce = yield* store.claimStageOperation(
@@ -474,6 +474,13 @@ describe("WorkflowStart integration", () => {
           artifact: publication,
           now: new Date("2026-07-21T05:01:03.000Z"),
         })
+        const trustedParent = yield* store.isTrustedArtifactPublication({
+          repository,
+          headRef: publish.headRef,
+          controllerId: publish.controllerId,
+          operationId: publish.operationId,
+          commitSha: publication.commitSha,
+        })
         yield* store.completeArtifactPublication({
           operationId: publish.operationId,
           expectedOld: baseSha,
@@ -482,8 +489,10 @@ describe("WorkflowStart integration", () => {
           observedHeadSha: publication.commitSha,
           now: new Date("2026-07-21T05:01:04.000Z"),
         })
+        return trustedParent
       }).pipe(Effect.provide(layer(filename, fake))),
     )
+    expect(trustedParent).toBe(baseSha)
 
     const state = await Effect.runPromise(
       Effect.gen(function* () {
