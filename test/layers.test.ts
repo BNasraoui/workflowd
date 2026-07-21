@@ -6,13 +6,14 @@ import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { loadConfig } from "../src/config"
+import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
 import { makeLiveLayer } from "../src/layers"
 import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 
-test("composes the four live ports from AppConfig and SqlClient", async () => {
+test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))
   try {
     const privateKeyPath = join(directory, "github.pem")
@@ -36,11 +37,13 @@ test("composes the four live ports from AppConfig and SqlClient", async () => {
         const store = yield* WorkflowStore
         const github = yield* GitHub
         const automation = yield* Automation
+        const agentHarness = yield* AgentHarness
         const workspace = yield* Workspace
         return [
           store.claimNextJob,
           github.publishReview,
-          automation.runReview,
+          automation.prepareReview,
+          agentHarness.createSession,
           workspace.prepareReview,
         ]
       }).pipe(Effect.provide(Live)),

@@ -1,9 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import {
+  AgentHarness,
+  AgentHarnessError,
+  type AgentHarnessPort,
+  type AgentExecutionContext,
+  type AgentLaunchIntent,
+  SessionReference,
+} from "../src/agent-harness"
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
+import { ReviewResult } from "../src/domain/review-result"
 import { GitHub, type GitHubPort } from "../src/github"
-import { Automation, type AutomationPort } from "../src/opencode"
+import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
 import {
   runCommandIteration,
   runJobIteration,
@@ -33,6 +42,10 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   completeFixJob: () => Effect.die("unused"),
   disableFixJob: () => Effect.die("unused"),
   recordFixResult: () => Effect.die("unused"),
+  completeAgentReviewJob: (input) => overrides.completeReviewJob?.(input) ?? Effect.die("unused"),
+  recordAgentFixResult: (input) => overrides.recordFixResult?.(input) ?? Effect.die("unused"),
+  recordAgentLaunchIntent: () => Effect.succeed("recorded"),
+  recordAgentSessionReference: () => Effect.succeed("recorded"),
   claimNextPublication: () => Effect.succeed(null),
   isPublicationCurrent: () => Effect.succeed(false),
   isJobCurrent: () => Effect.succeed(false),
@@ -45,13 +58,20 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   ...overrides,
 })
 
+type TestAutomation = Partial<AutomationPort> & {
+  readonly runReview?: () => Effect.Effect<typeof ReviewResult.Type>
+  readonly runFix?: () => Effect.Effect<typeof FixResult.Type>
+}
+
 const makeWorkerLayer = (options: {
   readonly store?: Partial<WorkflowStorePort>
   readonly github?: Partial<GitHubPort>
-  readonly automation?: Partial<AutomationPort>
+  readonly automation?: TestAutomation
+  readonly agentHarness?: Partial<AgentHarnessPort>
   readonly workspace?: Partial<WorkspacePort>
-}) =>
-  Layer.mergeAll(
+}) => {
+  const automation = options.automation
+  return Layer.mergeAll(
     Layer.succeed(WorkflowStore, makeStore(options.store)),
     Layer.succeed(GitHub, {
       publishReview: () => Effect.die("unused"),
@@ -60,9 +80,26 @@ const makeWorkerLayer = (options: {
     }),
     Layer.succeed(Automation, {
       validateAvailability: () => Effect.die("unused"),
-      runReview: () => Effect.die("unused"),
-      runFix: () => Effect.die("unused"),
+      prepareReview: (_input, context) => Effect.succeed(preparedReview(context)),
+      prepareFix: (_input, context) => Effect.succeed(preparedFix(context)),
       ...options.automation,
+    }),
+    Layer.succeed(AgentHarness, {
+      validateAvailability: () => Effect.die("unused"),
+      prepare: () => Effect.die("unused"),
+      createSession: (prepared) => Effect.succeed(sessionReference(prepared)),
+      resumeSession: (prepared) => {
+        const execution: Effect.Effect<unknown> =
+          prepared.launchIntent.harness.name === "opencode.pr-review"
+            ? (automation?.runReview?.() ?? Effect.die("unused"))
+            : (automation?.runFix?.() ?? Effect.die("unused"))
+        return execution.pipe(
+          Effect.flatMap((result) => Schema.decodeUnknown(prepared.outputSchema)(result)),
+          Effect.orDie,
+        )
+      },
+      abortSession: () => Effect.void,
+      ...options.agentHarness,
     }),
     Layer.succeed(Workspace, {
       prepareReview: () => Effect.die("unused"),
@@ -71,6 +108,69 @@ const makeWorkerLayer = (options: {
       ...options.workspace,
     }),
   )
+}
+
+const preparedReview = (context: AgentExecutionContext) => ({
+  launchIntent: {
+    sessionReferenceId: "22222222-2222-4222-8222-222222222222",
+    harness: { name: "opencode.pr-review", version: 1 },
+    definitionHash: "a".repeat(64),
+    agent: "pr-reviewer",
+    model: "openai/gpt-5.6-sol",
+    input: Schema.decodeUnknownSync(RunPullRequestAutomationInput)({
+      directory: context.directory,
+      repositoryFullName: "example-owner/example",
+      pullRequestNumber: 7,
+      baseSha: "d".repeat(40),
+      headSha: "a".repeat(40),
+    }),
+    scope: context.scope,
+    operationId: context.operationId,
+    operationRevision: context.operationRevision,
+    attempt: context.attempt,
+    leaseToken: context.leaseToken,
+    directory: context.directory,
+    timeoutMs: 10_000,
+    retryPolicy: {
+      maxAttempts: 3,
+      structuredOutputRetryCount: 2,
+      invalidOutput: "retry" as const,
+    },
+    requestedAt: context.requestedAt.toISOString(),
+  },
+  title: "review:example-owner/example#7",
+  prompt: "Review the pull request.",
+  model: { providerID: "openai", modelID: "gpt-5.6-sol" },
+  outputSchema: ReviewResult,
+  outputJsonSchema: { type: "object" },
+  pollIntervalMs: 1,
+})
+
+const preparedFix = (context: AgentExecutionContext) => ({
+  ...preparedReview(context),
+  launchIntent: {
+    ...preparedReview(context).launchIntent,
+    harness: { name: "opencode.pr-fix", version: 1 },
+    agent: "pr-fixer",
+  },
+  outputSchema: FixResult,
+})
+
+const sessionReference = <Input>(prepared: { readonly launchIntent: AgentLaunchIntent<Input> }) =>
+  Schema.decodeUnknownSync(SessionReference)({
+    sessionReferenceId: prepared.launchIntent.sessionReferenceId,
+    serverId: "opencode-primary",
+    endpointAlias: "private-opencode",
+    directory: prepared.launchIntent.directory,
+    nativeSessionId: "ses_review",
+    scope: prepared.launchIntent.scope,
+    operationId: prepared.launchIntent.operationId,
+    operationRevision: prepared.launchIntent.operationRevision,
+    attempt: prepared.launchIntent.attempt,
+    leaseToken: prepared.launchIntent.leaseToken,
+    createdAt: "2026-07-20T12:00:00.000Z",
+    state: "created",
+  })
 
 const jobOptions = {
   workerId: "worker-1",
@@ -112,6 +212,7 @@ describe("Review Work processing", () => {
   test("reviews the scoped worktree and commits the structured result", async () => {
     const actions: Array<string> = []
     const job = makeReviewWork({ target: { headRef: "feature" } })
+    let prepared: ReturnType<typeof preparedReview> | undefined
 
     const result = await Effect.runPromise(
       runJobIteration(jobOptions).pipe(
@@ -119,22 +220,48 @@ describe("Review Work processing", () => {
           makeWorkerLayer({
             store: {
               claimNextJob: () => Effect.succeed(job),
-              completeReviewJob: (input) =>
+              recordAgentLaunchIntent: () =>
+                Effect.sync(() => {
+                  actions.push("launch")
+                  return "recorded" as const
+                }),
+              recordAgentSessionReference: () =>
+                Effect.sync(() => {
+                  actions.push("session")
+                  return "recorded" as const
+                }),
+              completeAgentReviewJob: (input) =>
                 Effect.sync(() => {
                   actions.push(`complete:${input.review.verdict}`)
                   return "completed" as const
                 }),
             },
             automation: {
-              runReview: () =>
+              prepareReview: (_input, context) =>
                 Effect.sync(() => {
-                  actions.push("review")
+                  actions.push("prepare")
+                  prepared = preparedReview(context)
+                  return prepared
+                }),
+            },
+            agentHarness: {
+              createSession: () =>
+                Effect.sync(() => {
+                  actions.push("create")
+                  return sessionReference(prepared!)
+                }),
+              resumeSession: (agentWork) =>
+                Effect.sync(() => {
+                  actions.push("prompt")
                   return {
                     verdict: "pass" as const,
                     summary: "No actionable findings.",
                     findings: [],
                   }
-                }),
+                }).pipe(
+                  Effect.flatMap((result) => Schema.decodeUnknown(agentWork.outputSchema)(result)),
+                  Effect.orDie,
+                ),
             },
             workspace: {
               prepareReview: () =>
@@ -154,7 +281,16 @@ describe("Review Work processing", () => {
     )
 
     expect(result).toBe("completed")
-    expect(actions).toEqual(["workspace:acquire", "review", "complete:pass", "workspace:release"])
+    expect(actions).toEqual([
+      "workspace:acquire",
+      "prepare",
+      "launch",
+      "create",
+      "session",
+      "prompt",
+      "complete:pass",
+      "workspace:release",
+    ])
   })
 
   test("queues a fixer after findings on an agent-owned PR", async () => {
@@ -457,6 +593,44 @@ describe("runJobIteration", () => {
 
     expect(result).toBe("retry")
     expect(calls[0]).toContain("temporary failure")
+  })
+
+  test("exhausts the current attempt for terminal structured-output policy", async () => {
+    const job = makeReviewWork({ id: 18, attempt: 2 })
+    let maxAttempts = 0
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              rescheduleJob: (input) =>
+                Effect.sync(() => {
+                  maxAttempts = input.maxAttempts
+                  return "failed" as const
+                }),
+            },
+            agentHarness: {
+              resumeSession: () =>
+                Effect.fail(
+                  new AgentHarnessError({
+                    operation: "decode structured session output",
+                    cause: new Error("invalid output"),
+                    retryable: false,
+                  }),
+                ),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("failed")
+    expect(maxAttempts).toBe(2)
   })
 })
 
@@ -874,12 +1048,15 @@ describe("job cancellation", () => {
                   Effect.ensuring(Effect.sync(() => actions.push("interrupted"))),
                 ),
             },
+            agentHarness: {
+              abortSession: () => Effect.sync(() => actions.push("abort")),
+            },
           }),
         ),
       ),
     )
 
     expect(result).toBe("retry")
-    expect(actions).toEqual(["interrupted"])
+    expect(actions).toEqual(["interrupted", "abort"])
   })
 })

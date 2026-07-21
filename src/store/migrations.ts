@@ -268,6 +268,64 @@ const initialSchema = Effect.gen(function* () {
     ON reconciliations (state, run_at, lease_until, id)`
 })
 
+const agentHarnessSchema = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE agent_executions (
+      session_reference_id TEXT PRIMARY KEY CHECK (
+        length(session_reference_id) BETWEEN 1 AND 128
+      ),
+      job_id INTEGER NOT NULL CHECK (job_id > 0),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      lease_token TEXT NOT NULL CHECK (length(lease_token) BETWEEN 16 AND 128),
+      launch_intent_json TEXT NOT NULL CHECK (
+        json_valid(launch_intent_json) = 1
+          AND json_type(launch_intent_json, '$') = 'object'
+          AND length(launch_intent_json) <= 65536
+      ),
+      session_reference_json TEXT CHECK (
+        session_reference_json IS NULL OR (
+          json_valid(session_reference_json) = 1
+            AND json_type(session_reference_json, '$') = 'object'
+            AND length(session_reference_json) <= 16384
+        )
+      ),
+      output_json TEXT CHECK (
+        output_json IS NULL OR (
+          json_valid(output_json) = 1 AND length(output_json) <= 65536
+        )
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'launch_intent', 'session_ready', 'succeeded', 'failed', 'superseded'
+      )),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (state = 'launch_intent'
+          AND session_reference_json IS NULL AND output_json IS NULL)
+        OR (state = 'session_ready'
+          AND session_reference_json IS NOT NULL AND output_json IS NULL)
+        OR (state = 'succeeded'
+          AND session_reference_json IS NOT NULL AND output_json IS NOT NULL)
+        OR state IN ('failed', 'superseded')
+      ),
+      FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
+    ) STRICT
+  `
+  yield* sql`
+    ALTER TABLE publications ADD COLUMN session_reference_id TEXT
+      REFERENCES agent_executions (session_reference_id) ON DELETE SET NULL
+      CHECK (
+        session_reference_id IS NULL OR length(session_reference_id) BETWEEN 1 AND 128
+      )
+  `
+  yield* sql`CREATE INDEX agent_executions_job ON agent_executions (job_id, attempt)`
+})
+
 export const runStoreMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({ "0001_initial_schema": initialSchema }),
+  loader: Migrator.fromRecord({
+    "0001_initial_schema": initialSchema,
+    "0002_agent_harness": agentHarnessSchema,
+  }),
 })

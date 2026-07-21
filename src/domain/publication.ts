@@ -21,6 +21,9 @@ export const Publication = Schema.Struct({
   generation: GenerationNumber,
   reviewRequestNumber: ReviewRequestNumber,
   review: ReviewResult,
+  sessionReferenceId: Schema.optional(
+    Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  ),
   attempt: AttemptNumber,
 })
 

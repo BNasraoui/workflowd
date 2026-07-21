@@ -1,8 +1,10 @@
-import { Cause, Data, Effect, Exit } from "effect"
+import { randomUUID } from "node:crypto"
+import { Cause, Data, Effect, Exit, Option } from "effect"
+import { AgentHarness, AgentHarnessError } from "./agent-harness"
 import type { FixWork, ReviewWork } from "./domain/work"
 import { decideFixEligibility } from "./domain/transaction-policy"
 import { GitHub } from "./github"
-import { Automation } from "./opencode"
+import { Automation, OpenCodeAutomationError } from "./opencode"
 import { WorkflowStore } from "./store/contracts"
 import { Workspace } from "./workspace"
 import { WorkspaceError } from "./workspace/errors"
@@ -40,6 +42,14 @@ function leaseFailure<E>(cause: Cause.Cause<E>, attempt: number, now: () => Date
   }
 }
 
+function retryableFailure<E>(cause: Cause.Cause<E>): boolean {
+  const failure = Option.getOrUndefined(Cause.failureOption(cause))
+  return !(
+    (failure instanceof AgentHarnessError || failure instanceof OpenCodeAutomationError) &&
+    !failure.retryable
+  )
+}
+
 function processReviewWork(
   work: ReviewWork,
   workerId: string,
@@ -50,19 +60,56 @@ function processReviewWork(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const harness = yield* AgentHarness
       const workspaces = yield* Workspace
       const workspace = yield* workspaces.prepareReview(work)
-      const review = yield* automation.runReview({
-        directory: workspace.directory,
-        repositoryFullName: work.repositoryFullName,
-        pullRequestNumber: work.pullRequestNumber,
-        baseSha: work.target.baseSha,
-        headSha: work.target.headSha,
-      })
-      const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
-      return yield* store.completeReviewJob({
+      const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
+      const prepared = yield* automation.prepareReview(
+        {
+          directory: workspace.directory,
+          repositoryFullName: work.repositoryFullName,
+          pullRequestNumber: work.pullRequestNumber,
+          baseSha: work.target.baseSha,
+          headSha: work.target.headSha,
+        },
+        agentExecutionContext(work, workspace.directory, requestedAt),
+      )
+      const launch = yield* store.recordAgentLaunchIntent({
         jobId: work.id,
         workerId,
+        recordedAt: requestedAt,
+        intent: prepared.launchIntent,
+      })
+      if (launch === "stale") return launch
+      const reference = yield* harness.createSession(prepared)
+      const referenceRecordedAt = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      const sessionResult = yield* Effect.gen(function* () {
+        const session = yield* store.recordAgentSessionReference({
+          jobId: work.id,
+          workerId,
+          recordedAt: referenceRecordedAt,
+          reference,
+        })
+        if (session === "stale") return { _tag: "Stale" } as const
+        const review = yield* harness.resumeSession(prepared, reference)
+        return { _tag: "Completed", review } as const
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isFailure(exit) ? harness.abortSession(reference) : Effect.void,
+        ),
+      )
+      if (sessionResult._tag === "Stale") {
+        yield* harness.abortSession(reference)
+        return "stale" as const
+      }
+      const review = sessionResult.review
+      const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
+      return yield* store.completeAgentReviewJob({
+        jobId: work.id,
+        workerId,
+        sessionReferenceId: reference.sessionReferenceId,
         completedAt,
         review,
         autoFix:
@@ -84,22 +131,59 @@ function processFixWork(work: FixWork, workerId: string) {
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const harness = yield* AgentHarness
       const workspaces = yield* Workspace
       const workspace = yield* workspaces.prepareFix(work)
       let result = work.checkpoint
       if (workspace.recovery === "none" && result === undefined) {
-        result = yield* automation.runFix({
-          jobId: work.id,
-          directory: workspace.directory,
-          repositoryFullName: work.repositoryFullName,
-          pullRequestNumber: work.pullRequestNumber,
-          baseSha: work.target.baseSha,
-          headSha: work.target.headSha,
-        })
-        const recordedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
-        const recorded = yield* store.recordFixResult({
+        const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
+        const prepared = yield* automation.prepareFix(
+          {
+            jobId: work.id,
+            directory: workspace.directory,
+            repositoryFullName: work.repositoryFullName,
+            pullRequestNumber: work.pullRequestNumber,
+            baseSha: work.target.baseSha,
+            headSha: work.target.headSha,
+          },
+          agentExecutionContext(work, workspace.directory, requestedAt),
+        )
+        const launch = yield* store.recordAgentLaunchIntent({
           jobId: work.id,
           workerId,
+          recordedAt: requestedAt,
+          intent: prepared.launchIntent,
+        })
+        if (launch === "stale") return launch
+        const reference = yield* harness.createSession(prepared)
+        const referenceRecordedAt = new Date(
+          yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+        )
+        const sessionResult = yield* Effect.gen(function* () {
+          const session = yield* store.recordAgentSessionReference({
+            jobId: work.id,
+            workerId,
+            recordedAt: referenceRecordedAt,
+            reference,
+          })
+          if (session === "stale") return { _tag: "Stale" } as const
+          const fixResult = yield* harness.resumeSession(prepared, reference)
+          return { _tag: "Completed", fixResult } as const
+        }).pipe(
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit) ? harness.abortSession(reference) : Effect.void,
+          ),
+        )
+        if (sessionResult._tag === "Stale") {
+          yield* harness.abortSession(reference)
+          return "stale" as const
+        }
+        result = sessionResult.fixResult
+        const recordedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
+        const recorded = yield* store.recordAgentFixResult({
+          jobId: work.id,
+          workerId,
+          sessionReferenceId: reference.sessionReferenceId,
           recordedAt,
           result,
         })
@@ -126,6 +210,22 @@ function processFixWork(work: FixWork, workerId: string) {
       return disposition
     }),
   )
+}
+
+function agentExecutionContext(work: ReviewWork | FixWork, directory: string, requestedAt: Date) {
+  return {
+    directory,
+    scope: {
+      _tag: "GenerationScope" as const,
+      workflowId: `pr:${work.repositoryId}:${work.pullRequestNumber}`,
+      generation: work.generation,
+    },
+    operationId: `job:${work.id}`,
+    operationRevision: 1,
+    attempt: work.attempt,
+    leaseToken: randomUUID(),
+    requestedAt,
+  }
 }
 
 export function runJobIteration(options: {
@@ -179,7 +279,7 @@ export function runJobIteration(options: {
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
-      maxAttempts: options.maxAttempts,
+      maxAttempts: retryableFailure(exit.cause) ? options.maxAttempts : work.attempt,
     })
   })
 }

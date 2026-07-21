@@ -6,14 +6,19 @@ import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import { SqlLeaseQueue } from "./lease"
 import type { makeSharedStoreOperations } from "./shared"
+import type { CompleteReviewJobInput, RecordFixResultInput } from "./model"
 
 type JobOperations = Pick<
   WorkflowStorePort,
   | "claimNextJob"
+  | "completeAgentReviewJob"
   | "completeFixJob"
   | "completeReviewJob"
   | "disableFixJob"
   | "isJobCurrent"
+  | "recordAgentFixResult"
+  | "recordAgentLaunchIntent"
+  | "recordAgentSessionReference"
   | "recordFixResult"
   | "rescheduleJob"
   | "shouldCancelJob"
@@ -26,6 +31,16 @@ export function makeJobOperations(
   const currentness = makeCurrentnessPolicy(sql)
   const queue = new SqlLeaseQueue<Work>(sql, {
     table: "jobs",
+    beforeClaim: (claimedAt) =>
+      sql`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${claimedAt}
+        WHERE state IN ('launch_intent', 'session_ready')
+        AND job_id IN (
+          SELECT id FROM jobs
+          WHERE state = 'leased' AND lease_until <= ${claimedAt}
+        )
+      `.pipe(Effect.asVoid),
     claimableId: currentness.jobClaimCandidate,
     returning: sql.literal(`
       id,
@@ -51,6 +66,128 @@ export function makeJobOperations(
     decode: decodeJobRow,
   })
 
+  const completeReviewJob = (input: CompleteReviewJobInput) =>
+    Effect.gen(function* () {
+      const timestamp = input.completedAt.toISOString()
+      const jobs = yield* sql<{
+        readonly installation_id: number
+        readonly repository_id: number
+        readonly repository_full_name: string
+        readonly pull_request_number: number
+        readonly base_ref: string
+        readonly base_sha: string
+        readonly expected_head_sha: string
+        readonly head_ref: string
+        readonly head_repository_full_name: string
+        readonly generation: number
+        readonly review_request_number: number
+      }>`
+        UPDATE jobs AS candidate
+        SET
+          state = 'succeeded',
+          lease_owner = NULL,
+          lease_until = NULL,
+          last_error = NULL,
+          updated_at = ${timestamp}
+        WHERE candidate.id = ${input.jobId}
+        AND candidate.kind = 'review'
+        AND candidate.state = 'leased'
+        AND candidate.cancel_requested = FALSE
+        AND candidate.lease_owner = ${input.workerId}
+        AND candidate.lease_until > ${timestamp}
+        AND ${currentness.currentJob}
+        AND ${currentness.latestReviewRequest}
+        RETURNING
+          installation_id,
+          repository_id,
+          repository_full_name,
+          pull_request_number,
+          base_ref,
+          base_sha,
+          expected_head_sha,
+          head_ref,
+          head_repository_full_name,
+          generation,
+          review_request_number
+      `
+      const job = jobs[0]
+      if (job === undefined) return "stale" as const
+
+      const operationKey =
+        job.review_request_number === 1
+          ? `review:${job.repository_id}:${job.pull_request_number}:${job.generation}`
+          : `review:${job.repository_id}:${job.pull_request_number}:${job.generation}:${job.review_request_number}`
+      const sessionReferenceId = "sessionReferenceId" in input ? input.sessionReferenceId : null
+      yield* sql<{ readonly id: number }>`
+        INSERT INTO publications (
+          operation_key,
+          installation_id,
+          repository_id,
+          repository_full_name,
+          pull_request_number,
+          base_ref,
+          base_sha,
+          expected_head_sha,
+          head_ref,
+          head_repository_full_name,
+          generation,
+          review_request_number,
+          review_json,
+          session_reference_id,
+          state,
+          run_at,
+          created_at,
+          updated_at
+        ) VALUES (
+          ${operationKey},
+          ${job.installation_id},
+          ${job.repository_id},
+          ${job.repository_full_name},
+          ${job.pull_request_number},
+          ${job.base_ref},
+          ${job.base_sha},
+          ${job.expected_head_sha},
+          ${job.head_ref},
+          ${job.head_repository_full_name},
+          ${job.generation},
+          ${job.review_request_number},
+          ${JSON.stringify(input.review)},
+          ${sessionReferenceId},
+          'ready',
+          ${timestamp},
+          ${timestamp},
+          ${timestamp}
+        )
+        RETURNING id
+      `
+      if (input.autoFix) {
+        yield* shared.enqueueFixFromReview({
+          headRepositoryFullName: job.head_repository_full_name,
+          reviewJobId: input.jobId,
+          requestedAt: timestamp,
+          repositoryFullName: job.repository_full_name,
+          review: input.review,
+          requeueFailed: false,
+        })
+      }
+      return "completed" as const
+    })
+
+  const recordFixResult = (input: RecordFixResultInput) =>
+    sql<{ readonly id: number }>`
+      UPDATE jobs
+      SET
+        fix_result_json = ${JSON.stringify(input.result)},
+        updated_at = ${input.recordedAt.toISOString()}
+      WHERE id = ${input.jobId}
+      AND kind = 'fix'
+      AND state = 'leased'
+      AND lease_owner = ${input.workerId}
+      AND lease_until > ${input.recordedAt.toISOString()}
+      AND fix_result_json IS NULL
+      RETURNING id
+    `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
+
   return {
     claimNextJob: (input) => queue.claim(input),
     isJobCurrent: (jobId, workerId, now) =>
@@ -67,22 +204,33 @@ export function makeJobOperations(
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length > 0)),
     disableFixJob: (input) =>
-      sql<{ readonly id: number }>`
-        UPDATE jobs
-        SET
-          state = 'superseded',
-          cancel_requested = TRUE,
-          lease_owner = NULL,
-          lease_until = NULL,
-          last_error = 'Fix Work disabled',
-          updated_at = ${input.disabledAt.toISOString()}
-        WHERE id = ${input.jobId}
-        AND kind = 'fix'
-        AND state = 'leased'
-        AND lease_owner = ${input.workerId}
-        AND lease_until > ${input.disabledAt.toISOString()}
-        RETURNING id
-      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "disabled"))),
+      Effect.gen(function* () {
+        const timestamp = input.disabledAt.toISOString()
+        const rows = yield* sql<{ readonly id: number }>`
+          UPDATE jobs
+          SET
+            state = 'superseded',
+            cancel_requested = TRUE,
+            lease_owner = NULL,
+            lease_until = NULL,
+            last_error = 'Fix Work disabled',
+            updated_at = ${timestamp}
+          WHERE id = ${input.jobId}
+          AND kind = 'fix'
+          AND state = 'leased'
+          AND lease_owner = ${input.workerId}
+          AND lease_until > ${timestamp}
+          RETURNING id
+        `
+        if (rows.length === 0) return "stale" as const
+        yield* sql`
+          UPDATE agent_executions
+          SET state = 'superseded', updated_at = ${timestamp}
+          WHERE job_id = ${input.jobId}
+          AND state IN ('launch_intent', 'session_ready')
+        `
+        return "disabled" as const
+      }).pipe(sql.withTransaction),
     completeFixJob: (input) =>
       sql<{ readonly id: number }>`
         UPDATE jobs AS candidate
@@ -102,30 +250,18 @@ export function makeJobOperations(
         AND ${currentness.latestReviewRequest}
         RETURNING id
       `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "completed"))),
-    completeReviewJob: (input) =>
+    completeReviewJob: (input) => completeReviewJob(input).pipe(sql.withTransaction),
+    completeAgentReviewJob: (input) =>
       Effect.gen(function* () {
         const timestamp = input.completedAt.toISOString()
-        const jobs = yield* sql<{
-          readonly installation_id: number
-          readonly repository_id: number
-          readonly repository_full_name: string
-          readonly pull_request_number: number
-          readonly base_ref: string
-          readonly base_sha: string
-          readonly expected_head_sha: string
-          readonly head_ref: string
-          readonly head_repository_full_name: string
-          readonly generation: number
-          readonly review_request_number: number
-        }>`
-          UPDATE jobs AS candidate
-          SET
-            state = 'succeeded',
-            lease_owner = NULL,
-            lease_until = NULL,
-            last_error = NULL,
-            updated_at = ${timestamp}
-          WHERE candidate.id = ${input.jobId}
+        const executions = yield* sql<{ readonly session_reference_id: string }>`
+          SELECT execution.session_reference_id
+          FROM agent_executions AS execution
+          JOIN jobs AS candidate ON candidate.id = execution.job_id
+          WHERE execution.session_reference_id = ${input.sessionReferenceId}
+          AND execution.job_id = ${input.jobId}
+          AND execution.state = 'session_ready'
+          AND execution.attempt = candidate.attempts
           AND candidate.kind = 'review'
           AND candidate.state = 'leased'
           AND candidate.cancel_requested = FALSE
@@ -133,92 +269,118 @@ export function makeJobOperations(
           AND candidate.lease_until > ${timestamp}
           AND ${currentness.currentJob}
           AND ${currentness.latestReviewRequest}
-          RETURNING
-            installation_id,
-            repository_id,
-            repository_full_name,
-            pull_request_number,
-            base_ref,
-            base_sha,
-            expected_head_sha,
-            head_ref,
-            head_repository_full_name,
-            generation,
-            review_request_number
         `
-        const job = jobs[0]
-        if (job === undefined) return "stale" as const
-
-        const operationKey =
-          job.review_request_number === 1
-            ? `review:${job.repository_id}:${job.pull_request_number}:${job.generation}`
-            : `review:${job.repository_id}:${job.pull_request_number}:${job.generation}:${job.review_request_number}`
-        yield* sql<{ readonly id: number }>`
-          INSERT INTO publications (
-            operation_key,
-            installation_id,
-            repository_id,
-            repository_full_name,
-            pull_request_number,
-            base_ref,
-            base_sha,
-            expected_head_sha,
-            head_ref,
-            head_repository_full_name,
-            generation,
-            review_request_number,
-            review_json,
-            state,
-            run_at,
-            created_at,
-            updated_at
-          ) VALUES (
-            ${operationKey},
-            ${job.installation_id},
-            ${job.repository_id},
-            ${job.repository_full_name},
-            ${job.pull_request_number},
-            ${job.base_ref},
-            ${job.base_sha},
-            ${job.expected_head_sha},
-            ${job.head_ref},
-            ${job.head_repository_full_name},
-            ${job.generation},
-            ${job.review_request_number},
-            ${JSON.stringify(input.review)},
-            'ready',
-            ${timestamp},
-            ${timestamp},
-            ${timestamp}
-          )
-          RETURNING id
+        if (executions.length === 0) return "stale" as const
+        const completed = yield* completeReviewJob(input)
+        if (completed === "stale") return completed
+        yield* sql`
+          UPDATE agent_executions
+          SET
+            state = 'succeeded',
+            output_json = ${JSON.stringify(input.review)},
+            updated_at = ${timestamp}
+          WHERE session_reference_id = ${input.sessionReferenceId}
+          AND state = 'session_ready'
         `
-        if (input.autoFix) {
-          yield* shared.enqueueFixFromReview({
-            headRepositoryFullName: job.head_repository_full_name,
-            reviewJobId: input.jobId,
-            requestedAt: timestamp,
-            repositoryFullName: job.repository_full_name,
-            review: input.review,
-            requeueFailed: false,
-          })
-        }
         return "completed" as const
       }).pipe(sql.withTransaction),
-    recordFixResult: (input) =>
-      sql<{ readonly id: number }>`
-        UPDATE jobs
+    recordFixResult,
+    recordAgentFixResult: (input) =>
+      Effect.gen(function* () {
+        const timestamp = input.recordedAt.toISOString()
+        const executions = yield* sql<{ readonly session_reference_id: string }>`
+          SELECT execution.session_reference_id
+          FROM agent_executions AS execution
+          JOIN jobs AS candidate ON candidate.id = execution.job_id
+          WHERE execution.session_reference_id = ${input.sessionReferenceId}
+          AND execution.job_id = ${input.jobId}
+          AND execution.state = 'session_ready'
+          AND execution.attempt = candidate.attempts
+          AND candidate.kind = 'fix'
+          AND candidate.state = 'leased'
+          AND candidate.cancel_requested = FALSE
+          AND candidate.lease_owner = ${input.workerId}
+          AND candidate.lease_until > ${timestamp}
+          AND ${currentness.currentJob}
+          AND ${currentness.latestReviewRequest}
+        `
+        if (executions.length === 0) return "stale" as const
+        const recorded = yield* recordFixResult(input)
+        if (recorded === "stale") return recorded
+        yield* sql`
+          UPDATE agent_executions
+          SET
+            state = 'succeeded',
+            output_json = ${JSON.stringify(input.result)},
+            updated_at = ${timestamp}
+          WHERE session_reference_id = ${input.sessionReferenceId}
+          AND state = 'session_ready'
+        `
+        return "recorded" as const
+      }).pipe(sql.withTransaction),
+    recordAgentLaunchIntent: (input) => {
+      const timestamp = input.recordedAt.toISOString()
+      return sql<{ readonly session_reference_id: string }>`
+        INSERT INTO agent_executions (
+          session_reference_id,
+          job_id,
+          attempt,
+          lease_token,
+          launch_intent_json,
+          state,
+          created_at,
+          updated_at
+        )
+        SELECT
+          ${input.intent.sessionReferenceId},
+          candidate.id,
+          candidate.attempts,
+          ${input.intent.leaseToken},
+          ${JSON.stringify(input.intent)},
+          'launch_intent',
+          ${timestamp},
+          ${timestamp}
+        FROM jobs AS candidate
+        WHERE candidate.id = ${input.jobId}
+        AND candidate.state = 'leased'
+        AND candidate.cancel_requested = FALSE
+        AND candidate.lease_owner = ${input.workerId}
+        AND candidate.lease_until > ${timestamp}
+        AND candidate.attempts = ${input.intent.attempt}
+        AND ${currentness.currentJob}
+        AND ${currentness.latestReviewRequest}
+        ON CONFLICT DO NOTHING
+        RETURNING session_reference_id
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
+    },
+    recordAgentSessionReference: (input) => {
+      const timestamp = input.recordedAt.toISOString()
+      return sql<{ readonly session_reference_id: string }>`
+        UPDATE agent_executions
         SET
-          fix_result_json = ${JSON.stringify(input.result)},
-          updated_at = ${input.recordedAt.toISOString()}
-        WHERE id = ${input.jobId}
-        AND kind = 'fix'
-        AND state = 'leased'
-        AND lease_owner = ${input.workerId}
-        AND lease_until > ${input.recordedAt.toISOString()}
-        AND fix_result_json IS NULL
-        RETURNING id
-      `.pipe(Effect.map((rows) => (rows.length === 0 ? "stale" : "recorded"))),
+          session_reference_json = ${JSON.stringify(input.reference)},
+          state = 'session_ready',
+          updated_at = ${timestamp}
+        WHERE session_reference_id = ${input.reference.sessionReferenceId}
+        AND job_id = ${input.jobId}
+        AND attempt = ${input.reference.attempt}
+        AND lease_token = ${input.reference.leaseToken}
+        AND state = 'launch_intent'
+        AND EXISTS (
+          SELECT 1
+          FROM jobs AS candidate
+          WHERE candidate.id = agent_executions.job_id
+          AND candidate.state = 'leased'
+          AND candidate.cancel_requested = FALSE
+          AND candidate.lease_owner = ${input.workerId}
+          AND candidate.lease_until > ${timestamp}
+          AND candidate.attempts = agent_executions.attempt
+          AND ${currentness.currentJob}
+          AND ${currentness.latestReviewRequest}
+        )
+        RETURNING session_reference_id
+      `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
+    },
     rescheduleJob: (input) => queue.reschedule({ ...input, id: input.jobId }),
     shouldCancelJob: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`

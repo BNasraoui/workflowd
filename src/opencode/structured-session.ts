@@ -7,7 +7,7 @@ type SessionEvent =
     ? Event
     : never
 type AssistantMessage = Extract<SessionEvent, { readonly type: "message.updated" }>["message"]
-type SessionInput = Parameters<OpenCodeAdapter["getSessionStatus"]>[0]
+export type StructuredSessionReference = Parameters<OpenCodeAdapter["getSessionStatus"]>[0]
 
 type StructuredSessionRequest = {
   readonly directory: string
@@ -43,7 +43,7 @@ export class StructuredSessionError extends Error {
 }
 
 export class StructuredSession<A, I> {
-  private session: SessionInput | undefined
+  private session: StructuredSessionReference | undefined
 
   constructor(
     private readonly adapter: OpenCodeAdapter,
@@ -51,19 +51,25 @@ export class StructuredSession<A, I> {
     private readonly schema: Schema.Schema<A, I>,
   ) {}
 
-  async run(signal?: AbortSignal): Promise<A> {
-    const execution = Effect.gen(this, function* () {
-      const created = yield* this.call("create session", (operationSignal) =>
-        this.adapter.createSession(
-          { directory: this.request.directory, title: this.request.title },
-          operationSignal,
-        ),
-      )
-      this.session = {
+  async create(signal?: AbortSignal): Promise<StructuredSessionReference> {
+    const execution = this.call("create session", (operationSignal) =>
+      this.adapter.createSession(
+        { directory: this.request.directory, title: this.request.title },
+        operationSignal,
+      ),
+    ).pipe(
+      Effect.map((created) => ({
         sessionID: created.id,
         directory: this.request.directory,
-      }
+      })),
+    )
 
+    return this.execute(execution, signal)
+  }
+
+  async resume(session: StructuredSessionReference, signal?: AbortSignal): Promise<A> {
+    this.session = session
+    const execution = Effect.gen(this, function* () {
       const initialEvents = yield* Effect.fork(this.consumeEventSubscription())
       yield* this.call("prompt session", (operationSignal) =>
         this.adapter.promptSession(
@@ -90,6 +96,18 @@ export class StructuredSession<A, I> {
       ),
     )
 
+    return this.execute(execution, signal)
+  }
+
+  async run(signal?: AbortSignal): Promise<A> {
+    const session = await this.create(signal)
+    return this.resume(session, signal)
+  }
+
+  private async execute<A>(
+    execution: Effect.Effect<A, StructuredSessionError>,
+    signal?: AbortSignal,
+  ): Promise<A> {
     try {
       return await Effect.runPromise(execution, { signal })
     } catch (cause) {
@@ -211,7 +229,7 @@ export class StructuredSession<A, I> {
     })
   }
 
-  private abortSession(session: SessionInput): Effect.Effect<void> {
+  private abortSession(session: StructuredSessionReference): Effect.Effect<void> {
     return Effect.tryPromise((signal) => this.adapter.abortSession(session, signal)).pipe(
       Effect.timeout("5 seconds"),
       Effect.ignore,

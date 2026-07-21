@@ -7,6 +7,7 @@ import type {
   AgentCommand,
   ApplyReconciliationSnapshotInput,
   CommandEvent,
+  CompleteAgentReviewJobInput,
   CompleteFixJobInput,
   CompletePublicationInput,
   CompleteReviewJobInput,
@@ -18,6 +19,9 @@ import type {
   LeaseClaim,
   PullRequestEvent,
   PullRequestReconciliation,
+  RecordAgentFixResultInput,
+  RecordAgentLaunchIntentInput,
+  RecordAgentSessionReferenceInput,
   RecordFixResultInput,
   RescheduleCommandInput,
   RescheduleJobInput,
@@ -61,6 +65,9 @@ export type WorkflowStorePort = {
   readonly completeReviewJob: (
     input: CompleteReviewJobInput,
   ) => Effect.Effect<"completed" | "stale", SqlError>
+  readonly completeAgentReviewJob: (
+    input: CompleteAgentReviewJobInput,
+  ) => Effect.Effect<"completed" | "stale", SqlError>
   readonly completeFixJob: (
     input: CompleteFixJobInput,
   ) => Effect.Effect<"completed" | "stale", SqlError>
@@ -69,6 +76,15 @@ export type WorkflowStorePort = {
   ) => Effect.Effect<"disabled" | "stale", SqlError>
   readonly recordFixResult: (
     input: RecordFixResultInput,
+  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly recordAgentFixResult: (
+    input: RecordAgentFixResultInput,
+  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly recordAgentLaunchIntent: <Input>(
+    input: RecordAgentLaunchIntentInput<Input>,
+  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  readonly recordAgentSessionReference: (
+    input: RecordAgentSessionReferenceInput,
   ) => Effect.Effect<"recorded" | "stale", SqlError>
   readonly claimNextPublication: (
     input: LeaseClaim,

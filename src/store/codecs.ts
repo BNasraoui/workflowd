@@ -139,6 +139,7 @@ const PublicationStorageRow = Schema.Struct({
   generation: GenerationNumber,
   reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
   review: column("review_json", json(ReviewResult)),
+  sessionReferenceId: column("session_reference_id", Schema.NullOr(Schema.NonEmptyString)),
   attempt: column("attempts", AttemptNumber),
 })
 const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
@@ -160,6 +161,7 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     generation: row.generation,
     reviewRequestNumber: row.reviewRequestNumber,
     review: row.review,
+    ...(row.sessionReferenceId === null ? {} : { sessionReferenceId: row.sessionReferenceId }),
     attempt: row.attempt,
   }),
   encode: (_, publication) => ({
@@ -177,6 +179,7 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     generation: publication.generation,
     reviewRequestNumber: publication.reviewRequestNumber,
     review: publication.review,
+    sessionReferenceId: publication.sessionReferenceId ?? null,
     attempt: publication.attempt,
   }),
 })

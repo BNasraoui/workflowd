@@ -106,7 +106,7 @@ const seedSchema = Effect.gen(function* () {
 })
 
 describe("strict initial store schema", () => {
-  test("creates one strict initial migration while initializing the store", async () => {
+  test("applies the strict store migrations while initializing the store", async () => {
     const result = await runWithDatabase(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -120,7 +120,7 @@ describe("strict initial store schema", () => {
           FROM pragma_table_list
           WHERE name IN (
             'webhook_deliveries', 'pull_requests', 'jobs', 'publications',
-            'commands', 'reconciliations'
+            'commands', 'reconciliations', 'agent_executions'
           )
           ORDER BY name
         `
@@ -130,8 +130,11 @@ describe("strict initial store schema", () => {
       }),
     )
 
-    expect(result.migrations).toEqual([{ migration_id: 1, name: "initial_schema" }])
-    expect(result.tables).toHaveLength(6)
+    expect(result.migrations).toEqual([
+      { migration_id: 1, name: "initial_schema" },
+      { migration_id: 2, name: "agent_harness" },
+    ])
+    expect(result.tables).toHaveLength(7)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
