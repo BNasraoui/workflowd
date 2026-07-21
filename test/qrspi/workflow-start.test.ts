@@ -1123,10 +1123,13 @@ describe("WorkflowStart integration", () => {
           readonly kind: string
           readonly state: string
           readonly input_json: string
+          readonly output_json: string | null
+          readonly external_observation_json: string | null
           readonly scope_json: string
           readonly parent_effect_json: string
         }>`
-          SELECT operation_id, kind, state, input_json, scope_json, parent_effect_json
+          SELECT operation_id, kind, state, input_json, output_json,
+            external_observation_json, scope_json, parent_effect_json
           FROM workflow_operations
           WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish', 'GenericReviewHandoff')
           ORDER BY kind
@@ -1181,6 +1184,22 @@ describe("WorkflowStart integration", () => {
       checkpoint,
       preparedDeliveryEvidence: deliveryEvidence,
     })
+    const pullRequest = {
+      reference: { repository, number: 17 },
+      state: "open",
+      title: "Kick off a QRSPI workflow",
+      baseRef: "main",
+      headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+      headSha: secondCommit.commitSha,
+      draft: false,
+      body: expect.any(String),
+      bodySha256: expect.any(String),
+      url: "https://example.test/example-owner/example/pull/17",
+    }
+    expect(JSON.parse(publication!.output_json!)).toEqual({ pullRequest })
+    expect(JSON.parse(publication!.external_observation_json!)).toEqual(pullRequest)
+    const handoff = state.finalization.find(({ kind }) => kind === "GenericReviewHandoff")
+    expect(JSON.parse(handoff!.input_json)).toMatchObject({ pullRequest })
     expect(fake.counts().finalPullRequestCalls).toBe(1)
   })
 

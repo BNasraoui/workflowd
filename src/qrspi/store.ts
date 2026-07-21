@@ -2883,6 +2883,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 draft: publication.draft,
               }) ||
             observation.draft ||
+            observation.state !== "open" ||
+            observation.title !== intent.title ||
             canonicalSha256(observation.reference.repository) !==
               canonicalSha256(intent.repository) ||
             observation.headSha !== intent.headSha ||
@@ -3150,6 +3152,8 @@ const FinalPullRequestObservationSchema = Schema.Struct({
     repository: RepositoryReference,
     number: Schema.Int.pipe(Schema.positive()),
   }),
+  state: Schema.NonEmptyString,
+  title: Schema.NonEmptyString,
   baseRef: Schema.NonEmptyString,
   headRef: Schema.NonEmptyString,
   headSha: Schema.String,
