@@ -34,6 +34,28 @@ export type AcceptedBranchObservation =
   | { readonly _tag: "Accepted"; readonly sha: string }
   | { readonly _tag: "UnknownHistory"; readonly sha: string }
 
+export type FinalPullRequestIntent = {
+  readonly repository: RepositoryReference
+  readonly baseRef: string
+  readonly headRef: string
+  readonly headSha: string
+  readonly title: string
+  readonly body: string
+  readonly bodySha256: string
+  readonly draft: false
+}
+
+export type FinalPullRequestObservation = {
+  readonly reference: { readonly repository: RepositoryReference; readonly number: number }
+  readonly baseRef: string
+  readonly headRef: string
+  readonly headSha: string
+  readonly draft: boolean
+  readonly body: string
+  readonly bodySha256: string
+  readonly url: string
+}
+
 export type QrspiRepositoryPort = {
   readonly inspect: (input: {
     readonly repository: RepositoryReference
@@ -63,6 +85,12 @@ export type QrspiRepositoryPort = {
       readonly leaseUntil: Date
     }
   }) => Effect.Effect<{ readonly sha: string }, QrspiRepositoryError | Error>
+  readonly createFinalPullRequest: (
+    input: FinalPullRequestIntent,
+  ) => Effect.Effect<FinalPullRequestObservation["reference"], QrspiRepositoryError>
+  readonly observeFinalPullRequest: (
+    input: FinalPullRequestIntent,
+  ) => Effect.Effect<FinalPullRequestObservation | null, QrspiRepositoryError>
 }
 export const QrspiRepository = Context.GenericTag<QrspiRepositoryPort>(
   "workflowd/qrspi/QrspiRepository",

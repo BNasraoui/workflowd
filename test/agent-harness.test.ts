@@ -7,7 +7,7 @@ import {
   TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
 import { makePullRequestHarnessDefinitions } from "../src/opencode"
-import { makeQrspiHarnessDefinitions } from "../src/qrspi/stages"
+import { StageContractInput, makeQrspiHarnessDefinitions } from "../src/qrspi/stages"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
@@ -243,6 +243,99 @@ describe("TrustedAgentHarnessCatalog", () => {
     expect(Buffer.byteLength(JSON.stringify(prepared.launchIntent), "utf8")).toBeLessThanOrEqual(
       MAX_AGENT_LAUNCH_INTENT_BYTES,
     )
+  })
+
+  test("starts a retained former-boundary QRSPI stage whose rendered prompt exceeds 256 KiB", async () => {
+    let submittedPrompt = ""
+    const definitions = makeQrspiHarnessDefinitions({
+      agent: "qrspi-producer",
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      maxInputBytes: 1024 * 1024,
+    })
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter({
+        createSession: async () => ({ id: "ses_retained_boundary" }),
+        promptSession: async (input) => {
+          submittedPrompt = input.parts[0]?.text ?? ""
+        },
+        subscribeSessionEvents: async () =>
+          events({
+            type: "message.updated",
+            sessionID: "ses_retained_boundary",
+            message: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              structured: {
+                candidateSha: "b".repeat(40),
+                changedPaths: ["src/result.ts"],
+                final: false,
+              },
+            },
+          }),
+      }),
+      new TrustedAgentHarnessCatalog([definitions.implementation]),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    const stageInput = Schema.decodeUnknownSync(StageContractInput)({
+      ticketRevisionSha256: "a".repeat(64),
+      readyTicket: {
+        reference: {
+          tracker: "beads",
+          trackerInstanceId: "fixture-workspace",
+          nativeTicketId: "fixture-ticket",
+        },
+        issueType: "feature",
+        title: "Retained workflow",
+        description: "Execute a retained stage input near the former boundary.",
+        sources: ["Fixture source"],
+        acceptanceCriteria: ["The retained stage executes."],
+        scenarios: [
+          {
+            name: "Execute retained stage",
+            given: "a retained workflow",
+            when: "the stage executes",
+            then: "its prompt reaches OpenCode",
+          },
+        ],
+      },
+      sources: [],
+      implementationCommits: [
+        {
+          position: 1,
+          commitSha: "b".repeat(40),
+          parentSha: "a".repeat(40),
+          changedPaths: Array.from(
+            { length: 1_800 },
+            (_, index) => `src/${index}-${"x".repeat(430)}`,
+          ),
+          operationId: "retained-operation",
+        },
+      ],
+    })
+    const input = {
+      contract: { name: "Implementation", contractVersion: 1 },
+      task: "Implement the retained workflow stage.",
+      input: stageInput,
+    }
+
+    const prepared = await Effect.runPromise(
+      harness.prepare(definitions.implementation, input, {
+        directory: "/tmp/qrspi-retained-worktree",
+        scope: { _tag: "GenerationScope", workflowId: "fixture-workflow", generation: 1 },
+        operationId: "fixture-operation",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+      }),
+    )
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+    await Effect.runPromise(harness.resumeSession(prepared, reference))
+
+    expect(prepared.prompt.length).toBeGreaterThan(256 * 1024)
+    expect(Buffer.byteLength(JSON.stringify(stageInput), "utf8")).toBeLessThanOrEqual(1024 * 1024)
+    expect(submittedPrompt).toBe(prepared.prompt)
   })
 })
 

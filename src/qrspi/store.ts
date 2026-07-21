@@ -1,4 +1,5 @@
 import { SqlClient } from "@effect/sql"
+import { createHash } from "node:crypto"
 import type { SqlError } from "@effect/sql/SqlError"
 import type { ParseError } from "effect/ParseResult"
 import { Context, Data, Effect, Layer, Schema } from "effect"
@@ -20,10 +21,12 @@ import {
   ImplementationCheckpointReference,
   ImplementationCommitReference,
   ImplementationStageResult,
+  PreparedDeliveryEvidence,
   validatePreparedDeliveryEvidence,
 } from "./stages"
 import type { BoundArtifactPublication } from "./artifact-publication"
 import type { AgentLaunchIntent, SessionReference } from "../agent-harness"
+import type { FinalPullRequestIntent, FinalPullRequestObservation } from "./ports"
 
 const OperationState = Schema.Literal(
   "blocked",
@@ -347,6 +350,41 @@ export type QrspiStorePort = {
     readonly observedHeadSha: string
     readonly now: Date
   }) => Effect.Effect<"completed" | "stale", SqlError | ParseError | WorkflowStartCurrentnessError>
+  readonly claimFinalizationOperation: (
+    kind: "PrePullRequestVerify" | "PullRequestPublish",
+    workerId: string,
+    leaseToken: string,
+    leaseDurationMs: number,
+    now: Date,
+  ) => Effect.Effect<FinalizationOperationLease | null, SqlError | ParseError>
+  readonly findPullRequestPublicationRecovery: () => Effect.Effect<
+    FinalizationOperationLease | null,
+    SqlError | ParseError
+  >
+  readonly completePrePullRequestVerification: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly observedHeadSha: string
+    readonly now: Date
+  }) => Effect.Effect<"verified" | "stale", SqlError | ParseError>
+  readonly bindPullRequestPublication: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly intent: FinalPullRequestIntent
+    readonly now: Date
+  }) => Effect.Effect<"bound" | "conflict" | "stale", SqlError | ParseError>
+  readonly completePullRequestPublication: (input: {
+    readonly operationId: string
+    readonly observation: FinalPullRequestObservation
+    readonly now: Date
+  }) => Effect.Effect<"published" | "stale", SqlError | ParseError>
+  readonly rescheduleFinalizationOperation: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly error: string
+    readonly runAt: Date
+    readonly now: Date
+  }) => Effect.Effect<"rescheduled" | "failed" | "stale", SqlError | ParseError>
 }
 
 export type StageOperationLease = {
@@ -367,6 +405,21 @@ export type StageOperationLease = {
   readonly sessionReferenceId?: string
   readonly predecessorSessionReferenceId?: string
   readonly implementationCommits?: ReadonlyArray<typeof ImplementationCommitReference.Type>
+}
+
+export type FinalizationOperationLease = {
+  readonly operationId: string
+  readonly operationRevision: number
+  readonly attempt: number
+  readonly leaseToken?: string
+  readonly scope: typeof GenerationScope.Type
+  readonly kind: "PrePullRequestVerify" | "PullRequestPublish"
+  readonly input: unknown
+  readonly intent?: FinalPullRequestIntent
+  readonly repository: typeof RepositoryReference.Type
+  readonly baseRef: string
+  readonly headRef: string
+  readonly currentHeadSha: string
 }
 
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
@@ -2412,6 +2465,411 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           return "completed" as const
         }),
       ),
+
+    claimFinalizationOperation: (kind, workerId, leaseToken, leaseDurationMs, now) =>
+      transaction(
+        Effect.gen(function* () {
+          yield* sql`
+            UPDATE workflow_operations SET state = 'failed',
+              last_error = 'retry budget exhausted after lease expiry',
+              terminal_failure_reason = 'retry budget exhausted after lease expiry',
+              terminal_retry_policy = 'retry_budget_exhausted', lease_owner = NULL,
+              lease_token = NULL, lease_until = NULL, updated_at = ${now.toISOString()}
+            WHERE kind = ${kind} AND is_current = 1 AND state = 'leased'
+              AND lease_until <= ${now.toISOString()} AND attempt >= max_attempts
+          `
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'failed', updated_at = ${now.toISOString()}
+            WHERE is_current = 1 AND state IN ('running', 'finalizing') AND EXISTS (
+              SELECT 1 FROM workflow_operations o
+              WHERE o.kind = ${kind} AND o.state = 'failed' AND o.is_current = 1
+                AND o.updated_at = ${now.toISOString()}
+                AND json_extract(o.scope_json, '$.workflowId') = qrspi_generations.workflow_id
+                AND json_extract(o.scope_json, '$.generation') = qrspi_generations.generation
+            )
+          `
+          const rows = yield* sql<{
+            readonly operation_id: string
+            readonly operation_revision: number
+            readonly attempt: number
+            readonly scope_json: string
+            readonly input_json: string
+            readonly repository_json: string
+            readonly base_ref: string
+            readonly head_ref: string
+            readonly current_head_sha: string
+          }>`
+            UPDATE workflow_operations
+            SET state = 'leased', attempt = attempt + 1, lease_owner = ${workerId},
+              lease_token = ${leaseToken},
+              lease_until = ${new Date(now.getTime() + leaseDurationMs).toISOString()},
+              updated_at = ${now.toISOString()}
+            WHERE operation_id = (
+              SELECT o.operation_id FROM workflow_operations o
+              JOIN qrspi_generations g
+                ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+                AND g.generation = json_extract(o.scope_json, '$.generation')
+              WHERE o.kind = ${kind} AND o.is_current = 1
+                AND (o.state = 'ready' OR (o.state = 'leased' AND o.lease_until <= ${now.toISOString()}))
+                AND o.run_at <= ${now.toISOString()} AND o.attempt < o.max_attempts
+                AND g.is_current = 1
+                AND g.state = ${kind === "PrePullRequestVerify" ? "running" : "finalizing"}
+              ORDER BY o.run_at, o.operation_id LIMIT 1
+            )
+            RETURNING operation_id, operation_revision, attempt, scope_json, input_json,
+              (SELECT repository_json FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS repository_json,
+              (SELECT base_ref FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS base_ref,
+              (SELECT head_ref FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS head_ref,
+              (SELECT current_head_sha FROM qrspi_generations g
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS current_head_sha
+          `
+          const row = rows[0]
+          if (row === undefined) return null
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const operationInput = yield* Schema.decodeUnknown(
+            Schema.parseJson(
+              kind === "PrePullRequestVerify" ? PrePullRequestVerifyInput : PullRequestPublishInput,
+            ),
+          )(row.input_json)
+          const repository = yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
+            row.repository_json,
+          )
+          return {
+            operationId: row.operation_id,
+            operationRevision: Number(row.operation_revision),
+            attempt: Number(row.attempt),
+            leaseToken,
+            scope,
+            kind,
+            input: operationInput,
+            repository,
+            baseRef: row.base_ref,
+            headRef: row.head_ref,
+            currentHeadSha: row.current_head_sha,
+          }
+        }),
+      ),
+
+    findPullRequestPublicationRecovery: () =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly operation_id: string
+          readonly operation_revision: number
+          readonly attempt: number
+          readonly scope_json: string
+          readonly input_json: string
+          readonly external_intent_json: string
+          readonly repository_json: string
+          readonly base_ref: string
+          readonly head_ref: string
+          readonly current_head_sha: string
+        }>`
+          SELECT o.operation_id, o.operation_revision, o.attempt, o.scope_json, o.input_json,
+            o.external_intent_json, g.repository_json, g.base_ref, g.head_ref, g.current_head_sha
+          FROM workflow_operations o JOIN qrspi_generations g
+            ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+            AND g.generation = json_extract(o.scope_json, '$.generation')
+          WHERE o.kind = 'PullRequestPublish' AND o.is_current = 1
+            AND o.state = 'waiting_external' AND g.is_current = 1 AND g.state = 'finalizing'
+          ORDER BY o.updated_at, o.operation_id LIMIT 1
+        `
+        const row = rows[0]
+        if (row === undefined) return null
+        return {
+          operationId: row.operation_id,
+          operationRevision: Number(row.operation_revision),
+          attempt: Number(row.attempt),
+          scope: yield* decodeGenerationScope(row.scope_json),
+          kind: "PullRequestPublish" as const,
+          input: yield* Schema.decodeUnknown(Schema.parseJson(PullRequestPublishInput))(
+            row.input_json,
+          ),
+          intent: yield* Schema.decodeUnknown(Schema.parseJson(FinalPullRequestIntentSchema))(
+            row.external_intent_json,
+          ),
+          repository: yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
+            row.repository_json,
+          ),
+          baseRef: row.base_ref,
+          headRef: row.head_ref,
+          currentHeadSha: row.current_head_sha,
+        }
+      }),
+
+    completePrePullRequestVerification: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly input_json: string
+            readonly repository_json: string
+            readonly base_ref: string
+            readonly head_ref: string
+            readonly current_head_sha: string
+            readonly prepared_result_json: string
+            readonly published_reference_json: string
+            readonly ticket_revision_json: string
+          }>`
+            SELECT o.scope_json, o.input_json, g.repository_json, g.base_ref, g.head_ref,
+              g.current_head_sha, v.prepared_result_json, v.published_reference_json,
+              t.revision_json AS ticket_revision_json
+            FROM workflow_operations o JOIN qrspi_generations g
+              ON g.workflow_id = json_extract(o.scope_json, '$.workflowId')
+              AND g.generation = json_extract(o.scope_json, '$.generation')
+            JOIN qrspi_stage_revisions v
+              ON v.workflow_id = g.workflow_id AND v.generation = g.generation
+              AND v.stage_key = json_extract(o.input_json, '$.checkpoint.stageKey')
+              AND v.revision = json_extract(o.input_json, '$.checkpoint.stageRevision')
+            JOIN qrspi_ticket_revisions t ON t.workflow_id = g.workflow_id
+              AND t.ticket_revision_sha256 = g.ticket_revision_sha256
+            WHERE o.operation_id = ${input.operationId} AND o.kind = 'PrePullRequestVerify'
+              AND o.state = 'leased' AND o.is_current = 1 AND o.lease_token = ${input.leaseToken}
+              AND o.lease_until > ${input.now.toISOString()}
+              AND g.is_current = 1 AND g.state = 'running'
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const verification = yield* Schema.decodeUnknown(
+            Schema.parseJson(PrePullRequestVerifyInput),
+          )(row.input_json)
+          const prepared = yield* Schema.decodeUnknown(Schema.parseJson(ImplementationStageResult))(
+            row.prepared_result_json,
+          )
+          const acceptedCheckpoint = yield* Schema.decodeUnknown(
+            Schema.parseJson(ImplementationCheckpointReference),
+          )(row.published_reference_json)
+          if (
+            input.observedHeadSha !== row.current_head_sha ||
+            verification.headSha !== row.current_head_sha ||
+            verification.checkpoint.finalSha !== row.current_head_sha ||
+            canonicalSha256(verification.checkpoint) !== canonicalSha256(acceptedCheckpoint) ||
+            prepared.deliveryEvidence === undefined ||
+            verification.preparedDeliveryEvidenceSha256 !==
+              canonicalSha256(prepared.deliveryEvidence)
+          ) {
+            return "stale" as const
+          }
+          const ticketRevision = yield* Schema.decodeUnknown(
+            Schema.parseJson(Schema.Struct({ readyTicket: ReadyTicket })),
+          )(row.ticket_revision_json)
+          const repository = yield* Schema.decodeUnknown(Schema.parseJson(RepositoryReference))(
+            row.repository_json,
+          )
+          const evidenceLines = prepared.deliveryEvidence.scenarios.map(
+            ({ scenario, evidence }) =>
+              `- **${ticketRevision.readyTicket.scenarios[scenario]!.name}**: ${evidence}`,
+          )
+          const body = [
+            prepared.deliveryEvidence.summary,
+            "",
+            "## Delivery evidence",
+            ...evidenceLines,
+          ].join("\n")
+          const bodySha256 = createHash("sha256").update(body).digest("hex")
+          const publishInput = {
+            repository,
+            baseRef: row.base_ref,
+            headRef: row.head_ref,
+            headSha: row.current_head_sha,
+            title: ticketRevision.readyTicket.title,
+            body,
+            bodySha256,
+            draft: false as const,
+            checkpoint: verification.checkpoint,
+            preparedDeliveryEvidence: prepared.deliveryEvidence,
+            verificationOperationId: input.operationId,
+          }
+          yield* sql`
+            UPDATE workflow_operations SET state = 'succeeded',
+              output_json = ${JSON.stringify({
+                checkpoint: verification.checkpoint,
+                headSha: row.current_head_sha,
+                verificationPolicySha256: canonicalSha256({
+                  contractVersion: 1,
+                  check: "branch-head",
+                }),
+                result: "passed",
+                preparedDeliveryEvidenceSha256: verification.preparedDeliveryEvidenceSha256,
+                completedAt: input.now.toISOString(),
+              })}, lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+              updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          const logical = `${scope.workflowId}:${scope.generation}:PullRequestPublish`
+          yield* insertOperation(sql, {
+            operationId: `${logical}:1`,
+            logicalOperationId: logical,
+            revision: 1,
+            retryOf: null,
+            kind: "PullRequestPublish",
+            scope,
+            inputJson: JSON.stringify(publishInput),
+            inputSha256: canonicalSha256(publishInput),
+            state: "ready",
+            attempt: 0,
+            parentEffect: { success: "advance parent", failure: "fail Generation" },
+            now: input.now,
+          })
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'finalizing', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND is_current = 1 AND state = 'running'
+          `
+          return "verified" as const
+        }),
+      ),
+
+    bindPullRequestPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const existing = yield* sql<{ readonly external_intent_json: string | null }>`
+            SELECT external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish' AND is_current = 1
+          `
+          const bound = existing[0]?.external_intent_json
+          if (bound !== null && bound !== undefined) {
+            const decoded = yield* Schema.decodeUnknown(
+              Schema.parseJson(FinalPullRequestIntentSchema),
+            )(bound)
+            return canonicalSha256(decoded) === canonicalSha256(input.intent)
+              ? ("bound" as const)
+              : ("conflict" as const)
+          }
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations SET state = 'waiting_external',
+              external_intent_json = ${JSON.stringify(input.intent)}, lease_owner = NULL,
+              lease_token = NULL, lease_until = NULL, updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+            RETURNING operation_id
+          `
+          return rows.length === 1 ? ("bound" as const) : ("stale" as const)
+        }),
+      ),
+
+    completePullRequestPublication: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const observation = yield* Schema.decodeUnknown(FinalPullRequestObservationSchema)(
+            input.observation,
+          )
+          const rows = yield* sql<{
+            readonly scope_json: string
+            readonly input_json: string
+            readonly external_intent_json: string
+          }>`
+            SELECT scope_json, input_json, external_intent_json FROM workflow_operations
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+              AND state = 'waiting_external' AND is_current = 1
+          `
+          const row = rows[0]
+          if (row === undefined) return "stale" as const
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          const publication = yield* Schema.decodeUnknown(
+            Schema.parseJson(PullRequestPublishInput),
+          )(row.input_json)
+          const intent = yield* Schema.decodeUnknown(
+            Schema.parseJson(FinalPullRequestIntentSchema),
+          )(row.external_intent_json)
+          if (
+            canonicalSha256(intent) !==
+              canonicalSha256({
+                repository: publication.repository,
+                baseRef: publication.baseRef,
+                headRef: publication.headRef,
+                headSha: publication.headSha,
+                title: publication.title,
+                body: publication.body,
+                bodySha256: publication.bodySha256,
+                draft: publication.draft,
+              }) ||
+            observation.draft ||
+            canonicalSha256(observation.reference.repository) !==
+              canonicalSha256(intent.repository) ||
+            observation.headSha !== intent.headSha ||
+            observation.headRef !== intent.headRef ||
+            observation.baseRef !== intent.baseRef ||
+            observation.bodySha256 !== intent.bodySha256
+          ) {
+            return "stale" as const
+          }
+          const generation = yield* sql<{ readonly workflow_id: string }>`
+            UPDATE qrspi_generations SET state = 'completed', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND is_current = 1 AND state = 'finalizing' AND current_head_sha = ${intent.headSha}
+            RETURNING workflow_id
+          `
+          if (generation.length !== 1) return "stale" as const
+          yield* sql`
+            UPDATE workflow_operations SET state = 'succeeded',
+              output_json = ${JSON.stringify({ pullRequest: observation })},
+              external_observation_json = ${JSON.stringify(observation)},
+              updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId}
+          `
+          const logical = `${scope.workflowId}:GenericReviewHandoff:${observation.reference.number}`
+          const handoffInput = {
+            pullRequest: observation,
+            generation: scope.generation,
+            checkpoint: publication.checkpoint,
+          }
+          yield* insertOperation(sql, {
+            operationId: `${logical}:1`,
+            logicalOperationId: logical,
+            revision: 1,
+            retryOf: null,
+            kind: "GenericReviewHandoff",
+            scope: { _tag: "WorkflowScope", workflowId: scope.workflowId },
+            inputJson: JSON.stringify(handoffInput),
+            inputSha256: canonicalSha256(handoffInput),
+            state: "ready",
+            attempt: 0,
+            parentEffect: { success: "audit only", failure: "open operation-scoped gate" },
+            now: input.now,
+          })
+          return "published" as const
+        }),
+      ),
+
+    rescheduleFinalizationOperation: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const failed = yield* sql<{ readonly operation_id: string; readonly scope_json: string }>`
+            UPDATE workflow_operations SET
+              state = CASE WHEN attempt >= max_attempts THEN 'failed' ELSE 'ready' END,
+              last_error = ${input.error}, run_at = ${input.runAt.toISOString()},
+              terminal_failure_reason = CASE WHEN attempt >= max_attempts THEN ${input.error} ELSE NULL END,
+              terminal_retry_policy = CASE WHEN attempt >= max_attempts THEN 'retry_budget_exhausted' ELSE NULL END,
+              lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+              updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND state = 'leased' AND is_current = 1
+              AND lease_token = ${input.leaseToken}
+            RETURNING operation_id, scope_json
+          `
+          const row = failed[0]
+          if (row === undefined) return "stale" as const
+          const state = yield* sql<{ readonly state: string }>`
+            SELECT state FROM workflow_operations WHERE operation_id = ${input.operationId}
+          `
+          if (state[0]?.state !== "failed") return "rescheduled" as const
+          const scope = yield* decodeGenerationScope(row.scope_json)
+          yield* sql`
+            UPDATE qrspi_generations SET state = 'failed', updated_at = ${input.now.toISOString()}
+            WHERE workflow_id = ${scope.workflowId} AND generation = ${scope.generation}
+              AND is_current = 1 AND state IN ('running', 'finalizing')
+          `
+          return "failed" as const
+        }),
+      ),
   }
 
   function decodeRow(raw: Record<string, unknown>) {
@@ -2488,6 +2946,40 @@ const GenerationScope = Schema.Struct({
   _tag: Schema.Literal("GenerationScope"),
   workflowId: Schema.NonEmptyString,
   generation: Schema.Int.pipe(Schema.positive()),
+})
+const PrePullRequestVerifyInput = Schema.Struct({
+  checkpoint: ImplementationCheckpointReference,
+  headSha: Schema.String,
+  preparedDeliveryEvidenceSha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+})
+const FinalPullRequestIntentSchema = Schema.Struct({
+  repository: RepositoryReference,
+  baseRef: Schema.NonEmptyString,
+  headRef: Schema.NonEmptyString,
+  headSha: Schema.String,
+  title: Schema.NonEmptyString,
+  body: Schema.String,
+  bodySha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  draft: Schema.Literal(false),
+})
+const PullRequestPublishInput = Schema.Struct({
+  ...FinalPullRequestIntentSchema.fields,
+  checkpoint: ImplementationCheckpointReference,
+  preparedDeliveryEvidence: PreparedDeliveryEvidence,
+  verificationOperationId: Schema.NonEmptyString,
+})
+const FinalPullRequestObservationSchema = Schema.Struct({
+  reference: Schema.Struct({
+    repository: RepositoryReference,
+    number: Schema.Int.pipe(Schema.positive()),
+  }),
+  baseRef: Schema.NonEmptyString,
+  headRef: Schema.NonEmptyString,
+  headSha: Schema.String,
+  draft: Schema.Boolean,
+  body: Schema.String,
+  bodySha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  url: Schema.NonEmptyString,
 })
 const StageOperationInput = Schema.Struct({
   stageKey: Schema.NonEmptyString,
@@ -2718,11 +3210,6 @@ function activateNextStage(
           parentEffect: { success: "advance parent", failure: "fail Generation" },
           now,
         })
-        yield* sql`
-          UPDATE qrspi_generations SET state = 'finalizing', updated_at = ${now.toISOString()}
-          WHERE workflow_id = ${workflowId} AND generation = ${generation}
-            AND is_current = 1 AND state = 'running'
-        `
       }
       return
     }

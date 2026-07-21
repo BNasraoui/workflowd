@@ -431,7 +431,11 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       const request = yield* Effect.try({
         try: () => ({
           title: boundedText(trustedDefinition.title(decodedInput), 256, "session title"),
-          prompt: boundedText(trustedDefinition.prompt(decodedInput), 256 * 1024, "session prompt"),
+          prompt: boundedText(
+            trustedDefinition.prompt(decodedInput),
+            MAX_AGENT_LAUNCH_INTENT_BYTES,
+            "session prompt",
+          ),
         }),
         catch: (cause) => this.error("prepare agent prompt", cause, false),
       })

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { createHash } from "node:crypto"
 import type { QrspiConfig } from "../../src/config"
 import type { RepositoryReference } from "../../src/qrspi/domain"
 import {
@@ -174,6 +175,68 @@ describe("QRSPI external adapters", () => {
     expect(parameters).toMatchObject({
       state: "open",
       head: "example-owner:feature/workflowd-vs3.3-start",
+    })
+  })
+
+  test("creates and observes the exact final non-draft pull request", async () => {
+    const body = "Implementation complete\n\n## Delivery evidence\n- Scenario passes"
+    const bodySha256 = createHash("sha256").update(body).digest("hex")
+    let pull:
+      | {
+          readonly number: number
+          readonly draft: boolean
+          readonly body: string
+          readonly html_url: string
+          readonly base: { readonly ref: string }
+          readonly head: { readonly ref: string; readonly sha: string }
+        }
+      | undefined
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "f".repeat(40) } } }),
+        },
+        pulls: {
+          list: async () => ({ data: pull === undefined ? [] : [pull] }),
+          create: async (input) => {
+            if (input === undefined) throw new Error("missing pull request input")
+            expect(input.draft).toBe(false)
+            pull = {
+              number: 17,
+              draft: false,
+              body: input.body ?? "",
+              html_url: "https://github.test/example-owner/example/pull/17",
+              base: { ref: input.base },
+              head: { ref: input.head, sha: "f".repeat(40) },
+            }
+            return { data: { number: 17 } }
+          },
+        },
+        git: { createRef: async () => undefined },
+      },
+    }))
+    const intent = {
+      repository,
+      baseRef: "main",
+      headRef: "feature/workflowd-vs3.3-start",
+      headSha: "f".repeat(40),
+      title: "Complete QRSPI",
+      body,
+      bodySha256,
+      draft: false as const,
+    }
+
+    await Effect.runPromise(adapter.createFinalPullRequest(intent))
+    const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
+
+    expect(observed).toMatchObject({
+      reference: { repository, number: 17 },
+      baseRef: "main",
+      headRef: intent.headRef,
+      headSha: intent.headSha,
+      draft: false,
+      bodySha256,
     })
   })
 

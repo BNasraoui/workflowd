@@ -22,6 +22,11 @@ import { AgentHarness } from "./agent-harness"
 import { QrspiStore } from "./qrspi/store"
 import { ArtifactPublicationRepositoryFactoryService } from "./qrspi/artifact-publication"
 import { QrspiWorkspace } from "./qrspi/workspace"
+import {
+  runPrePullRequestVerifyIteration,
+  runPullRequestPublishIteration,
+} from "./qrspi/finalization-worker"
+import { QrspiRepository } from "./qrspi/ports"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -108,7 +113,14 @@ export function serveHookHttp<R>(
 }
 
 export type RuntimeWorkerName =
-  "job" | "publication" | "reconciliation" | "command" | "stage-produce" | "artifact-publish"
+  | "job"
+  | "publication"
+  | "reconciliation"
+  | "command"
+  | "stage-produce"
+  | "artifact-publish"
+  | "pre-pull-request-verify"
+  | "pull-request-publish"
 
 export function startHookService(
   config: AppConfig,
@@ -129,6 +141,7 @@ export function startHookService(
       ArtifactPublicationRepositoryFactoryService,
     )
     const qrspiWorkspace = yield* Effect.serviceOption(QrspiWorkspace)
+    const qrspiRepository = yield* Effect.serviceOption(QrspiRepository)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
     }
@@ -137,7 +150,8 @@ export function startHookService(
       (Option.isNone(qrspiStore) ||
         Option.isNone(stageCatalog) ||
         Option.isNone(artifactRepositoryFactory) ||
-        Option.isNone(qrspiWorkspace))
+        Option.isNone(qrspiWorkspace) ||
+        Option.isNone(qrspiRepository))
     ) {
       return yield* Effect.die(new Error("QRSPI is configured without its worker services"))
     }
@@ -229,6 +243,34 @@ export function startHookService(
               Option.getOrThrow(artifactRepositoryFactory),
             ),
             Effect.provideService(QrspiWorkspace, Option.getOrThrow(qrspiWorkspace)),
+          ),
+        ),
+      )
+      yield* superviseWorker(
+        "QRSPI PrePullRequestVerify worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "pre-pull-request-verify",
+          runPrePullRequestVerifyIteration({
+            workerId: `${process.pid}:qrspi-pre-pr-verifier`,
+            leaseDurationMs: config.qrspi.leaseDurationMs,
+          }).pipe(
+            Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
+            Effect.provideService(QrspiRepository, Option.getOrThrow(qrspiRepository)),
+          ),
+        ),
+      )
+      yield* superviseWorker(
+        "QRSPI PullRequestPublish worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "pull-request-publish",
+          runPullRequestPublishIteration({
+            workerId: `${process.pid}:qrspi-pr-publisher`,
+            leaseDurationMs: config.qrspi.leaseDurationMs,
+          }).pipe(
+            Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
+            Effect.provideService(QrspiRepository, Option.getOrThrow(qrspiRepository)),
           ),
         ),
       )

@@ -15,6 +15,10 @@ import {
 } from "../../src/qrspi/ports"
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
 import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
+import {
+  runPrePullRequestVerifyIteration,
+  runPullRequestPublishIteration,
+} from "../../src/qrspi/finalization-worker"
 import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
@@ -95,6 +99,8 @@ function fakes(options: FakeOptions = {}) {
   let branchSha = options.initialBranchSha
   let createCalls = 0
   let pullRequestCalls = 0
+  let finalPullRequestCalls = 0
+  let finalPullRequest: Parameters<QrspiRepositoryPort["observeFinalPullRequest"]>[0] | undefined
   let openPullRequest = options.openPullRequest ?? false
   let crashed = false
   let lostCreatedBranch = false
@@ -176,6 +182,27 @@ function fakes(options: FakeOptions = {}) {
         }
         return { sha: branchSha }
       }),
+    createFinalPullRequest: (input) =>
+      Effect.sync(() => {
+        finalPullRequestCalls += 1
+        finalPullRequest = input
+        return { repository: input.repository, number: 17 }
+      }),
+    observeFinalPullRequest: (input) =>
+      Effect.succeed(
+        finalPullRequest === undefined
+          ? null
+          : {
+              reference: { repository: input.repository, number: 17 },
+              baseRef: finalPullRequest.baseRef,
+              headRef: finalPullRequest.headRef,
+              headSha: finalPullRequest.headSha,
+              draft: false,
+              body: finalPullRequest.body,
+              bodySha256: finalPullRequest.bodySha256,
+              url: "https://example.test/example-owner/example/pull/17",
+            },
+      ),
   } satisfies QrspiRepositoryPort
   return {
     tickets,
@@ -196,7 +223,7 @@ function fakes(options: FakeOptions = {}) {
       branchHistoryTrusted = value
     },
     branchHistory: () => branchHistoryTrusted,
-    counts: () => ({ createCalls, pullRequestCalls, authorityTokens }),
+    counts: () => ({ createCalls, pullRequestCalls, finalPullRequestCalls, authorityTokens }),
   }
 }
 
@@ -882,7 +909,7 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("persists implementation commits and does not gate on_escalation success", async () => {
+  test("workers verify and publish a terminal implementation through completed generation", async () => {
     const filename = await databasePath()
     const fake = fakes()
     const implementationOptions = {
@@ -1033,6 +1060,21 @@ describe("WorkflowStart integration", () => {
           observedHeadSha: secondCommit.commitSha,
           now: new Date("2026-07-21T05:01:10.000Z"),
         })
+        const beforeVerification = yield* store.getCurrentCursor(workflowId)
+        fake.setBranch(secondCommit.commitSha)
+        const verified = yield* runPrePullRequestVerifyIteration({
+          workerId: "verifier",
+          leaseDurationMs: 60_000,
+          now: () => new Date("2026-07-21T05:01:11.000Z"),
+          randomId: () => "55555555-5555-4555-8555-555555555555",
+        })
+        const afterVerification = yield* store.getCurrentCursor(workflowId)
+        const published = yield* runPullRequestPublishIteration({
+          workerId: "pr-publisher",
+          leaseDurationMs: 60_000,
+          now: () => new Date("2026-07-21T05:01:12.000Z"),
+          randomId: () => "66666666-6666-4666-8666-666666666666",
+        })
         const sql = yield* SqlClient.SqlClient
         const steps = yield* sql<{
           readonly commit_reference_json: string
@@ -1062,13 +1104,29 @@ describe("WorkflowStart integration", () => {
         }>`
           SELECT operation_id, kind, state, input_json, scope_json, parent_effect_json
           FROM workflow_operations
-          WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish') ORDER BY kind
+          WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish', 'GenericReviewHandoff')
+          ORDER BY kind
         `
-        return { duplicate, steps, revisions, generation, observations, finalization }
+        return {
+          duplicate,
+          beforeVerification,
+          verified,
+          afterVerification,
+          published,
+          steps,
+          revisions,
+          generation,
+          observations,
+          finalization,
+        }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(state.duplicate).toBe("stale")
+    expect(state.beforeVerification?.state).toBe("running")
+    expect(state.verified).toBe("verified")
+    expect(state.afterVerification?.state).toBe("finalizing")
+    expect(state.published).toBe("published")
     expect(
       state.steps.map(({ commit_reference_json }) =>
         Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(commit_reference_json),
@@ -1083,25 +1141,23 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(state.revisions[0]!.published_reference_json)).toEqual(checkpoint)
     expect(state.revisions[0]!.state).toBe("accepted")
     expect(state.generation).toEqual([
-      { state: "finalizing", current_head_sha: secondCommit.commitSha },
+      { state: "completed", current_head_sha: secondCommit.commitSha },
     ])
-    expect(state.finalization).toEqual([
-      {
-        operation_id: `${workflowId}:1:PrePullRequestVerify:1`,
-        kind: "PrePullRequestVerify",
-        state: "ready",
-        input_json: JSON.stringify({
-          checkpoint,
-          headSha: secondCommit.commitSha,
-          preparedDeliveryEvidenceSha256: checkpoint.preparedDeliveryEvidenceSha256,
-        }),
-        scope_json: JSON.stringify({ _tag: "GenerationScope", workflowId, generation: 1 }),
-        parent_effect_json: JSON.stringify({
-          success: "advance parent",
-          failure: "fail Generation",
-        }),
-      },
+    expect(state.finalization.map(({ kind, state }) => ({ kind, state }))).toEqual([
+      { kind: "GenericReviewHandoff", state: "ready" },
+      { kind: "PrePullRequestVerify", state: "succeeded" },
+      { kind: "PullRequestPublish", state: "succeeded" },
     ])
+    const publication = state.finalization.find(({ kind }) => kind === "PullRequestPublish")
+    expect(JSON.parse(publication!.input_json)).toMatchObject({
+      repository,
+      baseRef: "main",
+      headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+      headSha: secondCommit.commitSha,
+      checkpoint,
+      preparedDeliveryEvidence: deliveryEvidence,
+    })
+    expect(fake.counts().finalPullRequestCalls).toBe(1)
   })
 
   test("uses the documented branch format after sanitizing the ticket ID", async () => {

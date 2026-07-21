@@ -10,6 +10,7 @@ import {
   type TicketSourcePort,
 } from "./ports"
 import type { RepositoryReference, TicketReference } from "./domain"
+import { createHash } from "node:crypto"
 import type { JsonValue } from "../json"
 import { runWorkspaceCommandBytes } from "../workspace/command"
 import type { WorkspaceError } from "../workspace/errors"
@@ -169,9 +170,19 @@ type QrspiOctokit = {
       }>
     }
     readonly pulls: {
-      readonly list: (
-        input: Parameters<PullsApi["list"]>[0],
-      ) => Promise<{ readonly data: ReadonlyArray<unknown> }>
+      readonly list: (input: Parameters<PullsApi["list"]>[0]) => Promise<{
+        readonly data: ReadonlyArray<{
+          readonly number: number
+          readonly draft?: boolean | null
+          readonly body?: string | null
+          readonly html_url: string
+          readonly base: { readonly ref: string }
+          readonly head: { readonly ref: string; readonly sha: string }
+        }>
+      }>
+      readonly create?: (input: Parameters<PullsApi["create"]>[0]) => Promise<{
+        readonly data: { readonly number: number }
+      }>
     }
     readonly git: {
       readonly createRef: (input: Parameters<GitApi["createRef"]>[0]) => Promise<unknown>
@@ -310,6 +321,58 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       return { sha: input.expectedBaseSha }
+    })
+
+  readonly createFinalPullRequest: QrspiRepositoryPort["createFinalPullRequest"] = (input) =>
+    this.attempt("create final pull request", async (signal) => {
+      const { owner, repo } = repositoryName(input.repository)
+      const client = await this.client(this.config.installationId)
+      if (client.rest.pulls.create === undefined)
+        throw new Error("Pull request creation unavailable")
+      const created = await client.rest.pulls.create({
+        owner,
+        repo,
+        base: input.baseRef,
+        head: input.headRef,
+        title: input.title,
+        body: input.body,
+        draft: false,
+        request: { signal },
+      })
+      return { repository: input.repository, number: created.data.number }
+    })
+
+  readonly observeFinalPullRequest: QrspiRepositoryPort["observeFinalPullRequest"] = (input) =>
+    this.attempt("observe final pull request", async (signal) => {
+      const { owner, repo } = repositoryName(input.repository)
+      const client = await this.client(this.config.installationId)
+      const pulls = await client.rest.pulls.list({
+        ...openPullRequestQuery(owner, repo, input.headRef),
+        base: input.baseRef,
+        request: { signal },
+      })
+      const pull = pulls.data.find(
+        ({ base, head, draft, body }) =>
+          base.ref === input.baseRef &&
+          head.ref === input.headRef &&
+          head.sha === input.headSha &&
+          draft !== true &&
+          createHash("sha256")
+            .update(body ?? "")
+            .digest("hex") === input.bodySha256,
+      )
+      if (pull === undefined) return null
+      const body = pull.body ?? ""
+      return {
+        reference: { repository: input.repository, number: pull.number },
+        baseRef: pull.base.ref,
+        headRef: pull.head.ref,
+        headSha: pull.head.sha,
+        draft: pull.draft === true,
+        body,
+        bodySha256: createHash("sha256").update(body).digest("hex"),
+        url: pull.html_url,
+      }
     })
 
   private attempt<A>(operation: string, run: (signal: AbortSignal) => Promise<A>) {
