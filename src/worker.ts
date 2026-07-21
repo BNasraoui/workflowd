@@ -99,7 +99,7 @@ function processReviewWork(
         return { _tag: "Completed", review } as const
       }).pipe(
         Effect.onExit((exit) =>
-          Exit.isFailure(exit) ? harness.abortSession(reference) : Effect.void,
+          Exit.isFailure(exit) ? harness.abortSession(reference).pipe(Effect.ignore) : Effect.void,
         ),
       )
       if (sessionResult._tag === "Stale") {
@@ -178,7 +178,9 @@ function processFixWork(
           return { _tag: "Completed", fixResult } as const
         }).pipe(
           Effect.onExit((exit) =>
-            Exit.isFailure(exit) ? harness.abortSession(reference) : Effect.void,
+            Exit.isFailure(exit)
+              ? harness.abortSession(reference).pipe(Effect.ignore)
+              : Effect.void,
           ),
         )
         if (sessionResult._tag === "Stale") {

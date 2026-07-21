@@ -6,7 +6,9 @@ import {
   type AgentHarnessPort,
   type AgentExecutionContext,
   type AgentLaunchIntent,
+  OpenCodeAgentHarness,
   SessionReference,
+  TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
@@ -243,6 +245,77 @@ test("aborts an expired native session before starting its replacement", async (
 
   expect(result).toBe("completed")
   expect(actions).toEqual(["abort expired", "claim replacement", "create replacement"])
+})
+
+test("does not claim a replacement when aborting the expired session rejects", async () => {
+  const oldReference = Schema.decodeUnknownSync(SessionReference)({
+    ...sessionReference(
+      preparedReview({
+        directory: "/tmp/review",
+        scope: { _tag: "GenerationScope", workflowId: "pr:42:7", generation: 1 },
+        operationId: "job:1",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-19T11:58:00.000Z"),
+      }),
+    ),
+    sessionReferenceId: "11111111-1111-4111-8111-111111111111",
+    nativeSessionId: "ses_expired",
+  })
+  let replacementClaims = 0
+  let superseded = 0
+  let cleanupClaims = 0
+  const harness = new OpenCodeAgentHarness(
+    {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeSessionEvents: async () => {
+        throw new Error("unused")
+      },
+      getSessionStatus: async () => ({ type: "idle" }),
+      listSessionMessages: async () => [],
+      abortSession: async () => {
+        throw new Error("abort rejected")
+      },
+      validateAvailability: async () => undefined,
+    },
+    new TrustedAgentHarnessCatalog([]),
+    {
+      serverId: "opencode-primary",
+      endpointAlias: "private-opencode",
+      pollIntervalMs: 1,
+    },
+  )
+
+  const exit = await Effect.runPromise(
+    runJobIteration(jobOptions).pipe(
+      Effect.provide(
+        makeWorkerLayer({
+          store: {
+            claimExpiredAgentSession: () =>
+              Effect.sync(() => (cleanupClaims++ === 0 ? oldReference : null)),
+            supersedeAgentSession: () =>
+              Effect.sync(() => {
+                superseded += 1
+                return "superseded" as const
+              }),
+            claimNextJob: () =>
+              Effect.sync(() => {
+                replacementClaims += 1
+                return null
+              }),
+          },
+          agentHarness: harness,
+        }),
+      ),
+      Effect.exit,
+    ),
+  )
+
+  expect(exit._tag).toBe("Failure")
+  expect(superseded).toBe(0)
+  expect(replacementClaims).toBe(0)
 })
 
 const makePublication = (id = 1) =>

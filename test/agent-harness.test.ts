@@ -213,10 +213,45 @@ describe("OpenCodeAgentHarness", () => {
         harness.resumeSession(prepared, mismatchedReference).pipe(Effect.flip),
       )
       expect(failure.operation).toBe("validate SessionReference")
-      await Effect.runPromise(harness.abortSession(mismatchedReference))
+      const abortFailure = await Effect.runPromise(
+        harness.abortSession(mismatchedReference).pipe(Effect.flip),
+      )
+      expect(abortFailure.operation).toBe("abort session")
     }
     expect(prompted).toBe(0)
     expect(aborted).toBe(0)
+  })
+
+  test("fails when OpenCode does not confirm a session abort", async () => {
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter({ abortSession: async () => false }),
+      new TrustedAgentHarnessCatalog([fixtureDefinition]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
+    )
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        fixtureDefinition,
+        { text: "A bounded fixture input." },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+      ),
+    )
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+
+    const failure = await Effect.runPromise(harness.abortSession(reference).pipe(Effect.flip))
+
+    expect(failure.operation).toBe("abort session")
   })
 
   test("marks invalid structured output terminal when the trusted policy says fail", async () => {

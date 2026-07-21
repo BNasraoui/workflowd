@@ -268,7 +268,7 @@ export type AgentHarnessPort = {
     prepared: PreparedAgentWork<Input, Output, OutputEncoded>,
     reference: SessionReference,
   ) => Effect.Effect<Output, AgentHarnessError>
-  readonly abortSession: (reference: SessionReference) => Effect.Effect<void, never>
+  readonly abortSession: (reference: SessionReference) => Effect.Effect<void, AgentHarnessError>
 }
 
 export const AgentHarness = Context.GenericTag<AgentHarnessPort>("workflowd/AgentHarness")
@@ -401,13 +401,29 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   }
 
   readonly abortSession: AgentHarnessPort["abortSession"] = (reference) => {
-    if (sessionEndpointMismatch(this.#config, reference) !== undefined) return Effect.void
-    return Effect.tryPromise((signal) =>
+    const mismatch = sessionEndpointMismatch(this.#config, reference)
+    if (mismatch !== undefined) {
+      return Effect.fail(this.error("abort session", new Error(mismatch), false))
+    }
+    return this.attempt("abort session", true, (signal) =>
       this.adapter.abortSession(
         { sessionID: reference.nativeSessionId, directory: reference.directory },
         signal,
       ),
-    ).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+    ).pipe(
+      Effect.flatMap((aborted) =>
+        aborted
+          ? Effect.void
+          : Effect.fail(
+              this.error("abort session", new Error("OpenCode did not confirm the abort"), true),
+            ),
+      ),
+      Effect.timeoutFail({
+        duration: "5 seconds",
+        onTimeout: () =>
+          this.error("abort session", new Error("OpenCode session abort timed out"), true),
+      }),
+    )
   }
 
   private structuredSession<Input, Output, OutputEncoded>(
