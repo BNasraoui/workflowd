@@ -375,7 +375,9 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   }
 
   readonly resumeSession: AgentHarnessPort["resumeSession"] = (prepared, reference) => {
-    const mismatch = sessionMismatch(prepared.launchIntent, reference)
+    const mismatch =
+      sessionEndpointMismatch(this.#config, reference) ??
+      sessionMismatch(prepared.launchIntent, reference)
     if (mismatch !== undefined) {
       return Effect.fail(this.error("validate SessionReference", new Error(mismatch), false))
     }
@@ -398,13 +400,15 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
     )
   }
 
-  readonly abortSession: AgentHarnessPort["abortSession"] = (reference) =>
-    Effect.tryPromise((signal) =>
+  readonly abortSession: AgentHarnessPort["abortSession"] = (reference) => {
+    if (sessionEndpointMismatch(this.#config, reference) !== undefined) return Effect.void
+    return Effect.tryPromise((signal) =>
       this.adapter.abortSession(
         { sessionID: reference.nativeSessionId, directory: reference.directory },
         signal,
       ),
     ).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+  }
 
   private structuredSession<Input, Output, OutputEncoded>(
     prepared: PreparedAgentWork<Input, Output, OutputEncoded>,
@@ -493,6 +497,15 @@ function sessionMismatch<Input>(
   if (reference.attempt !== intent.attempt) return "attempt changed"
   if (reference.leaseToken !== intent.leaseToken) return "lease token changed"
   if (JSON.stringify(reference.scope) !== JSON.stringify(intent.scope)) return "scope changed"
+  return undefined
+}
+
+function sessionEndpointMismatch(
+  config: HarnessConfig,
+  reference: SessionReference,
+): string | undefined {
+  if (reference.serverId !== config.serverId) return "server changed"
+  if (reference.endpointAlias !== config.endpointAlias) return "endpoint changed"
   return undefined
 }
 

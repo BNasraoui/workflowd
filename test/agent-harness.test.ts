@@ -166,6 +166,59 @@ describe("OpenCodeAgentHarness", () => {
     expect(actions).toEqual(["create", "prompt"])
   })
 
+  test("rejects persisted references for a different OpenCode endpoint", async () => {
+    let prompted = 0
+    let aborted = 0
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter({
+        promptSession: async () => {
+          prompted += 1
+          throw new Error("unexpected prompt")
+        },
+        abortSession: async () => {
+          aborted += 1
+          return true
+        },
+      }),
+      new TrustedAgentHarnessCatalog([fixtureDefinition]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
+    )
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        fixtureDefinition,
+        { text: "A bounded fixture input." },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+      ),
+    )
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+    const mismatchedReferences = [
+      { ...reference, serverId: "opencode-secondary" },
+      { ...reference, endpointAlias: "public-opencode" },
+    ]
+
+    for (const mismatchedReference of mismatchedReferences) {
+      const failure = await Effect.runPromise(
+        harness.resumeSession(prepared, mismatchedReference).pipe(Effect.flip),
+      )
+      expect(failure.operation).toBe("validate SessionReference")
+      await Effect.runPromise(harness.abortSession(mismatchedReference))
+    }
+    expect(prompted).toBe(0)
+    expect(aborted).toBe(0)
+  })
+
   test("marks invalid structured output terminal when the trusted policy says fail", async () => {
     const definition = {
       ...fixtureDefinition,
