@@ -436,63 +436,95 @@ test("publishes a non-final implementation step without requiring delivery evide
   expect(completion).not.toHaveProperty("checkpoint")
 })
 
-test("rejects a final implementation result without delivery evidence before repository mutation", async () => {
-  const work = {
-    operationId: "implementation-publish:final",
-    operationRevision: 1,
-    attempt: 1,
-    leaseToken: "11111111-1111-4111-8111-111111111111",
-    scope: { _tag: "GenerationScope" as const, workflowId: "workflow", generation: 1 },
-    input: {
-      stageKey: "implementation",
-      stageKind: "implementation" as const,
-      stageRevision: 1,
-      workflowDefinitionSha256: "a".repeat(64),
-      ticketRevisionSha256: "b".repeat(64),
-      sources: [],
-    },
-    stage: defaultQrspiWorkflowDefinition.stages[5]!,
-    repository: {
-      providerInstanceId: "github",
-      repositoryId: "42",
-      repositoryFullName: "owner/repo",
-    },
-    headRef: "feature/ticket",
-    currentHeadSha: "c".repeat(40),
-    ticketId: "workflowd-vs3.4",
+test.each([
+  ["without delivery evidence", readyTicket, undefined],
+  [
+    "with out-of-range scenario evidence",
     readyTicket,
-    sessionReferenceId: "session-ref",
-    preparedResult: {
-      candidateSha: "d".repeat(40),
-      changedPaths: ["src/change.ts"],
-      final: true,
+    { summary: "Invalid scenario", scenarios: [{ scenario: 999, evidence: "not linked" }] },
+  ],
+  [
+    "without evidence for every ticket scenario",
+    {
+      ...readyTicket,
+      scenarios: [
+        ...readyTicket.scenarios,
+        { name: "Verify", given: "a change", when: "tests run", then: "they pass", covers: [0] },
+      ],
     },
-  } satisfies StageOperationLease
-  let mutated = false
-  const repository: ArtifactPublicationRepository = {
-    finalizeDocument: () => Effect.die("unexpected document publication"),
-    finalizeImplementation: () => Effect.sync(() => void (mutated = true)).pipe(Effect.die),
-    updateRefExact: () => Effect.die("unexpected ref update"),
-    observeRef: () => Effect.die("unexpected observation"),
-    advanceLocalWorktree: () => Effect.die("unexpected local advance"),
-  }
+    { summary: "Incomplete", scenarios: [{ scenario: 0, evidence: "one scenario" }] },
+  ],
+] as const)(
+  "reschedules a final implementation result %s before repository mutation",
+  async (_case, ticket, deliveryEvidence) => {
+    const work = {
+      operationId: "implementation-publish:final",
+      operationRevision: 1,
+      attempt: 1,
+      leaseToken: "11111111-1111-4111-8111-111111111111",
+      scope: { _tag: "GenerationScope" as const, workflowId: "workflow", generation: 1 },
+      input: {
+        stageKey: "implementation",
+        stageKind: "implementation" as const,
+        stageRevision: 1,
+        workflowDefinitionSha256: "a".repeat(64),
+        ticketRevisionSha256: "b".repeat(64),
+        sources: [],
+      },
+      stage: defaultQrspiWorkflowDefinition.stages[5]!,
+      repository: {
+        providerInstanceId: "github",
+        repositoryId: "42",
+        repositoryFullName: "owner/repo",
+      },
+      headRef: "feature/ticket",
+      currentHeadSha: "c".repeat(40),
+      ticketId: "workflowd-vs3.4",
+      readyTicket: ticket,
+      sessionReferenceId: "session-ref",
+      preparedResult: {
+        candidateSha: "d".repeat(40),
+        changedPaths: ["src/change.ts"],
+        final: true,
+        ...(deliveryEvidence === undefined ? {} : { deliveryEvidence }),
+      },
+    } satisfies StageOperationLease
+    let mutated = false
+    let rescheduled:
+      { readonly runAt: Date; readonly now: Date; readonly error: string } | undefined
+    const repository: ArtifactPublicationRepository = {
+      finalizeDocument: () => Effect.die("unexpected document publication"),
+      finalizeImplementation: () => Effect.sync(() => void (mutated = true)).pipe(Effect.die),
+      updateRefExact: () => Effect.die("unexpected ref update"),
+      observeRef: () => Effect.die("unexpected observation"),
+      advanceLocalWorktree: () => Effect.die("unexpected local advance"),
+    }
 
-  await expect(
-    Effect.runPromise(
+    await Effect.runPromise(
       runArtifactPublishIterationWith({
         workerId: "publisher",
         leaseDurationMs: 60_000,
         now: () => new Date("2026-07-22T12:00:00.000Z"),
         randomId: () => work.leaseToken,
-        store: { ...unusedStoreMethods, claimStageOperation: () => Effect.succeed(work) },
+        store: {
+          ...unusedStoreMethods,
+          claimStageOperation: () => Effect.succeed(work),
+          rescheduleStageOperation: (input) => {
+            rescheduled = input
+            return Effect.succeed("rescheduled" as const)
+          },
+        },
         repository,
       }),
-    ),
-  ).rejects.toThrow("final delivery evidence")
-  expect(mutated).toBe(false)
-})
+    )
+    expect(mutated).toBe(false)
+    expect(rescheduled?.runAt).toEqual(new Date("2026-07-22T12:00:01.000Z"))
+    expect(rescheduled?.now).toEqual(new Date("2026-07-22T12:00:00.000Z"))
+    expect(rescheduled?.error).toBeTruthy()
+  },
+)
 
-test("rejects an over-bound cumulative checkpoint before binding or updating refs", async () => {
+test("reschedules an over-bound cumulative checkpoint before binding or updating refs", async () => {
   const calls: string[] = []
   const work = {
     operationId: "implementation-publish:over-bound",
@@ -543,6 +575,8 @@ test("rejects an over-bound cumulative checkpoint before binding or updating ref
     claimStageOperation: () => Effect.succeed(work),
     bindImplementationPublication: () =>
       Effect.sync(() => calls.push("bind")).pipe(Effect.as("bound" as const)),
+    rescheduleStageOperation: () =>
+      Effect.sync(() => calls.push("reschedule")).pipe(Effect.as("rescheduled" as const)),
   }
   const repository: ArtifactPublicationRepository = {
     finalizeDocument: () => Effect.die("unexpected document publication"),
@@ -566,6 +600,6 @@ test("rejects an over-bound cumulative checkpoint before binding or updating ref
         repository,
       }),
     ),
-  ).rejects.toThrow()
-  expect(calls).toEqual(["finalize"])
+  ).resolves.toBe("rescheduled")
+  expect(calls).toEqual(["finalize", "reschedule"])
 })

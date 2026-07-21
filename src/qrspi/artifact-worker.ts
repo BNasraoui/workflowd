@@ -12,6 +12,7 @@ import {
   ImplementationCheckpointReference,
   ImplementationStageResult,
   resolveArtifactDestination,
+  validatePreparedDeliveryEvidence,
 } from "./stages"
 import { canonicalSha256 } from "./domain"
 import { QrspiWorkspace, type QrspiWorkspacePort } from "./workspace"
@@ -80,18 +81,6 @@ export function runArtifactPublishIterationWith(options: {
     const publish = (repository: ArtifactPublicationRepository) =>
       Effect.gen(function* () {
         if (work.stage.kind === "implementation") {
-          const prepared = yield* Schema.decodeUnknown(ImplementationStageResult)(
-            work.preparedResult,
-          )
-          if (prepared.final && prepared.deliveryEvidence === undefined) {
-            return yield* Effect.fail(
-              new Error("Implementation checkpoint requires final delivery evidence"),
-            )
-          }
-          const finalize = repository.finalizeImplementation
-          if (finalize === undefined) {
-            return yield* Effect.fail(new Error("Implementation publisher is unavailable"))
-          }
           const trailers = [
             ["Provenance-Version", "1"],
             ["Ticket", work.ticketId],
@@ -105,49 +94,87 @@ export function runArtifactPublishIterationWith(options: {
             recovery !== null && "implementationCommit" in recovery
               ? recovery.implementationCommit
               : undefined
-          const finalized =
-            recoveredCommit === undefined
-              ? yield* finalize({
-                  operationId: work.operationId,
-                  candidateSha: prepared.candidateSha,
-                  expectedParentSha: work.currentHeadSha,
-                  expectedChangedPaths: prepared.changedPaths,
-                  trustedTrailers: trailers,
-                })
-              : { finalSha: recoveredCommit.commitSha, parentSha: recoveredCommit.parentSha }
-          const commit = recoveredCommit ?? {
-            position: (work.implementationCommits?.length ?? 0) + 1,
-            commitSha: finalized.finalSha,
-            parentSha: finalized.parentSha,
-            changedPaths: prepared.changedPaths,
-            operationId: work.operationId,
-          }
-          const commits = [...(work.implementationCommits ?? []), commit]
-          const checkpoint = prepared.final
-            ? yield* Schema.decodeUnknown(ImplementationCheckpointReference)({
-                repository: work.repository,
-                workflowId: work.scope.workflowId,
-                generation: work.scope.generation,
-                stageKey: work.stage.key,
-                stageRevision: work.input.stageRevision,
-                checkpointId: `checkpoint:${work.operationId}`,
-                baseSha: commits[0]!.parentSha,
-                finalSha: commit.commitSha,
-                commits,
-                changedPaths: [...new Set(commits.flatMap(({ changedPaths }) => changedPaths))],
-                preparedDeliveryEvidenceSha256: canonicalSha256(prepared.deliveryEvidence!),
+          const preparePublication = Effect.gen(function* () {
+            const prepared = yield* Schema.decodeUnknown(ImplementationStageResult)(
+              work.preparedResult,
+            )
+            if (prepared.final && prepared.deliveryEvidence === undefined) {
+              return yield* Effect.fail(
+                new Error("Implementation checkpoint requires final delivery evidence"),
+              )
+            }
+            if (prepared.final) {
+              yield* Effect.try({
+                try: () =>
+                  validatePreparedDeliveryEvidence(work.readyTicket, prepared.deliveryEvidence!),
+                catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
               })
-            : undefined
-          if (recoveredCommit === undefined) {
-            const binding = yield* store.bindImplementationPublication({
+            }
+            const finalize = repository.finalizeImplementation
+            if (finalize === undefined) {
+              return yield* Effect.fail(new Error("Implementation publisher is unavailable"))
+            }
+            const finalized =
+              recoveredCommit === undefined
+                ? yield* finalize({
+                    operationId: work.operationId,
+                    candidateSha: prepared.candidateSha,
+                    expectedParentSha: work.currentHeadSha,
+                    expectedChangedPaths: prepared.changedPaths,
+                    trustedTrailers: trailers,
+                  })
+                : { finalSha: recoveredCommit.commitSha, parentSha: recoveredCommit.parentSha }
+            const commit = recoveredCommit ?? {
+              position: (work.implementationCommits?.length ?? 0) + 1,
+              commitSha: finalized.finalSha,
+              parentSha: finalized.parentSha,
+              changedPaths: prepared.changedPaths,
+              operationId: work.operationId,
+            }
+            const commits = [...(work.implementationCommits ?? []), commit]
+            const checkpoint = prepared.final
+              ? yield* Schema.decodeUnknown(ImplementationCheckpointReference)({
+                  repository: work.repository,
+                  workflowId: work.scope.workflowId,
+                  generation: work.scope.generation,
+                  stageKey: work.stage.key,
+                  stageRevision: work.input.stageRevision,
+                  checkpointId: `checkpoint:${work.operationId}`,
+                  baseSha: commits[0]!.parentSha,
+                  finalSha: commit.commitSha,
+                  commits,
+                  changedPaths: [...new Set(commits.flatMap(({ changedPaths }) => changedPaths))],
+                  preparedDeliveryEvidenceSha256: canonicalSha256(prepared.deliveryEvidence!),
+                })
+              : undefined
+            const binding =
+              recoveredCommit === undefined
+                ? yield* store.bindImplementationPublication({
+                    operationId: work.operationId,
+                    leaseToken: work.leaseToken,
+                    expectedOld: work.currentHeadSha,
+                    commit,
+                    now: options.now(),
+                  })
+                : "bound"
+            return { prepared, commit, checkpoint, binding }
+          })
+          const preparedPublication =
+            recoveredCommit === undefined
+              ? yield* Effect.exit(preparePublication)
+              : Exit.succeed(yield* preparePublication)
+          if (Exit.isFailure(preparedPublication)) {
+            const failedAt = options.now()
+            return yield* store.rescheduleStageOperation({
               operationId: work.operationId,
               leaseToken: work.leaseToken,
-              expectedOld: work.currentHeadSha,
-              commit,
-              now: options.now(),
+              error: Cause.pretty(preparedPublication.cause),
+              runAt: new Date(failedAt.getTime() + work.stage.producer.retry.backoffMs),
+              now: failedAt,
             })
-            if (binding !== "bound") return binding
           }
+          const { prepared, commit, checkpoint, binding } = preparedPublication.value
+          if (binding !== "bound") return binding
           yield* repository.advanceLocalWorktree({
             candidateSha: prepared.candidateSha,
             finalSha: commit.commitSha,

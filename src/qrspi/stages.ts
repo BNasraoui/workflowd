@@ -100,6 +100,19 @@ export const PreparedDeliveryEvidence = Schema.Struct({
   ).pipe(Schema.minItems(1), Schema.maxItems(100)),
 })
 
+export function validatePreparedDeliveryEvidence(
+  readyTicket: typeof ReadyTicket.Type,
+  evidence: typeof PreparedDeliveryEvidence.Type,
+): void {
+  const scenarios = new Set(evidence.scenarios.map(({ scenario }) => scenario))
+  if (
+    scenarios.size !== readyTicket.scenarios.length ||
+    [...scenarios].some((scenario) => scenario >= readyTicket.scenarios.length)
+  ) {
+    throw new Error("Delivery evidence must cover every ticket scenario exactly")
+  }
+}
+
 export const ImplementationStageResult = Schema.Struct({
   candidateSha: GitSha,
   changedPaths: Schema.Array(RelativeArtifactPath).pipe(Schema.maxItems(6_000)),
@@ -309,7 +322,7 @@ export function makeQrspiHarnessDefinitionsForStage(stage: StageDefinition) {
 export function qrspiHarnessDefinitionsForWorkflows(
   definitions: ReadonlyArray<WorkflowDefinition>,
 ): ReadonlyArray<DocumentQrspiHarnessDefinition | ImplementationQrspiHarnessDefinition> {
-  return definitions.flatMap((definition) =>
+  const variants = definitions.flatMap((definition) =>
     definition.stages
       .filter((stage) => stage.activation.mode !== "disabled")
       .map((stage) => {
@@ -317,6 +330,21 @@ export function qrspiHarnessDefinitionsForWorkflows(
         return stage.kind === "document" ? variants.document : variants.implementation
       }),
   )
+  const retained = new Map<string, (typeof variants)[number]>()
+  for (const variant of variants) {
+    const key = JSON.stringify({
+      ref: variant.ref,
+      agent: variant.agent,
+      model: variant.model,
+      maxInputBytes: variant.maxInputBytes,
+      maxOutputBytes: variant.maxOutputBytes,
+      promptContract: variant.promptContract,
+      timeoutMs: variant.timeoutMs,
+      retryPolicy: variant.retryPolicy,
+    })
+    if (!retained.has(key)) retained.set(key, variant)
+  }
+  return [...retained.values()]
 }
 
 export type StageContract<Input, InputEncoded, Result, ResultEncoded> = {

@@ -346,6 +346,59 @@ test("Git publisher verifies candidates, signs trusted commits, and updates only
   expect(commands.some((command) => command.includes("reset"))).toBe(false)
 })
 
+test("Git publisher reads valid multibyte document content within the output envelope", async () => {
+  const content = "é".repeat(600_000)
+  const encoded = new TextEncoder().encode(content)
+  let requestedBytes = 0
+  const publisher = new GitArtifactPublicationRepository("/repo", "1".repeat(40), {
+    run: (_operation, command) => {
+      const args = command.slice(1)
+      if (args[0] === "show" && args.includes("--format=%P")) return Effect.succeed(parentSha)
+      if (args[0] === "show" && args.includes("--format=%T")) return Effect.succeed("tree-sha")
+      if (args[0] === "diff-tree") return Effect.succeed(artifact.path)
+      if (args[0] === "ls-tree") {
+        const path = String(args.at(-1))
+        return Effect.succeed(
+          path === artifact.path
+            ? `100644 blob ${artifact.blobSha}\t${path}`
+            : `040000 tree ${"7".repeat(40)}\t${path}`,
+        )
+      }
+      if (args[0] === "commit-tree") return Effect.succeed(finalSha)
+      if (args[0] === "verify-commit") return Effect.succeed("")
+      if (args[0] === "rev-parse") return Effect.succeed(artifact.blobSha)
+      return Effect.die(`Unexpected git command: ${args.join(" ")}`)
+    },
+    runBytes: (_operation, _command, options) => {
+      requestedBytes = options.maxStdoutBytes
+      return Effect.succeed({ stdout: encoded, truncated: encoded.byteLength >= requestedBytes })
+    },
+  })
+
+  await expect(
+    Effect.runPromise(
+      publisher.finalizeDocument({
+        operationId: "publish:multibyte",
+        candidateSha: "d".repeat(40),
+        expectedParentSha: parentSha,
+        expectedPath: artifact.path,
+        expectedContentSha256: createHash("sha256").update(encoded).digest("hex"),
+        artifactIdentity: {
+          repository: artifact.repository,
+          workflowId: artifact.workflowId,
+          generation: artifact.generation,
+          stageKey: artifact.stageKey,
+          stageRevision: artifact.stageRevision,
+          path: artifact.path,
+          mediaType: artifact.mediaType,
+        },
+        trustedTrailers: input.trustedTrailers,
+      }),
+    ),
+  ).resolves.toMatchObject({ finalSha })
+  expect(requestedBytes).toBeGreaterThan(encoded.byteLength)
+})
+
 test.each([
   ["symlink artifact", artifact.path, "120000", "blob"],
   ["gitlink artifact", artifact.path, "160000", "commit"],

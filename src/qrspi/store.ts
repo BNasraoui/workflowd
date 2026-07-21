@@ -20,6 +20,7 @@ import {
   ImplementationCheckpointReference,
   ImplementationCommitReference,
   ImplementationStageResult,
+  validatePreparedDeliveryEvidence,
 } from "./stages"
 import type { BoundArtifactPublication } from "./artifact-publication"
 import type { AgentLaunchIntent, SessionReference } from "../agent-harness"
@@ -2064,8 +2065,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             readonly produce_operation_id: string
             readonly session_reference_id: string
             readonly existing_steps: number
+            readonly ticket_revision_json: string
           }>`
-            SELECT r.prepared_result_json, d.definition_json,
+            SELECT r.prepared_result_json, d.definition_json, t.revision_json AS ticket_revision_json,
               p.operation_id AS produce_operation_id,
               json_extract(p.output_json, '$.sessionReferenceId') AS session_reference_id,
               (SELECT count(*) FROM qrspi_implementation_steps s
@@ -2074,6 +2076,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             FROM qrspi_stage_revisions r
             JOIN qrspi_generations g ON g.workflow_id = r.workflow_id AND g.generation = r.generation
             JOIN qrspi_workflow_definitions d ON d.definition_sha256 = g.workflow_definition_sha256
+            JOIN qrspi_ticket_revisions t ON t.workflow_id = g.workflow_id
+              AND t.ticket_revision_sha256 = g.ticket_revision_sha256
             JOIN workflow_operations p ON p.kind = 'StageProduce' AND p.state = 'succeeded'
               AND json_extract(p.scope_json, '$.workflowId') = r.workflow_id
               AND json_extract(p.scope_json, '$.generation') = r.generation
@@ -2092,6 +2096,23 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           const preparedResult = yield* Schema.decodeUnknown(
             Schema.parseJson(ImplementationStageResult),
           )(preparedRow.prepared_result_json)
+          if (preparedResult.final && preparedResult.deliveryEvidence !== undefined) {
+            const ticketRevision = yield* Schema.decodeUnknown(
+              Schema.parseJson(Schema.Struct({ readyTicket: ReadyTicket })),
+            )(preparedRow.ticket_revision_json)
+            yield* Effect.try({
+              try: () =>
+                validatePreparedDeliveryEvidence(
+                  ticketRevision.readyTicket,
+                  preparedResult.deliveryEvidence!,
+                ),
+              catch: (cause) =>
+                new WorkflowStartCurrentnessError({
+                  operationId: input.operationId,
+                  reason: cause instanceof Error ? cause.message : String(cause),
+                }),
+            })
+          }
           const expectedPosition = Number(preparedRow.existing_steps) + 1
           if (commit.position !== expectedPosition) {
             return yield* Effect.fail(

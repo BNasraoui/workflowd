@@ -199,6 +199,15 @@ describe("StageCatalog", () => {
     ])
   })
 
+  test("deduplicates exact generated producer policies", () => {
+    const stage = defaultQrspiWorkflowDefinition.stages[0]!
+    const variants = qrspiHarnessDefinitionsForWorkflows([
+      { ...defaultQrspiWorkflowDefinition, stages: [stage, { ...stage, key: "research" }] },
+    ])
+
+    expect(variants).toHaveLength(1)
+  })
+
   test("uses kind-specific schemas whose maximum field-sized outputs fit their byte envelopes", () => {
     const definitions = makeQrspiHarnessDefinitions({
       agent: "qrspi-producer",

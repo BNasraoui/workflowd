@@ -62,6 +62,25 @@ const qrspiDefinition = {
   ],
 }
 
+const sharedPolicyQrspiDefinition = {
+  ...qrspiDefinition,
+  stages: [
+    qrspiDefinition.stages[0],
+    {
+      ...qrspiDefinition.stages[0],
+      key: "research",
+      inputContract: {
+        ...qrspiDefinition.stages[0]!.inputContract,
+        schemaId: "qrspi.research.input",
+      },
+      outputContract: {
+        ...qrspiDefinition.stages[0]!.outputContract,
+        pathTemplate: "docs/qrspi/{ticketId}/02-research.md",
+      },
+    },
+  ],
+}
+
 test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))
   try {
@@ -80,7 +99,7 @@ test("composes the reusable agent harness with the live ports", async () => {
         WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(sharedPolicyQrspiDefinition),
         WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
       },
       { home: directory },

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { Context, Data, Effect, Schema } from "effect"
+import { MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 import { runWorkspaceCommand, runWorkspaceCommandBytes } from "../workspace/command"
 import { ArtifactReference, type ArtifactReference as ArtifactReferenceValue } from "./stages"
 
@@ -281,7 +282,7 @@ export class GitArtifactPublicationRepository implements ArtifactPublicationRepo
     return this.command
       .runBytes(operation, ["git", ...args], {
         cwd: this.directory,
-        maxStdoutBytes: 1_048_577,
+        maxStdoutBytes: MAX_AGENT_OUTPUT_BYTES + 1,
       })
       .pipe(
         Effect.flatMap((result) =>
