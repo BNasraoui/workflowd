@@ -12,6 +12,7 @@ import {
   ReadyTicket,
   StageContractRef,
   normalizeWorkflowDefinition,
+  normalizeRetainedWorkflowDefinition,
   type StageDefinition,
   type WorkflowDefinition,
 } from "./domain"
@@ -731,11 +732,14 @@ export function validateWorkflowDefinition(
         "ref" | "agent" | "model" | "timeoutMs" | "maxInputBytes"
       >
   >,
+  options: { readonly retained?: boolean } = {},
 ): {
   readonly definition: WorkflowDefinition
   readonly executionPlan: ReadonlyArray<StageExecutionPlanEntry>
 } {
-  const definition = normalizeWorkflowDefinition(input)
+  const definition = options.retained
+    ? normalizeRetainedWorkflowDefinition(input)
+    : normalizeWorkflowDefinition(input)
   const harnesses = new Map<string, Array<(typeof availableHarnesses)[number]>>()
   for (const candidate of availableHarnesses) {
     const ref = "ref" in candidate ? candidate.ref : candidate

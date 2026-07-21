@@ -1,7 +1,7 @@
 import { Migrator, SqlClient } from "@effect/sql"
 import { Effect, Schema } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
-import { WorkflowDefinition, stageDefinitionSha256 } from "../qrspi/domain"
+import { WorkflowDefinition, canonicalSha256, stageDefinitionSha256 } from "../qrspi/domain"
 
 const initialSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -621,11 +621,13 @@ const qrspiStages = Effect.gen(function* () {
   const activeGenerations = yield* sql<{
     readonly workflow_id: string
     readonly generation: number
+    readonly ticket_revision_sha256: string
     readonly definition_json: string
     readonly created_at: string
     readonly updated_at: string
   }>`
-    SELECT g.workflow_id, g.generation, d.definition_json, g.created_at, g.updated_at
+    SELECT g.workflow_id, g.generation, g.ticket_revision_sha256,
+      d.definition_json, g.created_at, g.updated_at
     FROM qrspi_generations g
     JOIN qrspi_workflow_definitions d
       ON d.definition_sha256 = g.workflow_definition_sha256
@@ -674,6 +676,31 @@ const qrspiStages = Effect.gen(function* () {
           ${firstStage.kind}, '[]', NULL, NULL, 'producing',
           ${generation.created_at}, ${generation.updated_at}
         )
+      `
+    }
+    const legacyOperations = yield* sql<{
+      readonly operation_id: string
+      readonly input_json: string
+    }>`
+      SELECT operation_id, input_json FROM workflow_operations
+      WHERE kind IN ('StageProduce', 'ArtifactPublish') AND is_current = 1
+        AND json_extract(scope_json, '$.workflowId') = ${generation.workflow_id}
+        AND json_extract(scope_json, '$.generation') = ${generation.generation}
+    `
+    for (const operation of legacyOperations) {
+      const input = yield* Schema.decodeUnknown(
+        Schema.parseJson(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
+      )(operation.input_json)
+      const upgradedInput = {
+        ...input,
+        ticketRevisionSha256: generation.ticket_revision_sha256,
+        sources: "sources" in input ? input.sources : [],
+      }
+      yield* sql`
+        UPDATE workflow_operations
+        SET input_json = ${JSON.stringify(upgradedInput)},
+            input_sha256 = ${canonicalSha256(upgradedInput)}
+        WHERE operation_id = ${operation.operation_id}
       `
     }
   }

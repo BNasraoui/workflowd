@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect, Either, Layer } from "effect"
-import { stageDefinitionSha256, workflowDefinitionSha256 } from "../../src/qrspi/domain"
+import {
+  canonicalSha256,
+  stageDefinitionSha256,
+  workflowDefinitionSha256,
+} from "../../src/qrspi/domain"
 import { defaultQrspiWorkflowDefinition } from "../../src/qrspi/stages"
 import { runStoreMigrations } from "../../src/store/migrations"
 import { makeCurrentnessPolicy } from "../../src/store/currentness"
@@ -170,6 +174,8 @@ describe("strict initial store schema", () => {
   })
 
   test("backfills stage state for a running generation upgrading from 0006", async () => {
+    const definitionSha = workflowDefinitionSha256(defaultQrspiWorkflowDefinition)
+    const ticketSha = "a".repeat(64)
     const result = await runWithDatabase(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -179,8 +185,6 @@ describe("strict initial store schema", () => {
         yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 7`
 
         const workflowId = "workflow-upgrade"
-        const ticketSha = "a".repeat(64)
-        const definitionSha = workflowDefinitionSha256(defaultQrspiWorkflowDefinition)
         yield* sql`
           INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
           VALUES (${workflowId}, 'feature/upgrade', ${timestamp}, ${timestamp})
@@ -250,8 +254,14 @@ describe("strict initial store schema", () => {
           SELECT stage_key, revision, revision_type, source_artifacts_json, state
           FROM qrspi_stage_revisions
         `
-        const operations = yield* sql`
-          SELECT kind, state FROM workflow_operations ORDER BY kind
+        const operations = yield* sql<{
+          readonly kind: string
+          readonly state: string
+          readonly input_json: string
+          readonly input_sha256: string
+        }>`
+          SELECT kind, state, input_json, input_sha256
+          FROM workflow_operations ORDER BY kind
         `
         return { runs, revisions, operations }
       }),
@@ -273,9 +283,38 @@ describe("strict initial store schema", () => {
         state: "producing",
       },
     ])
-    expect(result.operations).toEqual([
-      { kind: "ArtifactPublish", state: "blocked" },
-      { kind: "StageProduce", state: "ready" },
+    expect(
+      result.operations.map(({ kind, state, input_json, input_sha256 }) => {
+        const input = JSON.parse(input_json)
+        return { kind, state, input, hashMatches: input_sha256 === canonicalSha256(input) }
+      }),
+    ).toEqual([
+      {
+        kind: "ArtifactPublish",
+        state: "blocked",
+        input: {
+          stageKey: "questions",
+          stageKind: "document",
+          stageRevision: 1,
+          workflowDefinitionSha256: definitionSha,
+          ticketRevisionSha256: ticketSha,
+          sources: [],
+        },
+        hashMatches: true,
+      },
+      {
+        kind: "StageProduce",
+        state: "ready",
+        input: {
+          stageKey: "questions",
+          stageKind: "document",
+          stageRevision: 1,
+          workflowDefinitionSha256: definitionSha,
+          ticketRevisionSha256: ticketSha,
+          sources: [],
+        },
+        hashMatches: true,
+      },
     ])
   })
 

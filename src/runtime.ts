@@ -172,9 +172,12 @@ export function startHookService(
       for (const definition of activeDefinitions) {
         yield* Effect.try({
           try: () =>
-            validateWorkflowDefinition(definition, Option.getOrThrow(stageCatalog), [
-              ...retainedHarnesses,
-            ]),
+            validateWorkflowDefinition(
+              definition,
+              Option.getOrThrow(stageCatalog),
+              [...retainedHarnesses],
+              { retained: true },
+            ),
           catch: (cause) => new Error(`QRSPI startup catalog validation failed: ${String(cause)}`),
         })
       }

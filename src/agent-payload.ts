@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 
-export const MAX_AGENT_LAUNCH_INTENT_BYTES = 384 * 1024
+export const MAX_AGENT_LAUNCH_INTENT_BYTES = 2 * 1024 * 1024
 export const MAX_AGENT_OUTPUT_BYTES = 4 * 1024 * 1024
 
 export const boundedAgentPayload = (maximumBytes: number, name: string) =>

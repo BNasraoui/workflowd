@@ -5,6 +5,7 @@ import {
   Ticket,
   canonicalSha256,
   checkTicket as checkTicketDomain,
+  normalizeRetainedWorkflowDefinition,
   normalizeWorkflowDefinition,
   workflowIdFor,
 } from "../../src/qrspi/domain"
@@ -533,6 +534,27 @@ describe("QRSPI ticket boundary", () => {
     ).toMatchObject({
       inputContract: { maxEncodedBytes: 65_536 },
       producer: { retry: { maxAttempts: 10 } },
+    })
+  })
+
+  test("decodes workflow v1 definitions persisted at the former boundaries", () => {
+    const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
+    const stage = definition.stages[0]!
+
+    expect(
+      normalizeRetainedWorkflowDefinition({
+        ...definition,
+        stages: [
+          {
+            ...stage,
+            inputContract: { ...stage.inputContract, maxEncodedBytes: 1_048_576 },
+            producer: { ...stage.producer, retry: { ...stage.producer.retry, maxAttempts: 20 } },
+          },
+        ],
+      }).stages[0],
+    ).toMatchObject({
+      inputContract: { maxEncodedBytes: 1_048_576 },
+      producer: { retry: { maxAttempts: 20 } },
     })
   })
 

@@ -172,7 +172,7 @@ export type StageContractRef = typeof StageContractRef.Type
 export const StageInputContract = Schema.Struct({
   schemaId: ContractIdentifier,
   schemaVersion: PositiveVersion,
-  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(64 * 1024)),
+  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1024 * 1024)),
 })
 
 export const StageProducerDefinition = Schema.Struct({
@@ -182,7 +182,7 @@ export const StageProducerDefinition = Schema.Struct({
   model: Schema.String.pipe(Schema.pattern(/^[^\s/]+\/[^\s/]+$/), Schema.maxLength(256)),
   timeoutMs: BoundedMilliseconds,
   retry: Schema.Struct({
-    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(10)),
+    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
     backoffMs: BoundedMilliseconds,
   }),
 })
@@ -266,6 +266,17 @@ export function stageDefinitionSha256(definition: StageDefinition): string {
 }
 
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
+  return normalizeWorkflowDefinitionWith(input, true)
+}
+
+export function normalizeRetainedWorkflowDefinition(input: unknown): WorkflowDefinition {
+  return normalizeWorkflowDefinitionWith(input, false)
+}
+
+function normalizeWorkflowDefinitionWith(
+  input: unknown,
+  enforceConfiguredLimits: boolean,
+): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
   if (
     !definition.stages.some(
@@ -278,6 +289,12 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
   }
   const keys = new Set<string>()
   for (const stage of definition.stages) {
+    if (enforceConfiguredLimits && stage.inputContract.maxEncodedBytes > 64 * 1024) {
+      throw new Error(`Stage input bound exceeds configured workflow limit: ${stage.key}`)
+    }
+    if (enforceConfiguredLimits && stage.producer.retry.maxAttempts > 10) {
+      throw new Error(`Stage producer retry limit exceeds configured workflow limit: ${stage.key}`)
+    }
     if (keys.has(stage.key)) throw new Error(`Duplicate workflow stage key: ${stage.key}`)
     keys.add(stage.key)
     const operationKinds = new Set<string>()
