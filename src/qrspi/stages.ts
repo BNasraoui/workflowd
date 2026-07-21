@@ -8,6 +8,7 @@ import type {
   SessionReference,
 } from "../agent-harness"
 import {
+  ReadyTicket,
   StageContractRef,
   normalizeWorkflowDefinition,
   type StageDefinition,
@@ -53,6 +54,7 @@ export type ArtifactReference = typeof ArtifactReference.Type
 
 export const StageContractInput = Schema.Struct({
   ticketRevisionSha256: Sha256,
+  readyTicket: ReadyTicket,
   sources: Schema.Array(ArtifactReference).pipe(Schema.maxItems(32)),
   stepPosition: Schema.optional(PositiveInt),
   implementationCommits: Schema.optional(
@@ -368,7 +370,8 @@ const documentContract = (name: string, purpose: string) =>
     resultSchema: DocumentStageResult,
     task: (input: StageContractInput) =>
       `${name}: ${purpose}. The Ticket revision ${input.ticketRevisionSha256} is product authority. ` +
-      `Use only the ${input.sources.length} accepted technical source artifact(s); later technical detail may refine, but never override, the Ticket.`,
+      `Use only the ${input.sources.length} accepted technical source artifact(s); later technical detail may refine, but never override, the Ticket.\n\n` +
+      `Authoritative ReadyTicket:\n${JSON.stringify(input.readyTicket, null, 2)}`,
   }) satisfies StageContract<
     StageContractInput,
     typeof StageContractInput.Encoded,
@@ -403,7 +406,8 @@ export const ImplementationStageContract = {
   resultSchema: ImplementationStageResult,
   task: (input: StageContractInput) =>
     `Implementation: implement the Ticket revision ${input.ticketRevisionSha256} using only accepted source artifacts, ` +
-    "publish one exact-parent signed commit per step, and provide scenario-linked delivery evidence on the final step.",
+    "publish one exact-parent signed commit per step, and provide scenario-linked delivery evidence on the final step.\n\n" +
+    `Authoritative ReadyTicket:\n${JSON.stringify(input.readyTicket, null, 2)}`,
 } satisfies StageContract<
   StageContractInput,
   typeof StageContractInput.Encoded,

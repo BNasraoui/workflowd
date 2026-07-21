@@ -5,6 +5,29 @@ import { runArtifactPublishIterationWith } from "../../src/qrspi/artifact-worker
 import { type ArtifactPublicationRepository } from "../../src/qrspi/artifact-publication"
 import type { StageOperationLease } from "../../src/qrspi/store"
 import { defaultQrspiWorkflowDefinition } from "../../src/qrspi/stages"
+import type { QrspiWorkspacePort } from "../../src/qrspi/workspace"
+
+const readyTicket = {
+  reference: {
+    tracker: "beads" as const,
+    trackerInstanceId: "workspace-42",
+    nativeTicketId: "workflowd-vs3.4",
+  },
+  issueType: "feature" as const,
+  title: "Publish a QRSPI stage",
+  description: "Publish each prepared stage result to its isolated ticket branch.",
+  sources: ["https://example.test/ticket"],
+  acceptanceCriteria: ["The result is published from the workflow worktree."],
+  scenarios: [
+    {
+      name: "Publish",
+      given: "a prepared result",
+      when: "publication runs",
+      then: "the ticket branch advances",
+      covers: [0],
+    },
+  ],
+}
 
 const unusedStoreMethods = {
   findArtifactPublicationRecovery: () => Effect.succeed(null),
@@ -45,6 +68,7 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: { candidateSha: "d".repeat(40), content, summary: "Answered" },
   }
@@ -81,6 +105,12 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
     observeRef: () => Effect.succeed(remote),
     advanceLocalWorktree: () => Effect.void,
   }
+  const workspace: QrspiWorkspacePort = {
+    withWorkspace: (input, use) => {
+      calls.push(`workspace:${input.workflowId}:${input.targetSha}`)
+      return use("/tmp/qrspi/workflow")
+    },
+  }
 
   const result = await Effect.runPromise(
     runArtifactPublishIterationWith({
@@ -89,12 +119,22 @@ test("ArtifactPublish publishes the ticket branch directly and has no pull-reque
       now: () => new Date("2026-07-22T12:00:00.000Z"),
       randomId: () => work.leaseToken,
       store,
-      repository,
+      workspace,
+      repositoryForDirectory: (directory) => {
+        calls.push(`repository:${directory}`)
+        return repository
+      },
     }),
   )
 
   expect(result).toBe("Published")
-  expect(calls).toEqual(["finalize", "update-ticket-ref", "complete"])
+  expect(calls).toEqual([
+    `workspace:workflow:${"d".repeat(40)}`,
+    "repository:/tmp/qrspi/workflow",
+    "finalize",
+    "update-ticket-ref",
+    "complete",
+  ])
   expect("createPullRequest" in repository).toBe(false)
   expect("updatePullRequest" in repository).toBe(false)
 })
@@ -136,6 +176,7 @@ test("restart recovers a waiting_external publication from its durable SHA bindi
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: {
       candidateSha: "d".repeat(40),
@@ -203,6 +244,7 @@ test("publishes an implementation commit as a durable checkpoint rather than a d
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: {
       candidateSha: "d".repeat(40),
@@ -284,6 +326,7 @@ test("durably binds the final implementation SHA before advancing local HEAD", a
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: {
       candidateSha: "d".repeat(40),
@@ -350,6 +393,7 @@ test("publishes a non-final implementation step without requiring delivery evide
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: {
       candidateSha: "d".repeat(40),
@@ -416,6 +460,7 @@ test("rejects a final implementation result without delivery evidence before rep
     headRef: "feature/ticket",
     currentHeadSha: "c".repeat(40),
     ticketId: "workflowd-vs3.4",
+    readyTicket,
     sessionReferenceId: "session-ref",
     preparedResult: {
       candidateSha: "d".repeat(40),

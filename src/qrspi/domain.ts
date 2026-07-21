@@ -312,6 +312,17 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
       throw new Error(`Invalid artifact path template for stage: ${stage.key}`)
     }
   }
+  const runnableStages = definition.stages.filter(
+    (stage) =>
+      stage.activation.mode === "enabled" ||
+      (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
+  )
+  const nonTerminalImplementation = runnableStages.find(
+    (stage, index) => stage.kind === "implementation" && index < runnableStages.length - 1,
+  )
+  if (nonTerminalImplementation !== undefined) {
+    throw new Error(`Implementation stage must be terminal: ${nonTerminalImplementation.key}`)
+  }
   return definition
 }
 

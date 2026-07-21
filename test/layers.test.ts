@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
@@ -14,6 +14,8 @@ import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkflowStart } from "../src/qrspi/workflow-start"
 import { StageCatalogService } from "../src/qrspi/stages"
+import { QrspiWorkspace } from "../src/qrspi/workspace"
+import { ArtifactPublicationRepositoryFactoryService } from "../src/qrspi/artifact-publication"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -96,6 +98,10 @@ test("composes the reusable agent harness with the live ports", async () => {
         const workspace = yield* Workspace
         const workflowStart = yield* WorkflowStart
         const stageCatalog = yield* StageCatalogService
+        const qrspiWorkspace = yield* Effect.serviceOption(QrspiWorkspace)
+        const artifactRepositoryFactory = yield* Effect.serviceOption(
+          ArtifactPublicationRepositoryFactoryService,
+        )
         return [
           store.claimNextJob,
           github.publishReview,
@@ -104,6 +110,8 @@ test("composes the reusable agent harness with the live ports", async () => {
           workspace.prepareReview,
           workflowStart.start,
           stageCatalog.resolve,
+          Option.getOrThrow(qrspiWorkspace).withWorkspace,
+          Option.getOrThrow(artifactRepositoryFactory).forDirectory,
         ]
       }).pipe(Effect.provide(Live)),
     )

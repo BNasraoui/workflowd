@@ -22,9 +22,10 @@ import { QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 import {
-  ArtifactPublicationRepositoryService,
+  ArtifactPublicationRepositoryFactoryService,
   GitArtifactPublicationRepository,
 } from "./qrspi/artifact-publication"
+import { GitQrspiWorkspace, QrspiWorkspace } from "./qrspi/workspace"
 import {
   BuiltInStageContracts,
   StageCatalog,
@@ -133,14 +134,18 @@ export const makeLiveLayer = (config: AppConfig) => {
         )
   const artifactRepositoryLayer =
     config.qrspi !== undefined && config.workspace.gitSigningKey !== undefined
-      ? Layer.succeed(
-          ArtifactPublicationRepositoryService,
-          new GitArtifactPublicationRepository(
-            config.qrspi.beadsWorkspace,
-            config.workspace.gitSigningKey,
-          ),
-        )
+      ? Layer.succeed(ArtifactPublicationRepositoryFactoryService, {
+          forDirectory: (directory) =>
+            new GitArtifactPublicationRepository(directory, config.workspace.gitSigningKey!),
+        })
       : Layer.empty
+  const qrspiWorkspaceLayer =
+    config.qrspi === undefined
+      ? Layer.empty
+      : Layer.succeed(
+          QrspiWorkspace,
+          new GitQrspiWorkspace(config.qrspi.beadsWorkspace, config.workspace.worktreeRoot),
+        )
   return Layer.mergeAll(
     WorkflowStoreLive,
     Layer.effect(
@@ -170,6 +175,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
     Layer.succeed(StageCatalogService, stageCatalog),
     artifactRepositoryLayer,
+    qrspiWorkspaceLayer,
     qrspiLayer,
   )
 }

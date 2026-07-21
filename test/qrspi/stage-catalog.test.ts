@@ -12,6 +12,28 @@ import {
   type StageContract,
 } from "../../src/qrspi/stages"
 
+const readyTicket = {
+  reference: {
+    tracker: "beads" as const,
+    trackerInstanceId: "workspace-42",
+    nativeTicketId: "workflowd-vs3.4",
+  },
+  issueType: "feature" as const,
+  title: "Deliver authoritative stage context",
+  description: "Every QRSPI producer must receive the decoded ready ticket.",
+  sources: ["https://example.test/ticket"],
+  acceptanceCriteria: ["The producer receives the ticket acceptance criteria."],
+  scenarios: [
+    {
+      name: "Producer receives context",
+      given: "a ready ticket",
+      when: "a stage starts",
+      then: "the complete ticket is included in the task",
+      covers: [0],
+    },
+  ],
+}
+
 describe("StageCatalog", () => {
   test("registers the six versioned built-in contracts in deterministic order", () => {
     const catalog = new StageCatalog(BuiltInStageContracts)
@@ -39,10 +61,15 @@ describe("StageCatalog", () => {
     const resolved = catalog.resolve({ name: "Questions", contractVersion: 1 })
     const input = resolved.decodeInput({
       ticketRevisionSha256: "a".repeat(64),
+      readyTicket,
       sources: [],
     })
 
     expect(resolved.task(input)).toContain("Questions")
+    expect(resolved.task(input)).toContain(readyTicket.title)
+    expect(resolved.task(input)).toContain(readyTicket.description)
+    expect(resolved.task(input)).toContain(readyTicket.acceptanceCriteria[0]!)
+    expect(resolved.task(input)).toContain(readyTicket.scenarios[0]!.then)
     expect(
       resolved.decodeResult({
         candidateSha: "a".repeat(40),
@@ -205,6 +232,22 @@ describe("StageCatalog", () => {
     })
   })
 
+  test("rejects an implementation stage followed by another runnable stage", () => {
+    const implementation = defaultQrspiWorkflowDefinition.stages[5]!
+    const questions = defaultQrspiWorkflowDefinition.stages[0]!
+
+    expect(() =>
+      validateWorkflowDefinition(
+        { ...defaultQrspiWorkflowDefinition, stages: [implementation, questions] },
+        new StageCatalog(BuiltInStageContracts),
+        [
+          { name: "qrspi.document", version: 1 },
+          { name: "qrspi.implementation", version: 1 },
+        ],
+      ),
+    ).toThrow("Implementation stage must be terminal: implementation")
+  })
+
   test("runs any selected contract through the selected AgentHarness without publication authority", async () => {
     const actions: Array<string> = []
     const definitions = makeQrspiHarnessDefinitions({
@@ -280,7 +323,7 @@ describe("StageCatalog", () => {
         harness,
         harnessDefinitions: definitions,
         stage: defaultQrspiWorkflowDefinition.stages[0]!,
-        input: { ticketRevisionSha256: "a".repeat(64), sources: [] },
+        input: { ticketRevisionSha256: "a".repeat(64), readyTicket, sources: [] },
         context: {
           directory: "/tmp/qrspi-stage",
           scope: { _tag: "GenerationScope", workflowId: "workflow", generation: 1 },

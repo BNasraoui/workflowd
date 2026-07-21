@@ -3,6 +3,7 @@ import { Cause, Effect, Exit } from "effect"
 import { AgentHarness, type AgentHarnessPort } from "../agent-harness"
 import { QrspiStore, type QrspiStorePort, type StageOperationLease } from "./store"
 import { StageCatalogService, runStageContract, type StageCatalog } from "./stages"
+import { QrspiWorkspace, type QrspiWorkspacePort } from "./workspace"
 
 type StageHarnessDefinitions = Parameters<typeof runStageContract>[0]["harnessDefinitions"]
 type StageHarnessDefinitionsSource =
@@ -11,7 +12,6 @@ type StageHarnessDefinitionsSource =
 export function runStageProduceIteration(options: {
   readonly workerId: string
   readonly leaseDurationMs: number
-  readonly directory: string
   readonly harnessDefinitions: StageHarnessDefinitionsSource
   readonly now?: () => Date
   readonly randomId?: () => string
@@ -22,11 +22,13 @@ export function runStageProduceIteration(options: {
     const store = yield* QrspiStore
     const harness = yield* AgentHarness
     const catalog = yield* StageCatalogService
+    const workspace = yield* QrspiWorkspace
     return yield* runStageProduceIterationWith({
       ...options,
       store,
       harness,
       catalog,
+      workspace,
       now,
       randomId,
     })
@@ -36,7 +38,7 @@ export function runStageProduceIteration(options: {
 export function runStageProduceIterationWith(options: {
   readonly workerId: string
   readonly leaseDurationMs: number
-  readonly directory: string
+  readonly workspace: QrspiWorkspacePort
   readonly harnessDefinitions: StageHarnessDefinitionsSource
   readonly store: Pick<
     QrspiStorePort,
@@ -66,46 +68,56 @@ export function runStageProduceIterationWith(options: {
     }
 
     const execution = yield* Effect.exit(
-      runStageContract({
-        catalog,
-        harness,
-        harnessDefinitions:
-          typeof options.harnessDefinitions === "function"
-            ? options.harnessDefinitions(work.stage)
-            : options.harnessDefinitions,
-        stage: work.stage,
-        input: {
-          ticketRevisionSha256: work.input.ticketRevisionSha256,
-          sources: work.input.sources ?? [],
-          ...(work.input.stepPosition === undefined
-            ? {}
-            : { stepPosition: work.input.stepPosition }),
-          ...(work.implementationCommits === undefined
-            ? {}
-            : { implementationCommits: work.implementationCommits }),
-          ...(work.predecessorSessionReferenceId === undefined
-            ? {}
-            : { predecessorSessionReferenceId: work.predecessorSessionReferenceId }),
-          ...(work.input.feedback === undefined ? {} : { feedback: work.input.feedback }),
+      options.workspace.withWorkspace(
+        {
+          repository: work.repository,
+          workflowId: work.scope.workflowId,
+          headRef: work.headRef,
+          targetSha: work.currentHeadSha,
         },
-        context: {
-          directory: options.directory,
-          scope: work.scope,
-          operationId: work.operationId,
-          operationRevision: work.operationRevision,
-          attempt: work.attempt,
-          leaseToken: work.leaseToken,
-          requestedAt: options.now(),
-        },
-        onSessionCreated: (launchIntent, reference) =>
-          store.recordStageAgentSession({
-            operationId: work.operationId,
-            leaseToken: work.leaseToken,
-            launchIntent,
-            reference,
-            now: options.now(),
+        (directory) =>
+          runStageContract({
+            catalog,
+            harness,
+            harnessDefinitions:
+              typeof options.harnessDefinitions === "function"
+                ? options.harnessDefinitions(work.stage)
+                : options.harnessDefinitions,
+            stage: work.stage,
+            input: {
+              ticketRevisionSha256: work.input.ticketRevisionSha256,
+              readyTicket: work.readyTicket,
+              sources: work.input.sources ?? [],
+              ...(work.input.stepPosition === undefined
+                ? {}
+                : { stepPosition: work.input.stepPosition }),
+              ...(work.implementationCommits === undefined
+                ? {}
+                : { implementationCommits: work.implementationCommits }),
+              ...(work.predecessorSessionReferenceId === undefined
+                ? {}
+                : { predecessorSessionReferenceId: work.predecessorSessionReferenceId }),
+              ...(work.input.feedback === undefined ? {} : { feedback: work.input.feedback }),
+            },
+            context: {
+              directory,
+              scope: work.scope,
+              operationId: work.operationId,
+              operationRevision: work.operationRevision,
+              attempt: work.attempt,
+              leaseToken: work.leaseToken,
+              requestedAt: options.now(),
+            },
+            onSessionCreated: (launchIntent, reference) =>
+              store.recordStageAgentSession({
+                operationId: work.operationId,
+                leaseToken: work.leaseToken,
+                launchIntent,
+                reference,
+                now: options.now(),
+              }),
           }),
-      }),
+      ),
     )
     if (Exit.isFailure(execution)) {
       const failedAt = options.now()

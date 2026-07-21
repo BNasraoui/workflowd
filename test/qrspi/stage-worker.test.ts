@@ -10,8 +10,30 @@ import {
   makeQrspiHarnessDefinitions,
 } from "../../src/qrspi/stages"
 import { runStageProduceIterationWith } from "../../src/qrspi/stage-worker"
+import type { QrspiWorkspacePort } from "../../src/qrspi/workspace"
 
 const now = new Date("2026-07-22T12:00:00.000Z")
+const readyTicket = {
+  reference: {
+    tracker: "beads" as const,
+    trackerInstanceId: "workspace-42",
+    nativeTicketId: "workflowd-vs3.4",
+  },
+  issueType: "feature" as const,
+  title: "Pass the ticket to the producer",
+  description: "The producer needs the authoritative product requirements.",
+  sources: ["https://example.test/ticket"],
+  acceptanceCriteria: ["The complete ready ticket is present in the stage input."],
+  scenarios: [
+    {
+      name: "Authoritative context",
+      given: "a ready ticket",
+      when: "the producer starts",
+      then: "the title, description, criteria, and scenarios are available",
+      covers: [0],
+    },
+  ],
+}
 const lease: StageOperationLease = {
   operationId: "workflow:1:StageProduce:questions:1:1",
   operationRevision: 1,
@@ -35,6 +57,7 @@ const lease: StageOperationLease = {
   headRef: "feature/ticket",
   currentHeadSha: "c".repeat(40),
   ticketId: "workflowd-vs3.4",
+  readyTicket,
 }
 
 function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
@@ -121,29 +144,59 @@ function fixture(currentness: ReadonlyArray<boolean> = [true, true]) {
     model: "openai/gpt-5.6-sol",
     timeoutMs: 3_600_000,
   })
-  return { calls, definitions, store, harness, catalog: new StageCatalog(BuiltInStageContracts) }
+  const workspace: QrspiWorkspacePort = {
+    withWorkspace: (input, use) => {
+      calls.push(`workspace:${input.workflowId}:${input.targetSha}`)
+      return use("/tmp/qrspi/workflow")
+    },
+  }
+  return {
+    calls,
+    definitions,
+    store,
+    harness,
+    workspace,
+    catalog: new StageCatalog(BuiltInStageContracts),
+  }
 }
 
 describe("StageProduce worker", () => {
   test("runs a generic retained stage without invoking any pull-request API", async () => {
     const fake = fixture()
+    let contractInput: unknown
+    const harness: AgentHarnessPort = {
+      ...fake.harness,
+      prepare: (definition, input, context) => {
+        contractInput = Schema.decodeUnknownSync(Schema.Struct({ input: StageContractInput }))(
+          input,
+        ).input
+        return fake.harness.prepare(definition, input, context)
+      },
+    }
 
     const result = await Effect.runPromise(
       runStageProduceIterationWith({
         workerId: "stage-worker",
         leaseDurationMs: 60_000,
-        directory: "/tmp/qrspi",
+        workspace: fake.workspace,
         harnessDefinitions: fake.definitions,
         now: () => now,
         randomId: () => lease.leaseToken,
         store: fake.store,
-        harness: fake.harness,
+        harness,
         catalog: fake.catalog,
       }),
     )
 
     expect(result).toBe("completed")
-    expect(fake.calls).toEqual(["create-session", "record-session", "resume-session", "complete"])
+    expect(fake.calls).toEqual([
+      `workspace:workflow:${lease.currentHeadSha}`,
+      "create-session",
+      "record-session",
+      "resume-session",
+      "complete",
+    ])
+    expect(contractInput).toMatchObject({ readyTicket })
   })
 
   test("yields the post-agent currentness check before durable completion", async () => {
@@ -153,7 +206,7 @@ describe("StageProduce worker", () => {
       runStageProduceIterationWith({
         workerId: "stage-worker",
         leaseDurationMs: 60_000,
-        directory: "/tmp/qrspi",
+        workspace: fake.workspace,
         harnessDefinitions: fake.definitions,
         now: () => now,
         randomId: () => lease.leaseToken,
@@ -208,7 +261,7 @@ describe("StageProduce worker", () => {
       runStageProduceIterationWith({
         workerId: "stage-worker",
         leaseDurationMs: 3_700_000,
-        directory: "/tmp/qrspi",
+        workspace: fake.workspace,
         harnessDefinitions: fake.definitions,
         now: () => now,
         randomId: () => lease.leaseToken,

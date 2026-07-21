@@ -56,6 +56,15 @@ export type ArtifactPublicationRepository = {
 export const ArtifactPublicationRepositoryService =
   Context.GenericTag<ArtifactPublicationRepository>("workflowd/qrspi/ArtifactPublicationRepository")
 
+export type ArtifactPublicationRepositoryFactory = {
+  readonly forDirectory: (directory: string) => ArtifactPublicationRepository
+}
+
+export const ArtifactPublicationRepositoryFactoryService =
+  Context.GenericTag<ArtifactPublicationRepositoryFactory>(
+    "workflowd/qrspi/ArtifactPublicationRepositoryFactory",
+  )
+
 export class ArtifactRefConflictError extends Data.TaggedError("ArtifactRefConflictError")<{
   readonly expectedOld: string
   readonly observed: string | null

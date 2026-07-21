@@ -20,7 +20,8 @@ import { runStageProduceIteration } from "./qrspi/stage-worker"
 import { runArtifactPublishIteration } from "./qrspi/artifact-worker"
 import { AgentHarness } from "./agent-harness"
 import { QrspiStore } from "./qrspi/store"
-import { ArtifactPublicationRepositoryService } from "./qrspi/artifact-publication"
+import { ArtifactPublicationRepositoryFactoryService } from "./qrspi/artifact-publication"
+import { QrspiWorkspace } from "./qrspi/workspace"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -124,7 +125,10 @@ export function startHookService(
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const qrspiStore = yield* Effect.serviceOption(QrspiStore)
     const stageCatalog = yield* Effect.serviceOption(StageCatalogService)
-    const artifactRepository = yield* Effect.serviceOption(ArtifactPublicationRepositoryService)
+    const artifactRepositoryFactory = yield* Effect.serviceOption(
+      ArtifactPublicationRepositoryFactoryService,
+    )
+    const qrspiWorkspace = yield* Effect.serviceOption(QrspiWorkspace)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
     }
@@ -132,7 +136,8 @@ export function startHookService(
       config.qrspi !== undefined &&
       (Option.isNone(qrspiStore) ||
         Option.isNone(stageCatalog) ||
-        Option.isNone(artifactRepository))
+        Option.isNone(artifactRepositoryFactory) ||
+        Option.isNone(qrspiWorkspace))
     ) {
       return yield* Effect.die(new Error("QRSPI is configured without its worker services"))
     }
@@ -197,12 +202,12 @@ export function startHookService(
           runStageProduceIteration({
             workerId: `${process.pid}:qrspi-stage-producer`,
             leaseDurationMs: stageLeaseDurationMs,
-            directory: config.qrspi.beadsWorkspace,
             harnessDefinitions: makeQrspiHarnessDefinitionsForStage,
           }).pipe(
             Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
             Effect.provideService(StageCatalogService, Option.getOrThrow(stageCatalog)),
             Effect.provideService(AgentHarness, harness),
+            Effect.provideService(QrspiWorkspace, Option.getOrThrow(qrspiWorkspace)),
           ),
         ),
       )
@@ -217,9 +222,10 @@ export function startHookService(
           }).pipe(
             Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
             Effect.provideService(
-              ArtifactPublicationRepositoryService,
-              Option.getOrThrow(artifactRepository),
+              ArtifactPublicationRepositoryFactoryService,
+              Option.getOrThrow(artifactRepositoryFactory),
             ),
+            Effect.provideService(QrspiWorkspace, Option.getOrThrow(qrspiWorkspace)),
           ),
         ),
       )

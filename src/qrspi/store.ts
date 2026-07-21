@@ -5,6 +5,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
 import { runStoreMigrations } from "../store/migrations"
 import {
   RepositoryReference,
+  ReadyTicket,
   WorkflowDefinition,
   WorkflowStartInput,
   WorkflowStartOutput,
@@ -340,6 +341,7 @@ export type StageOperationLease = {
   readonly currentHeadSha: string
   readonly preparedResult?: unknown
   readonly ticketId: string
+  readonly readyTicket: typeof ReadyTicket.Type
   readonly sessionReferenceId?: string
   readonly predecessorSessionReferenceId?: string
   readonly implementationCommits?: ReadonlyArray<typeof ImplementationCommitReference.Type>
@@ -1086,6 +1088,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             readonly current_head_sha: string
             readonly prepared_result_json: string | null
             readonly ticket_id: string
+            readonly ticket_revision_json: string
             readonly produce_output_json: string | null
             readonly implementation_commits_json: string
             readonly predecessor_session_reference_id: string | null
@@ -1126,7 +1129,13 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                   ON g.workflow_id = t.workflow_id
                   AND g.ticket_revision_sha256 = t.ticket_revision_sha256
                 WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
-                  AND g.generation = json_extract(scope_json, '$.generation')) AS ticket_id,
+                   AND g.generation = json_extract(scope_json, '$.generation')) AS ticket_id,
+              (SELECT t.revision_json
+                FROM qrspi_ticket_revisions t JOIN qrspi_generations g
+                  ON g.workflow_id = t.workflow_id
+                  AND g.ticket_revision_sha256 = t.ticket_revision_sha256
+                WHERE g.workflow_id = json_extract(scope_json, '$.workflowId')
+                  AND g.generation = json_extract(scope_json, '$.generation')) AS ticket_revision_json,
               (SELECT p.output_json FROM workflow_operations p
                 WHERE p.kind = 'StageProduce'
                   AND json_extract(p.scope_json, '$.workflowId') = json_extract(scope_json, '$.workflowId')
@@ -1178,6 +1187,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           const implementationCommits = yield* Schema.decodeUnknown(
             Schema.parseJson(Schema.Array(ImplementationCommitReference)),
           )(row.implementation_commits_json)
+          const ticketRevision = yield* Schema.decodeUnknown(
+            Schema.parseJson(Schema.Struct({ readyTicket: ReadyTicket })),
+          )(row.ticket_revision_json)
           return {
             operationId: row.operation_id,
             operationRevision: Number(row.operation_revision),
@@ -1190,6 +1202,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             headRef: row.head_ref,
             currentHeadSha: row.current_head_sha,
             ticketId: row.ticket_id,
+            readyTicket: ticketRevision.readyTicket,
             ...(produceOutput === undefined
               ? {}
               : { sessionReferenceId: produceOutput.sessionReferenceId }),
@@ -1231,13 +1244,14 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           readonly current_head_sha: string
           readonly prepared_result_json: string
           readonly ticket_id: string
+          readonly ticket_revision_json: string
           readonly produce_output_json: string
           readonly external_intent_json: string
           readonly implementation_commits_json: string
         }>`
           SELECT o.operation_id, o.operation_revision, o.attempt, o.scope_json, o.input_json,
             d.definition_json, g.repository_json, g.head_ref, g.current_head_sha,
-            r.prepared_result_json,
+            r.prepared_result_json, t.revision_json AS ticket_revision_json,
             json_extract(t.revision_json, '$.readyTicket.reference.nativeTicketId') AS ticket_id,
             p.output_json AS produce_output_json, o.external_intent_json,
             (SELECT coalesce(json_group_array(json(s.commit_reference_json)), '[]')
@@ -1292,6 +1306,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         const implementationCommits = yield* Schema.decodeUnknown(
           Schema.parseJson(Schema.Array(ImplementationCommitReference)),
         )(row.implementation_commits_json)
+        const ticketRevision = yield* Schema.decodeUnknown(
+          Schema.parseJson(Schema.Struct({ readyTicket: ReadyTicket })),
+        )(row.ticket_revision_json)
         const intent = yield* Schema.decodeUnknown(
           Schema.parseJson(
             Schema.Union(
@@ -1320,6 +1337,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           currentHeadSha: row.current_head_sha,
           preparedResult,
           ticketId: row.ticket_id,
+          readyTicket: ticketRevision.readyTicket,
           sessionReferenceId: produceOutput.sessionReferenceId,
           ...(operationInput.stageKind === "implementation" ? { implementationCommits } : {}),
         }
@@ -1768,6 +1786,48 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           )
           const stage = definition.stages.find(({ key }) => key === input.stageKey)
           if (stage === undefined || stage.kind !== "document") return "stale" as const
+          if (
+            stage.reviewPolicy.mode === "automated" &&
+            input.stageRevision - 1 >= stage.reviewPolicy.maximumRevisions
+          ) {
+            const reason = "document revision budget exhausted; operator review required"
+            yield* sql`
+              UPDATE qrspi_stage_revisions SET state = 'waiting_human',
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+                AND stage_key = ${input.stageKey} AND revision = ${input.stageRevision}
+                AND state IN ('reviewing', 'waiting_human')
+            `
+            yield* sql`
+              UPDATE qrspi_stage_runs SET state = 'waiting_human',
+                updated_at = ${input.now.toISOString()}
+              WHERE workflow_id = ${input.workflowId} AND generation = ${input.generation}
+                AND stage_key = ${input.stageKey} AND pending_revision = ${input.stageRevision}
+                AND state IN ('waiting_review', 'waiting_human')
+            `
+            yield* sql`
+              UPDATE workflow_operations SET state = 'waiting_human', last_error = ${reason},
+                terminal_failure_reason = ${reason}, terminal_retry_policy = 'operator_required',
+                updated_at = ${input.now.toISOString()}
+              WHERE kind IN ('ReviewSynthesize', 'GenericReviewHandoff') AND is_current = 1
+                AND json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+                AND json_extract(scope_json, '$.generation') = ${input.generation}
+                AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+                AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+                AND state IN ('ready', 'waiting_human')
+            `
+            yield* sql`
+              UPDATE workflow_operation_gates SET reason = ${reason}
+              WHERE state = 'pending' AND operation_id IN (
+                SELECT operation_id FROM workflow_operations
+                WHERE json_extract(scope_json, '$.workflowId') = ${input.workflowId}
+                  AND json_extract(scope_json, '$.generation') = ${input.generation}
+                  AND json_extract(input_json, '$.stageKey') = ${input.stageKey}
+                  AND json_extract(input_json, '$.stageRevision') = ${input.stageRevision}
+              )
+            `
+            return "completed" as const
+          }
           const nextRevision = input.stageRevision + 1
           yield* sql`
             UPDATE qrspi_stage_revisions SET state = 'abandoned', updated_at = ${input.now.toISOString()}

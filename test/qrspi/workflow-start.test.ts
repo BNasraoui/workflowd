@@ -687,6 +687,71 @@ describe("WorkflowStart integration", () => {
     ])
   })
 
+  test("escalates to human review when the document revision budget is exhausted", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const reviewOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            reviewPolicy: {
+              mode: "automated" as const,
+              minimumContributions: 1,
+              maximumContributions: 2,
+              deadlineMs: 60_000,
+              maximumRevisions: 2,
+            },
+          },
+        ],
+      },
+    }
+    await startWithOptions(filename, fake, reviewOptions)
+    const workflowId = workflowIdFor(repository, ticketReference)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE qrspi_stage_revisions SET revision = 3, state = 'reviewing'
+          WHERE stage_key = 'questions' AND revision = 1
+        `
+        yield* sql`
+          UPDATE qrspi_stage_runs SET state = 'waiting_review', published_revision = 3,
+            pending_revision = 3
+          WHERE stage_key = 'questions'
+        `
+        const requested = yield* store.requestDocumentRevision({
+          workflowId,
+          generation: 1,
+          stageKey: "questions",
+          stageRevision: 3,
+          acceptedSources: [],
+          now: new Date("2026-07-21T05:03:00.000Z"),
+        })
+        const revisions = yield* sql<{ readonly revision: number; readonly state: string }>`
+          SELECT revision, state FROM qrspi_stage_revisions ORDER BY revision
+        `
+        const runs = yield* sql<{
+          readonly state: string
+          readonly pending_revision: number | null
+        }>`
+          SELECT state, pending_revision FROM qrspi_stage_runs WHERE stage_key = 'questions'
+        `
+        return { requested, revisions, runs }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toEqual({
+      requested: "completed",
+      revisions: [{ revision: 3, state: "waiting_human" }],
+      runs: [{ state: "waiting_human", pending_revision: 3 }],
+    })
+  })
+
   test("persists implementation commits and checkpoint handoff separately from artifacts", async () => {
     const filename = await databasePath()
     const fake = fakes()
