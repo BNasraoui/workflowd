@@ -531,6 +531,92 @@ describe("durable pull request reconciliation", () => {
     }
   })
 
+  test("does not revoke reconciliation for an older ambiguous observation ingested late", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const observedAt = "2026-07-19T12:00:00.000Z"
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-initial",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date(observedAt),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-newer",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:02.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              headSha: "f".repeat(40),
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        const reconciliation = yield* store.claimNextReconciliation({
+          workerId: "out-of-order-reconciler",
+          now: new Date("2026-07-19T12:01:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (reconciliation === null) throw new Error("expected reconciliation")
+
+        const older = yield* store.ingestPullRequest(
+          {
+            deliveryId: "out-of-order-older",
+            event: "pull_request",
+            action: "synchronize",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:01.000Z"),
+          },
+          decodePullRequestEvent({
+            ...samplePullRequestEvent,
+            action: "synchronize",
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              headSha: "e".repeat(40),
+              updatedAt: observedAt,
+            },
+          }),
+        )
+        const completed = yield* store.applyReconciliationSnapshot({
+          reconciliationId: reconciliation.id,
+          workerId: "out-of-order-reconciler",
+          completedAt: new Date("2026-07-19T12:01:01.000Z"),
+          snapshot: {
+            _tag: "AuthoritativePullRequestSnapshot",
+            installationId: 91,
+            repository: samplePullRequestEvent.repository,
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: "2026-07-19T12:00:03.000Z",
+            },
+          },
+        })
+        return { completed, older }
+      }).pipe(Effect.provide(makeStoreLayer())),
+    )
+
+    expect(result.older).toEqual({ status: "reconciliation_enqueued", generation: 1 })
+    expect(result.completed).toBe("completed")
+  })
+
   test("does not revoke reconciliation for an ignored older delivery", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

@@ -137,6 +137,7 @@ export function makePullRequestTransition(
             pull_request_number,
             state,
             run_at,
+            observation_received_at,
             created_at,
             updated_at
           ) VALUES (
@@ -145,6 +146,7 @@ export function makePullRequestTransition(
             ${repository.fullName},
             ${pullRequest.number},
             'ready',
+            ${timestamp},
             ${timestamp},
             ${timestamp},
             ${timestamp}
@@ -158,7 +160,10 @@ export function makePullRequestTransition(
             lease_owner = NULL,
             lease_until = NULL,
             last_error = NULL,
+            observation_received_at = excluded.observation_received_at,
             updated_at = excluded.updated_at
+          WHERE reconciliations.observation_received_at IS NULL
+          OR excluded.observation_received_at > reconciliations.observation_received_at
         `
         return {
           status: "reconciliation_enqueued",
@@ -179,9 +184,23 @@ export function makePullRequestTransition(
             last_error = NULL,
             updated_at = ${timestamp}
           WHERE repository_id = ${repository.id}
-          AND pull_request_number = ${pullRequest.number}
-          AND state IN ('ready', 'leased', 'retry_scheduled')
-        `
+            AND pull_request_number = ${pullRequest.number}
+            AND state IN ('ready', 'leased', 'retry_scheduled')
+            AND (
+              observation_received_at IS NULL
+              OR observation_received_at < ${timestamp}
+            )
+          `
+        yield* sql`
+            UPDATE reconciliations
+            SET observation_received_at = ${timestamp}
+            WHERE repository_id = ${repository.id}
+            AND pull_request_number = ${pullRequest.number}
+            AND (
+              observation_received_at IS NULL
+              OR observation_received_at < ${timestamp}
+            )
+          `
       }
       for (const intent of decision.intents) {
         if (intent._tag === "SupersedeGeneration") {
