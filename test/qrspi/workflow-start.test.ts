@@ -616,6 +616,39 @@ describe("WorkflowStart integration", () => {
     expect(Number(states.gates[0]?.count)).toBe(1)
   })
 
+  test("preserves an operator-required wait when an open pull request exists", async () => {
+    const filename = await databasePath()
+    const fake = fakes({ crashBeforeCreate: true })
+    await expect(start(filename, fake)).rejects.toThrow()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET state = 'waiting_external', lease_owner = NULL, lease_token = NULL,
+              lease_until = NULL, observation_attempts = 0, max_observation_attempts = 1
+          WHERE kind = 'WorkflowStart'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    await expect(start(filename, fake)).rejects.toMatchObject({
+      _tag: "WorkflowStartNeedsOperator",
+    })
+    fake.setOpenPullRequest(true)
+
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly state: string; readonly terminal_retry_policy: string }>`
+          SELECT state, terminal_retry_policy FROM workflow_operations WHERE kind = 'WorkflowStart'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([{ state: "waiting_human", terminal_retry_policy: "operator_required" }])
+  })
+
   test("fails ready work atomically when retry budget is exhausted", async () => {
     const filename = await databasePath()
     const fake = fakes({ crashBeforeCreate: true })
@@ -759,6 +792,29 @@ describe("WorkflowStart integration", () => {
     expect(fake.counts().createCalls).toBe(1)
   })
 
+  test("adopts an accepted branch after a final-attempt crash before intent persistence", async () => {
+    const filename = await databasePath()
+    const fake = fakes({ unknownAfterAcceptance: true })
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartUncertain" })
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          UPDATE workflow_operations
+          SET state = 'leased', attempt = max_attempts, lease_owner = 'crashed-worker',
+              lease_token = '11111111-1111-4111-8111-111111111111',
+              lease_until = '2020-01-01T00:00:00.000Z', external_intent_json = NULL
+          WHERE kind = 'WorkflowStart'
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const recovered = await start(filename, fake)
+
+    expect(recovered).toMatchObject({ _tag: "Started", generation: 1, rootSha: baseSha })
+    expect(fake.counts().createCalls).toBe(1)
+  })
+
   test("does not let a concurrent duplicate replace an unexpired lease or mutate", async () => {
     const filename = await databasePath()
     let entered!: () => void
@@ -879,6 +935,40 @@ describe("WorkflowStart integration", () => {
     expect(await counts(filename, fake)).toEqual([1, 2, 1])
   })
 
+  test("uses the stage producer retry limit for StageProduce operations", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await startWithOptions(filename, fake, {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          {
+            ...options.workflowDefinition.stages[0],
+            producer: {
+              ...options.workflowDefinition.stages[0].producer,
+              retry: { maxAttempts: 7, backoffMs: 1_000 },
+            },
+          },
+        ],
+      },
+    })
+
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly kind: string; readonly max_attempts: number }>`
+          SELECT kind, max_attempts FROM workflow_operations
+          WHERE kind IN ('StageProduce', 'ArtifactPublish') ORDER BY kind
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(rows).toEqual([
+      { kind: "ArtifactPublish", max_attempts: 3 },
+      { kind: "StageProduce", max_attempts: 7 },
+    ])
+  })
+
   test("returns typed currentness loss instead of dying during completion", async () => {
     const filename = await databasePath()
     const fake = fakes()
@@ -971,6 +1061,34 @@ describe("WorkflowStart integration", () => {
     )
     expect(targets[1]).toEqual({ base_sha: baseSha, root_sha: advancedSha })
   })
+
+  for (const terminalState of ["completed", "rejected", "cancelled", "failed"] as const) {
+    test(`preserves a ${terminalState} predecessor when starting a successor`, async () => {
+      const filename = await databasePath()
+      const fake = fakes()
+      await start(filename, fake)
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* sql`UPDATE qrspi_generations SET state = ${terminalState} WHERE generation = 1`
+        }).pipe(Effect.provide(layer(filename, fake))),
+      )
+      fake.setBranch("c".repeat(40))
+      fake.setTicket({ ...readyTicket, title: `Kick off after ${terminalState}` })
+
+      await start(filename, fake)
+
+      const rows = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          return yield* sql<{ readonly state: string; readonly is_current: number }>`
+            SELECT state, is_current FROM qrspi_generations WHERE generation = 1
+          `
+        }).pipe(Effect.provide(layer(filename, fake))),
+      )
+      expect(rows).toEqual([{ state: terminalState, is_current: 0 }])
+    })
+  }
 
   test("reconciles rather than adopting an advanced branch with unknown history", async () => {
     const filename = await databasePath()

@@ -184,6 +184,7 @@ export type QrspiStorePort = {
     outcome: "present" | "absent" | "unknown",
     observationJson: string,
     now: Date,
+    intentJson?: string,
   ) => Effect.Effect<"waiting_external" | "failed" | "waiting_human" | "stale", SqlError>
   readonly recordBranchAbsent: (
     operationId: string,
@@ -496,7 +497,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         RETURNING operation_id
       `.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale"))),
 
-    recoverExpiredLease: (operationId, outcome, observationJson, now) =>
+    recoverExpiredLease: (operationId, outcome, observationJson, now, intentJson) =>
       transaction(
         Effect.gen(function* () {
           const state =
@@ -508,6 +509,11 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           const rows = yield* sql<{ readonly state: typeof state }>`
             UPDATE workflow_operations
             SET state = ${state}, external_observation_json = ${observationJson},
+                external_intent_json = CASE
+                  WHEN ${state} = 'waiting_external'
+                    THEN coalesce(external_intent_json, ${intentJson ?? null})
+                  ELSE external_intent_json
+                END,
                 observation_attempts = observation_attempts + 1,
                 last_error = CASE
                   WHEN ${state} = 'failed' THEN 'retry budget exhausted; branch absent'
@@ -739,7 +745,12 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             )
           }
           yield* sql`
-            UPDATE qrspi_generations SET state = 'superseded', is_current = 0,
+            UPDATE qrspi_generations SET
+              state = CASE
+                WHEN state IN ('completed', 'rejected', 'cancelled', 'failed') THEN state
+                ELSE 'superseded'
+              END,
+              is_current = 0,
               updated_at = ${input.now.toISOString()}
             WHERE workflow_id = ${input.workflowId} AND is_current = 1
           `
@@ -804,6 +815,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 inputSha256: canonicalSha256(childInput),
                 state: initial.state,
                 attempt: 0,
+                maxAttempts:
+                  initial.kind === "StageProduce" ? firstStage.producer.retry.maxAttempts : 3,
                 parentEffect: initial.parentEffect,
                 now: input.now,
               })
@@ -907,6 +920,7 @@ type InsertOperationInput = {
   readonly inputSha256: string
   readonly state: "ready" | "blocked" | "leased"
   readonly attempt: number
+  readonly maxAttempts?: number
   readonly leaseToken?: string
   readonly leaseUntil?: Date
   readonly parentEffect: object
@@ -924,7 +938,7 @@ function insertOperation(sql: SqlClient.SqlClient, input: InsertOperationInput) 
     ) VALUES (
       ${input.operationId}, ${input.logicalOperationId}, ${input.revision}, ${input.retryOf},
       ${input.kind}, ${JSON.stringify(input.scope)}, ${input.inputJson}, ${input.inputSha256},
-      NULL, ${input.state}, 1, ${input.attempt}, 3,
+      NULL, ${input.state}, 1, ${input.attempt}, ${input.maxAttempts ?? 3},
       ${input.state === "leased" ? "workflow-start-ingress" : null},
       ${input.leaseToken ?? null}, ${input.leaseUntil?.toISOString() ?? null},
       ${input.now.toISOString()}, NULL, NULL, 0, 5, ${JSON.stringify(input.parentEffect)},

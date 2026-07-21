@@ -199,7 +199,12 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
             now: now(),
           })
         }
-        if (operation.state !== "succeeded") {
+        if (
+          operation.state === "blocked" ||
+          operation.state === "ready" ||
+          operation.state === "leased" ||
+          operation.state === "waiting_external"
+        ) {
           yield* store.failStart(
             operation.operationId,
             "ticket branch already has an open PR",
@@ -283,6 +288,14 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
               : { headRef: operation.branchName, sha: observed.sha },
           ),
           now(),
+          observed === null
+            ? undefined
+            : JSON.stringify({
+                idempotencyIdentity: operation.logicalOperationId,
+                repository: request.repository,
+                headRef: operation.branchName,
+                expectedSha: observed.sha,
+              }),
         )
         if (recovered === "failed") {
           return yield* Effect.fail(
