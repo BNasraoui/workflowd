@@ -132,6 +132,20 @@ describe("loadConfig", () => {
         { home: "/home/test" },
       ),
     ).rejects.toThrow("WORKFLOWD_OPENCODE_ATTACH_URL must not include credentials")
+    for (const attachUrl of [
+      "https://mint.example-tailnet.ts.net:4096/?access_token=secret",
+      "https://mint.example-tailnet.ts.net:4096/#access_token=secret",
+    ]) {
+      await expect(
+        loadConfig(
+          {
+            ...requiredEnvironment,
+            WORKFLOWD_OPENCODE_ATTACH_URL: attachUrl,
+          },
+          { home: "/home/test" },
+        ),
+      ).rejects.toThrow("WORKFLOWD_OPENCODE_ATTACH_URL must not include credentials")
+    }
     const withoutAttachUrl = { ...requiredEnvironment }
     delete withoutAttachUrl.WORKFLOWD_OPENCODE_ATTACH_URL
     await expect(loadConfig(withoutAttachUrl, { home: "/home/test" })).rejects.toThrow(

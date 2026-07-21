@@ -133,7 +133,12 @@ function httpUrl(value: string, name: string): string {
 function credentialFreeHttpUrl(value: string, name: string): string {
   const normalized = httpUrl(value, name)
   const parsed = new URL(normalized)
-  if (parsed.username !== "" || parsed.password !== "") {
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
     throw new Error(`${name} must not include credentials`)
   }
   return normalized
