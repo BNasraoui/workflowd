@@ -37,9 +37,9 @@ const encodeDurablePayload = <A, I>(
   envelope: Schema.Schema<unknown>,
   value: unknown,
 ) =>
-  Schema.decodeUnknown(schema)(value).pipe(
-    Effect.flatMap((decoded) => Schema.decodeUnknown(envelope)(decoded)),
-    Effect.map((decoded) => ({ decoded: decoded as A, json: JSON.stringify(decoded) })),
+  Schema.decodeUnknown(envelope)(value).pipe(
+    Effect.flatMap(() => Schema.decodeUnknown(schema)(value)),
+    Effect.map((decoded) => ({ decoded, json: JSON.stringify(decoded) })),
     Effect.mapError(
       (cause) => new SqlError({ cause, message: "Agent payload exceeds its durable envelope" }),
     ),
