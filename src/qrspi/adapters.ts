@@ -393,6 +393,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       const client = await this.client(this.config.installationId)
       const pulls = await client.rest.pulls.list({
         ...openPullRequestQuery(owner, repo, input.headRef),
+        state: "all",
         base: input.baseRef,
         request: { signal },
       })

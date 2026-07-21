@@ -177,7 +177,7 @@ describe("QRSPI external adapters", () => {
     })
   })
 
-  test("observes a final pull request whose body was edited before durable binding", async () => {
+  test("recovers a closed final pull request created before durable binding", async () => {
     const body = "Implementation complete\n\n## Delivery evidence\n- Scenario passes"
     const bodySha256 = createHash("sha256").update(body).digest("hex")
     let pull:
@@ -199,7 +199,15 @@ describe("QRSPI external adapters", () => {
           getBranch: async () => ({ data: { commit: { sha: "f".repeat(40) } } }),
         },
         pulls: {
-          list: async () => ({ data: pull === undefined ? [] : [pull] }),
+          list: async (input) => {
+            if (input === undefined) throw new Error("missing pull request query")
+            return {
+              data:
+                pull === undefined || (input.state === "open" && pull.state !== "open")
+                  ? []
+                  : [pull],
+            }
+          },
           create: async (input) => {
             if (input === undefined) throw new Error("missing pull request input")
             expect(input.draft).toBe(false)
@@ -232,18 +240,18 @@ describe("QRSPI external adapters", () => {
 
     await Effect.runPromise(adapter.createFinalPullRequest(intent))
     if (pull === undefined) throw new Error("pull request was not created")
-    pull = { ...pull, body: "Edited after creation" }
+    pull = { ...pull, state: "closed", body: "Edited and closed after creation" }
     const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
 
     expect(observed).toMatchObject({
       reference: { repository, number: 17 },
-      state: "open",
+      state: "closed",
       title: intent.title,
       baseRef: "main",
       headRef: intent.headRef,
       headSha: intent.headSha,
       draft: false,
-      bodySha256: createHash("sha256").update("Edited after creation").digest("hex"),
+      bodySha256: createHash("sha256").update("Edited and closed after creation").digest("hex"),
     })
   })
 
