@@ -6,11 +6,7 @@ import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "./command"
 import { WorkspaceError } from "./errors"
 import { pathExists } from "./filesystem"
-import type {
-  GitWorkspaceConfig,
-  ResolvedWorktree,
-  WorkspaceRemoteUrl,
-} from "./model"
+import type { GitWorkspaceConfig, ResolvedWorktree, WorkspaceRemoteUrl } from "./model"
 
 type RootVersion = number | string | null
 
@@ -43,8 +39,7 @@ const defaultCatalogIo: LocalRepositoryCatalogIo = {
     ),
   readSubdirectories: (root) =>
     readdir(root, { withFileTypes: true }).then(
-      (entries) =>
-        entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
+      (entries) => entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
       () => [],
     ),
 }
@@ -70,8 +65,7 @@ export class LocalRepositoryCatalog {
   }
 
   candidates(): Promise<ReadonlyArray<string>> {
-    return this.#snapshots.size === this.#roots.length &&
-      this.#io.now() < this.#expiresAt
+    return this.#snapshots.size === this.#roots.length && this.#io.now() < this.#expiresAt
       ? Promise.resolve(this.#allCandidates())
       : this.refreshChanged()
   }
@@ -102,11 +96,7 @@ export class LocalRepositoryCatalog {
 
   #allCandidates(): ReadonlyArray<string> {
     return [
-      ...new Set(
-        this.#roots.flatMap(
-          (root) => this.#snapshots.get(root)?.candidates ?? [root],
-        ),
-      ),
+      ...new Set(this.#roots.flatMap((root) => this.#snapshots.get(root)?.candidates ?? [root])),
     ]
   }
 }
@@ -161,32 +151,20 @@ export class ExistingWorktreeDiscovery {
     this.#localCatalog = localCatalog
   }
 
-  discover(
-    work: Work,
-  ): Effect.Effect<ResolvedWorktree | null, WorkspaceError> {
+  discover(work: Work): Effect.Effect<ResolvedWorktree | null, WorkspaceError> {
     return Effect.gen(this, function* () {
-      const expectedRemote = normalizeRemote(
-        this.#remoteUrl(work.repositoryFullName),
-      )
+      const expectedRemote = normalizeRemote(this.#remoteUrl(work.repositoryFullName))
       const registered = yield* this.#registryCandidates(work)
-      const registeredMatch = yield* this.#inspect(
-        work,
-        expectedRemote,
-        registered,
-      )
+      const registeredMatch = yield* this.#inspect(work, expectedRemote, registered)
       if (registeredMatch !== null) return registeredMatch
 
-      const discovered = yield* this.#readCatalog(() =>
-        this.#localCatalog.candidates(),
-      )
+      const discovered = yield* this.#readCatalog(() => this.#localCatalog.candidates())
       const existing = yield* this.#inspect(work, expectedRemote, discovered)
       if (existing !== null) return existing
 
       // A cache miss revalidates root metadata so newly-created repositories are
       // visible immediately without rescanning unchanged roots on every job.
-      const refreshed = yield* this.#readCatalog(() =>
-        this.#localCatalog.refreshChanged(),
-      )
+      const refreshed = yield* this.#readCatalog(() => this.#localCatalog.refreshChanged())
       return yield* this.#inspect(work, expectedRemote, refreshed)
     })
   }
@@ -213,8 +191,7 @@ export class ExistingWorktreeDiscovery {
         const value = decoded.value
         if (
           (value.state === undefined || value.state === "ready") &&
-          value.github_repository.toLowerCase() ===
-            work.repositoryFullName.toLowerCase() &&
+          value.github_repository.toLowerCase() === work.repositoryFullName.toLowerCase() &&
           value.branch === work.target.headRef &&
           value.worktree !== ""
         ) {
@@ -225,11 +202,7 @@ export class ExistingWorktreeDiscovery {
     })
   }
 
-  #inspect(
-    work: Work,
-    expectedRemote: string,
-    repositories: ReadonlyArray<string>,
-  ) {
+  #inspect(work: Work, expectedRemote: string, repositories: ReadonlyArray<string>) {
     return Effect.gen(function* () {
       for (const repository of new Set(repositories)) {
         if (!(yield* pathExists(repository))) continue
@@ -240,10 +213,7 @@ export class ExistingWorktreeDiscovery {
           "get-url",
           "origin",
         ).pipe(Effect.option)
-        if (
-          origin._tag === "None" ||
-          normalizeRemote(origin.value) !== expectedRemote
-        ) {
+        if (origin._tag === "None" || normalizeRemote(origin.value) !== expectedRemote) {
           continue
         }
         const listed = yield* runGit(

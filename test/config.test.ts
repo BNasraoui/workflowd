@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { loadConfig } from "../src/config"
 
-const requiredEnvironment = {
+const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
@@ -44,6 +44,8 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
         username: "opencode",
         password: "server-password",
         model: "openai/gpt-5.6-sol",
@@ -65,7 +67,9 @@ describe("loadConfig", () => {
   })
 
   test("requires explicit opt-in before enabling Fix Work", async () => {
-    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    const disabled = await loadConfig(requiredEnvironment, {
+      home: "/home/test",
+    })
     const enabled = await loadConfig(
       { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "true" },
       { home: "/home/test" },
@@ -94,17 +98,12 @@ describe("loadConfig", () => {
         home: "/home/test",
         readFile: async (path) => {
           reads.push(path)
-          return path.endsWith("webhook-secret")
-            ? "webhook-from-file\n"
-            : "password-from-file\r\n"
+          return path.endsWith("webhook-secret") ? "webhook-from-file\n" : "password-from-file\r\n"
         },
       },
     )
 
-    expect(reads).toEqual([
-      "/run/credentials/webhook-secret",
-      "/run/credentials/opencode-password",
-    ])
+    expect(reads).toEqual(["/run/credentials/webhook-secret", "/run/credentials/opencode-password"])
     expect(config.github.webhookSecret).toBe("webhook-from-file")
     expect(config.openCode.password).toBe("password-from-file")
   })
@@ -134,11 +133,11 @@ describe("loadConfig", () => {
     ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE"],
   ])("requires either %s or %s", async (direct, file) => {
     const environment = { ...requiredEnvironment }
-    delete environment[direct as keyof typeof environment]
+    delete environment[direct]
 
-    await expect(
-      loadConfig(environment, { home: "/home/test" }),
-    ).rejects.toThrow(`Set exactly one of ${direct} or ${file}`)
+    await expect(loadConfig(environment, { home: "/home/test" })).rejects.toThrow(
+      `Set exactly one of ${direct} or ${file}`,
+    )
   })
 
   test("reports unreadable and empty secret files without exposing content", async () => {
@@ -155,9 +154,7 @@ describe("loadConfig", () => {
           throw new Error("permission denied")
         },
       }),
-    ).rejects.toThrow(
-      "Could not read GITHUB_WEBHOOK_SECRET_FILE at /missing/webhook-secret",
-    )
+    ).rejects.toThrow("Could not read GITHUB_WEBHOOK_SECRET_FILE at /missing/webhook-secret")
 
     await expect(
       loadConfig(environment, {
@@ -175,17 +172,34 @@ describe("loadConfig", () => {
     ["WORKFLOWD_MODEL", "claude", "WORKFLOWD_MODEL must use provider/model syntax"],
     ["WORKFLOWD_MODEL", "anthropic/", "WORKFLOWD_MODEL must use provider/model syntax"],
     ["WORKFLOWD_MODEL", "anthropic//claude", "WORKFLOWD_MODEL must use provider/model syntax"],
-    ["WORKFLOWD_REVIEWER_AGENT", "review agent", "WORKFLOWD_REVIEWER_AGENT must be a valid agent ID"],
-    ["WORKFLOWD_AGENT_BRANCH_PREFIXES", "", "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes"],
-    ["WORKFLOWD_AGENT_BRANCH_PREFIXES", "opencode/,,plan/", "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes"],
-    ["WORKFLOWD_COMMAND_USERS", "valid-user,not_a_user", "WORKFLOWD_COMMAND_USERS must contain valid GitHub users"],
-    ["WORKFLOWD_COMMAND_USERS", "not--a-user", "WORKFLOWD_COMMAND_USERS must contain valid GitHub users"],
+    [
+      "WORKFLOWD_REVIEWER_AGENT",
+      "review agent",
+      "WORKFLOWD_REVIEWER_AGENT must be a valid agent ID",
+    ],
+    [
+      "WORKFLOWD_AGENT_BRANCH_PREFIXES",
+      "",
+      "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes",
+    ],
+    [
+      "WORKFLOWD_AGENT_BRANCH_PREFIXES",
+      "opencode/,,plan/",
+      "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes",
+    ],
+    [
+      "WORKFLOWD_COMMAND_USERS",
+      "valid-user,not_a_user",
+      "WORKFLOWD_COMMAND_USERS must contain valid GitHub users",
+    ],
+    [
+      "WORKFLOWD_COMMAND_USERS",
+      "not--a-user",
+      "WORKFLOWD_COMMAND_USERS must contain valid GitHub users",
+    ],
   ])("rejects invalid %s", async (name, value, message) => {
     await expect(
-      loadConfig(
-        { ...requiredEnvironment, [name]: value },
-        { home: "/home/test" },
-      ),
+      loadConfig({ ...requiredEnvironment, [name]: value }, { home: "/home/test" }),
     ).rejects.toThrow(message)
   })
 
@@ -202,10 +216,7 @@ describe("loadConfig", () => {
     ],
   ])("requires a safe %s relationship", async (name, value, message) => {
     await expect(
-      loadConfig(
-        { ...requiredEnvironment, [name]: value },
-        { home: "/home/test" },
-      ),
+      loadConfig({ ...requiredEnvironment, [name]: value }, { home: "/home/test" }),
     ).rejects.toThrow(message)
   })
 })

@@ -27,13 +27,9 @@ export const ChangesRequestedReviewResult = Schema.Struct({
   summary: ReviewSummary,
   findings: Findings.pipe(Schema.minItems(1)),
 })
-export type ChangesRequestedReviewResult =
-  typeof ChangesRequestedReviewResult.Type
+export type ChangesRequestedReviewResult = typeof ChangesRequestedReviewResult.Type
 
-export const ReviewResult = Schema.Union(
-  PassedReviewResult,
-  ChangesRequestedReviewResult,
-)
+export const ReviewResult = Schema.Union(PassedReviewResult, ChangesRequestedReviewResult)
 export type ReviewResult = typeof ReviewResult.Type
 
 export const ReviewResultJsonSchema = JSONSchema.make(ReviewResult)

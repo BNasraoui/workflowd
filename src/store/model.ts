@@ -1,5 +1,6 @@
 import type { GitHubEvent } from "../github-event"
 import type { PullRequestSnapshot } from "../github"
+import type { AgentLaunchIntent, SessionReference } from "../agent-harness"
 import type { FixResult } from "../domain/fix-result"
 import type { ReviewResult } from "../domain/review-result"
 
@@ -13,10 +14,7 @@ export type DeliveryInput = {
 
 export type DeliveryRecordResult = "inserted" | "duplicate"
 
-export type PullRequestEvent = Extract<
-  GitHubEvent,
-  { readonly _tag: "PullRequest" }
->
+export type PullRequestEvent = Extract<GitHubEvent, { readonly _tag: "PullRequest" }>
 
 export type CommandEvent = Extract<GitHubEvent, { readonly _tag: "Command" }>
 
@@ -40,6 +38,10 @@ export type CompleteReviewJobInput = {
   readonly autoFix: boolean
 }
 
+export type CompleteAgentReviewJobInput = CompleteReviewJobInput & {
+  readonly sessionReferenceId: string
+}
+
 export type CompleteFixJobInput = {
   readonly jobId: number
   readonly workerId: string
@@ -59,6 +61,31 @@ export type RecordFixResultInput = {
   readonly result: FixResult
 }
 
+export type RecordAgentFixResultInput = RecordFixResultInput & {
+  readonly sessionReferenceId: string
+}
+
+export type RecordAgentLaunchIntentInput<Input> = {
+  readonly jobId: number
+  readonly workerId: string
+  readonly recordedAt: Date
+  readonly intent: AgentLaunchIntent<Input>
+}
+
+export type RecordAgentSessionReferenceInput = {
+  readonly jobId: number
+  readonly workerId: string
+  readonly recordedAt: Date
+  readonly reference: SessionReference
+}
+
+export type RecordAgentSessionCleanupFailureInput = {
+  readonly sessionReferenceId: string
+  readonly workerId: string
+  readonly failedAt: Date
+  readonly error: string
+}
+
 export type CompletePublicationInput = {
   readonly publicationId: number
   readonly workerId: string
@@ -73,6 +100,10 @@ export type RescheduleJobInput = {
   readonly runAt: Date
   readonly error: string
   readonly maxAttempts: number
+  readonly execution?: {
+    readonly attempt: number
+    readonly leaseToken: string
+  }
 }
 
 export type ReschedulePublicationInput = {

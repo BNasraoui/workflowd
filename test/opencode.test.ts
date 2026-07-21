@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../src/agent-harness"
 import {
   type AutomationPort,
   OpenCodeAutomationAdapter,
   OpenCodeAutomationError,
+  RunPullRequestAutomationInput,
+  makePullRequestHarnessDefinitions,
 } from "../src/opencode"
-import type {
-  OpenCodeAdapter,
-  OpenCodeSessionEvent,
-} from "../src/opencode/adapter"
+import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
   ...values: ReadonlyArray<OpenCodeSessionEvent>
@@ -16,9 +16,7 @@ async function* events(
   yield* values
 }
 
-function makeAdapter(
-  overrides: Partial<OpenCodeAdapter> = {},
-): OpenCodeAdapter {
+function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
     createSession: async () => ({ id: "ses_default" }),
     promptSession: async () => undefined,
@@ -31,19 +29,34 @@ function makeAdapter(
   }
 }
 
-const input = {
+const input = Schema.decodeUnknownSync(RunPullRequestAutomationInput)({
   directory: "/tmp/review-worktree",
   repositoryFullName: "example-owner/example",
   pullRequestNumber: 7,
-  baseSha: "def456",
-  headSha: "abc123",
-}
+  baseSha: "d".repeat(40),
+  headSha: "a".repeat(40),
+})
 
 const config = {
   reviewerAgent: "pr-reviewer",
   fixerAgent: "pr-fixer",
   model: "anthropic/claude-sonnet-4-6",
   pollIntervalMs: 0,
+  timeoutMs: 10_000,
+}
+
+const execution = {
+  directory: input.directory,
+  scope: {
+    _tag: "GenerationScope" as const,
+    workflowId: "pr:example-owner/example:7",
+    generation: 1,
+  },
+  operationId: "job:11",
+  operationRevision: 1,
+  attempt: 1,
+  leaseToken: "11111111-1111-4111-8111-111111111111",
+  requestedAt: new Date("2026-07-20T12:00:00.000Z"),
 }
 
 describe("OpenCodeAutomationAdapter", () => {
@@ -51,39 +64,51 @@ describe("OpenCodeAutomationAdapter", () => {
     const prompts: Array<Parameters<OpenCodeAdapter["promptSession"]>[0]> = []
     let statusChecks = 0
     let messageLists = 0
-    const runner: AutomationPort = new OpenCodeAutomationAdapter(
-      makeAdapter({
-        createSession: async () => ({ id: "ses_review_1" }),
-        promptSession: async (prompt) => {
-          prompts.push(prompt)
-        },
-        subscribeSessionEvents: async () =>
-          events({
-            type: "message.updated",
-            sessionID: "ses_review_1",
-            message: {
-              role: "assistant",
-              time: { created: 1, completed: 2 },
-              structured: {
-                verdict: "pass",
-                summary: "No actionable findings.",
-                findings: [],
-              },
+    const adapter = makeAdapter({
+      createSession: async () => ({ id: "ses_review_1" }),
+      promptSession: async (prompt) => {
+        prompts.push(prompt)
+      },
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_review_1",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: {
+              verdict: "pass",
+              summary: "No actionable findings.",
+              findings: [],
             },
-          }),
-        getSessionStatus: async () => {
-          statusChecks += 1
-          return { type: "busy" }
-        },
-        listSessionMessages: async () => {
-          messageLists += 1
-          return []
-        },
-      }),
-      config,
+          },
+        }),
+      getSessionStatus: async () => {
+        statusChecks += 1
+        return { type: "busy" }
+      },
+      listSessionMessages: async () => {
+        messageLists += 1
+        return []
+      },
+    })
+    const definitions = makePullRequestHarnessDefinitions(config)
+    const harness = new OpenCodeAgentHarness(
+      adapter,
+      new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
     )
+    const runner: AutomationPort = new OpenCodeAutomationAdapter(harness, definitions)
 
-    const result = await Effect.runPromise(runner.runReview(input))
+    const prepared = await Effect.runPromise(runner.prepareReview(input, execution))
+    expect(prompts).toHaveLength(0)
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+    expect(prompts).toHaveLength(0)
+    const result = await Effect.runPromise(harness.resumeSession(prepared, reference))
 
     expect(result).toEqual({
       verdict: "pass",
@@ -102,33 +127,50 @@ describe("OpenCodeAutomationAdapter", () => {
 
   test("runs the fixer with structured completion output", async () => {
     const prompts: Array<Parameters<OpenCodeAdapter["promptSession"]>[0]> = []
-    const runner = new OpenCodeAutomationAdapter(
-      makeAdapter({
-        createSession: async () => ({ id: "ses_fix_1" }),
-        promptSession: async (prompt) => {
-          prompts.push(prompt)
-        },
-        subscribeSessionEvents: async () =>
-          events({
-            type: "message.updated",
-            sessionID: "ses_fix_1",
-            message: {
-              role: "assistant",
-              time: { created: 1, completed: 2 },
-              structured: {
-                _tag: "CommitPrepared",
-                summary: "Prepared the fix commit.",
-                commitSha: "c".repeat(40),
-              },
+    const adapter = makeAdapter({
+      createSession: async () => ({ id: "ses_fix_1" }),
+      promptSession: async (prompt) => {
+        prompts.push(prompt)
+      },
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_fix_1",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: {
+              _tag: "CommitPrepared",
+              summary: "Prepared the fix commit.",
+              commitSha: "c".repeat(40),
             },
-          }),
-      }),
-      config,
+          },
+        }),
+    })
+    const definitions = makePullRequestHarnessDefinitions(config)
+    const harness = new OpenCodeAgentHarness(
+      adapter,
+      new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
     )
+    const runner = new OpenCodeAutomationAdapter(harness, definitions)
 
-    const result = await Effect.runPromise(
-      runner.runFix({ ...input, directory: "/tmp/fix-worktree" }),
+    const prepared = await Effect.runPromise(
+      runner.prepareFix(
+        Schema.decodeUnknownSync(RunPullRequestAutomationInput)({
+          ...input,
+          jobId: 11,
+          directory: "/tmp/fix-worktree",
+        }),
+        { ...execution, directory: "/tmp/fix-worktree" },
+      ),
     )
+    const reference = await Effect.runPromise(harness.createSession(prepared))
+    const result = await Effect.runPromise(harness.resumeSession(prepared, reference))
 
     expect(result).toMatchObject({
       _tag: "CommitPrepared",
@@ -143,14 +185,22 @@ describe("OpenCodeAutomationAdapter", () => {
       readonly agents: ReadonlyArray<string>
       readonly model: { readonly providerID: string; readonly modelID: string }
     }> = []
-    const runner = new OpenCodeAutomationAdapter(
-      makeAdapter({
-        validateAvailability: async (request) => {
-          validations.push(request)
-        },
-      }),
-      config,
+    const adapter = makeAdapter({
+      validateAvailability: async (request) => {
+        validations.push(request)
+      },
+    })
+    const definitions = makePullRequestHarnessDefinitions(config)
+    const harness = new OpenCodeAgentHarness(
+      adapter,
+      new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        pollIntervalMs: 1,
+      },
     )
+    const runner = new OpenCodeAutomationAdapter(harness, definitions)
 
     await Effect.runPromise(
       runner.validateAvailability({
@@ -175,6 +225,7 @@ describe("OpenCodeAutomationAdapter", () => {
     const error = new OpenCodeAutomationError({
       operation: "review",
       cause: new Error("failed"),
+      retryable: true,
     })
 
     expect(error._tag).toBe("OpenCodeAutomationError")

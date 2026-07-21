@@ -36,11 +36,7 @@ describe("expired lease authority", () => {
         })
         if (review === null) throw new Error("expected review")
         const now = new Date("2026-07-20T13:00:01.000Z")
-        const shouldCancel = yield* store.shouldCancelJob(
-          review.id,
-          "expired-reviewer",
-          now,
-        )
+        const shouldCancel = yield* store.shouldCancelJob(review.id, "expired-reviewer", now)
         const completed = yield* store.completeReviewJob({
           jobId: review.id,
           workerId: "expired-reviewer",
@@ -51,7 +47,11 @@ describe("expired lease authority", () => {
         const publications = yield* sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM publications
         `
-        return { completed, publicationCount: publications[0]?.count, shouldCancel }
+        return {
+          completed,
+          publicationCount: publications[0]?.count,
+          shouldCancel,
+        }
       }).pipe(Effect.provide(makeStoreLayer())),
     )
 
@@ -152,11 +152,7 @@ describe("expired lease authority", () => {
         })
         if (publication === null) throw new Error("expected publication")
         const now = new Date("2026-07-20T13:00:01.000Z")
-        const current = yield* store.isPublicationCurrent(
-          publication.id,
-          "expired-publisher",
-          now,
-        )
+        const current = yield* store.isPublicationCurrent(publication.id, "expired-publisher", now)
         const completed = yield* store.completePublication({
           publicationId: publication.id,
           workerId: "expired-publisher",
@@ -191,11 +187,7 @@ describe("expired lease authority", () => {
           }),
         )
         yield* store.ingestPullRequest(
-          delivery(
-            "expired-control-ambiguous",
-            "synchronize",
-            "2026-07-20T12:00:01.000Z",
-          ),
+          delivery("expired-control-ambiguous", "synchronize", "2026-07-20T12:00:01.000Z"),
           decodePullRequestEvent({
             ...samplePullRequestEvent,
             action: "synchronize",
@@ -254,6 +246,9 @@ describe("expired lease authority", () => {
       }).pipe(Effect.provide(makeStoreLayer())),
     )
 
-    expect(result).toEqual({ commandResult: "stale", reconciliationResult: "stale" })
+    expect(result).toEqual({
+      commandResult: "stale",
+      reconciliationResult: "stale",
+    })
   })
 })

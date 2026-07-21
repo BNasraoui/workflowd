@@ -68,24 +68,29 @@ export function decodeGitHubEvent(
 ): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
   if (event === "issue_comment") {
     return Schema.decodeUnknown(IssueCommentPayload)(payload).pipe(
-      Effect.mapError(
-        (error) => new InvalidGitHubEvent({ message: String(error) }),
-      ),
+      Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
       Effect.flatMap((decoded): Effect.Effect<GitHubEvent, InvalidGitHubEvent> => {
         if (decoded.installation === undefined) {
-          return Effect.succeed({ _tag: "Ignored", reason: "missing-installation" })
+          return Effect.succeed({
+            _tag: "Ignored",
+            reason: "missing-installation",
+          })
         }
         if (decoded.action !== "created") {
           return Effect.succeed({ _tag: "Ignored", reason: "comment-action" })
         }
         if (decoded.issue.pull_request === undefined) {
-          return Effect.succeed({ _tag: "Ignored", reason: "not-a-pull-request" })
+          return Effect.succeed({
+            _tag: "Ignored",
+            reason: "not-a-pull-request",
+          })
         }
-        const match = decoded.comment.body
-          .trim()
-          .match(/^\/agent\s+(review|fix|status)\s*$/i)
+        const match = decoded.comment.body.trim().match(/^\/agent\s+(review|fix|status)\s*$/i)
         if (match === null) {
-          return Effect.succeed({ _tag: "Ignored", reason: "not-an-agent-command" })
+          return Effect.succeed({
+            _tag: "Ignored",
+            reason: "not-an-agent-command",
+          })
         }
 
         return Schema.decodeUnknown(Command)({
@@ -102,11 +107,7 @@ export function decodeGitHubEvent(
             name: decoded.repository.name,
             owner: decoded.repository.owner.login,
           },
-        }).pipe(
-          Effect.mapError(
-            (error) => new InvalidGitHubEvent({ message: String(error) }),
-          ),
-        )
+        }).pipe(Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })))
       }),
     )
   }
@@ -116,55 +117,47 @@ export function decodeGitHubEvent(
   }
 
   return Schema.decodeUnknown(PullRequestPayload)(payload).pipe(
-    Effect.mapError(
-      (error) => new InvalidGitHubEvent({ message: String(error) }),
-    ),
-    Effect.flatMap(
-      (decoded): Effect.Effect<GitHubEvent, InvalidGitHubEvent> => {
-        if (decoded.installation === undefined) {
-          return Effect.succeed({
-            _tag: "Ignored" as const,
-            reason: "missing-installation",
-          })
-        }
-        if (decoded.pull_request.head.repo === null) {
-          return Effect.fail(
-            new InvalidGitHubEvent({
-              message: "pull request head repository is unavailable",
-            }),
-          )
-        }
-
-        return Schema.decodeUnknown(PullRequestObservation)({
-          _tag: "PullRequest",
-          action: decoded.action,
-          installationId: decoded.installation.id,
-          repository: {
-            id: decoded.repository.id,
-            fullName: decoded.repository.full_name,
-            name: decoded.repository.name,
-            owner: decoded.repository.owner.login,
-          },
-          pullRequest: {
-            number: decoded.pull_request.number,
-            author: decoded.pull_request.user.login,
-            baseRef: decoded.pull_request.base.ref,
-            baseSha: decoded.pull_request.base.sha,
-            draft: decoded.pull_request.draft ?? false,
-            headRef: decoded.pull_request.head.ref,
-            headRepositoryFullName: decoded.pull_request.head.repo.full_name,
-            headSha: decoded.pull_request.head.sha,
-            state: decoded.pull_request.state,
-            ...(decoded.pull_request.updated_at === undefined
-              ? {}
-              : { updatedAt: decoded.pull_request.updated_at }),
-          },
-        }).pipe(
-          Effect.mapError(
-            (error) => new InvalidGitHubEvent({ message: String(error) }),
-          ),
+    Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
+    Effect.flatMap((decoded): Effect.Effect<GitHubEvent, InvalidGitHubEvent> => {
+      if (decoded.installation === undefined) {
+        return Effect.succeed({
+          _tag: "Ignored" as const,
+          reason: "missing-installation",
+        })
+      }
+      if (decoded.pull_request.head.repo === null) {
+        return Effect.fail(
+          new InvalidGitHubEvent({
+            message: "pull request head repository is unavailable",
+          }),
         )
-      },
-    ),
+      }
+
+      return Schema.decodeUnknown(PullRequestObservation)({
+        _tag: "PullRequest",
+        action: decoded.action,
+        installationId: decoded.installation.id,
+        repository: {
+          id: decoded.repository.id,
+          fullName: decoded.repository.full_name,
+          name: decoded.repository.name,
+          owner: decoded.repository.owner.login,
+        },
+        pullRequest: {
+          number: decoded.pull_request.number,
+          author: decoded.pull_request.user.login,
+          baseRef: decoded.pull_request.base.ref,
+          baseSha: decoded.pull_request.base.sha,
+          draft: decoded.pull_request.draft ?? false,
+          headRef: decoded.pull_request.head.ref,
+          headRepositoryFullName: decoded.pull_request.head.repo.full_name,
+          headSha: decoded.pull_request.head.sha,
+          state: decoded.pull_request.state,
+          ...(decoded.pull_request.updated_at === undefined
+            ? {}
+            : { updatedAt: decoded.pull_request.updated_at }),
+        },
+      }).pipe(Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })))
+    }),
   )
 }

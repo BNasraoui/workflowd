@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect } from "effect"
-import {
-  WorkflowStore,
-  type WorkflowStorePort,
-} from "../../src/store/contracts"
+import { WorkflowStore, type WorkflowStorePort } from "../../src/store/contracts"
 import type { LeaseClaim, RescheduleJobInput } from "../../src/store/model"
 import {
   changesRequestedReview,
@@ -88,16 +85,12 @@ const leaseCases = [
     maxAttempts: 3,
     arrange: arrangeJob,
     claim: (store: WorkflowStorePort, input: LeaseClaim) =>
-      store.claimNextJob(input).pipe(
-        Effect.map((work) =>
-          work === null ? null : { id: work.id, attempts: work.attempt },
+      store
+        .claimNextJob(input)
+        .pipe(
+          Effect.map((work) => (work === null ? null : { id: work.id, attempts: work.attempt })),
         ),
-      ),
-    reschedule: (
-      store: WorkflowStorePort,
-      id: number,
-      input: Omit<RescheduleJobInput, "jobId">,
-    ) =>
+    reschedule: (store: WorkflowStorePort, id: number, input: Omit<RescheduleJobInput, "jobId">) =>
       store.rescheduleJob({ ...input, jobId: id }),
   },
   {
@@ -106,18 +99,14 @@ const leaseCases = [
     maxAttempts: 5,
     arrange: arrangePublication,
     claim: (store: WorkflowStorePort, input: LeaseClaim) =>
-      store.claimNextPublication(input).pipe(
-        Effect.map((publication) =>
-          publication === null
-            ? null
-            : { id: publication.id, attempts: publication.attempt },
+      store
+        .claimNextPublication(input)
+        .pipe(
+          Effect.map((publication) =>
+            publication === null ? null : { id: publication.id, attempts: publication.attempt },
+          ),
         ),
-      ),
-    reschedule: (
-      store: WorkflowStorePort,
-      id: number,
-      input: Omit<RescheduleJobInput, "jobId">,
-    ) =>
+    reschedule: (store: WorkflowStorePort, id: number, input: Omit<RescheduleJobInput, "jobId">) =>
       store.reschedulePublication({ ...input, publicationId: id }),
   },
   {
@@ -125,13 +114,8 @@ const leaseCases = [
     table: "commands",
     maxAttempts: 3,
     arrange: arrangeCommand,
-    claim: (store: WorkflowStorePort, input: LeaseClaim) =>
-      store.claimNextCommand(input),
-    reschedule: (
-      store: WorkflowStorePort,
-      id: number,
-      input: Omit<RescheduleJobInput, "jobId">,
-    ) =>
+    claim: (store: WorkflowStorePort, input: LeaseClaim) => store.claimNextCommand(input),
+    reschedule: (store: WorkflowStorePort, id: number, input: Omit<RescheduleJobInput, "jobId">) =>
       store.rescheduleCommand({ ...input, commandId: id }),
   },
   {
@@ -139,13 +123,8 @@ const leaseCases = [
     table: "reconciliations",
     maxAttempts: 5,
     arrange: arrangeReconciliation,
-    claim: (store: WorkflowStorePort, input: LeaseClaim) =>
-      store.claimNextReconciliation(input),
-    reschedule: (
-      store: WorkflowStorePort,
-      id: number,
-      input: Omit<RescheduleJobInput, "jobId">,
-    ) =>
+    claim: (store: WorkflowStorePort, input: LeaseClaim) => store.claimNextReconciliation(input),
+    reschedule: (store: WorkflowStorePort, id: number, input: Omit<RescheduleJobInput, "jobId">) =>
       store.rescheduleReconciliation({ ...input, reconciliationId: id }),
   },
 ] as const
@@ -178,11 +157,7 @@ describe("durable lease queues", () => {
         }).pipe(Effect.provide(makeStoreLayer())),
       )
 
-      expect(
-        result.attempts
-          .slice(0, leaseCase.maxAttempts)
-          .map((item) => item?.attempts),
-      ).toEqual(
+      expect(result.attempts.slice(0, leaseCase.maxAttempts).map((item) => item?.attempts)).toEqual(
         Array.from({ length: leaseCase.maxAttempts }, (_, index) => index + 1),
       )
       expect(result.attempts[leaseCase.maxAttempts]).toBeNull()
@@ -261,9 +236,7 @@ describe("durable lease queues", () => {
           const rows = yield* sql.unsafe<{
             readonly lease_owner: string | null
             readonly state: string
-          }>(`SELECT state, lease_owner FROM ${leaseCase.table} WHERE id = ?`, [
-            claimed.id,
-          ])
+          }>(`SELECT state, lease_owner FROM ${leaseCase.table} WHERE id = ?`, [claimed.id])
           return { disposition, row: rows[0] }
         }).pipe(Effect.provide(makeStoreLayer())),
       )

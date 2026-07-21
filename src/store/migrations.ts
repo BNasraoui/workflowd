@@ -1,5 +1,6 @@
 import { Migrator, SqlClient } from "@effect/sql"
 import { Effect } from "effect"
+import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -268,6 +269,124 @@ const initialSchema = Effect.gen(function* () {
     ON reconciliations (state, run_at, lease_until, id)`
 })
 
+const agentHarnessSchema = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE agent_executions (
+      session_reference_id TEXT PRIMARY KEY CHECK (
+        length(session_reference_id) BETWEEN 1 AND 128
+      ),
+      job_id INTEGER NOT NULL CHECK (job_id > 0),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      lease_token TEXT NOT NULL CHECK (length(lease_token) BETWEEN 16 AND 128),
+      launch_intent_json TEXT NOT NULL CHECK (
+        json_valid(launch_intent_json) = 1
+          AND json_type(launch_intent_json, '$') = 'object'
+      ),
+      session_reference_json TEXT CHECK (
+        session_reference_json IS NULL OR (
+          json_valid(session_reference_json) = 1
+            AND json_type(session_reference_json, '$') = 'object'
+            AND length(session_reference_json) <= 16384
+        )
+      ),
+      output_json TEXT CHECK (
+        output_json IS NULL OR (
+          json_valid(output_json) = 1
+        )
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'launch_intent', 'session_ready', 'succeeded', 'failed', 'superseded'
+      )),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (state = 'launch_intent'
+          AND session_reference_json IS NULL AND output_json IS NULL)
+        OR (state = 'session_ready'
+          AND session_reference_json IS NOT NULL AND output_json IS NULL)
+        OR (state = 'succeeded'
+          AND session_reference_json IS NOT NULL AND output_json IS NOT NULL)
+        OR state IN ('failed', 'superseded')
+      ),
+      FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
+    ) STRICT
+  `
+  yield* sql`
+    ALTER TABLE publications ADD COLUMN session_reference_id TEXT
+      REFERENCES agent_executions (session_reference_id) ON DELETE SET NULL
+      CHECK (
+        session_reference_id IS NULL OR length(session_reference_id) BETWEEN 1 AND 128
+      )
+  `
+  yield* sql`CREATE INDEX agent_executions_job ON agent_executions (job_id, attempt)`
+})
+
+const agentSessionCleanupLeases = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_owner TEXT`
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_until TEXT`
+  yield* sql`
+    ALTER TABLE agent_executions
+    ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0)
+  `
+})
+
+const agentSessionRecoveryAndPayloadEnvelopes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    ALTER TABLE agent_executions ADD COLUMN cleanup_disposition TEXT
+      CHECK (cleanup_disposition IN ('operator_required', 'data_error'))
+  `
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_last_error TEXT`
+  const oversized = yield* sql<{ readonly count: number }>`
+    SELECT count(*) AS count
+    FROM agent_executions
+    WHERE length(CAST(launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        output_json IS NOT NULL
+        AND length(CAST(output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+  `
+  if (Number(oversized[0]?.count ?? 0) > 0) {
+    return yield* Effect.fail(
+      new Error("Existing agent execution payload exceeds the durable envelope"),
+    )
+  }
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_insert
+    BEFORE INSERT ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_update
+    BEFORE UPDATE OF launch_intent_json, output_json ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+})
+
 export const runStoreMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({ "0001_initial_schema": initialSchema }),
+  loader: Migrator.fromRecord({
+    "0001_initial_schema": initialSchema,
+    "0002_agent_harness": agentHarnessSchema,
+    "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
+    "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
+  }),
 })

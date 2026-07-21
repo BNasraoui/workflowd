@@ -7,8 +7,7 @@ describe("verifyWebhookSignature", () => {
       verifyWebhookSignature({
         body: "Hello, World!",
         secret: "It's a Secret to Everybody",
-        signature:
-          "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17",
+        signature: "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17",
       }),
     ).toBe(true)
   })
@@ -18,15 +17,20 @@ describe("verifyWebhookSignature", () => {
       verifyWebhookSignature({
         body: "Hello, World!",
         secret: "It's a Secret to Everybody",
-        signature:
-          "sha256=757107EA0EB2509FC211221CCE984B8A37570B6D7586C22C46F4379C8B043E17",
+        signature: "sha256=757107EA0EB2509FC211221CCE984B8A37570B6D7586C22C46F4379C8B043E17",
       }),
     ).toBe(true)
   })
 
   test.each([
-    ["a trailing byte", "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e1700"],
-    ["trailing text", "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17junk"],
+    [
+      "a trailing byte",
+      "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e1700",
+    ],
+    [
+      "trailing text",
+      "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17junk",
+    ],
     ["an odd-length digest", `sha256=${"a".repeat(63)}`],
     ["non-hexadecimal characters", `sha256=${"g".repeat(64)}`],
     ["a short digest", `sha256=${"a".repeat(62)}`],

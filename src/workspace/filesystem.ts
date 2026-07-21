@@ -9,8 +9,7 @@ export function filesystemEffect<A>(
 ): Effect.Effect<A, WorkspaceError> {
   return Effect.tryPromise({
     try: task,
-    catch: (cause) =>
-      new WorkspaceError({ operation, cause: normalizeError(cause) }),
+    catch: (cause) => new WorkspaceError({ operation, cause: normalizeError(cause) }),
   })
 }
 
@@ -22,5 +21,10 @@ export function filesystemTransition<A>(
 }
 
 export function pathExists(path: string): Effect.Effect<boolean> {
-  return Effect.promise(() => stat(path).then(() => true, () => false))
+  return Effect.promise(() =>
+    stat(path).then(
+      () => true,
+      () => false,
+    ),
+  )
 }

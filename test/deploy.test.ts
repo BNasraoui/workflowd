@@ -9,9 +9,7 @@ test("shipped deployment defaults Fix Work off but permits explicit enablement",
   ])
 
   expect(environment).toContain("WORKFLOWD_FIX_WORK_ENABLED=false")
-  const execStart = unit
-    .split("\n")
-    .find((line) => line.startsWith("ExecStart="))
+  const execStart = unit.split("\n").find((line) => line.startsWith("ExecStart="))
   if (execStart === undefined) throw new Error("missing ExecStart")
   expect(execStart).toBe("ExecStart=%h/.bun/bin/bun run start")
   expect(unit).not.toContain("WORKFLOWD_FIX_WORK_ENABLED=false")

@@ -6,13 +6,13 @@ import {
   TrackedPullRequestState,
   decidePullRequestTransition,
 } from "../domain/pull-request-transition"
+import { StoreDataError } from "./errors"
 import type { makeSharedStoreOperations } from "./shared"
 
 type PullRequestTransitionInput = {
   readonly appliedAt: Date
   readonly snapshot:
-    | typeof PullRequestObservation.Encoded
-    | typeof AuthoritativePullRequestSnapshot.Encoded
+    typeof PullRequestObservation.Encoded | typeof AuthoritativePullRequestSnapshot.Encoded
 }
 
 type PullRequestRow = {
@@ -36,11 +36,18 @@ type PullRequestRow = {
   readonly review_request_active: number
 }
 
-const decodeTracked = Schema.decodeUnknownSync(TrackedPullRequestState)
-const decodeObservation = Schema.decodeUnknownSync(PullRequestObservation)
-const decodeAuthoritative = Schema.decodeUnknownSync(
-  AuthoritativePullRequestSnapshot,
-)
+const decodeTracked = (row: unknown) =>
+  Schema.decodeUnknown(TrackedPullRequestState)(row).pipe(
+    Effect.mapError(
+      (error) =>
+        new StoreDataError({
+          record: "pull_request",
+          recordId: 0,
+          field: "row",
+          message: String(error),
+        }),
+    ),
+  )
 
 export function makePullRequestTransition(
   sql: SqlClient,
@@ -53,8 +60,10 @@ export function makePullRequestTransition(
     Effect.gen(function* () {
       const snapshot =
         input.snapshot._tag === "PullRequest"
-          ? decodeObservation(input.snapshot)
-          : decodeAuthoritative(input.snapshot)
+          ? yield* Schema.decodeUnknown(PullRequestObservation)(input.snapshot).pipe(Effect.orDie)
+          : yield* Schema.decodeUnknown(AuthoritativePullRequestSnapshot)(input.snapshot).pipe(
+              Effect.orDie,
+            )
       const { pullRequest, repository } = snapshot
       const existing = yield* sql<PullRequestRow>`
         SELECT
@@ -84,7 +93,7 @@ export function makePullRequestTransition(
       const current =
         row === undefined
           ? undefined
-          : decodeTracked({
+          : yield* decodeTracked({
               _tag: "TrackedPullRequestState",
               installationId: row.installation_id,
               repository: {
@@ -103,16 +112,13 @@ export function makePullRequestTransition(
                 headRepositoryFullName: row.head_repository_full_name,
                 headSha: row.head_sha,
                 state: row.state,
-                ...(row.github_updated_at === null
-                  ? {}
-                  : { updatedAt: row.github_updated_at }),
+                ...(row.github_updated_at === null ? {} : { updatedAt: row.github_updated_at }),
               },
               generation: row.generation,
               ...(row.latest_review_request_number === null
                 ? {}
                 : {
-                    latestReviewRequestNumber:
-                      row.latest_review_request_number,
+                    latestReviewRequestNumber: row.latest_review_request_number,
                   }),
               reviewRequestActive: Boolean(row.review_request_active),
             })
@@ -189,10 +195,7 @@ export function makePullRequestTransition(
             timestamp,
           })
         }
-        if (
-          intent._tag === "SupersedeReviewRequests" &&
-          intent.scope === "current-generation"
-        ) {
+        if (intent._tag === "SupersedeReviewRequests" && intent.scope === "current-generation") {
           yield* shared.supersedePullRequestWork({
             repositoryId: repository.id,
             pullRequestNumber: pullRequest.number,
@@ -263,9 +266,7 @@ export function makePullRequestTransition(
           updated_at = excluded.updated_at
       `
 
-      const queue = decision.intents.find(
-        (intent) => intent._tag === "QueueReview",
-      )
+      const queue = decision.intents.find((intent) => intent._tag === "QueueReview")
       if (queue === undefined || queue._tag !== "QueueReview") {
         return { status: "ignored", generation: decision.generation } as const
       }
@@ -316,8 +317,7 @@ export function makePullRequestTransition(
         reviewJob !== undefined &&
         decision.intents.some(
           (intent) =>
-            intent._tag === "SupersedeReviewRequests" &&
-            intent.scope === "earlier-review-requests",
+            intent._tag === "SupersedeReviewRequests" && intent.scope === "earlier-review-requests",
         )
       ) {
         yield* shared.supersedeOlderReviewWork({

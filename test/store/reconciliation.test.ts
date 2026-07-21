@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
-import {
-  decodePullRequestEvent,
-  makeStoreLayer,
-  samplePullRequestEvent,
-} from "./harness"
+import { decodePullRequestEvent, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 const TestLayer = makeStoreLayer()
 
@@ -26,7 +22,10 @@ describe("durable pull request reconciliation", () => {
           },
           {
             ...samplePullRequestEvent,
-            pullRequest: { ...samplePullRequestEvent.pullRequest, updatedAt: timestamp },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: timestamp,
+            },
           },
         )
         const original = yield* store.claimNextJob({
@@ -152,7 +151,10 @@ describe("durable pull request reconciliation", () => {
           },
           decodePullRequestEvent({
             ...samplePullRequestEvent,
-            pullRequest: { ...samplePullRequestEvent.pullRequest, updatedAt: observedAt },
+            pullRequest: {
+              ...samplePullRequestEvent.pullRequest,
+              updatedAt: observedAt,
+            },
           }),
         )
         yield* store.ingestPullRequest(

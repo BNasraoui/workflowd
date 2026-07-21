@@ -10,16 +10,15 @@ const validFinding = {
   line: 81,
 }
 
-const decode = (input: unknown) =>
-  Effect.runPromise(Schema.decodeUnknown(ReviewResult)(input))
+const decode = (input: unknown) => Effect.runPromise(Schema.decodeUnknown(ReviewResult)(input))
 
 describe("ReviewResult", () => {
   test("decodes a structured review result", async () => {
     const result = await decode({
-        verdict: "changes_requested",
-        summary: "One correctness issue needs attention.",
-        findings: [validFinding],
-      })
+      verdict: "changes_requested",
+      summary: "One correctness issue needs attention.",
+      findings: [validFinding],
+    })
 
     expect(result.findings[0]?.severity).toBe("high")
     expect(result.verdict).toBe("changes_requested")
@@ -39,18 +38,9 @@ describe("ReviewResult", () => {
 
   test.each([
     ["summary", { summary: "s".repeat(4_001), findings: [validFinding] }],
-    [
-      "finding title",
-      { findings: [{ ...validFinding, title: "t".repeat(201) }] },
-    ],
-    [
-      "finding body",
-      { findings: [{ ...validFinding, body: "b".repeat(10_001) }] },
-    ],
-    [
-      "finding path",
-      { findings: [{ ...validFinding, path: "p".repeat(1_025) }] },
-    ],
+    ["finding title", { findings: [{ ...validFinding, title: "t".repeat(201) }] }],
+    ["finding body", { findings: [{ ...validFinding, body: "b".repeat(10_001) }] }],
+    ["finding path", { findings: [{ ...validFinding, path: "p".repeat(1_025) }] }],
     ["finding count", { findings: Array(51).fill(validFinding) }],
   ])("rejects an oversized %s", async (_description, overrides) => {
     await expect(
