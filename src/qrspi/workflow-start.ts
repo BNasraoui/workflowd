@@ -9,6 +9,7 @@ import {
   canonicalSha256,
   checkTicket,
   normalizeWorkflowDefinition,
+  workflowDefinitionSha256,
   workflowIdFor,
   type TicketCheck,
   type WorkflowDefinition,
@@ -112,7 +113,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
     throw new Error("WorkflowStart lease must exceed repository timeout plus completion margin")
   }
   const workflowDefinition = normalizeWorkflowDefinition(options.workflowDefinition)
-  const workflowDefinitionSha256 = canonicalSha256(workflowDefinition)
+  const definitionSha256 = workflowDefinitionSha256(workflowDefinition)
 
   return (unknownRequest: unknown) =>
     Effect.gen(function* () {
@@ -158,14 +159,15 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           new WorkflowStartUnauthorized({ reason: "Ambiguous repository or fork target" }),
         )
       }
+      const authorizedRequest = { ...request, repository: inspection.repository }
       const currentCursor = yield* store.getCurrentCursor(workflowId)
       const selectedBranchName = yield* store.resolveBranch(workflowId, proposedBranchName, now())
       const input = {
         contractVersion: 1 as const,
-        repository: request.repository,
+        repository: authorizedRequest.repository,
         ticket: request.ticket,
         ticketRevisionSha256: checked.ticketRevision.ticketRevisionSha256,
-        workflowDefinitionSha256,
+        workflowDefinitionSha256: definitionSha256,
         baseRef: inspection.baseRef,
         baseSha: inspection.baseSha,
         branchName: selectedBranchName,
@@ -176,7 +178,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         proposedBranchName: selectedBranchName,
         ticketRevision: checked.ticketRevision,
         workflowDefinition,
-        workflowDefinitionSha256,
+        workflowDefinitionSha256: definitionSha256,
         inputSha256: canonicalSha256(input),
         inputJson: JSON.stringify(input),
         leaseToken: requestedLeaseToken,
@@ -186,7 +188,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
 
       if (
         yield* repositories.hasOpenPullRequest({
-          repository: request.repository,
+          repository: authorizedRequest.repository,
           headRef: operation.branchName,
         })
       ) {
@@ -219,7 +221,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
 
       const branchHistory = yield* repositories
         .observeAcceptedBranch({
-          repository: request.repository,
+          repository: authorizedRequest.repository,
           headRef: operation.branchName,
           baseSha: inspection.baseSha,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
@@ -292,7 +294,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
             ? undefined
             : JSON.stringify({
                 idempotencyIdentity: operation.logicalOperationId,
-                repository: request.repository,
+                repository: authorizedRequest.repository,
                 headRef: operation.branchName,
                 expectedSha: observed.sha,
               }),
@@ -313,7 +315,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           proposedBranchName: selectedBranchName,
           ticketRevision: checked.ticketRevision,
           workflowDefinition,
-          workflowDefinitionSha256,
+          workflowDefinitionSha256: definitionSha256,
           inputSha256: canonicalSha256(input),
           inputJson: JSON.stringify(input),
           leaseToken: requestedLeaseToken,
@@ -375,7 +377,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           checked,
           inspection,
           branchName: operation.branchName,
-          workflowDefinitionSha256,
+          workflowDefinitionSha256: definitionSha256,
           workflowDefinition,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
           expectedRootSha: operation.output.rootSha,
@@ -443,7 +445,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         const authority = yield* leaseAuthority(operation, now())
         const intent = {
           idempotencyIdentity: operation.logicalOperationId,
-          repository: request.repository,
+          repository: authorizedRequest.repository,
           headRef: operation.branchName,
           expectedAbsent: true,
           expectedBaseSha: inspection.baseSha,
@@ -462,7 +464,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           restore(
             repositories
               .createBranch({
-                repository: request.repository,
+                repository: authorizedRequest.repository,
                 headRef: operation.branchName,
                 expectedBaseSha: inspection.baseSha,
                 authority,
@@ -516,7 +518,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         )
         if (waiting === "stale") return yield* busy()
         const createdHistory = yield* repositories.observeAcceptedBranch({
-          repository: request.repository,
+          repository: authorizedRequest.repository,
           headRef: operation.branchName,
           baseSha: inspection.baseSha,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
@@ -536,7 +538,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           authority.leaseToken,
           JSON.stringify({
             idempotencyIdentity: operation.logicalOperationId,
-            repository: request.repository,
+            repository: authorizedRequest.repository,
             headRef: operation.branchName,
             expectedSha: observed.sha,
           }),
@@ -563,11 +565,11 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       yield* finalRecheck({
         tickets,
         repositories,
-        request,
+        request: authorizedRequest,
         checked,
         inspection,
         branchName: operation.branchName,
-        workflowDefinitionSha256,
+        workflowDefinitionSha256: definitionSha256,
         workflowDefinition,
         previousTrustedSha: currentCursor?.currentHeadSha ?? null,
         expectedRootSha: observed.sha,
@@ -582,8 +584,8 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           workflowId,
           branchName: operation.branchName,
           ticketRevisionSha256: checked.ticketRevision.ticketRevisionSha256,
-          workflowDefinitionSha256,
-          repositoryJson: JSON.stringify(request.repository),
+          workflowDefinitionSha256: definitionSha256,
+          repositoryJson: JSON.stringify(authorizedRequest.repository),
           baseRef: inspection.baseRef,
           baseSha: inspection.baseSha,
           rootSha: observed.sha,
@@ -652,7 +654,7 @@ function finalRecheck(input: {
       finalBranch._tag !== "Accepted" ||
       (finalBranch._tag === "Accepted" && finalBranch.sha !== input.expectedRootSha) ||
       finalOpenPr ||
-      input.workflowDefinitionSha256 !== canonicalSha256(input.workflowDefinition)
+      input.workflowDefinitionSha256 !== workflowDefinitionSha256(input.workflowDefinition)
     ) {
       if (input.onChanged !== undefined) yield* input.onChanged()
       return yield* Effect.fail(
@@ -740,9 +742,7 @@ function sameRepository(
   right: typeof RepositoryReference.Type,
 ) {
   return (
-    left.providerInstanceId === right.providerInstanceId &&
-    left.repositoryId === right.repositoryId &&
-    left.repositoryFullName === right.repositoryFullName
+    left.providerInstanceId === right.providerInstanceId && left.repositoryId === right.repositoryId
   )
 }
 

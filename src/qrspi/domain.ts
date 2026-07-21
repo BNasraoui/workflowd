@@ -223,6 +223,14 @@ export const WorkflowDefinition = Schema.Struct({
 })
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
 
+export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
+  return canonicalSha256({
+    contractVersion: definition.contractVersion,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
   const keys = new Set<string>()
@@ -295,6 +303,10 @@ export function checkTicket(ticket: Ticket, checkedAt: Date): TicketCheck {
     )
   if (storyIsAppropriate(ticket) && !ticket.userStory?.trim())
     problems.push(problem("missing_user_story", "Add the feature actor, capability, and value."))
+  if (!storyIsAppropriate(ticket) && ticket.userStory?.trim())
+    problems.push(
+      problem("inappropriate_user_story", "Remove the user story from non-feature work."),
+    )
   if (ticket.acceptanceCriteria === undefined || ticket.acceptanceCriteria.length === 0)
     problems.push(problem("missing_acceptance_criteria", "Add observable acceptance criteria."))
   else if (ticket.acceptanceCriteria.some(isUnobservableCriterion))

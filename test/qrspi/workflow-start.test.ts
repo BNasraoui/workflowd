@@ -16,7 +16,12 @@ import {
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
 import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
 import type { JsonValue } from "../../src/json"
-import { WorkflowStartInput, WorkflowStartRequest, workflowIdFor } from "../../src/qrspi/domain"
+import {
+  WorkflowStartInput,
+  WorkflowStartRequest,
+  workflowIdFor,
+  type RepositoryReference,
+} from "../../src/qrspi/domain"
 
 const directories: string[] = []
 afterEach(async () => {
@@ -58,6 +63,7 @@ const readyTicket = {
 
 type FakeOptions = {
   readonly ticket?: JsonValue
+  readonly inspectedRepository?: RepositoryReference
   readonly crashAfterCreate?: boolean
   readonly crashBeforeCreate?: boolean
   readonly initialBranchSha?: string
@@ -104,10 +110,10 @@ function fakes(options: FakeOptions = {}) {
     inspect: () =>
       options.inspectError === undefined
         ? Effect.succeed({
-            repository,
+            repository: options.inspectedRepository ?? repository,
             baseRef: "main",
             baseSha,
-            headRepository: repository,
+            headRepository: options.inspectedRepository ?? repository,
           })
         : Effect.fail(
             new QrspiRepositoryError({ operation: "inspect", cause: options.inspectError }),
@@ -313,7 +319,9 @@ describe("WorkflowStart integration", () => {
       }).pipe(Effect.provide(layer(filename, fake))),
     )
     expect(JSON.parse(definition[0]!.definition_json)).toEqual(options.workflowDefinition)
-    expect(definition[0]!.definition_sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(definition[0]!.definition_sha256).toBe(
+      "c1110ceb7e0487eeb3910e530cbd1a9f484a76f8c6124cbd93dd7fde8782cc74",
+    )
     if (result._tag !== "Started") throw new Error("Expected started workflow")
     const observations = await Effect.runPromise(
       Effect.gen(function* () {
@@ -1190,14 +1198,42 @@ describe("WorkflowStart integration", () => {
     expect(states).toEqual([{ state: "data_error" }])
   })
 
-  test("rejects unauthorized, cross-workspace, forked, malformed, and ambiguous ingress before mutation", async () => {
+  test("accepts a renamed repository by immutable identity and persists its provider locator", async () => {
+    const filename = await databasePath()
+    const requestedRepository = {
+      ...repository,
+      repositoryFullName: "renamed-owner/example",
+    } as const
+    const providerRepository = {
+      ...repository,
+      repositoryFullName: "canonical-owner/example",
+    } as const
+    const fake = fakes({ inspectedRepository: providerRepository })
+
+    const result = await startWithOptions(filename, fake, options, {
+      ...request,
+      repository: requestedRepository,
+    })
+
+    expect(result).toMatchObject({ _tag: "Started" })
+    const rows = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly repository_json: string }>`
+          SELECT repository_json FROM qrspi_generations
+        `
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(JSON.parse(rows[0]!.repository_json)).toEqual(providerRepository)
+  })
+
+  test("rejects unauthorized, cross-workspace, malformed, and ambiguous ingress before mutation", async () => {
     const filename = await databasePath()
     const fake = fakes()
     const startWorkflow = makeWorkflowStart(options)
     const badRequests: unknown[] = [
       { ...request, repository: { ...repository, repositoryId: "99" } },
       { ...request, ticket: { ...ticketReference, trackerInstanceId: "other" } },
-      { ...request, repository: { ...repository, repositoryFullName: "fork/example" } },
       { repository, ticket: { tracker: "beads" } },
       { ...request, repository: { ...repository, repositoryFullName: "example" } },
     ]

@@ -72,6 +72,20 @@ describe("QRSPI ticket boundary", () => {
     }
   })
 
+  test("reports a user story as inappropriate for non-feature work", () => {
+    const ticket = Schema.decodeUnknownSync(Ticket)({
+      ...readyTicket(),
+      issueType: "bug",
+    })
+
+    const result = checkTicket(ticket, new Date("2026-07-21T05:00:00.000Z"))
+
+    expect(result._tag).toBe("NeedsWork")
+    if (result._tag === "NeedsWork") {
+      expect(result.problems.map(({ code }) => code)).toContain("inappropriate_user_story")
+    }
+  })
+
   test("excludes tracker observation metadata from the ticket revision hash", () => {
     const decode = Schema.decodeUnknownSync(Ticket)
     const first = checkTicket(

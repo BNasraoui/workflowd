@@ -8,6 +8,7 @@ import {
   WorkflowStartInput,
   WorkflowStartOutput,
   canonicalSha256,
+  workflowDefinitionSha256,
   type TicketRevision,
 } from "./domain"
 
@@ -739,7 +740,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               dataError("workflow_definition", input.workflowDefinitionSha256, cause),
             ),
           )
-          if (canonicalSha256(definition) !== input.workflowDefinitionSha256) {
+          if (workflowDefinitionSha256(definition) !== input.workflowDefinitionSha256) {
             return yield* Effect.fail(
               dataError("workflow_definition", input.workflowDefinitionSha256, "hash mismatch"),
             )
