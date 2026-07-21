@@ -167,6 +167,65 @@ test("persists agent checkpoints in order and completes output with downstream r
   ])
 })
 
+test("persists a stale session reference for later cleanup", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "stale-agent-session",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        decodePullRequestEvent({
+          ...samplePullRequestEvent,
+          pullRequest: {
+            ...samplePullRequestEvent.pullRequest,
+            updatedAt: "2026-07-20T12:00:00.000Z",
+          },
+        }),
+      )
+      const work = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (work === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        work,
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: execution.intent,
+      })
+
+      const recorded = yield* store.recordAgentSessionReference({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:02:01.000Z"),
+        reference: execution.reference,
+      })
+      const cleanup = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:02:01.000Z"),
+        leaseDurationMs: 60_000,
+      })
+
+      return { recorded, cleanup }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.recorded).toBe("stale")
+  expect(result.cleanup?.nativeSessionId).toBe("ses_1")
+})
+
 test("persists every schema-valid review output larger than 64 KiB", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
@@ -371,14 +430,24 @@ test("restarts with a new session after either checkpoint and fences expired att
         now: new Date("2026-07-20T12:03:00.000Z"),
         leaseDurationMs: 60_000,
       })
-      const expiredSession = yield* store.claimExpiredAgentSession({
+      const firstExpiredSession = yield* store.claimExpiredAgentSession({
         workerId: "cleanup-worker",
         now: new Date("2026-07-20T12:03:00.000Z"),
         leaseDurationMs: 60_000,
       })
-      if (expiredSession === null) throw new Error("expected expired session")
+      if (firstExpiredSession === null) throw new Error("expected first expired session")
       yield* store.supersedeAgentSession(
-        expiredSession.sessionReferenceId,
+        firstExpiredSession.sessionReferenceId,
+        new Date("2026-07-20T12:03:00.000Z"),
+      )
+      const secondExpiredSession = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:03:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (secondExpiredSession === null) throw new Error("expected second expired session")
+      yield* store.supersedeAgentSession(
+        secondExpiredSession.sessionReferenceId,
         new Date("2026-07-20T12:03:00.000Z"),
       )
       const third = yield* store.claimNextJob({
@@ -427,7 +496,7 @@ test("restarts with a new session after either checkpoint and fences expired att
       const publications = yield* sql`SELECT review_json FROM publications`
       return {
         blockedByExpiredSession,
-        expiredSession,
+        expiredSessions: [firstExpiredSession, secondExpiredSession],
         orphanedReference,
         late,
         completed,
@@ -439,7 +508,10 @@ test("restarts with a new session after either checkpoint and fences expired att
 
   expect(result.orphanedReference).toBe("stale")
   expect(result.blockedByExpiredSession).toBeNull()
-  expect(result.expiredSession.nativeSessionId).toBe("ses_2")
+  expect(result.expiredSessions.map((session) => session.nativeSessionId).sort()).toEqual([
+    "ses_1",
+    "ses_2",
+  ])
   expect(result.late).toBe("stale")
   expect(result.completed).toBe("completed")
   expect(result.executions).toEqual([

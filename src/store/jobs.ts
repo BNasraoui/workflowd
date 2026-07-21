@@ -391,31 +391,49 @@ export function makeJobOperations(
     },
     recordAgentSessionReference: (input) => {
       const timestamp = input.recordedAt.toISOString()
-      return sql<{ readonly session_reference_id: string }>`
-        UPDATE agent_executions
-        SET
-          session_reference_json = ${JSON.stringify(input.reference)},
-          state = 'session_ready',
-          updated_at = ${timestamp}
-        WHERE session_reference_id = ${input.reference.sessionReferenceId}
-        AND job_id = ${input.jobId}
-        AND attempt = ${input.reference.attempt}
-        AND lease_token = ${input.reference.leaseToken}
-        AND state = 'launch_intent'
-        AND EXISTS (
-          SELECT 1
-          FROM jobs AS candidate
-          WHERE candidate.id = agent_executions.job_id
-          AND candidate.state = 'leased'
-          AND candidate.cancel_requested = FALSE
-          AND candidate.lease_owner = ${input.workerId}
-          AND candidate.lease_until > ${timestamp}
-          AND candidate.attempts = agent_executions.attempt
-          AND ${currentness.currentJob}
-          AND ${currentness.latestReviewRequest}
-        )
-        RETURNING session_reference_id
-      `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
+      const referenceJson = JSON.stringify(input.reference)
+      return Effect.gen(function* () {
+        const current = yield* sql<{ readonly session_reference_id: string }>`
+          UPDATE agent_executions
+          SET
+            session_reference_json = ${referenceJson},
+            state = 'session_ready',
+            updated_at = ${timestamp}
+          WHERE session_reference_id = ${input.reference.sessionReferenceId}
+          AND job_id = ${input.jobId}
+          AND attempt = ${input.reference.attempt}
+          AND lease_token = ${input.reference.leaseToken}
+          AND state = 'launch_intent'
+          AND EXISTS (
+            SELECT 1
+            FROM jobs AS candidate
+            WHERE candidate.id = agent_executions.job_id
+            AND candidate.state = 'leased'
+            AND candidate.cancel_requested = FALSE
+            AND candidate.lease_owner = ${input.workerId}
+            AND candidate.lease_until > ${timestamp}
+            AND candidate.attempts = agent_executions.attempt
+            AND ${currentness.currentJob}
+            AND ${currentness.latestReviewRequest}
+          )
+          RETURNING session_reference_id
+        `
+        if (current.length !== 0) return "recorded" as const
+
+        yield* sql`
+          UPDATE agent_executions
+          SET
+            session_reference_json = ${referenceJson},
+            state = 'session_ready',
+            updated_at = ${timestamp}
+          WHERE session_reference_id = ${input.reference.sessionReferenceId}
+          AND job_id = ${input.jobId}
+          AND attempt = ${input.reference.attempt}
+          AND lease_token = ${input.reference.leaseToken}
+          AND state IN ('launch_intent', 'superseded')
+        `
+        return "stale" as const
+      }).pipe(sql.withTransaction)
     },
     rescheduleJob: (input) =>
       Effect.gen(function* () {

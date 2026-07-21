@@ -309,6 +309,68 @@ test("continues to unrelated work when aborting an expired session rejects", asy
   expect(jobClaims).toBe(1)
 })
 
+test("retries cleanup after a stale session checkpoint abort fails", async () => {
+  const job = makeReviewWork()
+  let claimedJob = false
+  let persistedReference: SessionReference | undefined
+  let cleanupClaimed = false
+  let abortAttempts = 0
+  let superseded = 0
+  const store = makeStore({
+    claimExpiredAgentSession: () =>
+      Effect.sync(() => {
+        if (persistedReference === undefined || cleanupClaimed) return null
+        cleanupClaimed = true
+        return persistedReference
+      }),
+    claimNextJob: () =>
+      Effect.sync(() => {
+        if (claimedJob) return null
+        claimedJob = true
+        return job
+      }),
+    recordAgentSessionReference: (input) =>
+      Effect.sync(() => {
+        persistedReference = input.reference
+        return "stale" as const
+      }),
+    supersedeAgentSession: () =>
+      Effect.sync(() => {
+        superseded += 1
+        return "superseded" as const
+      }),
+  })
+  const layer = makeWorkerLayer({
+    store,
+    workspace: {
+      prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+    },
+    agentHarness: {
+      abortSession: () =>
+        Effect.suspend(() => {
+          abortAttempts += 1
+          return abortAttempts === 1
+            ? Effect.fail(
+                new AgentHarnessError({
+                  operation: "abort session",
+                  cause: new Error("abort rejected"),
+                  retryable: true,
+                }),
+              )
+            : Effect.void
+        }),
+    },
+  })
+
+  const first = await Effect.runPromise(runJobIteration(jobOptions).pipe(Effect.provide(layer)))
+  const second = await Effect.runPromise(runJobIteration(jobOptions).pipe(Effect.provide(layer)))
+
+  expect(first).toBe("cleanup_pending")
+  expect(second).toBe("idle")
+  expect(abortAttempts).toBe(2)
+  expect(superseded).toBe(1)
+})
+
 const makePublication = (id = 1) =>
   Schema.decodeUnknownSync(Publication)({
     id,
