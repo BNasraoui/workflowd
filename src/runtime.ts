@@ -23,6 +23,7 @@ import { QrspiStore } from "./qrspi/store"
 import { ArtifactPublicationRepositoryFactoryService } from "./qrspi/artifact-publication"
 import { QrspiWorkspace } from "./qrspi/workspace"
 import {
+  runGenericReviewHandoffIteration,
   runPrePullRequestVerifyIteration,
   runPullRequestPublishIteration,
 } from "./qrspi/finalization-worker"
@@ -121,6 +122,7 @@ export type RuntimeWorkerName =
   | "artifact-publish"
   | "pre-pull-request-verify"
   | "pull-request-publish"
+  | "generic-review-handoff"
 
 export function startHookService(
   config: AppConfig,
@@ -272,6 +274,18 @@ export function startHookService(
             Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore)),
             Effect.provideService(QrspiRepository, Option.getOrThrow(qrspiRepository)),
           ),
+        ),
+      )
+      yield* superviseWorker(
+        "QRSPI GenericReviewHandoff worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "generic-review-handoff",
+          runGenericReviewHandoffIteration({
+            workerId: `${process.pid}:qrspi-review-handoff`,
+            leaseDurationMs: config.qrspi.leaseDurationMs,
+            installationId: config.qrspi.installationId,
+          }).pipe(Effect.provideService(QrspiStore, Option.getOrThrow(qrspiStore))),
         ),
       )
     }

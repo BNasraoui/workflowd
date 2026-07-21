@@ -24,6 +24,11 @@ export type IngestPullRequestResult =
   | { readonly status: "reconciliation_enqueued"; readonly generation: number }
   | { readonly status: "enqueued"; readonly generation: number }
 
+export type IngestPullRequestSnapshotInput = {
+  readonly snapshot: PullRequestSnapshot
+  readonly observedAt: Date
+}
+
 export type LeaseClaim = {
   readonly workerId: string
   readonly now: Date

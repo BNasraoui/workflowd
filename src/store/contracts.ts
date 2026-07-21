@@ -17,6 +17,7 @@ import type {
   ExecuteCommandInput,
   DisableFixJobInput,
   IngestPullRequestResult,
+  IngestPullRequestSnapshotInput,
   LeaseClaim,
   PullRequestEvent,
   PullRequestReconciliation,
@@ -38,6 +39,9 @@ export type WorkflowStorePort = {
   readonly ingestPullRequest: (
     delivery: DeliveryInput,
     event: PullRequestEvent,
+  ) => Effect.Effect<IngestPullRequestResult, SqlError | StoreDataError>
+  readonly ingestPullRequestSnapshot: (
+    input: IngestPullRequestSnapshotInput,
   ) => Effect.Effect<IngestPullRequestResult, SqlError | StoreDataError>
   readonly applyReconciliationSnapshot: (
     input: ApplyReconciliationSnapshotInput,

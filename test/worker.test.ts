@@ -32,6 +32,7 @@ import {
 const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePort => ({
   recordDelivery: () => Effect.die("unused"),
   ingestPullRequest: () => Effect.die("unused"),
+  ingestPullRequestSnapshot: () => Effect.die("unused"),
   applyReconciliationSnapshot: () => Effect.die("unused"),
   claimNextReconciliation: () => Effect.succeed(null),
   rescheduleReconciliation: () => Effect.die("unused"),

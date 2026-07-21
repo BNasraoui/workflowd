@@ -1,8 +1,16 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { Effect } from "effect"
-import { runPullRequestPublishIterationWith } from "../../src/qrspi/finalization-worker"
-import type { FinalPullRequestIntent, FinalPullRequestObservation } from "../../src/qrspi/ports"
+import { GitHubClientError } from "../../src/github"
+import {
+  runGenericReviewHandoffIterationWith,
+  runPullRequestPublishIterationWith,
+} from "../../src/qrspi/finalization-worker"
+import {
+  QrspiRepositoryError,
+  type FinalPullRequestIntent,
+  type FinalPullRequestObservation,
+} from "../../src/qrspi/ports"
 import type { FinalizationOperationLease } from "../../src/qrspi/store"
 
 const repositoryReference = {
@@ -95,6 +103,7 @@ test.each([
         bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
         isFinalizationOperationCurrent: () => Effect.succeed(true),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordPullRequestPublicationFailure: () => Effect.die("unexpected failure recording"),
         recordStalePullRequestPublicationEffect: ({ reference }) =>
           Effect.sync(() => {
             calls.push(`reconcile:${reference.number}`)
@@ -154,6 +163,7 @@ test("PullRequestPublish does not create a PR after its generation is superseded
         bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
         isFinalizationOperationCurrent: () => Effect.succeed(false),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordPullRequestPublicationFailure: () => Effect.die("unexpected failure recording"),
         recordStalePullRequestPublicationEffect: () => Effect.die("unexpected stale effect"),
       },
       repository: repository(calls),
@@ -184,6 +194,7 @@ test("PullRequestPublish durably reconciles a PR created as currentness is lost"
           }),
         isFinalizationOperationCurrent: () => Effect.succeed(current),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordPullRequestPublicationFailure: () => Effect.die("unexpected failure recording"),
         recordStalePullRequestPublicationEffect: ({ reference }) =>
           Effect.sync(() => {
             calls.push(`reconcile:${reference.number}`)
@@ -227,6 +238,7 @@ test("PullRequestPublish reconciles when completion discovers supersession", asy
         bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
         isFinalizationOperationCurrent: () => Effect.succeed(true),
         completePullRequestPublication: () => Effect.succeed("stale" as const),
+        recordPullRequestPublicationFailure: () => Effect.die("unexpected failure recording"),
         recordStalePullRequestPublicationEffect: ({ reference }) =>
           Effect.sync(() => {
             calls.push(`reconcile:${reference.number}`)
@@ -261,6 +273,7 @@ test("PullRequestPublish records a created PR whose branch advanced during creat
           }),
         isFinalizationOperationCurrent: () => Effect.succeed(true),
         completePullRequestPublication: () => Effect.die("unexpected completion"),
+        recordPullRequestPublicationFailure: () => Effect.die("unexpected failure recording"),
         recordStalePullRequestPublicationEffect: ({ reference, observation }) =>
           Effect.sync(() => {
             calls.push(`reconcile:${reference.number}:${observation?.headSha}`)
@@ -286,4 +299,154 @@ test("PullRequestPublish records a created PR whose branch advanced during creat
     "observe-reference",
     `reconcile:17:${changed.headSha}`,
   ])
+})
+
+test.each(["observe", "create"] as const)(
+  "PullRequestPublish durably records a failed %s call",
+  async (failurePoint) => {
+    const calls: string[] = []
+    const result = await Effect.runPromise(
+      runPullRequestPublishIterationWith({
+        workerId: "publisher",
+        leaseDurationMs: 60_000,
+        now: () => new Date("2026-07-22T00:00:00.000Z"),
+        randomId: () => "22222222-2222-4222-8222-222222222222",
+        store: {
+          findPullRequestPublicationRecovery: () => Effect.succeed(null),
+          claimFinalizationOperation: () => Effect.succeed(work),
+          bindPullRequestPublication: () => Effect.succeed("bound" as const),
+          bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
+          isFinalizationOperationCurrent: () => Effect.succeed(true),
+          completePullRequestPublication: () => Effect.die("unexpected completion"),
+          recordStalePullRequestPublicationEffect: () => Effect.die("unexpected stale effect"),
+          recordPullRequestPublicationFailure: ({ error }) =>
+            Effect.sync(() => {
+              calls.push(`record:${error}`)
+              return "waiting_external" as const
+            }),
+        },
+        repository: {
+          ...repository(calls),
+          observeFinalPullRequest: () =>
+            failurePoint === "observe"
+              ? Effect.fail(
+                  new QrspiRepositoryError({
+                    operation: "observe final pull request",
+                    cause: new Error("observe unavailable"),
+                  }),
+                )
+              : Effect.sync(() => {
+                  calls.push("observe")
+                  return null
+                }),
+          createFinalPullRequest: () =>
+            failurePoint === "create"
+              ? Effect.fail(
+                  new QrspiRepositoryError({
+                    operation: "create final pull request",
+                    cause: new Error("create unavailable"),
+                  }),
+                )
+              : Effect.die("unexpected create"),
+        },
+      }),
+    )
+
+    expect(result).toBe("waiting_external")
+    expect(calls.at(-1)).toContain("record:QrspiRepositoryError")
+  },
+)
+
+test("PullRequestPublish exhausts repeated observation failures into a human wait", async () => {
+  let attempts = 0
+  const results: string[] = []
+  for (let index = 0; index < 5; index += 1) {
+    results.push(
+      await Effect.runPromise(
+        runPullRequestPublishIterationWith({
+          workerId: "publisher",
+          leaseDurationMs: 60_000,
+          now: () => new Date("2026-07-22T00:00:00.000Z"),
+          randomId: () => "22222222-2222-4222-8222-222222222222",
+          store: {
+            findPullRequestPublicationRecovery: () => {
+              const { leaseToken: _leaseToken, ...recovery } = work
+              return Effect.succeed(recovery)
+            },
+            claimFinalizationOperation: () => Effect.die("unexpected claim"),
+            bindPullRequestPublication: () => Effect.die("unexpected binding"),
+            bindPullRequestPublicationReference: () => Effect.die("unexpected reference binding"),
+            isFinalizationOperationCurrent: () => Effect.succeed(true),
+            completePullRequestPublication: () => Effect.die("unexpected completion"),
+            recordStalePullRequestPublicationEffect: () => Effect.die("unexpected stale effect"),
+            recordPullRequestPublicationFailure: () =>
+              Effect.sync(() => {
+                attempts += 1
+                return attempts === 5 ? ("waiting_human" as const) : ("waiting_external" as const)
+              }),
+          },
+          repository: {
+            ...repository([]),
+            observeFinalPullRequest: () =>
+              Effect.fail(
+                new QrspiRepositoryError({
+                  operation: "observe final pull request",
+                  cause: new Error("permission denied"),
+                }),
+              ),
+          },
+        }),
+      ),
+    )
+  }
+
+  expect(results).toEqual([
+    "waiting_external",
+    "waiting_external",
+    "waiting_external",
+    "waiting_external",
+    "waiting_human",
+  ])
+})
+
+test("GenericReviewHandoff opens an operation gate when ingestion fails", async () => {
+  const calls: string[] = []
+  const result = await Effect.runPromise(
+    runGenericReviewHandoffIterationWith({
+      workerId: "handoff",
+      leaseDurationMs: 60_000,
+      installationId: 123,
+      now: () => new Date("2026-07-22T00:00:00.000Z"),
+      randomId: () => "33333333-3333-4333-8333-333333333333",
+      store: {
+        claimGenericReviewHandoff: () =>
+          Effect.succeed({
+            operationId: "handoff:1",
+            leaseToken: "33333333-3333-4333-8333-333333333333",
+            pullRequest: observation,
+          }),
+        isGenericReviewHandoffCurrent: () => Effect.succeed(true),
+        completeGenericReviewHandoff: () => Effect.die("unexpected completion"),
+        failGenericReviewHandoff: ({ error }) =>
+          Effect.sync(() => {
+            calls.push(error)
+            return "waiting_human" as const
+          }),
+      },
+      workflowStore: { ingestPullRequestSnapshot: () => Effect.die("unexpected ingestion") },
+      github: {
+        publishReview: () => Effect.die("unexpected publication"),
+        fetchPullRequestSnapshot: () =>
+          Effect.fail(
+            new GitHubClientError({
+              operation: "get pull request",
+              cause: new Error("snapshot unavailable"),
+            }),
+          ),
+      },
+    }),
+  )
+
+  expect(result).toBe("waiting_human")
+  expect(calls[0]).toContain("GitHubClientError")
 })

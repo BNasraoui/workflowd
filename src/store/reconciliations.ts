@@ -9,7 +9,10 @@ import type { makePullRequestTransition } from "./pull-requests"
 
 type ReconciliationOperations = Pick<
   WorkflowStorePort,
-  "applyReconciliationSnapshot" | "claimNextReconciliation" | "rescheduleReconciliation"
+  | "applyReconciliationSnapshot"
+  | "claimNextReconciliation"
+  | "ingestPullRequestSnapshot"
+  | "rescheduleReconciliation"
 >
 
 export function makeReconciliationOperations(
@@ -30,6 +33,10 @@ export function makeReconciliationOperations(
     decode: decodeReconciliationRow,
   })
   return {
+    ingestPullRequestSnapshot: (input) =>
+      applyTransition({ appliedAt: input.observedAt, snapshot: input.snapshot }).pipe(
+        sql.withTransaction,
+      ),
     applyReconciliationSnapshot: (input) =>
       Effect.gen(function* () {
         const claimed = yield* sql<{ readonly id: number }>`

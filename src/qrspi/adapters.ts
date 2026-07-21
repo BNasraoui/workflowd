@@ -393,18 +393,24 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       const client = await this.client(this.config.installationId)
       const marker = /<!-- workflowd-pull-request:[0-9a-f]{64} -->/.exec(input.body)?.[0]
       if (marker === undefined) return null
-      const pulls = await client.rest.pulls.list({
-        ...openPullRequestQuery(owner, repo, input.headRef),
-        state: "all",
-        base: input.baseRef,
-        request: { signal },
-      })
-      const pull = pulls.data.find(
-        ({ base, head, body }) =>
-          base.ref === input.baseRef && head.ref === input.headRef && body?.includes(marker),
-      )
-      if (pull === undefined) return null
-      return finalPullRequestObservation(input.repository, pull)
+      for (let page = 1; ; page += 1) {
+        const pulls = await client.rest.pulls.list({
+          owner,
+          repo,
+          state: "all",
+          head: `${owner}:${input.headRef}`,
+          base: input.baseRef,
+          per_page: 100,
+          page,
+          request: { signal },
+        })
+        const pull = pulls.data.find(
+          ({ base, head, body }) =>
+            base.ref === input.baseRef && head.ref === input.headRef && body?.includes(marker),
+        )
+        if (pull !== undefined) return finalPullRequestObservation(input.repository, pull)
+        if (pulls.data.length < 100) return null
+      }
     })
 
   readonly observeFinalPullRequestReference: QrspiRepositoryPort["observeFinalPullRequestReference"] =

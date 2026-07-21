@@ -313,6 +313,59 @@ describe("QRSPI external adapters", () => {
     expect(observed?.reference.number).toBe(18)
   })
 
+  test("paginates final pull request recovery until the generation marker is found", async () => {
+    const marker = `<!-- workflowd-pull-request:${"b".repeat(64)} -->`
+    const body = `Current delivery evidence\n\n${marker}`
+    const intent = {
+      repository,
+      baseRef: "main",
+      headRef: "feature/workflowd-vs3.3-start",
+      headSha: "f".repeat(40),
+      title: "Complete current generation",
+      body,
+      bodySha256: createHash("sha256").update(body).digest("hex"),
+      draft: false as const,
+    }
+    const pages: number[] = []
+    const pull = (number: number, pullBody: string) => ({
+      number,
+      state: "closed",
+      title: `Pull request ${number}`,
+      draft: false,
+      body: pullBody,
+      html_url: `https://github.test/example-owner/example/pull/${number}`,
+      base: { ref: intent.baseRef },
+      head: { ref: intent.headRef, sha: intent.headSha },
+    })
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: intent.headSha } } }),
+        },
+        pulls: {
+          list: async (input) => {
+            if (input === undefined) throw new Error("missing pull request query")
+            const page = input.page ?? 1
+            pages.push(page)
+            return {
+              data:
+                page === 1
+                  ? Array.from({ length: 100 }, (_, index) => pull(index + 1, "old generation"))
+                  : [pull(101, intent.body)],
+            }
+          },
+        },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
+
+    expect(observed?.reference.number).toBe(101)
+    expect(pages).toEqual([1, 2])
+  })
+
   test("accepts the exact previously trusted branch head", async () => {
     const previousTrustedSha = "a".repeat(40)
     const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({

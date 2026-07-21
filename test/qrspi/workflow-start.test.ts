@@ -16,9 +16,12 @@ import {
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
 import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
 import {
+  runGenericReviewHandoffIterationWith,
   runPrePullRequestVerifyIteration,
   runPullRequestPublishIteration,
 } from "../../src/qrspi/finalization-worker"
+import { WorkflowStoreLive } from "../../src/store"
+import { WorkflowStore } from "../../src/store/contracts"
 import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
@@ -246,6 +249,7 @@ function layer(filename: string, fake: ReturnType<typeof fakes>) {
   const database = SqliteClient.layer({ filename })
   return Layer.mergeAll(
     QrspiStoreLive.pipe(Layer.provideMerge(database)),
+    WorkflowStoreLive.pipe(Layer.provide(database)),
     Layer.succeed(TicketSource, fake.tickets),
     Layer.succeed(QrspiRepository, fake.repositories),
   )
@@ -628,8 +632,8 @@ describe("WorkflowStart integration", () => {
     )
 
     expect(state).toEqual({
-      recorded: "reconciling",
-      generation: [{ state: "reconciling" }],
+      recorded: "waiting_human",
+      generation: [{ state: "waiting_human" }],
       run: [{ state: "active", published_revision: null }],
       operations: [
         {
@@ -641,7 +645,7 @@ describe("WorkflowStart integration", () => {
             outcome: "stale_effect",
           }),
         },
-        { kind: "TargetReconcile", state: "ready", external_observation_json: null },
+        { kind: "TargetReconcile", state: "waiting_human", external_observation_json: null },
       ],
     })
   })
@@ -1161,6 +1165,41 @@ describe("WorkflowStart integration", () => {
           now: () => new Date("2026-07-21T05:01:12.000Z"),
           randomId: () => "66666666-6666-4666-8666-666666666666",
         })
+        const workflowStore = yield* WorkflowStore
+        const handedOff = yield* runGenericReviewHandoffIterationWith({
+          workerId: "review-handoff",
+          leaseDurationMs: 60_000,
+          installationId: 123,
+          now: () => new Date("2026-07-21T05:01:13.000Z"),
+          randomId: () => "77777777-7777-4777-8777-777777777777",
+          store,
+          workflowStore,
+          github: {
+            publishReview: () => Effect.die("unexpected review publication"),
+            fetchPullRequestSnapshot: () =>
+              Effect.succeed({
+                _tag: "AuthoritativePullRequestSnapshot" as const,
+                installationId: 123,
+                repository: {
+                  id: 42,
+                  fullName: repository.repositoryFullName,
+                  owner: "example-owner",
+                  name: "example",
+                },
+                pullRequest: {
+                  number: 17,
+                  author: "octocat",
+                  baseRef: "main",
+                  baseSha,
+                  headRef: "feature/workflowd-vs3.3-kick-off-a-qrspi-workflow",
+                  headSha: secondCommit.commitSha,
+                  headRepositoryFullName: repository.repositoryFullName,
+                  draft: false,
+                  state: "open",
+                },
+              }),
+          },
+        })
         const steps = yield* sql<{
           readonly commit_reference_json: string
           readonly session_reference_id: string
@@ -1195,6 +1234,9 @@ describe("WorkflowStart integration", () => {
           WHERE kind IN ('PrePullRequestVerify', 'PullRequestPublish', 'GenericReviewHandoff')
           ORDER BY kind
         `
+        const reviewJobs = yield* sql<{ readonly kind: string; readonly state: string }>`
+          SELECT kind, state FROM jobs WHERE kind = 'review'
+        `
         return {
           duplicate,
           reviewAccepted,
@@ -1205,11 +1247,13 @@ describe("WorkflowStart integration", () => {
           verified,
           afterVerification,
           published,
+          handedOff,
           steps,
           revisions,
           generation,
           observations,
           finalization,
+          reviewJobs,
         }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
@@ -1226,6 +1270,8 @@ describe("WorkflowStart integration", () => {
     expect(state.verified).toBe("verified")
     expect(state.afterVerification?.state).toBe("finalizing")
     expect(state.published).toBe("published")
+    expect(state.handedOff).toBe("completed")
+    expect(state.reviewJobs).toEqual([{ kind: "review", state: "ready" }])
     expect(
       state.steps.map(({ commit_reference_json }) =>
         Schema.decodeUnknownSync(Schema.parseJson(Schema.Unknown))(commit_reference_json),
@@ -1244,7 +1290,7 @@ describe("WorkflowStart integration", () => {
     ])
     expect(state.finalization.map(({ kind, state }) => ({ kind, state }))).toEqual([
       { kind: "GenericReviewHandoff", state: "succeeded" },
-      { kind: "GenericReviewHandoff", state: "ready" },
+      { kind: "GenericReviewHandoff", state: "succeeded" },
       { kind: "PrePullRequestVerify", state: "succeeded" },
       { kind: "PullRequestPublish", state: "succeeded" },
     ])

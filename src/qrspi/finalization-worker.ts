@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { Cause, Effect, Exit, Schema } from "effect"
+import { Cause, Effect, Either, Exit, Schema } from "effect"
 import { RepositoryReference } from "./domain"
 import {
   QrspiRepository,
@@ -8,6 +8,8 @@ import {
 } from "./ports"
 import { QrspiStore, type QrspiStorePort } from "./store"
 import { ImplementationCheckpointReference, PreparedDeliveryEvidence } from "./stages"
+import { GitHub, type GitHubPort } from "../github"
+import { WorkflowStore, type WorkflowStorePort } from "../store/contracts"
 
 const PrePullRequestVerifyInput = Schema.Struct({
   checkpoint: ImplementationCheckpointReference,
@@ -132,6 +134,7 @@ export function runPullRequestPublishIterationWith(options: {
     | "bindPullRequestPublicationReference"
     | "isFinalizationOperationCurrent"
     | "completePullRequestPublication"
+    | "recordPullRequestPublicationFailure"
     | "recordStalePullRequestPublicationEffect"
   >
   readonly repository: typeof QrspiRepository.Service
@@ -168,16 +171,33 @@ export function runPullRequestPublishIterationWith(options: {
       })
       if (binding !== "bound") return binding
     }
-    let observed =
+    const initialObservation = yield* Effect.either(
       work.publicationReference === undefined
-        ? yield* options.repository.observeFinalPullRequest(intent)
-        : yield* options.repository.observeFinalPullRequestReference(work.publicationReference)
+        ? options.repository.observeFinalPullRequest(intent)
+        : options.repository.observeFinalPullRequestReference(work.publicationReference),
+    )
+    if (Either.isLeft(initialObservation)) {
+      return yield* options.store.recordPullRequestPublicationFailure({
+        operationId: work.operationId,
+        error: Cause.pretty(Cause.fail(initialObservation.left)),
+        now: options.now(),
+      })
+    }
+    let observed = initialObservation.right
     let created: FinalPullRequestObservation["reference"] | undefined
     if (observed === null) {
       if (!(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))) {
         return "stale" as const
       }
-      created = yield* options.repository.createFinalPullRequest(intent)
+      const creation = yield* Effect.either(options.repository.createFinalPullRequest(intent))
+      if (Either.isLeft(creation)) {
+        return yield* options.store.recordPullRequestPublicationFailure({
+          operationId: work.operationId,
+          error: Cause.pretty(Cause.fail(creation.left)),
+          now: options.now(),
+        })
+      }
+      created = creation.right
       const referenceBinding = yield* options.store.bindPullRequestPublicationReference({
         operationId: work.operationId,
         reference: created,
@@ -191,10 +211,10 @@ export function runPullRequestPublishIterationWith(options: {
           now: options.now(),
         })
       }
-      const observation = yield* Effect.exit(
+      const observation = yield* Effect.either(
         options.repository.observeFinalPullRequestReference(created),
       )
-      if (Exit.isFailure(observation)) {
+      if (Either.isLeft(observation)) {
         if (
           !(yield* options.store.isFinalizationOperationCurrent(work.operationId, options.now()))
         ) {
@@ -205,9 +225,13 @@ export function runPullRequestPublishIterationWith(options: {
             now: options.now(),
           })
         }
-        return yield* Effect.failCause(observation.cause)
+        return yield* options.store.recordPullRequestPublicationFailure({
+          operationId: work.operationId,
+          error: Cause.pretty(Cause.fail(observation.left)),
+          now: options.now(),
+        })
       }
-      observed = observation.value
+      observed = observation.right
     }
     if (observed === null) {
       if (
@@ -221,7 +245,11 @@ export function runPullRequestPublishIterationWith(options: {
           now: options.now(),
         })
       }
-      return yield* Effect.fail(new Error("final pull request was not observable after creation"))
+      return yield* options.store.recordPullRequestPublicationFailure({
+        operationId: work.operationId,
+        error: "final pull request was not observable after creation",
+        now: options.now(),
+      })
     }
     if (!matchesIntent(observed, intent)) {
       return yield* options.store.recordStalePullRequestPublicationEffect({
@@ -252,6 +280,94 @@ export function runPullRequestPublishIterationWith(options: {
       intent,
       reference: observed.reference,
       observation: observed,
+      now: options.now(),
+    })
+  })
+}
+
+export function runGenericReviewHandoffIteration(
+  options: FinalizationWorkerOptions & { readonly installationId: number },
+) {
+  return Effect.gen(function* () {
+    const store = yield* QrspiStore
+    const workflowStore = yield* WorkflowStore
+    const github = yield* GitHub
+    return yield* runGenericReviewHandoffIterationWith({
+      ...options,
+      store,
+      workflowStore,
+      github,
+      now: options.now ?? (() => new Date()),
+      randomId: options.randomId ?? randomUUID,
+    })
+  })
+}
+
+export function runGenericReviewHandoffIterationWith(options: {
+  readonly workerId: string
+  readonly leaseDurationMs: number
+  readonly installationId: number
+  readonly now: () => Date
+  readonly randomId: () => string
+  readonly store: Pick<
+    QrspiStorePort,
+    | "claimGenericReviewHandoff"
+    | "isGenericReviewHandoffCurrent"
+    | "completeGenericReviewHandoff"
+    | "failGenericReviewHandoff"
+  >
+  readonly workflowStore: Pick<WorkflowStorePort, "ingestPullRequestSnapshot">
+  readonly github: GitHubPort
+}) {
+  return Effect.gen(function* () {
+    const work = yield* options.store.claimGenericReviewHandoff(
+      options.workerId,
+      options.randomId(),
+      options.leaseDurationMs,
+      options.now(),
+    )
+    if (work === null) return "idle" as const
+    const snapshot = yield* Effect.either(
+      options.github.fetchPullRequestSnapshot({
+        installationId: options.installationId,
+        repositoryFullName: work.pullRequest.reference.repository.repositoryFullName,
+        pullRequestNumber: work.pullRequest.reference.number,
+      }),
+    )
+    if (Either.isLeft(snapshot)) {
+      return yield* options.store.failGenericReviewHandoff({
+        operationId: work.operationId,
+        leaseToken: work.leaseToken,
+        error: Cause.pretty(Cause.fail(snapshot.left)),
+        now: options.now(),
+      })
+    }
+    if (
+      !(yield* options.store.isGenericReviewHandoffCurrent(
+        work.operationId,
+        work.leaseToken,
+        options.now(),
+      ))
+    ) {
+      return "stale" as const
+    }
+    const handoff = yield* Effect.either(
+      options.workflowStore.ingestPullRequestSnapshot({
+        snapshot: snapshot.right,
+        observedAt: options.now(),
+      }),
+    )
+    if (Either.isLeft(handoff)) {
+      return yield* options.store.failGenericReviewHandoff({
+        operationId: work.operationId,
+        leaseToken: work.leaseToken,
+        error: Cause.pretty(Cause.fail(handoff.left)),
+        now: options.now(),
+      })
+    }
+    return yield* options.store.completeGenericReviewHandoff({
+      operationId: work.operationId,
+      leaseToken: work.leaseToken,
       now: options.now(),
     })
   })

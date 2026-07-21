@@ -302,7 +302,7 @@ export type QrspiStorePort = {
     readonly finalSha: string
     readonly observedHeadSha: string
     readonly now: Date
-  }) => Effect.Effect<"reconciling" | "stale", SqlError | ParseError>
+  }) => Effect.Effect<"reconciling" | "waiting_human" | "stale", SqlError | ParseError>
   readonly completeStageProduce: (input: {
     readonly operationId: string
     readonly leaseToken: string
@@ -394,13 +394,40 @@ export type QrspiStorePort = {
     readonly observation: FinalPullRequestObservation
     readonly now: Date
   }) => Effect.Effect<"published" | "stale", SqlError | ParseError>
+  readonly recordPullRequestPublicationFailure: (input: {
+    readonly operationId: string
+    readonly error: string
+    readonly now: Date
+  }) => Effect.Effect<"waiting_external" | "waiting_human" | "stale", SqlError>
   readonly recordStalePullRequestPublicationEffect: (input: {
     readonly operationId: string
     readonly intent: FinalPullRequestIntent
     readonly reference: FinalPullRequestObservation["reference"]
     readonly observation?: FinalPullRequestObservation
     readonly now: Date
-  }) => Effect.Effect<"reconciling" | "stale", SqlError | ParseError>
+  }) => Effect.Effect<"reconciling" | "waiting_human" | "stale", SqlError | ParseError>
+  readonly claimGenericReviewHandoff: (
+    workerId: string,
+    leaseToken: string,
+    leaseDurationMs: number,
+    now: Date,
+  ) => Effect.Effect<GenericReviewHandoffLease | null, SqlError | ParseError>
+  readonly completeGenericReviewHandoff: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly now: Date
+  }) => Effect.Effect<"completed" | "stale", SqlError>
+  readonly isGenericReviewHandoffCurrent: (
+    operationId: string,
+    leaseToken: string,
+    now: Date,
+  ) => Effect.Effect<boolean, SqlError>
+  readonly failGenericReviewHandoff: (input: {
+    readonly operationId: string
+    readonly leaseToken: string
+    readonly error: string
+    readonly now: Date
+  }) => Effect.Effect<"waiting_human" | "stale", SqlError>
   readonly rescheduleFinalizationOperation: (input: {
     readonly operationId: string
     readonly leaseToken: string
@@ -444,6 +471,12 @@ export type FinalizationOperationLease = {
   readonly baseRef: string
   readonly headRef: string
   readonly currentHeadSha: string
+}
+
+export type GenericReviewHandoffLease = {
+  readonly operationId: string
+  readonly leaseToken: string
+  readonly pullRequest: FinalPullRequestObservation
 }
 
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
@@ -1720,7 +1753,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               AND state IN ('waiting_external', 'superseded')
           `
           yield* sql`
-            UPDATE qrspi_generations SET state = 'reconciling', updated_at = ${input.now.toISOString()}
+            UPDATE qrspi_generations SET state = 'waiting_human', updated_at = ${input.now.toISOString()}
             WHERE workflow_id = ${scope.workflowId} AND is_current = 1
               AND state NOT IN ('completed', 'rejected', 'cancelled', 'failed', 'superseded')
           `
@@ -1734,7 +1767,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             SELECT operation_id FROM workflow_operations
             WHERE logical_operation_id = ${logical} AND is_current = 1
           `
-          if (existing.length === 0) {
+          const existingOperationId = existing[0]?.operation_id
+          const reconciliationOperationId = existingOperationId ?? `${logical}:1`
+          if (existingOperationId === undefined) {
             const reconciliationInput = {
               staleOperationId: input.operationId,
               generation: scope.generation,
@@ -1743,7 +1778,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               observedHeadSha: input.observedHeadSha,
             }
             yield* insertOperation(sql, {
-              operationId: `${logical}:1`,
+              operationId: reconciliationOperationId,
               logicalOperationId: logical,
               revision: 1,
               retryOf: null,
@@ -1751,13 +1786,28 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               scope: { _tag: "WorkflowScope", workflowId: scope.workflowId },
               inputJson: JSON.stringify(reconciliationInput),
               inputSha256: canonicalSha256(reconciliationInput),
-              state: "ready",
+              state: "waiting_human",
               attempt: 0,
               parentEffect: { success: "audit only", failure: "open operation-scoped gate" },
               now: input.now,
             })
+          } else {
+            yield* sql`
+              UPDATE workflow_operations SET state = 'waiting_human',
+                terminal_failure_reason = 'stale artifact publication requires target reconciliation',
+                terminal_retry_policy = 'operator_required', updated_at = ${input.now.toISOString()}
+              WHERE operation_id = ${reconciliationOperationId} AND state = 'ready'
+            `
           }
-          return "reconciling" as const
+          yield* sql`
+            INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+            VALUES (
+              ${reconciliationOperationId}, 'pending',
+              'stale artifact publication requires target reconciliation',
+              ${input.now.toISOString()}
+            ) ON CONFLICT (operation_id) DO NOTHING
+          `
+          return "waiting_human" as const
         }),
       ),
 
@@ -2977,6 +3027,52 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }),
       ),
 
+    recordPullRequestPublicationFailure: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly state: "waiting_external" | "waiting_human" }>`
+            UPDATE workflow_operations
+            SET state = CASE WHEN observation_attempts + 1 >= max_observation_attempts
+                  THEN 'waiting_human' ELSE 'waiting_external' END,
+                observation_attempts = observation_attempts + 1,
+                last_error = ${input.error},
+                terminal_failure_reason = CASE
+                  WHEN observation_attempts + 1 >= max_observation_attempts
+                    THEN 'pull request observation budget exhausted'
+                  ELSE terminal_failure_reason END,
+                terminal_retry_policy = CASE
+                  WHEN observation_attempts + 1 >= max_observation_attempts
+                    THEN 'operator_required'
+                  ELSE terminal_retry_policy END,
+                updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'PullRequestPublish'
+              AND state = 'waiting_external' AND is_current = 1
+            RETURNING state
+          `
+          const state = rows[0]?.state
+          if (state === undefined) return "stale" as const
+          if (state === "waiting_human") {
+            yield* sql`
+              INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+              VALUES (
+                ${input.operationId}, 'pending', 'pull request observation budget exhausted',
+                ${input.now.toISOString()}
+              ) ON CONFLICT (operation_id) DO NOTHING
+            `
+            yield* sql`
+              UPDATE qrspi_generations SET state = 'waiting_human',
+                updated_at = ${input.now.toISOString()}
+              WHERE is_current = 1 AND state = 'finalizing'
+                AND workflow_id = json_extract((SELECT scope_json FROM workflow_operations
+                  WHERE operation_id = ${input.operationId}), '$.workflowId')
+                AND generation = json_extract((SELECT scope_json FROM workflow_operations
+                  WHERE operation_id = ${input.operationId}), '$.generation')
+            `
+          }
+          return state
+        }),
+      ),
+
     recordStalePullRequestPublicationEffect: (input) =>
       transaction(
         Effect.gen(function* () {
@@ -3026,7 +3122,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               AND state IN ('waiting_external', 'superseded')
           `
           yield* sql`
-            UPDATE qrspi_generations SET state = 'reconciling', updated_at = ${input.now.toISOString()}
+            UPDATE qrspi_generations SET state = 'waiting_human', updated_at = ${input.now.toISOString()}
             WHERE workflow_id = ${scope.workflowId} AND is_current = 1
               AND state NOT IN ('completed', 'rejected', 'cancelled', 'failed', 'superseded')
           `
@@ -3039,14 +3135,16 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             SELECT operation_id FROM workflow_operations
             WHERE logical_operation_id = ${logical} AND is_current = 1
           `
-          if (existing.length === 0) {
+          const existingOperationId = existing[0]?.operation_id
+          const reconciliationOperationId = existingOperationId ?? `${logical}:1`
+          if (existingOperationId === undefined) {
             const reconciliationInput = {
               staleOperationId: input.operationId,
               generation: scope.generation,
               pullRequest: observation ?? { reference, intent },
             }
             yield* insertOperation(sql, {
-              operationId: `${logical}:1`,
+              operationId: reconciliationOperationId,
               logicalOperationId: logical,
               revision: 1,
               retryOf: null,
@@ -3054,13 +3152,102 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               scope: { _tag: "WorkflowScope", workflowId: scope.workflowId },
               inputJson: JSON.stringify(reconciliationInput),
               inputSha256: canonicalSha256(reconciliationInput),
-              state: "ready",
+              state: "waiting_human",
               attempt: 0,
               parentEffect: { success: "audit only", failure: "open operation-scoped gate" },
               now: input.now,
             })
+          } else {
+            yield* sql`
+              UPDATE workflow_operations SET state = 'waiting_human',
+                terminal_failure_reason = 'stale pull request publication requires target reconciliation',
+                terminal_retry_policy = 'operator_required', updated_at = ${input.now.toISOString()}
+              WHERE operation_id = ${reconciliationOperationId} AND state = 'ready'
+            `
           }
-          return "reconciling" as const
+          yield* sql`
+            INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+            VALUES (
+              ${reconciliationOperationId}, 'pending',
+              'stale pull request publication requires target reconciliation',
+              ${input.now.toISOString()}
+            ) ON CONFLICT (operation_id) DO NOTHING
+          `
+          return "waiting_human" as const
+        }),
+      ),
+
+    claimGenericReviewHandoff: (workerId, leaseToken, leaseDurationMs, now) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<{
+          readonly operation_id: string
+          readonly input_json: string
+        }>`
+          UPDATE workflow_operations
+          SET state = 'leased', attempt = attempt + 1, lease_owner = ${workerId},
+            lease_token = ${leaseToken},
+            lease_until = ${new Date(now.getTime() + leaseDurationMs).toISOString()},
+            updated_at = ${now.toISOString()}
+          WHERE operation_id = (
+            SELECT operation_id FROM workflow_operations
+            WHERE kind = 'GenericReviewHandoff' AND is_current = 1
+              AND json_type(input_json, '$.pullRequest') = 'object'
+              AND (state = 'ready' OR (state = 'leased' AND lease_until <= ${now.toISOString()}))
+              AND run_at <= ${now.toISOString()}
+            ORDER BY run_at, operation_id LIMIT 1
+          )
+          RETURNING operation_id, input_json
+        `
+        const row = rows[0]
+        if (row === undefined) return null
+        const handoff = yield* Schema.decodeUnknown(Schema.parseJson(GenericReviewHandoffInput))(
+          row.input_json,
+        )
+        return { operationId: row.operation_id, leaseToken, pullRequest: handoff.pullRequest }
+      }),
+
+    isGenericReviewHandoffCurrent: (operationId, leaseToken, now) =>
+      sql<{ readonly operation_id: string }>`
+        SELECT operation_id FROM workflow_operations
+        WHERE operation_id = ${operationId} AND kind = 'GenericReviewHandoff'
+          AND state = 'leased' AND is_current = 1 AND lease_token = ${leaseToken}
+          AND lease_until > ${now.toISOString()}
+      `.pipe(Effect.map((rows) => rows.length === 1)),
+
+    completeGenericReviewHandoff: (input) =>
+      sql<{ readonly operation_id: string }>`
+        UPDATE workflow_operations SET state = 'succeeded',
+          output_json = ${JSON.stringify({ handedOff: true })},
+          lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+          updated_at = ${input.now.toISOString()}
+        WHERE operation_id = ${input.operationId} AND kind = 'GenericReviewHandoff'
+          AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+          AND lease_until > ${input.now.toISOString()}
+        RETURNING operation_id
+      `.pipe(
+        Effect.map((rows) => (rows.length === 1 ? ("completed" as const) : ("stale" as const))),
+      ),
+
+    failGenericReviewHandoff: (input) =>
+      transaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly operation_id: string }>`
+            UPDATE workflow_operations SET state = 'waiting_human', last_error = ${input.error},
+              terminal_failure_reason = ${input.error}, terminal_retry_policy = 'operator_required',
+              lease_owner = NULL, lease_token = NULL, lease_until = NULL,
+              updated_at = ${input.now.toISOString()}
+            WHERE operation_id = ${input.operationId} AND kind = 'GenericReviewHandoff'
+              AND state = 'leased' AND is_current = 1 AND lease_token = ${input.leaseToken}
+              AND lease_until > ${input.now.toISOString()}
+            RETURNING operation_id
+          `
+          if (rows.length === 0) return "stale" as const
+          yield* sql`
+            INSERT INTO workflow_operation_gates (operation_id, state, reason, created_at)
+            VALUES (${input.operationId}, 'pending', ${input.error}, ${input.now.toISOString()})
+            ON CONFLICT (operation_id) DO NOTHING
+          `
+          return "waiting_human" as const
         }),
       ),
 
@@ -3206,6 +3393,11 @@ const FinalPullRequestObservationSchema = Schema.Struct({
   body: Schema.String,
   bodySha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
   url: Schema.NonEmptyString,
+})
+const GenericReviewHandoffInput = Schema.Struct({
+  pullRequest: FinalPullRequestObservationSchema,
+  generation: Schema.Int.pipe(Schema.positive()),
+  checkpoint: ImplementationCheckpointReference,
 })
 const StageOperationInput = Schema.Struct({
   stageKey: Schema.NonEmptyString,
