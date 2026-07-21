@@ -177,7 +177,7 @@ describe("QRSPI external adapters", () => {
     })
   })
 
-  test("creates and observes the exact final non-draft pull request", async () => {
+  test("observes a final pull request whose body was edited before durable binding", async () => {
     const body = "Implementation complete\n\n## Delivery evidence\n- Scenario passes"
     const bodySha256 = createHash("sha256").update(body).digest("hex")
     let pull:
@@ -231,6 +231,8 @@ describe("QRSPI external adapters", () => {
     }
 
     await Effect.runPromise(adapter.createFinalPullRequest(intent))
+    if (pull === undefined) throw new Error("pull request was not created")
+    pull = { ...pull, body: "Edited after creation" }
     const observed = await Effect.runPromise(adapter.observeFinalPullRequest(intent))
 
     expect(observed).toMatchObject({
@@ -241,7 +243,7 @@ describe("QRSPI external adapters", () => {
       headRef: intent.headRef,
       headSha: intent.headSha,
       draft: false,
-      bodySha256,
+      bodySha256: createHash("sha256").update("Edited after creation").digest("hex"),
     })
   })
 

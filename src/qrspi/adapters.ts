@@ -397,14 +397,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       const pull = pulls.data.find(
-        ({ base, head, draft, body }) =>
-          base.ref === input.baseRef &&
-          head.ref === input.headRef &&
-          head.sha === input.headSha &&
-          draft !== true &&
-          createHash("sha256")
-            .update(body ?? "")
-            .digest("hex") === input.bodySha256,
+        ({ base, head }) => base.ref === input.baseRef && head.ref === input.headRef,
       )
       if (pull === undefined) return null
       return finalPullRequestObservation(input.repository, pull)
