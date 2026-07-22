@@ -112,6 +112,20 @@
         "The Human Risk Decision does not accept or answer the capacity tradeoff and defers its exact question to the next Design revision.",
         "Control coverage uses Missing or PendingDecision where appropriate instead of inventing controls, owners, or verification obligations to force completeness."
       ]
+    },
+    {
+      "id": 8,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "An ImpactReady report that accepts the canonical upstream ownership-report shape through its separate authoritative binding envelope.",
+      "files": ["evals/fixtures/upstream-handoff.md"],
+      "expectations": [
+        "The reviewer accepts the complete canonical Design Boundary Review even though it has no Subject section, because binding-change-808@rev-1 separately binds its exact identity and sha256:scope808 digest.",
+        "The Subject records change-808@rev-2, design-change-808@rev-3, scope-change-808@artifact-1, binding-change-808@rev-1, sources-change-808@rev-2, gen-93, and design-acceptance-v2.",
+        "The Source Inventory examines the canonical ownership report and authoritative binding as separate sources and does not claim that the report itself contains the missing workflow identities.",
+        "The Verdict section contains only ImpactReady and does not refuse the handoff or request another ownership review.",
+        "The single Design decision has all eight surface dispositions and retains only the evidence-backed stale-readiness failure mode.",
+        "The report never infers, invents, or reconstructs an ownership-report digest, source-set identity, workflow Generation, or policy revision from the upstream report contents."
+      ]
     }
   ]
 }

@@ -12,6 +12,7 @@ Return these sections in this order and use the field names exactly.
 | Ticket              | ...                                            |
 | Design              | Artifact identity and revision                 |
 | Ownership report    | Artifact identity and matching Design revision |
+| Review binding      | Embedded fields or separate envelope identity and report digest |
 | Source set          | Identity or revision                           |
 | Workflow Generation | ...                                            |
 | Policy revision     | ...                                            |
@@ -125,8 +126,10 @@ the Design, or accept residual risk.
 
 The report is complete only when:
 
-- Subject binds the exact ticket, Design, ownership report, source set, workflow
-  Generation, and policy revision;
+- Subject binds the exact ticket, Design, ownership report, authoritative review binding,
+  source set, workflow Generation, and policy revision;
+- the review binding names the exact ownership report identity and digest and was
+  examined rather than reconstructed from report contents;
 - Source Inventory contains every required input and cited source;
 - every material Design statement maps to one `D*` and every `D*` has all eight surface
   rows;

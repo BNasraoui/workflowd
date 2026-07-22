@@ -7,6 +7,7 @@
 | Ticket              | `change-101@rev-3`                             |
 | Design              | `design-change-101@rev-4`                      |
 | Ownership report    | `scope-change-101@rev-4`, verdict `ScopeClean` |
+| Review binding      | `binding-change-101@rev-1`, authoritative envelope |
 | Source set          | `sources-change-101@rev-2`                     |
 | Workflow Generation | `gen-18`                                       |
 | Policy revision     | `design-acceptance-v2`                         |
@@ -21,6 +22,7 @@
 | Accepted Research                      | `research-change-101@rev-2`    | Complete                                                                    |
 | Draft Design                           | `design-change-101@rev-4`      | Complete, including both numbered decisions                                 |
 | Ownership report                       | `scope-change-101@rev-4`       | Complete and bound to this Design and review identity                       |
+| Review binding                          | `binding-change-101@rev-1`     | Complete; binds the ownership report digest to the Review Identity          |
 | Architecture references                | `data-publication-rules@rev-5` | Complete                                                                    |
 | Current source                         | `import-service@commit-a41`    | Complete affected source snapshot                                           |
 | Current tests                          | `import-tests@commit-a41`      | Complete affected test inventory and latest results                         |

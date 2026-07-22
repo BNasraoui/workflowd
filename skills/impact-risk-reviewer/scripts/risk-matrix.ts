@@ -59,7 +59,11 @@ export const parseImpact = (value: string | number) =>
   parseAxis(value, IMPACT_TOKENS, "impact");
 
 export const parseLikelihood = (value: string | number) => {
-  const normalized = String(value).trim().replace(/[ _-]/g, "");
+  const input = String(value).trim();
+  const normalized = input.replace(
+    /^almost[ _-]certain$/i,
+    "AlmostCertain",
+  );
   return parseAxis(normalized, LIKELIHOOD_TOKENS, "likelihood");
 };
 

@@ -7,6 +7,7 @@
 | Ticket              | `change-202@rev-5`                             |
 | Design              | `design-change-202@rev-2`                      |
 | Ownership report    | `scope-change-202@rev-2`, verdict `ScopeClean` |
+| Review binding      | `binding-change-202@rev-1`, authoritative envelope |
 | Source set          | `sources-change-202@rev-4`                     |
 | Workflow Generation | `gen-31`                                       |
 | Policy revision     | `design-acceptance-v2`                         |
@@ -21,6 +22,7 @@
 | Accepted Research                      | `research-change-202@rev-3`   | Complete                                    |
 | Draft Design                           | `design-change-202@rev-2`     | Complete, including both numbered decisions |
 | Ownership report                       | `scope-change-202@rev-2`      | Complete and identity-matched               |
+| Review binding                          | `binding-change-202@rev-1`    | Complete authoritative envelope              |
 | Architecture references                | `external-effect-rules@rev-8` | Complete                                    |
 | Current source                         | `delivery-worker@commit-b72`  | Complete affected source snapshot           |
 | Current tests                          | `delivery-tests@commit-b72`   | Complete inventory and results              |

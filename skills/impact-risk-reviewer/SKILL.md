@@ -13,10 +13,15 @@ and gate approval to their owners.
 
 ## Entry condition
 
-Start only with a complete `ScopeClean` ownership report bound to the same Design
-identity, revision, source set, workflow Generation, and policy revision under review.
-If these identities differ or ownership is not clean, request the matching ownership
-review instead of issuing an impact verdict.
+Start only with a complete `ScopeClean` ownership report and an authoritative review
+binding that ties that exact report identity and digest to the Design identity and
+revision, source set, workflow Generation, and policy revision under review. The binding
+may be fields embedded in the report or a separate envelope issued by the Design
+acceptance workflow. The canonical Design Boundary Review has no embedded Subject, so it
+requires the separate envelope. Never infer or create a binding from report contents.
+
+If any identity differs, the binding is incomplete, or ownership is not clean, request a
+correct binding or matching ownership review instead of issuing an impact verdict.
 
 ## Required inputs
 
@@ -25,7 +30,7 @@ completeness:
 
 - the exact current ticket and complete issue graph;
 - accepted Questions and Research;
-- the exact Design revision and matching ownership report;
+- the exact Design revision, matching ownership report, and authoritative review binding;
 - every cited architecture reference;
 - current source and tests affected by the Design;
 - the deployment and operating model; and
@@ -40,9 +45,10 @@ unverified, or inaccessible source is `Unavailable`, not absent.
    [`references/verification-model.md`](references/verification-model.md), and
    [`references/output-contract.md`](references/output-contract.md). Done when the
    materiality, rating, control, verification, report, and verdict rules are available.
-2. Inventory every required source and bind the review subject. Done when every source
-   is `Examined`, `ConfirmedAbsent`, or `Unavailable`, with its revision, completeness,
-   and relevance recorded.
+2. Inventory every required source and verify the review binding without deriving missing
+   identities from the report. Done when every source is `Examined`, `ConfirmedAbsent`,
+   or `Unavailable`, with its revision, completeness, and relevance recorded, and the
+   exact ownership report and Design resolve through one authoritative binding.
 3. Map the Design in source order to stable `D1`, `D2`, ... decisions. Keep details with
    their source decision when they share an intended outcome, surface set, and control
    owner. When a real split is needed, use child IDs such as `D2a` that retain the source

@@ -7,6 +7,7 @@
 | Ticket              | `change-505@rev-2`                             |
 | Design              | `design-change-505@rev-5`                      |
 | Ownership report    | `scope-change-505@rev-5`, verdict `ScopeClean` |
+| Review binding      | `binding-change-505@rev-1`, authoritative envelope |
 | Source set          | `sources-change-505@rev-3`                     |
 | Workflow Generation | `gen-63`                                       |
 | Policy revision     | `design-acceptance-v2`                         |
@@ -21,6 +22,7 @@
 | Accepted Research                      | `research-change-505@rev-3`  | Complete for application and schema behavior                             |
 | Draft Design                           | `design-change-505@rev-5`    | Complete, including both numbered decisions                              |
 | Ownership report                       | `scope-change-505@rev-5`     | Complete and identity-matched                                            |
+| Review binding                          | `binding-change-505@rev-1`   | Complete authoritative envelope                                           |
 | Architecture references                | `schema-compatibility@rev-9` | Complete                                                                 |
 | Current source                         | `record-service@commit-e27`  | Complete affected source snapshot                                        |
 | Current tests                          | `record-tests@commit-e27`    | Complete inventory and current results                                   |

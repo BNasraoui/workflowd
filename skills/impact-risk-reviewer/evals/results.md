@@ -2,8 +2,9 @@
 
 ## 2026-07-22: Current regression - Iteration 6
 
-All seven fixtures ran in fresh `general` subagents against one exact staged skill
-revision. Separate `analyzer` subagents graded every report against the same `evals.json`.
+The seven pre-review fixtures ran in fresh `general` subagents against one exact staged
+skill revision. Separate `analyzer` subagents graded every report against the same
+`evals.json`.
 
 | Fixture                       | Verdict branch                            |       Assertions | Recorded evidence                                                                                                                                                                |
 | ----------------------------- | ----------------------------------------- | ---------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -16,6 +17,13 @@ revision. Separate `analyzer` subagents graded every report against the same `ev
 | `verdict-precedence.md`       | `ReviseDesign` before `NeedsRiskDecision` |              6/6 | The Design correction won the first-match collision while the separate residual tradeoff stayed unaccepted and deferred to the next revision.                                    |
 | **Total**                     |                                           | **56/56 (100%)** |                                                                                                                                                                                  |
 
+Review fixes received targeted regression coverage rather than repeating the unchanged
+suite:
+
+| Targeted fixture | Result | Recorded evidence |
+| --- | ---: | --- |
+| `upstream-handoff.md` | 6/6 | The canonical Design Boundary Review shape, which has no Subject, passed through a separate authoritative envelope binding the exact report identity and digest to the Design and workflow identities. |
+
 An independent final audit found no blocking semantic issue in the current skill or these
 reports. It specifically rechecked effective detection, true recovery, explicit control
 ownership, honest `Missing` and `PendingDecision` dispositions, score evidence, verdict
@@ -26,12 +34,20 @@ above. Detailed generated reports and grader evidence remain in:
 
 ```text
 /tmp/opencode/impact-risk-reviewer-workspace/iteration-6
+/tmp/opencode/impact-risk-reviewer-workspace/iteration-7/eval-8-upstream-handoff
 ```
 
 The host did not return subagent model IDs, token counts, or timing, so those fields are
 not claimed here. Executors used the `general` agent and graders used `analyzer`.
 
 ## Iteration history
+
+### Iteration 7 - targeted review fixes
+
+The new upstream-handoff fixture passed 6/6 against the canonical ownership-report shape
+and separate binding envelope. Calculator regression tests also proved that negative
+likelihood levels fail through both the API and CLI. The seven unchanged semantic
+fixtures were not rerun.
 
 ### Iteration 6
 
@@ -84,7 +100,7 @@ supporting obligation rather than an implementation test plan. Iteration 1 is su
 
 - Skill Creator `quick_validate.py`: passed (`Skill is valid!`)
 - `bun test skills/impact-risk-reviewer/scripts/risk-matrix.test.ts`: 8 passed, 0 failed,
-  53 assertions
+  55 assertions
 - `bunx prettier --check "skills/impact-risk-reviewer/**/*.{md,json,ts}"`: passed
 - `npx skills add . --list`: found `impact-risk-reviewer` with its model-invoked
   description

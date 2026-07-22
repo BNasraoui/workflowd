@@ -7,6 +7,7 @@
 | Ticket              | `change-303@rev-4`                             |
 | Design              | `design-change-303@rev-6`                      |
 | Ownership report    | `scope-change-303@rev-6`, verdict `ScopeClean` |
+| Review binding      | `binding-change-303@rev-1`, authoritative envelope |
 | Source set          | `sources-change-303@rev-3`                     |
 | Workflow Generation | `gen-44`                                       |
 | Policy revision     | `design-acceptance-v2`                         |
@@ -21,6 +22,7 @@
 | Accepted Research                      | `research-change-303@rev-5`    | Complete technical evidence                                           |
 | Draft Design                           | `design-change-303@rev-6`      | Complete, including both numbered decisions and all feasible controls |
 | Ownership report                       | `scope-change-303@rev-6`       | Complete and identity-matched                                         |
+| Review binding                          | `binding-change-303@rev-1`     | Complete authoritative envelope                                        |
 | Architecture references                | `queued-provider-rules@rev-4`  | Complete                                                              |
 | Current source                         | `provider-adapter@commit-c18`  | Complete affected source snapshot                                     |
 | Current tests                          | `provider-tests@commit-c18`    | Complete inventory and results                                        |

@@ -7,6 +7,7 @@
 | Ticket              | `change-404@rev-6`                             |
 | Design              | `design-change-404@rev-3`                      |
 | Ownership report    | `scope-change-404@rev-3`, verdict `ScopeClean` |
+| Review binding      | `binding-change-404@rev-1`, authoritative envelope |
 | Source set          | `sources-change-404@rev-5`                     |
 | Workflow Generation | `gen-52`                                       |
 | Policy revision     | `design-acceptance-v2`                         |
@@ -21,6 +22,7 @@
 | Accepted Research                      | `research-change-404@rev-4`    | Complete                                                             |
 | Draft Design                           | `design-change-404@rev-3`      | Complete, including both numbered decisions                          |
 | Ownership report                       | `scope-change-404@rev-3`       | Complete and identity-matched                                        |
+| Review binding                          | `binding-change-404@rev-1`     | Complete authoritative envelope                                       |
 | Architecture references                | `event-handoff-rules@rev-7`    | Complete                                                             |
 | Current source                         | `lifecycle-service@commit-d09` | Complete affected source snapshot                                    |
 | Current tests                          | `lifecycle-tests@commit-d09`   | Complete inventory and results                                       |

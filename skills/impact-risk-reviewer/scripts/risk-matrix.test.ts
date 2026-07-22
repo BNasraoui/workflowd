@@ -101,7 +101,16 @@ describe("5x5 risk matrix", () => {
       expect(() => parseImpact(value)).toThrow();
     }
 
-    for (const value of ["", "0", "6", "2.5", "Frequent", "priority-high"]) {
+    for (const value of [
+      "",
+      "-1",
+      "-5",
+      "0",
+      "6",
+      "2.5",
+      "Frequent",
+      "priority-high",
+    ]) {
       expect(() => parseLikelihood(value)).toThrow();
     }
   });
@@ -157,7 +166,7 @@ describe("risk matrix command", () => {
         "--impact",
         "Significant",
         "--likelihood",
-        "priority-high",
+        "-1",
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
