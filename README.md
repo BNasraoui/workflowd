@@ -149,6 +149,18 @@ The canonical ticket template lives in
 `skills/ticket-writing/references/ticket-template.md`; do not copy it into
 OpenCode configuration.
 
+## QRSPI Design and Structure Skill
+
+Install the bundled process skill when an agent will produce or review QRSPI Design or
+Structure artifacts:
+
+```bash
+npx skills add BNasraoui/workflowd --skill qrspi-design-structure --agent opencode -y
+```
+
+The skill is an operational checklist. The normative identity, routing, acceptance,
+Provenance promotion, and coverage rules remain in `docs/qrspi-contract.md`.
+
 ## Workflowd Unit
 
 Install, but do not enable or start, the Workflowd unit:

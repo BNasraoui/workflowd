@@ -26,19 +26,24 @@ The words MUST, MUST NOT, SHOULD, and MAY are normative.
    external effects, observation, operator intervention, and recovery.
 7. An expected signed QRSPI commit advances one workflow generation. It does not create
    a new generation merely because the ticket-branch head changed.
+8. Design acceptance is a revision-scoped subflow: production, semantic-ownership
+   review, impact-and-risk analysis, one package gate, and confirmed Provenance promotion.
+   Structure cannot start from human approval alone.
+9. Structure is a coverage projection of accepted Design meaning and one immutable,
+   authoritatively observed Provenance graph snapshot. It is not authority to invent work.
 
 ## System Boundaries
 
-| System | Owns | Must not own |
-| --- | --- | --- |
-| Beads | Ticket identity, product intent, acceptance criteria, BDD scenarios, source references, and dependency links | Stage queues, leases, review rounds, gates, or sessions |
-| Workflowd | Workflow generations, operations, stage and review state, currentness, gates, session references, and publication intent | Editable product intent or canonical artifact content |
-| Git repository | Signed stage commits, canonical stage artifacts, implementation changes, and reachable history | Queue state, retries, gates, or transcripts |
-| GitHub pull request | Current merge-candidate presentation and delivery evidence after QRSPI completion | Planning-stage review or ticket readiness |
-| Provenance | Selected questions, proposals, contributions, synthesis, and ratified product meaning | Worker, lease, gate, or session state |
-| Doomscroll | Presentation of pending gates and action-delivery status | Gate truth or approval authority |
-| Plannotator | Optional interactive annotation of one exact artifact | Durable gates or asynchronous approval |
-| OpenCode | Server-resident conversation and structured agent output | Canonical artifacts, workflow state, or approval authority |
+| System              | Owns                                                                                                                     | Must not own                                                    |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| Beads               | Ticket identity, product intent, acceptance criteria, BDD scenarios, source references, and dependency links             | Stage queues, leases, review rounds, gates, or sessions         |
+| Workflowd           | Workflow generations, operations, stage and review state, currentness, gates, session references, and publication intent | Editable product intent or canonical artifact content           |
+| Git repository      | Signed stage commits, canonical stage artifacts, implementation changes, and reachable history                           | Queue state, retries, gates, or transcripts                     |
+| GitHub pull request | Current merge-candidate presentation and delivery evidence after QRSPI completion                                        | Planning-stage review or ticket readiness                       |
+| Provenance          | Selected attributable product meaning, semantic links, promotion state, and immutable graph snapshots                    | Worker, lease, gate, session state, or full canonical artifacts |
+| Doomscroll          | Presentation of pending gates and action-delivery status                                                                 | Gate truth or approval authority                                |
+| Plannotator         | Optional interactive annotation of one exact artifact                                                                    | Durable gates or asynchronous approval                          |
+| OpenCode            | Server-resident conversation and structured agent output                                                                 | Canonical artifacts, workflow state, or approval authority      |
 
 When records disagree, the current accepted ticket revision owns product meaning. Git
 owns artifact bytes. Workflowd decides whether work, review, response, or publication
@@ -80,6 +85,11 @@ It excludes its own digest, check time, and tracker observation metadata.
 
 `workflowDefinitionSha256` and `stageDefinitionSha256` hash complete normalized
 definitions while excluding digest fields. `contentSha256` hashes exact artifact bytes.
+
+A source set is an ordered, duplicate-free list of immutable references. Its
+`sourceSetSha256` hashes the complete canonical list, including each reference's identity
+and content hash. Reordering, adding, removing, or replacing a source creates a different
+source set.
 
 ## Ticket Contract
 
@@ -262,24 +272,24 @@ superseded
 
 The last five are terminal.
 
-| From | Event | To |
-| --- | --- | --- |
-| creation | WorkflowStart succeeds | `running` |
-| `running` | ticket becomes not-ready or unreadable | `waiting_ticket` |
-| `waiting_ticket` | ready changed ticket accepted | `superseded`; create next Generation |
-| `waiting_ticket` | valid restore response against unchanged ticket | persisted prior state |
-| `running` | required human gate opens | `waiting_human` |
-| `waiting_human` | gate resumes work | `running` or `waiting_ticket` |
-| active state | target ambiguity appears | `reconciling` |
-| `reconciling` | exact target is restored | persisted prior state |
-| `reconciling` | changed target is accepted | `superseded`; create next Generation |
-| `running` | required stages finish and finalization is required | `finalizing` |
-| `finalizing` | final PR publication succeeds | `completed` |
-| `running` | plan-only configured stages finish | `completed` |
-| nonterminal state | required stage or finalization fails by policy | `failed` |
-| nonterminal state | required approval is rejected | `rejected` |
-| nonterminal state | cancellation is accepted | `cancelled` |
-| nonterminal state | newer Generation is made current | `superseded` |
+| From              | Event                                               | To                                   |
+| ----------------- | --------------------------------------------------- | ------------------------------------ |
+| creation          | WorkflowStart succeeds                              | `running`                            |
+| `running`         | ticket becomes not-ready or unreadable              | `waiting_ticket`                     |
+| `waiting_ticket`  | ready changed ticket accepted                       | `superseded`; create next Generation |
+| `waiting_ticket`  | valid restore response against unchanged ticket     | persisted prior state                |
+| `running`         | required human gate opens                           | `waiting_human`                      |
+| `waiting_human`   | gate resumes work                                   | `running` or `waiting_ticket`        |
+| active state      | target ambiguity appears                            | `reconciling`                        |
+| `reconciling`     | exact target is restored                            | persisted prior state                |
+| `reconciling`     | changed target is accepted                          | `superseded`; create next Generation |
+| `running`         | required stages finish and finalization is required | `finalizing`                         |
+| `finalizing`      | final PR publication succeeds                       | `completed`                          |
+| `running`         | plan-only configured stages finish                  | `completed`                          |
+| nonterminal state | required stage or finalization fails by policy      | `failed`                             |
+| nonterminal state | required approval is rejected                       | `rejected`                           |
+| nonterminal state | cancellation is accepted                            | `cancelled`                          |
+| nonterminal state | newer Generation is made current                    | `superseded`                         |
 
 Only one Generation for a `WorkflowId` is current. Creating a successor does not rewrite
 an already terminal predecessor's outcome.
@@ -350,23 +360,23 @@ data_error
 
 The last five are terminal.
 
-| From | Event | To |
-| --- | --- | --- |
-| `blocked` | prerequisites succeed | `ready` |
-| `ready` | claim succeeds | `leased` with new attempt and random lease token |
-| expired `leased` | recovery claim succeeds | `leased` with new attempt and token |
-| `leased` | pure/local operation succeeds | `succeeded` |
-| `leased` | retryable local failure | `ready` with future `runAt` |
-| `leased` | retry budget is exhausted | `failed` and apply parent effect |
-| `leased` | durable external intent is stored | perform effect, then `waiting_external` |
-| `waiting_external` | observation confirms intended result | `succeeded` |
-| `waiting_external` | observation proves effect absent and retry remains | `ready` |
-| `waiting_external` | outcome remains unknown within observation budget | remain `waiting_external` |
-| `waiting_external` | observation budget is exhausted | `waiting_human` with operation gate |
-| `waiting_human` | response schedules observation or same-record retry | `waiting_external` or `ready` |
-| `waiting_human` | response fails or cancels operation | `failed` or `cancelled` |
-| nonterminal state | scope loses currentness | `superseded` |
-| nonterminal state | stored record cannot decode with readable identity | `data_error` |
+| From               | Event                                               | To                                               |
+| ------------------ | --------------------------------------------------- | ------------------------------------------------ |
+| `blocked`          | prerequisites succeed                               | `ready`                                          |
+| `ready`            | claim succeeds                                      | `leased` with new attempt and random lease token |
+| expired `leased`   | recovery claim succeeds                             | `leased` with new attempt and token              |
+| `leased`           | pure/local operation succeeds                       | `succeeded`                                      |
+| `leased`           | retryable local failure                             | `ready` with future `runAt`                      |
+| `leased`           | retry budget is exhausted                           | `failed` and apply parent effect                 |
+| `leased`           | durable external intent is stored                   | perform effect, then `waiting_external`          |
+| `waiting_external` | observation confirms intended result                | `succeeded`                                      |
+| `waiting_external` | observation proves effect absent and retry remains  | `ready`                                          |
+| `waiting_external` | outcome remains unknown within observation budget   | remain `waiting_external`                        |
+| `waiting_external` | observation budget is exhausted                     | `waiting_human` with operation gate              |
+| `waiting_human`    | response schedules observation or same-record retry | `waiting_external` or `ready`                    |
+| `waiting_human`    | response fails or cancels operation                 | `failed` or `cancelled`                          |
+| nonterminal state  | scope loses currentness                             | `superseded`                                     |
+| nonterminal state  | stored record cannot decode with readable identity  | `data_error`                                     |
 
 An unknown external result MUST NOT become `failed` merely because mutation attempts
 are exhausted. It remains observable or waits for an operator.
@@ -600,22 +610,29 @@ The last seven are terminal.
 StageRun stores `publishedRevision`, `pendingRevision`, and `acceptedRevision`. At most
 one revision is pending. Successor stages consume only `acceptedRevision`.
 
-| From | Event | To |
-| --- | --- | --- |
-| `blocked` | prior stage succeeds or this is first | `active` |
-| `blocked` | condition excludes stage | `skipped` |
-| `active` | current revision publishes and no review/gate is required | `succeeded` |
-| `active` | current revision publishes and review is required | `waiting_review` |
-| `waiting_review` | synthesis accepts and no gate remains | `succeeded` |
-| `waiting_review` | synthesis requests revision | `active` with next revision |
-| `waiting_review` | synthesis asks human | `waiting_human` |
-| `waiting_human` | approve | policy-selected `succeeded`, `active`, or `waiting_review` |
-| `waiting_human` | request changes | `active` with next revision |
-| `waiting_human` | approve product change | `waiting_ticket` |
-| `waiting_ticket` | ready changed ticket arrives | `superseded` with Generation |
-| nonterminal | required child operation fails by declared effect | `failed` or `waiting_human` |
-| nonterminal | cancellation | `cancelled` |
-| nonterminal | newer Generation | `superseded` |
+The Generation stores the current StageRun identity for each configured stage. A stage
+normally has one run. The Design reentry route defined below creates a higher run ordinal
+rather than reopening a terminal run; only the latest ordinal is current. Stage revision
+ordinals remain monotonic for the stage across all of its run ordinals, so
+`generation + stageKey + stageRevision` remains unambiguous in `ArtifactReference`.
+
+| From             | Event                                                     | To                                                         |
+| ---------------- | --------------------------------------------------------- | ---------------------------------------------------------- |
+| `blocked`        | prior stage succeeds or this is first                     | `active`                                                   |
+| `blocked`        | condition excludes stage                                  | `skipped`                                                  |
+| `active`         | current revision publishes and no review/gate is required | `succeeded`                                                |
+| `active`         | current revision publishes and review is required         | `waiting_review`                                           |
+| `waiting_review` | synthesis accepts and no gate remains                     | `succeeded`                                                |
+| `waiting_review` | synthesis requests revision                               | `active` with next revision                                |
+| `waiting_review` | synthesis asks human                                      | `waiting_human`                                            |
+| `waiting_human`  | approve                                                   | policy-selected `succeeded`, `active`, or `waiting_review` |
+| `waiting_human`  | request changes                                           | `active` with next revision                                |
+| `waiting_human`  | approve product change                                    | `waiting_ticket`                                           |
+| `active`         | accepted Design promotion is authoritatively confirmed    | `succeeded`                                                |
+| `waiting_ticket` | ready changed ticket arrives                              | `superseded` with Generation                               |
+| nonterminal      | required child operation fails by declared effect         | `failed` or `waiting_human`                                |
+| nonterminal      | cancellation                                              | `cancelled`                                                |
+| nonterminal      | newer Generation                                          | `superseded`                                               |
 
 A succeeded or skipped stage releases only the next configured stage.
 
@@ -662,6 +679,266 @@ revision never remains pending.
 
 A document publication with no review or gate sets published and accepted pointers
 together. Otherwise publication sets published; review or gate sets accepted.
+
+Creating a newer revision atomically clears any older `acceptedRevision` pointer and
+supersedes or cancels all nonterminal checks, gates, and promotion work for the older
+revision. Historical records remain immutable, but none is current for the new revision.
+
+After Design has succeeded, an accepted Structure semantic-defect route or an approved
+semantic graph supersession does not reopen that terminal StageRun. In one currentness
+transaction, vs3.4 marks affected downstream outputs stale, supersedes their nonterminal
+runs, creates higher-ordinal `blocked` replacement runs for every affected downstream
+stage regardless of whether its prior run was terminal, creates the next Design StageRun
+ordinal in `active` with no accepted revision, and reserves the stage's next monotonic
+Design revision from the prior accepted inputs plus the routed finding. Terminal prior
+runs and revisions remain immutable stale history. The current linear stage position
+rewinds to this replacement Design run; its success releases the blocked replacement
+Structure run and later replacement runs proceed in configured order. They can be
+released only through the complete Design acceptance and promotion subflow. This is the
+sole upstream stage-reentry rule, not permission for arbitrary DAG execution.
+
+## Design Acceptance Subflow
+
+### Acceptance identity
+
+Design is one linear stage with a bounded revision loop inside it, not one producer call
+and not an arbitrary workflow DAG. Every Design review request, report, synthesis,
+mitigation, control obligation, residual-risk decision, gate revision, gate response,
+promotion request, and promotion result MUST carry one exact `DesignAcceptanceScope`:
+
+```text
+workflowId
+generation
+design: ArtifactReference
+sources: ordered ArtifactReference[]
+sourceSetSha256
+workflowDefinitionSha256
+designPolicyRevision
+designPolicySha256
+promotionPolicyRevision
+promotionPolicySha256
+```
+
+`design` includes the Design stage and revision, commit, blob, path, and content hashes.
+The Design policy revision is a stable identifier and its hash covers reviewer roles,
+independence rules, synthesis rules, revision budget, and gate response policy. The
+promotion policy is separately identified and hashed before review; it covers Provenance
+selection and graph-snapshot acceptance. Both policies are part of every report, package,
+and response and cannot be selected or changed after approval. A report that matches the
+bytes but not the Generation, source set, or either policy revision is stale.
+
+Publishing Design revision N creates that revision's scope. It never adopts checks from
+another scope. In particular, Design revision 3 cannot reuse a report, risk decision,
+gate, response, approval, promotion, or graph snapshot for revision 2. Creating revision
+3 clears revision 2 as the accepted revision even if its artifact path is unchanged.
+
+### Required review order and routing
+
+For each exact Design revision, workflowd-vs3.5 orchestrates these bounded steps:
+
+1. Run semantic-ownership review first. Its immutable `OwnershipReviewReport` binds the
+   exact acceptance scope, trusted reviewer and session, ownership claims and evidence,
+   unowned or conflicting semantics, and exactly one verdict: `OwnershipReady` or
+   `ReviseDesign`. Its reviewer identity, slot, and session are distinct from the Design
+   producer.
+2. Only `OwnershipReady` releases impact-and-risk analysis. The impact reviewer receives
+   the same Design and source scope but not ownership-review conclusions. It uses a
+   reviewer identity, slot, and session distinct from both the producer and ownership
+   reviewer. Neither reviewer receives the other's conclusions before submitting. Its
+   immutable `ImpactReviewReport` records affected surfaces, failure modes, controls,
+   residual risks, evidence and uncertainty, and exactly one verdict: `ImpactReady`,
+   `ReviseDesign`, or `NeedsRiskDecision`. There is no risk-free verdict.
+3. Any `ReviseDesign` verdict returns actionable findings to a new producer revision.
+   The old reports remain history and cannot be attached to the replacement revision.
+4. `NeedsRiskDecision` invokes bounded synthesis for the same scope. Synthesis records
+   proposed mitigation or control obligations and explicit residual-risk dispositions,
+   including decision owner, rationale, conditions, and follow-up owner. If the defect
+   changes Design semantics or cannot be resolved under current authority, synthesis
+   routes to a new Design revision. Otherwise those proposals enter the acceptance
+   package for human decision.
+5. `ImpactReady` also runs synthesis. Synthesis may preserve explicit controls and
+   residual risks; it MUST NOT translate `ImpactReady` into a claim that risk is absent.
+
+Ownership and impact operations may use the common review machinery, but their schemas,
+verdicts, ordering, and independence are stage-specific. Revision-budget exhaustion,
+contested ownership, unresolved risk authority, or uncertain synthesis opens the human
+path defined by policy; it does not silently accept or start Structure.
+
+### Design acceptance package and gate
+
+The immutable `DesignAcceptancePackage` manifest contains:
+
+```text
+DesignAcceptanceScope
+OwnershipReviewReport ArtifactReference and content hash
+ImpactReviewReport ArtifactReference and content hash
+synthesis ArtifactReference and content hash
+ordered mitigation and control obligations
+ordered residual-risk decisions or decisions requested
+packageSha256
+```
+
+The package manifest itself has an `ArtifactReference`. Git owns the canonical complete
+bytes of the Design, both reports, synthesis, and package manifest; Workflowd owns their
+lifecycle records and immutable references. The stage executor publishes validated review
+outputs without granting reviewers repository mutation authority. The artifact-approval
+`GateRevision` presents that exact package and binds its `packageSha256`. A GateResponse
+additionally binds the exact acceptance scope, expected gate revision, package hash,
+authenticated human identity, and typed decisions for every requested mitigation,
+control, and residual risk. Partial or mismatched responses do not approve Design.
+
+`request changes` creates a new Design revision. `approve` atomically stores the response,
+sets this Design `acceptedRevision`, and creates the exact Provenance promotion request;
+it does **not** succeed Design or release Structure. While promotion is pending or its
+external outcome is uncertain, the Design StageRun remains `active` with no producer work
+claimable. Only the confirmed result described below moves it to `succeeded`, which
+releases the next configured linear stage.
+
+Any later discovery that the ownership or impact semantics are defective routes to a new
+Design revision under the same bounded revision policy. It cannot patch an accepted
+package in place.
+
+## Provenance-to-Structure Contract
+
+### Exact promotion seam
+
+Human approval creates one `ProvenancePromotionRequest` containing:
+
+```text
+DesignAcceptanceScope
+DesignAcceptancePackage reference and packageSha256
+GateResponse reference and content hash
+promotionPolicyRevision and promotionPolicySha256
+selection manifest with ordered record intents and typed exclusions
+required semantic links
+requested graph root and snapshot policy
+deterministic request identity
+```
+
+The promotion policy revision and hash MUST equal the values approved in the acceptance
+scope. The deterministic selection manifest accounts for every semantic item in the
+approved package. Each selected item maps to exact record and link intents; each excluded
+item has a typed policy reason. Every accepted implementation-bearing requirement, rule,
+decision, control, ownership assignment, and residual-risk disposition MUST be selected;
+an exclusion cannot make an obligation disappear.
+
+Each selected record intent declares native Provenance kind, deterministic record ID,
+canonical content hash, dependencies, source citations, and attribution to source,
+Design artifact, reviewer or synthesizer when applicable, approving human, WorkflowId,
+Generation, and both policy revisions. Eligible promoted meaning is limited to selected
+attributable sources, requirements, decisions, resolutions, rules, controls, and
+residual-risk decisions. Git remains canonical for complete Design, report, synthesis,
+and package-manifest artifacts; transcripts, operational state, retries, leases, and
+complete artifacts are not copied into Provenance.
+
+workflowd-vs3.9 exclusively owns supported Provenance CLI/schema mutation, dependency
+ordering, retries, idempotency, authoritative observation, conflict handling, validation,
+and graph-snapshot production. The request is an intent seam, not permission for stage,
+review, gate, or Structure code to mutate Provenance.
+
+A successful `ProvenancePromotionResult` binds the exact request identity and acceptance
+scope and contains authoritative observations for every selected record and link,
+selection-completeness and graph validation results, and an immutable
+`ProvenanceGraphSnapshotReference` with repository or store identity, graph root,
+snapshot/version identity, content hash, creation time, and the exact included
+semantic-record identities and versions. Missing, conflicting, merely attempted, locally
+inferred, partially observed, or incompletely selected records do not satisfy the result.
+
+`ProvenancePublish` follows the common external-effect protocol. Before every mutation
+attempt after the first—including restart, replacement, timeout, transport failure, or an
+unknown CLI result—vs3.9 MUST observe authoritative Provenance state. Existing identical
+deterministic records and links are observed as success; absence permits the same
+idempotent intent to retry; conflicting content opens its declared operation gate.
+Recovery never creates a second logical record to escape uncertainty. Human approval
+therefore does not release Structure while publication is absent, partial, conflicting,
+or uncertain.
+
+### Structure input, output, and exit criteria
+
+Structure receives exactly one `StructureInput`:
+
+```text
+accepted DesignAcceptancePackage and GateResponse
+confirmed ProvenancePromotionResult
+pinned ProvenanceGraphSnapshotReference
+Structure policy revision and hash
+```
+
+All references MUST agree on WorkflowId, Generation, Design artifact, source set, Design
+policy revision/hash, promotion policy revision/hash, package, gate response, promotion
+request, and Structure policy revision/hash. Structure rejects a floating graph head, a
+reconstructed “latest” package, or a snapshot not produced by the authoritative result.
+
+The Structure artifact is a coverage projection, not a list of every graph node. Its
+structured result classifies every in-scope semantic node and records graph-node identity
+and version, classification rationale, and coverage:
+
+| Graph meaning                                          | Required Structure treatment                                                                                                                |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Implementation-bearing requirement or accepted control | Map to terminal work in this Structure, or to an explicit existing downstream owner with stable identity and authority.                     |
+| Cross-cutting rule or control                          | Carry as a constraint on every affected work item and preserve its verification or operational obligation; do not hide it in prose.         |
+| Informational source or context                        | Preserve traceability and classification, but create no spurious task.                                                                      |
+| Accepted residual risk                                 | Carry its disposition, conditions, accountable owner, monitoring or follow-up obligation, and affected work; do not rewrite it as resolved. |
+| Work owned outside this Structure                      | Name the existing owner and authority boundary; do not duplicate its work.                                                                  |
+
+Every created task MUST cite an accepted graph node that authorizes implementation and
+the exact coverage edge. A relation, evidence item, reviewer suggestion, or informational
+node alone grants no authority to create a task. Structure succeeds only when every
+implementation-bearing requirement and accepted control has terminal-work or explicit
+owner coverage, every cross-cutting constraint and residual risk is carried, every
+informational node is accounted for without fabricated work, and no task lacks authority.
+The successful artifact and result bind the accepted package, gate response, pinned
+snapshot, and exact Design, promotion, and Structure policy revisions and hashes.
+
+A semantic defect found while producing or reviewing Structure routes back to a new
+Design revision when it changes or questions a requirement, rule, decision, control,
+residual-risk disposition, ownership assignment, or Design impact. Structure may revise
+itself only to correct its projection of unchanged accepted meaning.
+
+### Graph change and derived-work currentness
+
+Structure currentness uses semantic dependency, not whole-graph equality. Adding
+attributable implementation, test, type, schema, commit, monitoring, alert, or runbook
+evidence to unchanged semantic records extends the graph and does not stale Structure.
+Such links may improve traceability but cannot retroactively authorize a task.
+
+An approved semantic supersession or meaning change to an in-scope requirement, rule,
+decision, control, residual-risk disposition, or authority/ownership edge identifies all
+transitively affected Structure and Plan outputs as stale and requiring reevaluation.
+Unaffected outputs may remain current when the snapshot/result can prove their dependency
+closure is unchanged. “Latest graph” alone is neither proof of validity nor invalidity.
+
+### Ticket ownership and minimal seams
+
+This contract defines integration seams; it does not transfer implementation ownership:
+
+| Ticket          | Owns                                                                                                                                                                              | Minimal input/output seam                                                                                                                                                                                                                                      | Does not acquire                                                                                 |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| workflowd-vs3.4 | Linear stage execution, StageRun and `acceptedRevision` state, Design reentry currentness, deterministic promotion-request construction, and release of the next configured stage | Supplies exact scope to vs3.5 and the complete package to vs3.6; validates the package-bound response; atomically applies acceptance and creates/submits the request to vs3.9; accepts only matching reports, response, promotion result, and Structure result | Reviewer, synthesis, gate, or Provenance lifecycle                                               |
+| workflowd-vs3.5 | Independent ownership/impact review, synthesis, and bounded Design-revision routing                                                                                               | Consumes exact Design scope; returns the immutable ownership report, impact report, synthesis, complete hashed `DesignAcceptancePackage`, and typed `new Design revision` routing                                                                              | Stage state, durable human response, or Provenance mutation                                      |
+| workflowd-vs3.6 | Durable gates and revisions, authenticated responses, Plannotator, and action delivery                                                                                            | Consumes exact acceptance package and response policy; returns the idempotent, authenticated GateResponse bound to package and scope                                                                                                                           | Review orchestration, stage acceptance outside the typed response effect, or Provenance mutation |
+| workflowd-vs3.9 | Supported Provenance publication, retries, idempotency, authoritative observation, validation, and graph-snapshot production                                                      | Consumes one exact promotion request; returns only its exact confirmed promotion result and pinned graph snapshot, or explicit conflict/uncertainty                                                                                                            | Stage, reviewer, gate, Structure, or artifact lifecycle                                          |
+
+The seams carry immutable references and bounded typed results, not worker commands,
+store APIs, or lifecycle delegation. In particular, vs3.4 may persist and route the exact
+request/result references needed for stage currentness without implementing work owned by
+vs3.5, vs3.6, or vs3.9.
+
+### Required contract scenarios
+
+1. **New Design revision:** Given Design revision 2 has reports and approval, when revision
+   3 is published, then revision 2's reports, risk decisions, response, approval, promotion,
+   and snapshot remain history but are stale and unusable for revision 3.
+2. **Uncertain promotion:** Given the human approved an exact package, when Provenance
+   publication is absent or its result is uncertain, then Structure remains blocked. On
+   recovery, vs3.9 observes authoritative state before retrying the same deterministic
+   record intents and cannot create duplicates.
+3. **Evidence-only extension:** Given accepted rules retain the same identities, versions,
+   meaning, and authority, when later tests, types, commits, monitoring, alerts, or runbooks
+   link to them, then the links extend evidence and do not stale Structure.
+4. **Semantic supersession:** Given Structure and Plan depend on an accepted requirement,
+   when an approved requirement supersedes it, then dependency closure identifies the
+   affected Structure and Plan outputs and marks them for reevaluation.
 
 ### Implementation loop
 
@@ -966,26 +1243,24 @@ state matches its selected resolution.
 ## Provenance Publication
 
 Workflowd publishes only records selected by a stage result under explicit policy.
-Eligible records include questions, proposals, selected contributions, synthesis,
-accepted requirements or resolutions, and promotion decisions.
+Questions, proposals, selected contributions, and synthesis may be published as
+nonauthoritative evidence in their native Provenance types. They do not release a stage.
 
-Questions, proposals, contributions, and synthesis published before ratification remain
-nonauthoritative evidence in native Provenance types. Only explicit human response may
-authorize a Requirement, Resolution, Rule, or Promotion Decision as ratified meaning.
+Only explicit human response may authorize ratified product meaning. Design promotion is
+the special blocking publication defined by the **Provenance-to-Structure Contract**: its
+selection is limited to the approved acceptance package, and only vs3.9's authoritative
+result and graph snapshot can release Structure.
 
 Operational state, full artifacts, retries, gates, and sessions MUST NOT be published
 as product meaning.
 
 `ProvenancePublish` uses supported CLI and emitted schemas, not direct JSONL mutation.
-It uses deterministic record IDs derived from workflow, generation, stage, artifact
-hash, and logical record identity. One operation writes one record so partial batches
-remain observable and prerequisites precede dependents. Existing identical content is
-success; conflicting content creates an operation gate. `provenance check` runs after a
-batch.
-
-Provenance delivery is asynchronous and does not block stage success in v1. A newer
+It uses deterministic record IDs derived from workflow, generation, stage, artifact hash,
+policy, and logical record identity. Partial batches remain observable and prerequisites
+precede dependents. Existing identical content is success; conflicting content creates an
+operation gate. Supported validation runs before graph-snapshot production. A newer
 Generation supersedes undelivered old records; already written records remain
-attributable to their historical Generation.
+attributable to their historical Generation and cannot advance stale work.
 
 ## Cancellation and Supersession
 
@@ -1005,24 +1280,25 @@ Old operational history remains auditable. Artifact availability follows Git ret
 Workflowd v1 performs no automatic deletion of QRSPI audit records. A later garbage
 collector requires a separate contract.
 
-| Record | Persisted fields | Canonical owner | Retention |
-| --- | --- | --- | --- |
-| Ticket | Native Beads fields | Beads | Beads history policy |
-| TicketRevision | Ready fields, coverage, source revision, hash, check time | Workflowd snapshot; Beads owns meaning | No automatic deletion in v1 |
-| WorkflowDefinition / StageDefinition | Full versioned trusted definitions and hashes | Workflowd config | While any Generation references them |
-| WorkflowOperation | Shared identity/revision, scope, typed input/output, state, attempts, lease, external intent/observation, parent effects, errors, timestamps | Workflowd | No automatic deletion in v1 |
-| Generation | WorkflowId, target, cursor, stage position, state, terminal fields, optional final PR references | Workflowd | No automatic deletion in v1 |
-| StageRun | Stage identity, state, published/pending/accepted pointers, terminal reason | Workflowd | No automatic deletion in v1 |
-| StageRevision | Tagged document or implementation fields, operations, results, review subject, state | Workflowd | No automatic deletion in v1 |
-| ArtifactReference / implementation references | Exact repository, Generation, stage/revision, commits, paths, hashes | Workflowd references Git content | No automatic deletion in v1 |
-| Canonical artifacts and code | Human artifact or implementation bytes and signed commit metadata | Git | While reachable, then repository policy |
-| ReviewRound / contribution / synthesis | Exact subject, slots, evidence, outcomes, attribution, state, timestamps | Workflowd; selected copies may enter Provenance | No automatic deletion in v1 |
-| Gate / GateRevision / GateResponse | Scope, revisions, question, response and timeout policy, links, actor, result, state | Workflowd | No automatic deletion in v1 |
-| SessionReference | Server/directory/native identity, predecessor, operation attempt and lease binding, state | Workflowd reference; OpenCode owns transcript | Reference retained with operation |
-| PullRequestBodyReference / delivery references | Exact submitted body snapshot/hash, PR and provider IDs, scenario links, timestamps | Workflowd owns immutable initial snapshot; GitHub owns current display | Snapshot retained with Generation |
-| Provenance records | Native records and links | Provenance | Provenance Git history |
-| Doomscroll gate copy and action delivery | Display projection and transport attempts | Workflowd owns gate truth; Doomscroll owns delivery copy | Product policies |
-| Plannotator draft/process | Interactive annotation state | Plannotator | Disposable after response import |
+| Record                                                 | Persisted fields                                                                                                                             | Canonical owner                                                                                | Retention                               |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------- |
+| Ticket                                                 | Native Beads fields                                                                                                                          | Beads                                                                                          | Beads history policy                    |
+| TicketRevision                                         | Ready fields, coverage, source revision, hash, check time                                                                                    | Workflowd snapshot; Beads owns meaning                                                         | No automatic deletion in v1             |
+| WorkflowDefinition / StageDefinition                   | Full versioned trusted definitions and hashes                                                                                                | Workflowd config                                                                               | While any Generation references them    |
+| WorkflowOperation                                      | Shared identity/revision, scope, typed input/output, state, attempts, lease, external intent/observation, parent effects, errors, timestamps | Workflowd                                                                                      | No automatic deletion in v1             |
+| Generation                                             | WorkflowId, target, cursor, stage position, state, terminal fields, optional final PR references                                             | Workflowd                                                                                      | No automatic deletion in v1             |
+| StageRun                                               | Stage identity, state, published/pending/accepted pointers, terminal reason                                                                  | Workflowd                                                                                      | No automatic deletion in v1             |
+| StageRevision                                          | Tagged document or implementation fields, operations, results, review subject, state                                                         | Workflowd                                                                                      | No automatic deletion in v1             |
+| ArtifactReference / implementation references          | Exact repository, Generation, stage/revision, commits, paths, hashes                                                                         | Workflowd references Git content                                                               | No automatic deletion in v1             |
+| Canonical artifacts and code                           | Human artifact or implementation bytes and signed commit metadata                                                                            | Git                                                                                            | While reachable, then repository policy |
+| ReviewRound / contribution / synthesis                 | Exact subject, slots, evidence, outcomes, attribution, state, timestamps                                                                     | Workflowd; selected copies may enter Provenance                                                | No automatic deletion in v1             |
+| Gate / GateRevision / GateResponse                     | Scope, revisions, question, response and timeout policy, links, actor, result, state                                                         | Workflowd                                                                                      | No automatic deletion in v1             |
+| DesignAcceptancePackage / promotion request and result | Exact Design/source/Generation/policy scope, report and response references, selection, observations, and snapshot reference                 | Workflowd owns request/result records; Git owns artifact bytes; Provenance owns observed graph | No automatic deletion in v1             |
+| SessionReference                                       | Server/directory/native identity, predecessor, operation attempt and lease binding, state                                                    | Workflowd reference; OpenCode owns transcript                                                  | Reference retained with operation       |
+| PullRequestBodyReference / delivery references         | Exact submitted body snapshot/hash, PR and provider IDs, scenario links, timestamps                                                          | Workflowd owns immutable initial snapshot; GitHub owns current display                         | Snapshot retained with Generation       |
+| Provenance records and graph snapshots                 | Native records, links, versions, and immutable snapshot identity                                                                             | Provenance                                                                                     | Provenance Git history                  |
+| Doomscroll gate copy and action delivery               | Display projection and transport attempts                                                                                                    | Workflowd owns gate truth; Doomscroll owns delivery copy                                       | Product policies                        |
+| Plannotator draft/process                              | Interactive annotation state                                                                                                                 | Plannotator                                                                                    | Disposable after response import        |
 
 Secrets, credentials, private signing material, unbounded prompts, and complete
 transcripts MUST NOT appear in commit trailers, gate projections, or public URLs.
@@ -1040,6 +1316,9 @@ transcripts MUST NOT appear in commit trailers, gate projections, or public URLs
 - Duplicate push, PR, gate, and publication events are idempotent observations.
 - WorkflowStart adopts only its exact branch effect and rejects conflicts.
 - PullRequestPublish adopts only its exact PR and initial body hash.
+- Provenance promotion observes authoritative records and links before retry, adopts only
+  identical deterministic content, and never releases Structure from an attempted or
+  uncertain result.
 - GenericReviewHandoff replays idempotently after restart.
 - Missing OpenCode session state starts a replacement attempt; title or metadata is never
   used to guess or adopt a session.
@@ -1129,6 +1408,43 @@ sequenceDiagram
     S-->>W: Accept
 ```
 
+### Design acceptance and Structure release
+
+```mermaid
+sequenceDiagram
+    actor H as Human
+    participant W as Stage execution (vs3.4)
+    participant P as Design producer
+    participant R as Review/synthesis (vs3.5)
+    participant G as Gate service (vs3.6)
+    participant V as Provenance (vs3.9)
+    participant S as Structure producer
+
+    W->>P: Produce Design revision N for exact sources/Generation/policy
+    P-->>W: Exact Design ArtifactReference
+    W->>R: Semantic ownership review
+    R-->>W: OwnershipReady or ReviseDesign
+    alt revision required
+        W->>P: Produce Design revision N+1
+    else ownership ready
+        W->>R: Independent impact-and-risk analysis
+        R-->>W: ImpactReady / ReviseDesign / NeedsRiskDecision
+        alt revision required by verdict or risk synthesis
+            W->>P: Produce new Design revision
+        else package ready
+            W->>G: Open gate for exact complete acceptance package
+            H->>G: Authenticated response bound to package
+            G-->>W: Exact approval response
+            Note over W,S: Approval alone does not release Structure
+            W->>V: Exact ProvenancePromotionRequest
+            V->>V: Observe, mutate idempotently, validate, snapshot
+            V-->>W: Confirmed result and pinned graph snapshot
+            W->>S: Accepted package plus exact snapshot
+            S-->>W: Authority-backed complete coverage or route to Design
+        end
+    end
+```
+
 ### Overnight human gate
 
 ```mermaid
@@ -1206,6 +1522,14 @@ Follow-on work conforms only when it:
 - uses exact currentness scope and random lease fencing;
 - publishes only signed exact-parent commits through exact-old ref update;
 - reviews immutable ArtifactReference or ImplementationCheckpointReference subjects;
+- treats Design as producer revision, ownership review, independent impact/risk analysis,
+  complete-package gate, confirmed Provenance promotion, then Structure release;
+- binds all Design reports, decisions, responses, requests, and results to exact Design,
+  source set, Generation, and policy identity;
+- allows only vs3.9 to mutate and authoritatively observe Provenance or produce snapshots;
+- requires Structure to cover implementation authority, controls, cross-cutting concerns,
+  residual risks, informational nodes, and downstream ownership without invented tasks;
+- invalidates affected derived work for semantic supersession but not evidence-only links;
 - caps automated revision loops;
 - holds no lease during human waits;
 - preserves asynchronous gate response without Plannotator or OpenCode;
