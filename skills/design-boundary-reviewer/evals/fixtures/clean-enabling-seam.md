@@ -1,5 +1,16 @@
 # Evaluation Fixture: Clean Enabling Seam
 
+## Source Snapshot Metadata
+
+| Source | Revision | Completeness |
+| --- | --- | --- |
+| Current ticket | `reports-141@fixture-1` | Complete, including task, acceptance criteria, and out-of-scope statements |
+| One-hop issue graph | `reports-141-graph@fixture-1` | Complete, including parent, dependencies, dependents or blockers, and relevant siblings |
+| Accepted Questions | `reports-141-questions@fixture-1` | Complete |
+| Accepted Research | `reports-141-research@fixture-1` | Complete |
+| Draft Design | `reports-141-design@fixture-1` | Complete |
+| Architecture references | `reports-architecture@fixture-1` | Complete for the cited export boundary |
+
 ## Current Ticket
 
 ID: `reports-141`

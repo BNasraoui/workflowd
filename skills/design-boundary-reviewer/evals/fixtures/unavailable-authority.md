@@ -1,5 +1,16 @@
 # Evaluation Fixture: Unavailable Authority
 
+## Source Snapshot Metadata
+
+| Source | Revision | Completeness |
+| --- | --- | --- |
+| Current ticket | `reports-300@fixture-1` | Complete, including task, acceptance criteria, and out-of-scope statements |
+| One-hop issue graph | Revision unavailable after tracker access failure | Incomplete: only the parent was captured |
+| Accepted Questions | `reports-300-questions@fixture-1` | Complete |
+| Accepted Research | Revision unavailable after artifact access failure | Unavailable |
+| Draft Design | `reports-300-design@fixture-1` | Complete |
+| Architecture references | `reports-rendering-architecture@fixture-1` | Complete for the cited rendering boundary |
+
 ## Current Ticket
 
 ID: `reports-300`

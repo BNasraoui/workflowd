@@ -1,5 +1,30 @@
 # Design Boundary Reviewer Evaluation Results
 
+## 2026-07-22: Iteration 3
+
+Each fixture ran once in a fresh general subagent with the repository skill. Each report
+was then graded against the current assertions in `evals.json`.
+
+| Fixture | Verdict branch | With skill |
+| --- | --- | ---: |
+| `workflowd-vs3.4.md` | `OwnedByAnotherTicket` | 8/8 |
+| `clean-enabling-seam.md` | `ScopeClean` | 6/6 |
+| `ambiguous-approval-boundary.md` | `NeedsHumanClarification` | 7/7 |
+| `unavailable-authority.md` | unavailable source | 5/5 |
+| `unsupported-expansion.md` | `UnsupportedExpansion` | 6/6 |
+| `missing-acceptance-coverage.md` | missing acceptance criterion | 6/6 |
+| `required-design-change.md` | required row needs Design changes | 6/6 |
+| **Total** |  | **44/44 (100%)** |
+
+Iteration 3 adds explicit revision and completeness metadata for every fixture source. It
+also isolates every `ReviseDesign` trigger: neighboring ownership, unsupported expansion,
+missing acceptance coverage, and a required capability whose Design mechanism must
+change. No baseline was rerun for this fixture-correction pass, so the Iteration 2 baseline
+remains historical rather than directly comparable.
+
+Iteration 2's `ScopeClean` fixture omitted the metadata required for a trusted source
+snapshot. Iteration 3 supersedes its skilled result as the current regression record.
+
 ## 2026-07-22: Iteration 2
 
 Each fixture ran once in a fresh general subagent with the repository skill and once

@@ -47,7 +47,7 @@
         "Every capability in numbered Draft Design items 1-3 maps to one or more ledger rows with design claim, current-ticket authority, neighboring owner, classification, evidence, and required action.",
         "Approval policy evaluation is classified as Required, while the typed hook is RequiredEnablingSeam and names reports-203 as the downstream owner.",
         "Durable ApprovalDecision storage is classified as NeedsHumanClarification rather than Required, OwnedByAnotherTicket, or UnsupportedExpansion.",
-        "The clarification cites the current ticket, reports-203, and the architecture constraint, then asks who owns durable decision persistence.",
+        "The report cites the current ticket, reports-203, and the architecture constraint, and Unresolved Clarifications asks who owns durable decision persistence.",
         "The report preserves the ambiguity for human review, does not choose or favor an owner, and limits any consequences to conditional actions after the ownership decision.",
         "The report accounts for all current-ticket acceptance criteria and all supplied one-hop relationships."
       ]
@@ -65,6 +65,54 @@
         "The deterministic JSON rendering claim is classified as Required from current-ticket authority.",
         "The report does not invent neighboring owners or classify absent evidence as proof of ScopeClean.",
         "Unresolved Clarifications asks for the complete issue graph and accepted Research before a final ownership verdict."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Review the draft Design in the supplied fixture before human Design approval. Return the complete Design Boundary Review report and do not change any source.",
+      "expected_output": "ReviseDesign. Saved per-user preview presets and their CRUD API have no current-ticket or neighboring-ticket authority and must be removed as UnsupportedExpansion.",
+      "files": [
+        "evals/fixtures/unsupported-expansion.md"
+      ],
+      "expectations": [
+        "The report returns exactly one ReviseDesign verdict.",
+        "Every capability in numbered Draft Design items 1-2 maps to one or more ledger rows with all required fields.",
+        "Deterministic PNG rendering and immutable artifact publication are classified as Required.",
+        "Saved per-user preview presets and their CRUD endpoints are classified as UnsupportedExpansion rather than assigned to a neighboring ticket.",
+        "The required action removes the unsupported preset capability while preserving the required preview work.",
+        "The report accounts for all current-ticket acceptance criteria and all supplied one-hop relationships."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Review the draft Design in the supplied fixture before human Design approval. Return the complete Design Boundary Review report and do not change any source.",
+      "expected_output": "ReviseDesign. The draft covers signing exact manifest bytes but omits the required signer key ID and signature algorithm, so acceptance coverage is Missing.",
+      "files": [
+        "evals/fixtures/missing-acceptance-coverage.md"
+      ],
+      "expectations": [
+        "The report returns exactly one ReviseDesign verdict.",
+        "Every capability in numbered Draft Design items 1-2 maps to one or more ledger rows with all required fields.",
+        "Signing exact manifest bytes is Required; returning exact manifest identity is Required or RequiredEnablingSeam.",
+        "The report adds a missing-coverage row for the omitted signer key ID and signature algorithm.",
+        "The signer-metadata acceptance criterion is Missing while the exact-byte and verification criteria remain accounted for.",
+        "The required action adds signer metadata without adding key rotation, revocation distribution, or trust policy."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Review the draft Design in the supplied fixture before human Design approval. Return the complete Design Boundary Review report and do not change any source.",
+      "expected_output": "ReviseDesign. Export checksum calculation is required and fully owned by the current ticket, but the Design must replace MD5 with the architecture-required lowercase SHA-256 representation.",
+      "files": [
+        "evals/fixtures/required-design-change.md"
+      ],
+      "expectations": [
+        "The report returns exactly one ReviseDesign verdict.",
+        "Every capability in numbered Draft Design items 1-2 maps to one or more ledger rows with all required fields.",
+        "Checksum calculation, exact-byte coverage, algorithm identification, and checksum value are Required; the export-revision handoff is Required or RequiredEnablingSeam.",
+        "Required checksum rows say the Design must replace MD5 with SHA-256 and use its lowercase representation.",
+        "The report does not classify checksum calculation as UnsupportedExpansion or transfer it to reports-431 or reports-432.",
+        "All acceptance criteria are Covered, and reports-432 remains the owner of signing and key management only."
       ]
     }
   ]

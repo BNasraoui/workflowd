@@ -1,5 +1,16 @@
 # Evaluation Fixture: workflowd-vs3.4
 
+## Source Snapshot Metadata
+
+| Source | Revision | Completeness |
+| --- | --- | --- |
+| Current ticket | `workflowd-vs3.4@fixture-1` | Complete, including task, acceptance criteria, out-of-scope statements, and explicit clarification |
+| One-hop issue graph | `workflowd-vs3.4-graph@fixture-1` | Complete, including parent, dependencies, dependents or blockers, and relevant siblings |
+| Accepted Questions | `workflowd-vs3.4-questions@fixture-1` | Complete |
+| Accepted Research | `workflowd-vs3.4-research@fixture-1` | Complete |
+| Draft Design | `workflowd-vs3.4-design@fixture-1` | Complete |
+| Architecture references | `qrspi-contract@fixture-1` | Complete for every cited ownership constraint |
+
 ## Current Ticket
 
 ID: `workflowd-vs3.4`
