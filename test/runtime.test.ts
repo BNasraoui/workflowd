@@ -187,6 +187,7 @@ describe("runHookService startup", () => {
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       { home: "/tmp" },
     )
@@ -260,6 +261,7 @@ describe("runHookService startup", () => {
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       { home: "/tmp" },
     )

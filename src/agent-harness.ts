@@ -68,6 +68,7 @@ export const SessionReference = Schema.Struct({
   serverId: BoundedIdentifier,
   endpointAlias: BoundedIdentifier,
   directory: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4096)),
+  directoryCleanupScheduled: Schema.optional(Schema.Literal(true)),
   nativeSessionId: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
   scope: AgentExecutionScope,
   operationId: BoundedReference,
@@ -75,7 +76,15 @@ export const SessionReference = Schema.Struct({
   attempt: PositiveInt,
   leaseToken: LeaseToken,
   createdAt: IsoTimestamp,
-  state: Schema.Literal("created", "prompted", "succeeded", "failed", "superseded"),
+  state: Schema.Literal(
+    "created",
+    "prompted",
+    "succeeded",
+    "failed",
+    "superseded",
+    "aborted",
+    "expired",
+  ),
 })
 export type SessionReference = typeof SessionReference.Type
 

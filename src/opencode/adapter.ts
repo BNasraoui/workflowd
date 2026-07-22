@@ -85,6 +85,7 @@ export type OpenCodeSdkClient = {
     OpenCodeSessionDirectoryInput,
     Readonly<Record<string, SessionStatus | undefined>>
   >
+  readonly sessionExists: AdapterCall<OpenCodeSessionInput, boolean>
   readonly listSessionMessages: AdapterCall<OpenCodeSessionInput, ReadonlyArray<AssistantMessage>>
   readonly abortSession: AdapterCall<OpenCodeSessionInput, boolean>
   readonly listAgents: AdapterCall<OpenCodeSdkDirectoryInput, ReadonlyArray<string>>
@@ -102,6 +103,7 @@ export type OpenCodeAdapter = {
     AsyncIterable<OpenCodeSessionEvent>
   >
   readonly getSessionStatus: AdapterCall<OpenCodeSessionInput, SessionStatus | undefined>
+  readonly sessionExists: AdapterCall<OpenCodeSessionInput, boolean>
   readonly listSessionMessages: AdapterCall<
     OpenCodeSessionInput,
     ReadonlyArray<OpenCodeAssistantMessage>
@@ -169,6 +171,10 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     return statuses[input.sessionID]
   }
 
+  async sessionExists(input: OpenCodeSessionInput, signal: AbortSignal): Promise<boolean> {
+    return this.client.sessionExists(input, signal)
+  }
+
   async listSessionMessages(
     input: OpenCodeSessionInput,
     signal: AbortSignal,
@@ -232,6 +238,12 @@ export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient
         throwOnError: true,
       })
       return response.data
+    },
+    sessionExists: async (input, signal) => {
+      const response = await client.session.get(input, { signal, throwOnError: false })
+      if (response.data !== undefined) return true
+      if (response.response.status === 404) return false
+      throw new Error(`OpenCode session probe failed with HTTP ${response.response.status}`)
     },
     listSessionMessages: async (input, signal) => {
       const response = await client.session.messages<true>(

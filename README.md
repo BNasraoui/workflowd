@@ -33,6 +33,20 @@ When it finds the PR branch locally, it:
 
 A managed checkout and temporary worktree are used only when no matching local worktree exists. Private repositories therefore require working local Git credentials for managed fallback.
 
+Managed review worktree paths include the immutable job generation and attempt. Managed Fix Work paths remain stable across attempts so retries can recover retained edits. Cleanup can make an old session directory unavailable, but a later job generation never reuses that path for unrelated contents.
+
+## Resumable OpenCode sessions
+
+Workflowd checkpoints the configured OpenCode server identity and exact native session ID before prompting an agent. Applicable review publications resolve that durable, generation-bound reference and include a copy-pastable command of the form:
+
+```sh
+opencode attach 'https://mint.example-tailnet.ts.net:4096' --dir '/exact/worktree' --session 'ses_exact'
+```
+
+Set `WORKFLOWD_OPENCODE_ATTACH_URL` to a credential-free URL reachable only through the private network. The command intentionally omits Basic-auth values and never uses `--continue`; OpenCode obtains credentials from the reviewer's local environment. Firewall, listener, and tailnet policy—not URL secrecy—must prevent public access.
+
+Session-reference metadata is retained with its execution. Workflowd does not copy or delete OpenCode transcripts. Superseded, failed, aborted, expired, endpoint-mismatched, and missing native sessions are reported explicitly and are never redirected to a newer generation or guessed by title. Worktree cleanup does not change the stored directory; if either the directory or server session is gone, the retained reference remains audit metadata rather than silently targeting replacement contents.
+
 ## Policies
 
 - Reviews run through the read-only `pr-reviewer` agent.
@@ -94,6 +108,7 @@ The required installed values are:
 - `GITHUB_APP_ID`: numeric GitHub App ID
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
+- `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
 - `WORKFLOWD_COMMAND_USERS`: comma-separated authorized GitHub usernames; an empty value disables commands
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
 - `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled

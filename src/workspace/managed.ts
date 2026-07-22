@@ -60,7 +60,9 @@ export class ManagedWorkspaceLifecycle {
         this.#config.worktreeRoot,
         String(work.repositoryId),
         String(work.pullRequestNumber),
-        `${work.id}-${work.generation}`,
+        work._tag === "FixWork"
+          ? `${work.id}-${work.generation}`
+          : `${work.id}-${work.generation}-attempt-${work.attempt}`,
       )
       const sameRepository =
         work.repositoryFullName.toLowerCase() === work.target.headRepositoryFullName.toLowerCase()
@@ -106,6 +108,14 @@ export class ManagedWorkspaceLifecycle {
           this.#remoteUrl(work.repositoryFullName),
           repository,
         ])
+      }
+      if (work._tag === "ReviewWork") {
+        for (let attempt = 1; attempt < work.attempt; attempt += 1) {
+          yield* this.remove(
+            repository,
+            join(dirname(directory), `${work.id}-${work.generation}-attempt-${attempt}`),
+          )
+        }
       }
       const pullRef = `refs/workflowd/pull/${work.pullRequestNumber}`
       const refspecs = [
