@@ -16,6 +16,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       WHERE ${pullRequestIdentity}
       AND candidate.generation = current_pr.generation
       AND candidate.expected_head_sha = current_pr.head_sha
+      AND LOWER(candidate.author) = LOWER(current_pr.author)
       AND ${reviewablePullRequest}
     )
   `)

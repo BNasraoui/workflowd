@@ -54,6 +54,7 @@ function processReviewWork(
   work: ReviewWork,
   workerId: string,
   agentBranchPrefixes: ReadonlyArray<string>,
+  trustedAgentUsers: ReadonlyArray<string>,
   fixWorkEnabled: boolean,
   onPrepared: (intent: AgentFailureContext) => void,
   onAbortFailure: () => void,
@@ -88,6 +89,10 @@ function processReviewWork(
         harness.createSession(prepared),
         (reference) =>
           Effect.gen(function* () {
+            const durableReference =
+              workspace.directoryCleanupScheduled === true
+                ? { ...reference, directoryCleanupScheduled: true as const }
+                : reference
             const referenceRecordedAt = new Date(
               yield* Effect.clockWith((clock) => clock.currentTimeMillis),
             )
@@ -95,9 +100,9 @@ function processReviewWork(
               jobId: work.id,
               workerId,
               recordedAt: referenceRecordedAt,
-              reference,
+              reference: durableReference,
             })
-            return { reference, session }
+            return { reference: durableReference, session }
           }),
         (reference, exit) =>
           Exit.isFailure(exit)
@@ -136,6 +141,8 @@ function processReviewWork(
           fixWorkEnabled &&
           decideFixEligibility({
             agentBranchPrefixes,
+            trustedAgentUsers,
+            author: work.author,
             headRef: work.target.headRef,
             repositoryFullName: work.repositoryFullName,
             headRepositoryFullName: work.target.headRepositoryFullName,
@@ -232,22 +239,27 @@ function processFixWork(
         })
         if (recorded === "stale") return "stale" as const
       }
-      yield* workspaces.publishFix(work, workspace, result, (now) =>
-        store.isJobCurrent(work.id, workerId, now).pipe(
-          Effect.mapError(
-            (cause) =>
-              new WorkspaceError({
-                operation: "check durable Fix Work currentness",
-                cause,
-              }),
+      const controllerSigningFingerprint = yield* workspaces.publishFix(
+        work,
+        workspace,
+        result,
+        (now) =>
+          store.isJobCurrent(work.id, workerId, now).pipe(
+            Effect.mapError(
+              (cause) =>
+                new WorkspaceError({
+                  operation: "check durable Fix Work currentness",
+                  cause,
+                }),
+            ),
           ),
-        ),
       )
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       const disposition = yield* store.completeFixJob({
         jobId: work.id,
         workerId,
         completedAt,
+        ...(controllerSigningFingerprint === null ? {} : { controllerSigningFingerprint }),
       })
       if (disposition === "completed") workspace.markCompleted()
       return disposition
@@ -284,6 +296,7 @@ export function runJobIteration(options: {
   readonly timeoutMs: number
   readonly cancellationPollIntervalMs: number
   readonly agentBranchPrefixes: ReadonlyArray<string>
+  readonly trustedAgentUsers: ReadonlyArray<string>
   readonly fixWorkEnabled: boolean
   readonly now: () => Date
 }) {
@@ -318,12 +331,23 @@ export function runJobIteration(options: {
       leaseDurationMs: options.leaseDurationMs,
     })
     if (work === null) return "idle" as const
-    if (work._tag === "FixWork" && !options.fixWorkEnabled) {
-      return yield* store.disableFixJob({
-        jobId: work.id,
-        workerId: options.workerId,
-        disabledAt: options.now(),
+    if (work._tag === "FixWork") {
+      const eligible = decideFixEligibility({
+        agentBranchPrefixes: options.agentBranchPrefixes,
+        trustedAgentUsers: options.trustedAgentUsers,
+        author: work.author,
+        headRef: work.target.headRef,
+        repositoryFullName: work.repositoryFullName,
+        headRepositoryFullName: work.target.headRepositoryFullName,
+        review: work.review,
       })
+      if (!options.fixWorkEnabled || eligible._tag === "Ineligible") {
+        return yield* store.disableFixJob({
+          jobId: work.id,
+          workerId: options.workerId,
+          disabledAt: options.now(),
+        })
+      }
     }
 
     let agentFailureContext: AgentFailureContext | undefined
@@ -337,6 +361,7 @@ export function runJobIteration(options: {
             work,
             options.workerId,
             options.agentBranchPrefixes,
+            options.trustedAgentUsers,
             options.fixWorkEnabled,
             captureAgentFailureContext,
             () => {

@@ -13,6 +13,8 @@ import { Publication } from "../src/domain/publication"
 import { ReviewResult } from "../src/domain/review-result"
 import { GitHub, type GitHubPort } from "../src/github"
 import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
+import type { OpenCodeAdapter } from "../src/opencode/adapter"
+import { SessionAccessResolver } from "../src/session-access"
 import {
   runCommandIteration,
   runJobIteration,
@@ -43,6 +45,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   rescheduleJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
   completeFixJob: () => Effect.die("unused"),
+  isTrustedBranchPublication: () => Effect.succeed(null),
   disableFixJob: () => Effect.die("unused"),
   recordFixResult: () => Effect.die("unused"),
   completeAgentReviewJob: (input) => overrides.completeReviewJob?.(input) ?? Effect.die("unused"),
@@ -182,7 +185,8 @@ const jobOptions = {
   maxAttempts: 3,
   timeoutMs: 10_000,
   cancellationPollIntervalMs: 100,
-  agentBranchPrefixes: [] as ReadonlyArray<string>,
+  agentBranchPrefixes: ["opencode/"] as ReadonlyArray<string>,
+  trustedAgentUsers: ["opencode-agent", "example-owner"] as ReadonlyArray<string>,
   fixWorkEnabled: false,
   now: () => new Date("2026-07-19T12:00:00.000Z"),
 }
@@ -467,6 +471,124 @@ const makePublication = (id = 1) =>
   })
 
 describe("Review Work processing", () => {
+  test("does not publish resumable access for a managed review worktree after scope release", async () => {
+    const job = makeReviewWork()
+    let reference: SessionReference | undefined
+    let released = false
+
+    const jobResult = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              recordAgentSessionReference: (input) =>
+                Effect.sync(() => {
+                  reference = input.reference
+                  return "recorded" as const
+                }),
+              completeAgentReviewJob: () => Effect.succeed("completed"),
+            },
+            workspace: {
+              prepareReview: () =>
+                Effect.acquireRelease(
+                  Effect.succeed({
+                    directory: "/tmp/managed-review",
+                    directoryCleanupScheduled: true as const,
+                  }),
+                  () =>
+                    Effect.sync(() => {
+                      released = true
+                    }),
+                ),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({ verdict: "pass" as const, summary: "No findings.", findings: [] }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(jobResult).toBe("completed")
+    expect(released).toBe(true)
+    if (reference === undefined) throw new Error("expected persisted session reference")
+
+    let probed = false
+    const openCode: OpenCodeAdapter = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeSessionEvents: async () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => ({ done: true as const, value: undefined }),
+        }),
+      }),
+      getSessionStatus: async () => ({ type: "idle" as const }),
+      sessionExists: async () => {
+        probed = true
+        return true
+      },
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      validateAvailability: async () => undefined,
+    }
+    const resolver = new SessionAccessResolver(
+      openCode,
+      {
+        serverId: "opencode-primary",
+        endpointAlias: "private-opencode",
+        attachUrl: "https://mint.tailnet.example:4096",
+      },
+      async () => true,
+    )
+    let resolvedAccess: unknown
+    const publication = {
+      ...makePublication(),
+      sessionReferenceId: reference.sessionReferenceId,
+      sessionReference: reference,
+      sessionExecutionState: "succeeded" as const,
+    }
+
+    const publicationResult = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-1",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: jobOptions.now,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextPublication: () => Effect.succeed(publication),
+              completePublication: () => Effect.succeed("completed"),
+            },
+            github: {
+              publishReview: (claimed) =>
+                resolver.resolve(claimed.sessionReference!).pipe(
+                  Effect.tap((access) =>
+                    Effect.sync(() => {
+                      resolvedAccess = access
+                    }),
+                  ),
+                  Effect.as("published" as const),
+                ),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(publicationResult).toBe("completed")
+    expect(resolvedAccess).toEqual({
+      _tag: "Unavailable",
+      sessionReferenceId: reference.sessionReferenceId,
+      reason: "directory_missing",
+    })
+    expect(probed).toBe(false)
+  })
+
   test("reviews the scoped worktree and commits the structured result", async () => {
     const actions: Array<string> = []
     const job = makeReviewWork({ target: { headRef: "feature" } })
@@ -559,6 +681,7 @@ describe("Review Work processing", () => {
       runJobIteration({
         ...jobOptions,
         agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["example-owner"],
         fixWorkEnabled: true,
       }).pipe(
         Effect.provide(
@@ -588,6 +711,49 @@ describe("Review Work processing", () => {
     )
 
     expect(enqueued).toEqual([11])
+  })
+
+  test("keeps an untrusted author's same-repository agent-prefixed branch review-only", async () => {
+    const autoFixValues: Array<boolean> = []
+    const job = makeReviewWork({
+      author: "untrusted-collaborator",
+      target: { headRef: "opencode/untrusted-change" },
+    })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["trusted-agent[bot]"],
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeReviewJob: (input) =>
+                Effect.sync(() => {
+                  autoFixValues.push(input.autoFix)
+                  return "completed" as const
+                }),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({
+                  verdict: "changes_requested",
+                  summary: "One issue.",
+                  findings: [{ severity: "high", title: "Bug", body: "Fix the bug." }],
+                }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(autoFixValues).toEqual([false])
   })
 
   test("does not queue Fix Work when the feature is disabled", async () => {
@@ -630,6 +796,31 @@ describe("Review Work processing", () => {
 })
 
 describe("Fix Work processing", () => {
+  test("disables previously queued Fix Work when its author is no longer trusted", async () => {
+    const disabled: Array<number> = []
+    const job = makeFixWork({ id: 14, author: "untrusted-collaborator" })
+
+    const result = await Effect.runPromise(
+      runJobIteration({ ...jobOptions, fixWorkEnabled: true }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              disableFixJob: (input) =>
+                Effect.sync(() => {
+                  disabled.push(input.jobId)
+                  return "disabled" as const
+                }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("disabled")
+    expect(disabled).toEqual([14])
+  })
+
   test("terminally disables claimed Fix Work without invoking OpenCode or Git", async () => {
     const disabled: Array<number> = []
     const job = makeFixWork({ id: 15 })
@@ -682,8 +873,9 @@ describe("Fix Work processing", () => {
                   actions.push("record")
                   return "recorded" as const
                 }),
-              completeFixJob: () =>
+              completeFixJob: (input) =>
                 Effect.sync(() => {
+                  expect(input.controllerSigningFingerprint).toBe("e".repeat(40))
                   actions.push("complete")
                   return "completed" as const
                 }),
@@ -712,6 +904,7 @@ describe("Fix Work processing", () => {
               publishFix: () =>
                 Effect.sync(() => {
                   actions.push("publish")
+                  return "e".repeat(40)
                 }),
             },
           }),
@@ -762,7 +955,7 @@ describe("Fix Work processing", () => {
                   markCompleted: () => undefined,
                 }),
               publishFix: (_job, _workspace, _result, isCurrent) =>
-                isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(Effect.asVoid),
+                isCurrent(new Date("2026-07-19T12:00:00.000Z")).pipe(Effect.as(null)),
             },
           }),
         ),
@@ -809,6 +1002,7 @@ describe("Fix Work processing", () => {
                 Effect.sync(() => {
                   expect(fixResult).toBeUndefined()
                   actions.push("verify")
+                  return null
                 }),
             },
           }),

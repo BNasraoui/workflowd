@@ -5,6 +5,7 @@ import type { WorkspaceError } from "./errors"
 
 export type ReviewWorkspace = {
   readonly directory: string
+  readonly directoryCleanupScheduled?: true
 }
 
 export type FixWorkspace = ReviewWorkspace & {
@@ -21,6 +22,7 @@ export type GitWorkspaceConfig = {
   readonly worktreeRoot: string
   readonly remoteUrl?: (repositoryFullName: string) => string
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 export type WorkspacePort = {
@@ -33,7 +35,7 @@ export type WorkspacePort = {
     workspace: FixWorkspace,
     result: FixResult | undefined,
     isCurrent: DurableJobCurrentness,
-  ) => Effect.Effect<void, WorkspaceError>
+  ) => Effect.Effect<string | null, WorkspaceError>
 }
 
 export type ResolvedWorktree = {

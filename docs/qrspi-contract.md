@@ -124,9 +124,10 @@ Missing or weak readiness fields produce `TicketProblem` instead.
 6. Resolvable source references.
 7. No unresolved contradiction that changes product meaning.
 
-Criterion-to-scenario coverage is computed readiness evidence. It may use positions in
-the captured normalized arrays. The ticket does not require a `Covers` field or a new
-persistent identifier scheme.
+Product-outcome clarity, acceptance-criterion observability, and criterion-to-scenario
+coverage are explicit trusted readiness evidence supplied with the readiness judgment.
+Per-criterion judgments use positions in the captured normalized arrays. The ticket does
+not require a `Covers` field or a new persistent identifier scheme.
 
 ### TicketCheck
 

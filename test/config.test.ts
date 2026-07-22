@@ -6,7 +6,53 @@ const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
+  WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
 }
+
+const qrspiDefinition = {
+  contractVersion: 1,
+  definitionVersion: 1,
+  stages: [
+    {
+      key: "questions",
+      kind: "document",
+      activation: { mode: "enabled" },
+      definitionVersion: 1,
+      inputContract: {
+        schemaId: "qrspi.questions.input",
+        schemaVersion: 1,
+        maxEncodedBytes: 16_384,
+      },
+      producer: {
+        harnessId: "opencode",
+        harnessVersion: 1,
+        agent: "qrspi-questions",
+        model: "openai/gpt-5.6-sol",
+        timeoutMs: 60_000,
+        retry: { maxAttempts: 3, backoffMs: 1_000 },
+      },
+      outputContract: {
+        _tag: "Artifact",
+        pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
+        mediaType: "text/markdown",
+      },
+      reviewPolicy: { mode: "none" },
+      humanGatePolicy: { mode: "none" },
+      initialOperations: [
+        {
+          kind: "StageProduce",
+          state: "ready",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+        {
+          kind: "ArtifactPublish",
+          state: "blocked",
+          parentEffect: { success: "advance parent", failure: "fail Generation" },
+        },
+      ],
+    },
+  ],
+} as const
 
 describe("loadConfig", () => {
   test("groups validated settings by their runtime domain", async () => {
@@ -44,6 +90,7 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        attachUrl: "https://mint.example-tailnet.ts.net:4096",
         serverId: "opencode-primary",
         endpointAlias: "private-opencode",
         username: "opencode",
@@ -61,9 +108,50 @@ describe("loadConfig", () => {
         publicationTimeoutMs: 45_000,
         publicationLeaseDurationMs: 105_000,
         agentBranchPrefixes: ["opencode/", "plan/"],
+        trustedAgentUsers: [],
         commandUsers: [],
       },
     })
+  })
+
+  test("configures a credential-free private URL for resumable session commands", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096/",
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.openCode.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_OPENCODE_ATTACH_URL: "https://user:secret@mint.example-tailnet.ts.net:4096",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_OPENCODE_ATTACH_URL must not include credentials")
+    for (const attachUrl of [
+      "https://mint.example-tailnet.ts.net:4096/?access_token=secret",
+      "https://mint.example-tailnet.ts.net:4096/#access_token=secret",
+    ]) {
+      await expect(
+        loadConfig(
+          {
+            ...requiredEnvironment,
+            WORKFLOWD_OPENCODE_ATTACH_URL: attachUrl,
+          },
+          { home: "/home/test" },
+        ),
+      ).rejects.toThrow("WORKFLOWD_OPENCODE_ATTACH_URL must not include credentials")
+    }
+    const withoutAttachUrl = { ...requiredEnvironment }
+    delete withoutAttachUrl.WORKFLOWD_OPENCODE_ATTACH_URL
+    await expect(loadConfig(withoutAttachUrl, { home: "/home/test" })).rejects.toThrow(
+      "Missing required environment variable WORKFLOWD_OPENCODE_ATTACH_URL",
+    )
   })
 
   test("requires explicit opt-in before enabling Fix Work", async () => {
@@ -71,18 +159,106 @@ describe("loadConfig", () => {
       home: "/home/test",
     })
     const enabled = await loadConfig(
-      { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "true" },
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_FIX_WORK_ENABLED: "true",
+        WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
+        WORKFLOWD_TRUSTED_AGENT_USERS: "Trusted-Agent[bot]",
+      },
       { home: "/home/test" },
     )
 
     expect(disabled.fixWork.enabled).toBe(false)
     expect(enabled.fixWork.enabled).toBe(true)
+    expect(enabled.worker.trustedAgentUsers).toEqual(["trusted-agent[bot]"])
+    expect(enabled.workspace.gitSigningKey).toBe("a".repeat(40))
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "true" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_FIX_WORK_ENABLED: "true",
+          WORKFLOWD_GIT_SIGNING_KEY: "a".repeat(40),
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_TRUSTED_AGENT_USERS is required when Fix Work is enabled")
     await expect(
       loadConfig(
         { ...requiredEnvironment, WORKFLOWD_FIX_WORK_ENABLED: "yes" },
         { home: "/home/test" },
       ),
     ).rejects.toThrow("WORKFLOWD_FIX_WORK_ENABLED must be true or false")
+  })
+
+  test("enables trusted QRSPI ingress only with a complete repository and Beads binding", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.qrspi).toEqual({
+      token: "kickoff-secret",
+      installationId: 91,
+      repository: {
+        providerInstanceId: "github-app-123",
+        repositoryId: "42",
+        repositoryFullName: "example-owner/example",
+      },
+      trackerInstanceId: "workspace-42",
+      beadsWorkspace: "/srv/example",
+      baseRef: "main",
+      repositoryOperationTimeoutMs: 30_000,
+      operationCompletionMarginMs: 10_000,
+      leaseDurationMs: 60_000,
+      workflowDefinition: qrspiDefinition,
+    })
+  })
+
+  test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
+    "requires the QRSPI token when %s is present",
+    async (name) => {
+      await expect(
+        loadConfig({ ...requiredEnvironment, [name]: "configured" }, { home: "/home/test" }),
+      ).rejects.toThrow("WORKFLOWD_QRSPI_TOKEN is required when QRSPI settings are present")
+    },
+  )
+
+  test("requires the WorkflowStart lease to exceed repository timeout plus completion margin", async () => {
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+          WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+          WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+          WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/srv/example",
+          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+          WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS: "100",
+          WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS: "50",
+          WORKFLOWD_QRSPI_LEASE_MS: "150",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow(
+      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+    )
   })
 
   test("loads secrets from files and removes one trailing line ending", async () => {
@@ -93,6 +269,7 @@ describe("loadConfig", () => {
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
         OPENCODE_SERVER_PASSWORD_FILE: "/run/credentials/opencode-password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       {
         home: "/home/test",

@@ -33,11 +33,26 @@ When it finds the PR branch locally, it:
 
 A managed checkout and temporary worktree are used only when no matching local worktree exists. Private repositories therefore require working local Git credentials for managed fallback.
 
+Managed review worktree paths include the immutable job generation and attempt. Managed Fix Work paths remain stable across attempts so retries can recover retained edits. Cleanup can make an old session directory unavailable, but a later job generation never reuses that path for unrelated contents.
+
+## Resumable OpenCode sessions
+
+Workflowd checkpoints the configured OpenCode server identity and exact native session ID before prompting an agent. Applicable review publications resolve that durable, generation-bound reference and include a copy-pastable command of the form:
+
+```sh
+opencode attach 'https://mint.example-tailnet.ts.net:4096' --dir '/exact/worktree' --session 'ses_exact'
+```
+
+Set `WORKFLOWD_OPENCODE_ATTACH_URL` to a credential-free URL reachable only through the private network. The command intentionally omits Basic-auth values and never uses `--continue`; OpenCode obtains credentials from the reviewer's local environment. Firewall, listener, and tailnet policy—not URL secrecy—must prevent public access.
+
+Session-reference metadata is retained with its execution. Workflowd does not copy or delete OpenCode transcripts. Superseded, failed, aborted, expired, endpoint-mismatched, and missing native sessions are reported explicitly and are never redirected to a newer generation or guessed by title. Worktree cleanup does not change the stored directory; if either the directory or server session is gone, the retained reference remains audit metadata rather than silently targeting replacement contents.
+
 ## Policies
 
 - Reviews run through the read-only `pr-reviewer` agent.
 - Fix Work is disabled by default. Reviews and `/agent fix` cannot enqueue or execute fixes unless `WORKFLOWD_FIX_WORK_ENABLED=true` is explicitly configured.
-- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only for same-repository branches beginning with `opencode/` or `plan/` by default. Existing eligibility and command authorization checks still apply.
+- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
+- The trusted identity is the PR author reported by GitHub and persisted with the current PR generation. It is not inferred from repository write access, branch name, branch creator, commit author, or organization membership. Therefore an unlisted collaborator's same-repository branch remains review-only even when its name has an eligible prefix. Command authorization is an additional check, not an override: `/agent fix` cannot run Fix Work for an unlisted author or ineligible branch.
 - The fixer verifies changes and commits without pushing. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
 - Enable Fix Work only for trusted agent-owned pull requests because fixer verification runs repository commands on this host.
 - A subsequent `pull_request.synchronize` webhook queues the follow-up review.
@@ -93,8 +108,13 @@ The required installed values are:
 - `GITHUB_APP_ID`: numeric GitHub App ID
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
+- `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
 - `WORKFLOWD_COMMAND_USERS`: comma-separated authorized GitHub usernames; an empty value disables commands
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
+- `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled
+- `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
+
+Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 
 All optional environment names, defaults, separators, timeout/lease settings, and development secret alternatives are documented in `deploy/workflowd.env.example`. Startup rejects invalid ports, URLs, model/agent identifiers, branch prefixes, GitHub users, and leases that do not outlast their timeout.
 
@@ -160,6 +180,25 @@ npx skills add BNasraoui/workflowd --skill qrspi-design-structure --agent openco
 
 The skill is an operational checklist. The normative identity, routing, acceptance,
 Provenance promotion, and coverage rules remain in `docs/qrspi-contract.md`.
+
+## Design Boundary Reviewer Skill
+
+Install the model-invoked `design-boundary-reviewer` skill through skills.sh:
+
+```bash
+npx skills add BNasraoui/workflowd --skill design-boundary-reviewer --agent opencode -y
+```
+
+Run `opencode debug skill` and verify that `design-boundary-reviewer` appears in the
+discovered skill list.
+
+Use it to trace every material capability in a draft Design to the current ticket and
+its issue graph before human Design approval. It returns `ScopeClean`, `ReviseDesign`, or
+`NeedsClarification` and does not replace the post-Structure size and decomposition
+review.
+
+The canonical skill, authority model, output contract, fixtures, and recorded evaluation
+results live under `skills/design-boundary-reviewer/`.
 
 ## Workflowd Unit
 

@@ -1,4 +1,4 @@
-import { Data, Effect, FiberSet } from "effect"
+import { Data, Effect, FiberSet, Option } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
@@ -9,6 +9,7 @@ import {
   runPublicationIteration,
   runReconciliationIteration,
 } from "./worker"
+import { WorkflowStart } from "./qrspi/workflow-start"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -26,7 +27,7 @@ type ScopedHookRouteHandler<R> = (
   options: WebhookHandlerOptions,
 ) => Effect.Effect<Response, never, R>
 
-function superviseWorker<A extends string, E, R>(
+export function superviseWorker<A extends string, E, R>(
   name: string,
   pollIntervalMs: number,
   iteration: Effect.Effect<A, E, R>,
@@ -94,34 +95,45 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-function serveDefaultHookHttp(config: HookHttpConfig) {
-  return serveHookHttpWithHandler(config, routeRequest)
-}
+export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
 
-export function runHookService(config: AppConfig) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      const automation = yield* Automation
+export function startHookService(
+  config: AppConfig,
+  observeWorkerIteration: (name: RuntimeWorkerName) => Effect.Effect<void> = () => Effect.void,
+) {
+  const observed = <A extends string, E, R>(
+    name: RuntimeWorkerName,
+    iteration: Effect.Effect<A, E, R>,
+  ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
-      yield* automation
-        .validateAvailability({
-          fixWorkEnabled: config.fixWork.enabled,
-        })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new Error(
-                `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-                { cause: error },
-              ),
-          ),
-        )
+  return Effect.gen(function* () {
+    const automation = yield* Automation
+    const workflowStart = yield* Effect.serviceOption(WorkflowStart)
+    if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
+      return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
+    }
 
-      for (let index = 0; index < config.worker.concurrency; index += 1) {
-        const workerId = `${process.pid}:worker:${index}`
-        yield* superviseWorker(
-          "Job worker",
-          config.worker.pollIntervalMs,
+    yield* automation
+      .validateAvailability({
+        fixWorkEnabled: config.fixWork.enabled,
+      })
+      .pipe(
+        Effect.mapError(
+          (error) =>
+            new Error(
+              `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
+              { cause: error },
+            ),
+        ),
+      )
+
+    for (let index = 0; index < config.worker.concurrency; index += 1) {
+      const workerId = `${process.pid}:worker:${index}`
+      yield* superviseWorker(
+        "Job worker",
+        config.worker.pollIntervalMs,
+        observed(
+          "job",
           runJobIteration({
             workerId,
             leaseDurationMs: config.worker.jobLeaseDurationMs,
@@ -129,15 +141,19 @@ export function runHookService(config: AppConfig) {
             timeoutMs: config.worker.jobTimeoutMs,
             cancellationPollIntervalMs: config.worker.pollIntervalMs,
             agentBranchPrefixes: config.worker.agentBranchPrefixes,
+            trustedAgentUsers: config.worker.trustedAgentUsers,
             fixWorkEnabled: config.fixWork.enabled,
             now: () => new Date(),
           }),
-        )
-      }
+        ),
+      )
+    }
 
-      yield* superviseWorker(
-        "Publisher",
-        config.worker.pollIntervalMs,
+    yield* superviseWorker(
+      "Publisher",
+      config.worker.pollIntervalMs,
+      observed(
+        "publication",
         runPublicationIteration({
           workerId: `${process.pid}:publisher`,
           leaseDurationMs: config.worker.publicationLeaseDurationMs,
@@ -145,22 +161,28 @@ export function runHookService(config: AppConfig) {
           maxAttempts: 5,
           now: () => new Date(),
         }),
-      )
+      ),
+    )
 
-      yield* superviseWorker(
-        "Reconciliation",
-        config.worker.pollIntervalMs,
+    yield* superviseWorker(
+      "Reconciliation",
+      config.worker.pollIntervalMs,
+      observed(
+        "reconciliation",
         runReconciliationIteration({
           workerId: `${process.pid}:reconciler`,
           leaseDurationMs: 2 * 60_000,
           maxAttempts: 5,
           now: () => new Date(),
         }),
-      )
+      ),
+    )
 
-      yield* superviseWorker(
-        "Command worker",
-        config.worker.pollIntervalMs,
+    yield* superviseWorker(
+      "Command worker",
+      config.worker.pollIntervalMs,
+      observed(
+        "command",
         runCommandIteration({
           workerId: `${process.pid}:commands`,
           leaseDurationMs: 60_000,
@@ -169,17 +191,35 @@ export function runHookService(config: AppConfig) {
           fixWorkEnabled: config.fixWork.enabled,
           now: () => new Date(),
         }),
-      )
+      ),
+    )
 
-      // Acquire the listener last so its finalizer stops acceptance and drains
-      // request fibers before worker and store scopes are released.
-      const server = yield* serveDefaultHookHttp({
+    // Acquire the listener last so its finalizer stops acceptance and drains
+    // request fibers before worker and store scopes are released.
+    const server = yield* serveHookHttpWithHandler(
+      {
         ...config.http,
         webhookSecret: config.github.webhookSecret,
-      })
-      yield* Effect.logInfo(`workflowd listening on http://${server.hostname}:${server.port}`)
+      },
+      (request, options) =>
+        routeRequest(request, {
+          ...options,
+          ...(config.qrspi === undefined
+            ? {}
+            : {
+                qrspi: {
+                  token: config.qrspi.token,
+                  start: Option.getOrThrow(workflowStart).start,
+                },
+              }),
+        }),
+    )
+    yield* Effect.logInfo(`workflowd listening on http://${server.hostname}:${server.port}`)
 
-      return yield* Effect.never
-    }),
-  )
+    return server
+  })
+}
+
+export function runHookService(config: AppConfig) {
+  return Effect.scoped(startHookService(config).pipe(Effect.andThen(Effect.never)))
 }

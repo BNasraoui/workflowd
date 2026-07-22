@@ -4,8 +4,14 @@ import type { Publication } from "./domain/publication"
 import { normalizeError } from "./errors"
 import type { GitHubInstallationAdapter } from "./github/adapter"
 import { presentReviewCheck, renderReviewComment, reviewMarker } from "./github/review-presentation"
+import type { SessionAccess } from "./session-access"
 
 type InstallationClientProvider = (installationId: number) => Promise<GitHubInstallationAdapter>
+type SessionAccessProvider = {
+  readonly resolve: (
+    reference: NonNullable<Publication["sessionReference"]>,
+  ) => Effect.Effect<SessionAccess, GitHubClientError>
+}
 
 type RepositoryName = {
   readonly owner: string
@@ -43,6 +49,7 @@ export class GitHubAppAdapter implements GitHubPort {
   constructor(
     private readonly appId: number,
     private readonly getInstallationClient: InstallationClientProvider,
+    private readonly sessionAccess?: SessionAccessProvider,
   ) {}
 
   readonly fetchPullRequestSnapshot = (
@@ -91,7 +98,8 @@ export class GitHubAppAdapter implements GitHubPort {
         return "stale" as const
       }
 
-      const comment = renderReviewComment(publication)
+      const session = yield* this.resolveSessionAccess(publication)
+      const comment = renderReviewComment(publication, session)
       const commentOutcome = yield* this.publishComment(
         client,
         repository,
@@ -110,6 +118,29 @@ export class GitHubAppAdapter implements GitHubPort {
       if (checkOutcome === "stale") return "stale" as const
       return "published" as const
     })
+
+  private resolveSessionAccess(
+    publication: Publication,
+  ): Effect.Effect<SessionAccess | undefined, GitHubClientError> {
+    const reference = publication.sessionReference
+    if (reference === undefined || this.sessionAccess === undefined)
+      return Effect.succeed(undefined)
+    if (
+      publication.sessionReferenceId !== reference.sessionReferenceId ||
+      publication.sessionExecutionState !== "succeeded" ||
+      reference.scope._tag !== "GenerationScope" ||
+      reference.scope.workflowId !==
+        `pr:${publication.repositoryId}:${publication.pullRequestNumber}` ||
+      reference.scope.generation !== publication.generation
+    ) {
+      return Effect.succeed({
+        _tag: "Unavailable",
+        sessionReferenceId: reference.sessionReferenceId,
+        reason: "superseded",
+      })
+    }
+    return this.sessionAccess.resolve(reference)
+  }
 
   private client(
     installationId: number,

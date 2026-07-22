@@ -14,7 +14,14 @@ import {
 } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
+import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
+import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
+import { QrspiRepository, TicketSource } from "./qrspi/ports"
+import { QrspiStoreLive } from "./qrspi/store"
+import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
+import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
+import { SessionAccessResolver } from "./session-access"
 
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
@@ -39,6 +46,78 @@ export const makeLiveLayer = (config: AppConfig) => {
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
+  const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
+    serverId: config.openCode.serverId,
+    endpointAlias: config.openCode.endpointAlias,
+    attachUrl: config.openCode.attachUrl,
+  })
+  const qrspiLayer =
+    config.qrspi === undefined
+      ? Layer.succeed(WorkflowStart, {
+          start: () =>
+            Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
+        })
+      : WorkflowStartLive({
+          binding: {
+            repository: config.qrspi.repository,
+            trackerInstanceId: config.qrspi.trackerInstanceId,
+          },
+          baseRef: config.qrspi.baseRef,
+          repositoryOperationTimeoutMs: config.qrspi.repositoryOperationTimeoutMs,
+          operationCompletionMarginMs: config.qrspi.operationCompletionMarginMs,
+          leaseDurationMs: config.qrspi.leaseDurationMs,
+          workflowDefinition: config.qrspi.workflowDefinition,
+          sourceResolver: makeWorkspaceSourceResolver(config.qrspi.beadsWorkspace),
+        }).pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              QrspiStoreLive,
+              Layer.succeed(
+                TicketSource,
+                new BeadsCliTicketSource(
+                  config.qrspi.beadsWorkspace,
+                  config.qrspi.trackerInstanceId,
+                ),
+              ),
+              Layer.effect(
+                QrspiRepository,
+                Effect.gen(function* () {
+                  const store = yield* WorkflowStore
+                  const privateKey = yield* Effect.tryPromise({
+                    try: () => readFile(config.github.privateKeyPath, "utf8"),
+                    catch: (cause) =>
+                      new Error(`Could not read GitHub App private key: ${String(cause)}`),
+                  })
+                  return new GitHubQrspiRepository(
+                    config.qrspi!,
+                    async (installationId) => {
+                      const app = new App({
+                        appId: config.github.appId,
+                        privateKey,
+                        Octokit,
+                      })
+                      return app.getInstallationOctokit(installationId)
+                    },
+                    (publication) => {
+                      const signingKey = config.workspace.gitSigningKey
+                      if (signingKey === undefined) return Promise.resolve(null)
+                      return Effect.runPromise(
+                        store.isTrustedBranchPublication({
+                          repositoryId: publication.repository.repositoryId,
+                          repositoryFullName: publication.repository.repositoryFullName,
+                          headRef: publication.headRef,
+                          jobId: publication.jobId,
+                          commitSha: publication.commitSha,
+                          controllerSigningFingerprint: signingKey.toLowerCase(),
+                        }),
+                      )
+                    },
+                  )
+                }).pipe(Effect.provide(WorkflowStoreLive)),
+              ),
+            ),
+          ),
+        )
   return Layer.mergeAll(
     WorkflowStoreLive,
     Layer.effect(
@@ -59,6 +138,9 @@ export const makeLiveLayer = (config: AppConfig) => {
               new OctokitInstallationAdapter(
                 makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
               ),
+            {
+              resolve: (reference) => sessionAccess.resolve(reference),
+            },
           )
         }),
       ),
@@ -66,5 +148,6 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
+    qrspiLayer,
   )
 }

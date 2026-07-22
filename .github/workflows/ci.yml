@@ -27,7 +27,7 @@ jobs:
           - name: Prettier
             command: bun run format:check
           - name: Tests
-            command: bun test
+            command: bun run test:coverage
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

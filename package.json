@@ -7,12 +7,13 @@
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
     "test": "bun test",
+    "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run lint && bun run format:check && bun test"
+    "check": "bun run typecheck && bun run effect:check && bun run lint && bun run format:check && bun run test:coverage"
   },
   "dependencies": {
     "@effect/platform": "0.97.0",

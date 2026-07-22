@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
+import type { SessionReference } from "../src/agent-harness"
 import { Publication, type Publication as PublicationType } from "../src/domain/publication"
 import { GitHubAppAdapter, GitHubClientError, type GitHubPort } from "../src/github"
 import type {
@@ -11,6 +12,20 @@ import type {
 
 const headSha = "a".repeat(40)
 const alwaysCurrent = () => Effect.succeed(true)
+const sessionReference: SessionReference = {
+  sessionReferenceId: "session-reference-1",
+  serverId: "opencode-primary",
+  endpointAlias: "private-opencode",
+  directory: "/worktrees/review-1",
+  nativeSessionId: "ses_exact",
+  scope: { _tag: "GenerationScope", workflowId: "pr:42:7", generation: 1 },
+  operationId: "review:42:7:1",
+  operationRevision: 1,
+  attempt: 1,
+  leaseToken: "lease-token-123456",
+  createdAt: "2026-07-21T12:00:00.000Z",
+  state: "succeeded",
+}
 
 type RecordingInputs = {
   readonly "pulls.get": Parameters<GitHubInstallationAdapter["getPullRequest"]>[0]
@@ -173,6 +188,117 @@ function callInput(
 }
 
 describe("GitHubAppAdapter.publishReview", () => {
+  test("publishes the exact resumable session command for the review result", async () => {
+    const recording = makeRecordingClient()
+    const publication = Schema.decodeUnknownSync(Publication)({
+      ...makePublication(),
+      sessionReferenceId: sessionReference.sessionReferenceId,
+      sessionReference,
+      sessionExecutionState: "succeeded",
+    })
+    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+      resolve: () =>
+        Effect.succeed({
+          _tag: "Available" as const,
+          sessionReferenceId: sessionReference.sessionReferenceId,
+          command:
+            "opencode attach 'https://mint.tailnet.example:4096' --dir '/worktrees/review-1' --session 'ses_exact'",
+        }),
+    })
+
+    await Effect.runPromise(client.publishReview(publication, alwaysCurrent))
+
+    const comment = callInput(recording.calls, "issues.createComment")
+    expect(comment.body).toContain("### Resume agent session")
+    expect(comment.body).toContain("opencode attach")
+    expect(comment.body).toContain("--session 'ses_exact'")
+  })
+
+  test("publishes an explicit missing-session result without substituting another session", async () => {
+    const recording = makeRecordingClient()
+    const publication = Schema.decodeUnknownSync(Publication)({
+      ...makePublication(),
+      sessionReferenceId: sessionReference.sessionReferenceId,
+      sessionReference,
+      sessionExecutionState: "succeeded",
+    })
+    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+      resolve: () =>
+        Effect.succeed({
+          _tag: "Unavailable" as const,
+          sessionReferenceId: sessionReference.sessionReferenceId,
+          reason: "missing" as const,
+        }),
+    })
+
+    await Effect.runPromise(client.publishReview(publication, alwaysCurrent))
+
+    const comment = callInput(recording.calls, "issues.createComment")
+    expect(comment.body).toContain("Session unavailable: `missing`")
+    expect(comment.body).toContain("`session-reference-1`")
+    expect(comment.body).not.toContain("--continue")
+  })
+
+  test("does not resolve a session attributed to another workflow", async () => {
+    const recording = makeRecordingClient()
+    const publication = Schema.decodeUnknownSync(Publication)({
+      ...makePublication(),
+      sessionReferenceId: sessionReference.sessionReferenceId,
+      sessionReference: {
+        ...sessionReference,
+        scope: { ...sessionReference.scope, workflowId: "pr:999:7" },
+      },
+      sessionExecutionState: "succeeded",
+    })
+    let resolved = false
+    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+      resolve: () => {
+        resolved = true
+        return Effect.die("must not resolve a foreign workflow")
+      },
+    })
+
+    await Effect.runPromise(client.publishReview(publication, alwaysCurrent))
+
+    expect(resolved).toBe(false)
+    expect(callInput(recording.calls, "issues.createComment").body).toContain(
+      "Session unavailable: `superseded`",
+    )
+  })
+
+  test("preserves the resume command when review content reaches GitHub limits", async () => {
+    const recording = makeRecordingClient()
+    const publication = Schema.decodeUnknownSync(Publication)({
+      ...makePublication(),
+      review: {
+        verdict: "changes_requested",
+        summary: "Large review",
+        findings: Array.from({ length: 7 }, (_, index) => ({
+          severity: "high",
+          title: `Finding ${index}`,
+          body: "x".repeat(10_000),
+        })),
+      },
+      sessionReferenceId: sessionReference.sessionReferenceId,
+      sessionReference,
+      sessionExecutionState: "succeeded",
+    })
+    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+      resolve: () =>
+        Effect.succeed({
+          _tag: "Available" as const,
+          sessionReferenceId: sessionReference.sessionReferenceId,
+          command: "opencode attach 'https://mint' --dir '/worktree' --session 'ses_exact'",
+        }),
+    })
+
+    await Effect.runPromise(client.publishReview(publication, alwaysCurrent))
+
+    expect(callInput(recording.calls, "issues.createComment").body).toContain(
+      "--session 'ses_exact'",
+    )
+  })
+
   test("creates the sticky comment and per-SHA Check Run with valid abortable payloads", async () => {
     const recording = makeRecordingClient()
     const currentnessTimes: Array<Date> = []

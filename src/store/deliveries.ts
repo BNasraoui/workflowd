@@ -15,11 +15,13 @@ export function makeDeliveryOperations(
     ingestPullRequest: (delivery, event) =>
       Effect.gen(function* () {
         const insertedDeliveries = yield* shared.insertDelivery(delivery)
-        if (insertedDeliveries.length === 0) {
+        const insertedDelivery = insertedDeliveries[0]
+        if (insertedDelivery === undefined) {
           return { status: "duplicate" } as const
         }
         return yield* applyTransition({
           appliedAt: delivery.receivedAt,
+          observationSequence: insertedDelivery.observation_sequence,
           snapshot: event,
         })
       }).pipe(sql.withTransaction),

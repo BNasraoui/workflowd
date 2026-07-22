@@ -22,6 +22,7 @@ type JobOperations = Pick<
   | "completeReviewJob"
   | "disableFixJob"
   | "isJobCurrent"
+  | "isTrustedBranchPublication"
   | "recordAgentFixResult"
   | "recordAgentLaunchIntent"
   | "recordAgentSessionCleanupFailure"
@@ -210,6 +211,20 @@ export function makeJobOperations(
     `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
 
   return {
+    isTrustedBranchPublication: (input) =>
+      sql<{ readonly expected_head_sha: string }>`
+        SELECT candidate.expected_head_sha
+        FROM jobs AS candidate
+        WHERE candidate.id = ${input.jobId}
+        AND candidate.kind = 'fix'
+        AND candidate.state = 'succeeded'
+        AND CAST(candidate.repository_id AS TEXT) = ${input.repositoryId}
+        AND candidate.repository_full_name = candidate.head_repository_full_name
+        AND candidate.head_ref = ${input.headRef}
+        AND json_extract(candidate.fix_result_json, '$._tag') = 'CommitPrepared'
+        AND json_extract(candidate.fix_result_json, '$.commitSha') = ${input.commitSha}
+        AND candidate.controller_signing_fingerprint = ${input.controllerSigningFingerprint}
+      `.pipe(Effect.map((rows) => rows[0]?.expected_head_sha ?? null)),
     claimExpiredAgentSession: (input) =>
       Effect.gen(function* () {
         const claimedAt = input.now.toISOString()
@@ -280,6 +295,7 @@ export function makeJobOperations(
         AND candidate.cancel_requested = FALSE
         AND candidate.lease_owner = ${workerId}
         AND candidate.lease_until > ${now.toISOString()}
+        AND ${currentness.currentJob}
         AND ${currentness.currentPublication}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length > 0)),
@@ -316,6 +332,7 @@ export function makeJobOperations(
         UPDATE jobs AS candidate
         SET
           state = 'succeeded',
+          controller_signing_fingerprint = ${input.controllerSigningFingerprint ?? null},
           lease_owner = NULL,
           lease_until = NULL,
           last_error = NULL,

@@ -141,6 +141,13 @@ const PublicationStorageRow = Schema.Struct({
   reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
   review: column("review_json", json(ReviewResult)),
   sessionReferenceId: column("session_reference_id", Schema.NullOr(Schema.NonEmptyString)),
+  sessionReference: column("session_reference_json", Schema.NullOr(json(SessionReference))),
+  sessionExecutionState: column(
+    "session_execution_state",
+    Schema.NullOr(
+      Schema.Literal("launch_intent", "session_ready", "succeeded", "failed", "superseded"),
+    ),
+  ),
   attempt: column("attempts", AttemptNumber),
 })
 const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
@@ -163,6 +170,10 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     reviewRequestNumber: row.reviewRequestNumber,
     review: row.review,
     ...(row.sessionReferenceId === null ? {} : { sessionReferenceId: row.sessionReferenceId }),
+    ...(row.sessionReference === null ? {} : { sessionReference: row.sessionReference }),
+    ...(row.sessionExecutionState === null
+      ? {}
+      : { sessionExecutionState: row.sessionExecutionState }),
     attempt: row.attempt,
   }),
   encode: (_, publication) => ({
@@ -181,6 +192,8 @@ const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
     reviewRequestNumber: publication.reviewRequestNumber,
     review: publication.review,
     sessionReferenceId: publication.sessionReferenceId ?? null,
+    sessionReference: publication.sessionReference ?? null,
+    sessionExecutionState: publication.sessionExecutionState ?? null,
     attempt: publication.attempt,
   }),
 })

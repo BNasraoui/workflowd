@@ -21,6 +21,7 @@ function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter 
     promptSession: async () => undefined,
     subscribeSessionEvents: async () => events(),
     getSessionStatus: async () => ({ type: "busy" }),
+    sessionExists: async () => true,
     listSessionMessages: async () => [],
     abortSession: async () => true,
     validateAvailability: async () => undefined,

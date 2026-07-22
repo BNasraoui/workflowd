@@ -5,7 +5,13 @@ import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
-import { HookHttpServerStartError, runHookService, serveHookHttp } from "../src/runtime"
+import {
+  HookHttpServerStartError,
+  runHookService,
+  serveHookHttp,
+  startHookService,
+  superviseWorker,
+} from "../src/runtime"
 import { WorkflowStoreLive } from "../src/store"
 import { Workspace } from "../src/workspace"
 
@@ -146,6 +152,31 @@ describe("serveHookHttp", () => {
   })
 })
 
+test("superviseWorker resumes the same worker after an iteration failure", async () => {
+  let attempts = 0
+  const recovered = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const resumed = yield* Deferred.make<void>()
+        yield* superviseWorker(
+          "Test worker",
+          0,
+          Effect.suspend(() => {
+            attempts += 1
+            return attempts === 1
+              ? Effect.fail("transient")
+              : Deferred.succeed(resumed, undefined).pipe(Effect.andThen(Effect.never))
+          }),
+        )
+        yield* Deferred.await(resumed)
+        return attempts
+      }),
+    ),
+  )
+
+  expect(recovered).toBe(2)
+})
+
 describe("runHookService startup", () => {
   test("validates OpenCode exactly once before listener or workers activate", async () => {
     let validations = 0
@@ -156,6 +187,7 @@ describe("runHookService startup", () => {
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       { home: "/tmp" },
     )
@@ -218,5 +250,79 @@ describe("runHookService startup", () => {
     expect(exit._tag).toBe("Failure")
     expect(validations).toBe(1)
     expect(githubCalls).toBe(0)
+  })
+
+  test("composes workers and starts a healthy listener after validation", async () => {
+    let validations = 0
+    const observedWorkers = new Set<string>()
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, pollIntervalMs: 60_000 },
+    }
+    const StoreLive = WorkflowStoreLive.pipe(
+      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    )
+    const TestAdapters = Layer.mergeAll(
+      Layer.succeed(GitHub, {
+        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+        publishReview: () => Effect.die("unexpected publish"),
+      }),
+      Layer.succeed(Automation, {
+        validateAvailability: () =>
+          Effect.sync(() => {
+            validations += 1
+          }),
+        prepareReview: () => Effect.die("unexpected review"),
+        prepareFix: () => Effect.die("unexpected fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        validateAvailability: () => Effect.die("unexpected harness validation"),
+        prepare: () => Effect.die("unexpected harness preparation"),
+        createSession: () => Effect.die("unexpected session creation"),
+        resumeSession: () => Effect.die("unexpected session resume"),
+        abortSession: () => Effect.die("unexpected session abort"),
+      }),
+      Layer.succeed(Workspace, {
+        prepareReview: () => Effect.die("unexpected review workspace"),
+        prepareFix: () => Effect.die("unexpected fix workspace"),
+        publishFix: () => Effect.die("unexpected fix publication"),
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const allWorkersObserved = yield* Deferred.make<void>()
+          const server = yield* startHookService(config, (worker) =>
+            Effect.gen(function* () {
+              observedWorkers.add(worker)
+              if (observedWorkers.size === 4) {
+                yield* Deferred.succeed(allWorkersObserved, undefined)
+              }
+            }),
+          )
+          yield* Deferred.await(allWorkersObserved)
+          const response = yield* Effect.tryPromise(() =>
+            fetch(`http://${server.hostname}:${server.port}/health`),
+          )
+          return { status: response.status, body: yield* Effect.promise(() => response.json()) }
+        }),
+      ).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
+    )
+
+    expect(validations).toBe(1)
+    expect(observedWorkers).toEqual(new Set(["job", "publication", "reconciliation", "command"]))
+    expect(result).toEqual({ status: 200, body: { status: "ok" } })
   })
 })

@@ -11,6 +11,7 @@ import type { makeSharedStoreOperations } from "./shared"
 
 type PullRequestTransitionInput = {
   readonly appliedAt: Date
+  readonly observationSequence?: number
   readonly snapshot:
     typeof PullRequestObservation.Encoded | typeof AuthoritativePullRequestSnapshot.Encoded
 }
@@ -129,6 +130,10 @@ export function makePullRequestTransition(
       }
       if (decision._tag === "RequestReconciliation") {
         const timestamp = input.appliedAt.toISOString()
+        const observationSequence = input.observationSequence
+        if (observationSequence === undefined) {
+          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+        }
         yield* sql`
           INSERT INTO reconciliations (
             installation_id,
@@ -137,6 +142,8 @@ export function makePullRequestTransition(
             pull_request_number,
             state,
             run_at,
+            observation_received_at,
+            observation_sequence,
             created_at,
             updated_at
           ) VALUES (
@@ -146,6 +153,8 @@ export function makePullRequestTransition(
             ${pullRequest.number},
             'ready',
             ${timestamp},
+            ${timestamp},
+            ${observationSequence},
             ${timestamp},
             ${timestamp}
           )
@@ -158,8 +167,15 @@ export function makePullRequestTransition(
             lease_owner = NULL,
             lease_until = NULL,
             last_error = NULL,
+            observation_received_at = excluded.observation_received_at,
+            observation_sequence = excluded.observation_sequence,
             updated_at = excluded.updated_at
-          WHERE reconciliations.state IN ('succeeded', 'failed', 'data_error')
+          WHERE reconciliations.observation_sequence IS NULL
+          OR excluded.observation_received_at > reconciliations.observation_received_at
+          OR (
+            excluded.observation_received_at = reconciliations.observation_received_at
+            AND excluded.observation_sequence > reconciliations.observation_sequence
+          )
         `
         return {
           status: "reconciliation_enqueued",
@@ -169,6 +185,10 @@ export function makePullRequestTransition(
 
       const timestamp = input.appliedAt.toISOString()
       if (snapshot._tag === "PullRequest") {
+        const observationSequence = input.observationSequence
+        if (observationSequence === undefined) {
+          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+        }
         yield* sql`
           UPDATE reconciliations
           SET
@@ -180,9 +200,33 @@ export function makePullRequestTransition(
             last_error = NULL,
             updated_at = ${timestamp}
           WHERE repository_id = ${repository.id}
-          AND pull_request_number = ${pullRequest.number}
-          AND state IN ('ready', 'leased', 'retry_scheduled')
-        `
+            AND pull_request_number = ${pullRequest.number}
+            AND state IN ('ready', 'leased', 'retry_scheduled')
+            AND (
+              observation_sequence IS NULL
+              OR observation_received_at < ${timestamp}
+              OR (
+                observation_received_at = ${timestamp}
+                AND observation_sequence < ${observationSequence}
+              )
+            )
+          `
+        yield* sql`
+            UPDATE reconciliations
+            SET
+              observation_received_at = ${timestamp},
+              observation_sequence = ${observationSequence}
+            WHERE repository_id = ${repository.id}
+            AND pull_request_number = ${pullRequest.number}
+            AND (
+              observation_sequence IS NULL
+              OR observation_received_at < ${timestamp}
+              OR (
+                observation_received_at = ${timestamp}
+                AND observation_sequence < ${observationSequence}
+              )
+            )
+          `
       }
       for (const intent of decision.intents) {
         if (intent._tag === "SupersedeGeneration") {

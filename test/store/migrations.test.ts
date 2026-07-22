@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Either, Layer } from "effect"
 import { makeCurrentnessPolicy } from "../../src/store/currentness"
 import {
   commandClaimCandidate,
   reconciliationClaimCandidate,
 } from "../../src/store/internal-claim-queries"
+import { reconciliationObservationSequence } from "../../src/store/migrations"
 import { makeStoreLayer } from "./harness"
 
 const timestamp = "2026-07-19T12:00:00.000Z"
@@ -120,7 +122,9 @@ describe("strict initial store schema", () => {
           FROM pragma_table_list
           WHERE name IN (
             'webhook_deliveries', 'pull_requests', 'jobs', 'publications',
-            'commands', 'reconciliations', 'agent_executions'
+            'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
+            'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
+            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations'
           )
           ORDER BY name
         `
@@ -135,11 +139,87 @@ describe("strict initial store schema", () => {
       { migration_id: 2, name: "agent_harness" },
       { migration_id: 3, name: "agent_session_cleanup_leases" },
       { migration_id: 4, name: "agent_session_recovery_and_payload_envelopes" },
+      { migration_id: 5, name: "qrspi_workflow_start" },
+      { migration_id: 6, name: "fix_publication_signing_evidence" },
+      { migration_id: 7, name: "reconciliation_observation_watermark" },
+      { migration_id: 8, name: "reconciliation_observation_sequence" },
     ])
-    expect(result.tables).toHaveLength(7)
+    expect(result.tables).toHaveLength(13)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
+  })
+
+  test("backfills reused reconciliation authority from its latest update", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          CREATE TABLE webhook_deliveries (
+            delivery_id TEXT PRIMARY KEY,
+            received_at TEXT NOT NULL
+          ) STRICT
+        `
+        yield* sql`
+          CREATE TABLE reconciliations (
+            id INTEGER PRIMARY KEY,
+            observation_received_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          ) STRICT
+        `
+        yield* sql`
+          INSERT INTO webhook_deliveries (delivery_id, received_at)
+          VALUES
+            ('first', '2026-07-19T12:00:00.000Z'),
+            ('latest', '2026-07-19T12:05:00.000Z')
+        `
+        yield* sql`
+          INSERT INTO reconciliations (id, observation_received_at, created_at, updated_at)
+          VALUES (
+            1,
+            '2026-07-19T12:00:00.000Z',
+            '2026-07-19T12:00:00.000Z',
+            '2026-07-19T12:05:00.000Z'
+          )
+        `
+
+        yield* reconciliationObservationSequence
+
+        return yield* sql<{
+          readonly observation_received_at: string
+          readonly observation_sequence: number
+        }>`
+          SELECT observation_received_at, observation_sequence
+          FROM reconciliations
+          WHERE id = 1
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+
+    expect(result).toEqual([
+      {
+        observation_received_at: "2026-07-19T12:05:00.000Z",
+        observation_sequence: 2,
+      },
+    ])
+  })
+
+  test("scopes identical ticket revision hashes to their owning workflow", async () => {
+    const primaryKey = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly name: string; readonly pk: number }>`
+          SELECT name, pk FROM pragma_table_info('qrspi_ticket_revisions')
+          WHERE pk > 0 ORDER BY pk
+        `
+      }),
+    )
+
+    expect(primaryKey).toEqual([
+      { name: "workflow_id", pk: 1 },
+      { name: "ticket_revision_sha256", pk: 2 },
+    ])
   })
 
   test("rejects invalid leased and non-leased Work State rows", async () => {

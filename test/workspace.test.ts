@@ -8,6 +8,7 @@ import { ReviewResult } from "../src/domain/review-result"
 import { FixWork, ReviewWork } from "../src/domain/work"
 import { GitWorkspaceAdapter } from "../src/workspace"
 import { runWorkspaceCommand } from "../src/workspace/command"
+import { makeFixPublication } from "../src/workspace/fix"
 
 const temporaryDirectories = new Set<string>()
 
@@ -303,6 +304,64 @@ describe("GitWorkspaceAdapter", () => {
     expect(prepared.review).toMatchObject({ verdict: "changes_requested" })
     expect((await stat(worktree)).isDirectory()).toBe(true)
     await expect(stat(join(worktree, ".workflowd"))).rejects.toThrow()
+  })
+
+  test("falls back to a managed worktree when a fork branch collides with a base branch", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fork-collision-")
+    const collidingWorktree = join(fixture.root, "base-main")
+    const forkRemote = join(fixture.root, "fork.git")
+    const forkSource = join(fixture.root, "fork-source")
+    await git(fixture.root, "clone", "--branch", "main", fixture.remote, collidingWorktree)
+    await git(fixture.source, "switch", "main")
+    await writeFile(join(fixture.source, "base.ts"), "export const base = 2\n")
+    await git(fixture.source, "add", "base.ts")
+    await git(fixture.source, "commit", "-m", "advance base")
+    await git(fixture.source, "push", "origin", "main")
+    const baseSha = await git(fixture.source, "rev-parse", "HEAD")
+    await mkdir(forkRemote)
+    await git(forkRemote, "init", "--bare")
+    await git(fixture.root, "clone", "--branch", "main", fixture.remote, forkSource)
+    await git(forkSource, "remote", "set-url", "origin", forkRemote)
+    await writeFile(join(forkSource, "fork.ts"), "export const fork = true\n")
+    await git(forkSource, "add", "fork.ts")
+    await git(forkSource, "commit", "-m", "fork change")
+    await git(forkSource, "push", "-u", "origin", "main")
+    const forkHeadSha = await git(forkSource, "rev-parse", "HEAD")
+    await git(forkSource, "push", fixture.remote, "+HEAD:refs/pull/7/head")
+    const manager = new GitWorkspaceAdapter({
+      localRepositories: [collidingWorktree],
+      repositoryRoot: join(fixture.root, "repositories"),
+      worktreeRoot: join(fixture.root, "worktrees"),
+      remoteUrl: (repositoryFullName) =>
+        repositoryFullName === "fork-owner/example" ? forkRemote : fixture.remote,
+      maxDiffBytes: 1_000_000,
+    })
+
+    const prepared = await Effect.runPromise(
+      Effect.scoped(
+        manager
+          .prepareReview(
+            makeReviewJob(fixture, {
+              baseSha,
+              expectedHeadSha: forkHeadSha,
+              headRef: "main",
+              headRepositoryFullName: "fork-owner/example",
+            }),
+          )
+          .pipe(
+            Effect.flatMap((workspace) =>
+              Effect.promise(async () => ({
+                directory: workspace.directory,
+                head: await git(workspace.directory, "rev-parse", "HEAD"),
+              })),
+            ),
+          ),
+      ),
+    )
+
+    expect(prepared.directory).not.toBe(collidingWorktree)
+    expect(prepared.head).toBe(forkHeadSha)
+    expect(await git(collidingWorktree, "rev-parse", "HEAD")).toBe(fixture.baseSha)
   })
 
   test("never deletes an unowned .workflowd directory", async () => {
@@ -607,14 +666,14 @@ describe("GitWorkspaceAdapter", () => {
       ),
     )
 
-    expect(directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1"))
+    expect(directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1"))
     expect(await git(repository, "rev-parse", "refs/remotes/origin/feature")).toBe(fixture.headSha)
   })
 
   test("managed fallback recovers a missing controller worktree registration", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-recover-")
     const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
-    const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
+    const directory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
     await mkdir(dirname(repository), { recursive: true })
     await mkdir(dirname(directory), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
@@ -632,10 +691,42 @@ describe("GitWorkspaceAdapter", () => {
     expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain(directory)
   })
 
+  test("managed review retry removes a worktree stranded by the previous attempt", async () => {
+    const fixture = await createRepositoryFixture("workflowd-managed-retry-")
+    const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
+    const previousDirectory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
+    await mkdir(dirname(repository), { recursive: true })
+    await mkdir(dirname(previousDirectory), { recursive: true })
+    await git(fixture.root, "clone", fixture.remote, repository)
+    await git(repository, "worktree", "add", "-b", "feature", previousDirectory, "origin/feature")
+    const manager = makeManager(fixture, [])
+
+    const prepared = await Effect.runPromise(
+      Effect.scoped(
+        manager.prepareReview(makeReviewJob(fixture, { attempt: 2 })).pipe(
+          Effect.flatMap((workspace) =>
+            Effect.promise(async () => ({
+              directory: workspace.directory,
+              registered: await git(repository, "worktree", "list", "--porcelain"),
+              previousExists: await stat(previousDirectory).then(
+                () => true,
+                () => false,
+              ),
+            })),
+          ),
+        ),
+      ),
+    )
+
+    expect(prepared.directory).toBe(join(fixture.root, "worktrees", "42", "7", "11-1-attempt-2"))
+    expect(prepared.registered).not.toContain(previousDirectory)
+    expect(prepared.previousExists).toBe(false)
+  })
+
   test("managed setup failure does not strand a worktree", async () => {
     const fixture = await createRepositoryFixture("workflowd-managed-failure-")
     const repository = join(fixture.root, "repositories", "github.com", "example-owner", "example")
-    const directory = join(fixture.root, "worktrees", "42", "7", "11-1")
+    const directory = join(fixture.root, "worktrees", "42", "7", "11-1-attempt-1")
     await mkdir(dirname(repository), { recursive: true })
     await git(fixture.root, "clone", fixture.remote, repository)
     await git(repository, "update-ref", "-d", "refs/remotes/origin/feature")
@@ -753,9 +844,13 @@ describe("GitWorkspaceAdapter", () => {
           ),
       ),
     )
+    const retryJob = makeFixJob(fixture, {
+      attempt: 2,
+      review: job.review,
+    })
     const recovered = await Effect.runPromise(
       Effect.scoped(
-        manager.prepareFix(job).pipe(
+        manager.prepareFix(retryJob).pipe(
           Effect.flatMap((workspace) =>
             Effect.promise(async () => ({
               contents: await readFile(join(workspace.directory, "app.ts"), "utf8"),
@@ -818,6 +913,136 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(recovery).toBe("committed")
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(commitSha)
+  })
+
+  test("configures fixer signing only for the fix scope", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-signing-")
+    const signingKey = "a".repeat(40)
+    const previousKey = "b".repeat(40)
+    await git(fixture.source, "config", "extensions.worktreeConfig", "true")
+    await git(fixture.source, "config", "--worktree", "commit.gpgSign", "false")
+    await git(fixture.source, "config", "--worktree", "gpg.format", "ssh")
+    await git(fixture.source, "config", "--worktree", "user.signingKey", previousKey)
+    const manager = new GitWorkspaceAdapter({
+      localRepositories: [fixture.source],
+      repositoryRoot: join(fixture.root, "repositories"),
+      worktreeRoot: join(fixture.root, "worktrees"),
+      remoteUrl: () => fixture.remote,
+      maxDiffBytes: 1_000_000,
+      gitSigningKey: signingKey,
+    })
+    const job = makeFixJob(fixture)
+
+    const configured = await Effect.runPromise(
+      Effect.scoped(
+        manager.prepareFix(job).pipe(
+          Effect.flatMap((workspace) =>
+            Effect.promise(async () => ({
+              enabled: await git(workspace.directory, "config", "--worktree", "commit.gpgSign"),
+              format: await git(workspace.directory, "config", "--worktree", "gpg.format"),
+              key: await git(workspace.directory, "config", "--worktree", "user.signingKey"),
+            })),
+          ),
+        ),
+      ),
+    )
+
+    expect(configured).toEqual({ enabled: "true", format: "openpgp", key: signingKey })
+    expect({
+      enabled: await git(fixture.source, "config", "--worktree", "commit.gpgSign"),
+      format: await git(fixture.source, "config", "--worktree", "gpg.format"),
+      key: await git(fixture.source, "config", "--worktree", "user.signingKey"),
+    }).toEqual({ enabled: "false", format: "ssh", key: previousKey })
+  })
+
+  test("refuses to publish an unsigned fix when controller signing is configured", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-unsigned-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `unsigned fix\n\nWorkflowd-Job: ${job.id}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+    const publication = makeFixPublication("a".repeat(40))
+
+    const exit = await Effect.runPromiseExit(
+      publication.publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Unsigned fix.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: {
+        _tag: "Fail",
+        error: { operation: "verify controller fix signature" },
+      },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
+  test("refuses to publish a multi-commit fix", async () => {
+    const fixture = await createRepositoryFixture("workflowd-fix-multi-commit-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `first fix\n\nWorkflowd-Job: ${job.id}`)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 4\n")
+    await git(fixture.source, "commit", "-am", `second fix\n\nWorkflowd-Job: ${job.id}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Two commits.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix ancestry" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
+  })
+
+  test.each([
+    ["a mismatched trailer prefix", "Workflowd-Job: 110"],
+    ["duplicate trailers", "Workflowd-Job: 11\nWorkflowd-Job: 11"],
+  ])("refuses to publish a fix with %s", async (_description, trailers) => {
+    const fixture = await createRepositoryFixture("workflowd-fix-invalid-trailer-")
+    const job = makeFixJob(fixture)
+    await writeFile(join(fixture.source, "app.ts"), "export const value = 3\n")
+    await git(fixture.source, "commit", "-am", `invalid trailer\n\n${trailers}`)
+    const commitSha = await git(fixture.source, "rev-parse", "HEAD")
+
+    const exit = await Effect.runPromiseExit(
+      makeFixPublication().publish(
+        job,
+        {
+          directory: fixture.source,
+          recovery: "none",
+          markCompleted: () => undefined,
+        },
+        fixResult({ _tag: "CommitPrepared", summary: "Invalid trailer.", commitSha }),
+        () => Effect.succeed(true),
+      ),
+    )
+
+    expect(exit).toMatchObject({
+      _tag: "Failure",
+      cause: { _tag: "Fail", error: { operation: "verify fix commit ownership" } },
+    })
+    expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
 
   test("recognizes the same job after push but before store completion", async () => {
