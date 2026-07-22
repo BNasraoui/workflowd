@@ -67,9 +67,9 @@ The report is complete only when:
 - Source Inventory includes the current ticket, complete one-hop issue graph, accepted
   Questions, accepted Research, draft Design, and every architecture reference;
 - every acceptance criterion maps to one or more rows or a missing-coverage row;
-- every ownership-relevant one-hop relationship found in the complete graph appears in Relationship
-  Coverage, including relationships found irrelevant after review;
+- every ownership-relevant one-hop relationship found in the complete graph appears in
+  Relationship Coverage, including relationships found irrelevant after review;
 - every `OwnedByAnotherTicket` row names that ticket;
-- every expansion and requested Design change cites decisive evidence; and
-- every ambiguity remains in both the ledger and Unresolved Clarifications.
+- every expansion and requested Design change cites decisive evidence;
+- every ambiguity remains in both the ledger and Unresolved Clarifications; and
 - every `Unavailable` source is requested in Unresolved Clarifications.
