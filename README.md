@@ -169,6 +169,25 @@ The canonical ticket template lives in
 `skills/ticket-writing/references/ticket-template.md`; do not copy it into
 OpenCode configuration.
 
+## Design Boundary Reviewer Skill
+
+Install the model-invoked `design-boundary-reviewer` skill through skills.sh:
+
+```bash
+npx skills add BNasraoui/workflowd --skill design-boundary-reviewer --agent opencode -y
+```
+
+Run `opencode debug skill` and verify that `design-boundary-reviewer` appears in the
+discovered skill list.
+
+Use it to trace every material capability in a draft Design to the current ticket and
+its issue graph before human Design approval. It returns `ScopeClean`, `ReviseDesign`, or
+`NeedsClarification` and does not replace the post-Structure size and decomposition
+review.
+
+The canonical skill, authority model, output contract, fixtures, and recorded evaluation
+results live under `skills/design-boundary-reviewer/`.
+
 ## Workflowd Unit
 
 Install, but do not enable or start, the Workflowd unit:
