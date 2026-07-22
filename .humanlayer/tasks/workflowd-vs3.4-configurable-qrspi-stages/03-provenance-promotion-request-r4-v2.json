@@ -1,0 +1,5556 @@
+{
+  "contractVersion": 1,
+  "requestKind": "ProvenancePromotionRequest",
+  "requestId": "workflowd-vs3-4-design-4-provenance-promotion-request-revision-2-package-bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+  "targetScope": "workflowd-vs3.4",
+  "cliScope": "workflowd-vs3-4",
+  "identityInputs": {
+    "ticketId": "workflowd-vs3.4",
+    "workflowId": "BNasraoui/workflowd:workflowd-vs3.4",
+    "generation": 1,
+    "designRevision": 4,
+    "repositoryBase": "42e129ab75ea0de39aa1bd6db4502325cd3effb1",
+    "workflowDefinitionSha256": "6f7f7dcc51ce36973696247baecd645ba622a1e6ac05ca3d94d5ba6eb23da001",
+    "sourceSetSha256": "71674132945f9a0043fb230e696d6daacd12438b443600b7d8211e25c0eb599a",
+    "package": {
+      "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-package-r4.json",
+      "declaredPackageSha256": "bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+      "verifiedByteSha256": "ad7669acead06a37ffabdb9021741d137434c3ca8a82ab78c2e9426e51c89aa7",
+      "hashAlgorithm": "sha256-jcs",
+      "hashScope": "RFC 8785 canonical JSON of the parsed package after removing the top-level packageSha256 digest field"
+    },
+    "gateResponse": {
+      "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-gate-response-r4.json",
+      "contentSha256": "8b1c1716b4fdb20adfb5d6f574a552b8371c9bb4229ea380ef4553a895987ea3",
+      "gateRevision": 1,
+      "response": "approve",
+      "effect": "authorize_provenance_promotion"
+    }
+  },
+  "identityVerification": {
+    "bindingAndArtifactByteHashes": "verified",
+    "gitBlobIdsForBindingDesignOwnershipQuestionsResearch": "verified",
+    "gateResponseByteHash": "verified",
+    "packageIdentity": "verified: RFC 8785 canonical JSON after removing the top-level packageSha256 digest field reproduces bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+    "packageIdentitySafetyRule": "Treat declaredPackageSha256 and verifiedByteSha256 as distinct mandatory checks and reproduce both before mutation."
+  },
+  "designAcceptanceScope": {
+    "workflowId": "BNasraoui/workflowd:workflowd-vs3.4",
+    "generation": 1,
+    "design": {
+      "revision": 4,
+      "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-discussion-configurable-stages-r4.md",
+      "blobSha": "9534cb55980aa72638a91b74816cfad04aaaedb8",
+      "contentSha256": "444b525f15e4d1065f7c91cf532b5f2a3d92bce5a7513d4f1c262ad635cbcf43"
+    },
+    "sources": [
+      {
+        "role": "questions",
+        "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/01-research-questions-configurable-stages.md",
+        "blobSha": "ec9ddbcbc6165087394066a2df9d6a80061ef38e",
+        "contentSha256": "4279e73b21aa25918639d3fbfed8574367d66023a69e6f3b53b60c28c3e24876"
+      },
+      {
+        "role": "research",
+        "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/02-research-configurable-stages.md",
+        "blobSha": "56fc1422df29da74bb81c8830eb46ba10c9f4ec4",
+        "contentSha256": "c88f48fbdb535bff05557a4007d77b0d2c25c25e0e893412f1a67490b6208701"
+      }
+    ],
+    "sourceSetSha256": "71674132945f9a0043fb230e696d6daacd12438b443600b7d8211e25c0eb599a",
+    "workflowDefinitionSha256": "6f7f7dcc51ce36973696247baecd645ba622a1e6ac05ca3d94d5ba6eb23da001",
+    "designPolicyRevision": "workflowd.design-acceptance@1",
+    "designPolicySha256": "30560f4776d78c0767d7a0e4f5ec71d780bc7cd0fc2edec92593e1945cbc5251",
+    "promotionPolicyRevision": "workflowd.provenance-promotion@1",
+    "promotionPolicySha256": "c49d6d0f646616efb87e13e1be4cb9f449e187796775d9f6476883584c466bbf",
+    "structurePolicyRevision": "workflowd.structure@1",
+    "structurePolicySha256": "d360ea62f9b7e1847c0da5b630af93fd28f98fb7f58e88d7b5f026be5922b85d"
+  },
+  "attribution": {
+    "workflow": "BNasraoui/workflowd:workflowd-vs3.4",
+    "generation": 1,
+    "designProducer": {
+      "sourceReference": "src-design",
+      "sessionReferenceExcludedAsOperationalState": true
+    },
+    "ownershipReviewer": {
+      "sourceReference": "src-ownership",
+      "sessionReferenceExcludedAsOperationalState": true
+    },
+    "impactReviewer": {
+      "sourceReference": "src-impact",
+      "sessionReferenceExcludedAsOperationalState": true
+    },
+    "synthesizer": {
+      "sourceReference": "src-synthesis",
+      "sessionReferenceExcludedAsOperationalState": true
+    },
+    "approvingHuman": {
+      "name": "Ben Nasraoui",
+      "identity": "nasraouiprojects@gmail.com",
+      "approvedAt": "2026-07-22T12:45:58Z",
+      "sourceReference": "src-gate"
+    },
+    "policyReferences": [
+      "workflowd.design-acceptance@1",
+      "workflowd.provenance-promotion@1",
+      "workflowd.structure@1"
+    ]
+  },
+  "selectionManifest": {
+    "idNamespace": "wvs34-d4-bac9e02e",
+    "idDerivation": "The namespace is the lowercase CLI-safe ticket abbreviation plus Design revision plus the first eight hex characters of the full declared package identity; requestId and identityInputs carry the full collision guard.",
+    "canonicalContentHashRule": "sha256 over RFC 8785 canonical JSON of the create object only",
+    "sourceIntents": [
+      {
+        "logicalId": "ticket",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-ticket",
+          "name": "workflowd-vs3.4 product authority",
+          "source-type": "project_artifact",
+          "reference": "beads:workflowd-vs3.4"
+        },
+        "canonicalContentSha256": "3d81d5f681ef2c09d5e8fd4f28d6e865e884a191f2f9e675950afd99e6414e2e",
+        "dependencies": [],
+        "sourceCitations": [
+          "workflowd-vs3.4"
+        ],
+        "attributionRefs": [
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "questions",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-questions",
+          "name": "Accepted Questions",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/01-research-questions-configurable-stages.md#blob=ec9ddbcbc6165087394066a2df9d6a80061ef38e&sha256=4279e73b21aa25918639d3fbfed8574367d66023a69e6f3b53b60c28c3e24876"
+        },
+        "canonicalContentSha256": "8db41765b6a2b5cf2ba291ea699539c2248d21bfefd2d93e717067e64afe15ca",
+        "dependencies": [],
+        "sourceCitations": [
+          "binding"
+        ],
+        "attributionRefs": [
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "research",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-research",
+          "name": "Accepted Research",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/02-research-configurable-stages.md#blob=56fc1422df29da74bb81c8830eb46ba10c9f4ec4&sha256=c88f48fbdb535bff05557a4007d77b0d2c25c25e0e893412f1a67490b6208701",
+          "commit-pin": "5bfec302fcb6e97e8bf1f399e561ea53881a6c6e"
+        },
+        "canonicalContentSha256": "9c5aa96249578a65d10dd7193862c06f823bd27cf33b7284ab6b0445661db4c9",
+        "dependencies": [],
+        "sourceCitations": [
+          "binding"
+        ],
+        "attributionRefs": [
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "design",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-design",
+          "name": "Accepted Design revision 4",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-discussion-configurable-stages-r4.md#blob=9534cb55980aa72638a91b74816cfad04aaaedb8&sha256=444b525f15e4d1065f7c91cf532b5f2a3d92bce5a7513d4f1c262ad635cbcf43"
+        },
+        "canonicalContentSha256": "b200a84ccde773146c4a493503164a40089a477ec5359ab0997b7918146a4bc0",
+        "dependencies": [],
+        "sourceCitations": [
+          "binding"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "binding",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-binding",
+          "name": "Design acceptance binding revision 4",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-binding-r4.json#blob=bb14801dc5d22ae1bee93ee63d08fcad50926672&sha256=092bd8990bb83c2aac19bea5962a1fc510c64215f38540501af32a8dcd4d8998"
+        },
+        "canonicalContentSha256": "5fe60bed252e81e22c705760424e3daa01c179eff86fd632cd15386a645476e4",
+        "dependencies": [],
+        "sourceCitations": [
+          "binding"
+        ],
+        "attributionRefs": [
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "ownership",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-ownership",
+          "name": "ScopeClean ownership report",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-boundary-review-configurable-stages-r4.md#blob=e2aa5eb4ef9ee68bbd6070472e9d84f051b02260&sha256=806f2f10b52d35c2e9d27dd920f4c50e19e949abf02e30c2e9cd44ac6eb8ecb5"
+        },
+        "canonicalContentSha256": "2237af67a14dce7540c951d54d40d2b11ac40550b0ded82d4fd823f5c3725479",
+        "dependencies": [],
+        "sourceCitations": [
+          "package"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "impact",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-impact",
+          "name": "NeedsRiskDecision impact report",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-impact-risk-review-configurable-stages-r4.md#sha256=67d3824798ef678aa89bd894f1890802490004d3967efdf09a9960ca251dcd94"
+        },
+        "canonicalContentSha256": "baa83f11360745d0b2363689a49ce8762130c1a920958ebed95db6d4c496fb7d",
+        "dependencies": [],
+        "sourceCitations": [
+          "package"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "synthesis",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-synthesis",
+          "name": "Design acceptance synthesis revision 4",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-synthesis-r4.md#sha256=4a8c94bd87d985f6d4df8a7bf65adc755cec2f71f757db3e60973550fc34b2c2"
+        },
+        "canonicalContentSha256": "963151b888847ae0cbdd97604a28e99c5b5b67d96b9794e2de6941f2c82af8db",
+        "dependencies": [],
+        "sourceCitations": [
+          "package"
+        ],
+        "attributionRefs": [
+          "synthesizer",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "package",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-package",
+          "name": "Design acceptance package revision 4",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-package-r4.json#declared-package-sha256=bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43&byte-sha256=ad7669acead06a37ffabdb9021741d137434c3ca8a82ab78c2e9426e51c89aa7"
+        },
+        "canonicalContentSha256": "4b22098cbb2b3c5077b518900e4b381378831fb79a19c0324dff39b525893fc3",
+        "dependencies": [],
+        "sourceCitations": [
+          "package"
+        ],
+        "attributionRefs": [
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "gate",
+        "kind": "source",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-src-gate",
+          "name": "Human approval gate response revision 4",
+          "source-type": "project_artifact",
+          "reference": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-gate-response-r4.json#sha256=8b1c1716b4fdb20adfb5d6f574a552b8371c9bb4229ea380ef4553a895987ea3"
+        },
+        "canonicalContentSha256": "168997d6887aa77b7ed025382a627660f50826422c6ff0ee4f97ce79fc0a359b",
+        "dependencies": [],
+        "sourceCitations": [
+          "gate"
+        ],
+        "attributionRefs": [
+          "approvingHuman",
+          "workflow"
+        ]
+      }
+    ],
+    "requirementIntents": [
+      {
+        "logicalId": "AC1",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac1",
+          "statement": "Validate the server-owned ordered WorkflowDefinition and every StageDefinition, contract reference, harness reference, policy, and hash before use.",
+          "description": "Ticket acceptance criterion 1; accepted Design coverage C1, C2, C24, C31.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "6a36703fee00deb855972506f68b5dccf82bd64ccddfd1e58b826644a1e7bf2a",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC2",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac2",
+          "statement": "Register Questions, Research, Design, Structure, Plan, and Implementation in deterministic order; an explicitly disabled stage creates no run.",
+          "description": "Ticket acceptance criterion 2; accepted Design coverage C3, C5, C15, C20-C23.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "7a353c5617525cd5427426718381afce69ed580e363ecebbaa09bcff20ee2406",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC3",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac3",
+          "statement": "Permit a built-in stage to be added through a contract and registration only, without a per-stage queue, worker, store family, Context tag, or central stage switch.",
+          "description": "Ticket acceptance criterion 3; accepted Design coverage C3, C4, C10, C30, C44.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "f5448b6a17a899d01b1e58b794260e1d08c265b4dc76509f461ffa5bdbcca52f",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC4",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac4",
+          "statement": "Use stable semantic type names and represent versions only as data.",
+          "description": "Ticket acceptance criterion 4; accepted Design coverage C1, C3, C6.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "d20ef4b667120a344da3113e623b2017e40a6ea089139d730093025deb112682",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC5",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac5",
+          "statement": "Reject unknown, duplicate, unavailable, or incompatible versions before claim and retain versions referenced by active work across restart.",
+          "description": "Ticket acceptance criterion 5; accepted Design coverage C2, C24, C29, C33-C36, C44.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "4bd61959452e1a60950df1feba68dc4295b916baf146d39f6285872948ae0029",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC6",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac6",
+          "statement": "Provide bounded Schema-decoded exact accepted source input while preserving ticket authority and technical-artifact precedence.",
+          "description": "Ticket acceptance criterion 6; accepted Design coverage C3, C7, C9, C44.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "ed8fb5e5ab5f37f61ec5bb8a470dafaa10efa5a799026e1370da7614a8f4c1bf",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC7",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac7",
+          "statement": "Execute through the selected AgentHarness without giving the harness authority to advance StageRun or publish Git state.",
+          "description": "Ticket acceptance criterion 7; accepted Design coverage C8, C10, C28.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "25a9b4382f5d3f1a541fa13f2cd04d3d978718d769ee48833b3808079dce6cf7",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC8",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac8",
+          "statement": "Publish signed exact-parent document artifacts with exact-old branch updates and authoritative duplicate or uncertain-effect recovery.",
+          "description": "Ticket acceptance criterion 8; accepted Design coverage C11-C14, C29, C41.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "66b4f6c47bcde8c491297202e2684442d93ee15623354bfcc23039aea11c5cff",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC9",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac9",
+          "statement": "Release successors from accepted revisions only and prevent stale Generation, revision, session, review, handoff, publication, promotion, or reentry outcomes from advancing work.",
+          "description": "Ticket acceptance criterion 9; accepted Design coverage C5-C7, C14-C17, C22-C25, C28-C29, C37.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "5dac35ae00d04c01580f999aa93748b55e9948c457b16d35a0226932637480b4",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC10",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac10",
+          "statement": "Create or update no pull request during QRSPI stage work.",
+          "description": "Ticket acceptance criterion 10; accepted Design coverage C11, C16, C31, C44-C45.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "25fdcb86c9662f5d961f7e76871f3a035d0906c9ad7cd80cf3a9c7a812946d2f",
+        "dependencies": [
+          "ticket",
+          "design"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "AC11",
+        "kind": "requirement",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-req-ac11",
+          "statement": "Prove registration, extension, skip, success, retry, restart, stale Generation, version recovery, uncertain publication, document revision, and implementation checkpoint handoff behavior.",
+          "description": "Ticket acceptance criterion 11; accepted Design coverage C41-C44 and impact verification V1-V11.",
+          "status": "active"
+        },
+        "canonicalContentSha256": "bdb03289a0b8390fd7d6ae30aeabb85c772437d84eef94318f7df5f3d8e227fd",
+        "dependencies": [
+          "ticket",
+          "design",
+          "impact",
+          "synthesis"
+        ],
+        "sourceCitations": [
+          "ticket",
+          "questions",
+          "research",
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      }
+    ],
+    "resolutionIntents": [
+      {
+        "logicalId": "D1",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d1",
+          "title": "Trusted definitions and catalog",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac1",
+          "position": "Use server-owned hashed definitions, trusted versioned contracts and harnesses, one validator, and one erased catalog seam.",
+          "rationale": "Reject unsafe, unknown, incompatible, or unavailable selections before claim without repository code execution or per-stage branches.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D1 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "79a087299981dbadb4b303758deaea8d60a086bbbf94edbee1b875b8a333dc5c",
+        "dependencies": [
+          "AC1"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D2",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d2",
+          "title": "Six exact typed stage contracts",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac2",
+          "position": "Use six distinct typed contracts with bounded immutable authority-ordered source sets and persisted exact request hashes.",
+          "rationale": "Preserve correct stage meaning, replay, and ticket authority.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D2 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "cbb86b8b5924361e025af33ba37eed5da9b0aa5733a198fae81d3c0e15a5e197",
+        "dependencies": [
+          "AC2",
+          "AC6"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D3",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d3",
+          "title": "Durable tagged runtime model",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Use strict tagged records and one generic operation lifecycle for leases, state, revision pointers, diagnostics, currentness, and restart.",
+          "rationale": "Provide durable progression without stale or malformed advancement.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D3 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "5b34dd79ed0d177e9660a3b8f09a5d96c943c6eebee9432ada226e0d8c50fd07",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D4",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d4",
+          "title": "Linear production and custody handoff",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac7",
+          "position": "Use linear initialization, session checkpoints, attempt workspaces, result validation, atomic custody transfer, and cleanup fencing.",
+          "rationale": "Keep agent execution safe and recoverable while denying the harness publication authority.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D4 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "d9449ff306dc555f985b9aefbbb250dd2a20cedea422d9e645c4a50d9023b95d",
+        "dependencies": [
+          "AC7",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D5",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d5",
+          "title": "Exact artifact publication",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "position": "Verify exact scope, tree, and content; create one signed sole-parent commit; persist intent; update exact-old fast-forward-only; observe authoritatively.",
+          "rationale": "Protect immutable canonical artifacts from duplicate or unauthorized Git effects.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D5 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "a25edd0618beb86ef5b7048b58d9eb4009f796c3fa0b725541dae5e6e93d066d",
+        "dependencies": [
+          "AC8",
+          "AC10"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D6",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d6",
+          "title": "Publication-scoped reconciliation",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "position": "Route publication conflicts, stale effects, rollback, and ambiguous observations to one durable read-only reconciliation with exact typed resolutions.",
+          "rationale": "Reconcile external Git truth without stale parent advance or destructive mutation.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D6 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "a7732349d61fdea0e17724c4a88e63bc43403e9e7564fa281e1bdf064b00d857",
+        "dependencies": [
+          "AC8",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D7",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d7",
+          "title": "Accepted-only progression",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Use accepted-only linear progression, distinct document and implementation shapes, observed contiguous commits, monotonic replacement revisions, and no stage pull request.",
+          "rationale": "Provide deterministic stage completion and checkpoint handoff.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D7 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "4685c3bd027c6db0bf9792299ad179f9a7a0be9e65e8d4461da08c9955daace7",
+        "dependencies": [
+          "AC2",
+          "AC9",
+          "AC10"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D8",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d8",
+          "title": "Mandatory owner handoffs",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Validate required owner capabilities before exposure and persist exact idempotent local receipts that recover on the same identity.",
+          "rationale": "Provide available duplicate-safe cross-owner delivery without taking owner lifecycles.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D8 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "2e752d202f4a73e2e6f9fb3073add62bc49a6129be8d0ed07477c2beab21f713",
+        "dependencies": [
+          "AC1",
+          "AC5",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D9",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d9",
+          "title": "Exact Design owner effects",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Apply only exact typed owner results; require confirmed Provenance result and snapshot before Structure; accept reentry selection only from workflowd-vs3.14.",
+          "rationale": "Preserve specialist ownership and prevent stale or incomplete Design advancement.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D9 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "d0a0b61403910057d798ba397af127bcd0aa48c0a586ace5e033ed3103eb2b3f",
+        "dependencies": [
+          "AC2",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D10",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d10",
+          "title": "Single runtime composition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac3",
+          "position": "Add one catalog, store, service, publisher, and loop; fail only QRSPI closed; retain local diagnostics without a status or readiness product.",
+          "rationale": "Deploy the stage runtime without coupling unrelated service or taking operational-status ownership.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D10 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "6134124094ced00157a7804e039b1113db1a0c4e19c86dfe0527be7b90b19eaf",
+        "dependencies": [
+          "AC1",
+          "AC3"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D11",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d11",
+          "title": "Legacy migration and offline recovery",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "position": "Preserve legacy rows, never infer facts, and require preflight manifest, verified backup, append-only apply or rollback, exact offline supersession, verification, then ordinary successor kickoff.",
+          "rationale": "Upgrade safely from shipped but unexecutable legacy child rows.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D11 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "8dc7d57687e4b026dd1d40182d0e8242e7b744d4893c18e9edb8be14bdda4240",
+        "dependencies": [
+          "AC5",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D12",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d12",
+          "title": "Lowest-boundary behavioral verification",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "position": "Use real SQLite and Git plus fault injection to prove reconciliation, diagnostics, owner availability and recovery, upgrade recovery, and the full stage matrix.",
+          "rationale": "Produce observable evidence at the lowest reliable boundaries.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D12 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "cfc82d14a98744fbc9c7312266a1f536c6ff761b94972b2426a32d3ef8df07c1",
+        "dependencies": [
+          "AC11"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "D13",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-d13",
+          "title": "No aggregate capacity subsystem",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Retain v1 audit records and nonterminal custody with individual bounds, but add no aggregate capacity policy, status, recovery, deletion, or invented owner.",
+          "rationale": "Preserve audit and recovery semantics without adding work outside ticket authority; R9 remains accepted residual risk.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-design",
+          "made-by": "Design producer via accepted Design revision 4",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "D13 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "f5f5d80d795c0aa404a4e8dd79f24d1922cba24f2baecafbf391b159d3361929",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "designProducer",
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O1",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o1",
+          "title": "workflowd-vs3.1 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac1",
+          "position": "workflowd-vs3.1 supplies the merged normative contract and owns no implementation lifecycle.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O1 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "186dddf517b6f7ea5170e54b830370706cb9678fa4e776723750342d93a4c800",
+        "dependencies": [
+          "AC1"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O2",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o2",
+          "title": "workflowd-vs3.2 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac7",
+          "position": "workflowd-vs3.2 supplies reusable trusted harness and session mechanics, not StageRun, catalog, or publication ownership.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O2 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "c60b1483fb47cfce3d33adf540628a64ab791657763e0af801436437a309d82b",
+        "dependencies": [
+          "AC7"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O3",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o3",
+          "title": "workflowd-vs3.3 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "position": "workflowd-vs3.3 owns ticket ingress, branch establishment, WorkflowStart, Generation kickoff, and ordinary successor kickoff.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O3 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "4a7e77b6f75001e9cc5ca8f629377a013fed3da3b3d2a349cb9fcaf96493ac4d",
+        "dependencies": [
+          "AC5",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O4",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o4",
+          "title": "workflowd-vs3.4 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-vs3.4 owns the catalog-aware linear runtime, StageRun and revisions, publication and reconciliation, local handoffs, Design state effects, deterministic promotion request, and next-stage release.",
+          "rationale": "Accepted Design authority assignment; neighboring lifecycles remain excluded.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O4 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "50630be9f84c43dc0e8942d28e5a575078cf04ca8e2022c160d47656c11b66d3",
+        "dependencies": [
+          "AC1",
+          "AC2",
+          "AC3",
+          "AC4",
+          "AC5",
+          "AC6",
+          "AC7",
+          "AC8",
+          "AC9",
+          "AC10",
+          "AC11"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O5",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o5",
+          "title": "workflowd-vs3.5 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-vs3.5 owns review contributions, Design ownership and impact review, synthesis, budgets, and revision verdicts.",
+          "rationale": "workflowd-vs3.4 supplies and consumes exact immutable handoffs only.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O5 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "1d304e453b0dcc8b94e230f3dfb334046d8ea90c21921eed2ba3941517361d37",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O6",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o6",
+          "title": "workflowd-vs3.6 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-vs3.6 owns durable gates, gate revisions, authenticated responses, Plannotator, and action delivery.",
+          "rationale": "workflowd-vs3.4 applies only an exact typed response effect.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O6 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "93c2ab281b1e13b208eb8a7126458b854977e711cb9e02d7d3bed9223dae5e7a",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O7",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o7",
+          "title": "workflowd-vs3.7 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac7",
+          "position": "workflowd-vs3.7 owns session-link presentation and retention policy; session identity here is execution and currentness data only.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O7 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "1eada74cfcfad373c3b4b1d7b652030cf2f9744863aa8ecda0c6dc597d79b0ae",
+        "dependencies": [
+          "AC7"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O8",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o8",
+          "title": "workflowd-vs3.8 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "position": "workflowd-vs3.8 owns private artifact presentation; workflowd-vs3.4 creates immutable references but serves no content.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O8 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "3ff97ce78742413462fad44882e79f49e1cbb39e26325e723f644db5879df2f4",
+        "dependencies": [
+          "AC8"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O9",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o9",
+          "title": "workflowd-vs3.9 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-vs3.9 exclusively owns Provenance mutation, retry, authoritative observation, conflict handling, validation, and graph snapshots.",
+          "rationale": "workflowd-vs3.4 builds one deterministic request and consumes one confirmed result.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O9 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "1f30d21f8a6ef626b2f3bad2b766f65a2b34fb4697c3633174fec80768247b9c",
+        "dependencies": [
+          "AC2",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O10",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o10",
+          "title": "workflowd-vs3.14 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-vs3.14 owns specialized Design route policy, sequencing, semantic classification, closure, affected-output selection, and reentry triggering.",
+          "rationale": "workflowd-vs3.4 validates route outputs and applies exact local stage-state effects.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O10 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "bd51fa8dc0c3e10c258dde7b1e12b965f49f5159a2b6fc5e6fa7415fbaec11ba",
+        "dependencies": [
+          "AC2",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "O11",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-o11",
+          "title": "workflowd-3d8 ownership boundary",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "workflowd-3d8 owns operational-status aggregation, presentation, readiness, and safe retry workflow, but not capacity policy or QRSPI runtime lifecycles.",
+          "rationale": "Accepted Design authority assignment.",
+          "status": "approved",
+          "input-type": "source_material",
+          "input-reference": "wvs34-d4-bac9e02e-src-ownership",
+          "made-by": "Ownership reviewer via ScopeClean report",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "O11 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "9f53486ab6c37c095e6aa352fef6003cda2e8c6780524c72029a7985b053243b",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "ownership",
+          "impact",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "impactReviewer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R1",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r1",
+          "title": "Residual risk R1 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac1",
+          "position": "NonMaterial under C1.",
+          "rationale": "Fail-closed QRSPI configuration error only; C1 and V1 are mandatory conditions of this disposition.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R1 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "74a68c7c0a0a9330527285fd196b51d3ce7f8d6e44450044f77c64a6d86881a1",
+        "dependencies": [
+          "AC1"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R2",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r2",
+          "title": "Residual risk R2 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac6",
+          "position": "NonMaterial under C2, C3, and C4.",
+          "rationale": "Malformed data is blocked or replaced before canonical use; V2 and V3 remain mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R2 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "027609432123942d03778bd69fec4b67aa3cc5ad319436397475ae535a98f753",
+        "dependencies": [
+          "AC6"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R3",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r3",
+          "title": "Residual risk R3 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "NonMaterial under C3, C4, and C5.",
+          "rationale": "Stale attempts remain audit and exact work recovers; V3 remains mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R3 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "6d43f511f3861f561838f5de17e90fe9bd7ff61130224f21cf2048a4c86d8623",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R4",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r4",
+          "title": "Residual risk R4 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "position": "NonMaterial under C6, C7, and C8.",
+          "rationale": "Exact-old and preflight failures do not advance; V4 remains mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R4 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "2a2ee490e144a5aa3cf49efbd27bafff52c96bb6cc6e0f08955e65a111c05d6c",
+        "dependencies": [
+          "AC8"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R5",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r5",
+          "title": "Residual risk R5 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "position": "NonMaterial under C7, C8, and C9.",
+          "rationale": "An unresolved conflict can park one Generation but cannot erase external work or advance stale state; V4 and V5 remain mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R5 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "840c1b3074e5714a5fdd39173d00d596c51e992e70860ada02c06613d31431ae",
+        "dependencies": [
+          "AC8",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R6",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r6",
+          "title": "Residual risk R6 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "NonMaterial under C10, C11, C12, and C13.",
+          "rationale": "An owner outage can park one boundary while unrelated service continues; V6 and V7 remain mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R6 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "e383f4cf3c84084eb7cd5607fc5a5f99fea9cb903d43a799926c24a045000f47",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R7",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r7",
+          "title": "Residual risk R7 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "NonMaterial under C4, C12, and C14.",
+          "rationale": "Stale or mismatched owner results remain blocked; V11 remains mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R7 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "5889aae11872812e10059bb77552f40358f38d6cee4888209a649272a198e6c4",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R8",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r8",
+          "title": "Residual risk R8 disposition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "position": "NonMaterial under C15, C16, and C17.",
+          "rationale": "A failed or unsupported upgrade preserves the prior database and blocks the affected workflow; V8 and V9 remain mandatory.",
+          "status": "approved",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-impact",
+          "made-by": "Impact reviewer and synthesizer",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000,
+          "input-summary": "R8 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+        },
+        "canonicalContentSha256": "6529ee83e830933ab46a250186f954c78c5b7988a0584384bfc92bae948c3aa9",
+        "dependencies": [
+          "AC5",
+          "AC9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "R9",
+        "kind": "resolution",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-res-r9",
+          "title": "Residual risk R9 accepted with follow-up",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "position": "Accept the exact finite-volume cumulative SQLite and workspace exhaustion exposure for Design revision 4 without an aggregate capacity control.",
+          "rationale": "Aggregate durable-storage capacity management is outside workflowd-vs3.4. Track prevention, detection, containment, and recovery separately in workflowd-8bg; C18 remains required and is not an aggregate-capacity control.",
+          "status": "approved",
+          "context": "Human-selected option A; rating Significant (4) x AlmostCertain (5) = 20 / Critical for sustained unbounded use on a finite shared volume.",
+          "enforcement": "Carry accepted residual risk, conditions, accountable human, and follow-up workflowd-8bg without rewriting the risk as resolved.",
+          "input-type": "technical",
+          "input-reference": "wvs34-d4-bac9e02e-src-gate",
+          "input-summary": "R9 accepted from Design revision 4 package bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+          "made-by": "Impact reviewer and synthesizer; final disposition by accountable human",
+          "approved-by": "Ben Nasraoui <nasraouiprojects@gmail.com>",
+          "approved-at": 1784724358000
+        },
+        "canonicalContentSha256": "69b48980c9affccd7575be91928fd6a604f7878180998734daeb7f71eb59ca7d",
+        "dependencies": [
+          "AC9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "synthesis",
+          "package",
+          "gate",
+          "workflowd-8bg"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      }
+    ],
+    "ruleIntents": [
+      {
+        "logicalId": "C1",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c1",
+          "rule-code": "C1",
+          "name": "Validate complete activation inputs",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac1",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d1",
+          "statement": "Resolve and validate complete definitions, contracts, harnesses, policies, availability, hashes, paths, bounds, and retained active versions at every activation and restart boundary; fail QRSPI closed before claim with exact error.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C1"
+        },
+        "canonicalContentSha256": "c481f42a6b8953b7622657e05ead077b88413fe478dc32859c276763c0f61f96",
+        "dependencies": [
+          "D1",
+          "R1"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C2",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c2",
+          "rule-code": "C2",
+          "name": "Bound exact semantic inputs",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac6",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d2",
+          "statement": "Decode and bound exact immutable source, request, and result bytes at the selected contract, preserve authority order, and reject hash, duplicate, or path mismatch before persistence or publication.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C2"
+        },
+        "canonicalContentSha256": "4beafd4644fdc57bddbc8f5c7a1a8ece6d6f1bfc34e47940c23ebf991c60650d",
+        "dependencies": [
+          "D2",
+          "R2"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C3",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c3",
+          "rule-code": "C3",
+          "name": "Fence harness execution",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac7",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d4",
+          "statement": "Keep the trusted harness limited to task and session work; persist launch before create and session before prompt; bind attempt workspace and output to exact lease and session identity.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C3"
+        },
+        "canonicalContentSha256": "aac81af89959563cb4a31c06b0863b3abcaa4f80d0216e0c53176e9317f3720c",
+        "dependencies": [
+          "D4",
+          "R2",
+          "R3"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C4",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c4",
+          "rule-code": "C4",
+          "name": "Guard every transition",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d3",
+          "statement": "Guard every durable transition and external intent by exact Generation, run, revision, operation, attempt, session, and handoff identities; quarantine data errors and preserve stale audit.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C4"
+        },
+        "canonicalContentSha256": "f2c58bc65a89e978842b037f693ff42bd28a9b4dad47c3d3353e10d3e473c218",
+        "dependencies": [
+          "D3",
+          "R2",
+          "R3",
+          "R7"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C5",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c5",
+          "rule-code": "C5",
+          "name": "Fence cleanup and custody",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d4",
+          "statement": "Fence cleanup and workspace custody; permit no replacement while cleanup is unconfirmed and no deletion while publication or effect is nonterminal or uncertain.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "prohibition",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C5"
+        },
+        "canonicalContentSha256": "4c570b308b0aa4a8af2052ed68eafee67aee3651b38e28902222ccd15e81b889",
+        "dependencies": [
+          "D4",
+          "R3"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C6",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c6",
+          "rule-code": "C6",
+          "name": "Verify exact publication candidate",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d5",
+          "statement": "Verify custody, scope, diff, path, content, parent, signature and trailers, and one final SHA, then use exact-old fast-forward-only mutation.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C6"
+        },
+        "canonicalContentSha256": "aee563262e4aeb28ef380a2d67cddd53291fcca4798f264fe0b7e2ae9ca9cf93",
+        "dependencies": [
+          "D5",
+          "R4"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C7",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c7",
+          "rule-code": "C7",
+          "name": "Observe publication authoritatively",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d5",
+          "statement": "Persist intent before mutation and authoritatively observe remote ref, parent, signature, trailers, attribution, blob, and content before completion; observe an unknown effect before retry.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C7"
+        },
+        "canonicalContentSha256": "1e576fd9eaeb471111890480c1e709760a760c1ef5da73c7696cf360f7bee072",
+        "dependencies": [
+          "D5",
+          "D6",
+          "R4",
+          "R5"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C8",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c8",
+          "rule-code": "C8",
+          "name": "Reconcile without destructive mutation",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d6",
+          "statement": "Atomically create one publication-scoped TargetReconcile, save parent state, make publication unclaimable, and permit only read-only observation and exact typed resolution.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C8"
+        },
+        "canonicalContentSha256": "c768ae90e0adb2a1a9a255cc47066e76cd59f38a7f5b8eb6f0fa0083bd493561",
+        "dependencies": [
+          "D6",
+          "R4",
+          "R5"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C9",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c9",
+          "rule-code": "C9",
+          "name": "Retain reconciliation evidence",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac8",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d6",
+          "statement": "Retain complete directly queryable reconciliation identity, observations, error, allowed actions, and terminal resolution exactly once across restart.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C9"
+        },
+        "canonicalContentSha256": "4fa249ce508f43845e19f48b4569fbae3c29fddc624646e9285cdb01ef2d589a",
+        "dependencies": [
+          "D6",
+          "R5"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C10",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c10",
+          "rule-code": "C10",
+          "name": "Validate mandatory owner capabilities",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac1",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d8",
+          "statement": "Derive mandatory owner references and validate registrations and availability before ingress, each activation, and new effects while unrelated service remains available.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C10"
+        },
+        "canonicalContentSha256": "aa7e03774aab0f674ff132419617b6c03083862931d4d6772d055e974d283e1a",
+        "dependencies": [
+          "D8",
+          "R6"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C11",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c11",
+          "rule-code": "C11",
+          "name": "Recover the same handoff",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d8",
+          "statement": "Persist exact handoff diagnostics and observe or resubmit the same deterministic local receipt after failure, restart, and restoration; duplicates return the same result and mismatches remain blocked.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C11"
+        },
+        "canonicalContentSha256": "9f5e73bec985a3de6161c6f4976efccd4c83d8ce6ec6bfc79f669bab1d74be19",
+        "dependencies": [
+          "D8",
+          "R6",
+          "R7"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C12",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c12",
+          "rule-code": "C12",
+          "name": "Accept exact owner results only",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d9",
+          "statement": "Accept only exact typed owner results bound to current scope, package, policy, and request; approval alone and partial or uncertain results cannot release Structure.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "necessity",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C12"
+        },
+        "canonicalContentSha256": "f20058e574d49c7ff3c7386a059bb1ec2aa1515e3d3e8296943b9bcb3d87df8c",
+        "dependencies": [
+          "D9",
+          "R6",
+          "R7"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C13",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c13",
+          "rule-code": "C13",
+          "name": "Require owner-side exact lifecycle",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d8",
+          "statement": "The selected named downstream owner must implement an idempotent owner-side lifecycle and exact result production behind the registered capability before its path is exposed.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "necessity",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C13"
+        },
+        "canonicalContentSha256": "264a2440ceca40ae4b487bd7e9173ed4b273c5f99edd085958e10ecbb5e0eaf3",
+        "dependencies": [
+          "D8",
+          "O5",
+          "O6",
+          "O9",
+          "O10",
+          "R6"
+        ],
+        "sourceCitations": [
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C14",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c14",
+          "rule-code": "C14",
+          "name": "Pin Design and reentry identities",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d9",
+          "statement": "Pin all Design, promotion, and Structure identities; require the exact workflowd-vs3.9 result and snapshot for release; accept bounded workflowd-vs3.14 reentry and apply only named local effects idempotently.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C14"
+        },
+        "canonicalContentSha256": "355d456b156cb5b41642712ff27d07d467900104d092f4146d6344eea9fd2132",
+        "dependencies": [
+          "D9",
+          "O9",
+          "O10",
+          "R7"
+        ],
+        "sourceCitations": [
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C15",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c15",
+          "rule-code": "C15",
+          "name": "Classify legacy state before writes",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d11",
+          "statement": "Before normal startup writes, take a read-only snapshot and classify every current Generation and nonterminal operation into a canonical bounded manifest with exact diagnostics and actions.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C15"
+        },
+        "canonicalContentSha256": "e9f937e933d065c12c4b17d153e8d8d77741ff9b079203d46749c29ab6d4e2b7",
+        "dependencies": [
+          "D11",
+          "R8"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C16",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c16",
+          "rule-code": "C16",
+          "name": "Back up and apply append-only",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d11",
+          "statement": "Verify unchanged manifest and database, fsync and verify same-filesystem database, WAL, and SHM backup, apply append-only schema transactionally, and prove rollback or restore and verify backup.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C16"
+        },
+        "canonicalContentSha256": "de4bac290b466caecb04d3216d74ec88b08323dc5bce1b234f976e855a188518",
+        "dependencies": [
+          "D11",
+          "R8"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C17",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c17",
+          "rule-code": "C17",
+          "name": "Supersede exact no-effect legacy work",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac5",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d11",
+          "statement": "Resolve only exact no-effect legacy Generation through idempotent offline supersession, verify the result, and use ordinary authenticated WorkflowStart for the successor.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C17"
+        },
+        "canonicalContentSha256": "6e1dafdfc98fed288c287180f9ff4990b2f83584ef8f3f92d3433314a5dc9425",
+        "dependencies": [
+          "D11",
+          "O3",
+          "R8"
+        ],
+        "sourceCitations": [
+          "ownership",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "ownershipReviewer",
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "C18",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-c18",
+          "rule-code": "C18",
+          "name": "Bound individual items without capacity claim",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac9",
+          "resolution-id": "wvs34-d4-bac9e02e-res-r9",
+          "statement": "Enforce every configured and global payload and diff bound and release only workspace custody proven terminal or superseded; do not represent these as aggregate-capacity control.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved Design synthesis",
+          "source-document": "wvs34-d4-bac9e02e-src-synthesis",
+          "source-section": "Ordered Control Obligations C18"
+        },
+        "canonicalContentSha256": "9f32694e686fc0d506a0e77a76a1cf053ef9afc021d30d347eeb60a6c1da1ed5",
+        "dependencies": [
+          "D13",
+          "R9"
+        ],
+        "sourceCitations": [
+          "design",
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V1",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v1",
+          "rule-code": "V1",
+          "name": "Verify activation validation",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove complete config, catalog, and handoff validation prevents claim at the Layer and activation boundary.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V1"
+        },
+        "canonicalContentSha256": "4fa9361b6882663f923bbf1fe427c6651650b9233861342ffba0e002d9a1467d",
+        "dependencies": [
+          "C1"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V2",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v2",
+          "rule-code": "V2",
+          "name": "Verify exact bounded data",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove exact source and result Schemas, hashes, bounds, order, and authority survive persistence and retry.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V2"
+        },
+        "canonicalContentSha256": "2b5740793d0125e64a132c0ba98bd69c311d6e8b448adbca625cbaa8d1797a08",
+        "dependencies": [
+          "C2"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V3",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v3",
+          "rule-code": "V3",
+          "name": "Verify attempt and custody fencing",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove session and workspace output transfer custody only under the exact current attempt and cleanup fence.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V3"
+        },
+        "canonicalContentSha256": "45214f088eaea551c6d3c6d02b094d64b243426bbd2a7edab9753fa629e207f7",
+        "dependencies": [
+          "C3",
+          "C4",
+          "C5"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V4",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v4",
+          "rule-code": "V4",
+          "name": "Verify exact Git reconciliation",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove publication and reconciliation preserve exact Git truth across every mutation, transaction, and restart window.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V4"
+        },
+        "canonicalContentSha256": "b00d72b0af652f991885bf4c5c71c105e698e5f0faa4c03d36141891bc0107c9",
+        "dependencies": [
+          "C6",
+          "C7",
+          "C8"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V5",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v5",
+          "rule-code": "V5",
+          "name": "Verify direct reconciliation recovery",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove reconciliation remains directly recoverable without a status product.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V5"
+        },
+        "canonicalContentSha256": "f134f16fbb83c73576a3acaa7fbf034c04819e8bdb2acd6c962f637d10546a59",
+        "dependencies": [
+          "C9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V6",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v6",
+          "rule-code": "V6",
+          "name": "Verify capability availability",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove mandatory owner capability exists before any configured crossing can create an effect.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V6"
+        },
+        "canonicalContentSha256": "ff4e4511561c9b510c9fc239ae71329c9245bc11787aceaa4b1c860649f9c11d",
+        "dependencies": [
+          "C10"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V7",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v7",
+          "rule-code": "V7",
+          "name": "Verify same-handoff recovery",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove an unavailable owner crossing recovers through one exact handoff and owner lifecycle.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V7"
+        },
+        "canonicalContentSha256": "c2f58d98442e0ff257820035d3d5f945b33a66f5dbd2d3247a7128c36bfd5447",
+        "dependencies": [
+          "C11",
+          "C13"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V8",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v8",
+          "rule-code": "V8",
+          "name": "Verify upgrade safety",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove upgrade classifies before writes, never converts or invents legacy state, and restores or proves the prior database on failure.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V8"
+        },
+        "canonicalContentSha256": "88941938a81c67d5d1acc6f291563f65a17651df161199fa6f9961d3b9e8d5c1",
+        "dependencies": [
+          "C15",
+          "C16"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V9",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v9",
+          "rule-code": "V9",
+          "name": "Verify exact legacy retirement",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove shipped recovery retires only exact dormant legacy work and creates a successor only through ordinary ingress.",
+          "status": "active",
+          "severity": "high",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V9"
+        },
+        "canonicalContentSha256": "6b7a3777d83fbef815f8d362c20325318e7b46c3ed7bfa21cb4b9e9cbd4923c4",
+        "dependencies": [
+          "C17"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V10",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v10",
+          "rule-code": "V10",
+          "name": "Verify individual bounds without capacity claim",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove individual bounds and custody rules work while making no aggregate-capacity guarantee.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V10"
+        },
+        "canonicalContentSha256": "df8d01cd32e7d1dabf9b69605cea08196664373f11034983608f71b3b710bf7a",
+        "dependencies": [
+          "C18",
+          "R9"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      },
+      {
+        "logicalId": "V11",
+        "kind": "rule",
+        "create": {
+          "scope": "workflowd-vs3-4",
+          "id": "wvs34-d4-bac9e02e-rule-v11",
+          "rule-code": "V11",
+          "name": "Verify exact Design progression identities",
+          "requirement-id": "wvs34-d4-bac9e02e-req-ac11",
+          "resolution-id": "wvs34-d4-bac9e02e-res-d12",
+          "statement": "Prove only exact current package, response, promotion, snapshot, and directive identities can alter Design progression or reentry.",
+          "status": "active",
+          "severity": "critical",
+          "rule-type": "technical",
+          "modality": "obligation",
+          "extraction-method": "human-approved impact verification plan",
+          "source-document": "wvs34-d4-bac9e02e-src-impact",
+          "source-section": "Verification Plan V11"
+        },
+        "canonicalContentSha256": "c951be48cdf75c721e7b7a5c1dad3cd5188201a96f9579a5f734513a3aebbf8c",
+        "dependencies": [
+          "C4",
+          "C12",
+          "C14"
+        ],
+        "sourceCitations": [
+          "impact",
+          "synthesis",
+          "package",
+          "gate"
+        ],
+        "attributionRefs": [
+          "impactReviewer",
+          "synthesizer",
+          "approvingHuman",
+          "workflow"
+        ]
+      }
+    ],
+    "edgeIntents": [
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac1",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac1",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac1",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac2",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac3",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac6",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac7",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac7",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac7",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-d9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-o9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "needs",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "resolution",
+        "to-id": "wvs34-d4-bac9e02e-res-r9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac1",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac1",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c15"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c16"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c17"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac7",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c18"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "requirement",
+        "from-id": "wvs34-d4-bac9e02e-req-ac9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d1",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c15"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c16"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d11",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c17"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-v9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d2",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d3",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o10",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o10",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o2",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o3",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c17"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c15"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c16"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c17"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c18"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r1",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r2",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r2",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r2",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r3",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r3",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r3",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r4",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r5",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r6",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c13"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r7",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c12"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r7",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c14"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r7",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c15"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c16"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r8",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c17"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "produces",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r9",
+        "to-type": "rule",
+        "to-id": "wvs34-d4-bac9e02e-rule-c18"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-binding",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-design",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-gate",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-impact",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ownership",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-package",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-questions",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-research",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-synthesis",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac10"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac4"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "references",
+        "from-type": "source",
+        "from-id": "wvs34-d4-bac9e02e-src-ticket",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d1",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d10",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac3"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d11",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d12",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac11"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d13",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d2",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac2"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d3",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d4",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d5",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d6",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d7",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d8",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-d9",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o1",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o10",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o11",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o2",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o3",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o4",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o5",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o6",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o7",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac7"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o8",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-o9",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r1",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac1"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r2",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac6"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r3",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r4",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r5",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac8"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r6",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r7",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r8",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac5"
+      },
+      {
+        "scope": "workflowd-vs3-4",
+        "type": "resolves",
+        "from-type": "resolution",
+        "from-id": "wvs34-d4-bac9e02e-res-r9",
+        "to-type": "requirement",
+        "to-id": "wvs34-d4-bac9e02e-req-ac9"
+      }
+    ],
+    "edgeGeneration": {
+      "orderedAlgorithm": [
+        "Materialize the 220 explicitly selected semantic edges from revision 1: 110 source-to-requirement references edges, 33 requirement-to-resolution needs edges, and 77 resolution-to-rule produces edges.",
+        "For each resolution intent in manifest order, account for the CLI edge deterministically generated by create.requirement-id: one resolves edge from that resolution id to its requirement id (33 total).",
+        "For each rule intent in manifest order, account for the CLI edge deterministically generated by create.requirement-id: one produces edge from that requirement id to the rule id (29 total). The create.resolution-id edge is already among the 77 selected resolution-to-rule produces edges.",
+        "Sort the complete set by the ordinal tuple (scope, type, from-type, from-id, to-type, to-id)."
+      ],
+      "deterministicSortKey": [
+        "scope",
+        "type",
+        "from-type",
+        "from-id",
+        "to-type",
+        "to-id"
+      ],
+      "materializationRequirement": "edgeIntents is the fully materialized, authoritative 282-edge selection and must equal the authoritative observed export by edge key; the algorithm is retained only as an audit check.",
+      "cliGeneratedEdgeDisclosure": "The supported resolution create --requirement-id and rule create --requirement-id options automatically materialize edges. Those 62 edges are explicit selection intents here; they are not hidden side effects."
+    }
+  },
+  "exclusions": [
+    {
+      "type": "complete_artifact_prose",
+      "items": [
+        "Questions body",
+        "Research body",
+        "Design body",
+        "ownership report body",
+        "impact report body",
+        "synthesis body",
+        "acceptance package body",
+        "gate response body"
+      ],
+      "reason": "Git remains canonical; Provenance receives immutable source references and selected attributable meaning only."
+    },
+    {
+      "type": "transcript",
+      "items": [
+        "producer conversation",
+        "reviewer conversations",
+        "synthesis conversation",
+        "human interaction transcript"
+      ],
+      "reason": "Transcripts are not approved semantic authority and are outside Provenance ownership."
+    },
+    {
+      "type": "operational_state",
+      "items": [
+        "leases",
+        "lease tokens",
+        "attempts",
+        "retries",
+        "operation state",
+        "handoff delivery state",
+        "gate lifecycle state",
+        "review lifecycle state",
+        "currentness cursors"
+      ],
+      "reason": "Workflowd owns operational state; it does not authorize implementation meaning."
+    },
+    {
+      "type": "session_reference",
+      "items": [
+        "producer session",
+        "ownership reviewer session",
+        "impact reviewer session",
+        "synthesis session"
+      ],
+      "reason": "Sessions support runtime attribution but are operational state; source references preserve role attribution without copying session state."
+    },
+    {
+      "type": "informational_non_authority",
+      "items": [
+        "research methodology",
+        "source inventories",
+        "line-by-line affected-surface evidence",
+        "excluded speculation",
+        "alternatives rejected",
+        "human summaries"
+      ],
+      "reason": "These items provide context or evidence but do not independently authorize work; selected requirements, resolutions, controls, and verification rules retain their attributable semantic effect."
+    },
+    {
+      "type": "outside_ticket_work",
+      "items": [
+        "aggregate capacity policy",
+        "operational status product",
+        "artifact presentation",
+        "session presentation",
+        "review lifecycle",
+        "gate lifecycle",
+        "Provenance lifecycle",
+        "Structure or Plan decomposition",
+        "implementation",
+        "final verification and pull-request publication"
+      ],
+      "reason": "Accepted ownership boundaries assign these elsewhere or exclude them; R9 follow-up is referenced as workflowd-8bg rather than promoted as current-ticket implementation authority."
+    }
+  ],
+  "selectionCompleteness": {
+    "ticketAcceptanceRequirements": {
+      "expected": 11,
+      "selectedLogicalIds": [
+        "AC1",
+        "AC2",
+        "AC3",
+        "AC4",
+        "AC5",
+        "AC6",
+        "AC7",
+        "AC8",
+        "AC9",
+        "AC10",
+        "AC11"
+      ],
+      "excluded": []
+    },
+    "designDecisions": {
+      "expected": 13,
+      "selectedLogicalIds": [
+        "D1",
+        "D2",
+        "D3",
+        "D4",
+        "D5",
+        "D6",
+        "D7",
+        "D8",
+        "D9",
+        "D10",
+        "D11",
+        "D12",
+        "D13"
+      ],
+      "excluded": []
+    },
+    "ownershipAssignments": {
+      "expected": 11,
+      "selectedLogicalIds": [
+        "O1",
+        "O2",
+        "O3",
+        "O4",
+        "O5",
+        "O6",
+        "O7",
+        "O8",
+        "O9",
+        "O10",
+        "O11"
+      ],
+      "excluded": []
+    },
+    "controlObligations": {
+      "expected": 18,
+      "selectedLogicalIds": [
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "C10",
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15",
+        "C16",
+        "C17",
+        "C18"
+      ],
+      "excluded": []
+    },
+    "verificationObligations": {
+      "expected": 11,
+      "selectedLogicalIds": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6",
+        "V7",
+        "V8",
+        "V9",
+        "V10",
+        "V11"
+      ],
+      "excluded": []
+    },
+    "residualRiskDispositions": {
+      "expected": 9,
+      "selectedLogicalIds": [
+        "R1",
+        "R2",
+        "R3",
+        "R4",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+        "R9"
+      ],
+      "excluded": [],
+      "r9FollowUp": "workflowd-8bg"
+    },
+    "sourceReferences": {
+      "expected": 10,
+      "selectedLogicalIds": [
+        "ticket",
+        "questions",
+        "research",
+        "design",
+        "binding",
+        "ownership",
+        "impact",
+        "synthesis",
+        "package",
+        "gate"
+      ],
+      "excluded": []
+    },
+    "invariant": "No implementation-bearing requirement, accepted decision, ownership assignment, control, verification obligation, residual-risk disposition, or deterministically materialized CLI edge is excluded.",
+    "intentCounts": {
+      "source": 10,
+      "requirement": 11,
+      "resolution": 33,
+      "rule": 29,
+      "edge": 282,
+      "totalRecords": 83,
+      "edgeByType": {
+        "references": 110,
+        "needs": 33,
+        "produces": 106,
+        "resolves": 33
+      },
+      "predecessorExplicitEdges": 220,
+      "observedCliGeneratedEdgesAddedInRevision2": 62
+    }
+  },
+  "requestedGraphRoot": {
+    "scope": "workflowd-vs3-4",
+    "semanticRootRequirementId": "wvs34-d4-bac9e02e-req-ac9",
+    "requiredIncludedRecordIds": "all create.id values in the four ordered intent arrays",
+    "requiredIncludedEdges": "all 282 ordered edgeIntents, with exact edge-key equality to the authoritative observation, including the 33 resolves edges generated by resolution requirement-id and the 29 requirement-to-rule produces edges generated by rule requirement-id"
+  },
+  "snapshotRequirement": {
+    "status": "required_and_currently_unsatisfied",
+    "mustBeProducedBy": "workflowd-vs3.9 after authoritative observation and complete graph validation",
+    "mustBind": [
+      "revision-2 requestId",
+      "complete DesignAcceptanceScope",
+      "declared package identity and verified package bytes",
+      "gate response content hash",
+      "store or repository identity",
+      "graph root",
+      "snapshot or version identity",
+      "snapshot content hash",
+      "creation time",
+      "exact included semantic record identities and versions",
+      "all 282 exact included edge identities corresponding to the ordered edgeIntents"
+    ],
+    "immutability": "The snapshot reference must identify an immutable, authoritatively observed graph version; a mutable current graph head is insufficient.",
+    "genericExportIsInsufficient": "The verified generic export proves the currently observed 83-record, 282-edge scope state but exposes no immutable snapshot/version identity, authoritative creation receipt, or command that binds the export to this revision-2 request and acceptance scope; it therefore does not satisfy the snapshot requirement.",
+    "releaseCondition": "Revision 1 is incomplete and cannot release Structure. Revision 2 also cannot release Structure until a matching ProvenancePromotionResult adopts the existing identical records and edges, proves complete authoritative observation of all 282 edge intents, and supplies the required immutable snapshot reference."
+  },
+  "cliCapabilityAssessment": {
+    "nativeRecordKinds": [
+      "source",
+      "requirement",
+      "resolution",
+      "rule"
+    ],
+    "nativeEdgeTypesUsed": [
+      "references",
+      "needs",
+      "produces",
+      "resolves"
+    ],
+    "validEdgeEndpointsUsed": [
+      "source->requirement",
+      "requirement->resolution",
+      "resolution->requirement",
+      "requirement->rule",
+      "resolution->rule"
+    ],
+    "unsupportedSnapshotCapability": "The installed CLI has generic export but no immutable graph snapshot command or snapshot identity schema.",
+    "packageHashCapabilityBlocker": null,
+    "mutationCommandsRun": false,
+    "storeInitialized": true,
+    "immutableGraphSnapshotClaimed": false,
+    "schemaCorrection": "resolution approved-at uses Unix epoch milliseconds; input-type, input-reference, and input-summary are emitted together for all 33 resolution intents",
+    "automaticEdgeBehavior": {
+      "resolutionRequirementId": "resolutions create --requirement-id deterministically generated one resolves edge from each resolution to its requirement (33 observed)",
+      "ruleRequirementId": "rules create --requirement-id deterministically generated one produces edge from each requirement to its rule (29 observed)",
+      "ruleResolutionId": "rules create --resolution-id generated the selected resolution-to-rule produces edge already present in revision 1",
+      "disclosure": "Revision 2 explicitly includes every observed automatic edge and does not treat automatic CLI behavior as absent or incidental."
+    },
+    "mutationCommandsRunMeaning": "No mutation command was or may be run while preparing revision 2; the predecessor promotion already created the identical observed records and edges.",
+    "authoritativeExportVerifiedSha256": "f8bd728183d02da4b79db6448cf8dbd3403a0e79e2bf39008d1d20efd4133977",
+    "provenanceCheckStatus": "ok"
+  },
+  "recoveryIdentity": {
+    "promotionRequestRevision": 2,
+    "recoveryKind": "authoritative_observation_adoption",
+    "predecessorRequest": {
+      "requestId": "workflowd-vs3-4-design-4-package-bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+      "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-provenance-promotion-request-r4.json",
+      "wholeFileSha256": "1dc5ce8663dcaf9d823ecab4f99e5d61e454407c0622f89c60828282c2f2bac0",
+      "promotionRequestRevision": 1,
+      "completeness": "incomplete",
+      "releaseEffect": "Revision 1 did not enumerate 62 deterministic CLI-generated edges, so it is not a complete promotion request and cannot release Structure."
+    },
+    "authoritativeObservation": {
+      "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-provenance-graph-export-r4.json",
+      "wholeFileSha256": "f8bd728183d02da4b79db6448cf8dbd3403a0e79e2bf39008d1d20efd4133977",
+      "provenanceCheckStatus": "ok",
+      "recordCounts": {
+        "source": 10,
+        "requirement": 11,
+        "resolution": 33,
+        "rule": 29,
+        "totalRecords": 83
+      },
+      "edgeCounts": {
+        "references": 110,
+        "needs": 33,
+        "produces": 106,
+        "resolves": 33,
+        "totalEdges": 282
+      },
+      "differenceFromPredecessorManifest": {
+        "additionalDeterministicEdges": 62,
+        "resolutionRequirementIdGeneratedResolves": 33,
+        "ruleRequirementIdGeneratedProduces": 29,
+        "otherAdditionalEdges": 0,
+        "missingRecords": 0,
+        "additionalRecords": 0,
+        "missingEdges": 0
+      }
+    },
+    "adoption": {
+      "mode": "existing_identical_records_and_edges_only",
+      "statement": "Revision 2 adopts only the existing identical deterministic 83 records and 282 edges after authoritative observation; it requests no new, changed, or deleted Provenance state.",
+      "provenanceMutationAuthorized": false,
+      "immutableGraphSnapshotClaimed": false
+    }
+  }
+}

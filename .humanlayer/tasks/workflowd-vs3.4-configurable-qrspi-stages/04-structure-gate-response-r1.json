@@ -1,0 +1,31 @@
+{
+  "contractVersion": 1,
+  "gateRevision": 1,
+  "workflowId": "BNasraoui/workflowd:workflowd-vs3.4",
+  "generation": 1,
+  "structurePath": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/04-structure-canonical-r1.md",
+  "structureSha256": "a89aa5cfc2295ab9f1c660d897bf9c815a13b845fd3585af52123f6c7030c9fc",
+  "response": "approve",
+  "actor": {
+    "name": "Ben Nasraoui",
+    "identity": "nasraouiprojects@gmail.com"
+  },
+  "respondedAt": "2026-07-22T19:29:11Z",
+  "acceptedCapabilities": [
+    "CAP-D1",
+    "CAP-D2",
+    "CAP-D3",
+    "CAP-D4",
+    "CAP-D5",
+    "CAP-D6",
+    "CAP-D7",
+    "CAP-D8",
+    "CAP-D9",
+    "CAP-D10",
+    "CAP-D11",
+    "CAP-D12"
+  ],
+  "acceptedDisposition": "SplitFlowRequired",
+  "effect": "accept_structure_only",
+  "downstreamRequiresSeparateAuthorization": true
+}

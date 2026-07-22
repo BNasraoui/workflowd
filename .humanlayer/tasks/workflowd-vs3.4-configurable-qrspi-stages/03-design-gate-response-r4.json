@@ -1,0 +1,53 @@
+{
+  "contractVersion": 1,
+  "gateRevision": 1,
+  "workflowId": "BNasraoui/workflowd:workflowd-vs3.4",
+  "generation": 1,
+  "packagePath": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-package-r4.json",
+  "packageSha256": "bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43",
+  "designRevision": 4,
+  "designContentSha256": "444b525f15e4d1065f7c91cf532b5f2a3d92bce5a7513d4f1c262ad635cbcf43",
+  "response": "approve",
+  "actor": {
+    "name": "Ben Nasraoui",
+    "identity": "nasraouiprojects@gmail.com"
+  },
+  "respondedAt": "2026-07-22T12:45:58Z",
+  "acceptedControlObligations": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+    "C9",
+    "C10",
+    "C11",
+    "C12",
+    "C13",
+    "C14",
+    "C15",
+    "C16",
+    "C17",
+    "C18"
+  ],
+  "riskDecisions": [
+    { "riskId": "R1", "decision": "NonMaterial" },
+    { "riskId": "R2", "decision": "NonMaterial" },
+    { "riskId": "R3", "decision": "NonMaterial" },
+    { "riskId": "R4", "decision": "NonMaterial" },
+    { "riskId": "R5", "decision": "NonMaterial" },
+    { "riskId": "R6", "decision": "NonMaterial" },
+    { "riskId": "R7", "decision": "NonMaterial" },
+    { "riskId": "R8", "decision": "NonMaterial" },
+    {
+      "riskId": "R9",
+      "decision": "AcceptedResidualRisk",
+      "rationale": "Aggregate durable-storage capacity management is outside workflowd-vs3.4. Accept the exact finite-volume exposure for this Design and track prevention, detection, containment, and recovery separately in workflowd-8bg."
+    }
+  ],
+  "followUpIssue": "workflowd-8bg",
+  "effect": "authorize_provenance_promotion"
+}

@@ -1,0 +1,69 @@
+{
+  "contractVersion": 1,
+  "hashAlgorithm": "sha256-jcs",
+  "acceptanceBinding": {
+    "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-binding-r4.json",
+    "blobSha": "bb14801dc5d22ae1bee93ee63d08fcad50926672",
+    "contentSha256": "092bd8990bb83c2aac19bea5962a1fc510c64215f38540501af32a8dcd4d8998"
+  },
+  "design": {
+    "revision": 4,
+    "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-discussion-configurable-stages-r4.md",
+    "blobSha": "9534cb55980aa72638a91b74816cfad04aaaedb8",
+    "contentSha256": "444b525f15e4d1065f7c91cf532b5f2a3d92bce5a7513d4f1c262ad635cbcf43"
+  },
+  "ownershipReport": {
+    "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-boundary-review-configurable-stages-r4.md",
+    "blobSha": "e2aa5eb4ef9ee68bbd6070472e9d84f051b02260",
+    "contentSha256": "806f2f10b52d35c2e9d27dd920f4c50e19e949abf02e30c2e9cd44ac6eb8ecb5",
+    "verdict": "ScopeClean"
+  },
+  "impactReport": {
+    "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-impact-risk-review-configurable-stages-r4.md",
+    "blobSha": "ef82fbe2e3f45c889efa7fac85572cce9818efeb",
+    "contentSha256": "67d3824798ef678aa89bd894f1890802490004d3967efdf09a9960ca251dcd94",
+    "verdict": "NeedsRiskDecision"
+  },
+  "synthesis": {
+    "path": ".humanlayer/tasks/workflowd-vs3.4-configurable-qrspi-stages/03-design-acceptance-synthesis-r4.md",
+    "blobSha": "a835fc28b35f93f00a42f747c16ba768fd831cd9",
+    "contentSha256": "4a8c94bd87d985f6d4df8a7bf65adc755cec2f71f757db3e60973550fc34b2c2",
+    "session": "ses_07629ced6ffec1ISYsdsXSYhHg"
+  },
+  "orderedControlObligations": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+    "C9",
+    "C10",
+    "C11",
+    "C12",
+    "C13",
+    "C14",
+    "C15",
+    "C16",
+    "C17",
+    "C18"
+  ],
+  "residualRiskDecisions": [
+    { "riskId": "R1", "decision": "NonMaterial" },
+    { "riskId": "R2", "decision": "NonMaterial" },
+    { "riskId": "R3", "decision": "NonMaterial" },
+    { "riskId": "R4", "decision": "NonMaterial" },
+    { "riskId": "R5", "decision": "NonMaterial" },
+    { "riskId": "R6", "decision": "NonMaterial" },
+    { "riskId": "R7", "decision": "NonMaterial" },
+    { "riskId": "R8", "decision": "NonMaterial" },
+    { "riskId": "R9", "decision": "PendingDecision" }
+  ],
+  "pendingDecision": {
+    "id": "PendingDecision:R9",
+    "options": ["A", "B", "C"]
+  },
+  "packageSha256": "bac9e02e7016aa3135b5cd0913003b6fe10d2ed8ece8f9c39a695e6e3d13da43"
+}
