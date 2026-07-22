@@ -169,6 +169,22 @@ The canonical ticket template lives in
 `skills/ticket-writing/references/ticket-template.md`; do not copy it into
 OpenCode configuration.
 
+## QRSPI Design and Structure Skill
+
+Install the bundled process skill when an agent will produce or review QRSPI Design or
+Structure artifacts:
+
+```bash
+npx skills add BNasraoui/workflowd --skill qrspi-design-structure --agent opencode -y
+```
+
+The installed skill is self-contained: the complete normative contract is bundled at
+`skills/qrspi-design-structure/references/qrspi-design-structure-contract.md`, so using it
+does not require repository access or a network request. In this repository,
+`docs/qrspi-contract.md` remains canonical. Maintainers must run `bun run skill:sync` and
+commit the generated reference, and review the operational checklist, with every contract
+change; `bun run skill:check` verifies the bundle's source hash and exact content.
+
 ## Design Boundary Reviewer Skill
 
 Install the model-invoked `design-boundary-reviewer` skill through skills.sh:
