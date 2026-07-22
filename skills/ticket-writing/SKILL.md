@@ -14,8 +14,9 @@ ticket that will require multistage work (i.e. QRSPI).
    For other work, use the chosen Beads type and the structure the user needs. Done when
    the type, purpose, and permission to write are clear.
 2. For an existing ticket, run `bd show <id> --json`. Read and verify each source the user
-   supplied and every reference in the ticket's `Sources` section. Done when you have read
-   the ticket and its sources and resolved every citation.
+   supplied and every reference in the ticket's `Sources` section. Follow parent, dependency,
+   and dependent IDs with `bd show <related-id> --json` when their scope overlaps the requested
+   change. Done when every citation is resolved and the ownership boundaries are clear.
 3. For a review-only request, assess the ticket against the readiness rules below, report
    whether it is ready and any missing product details, then stop. Do not draft changes or
    write to Beads.
@@ -33,6 +34,10 @@ ticket that will require multistage work (i.e. QRSPI).
 A QRSPI ticket is **Ready** when its title names the change, its Description explains the
 desired result, its acceptance criteria are observable, and its scenarios make every
 criterion concrete.
+
+When another ticket owns downstream behavior that this ticket enables, **Ready** also requires
+the Description to name that owner, state the minimal enabling seam retained here, and state
+the lifecycle deferred there.
 
 If it is not ready, discuss the missing product details before writing the ticket. User stories,
 source lists, and scope lists are optional but optimal. Research, design, planning, task
