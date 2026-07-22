@@ -2,7 +2,6 @@
 .beads/
 .claude/
 .codex/
-.humanlayer/
 deploy/
 skills/
 *.md

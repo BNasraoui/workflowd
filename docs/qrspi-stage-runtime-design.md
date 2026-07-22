@@ -2,7 +2,7 @@
 type: design-discussion
 ticket: workflowd-vs3.4
 title: Run configurable QRSPI stages and publish their artifacts
-status: proposed
+status: accepted
 revision: 4
 repository_base: 42e129ab75ea0de39aa1bd6db4502325cd3effb1
 questions_sha256: 4279e73b21aa25918639d3fbfed8574367d66023a69e6f3b53b60c28c3e24876
