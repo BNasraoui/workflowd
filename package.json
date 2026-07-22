@@ -10,10 +10,12 @@
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
+    "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
+    "skill:check": "bun scripts/sync-qrspi-skill-reference.mjs --check",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run lint && bun run format:check && bun run test:coverage"
+    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run lint && bun run format:check && bun run test:coverage"
   },
   "dependencies": {
     "@effect/platform": "0.97.0",
