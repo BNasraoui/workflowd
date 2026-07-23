@@ -148,12 +148,16 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       return WorkflowStart.of({
         preflight,
         start: (input) =>
-          makeWorkflowStart(options)(input).pipe(
-            Effect.provideService(TicketSource, tickets),
-            Effect.provideService(QrspiRepository, repositories),
-            Effect.provideService(QrspiStore, store),
-            Effect.provideService(StageCatalog, stageCatalog),
-            Effect.provideService(AgentHarness, agentHarness),
+          preflight.pipe(
+            Effect.andThen(
+              makeWorkflowStart(options)(input).pipe(
+                Effect.provideService(TicketSource, tickets),
+                Effect.provideService(QrspiRepository, repositories),
+                Effect.provideService(QrspiStore, store),
+                Effect.provideService(StageCatalog, stageCatalog),
+                Effect.provideService(AgentHarness, agentHarness),
+              ),
+            ),
           ),
       })
     }),

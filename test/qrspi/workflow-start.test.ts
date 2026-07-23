@@ -2136,6 +2136,69 @@ describe("Phase 3: Persisted identity preflight", () => {
     ])
   })
 
+  test("re-runs persisted availability preflight before accepting a workflow start", async () => {
+    const filename = await databasePath()
+    await start(filename, fakes())
+    const nextTicketReference = {
+      ...ticketReference,
+      nativeTicketId: "workflowd-vs3.4",
+    }
+    const fake = fakes({
+      ticket: {
+        ...readyTicket,
+        reference: nextTicketReference,
+        title: "Start another QRSPI workflow",
+      },
+    })
+    const nextOptions: WorkflowStartOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: options.workflowDefinition.stages.map((stage) => ({
+          ...stage,
+          producer: { ...stage.producer, agent: "next-qrspi-producer" },
+        })),
+      },
+    }
+    let persistedSelectionAvailable = true
+    const dependencies = layer(filename, fake, ({ selections }) => {
+      const unavailable = selections.find(({ agent }) => agent === "qrspi-producer")
+      return persistedSelectionAvailable || unavailable === undefined
+        ? Effect.void
+        : Effect.fail(
+            new AgentHarnessError({
+              operation: "validate OpenCode availability",
+              cause: new Error("persisted selection became unavailable"),
+              retryable: true,
+              selection: unavailable,
+            }),
+          )
+    })
+    const before = await counts(filename, fake)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const workflowStart = yield* WorkflowStart
+        persistedSelectionAvailable = false
+        return yield* workflowStart
+          .start({ ...request, ticket: nextTicketReference })
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(WorkflowStartLive(nextOptions).pipe(Layer.provide(dependencies)))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "availability",
+        reason: "unavailable_agent_model",
+        stageKey: "questions",
+      },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
   test.each([
     {
       name: "missing snapshot set",
