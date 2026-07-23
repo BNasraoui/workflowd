@@ -14,4 +14,5 @@ design-binding-r4|accepted|03-design-acceptance-binding-r4.json|c248e455334ba803
 design-impact-r4|accepted|03-design-impact-risk-review-r4.md|f5618943015bdbd98c380cdbaee2ce01c1e2a94e78e6eb545afd13e6d87f417b
 design-synthesis-r4|accepted|03-design-acceptance-synthesis-r4.md|db113815359703f009b321721fc6de21be4c1a8e254532ffe4dc5437a3c22144
 design-package-r4|accepted|03-design-acceptance-package-r4.json|7b6422410f3dfcdd34bc2c1c20194f9798431285579011dd092390c1586b17f7
-design-gate-r4|accepted|03-design-gate-response-r4.json|8c30b9d7746d1ac92b6df9dcab903c01521ab9c85adf28fc45d7019429547374
+design-gate-r4|accepted|03-design-gate-response-r4.json|566e85845f46b4386a65fd790ee8819d3d4c0d28e36cc77ffde1cab5331fcbba
+design-promotion-r4|accepted|03-provenance-promotion-result-r4.json|bb8941f3d4b90a8e523818ea68f77ee900c2edb18839bf433dc5ed9af13d2b92
