@@ -3,10 +3,11 @@ import { Effect, Schema } from "effect"
 import {
   MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
+  MAX_STAGE_REQUEST_BYTES,
   OpenCodeAgentHarness,
   TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
-import { makePullRequestHarnessDefinitions } from "../src/opencode"
+import { makeOpenCodeHarnessDefinitions, makePullRequestHarnessDefinitions } from "../src/opencode"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
 async function* events(
@@ -159,6 +160,99 @@ describe("TrustedAgentHarnessCatalog", () => {
 })
 
 describe("OpenCodeAgentHarness", () => {
+  test("prepares trusted stage work with the validated producer and task settings", async () => {
+    const definitions = makeOpenCodeHarnessDefinitions({
+      reviewerAgent: "pr-reviewer",
+      fixerAgent: "pr-fixer",
+      model: "openai/registration-placeholder",
+      pollIntervalMs: 1,
+      timeoutMs: 1_000,
+    })
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog(Object.values(definitions)),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    const retryPolicy = { maxAttempts: 12, backoffMs: 250 }
+
+    const prepared = await Effect.runPromise(
+      harness.prepare(
+        definitions.stage,
+        { ticket: "workflowd-vs3.4.1" },
+        {
+          directory: "/tmp/fixture-worktree",
+          scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+          operationId: "fixture-operation",
+          operationRevision: 1,
+          attempt: 1,
+          leaseToken: "11111111-1111-4111-8111-111111111111",
+          requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        {
+          selection: {
+            ref: definitions.stage.ref,
+            agent: "stage-producer",
+            model: "anthropic/claude-sonnet-4-6",
+          },
+          title: "Questions stage",
+          prompt: "Produce the questions artifact.",
+          timeoutMs: 45_000,
+          retryPolicy,
+        },
+      ),
+    )
+
+    expect(prepared.launchIntent).toMatchObject({
+      harness: definitions.stage.ref,
+      agent: "stage-producer",
+      model: "anthropic/claude-sonnet-4-6",
+      timeoutMs: 45_000,
+      retryPolicy,
+    })
+    expect(prepared.launchIntent.definitionHash).toBe(
+      new TrustedAgentHarnessCatalog(Object.values(definitions)).describe(definitions.stage.ref)
+        .registrationSha256,
+    )
+    expect(prepared.title).toBe("Questions stage")
+    expect(prepared.prompt).toBe("Produce the questions artifact.")
+    expect(prepared.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4-6" })
+  })
+
+  test("accepts the maximum stage request inside the durable launch envelope", async () => {
+    const definitions = makeOpenCodeHarnessDefinitions({
+      reviewerAgent: "pr-reviewer",
+      fixerAgent: "pr-fixer",
+      model: "openai/gpt-5.6-sol",
+      pollIntervalMs: 1,
+      timeoutMs: 1_000,
+    })
+    const harness = new OpenCodeAgentHarness(
+      makeAdapter(),
+      new TrustedAgentHarnessCatalog(Object.values(definitions)),
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+    expect(definitions.stage.maxInputBytes).toBe(MAX_STAGE_REQUEST_BYTES)
+    const emptyRequestBytes = Buffer.byteLength(JSON.stringify({ ticket: "" }))
+    const input = { ticket: "x".repeat(MAX_STAGE_REQUEST_BYTES - emptyRequestBytes) }
+
+    expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_STAGE_REQUEST_BYTES)
+    const prepared = await Effect.runPromise(
+      harness.prepare(definitions.stage, input, {
+        directory: "/tmp/fixture-worktree",
+        scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+        operationId: "fixture-operation",
+        operationRevision: 1,
+        attempt: 1,
+        leaseToken: "11111111-1111-4111-8111-111111111111",
+        requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+      }),
+    )
+
+    expect(Buffer.byteLength(JSON.stringify(prepared.launchIntent))).toBeLessThanOrEqual(
+      MAX_AGENT_LAUNCH_INTENT_BYTES,
+    )
+  })
+
   test("enforces trusted per-harness input limits below the global envelope", async () => {
     const definition = { ...fixtureDefinition, maxInputBytes: 10 }
     const harness = new OpenCodeAgentHarness(

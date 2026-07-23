@@ -16,6 +16,7 @@ export {
   AgentOutputEnvelope,
   MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
+  MAX_STAGE_REQUEST_BYTES,
 } from "./agent-payload"
 
 const BoundedIdentifier = Schema.String.pipe(
@@ -53,6 +54,27 @@ export const AgentRetryPolicy = Schema.Struct({
   invalidOutput: Schema.Literal("retry", "fail"),
 })
 export type AgentRetryPolicy = typeof AgentRetryPolicy.Type
+
+export const AgentTaskRetryPolicy = Schema.Struct({
+  maxAttempts: PositiveInt.pipe(Schema.lessThanOrEqualTo(20)),
+  backoffMs: PositiveInt.pipe(Schema.lessThanOrEqualTo(86_400_000)),
+})
+export type AgentTaskRetryPolicy = typeof AgentTaskRetryPolicy.Type
+
+const AgentLaunchRetryPolicy = Schema.Union(AgentRetryPolicy, AgentTaskRetryPolicy)
+type AgentLaunchRetryPolicy = typeof AgentLaunchRetryPolicy.Type
+
+export type AgentHarnessPrepareSettings = {
+  readonly selection: AgentHarnessSelection
+  readonly title: string
+  readonly prompt: string
+  readonly timeoutMs: number
+  readonly retryPolicy: AgentTaskRetryPolicy
+}
+
+type ResolvedPrepareSettings = Omit<AgentHarnessPrepareSettings, "retryPolicy"> & {
+  readonly retryPolicy: AgentLaunchRetryPolicy
+}
 
 export const AgentExecutionScope = Schema.Union(
   Schema.TaggedStruct("WorkflowScope", {
@@ -139,7 +161,7 @@ export type AgentLaunchIntent<Input> = {
   readonly leaseToken: string
   readonly directory: string
   readonly timeoutMs: number
-  readonly retryPolicy: AgentRetryPolicy
+  readonly retryPolicy: AgentLaunchRetryPolicy
   readonly requestedAt: string
 }
 
@@ -147,7 +169,7 @@ export const AgentLaunchIntentSchema = Schema.Struct({
   sessionReferenceId: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
   harness: AgentHarnessRef,
   definitionHash: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
-  agent: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64)),
+  agent: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
   model: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
   input: Schema.Unknown,
   scope: AgentExecutionScope,
@@ -157,7 +179,7 @@ export const AgentLaunchIntentSchema = Schema.Struct({
   leaseToken: LeaseToken,
   directory: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4096)),
   timeoutMs: PositiveInt.pipe(Schema.lessThanOrEqualTo(86_400_000)),
-  retryPolicy: AgentRetryPolicy,
+  retryPolicy: AgentLaunchRetryPolicy,
   requestedAt: IsoTimestamp,
 })
 
@@ -170,6 +192,7 @@ export type PreparedAgentWork<Input, Output, OutputEncoded> = {
   readonly outputJsonSchema: object
   readonly maxOutputBytes: number
   readonly pollIntervalMs: number
+  readonly structuredOutputPolicy?: AgentRetryPolicy
 }
 
 export class AgentHarnessError extends Data.TaggedError("AgentHarnessError")<{
@@ -232,6 +255,21 @@ const ExecutionContextSchema = Schema.Struct({
   attempt: PositiveInt,
   leaseToken: LeaseToken,
   requestedAt: Schema.DateFromSelf,
+})
+
+const PrepareSettingsMetadata = Schema.Struct({
+  selection: Schema.Struct({
+    ref: AgentHarnessRef,
+    agent: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+    model: Schema.String.pipe(
+      Schema.maxLength(256),
+      Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[^\s/][^\s]*$/),
+    ),
+  }),
+  title: Schema.String,
+  prompt: Schema.String,
+  timeoutMs: PositiveInt.pipe(Schema.lessThanOrEqualTo(86_400_000)),
+  retryPolicy: AgentTaskRetryPolicy,
 })
 
 const HarnessConfig = Schema.Struct({
@@ -349,6 +387,7 @@ export type AgentHarnessPort = {
     definition: AgentHarnessDefinition<Input, InputEncoded, Output, OutputEncoded>,
     input: InputEncoded,
     context: AgentExecutionContext,
+    settings?: AgentHarnessPrepareSettings,
   ) => Effect.Effect<PreparedAgentWork<Input, Output, OutputEncoded>, AgentHarnessError>
   readonly createSession: <Input, Output, OutputEncoded>(
     prepared: PreparedAgentWork<Input, Output, OutputEncoded>,
@@ -410,8 +449,13 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       { concurrency: 1, discard: true },
     )
 
-  readonly prepare: AgentHarnessPort["prepare"] = (definition, input, context) =>
-    Effect.gen(this, function* () {
+  prepare<Input, InputEncoded, Output, OutputEncoded>(
+    definition: AgentHarnessDefinition<Input, InputEncoded, Output, OutputEncoded>,
+    input: InputEncoded,
+    context: AgentExecutionContext,
+    settings?: AgentHarnessPrepareSettings,
+  ): Effect.Effect<PreparedAgentWork<Input, Output, OutputEncoded>, AgentHarnessError> {
+    return Effect.gen(this, function* () {
       const registration = yield* Effect.try({
         try: () => this.catalog.registrationFor(definition),
         catch: (cause) => this.error("select harness", cause, false),
@@ -427,10 +471,25 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       )(decodedInput).pipe(
         Effect.mapError((cause) => this.error("validate encoded agent prompt input", cause, false)),
       )
+      const execution: ResolvedPrepareSettings = yield* settings === undefined
+        ? Effect.succeed({
+            selection: {
+              ref: definition.ref,
+              agent: definition.agent,
+              model: definition.model,
+            },
+            title: definition.title(decodedInput),
+            prompt: definition.prompt(decodedInput),
+            timeoutMs: definition.timeoutMs,
+            retryPolicy: definition.retryPolicy,
+          })
+        : validatePrepareSettings(definition.ref, settings).pipe(
+            Effect.mapError((cause) => this.error("validate agent task settings", cause, false)),
+          )
       const request = yield* Effect.try({
         try: () => ({
-          title: boundedText(definition.title(decodedInput), 256, "session title"),
-          prompt: boundedText(definition.prompt(decodedInput), 32_768, "session prompt"),
+          title: boundedText(execution.title, 256, "session title"),
+          prompt: boundedText(execution.prompt, 32_768, "session prompt"),
         }),
         catch: (cause) => this.error("prepare agent prompt", cause, false),
       })
@@ -439,8 +498,8 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         sessionReferenceId: randomUUID(),
         harness: definition.ref,
         definitionHash: registration.definitionHash,
-        agent: definition.agent,
-        model: definition.model,
+        agent: execution.selection.agent,
+        model: execution.selection.model,
         input: decodedInput,
         scope: decodedContext.scope,
         operationId: decodedContext.operationId,
@@ -448,8 +507,8 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         attempt: decodedContext.attempt,
         leaseToken: decodedContext.leaseToken,
         directory,
-        timeoutMs: definition.timeoutMs,
-        retryPolicy: definition.retryPolicy,
+        timeoutMs: execution.timeoutMs,
+        retryPolicy: execution.retryPolicy,
         requestedAt: decodedContext.requestedAt.toISOString(),
       }
       yield* Schema.decodeUnknown(AgentLaunchIntentSchema)(launchIntent).pipe(
@@ -462,13 +521,15 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         launchIntent,
         title: request.title,
         prompt: request.prompt,
-        model: parseModel(definition.model),
+        model: parseModel(execution.selection.model),
         outputSchema: definition.outputSchema,
         outputJsonSchema: registration.outputJsonSchema,
         maxOutputBytes: definition.maxOutputBytes,
         pollIntervalMs: this.#config.pollIntervalMs,
+        structuredOutputPolicy: definition.retryPolicy,
       }
     })
+  }
 
   readonly createSession: AgentHarnessPort["createSession"] = (prepared) => {
     const session = this.structuredSession(prepared)
@@ -500,7 +561,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
     if (mismatch !== undefined) {
       return Effect.fail(this.error("validate SessionReference", new Error(mismatch), false))
     }
-    const retryable = prepared.launchIntent.retryPolicy.invalidOutput === "retry"
+    const retryable = structuredOutputPolicy(prepared).invalidOutput === "retry"
     return this.attempt("run structured agent session", retryable, (signal) =>
       this.structuredSession(prepared).resume(
         { sessionID: reference.nativeSessionId, directory: reference.directory },
@@ -558,7 +619,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         format: {
           type: "json_schema",
           schema: prepared.outputJsonSchema,
-          retryCount: prepared.launchIntent.retryPolicy.structuredOutputRetryCount,
+          retryCount: structuredOutputPolicy(prepared).structuredOutputRetryCount,
         },
         prompt: prepared.prompt,
         pollIntervalMs: prepared.pollIntervalMs,
@@ -606,6 +667,29 @@ function parseModel(value: string): OpenCodeModel {
     providerID: value.slice(0, separator),
     modelID: value.slice(separator + 1),
   }
+}
+
+function validatePrepareSettings(ref: AgentHarnessRef, settings: AgentHarnessPrepareSettings) {
+  return Effect.try({
+    try: () => {
+      Schema.decodeUnknownSync(PrepareSettingsMetadata)(settings)
+      if (referenceKey(settings.selection.ref) !== referenceKey(ref)) {
+        throw new Error("Agent task harness selection does not match trusted registration")
+      }
+      return settings
+    },
+    catch: normalizeError,
+  })
+}
+
+function structuredOutputPolicy<Input, Output, OutputEncoded>(
+  prepared: PreparedAgentWork<Input, Output, OutputEncoded>,
+): AgentRetryPolicy {
+  if (prepared.structuredOutputPolicy !== undefined) return prepared.structuredOutputPolicy
+  if ("invalidOutput" in prepared.launchIntent.retryPolicy) {
+    return prepared.launchIntent.retryPolicy
+  }
+  throw new Error("Prepared stage work is missing its trusted structured output policy")
 }
 
 function boundedText(value: string, maximum: number, name: string): string {

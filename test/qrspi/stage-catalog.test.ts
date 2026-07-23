@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import {
   AgentHarnessError,
+  MAX_STAGE_REQUEST_BYTES,
   TrustedAgentHarnessCatalog,
   type AgentHarnessPort,
 } from "../../src/agent-harness"
 import { workflowDefinitionSha256 } from "../../src/qrspi/domain"
 import {
   TrustedStageCatalog,
+  questionsStageContract,
   validatePersistedSnapshots,
   validateWorkflowDefinition,
   type StageContract,
@@ -147,13 +149,17 @@ describe("TrustedStageCatalog", () => {
       { ...fixtureContract, assembleRequest: undefined },
       { ...fixtureContract, buildTask: undefined },
       { ...fixtureContract, prepareOutput: undefined },
-      { ...fixtureContract, maxRequestBytes: 64 * 1024 + 1 },
+      { ...fixtureContract, maxRequestBytes: MAX_STAGE_REQUEST_BYTES + 1 },
       { ...fixtureContract, maxResultBytes: 4 * 1024 * 1024 + 1 },
     ]) {
       expect(() => new TrustedStageCatalog([registration])).toThrow(
         expect.objectContaining({ reason: "malformed_registration" }),
       )
     }
+  })
+
+  test("keeps the built-in request bound within the nested launch envelope", () => {
+    expect(questionsStageContract.maxRequestBytes).toBe(MAX_STAGE_REQUEST_BYTES)
   })
 
   test("reports malformed missing and non-object references as typed catalog errors", () => {

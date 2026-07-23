@@ -1,7 +1,7 @@
 import { Context, Data, Effect, JSONSchema, Schema } from "effect"
 import {
-  MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
+  MAX_STAGE_REQUEST_BYTES,
   type AgentHarnessPort,
   type AgentHarnessSelection,
 } from "../agent-harness"
@@ -141,7 +141,7 @@ export class TrustedStageCatalog {
         requestJsonSchema = JSONSchema.make(requestSchema)
         resultJsonSchema = JSONSchema.make(resultSchema)
         if (
-          metadata.maxRequestBytes > MAX_AGENT_LAUNCH_INTENT_BYTES ||
+          metadata.maxRequestBytes > MAX_STAGE_REQUEST_BYTES ||
           metadata.maxResultBytes > MAX_AGENT_OUTPUT_BYTES
         ) {
           throw new Error("declared limit exceeds durable envelope")
@@ -644,7 +644,7 @@ export const questionsStageContract: StageContract<
   kind: "document",
   requestSchema: QuestionsStageRequest,
   resultSchema: QuestionsStageResult,
-  maxRequestBytes: MAX_AGENT_LAUNCH_INTENT_BYTES,
+  maxRequestBytes: MAX_STAGE_REQUEST_BYTES,
   maxResultBytes: MAX_AGENT_OUTPUT_BYTES,
   compatibility: () => undefined,
   assembleRequest: (sources) => ({ ticket: sources }),

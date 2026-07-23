@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { Data, Schema } from "effect"
-import { AgentHarnessRef } from "../agent-harness"
+import { AgentHarnessRef, MAX_STAGE_REQUEST_BYTES } from "../agent-harness"
 
 const BoundedText = (maximum: number) =>
   Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
@@ -161,7 +161,7 @@ export const PositiveVersion = Schema.Int.pipe(
 const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
 const DurableStagePayloadBytes = Schema.Int.pipe(
   Schema.positive(),
-  Schema.lessThanOrEqualTo(65_536),
+  Schema.lessThanOrEqualTo(MAX_STAGE_REQUEST_BYTES),
 )
 const ProviderModel = Schema.String.pipe(
   Schema.pattern(/^[^\s/]+\/[^\s/]+$/),

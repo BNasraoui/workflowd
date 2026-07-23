@@ -2,6 +2,7 @@ import { Schema } from "effect"
 
 export const MAX_AGENT_LAUNCH_INTENT_BYTES = 64 * 1024
 export const MAX_AGENT_OUTPUT_BYTES = 4 * 1024 * 1024
+export const MAX_STAGE_REQUEST_BYTES = 32 * 1024
 
 export const boundedAgentPayload = (maximumBytes: number, name: string) =>
   Schema.Unknown.pipe(

@@ -4,6 +4,7 @@ import {
   type AgentHarnessDefinition,
   type AgentHarnessPort,
   AgentHarnessError,
+  MAX_STAGE_REQUEST_BYTES,
   type PreparedAgentWork,
 } from "./agent-harness"
 import { FixResult as FixResultSchema, type FixResult } from "./domain/fix-result"
@@ -130,7 +131,7 @@ export function makeOpenCodeHarnessDefinitions(config: OpenCodeAutomationConfig)
     model: "openai/gpt-5.6-sol",
     inputSchema: Schema.Unknown,
     outputSchema: Schema.Unknown,
-    maxInputBytes: 64 * 1024,
+    maxInputBytes: MAX_STAGE_REQUEST_BYTES,
     maxOutputBytes: 4 * 1024 * 1024,
     promptContract: "qrspi-stage-capability",
     title: () => "QRSPI stage",
