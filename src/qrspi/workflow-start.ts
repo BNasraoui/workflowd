@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Exit, Layer, Schema } from "effect"
+import { AgentHarness, type AgentHarnessError } from "../agent-harness"
 import {
   RepositoryReference,
   Ticket,
@@ -9,12 +10,16 @@ import {
   canonicalSha256,
   checkTicket,
   normalizeWorkflowDefinition,
+  stageSnapshotsMatchWorkflowDefinition,
   workflowDefinitionSha256,
   workflowIdFor,
   type TicketCheck,
   type TicketReadinessJudgment,
   type SourceResolver,
+  type ExecutableStageSnapshot,
   type WorkflowDefinition,
+  type WorkflowDefinitionValidationReason,
+  type WorkflowDefinitionValidationError,
   type WorkflowStartOutput,
 } from "./domain"
 import {
@@ -25,6 +30,12 @@ import {
   type TicketSourceError,
 } from "./ports"
 import { QrspiStore, type QrspiStoreDataError, type StartRecord } from "./store"
+import {
+  StageCatalog,
+  StageCatalogError,
+  validatePersistedSnapshots,
+  validateWorkflowDefinition,
+} from "./stage-catalog"
 
 export class WorkflowStartUnauthorized extends Data.TaggedError("WorkflowStartUnauthorized")<{
   readonly reason: string
@@ -50,6 +61,32 @@ export class WorkflowStartNeedsOperator extends Data.TaggedError("WorkflowStartN
 export class WorkflowStartRetryExhausted extends Data.TaggedError("WorkflowStartRetryExhausted")<{
   readonly reason: string
 }> {}
+
+export type WorkflowStartValidationDiagnostic = {
+  readonly phase: WorkflowDefinitionValidationError["phase"] | "persisted"
+  readonly reason:
+    | WorkflowDefinitionValidationReason
+    | NonNullable<QrspiStoreDataError["reason"]>
+    | StageCatalogError["reason"]
+  readonly workflowDefinitionSha256?: string
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly stageKey?: string
+  readonly sequencePosition?: number
+  readonly contractRef?: WorkflowDefinitionValidationError["contractRef"]
+  readonly harnessRef?: WorkflowDefinitionValidationError["harnessRef"]
+  readonly expectedRegistrationSha256?: string
+  readonly actualRegistrationSha256?: string
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
+  readonly record?: QrspiStoreDataError["record"]
+  readonly recordId?: string
+  readonly cause?: string
+}
+
+export class WorkflowStartValidationError extends Data.TaggedError(
+  "WorkflowStartValidationError",
+)<WorkflowStartValidationDiagnostic> {}
 
 export type WorkflowStartOptions = {
   readonly binding: {
@@ -78,12 +115,17 @@ export type WorkflowStartError =
   | WorkflowStartUncertain
   | WorkflowStartNeedsOperator
   | WorkflowStartRetryExhausted
+  | WorkflowStartValidationError
   | TicketSourceError
   | QrspiRepositoryError
   | QrspiStoreDataError
+  | StageCatalogError
+  | AgentHarnessError
+  | WorkflowDefinitionValidationError
   | SqlError
 
 export type WorkflowStartPort = {
+  readonly preflight: Effect.Effect<void, WorkflowStartError>
   readonly start: (input: unknown) => Effect.Effect<WorkflowStartResult, WorkflowStartError>
 }
 export const WorkflowStart = Context.GenericTag<WorkflowStartPort>("workflowd/qrspi/WorkflowStart")
@@ -95,16 +137,98 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       const tickets = yield* TicketSource
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
+      const stageCatalog = yield* StageCatalog
+      const agentHarness = yield* AgentHarness
+      const preflight = makeWorkflowStartPreflight(options).pipe(
+        Effect.provideService(QrspiStore, store),
+        Effect.provideService(StageCatalog, stageCatalog),
+        Effect.provideService(AgentHarness, agentHarness),
+      )
+      yield* preflight
       return WorkflowStart.of({
+        preflight,
         start: (input) =>
-          makeWorkflowStart(options)(input).pipe(
-            Effect.provideService(TicketSource, tickets),
-            Effect.provideService(QrspiRepository, repositories),
-            Effect.provideService(QrspiStore, store),
+          preflight.pipe(
+            Effect.andThen(
+              makeWorkflowStart(options)(input).pipe(
+                Effect.provideService(TicketSource, tickets),
+                Effect.provideService(QrspiRepository, repositories),
+                Effect.provideService(QrspiStore, store),
+                Effect.provideService(StageCatalog, stageCatalog),
+                Effect.provideService(AgentHarness, agentHarness),
+              ),
+            ),
           ),
       })
     }),
   )
+
+export const closedWorkflowStart = (error: WorkflowStartValidationError): WorkflowStartPort => ({
+  preflight: Effect.fail(error),
+  start: () => Effect.fail(error),
+})
+
+export function toWorkflowStartValidationError(
+  error: WorkflowDefinitionValidationError | QrspiStoreDataError | StageCatalogError,
+): WorkflowStartValidationError {
+  if (error._tag === "WorkflowDefinitionValidationError") {
+    const { _tag: _, ...diagnostic } = error
+    return new WorkflowStartValidationError({
+      ...diagnostic,
+      ...(error.cause === undefined ? {} : { cause: boundedCause(error.cause) }),
+    })
+  }
+  if (error._tag === "StageCatalogError") {
+    return new WorkflowStartValidationError({
+      phase: "contract",
+      reason: error.reason,
+      cause: boundedCause(
+        error.cause === undefined ? error.reference : `${error.reference}: ${error.cause}`,
+      ),
+    })
+  }
+  return new WorkflowStartValidationError({
+    phase: "persisted",
+    reason: error.reason ?? "malformed",
+    record: error.record,
+    recordId: error.recordId,
+    ...(error.workflowId === undefined ? {} : { workflowId: error.workflowId }),
+    ...(error.generation === undefined ? {} : { generation: error.generation }),
+    ...(error.sequencePosition === undefined ? {} : { sequencePosition: error.sequencePosition }),
+    ...(error.expectedSha256 === undefined ? {} : { expectedSha256: error.expectedSha256 }),
+    ...(error.actualSha256 === undefined ? {} : { actualSha256: error.actualSha256 }),
+    cause: boundedCause(error.message),
+  })
+}
+
+function boundedCause(cause: unknown): string {
+  return String(cause).slice(0, 1_000)
+}
+
+export function makeWorkflowStartPreflight(options: WorkflowStartOptions) {
+  return Effect.gen(function* () {
+    const store = yield* QrspiStore
+    const stageCatalog = yield* StageCatalog
+    const agentHarness = yield* AgentHarness
+    yield* validateWorkflowDefinition({
+      definition: options.workflowDefinition,
+      stageCatalog,
+      agentHarness,
+    })
+    const snapshotSets = yield* store.loadCurrentGenerationSnapshotSets()
+    yield* Effect.forEach(
+      snapshotSets,
+      (snapshotSet) =>
+        validatePersistedSnapshots({
+          workflowDefinitionSha256: snapshotSet.workflowDefinitionSha256,
+          snapshots: snapshotSet.snapshots,
+          stageCatalog,
+          agentHarness,
+        }),
+      { concurrency: 1, discard: true },
+    )
+  })
+}
 
 export function makeWorkflowStart(options: WorkflowStartOptions) {
   const now = options.now ?? (() => new Date())
@@ -139,6 +263,8 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       const tickets = yield* TicketSource
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
+      const stageCatalog = yield* StageCatalog
+      const agentHarness = yield* AgentHarness
       const ticket = yield* readTicket(tickets, request.ticket)
       const checked = checkTicket(ticket, now(), request.readinessJudgment, options.sourceResolver)
       if (checked._tag === "NeedsWork") return checked
@@ -178,6 +304,11 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           new WorkflowStartConflict({ reason: "Base target requires reconciliation" }),
         )
       }
+      const validatedDefinition = yield* validateWorkflowDefinition({
+        definition: workflowDefinition,
+        stageCatalog,
+        agentHarness,
+      })
       const selectedBranchName = yield* store.resolveBranch(workflowId, proposedBranchName, now())
       const input = {
         contractVersion: 1 as const,
@@ -185,6 +316,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         ticket: request.ticket,
         ticketRevisionSha256: checked.ticketRevision.ticketRevisionSha256,
         workflowDefinitionSha256: definitionSha256,
+        stageSnapshotsSha256: canonicalSha256(validatedDefinition.stageSnapshots),
         baseRef: inspection.baseRef,
         baseSha: inspection.baseSha,
         branchName: selectedBranchName,
@@ -374,6 +506,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           branchName: operation.branchName,
           workflowDefinitionSha256: definitionSha256,
           workflowDefinition,
+          stageSnapshots: validatedDefinition.stageSnapshots,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
           expectedRootSha: operation.output.rootSha,
           readinessJudgment: request.readinessJudgment,
@@ -568,6 +701,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         branchName: operation.branchName,
         workflowDefinitionSha256: definitionSha256,
         workflowDefinition,
+        stageSnapshots: validatedDefinition.stageSnapshots,
         previousTrustedSha: currentCursor?.currentHeadSha ?? null,
         expectedRootSha: observed.sha,
         readinessJudgment: request.readinessJudgment,
@@ -575,6 +709,12 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         now,
         onChanged: () =>
           store.supersedeStart(operation.operationId, "authoritative input changed", now()),
+      })
+
+      const freshValidatedDefinition = yield* validateWorkflowDefinition({
+        definition: workflowDefinition,
+        stageCatalog,
+        agentHarness,
       })
 
       return yield* store
@@ -589,6 +729,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           baseSha: inspection.baseSha,
           rootSha: observed.sha,
           authoritativeObservation: { headRef: operation.branchName, sha: observed.sha },
+          stageSnapshots: freshValidatedDefinition.stageSnapshots,
           now: now(),
         })
         .pipe(
@@ -620,6 +761,7 @@ function finalRecheck(input: {
   readonly branchName: string
   readonly workflowDefinitionSha256: string
   readonly workflowDefinition: WorkflowDefinition
+  readonly stageSnapshots: ReadonlyArray<ExecutableStageSnapshot>
   readonly previousTrustedSha: string | null
   readonly expectedRootSha: string
   readonly readinessJudgment: TicketReadinessJudgment
@@ -660,7 +802,8 @@ function finalRecheck(input: {
       finalBranch._tag !== "Accepted" ||
       (finalBranch._tag === "Accepted" && finalBranch.sha !== input.expectedRootSha) ||
       finalOpenPr ||
-      input.workflowDefinitionSha256 !== workflowDefinitionSha256(input.workflowDefinition)
+      input.workflowDefinitionSha256 !== workflowDefinitionSha256(input.workflowDefinition) ||
+      !stageSnapshotsMatchWorkflowDefinition(input.workflowDefinition, input.stageSnapshots)
     ) {
       if (input.onChanged !== undefined) yield* input.onChanged()
       return yield* Effect.fail(

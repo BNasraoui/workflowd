@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
-import { Schema } from "effect"
+import { Data, Schema } from "effect"
+import { AgentHarnessRef, MAX_STAGE_REQUEST_BYTES } from "../agent-harness"
 
 const BoundedText = (maximum: number) =>
   Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
@@ -144,44 +145,42 @@ export const WorkflowStartInput = Schema.Struct({
   ticket: TicketReference,
   ticketRevisionSha256: Sha256,
   workflowDefinitionSha256: Sha256,
+  stageSnapshotsSha256: Sha256,
   baseRef: BoundedText(256),
   baseSha: GitSha,
   branchName: BoundedText(256),
 })
 
-export const WorkflowInitialOperationDefinition = Schema.Struct({
-  kind: Schema.Literal("StageProduce", "ArtifactPublish"),
-  state: Schema.Literal("ready", "blocked"),
-  parentEffect: Schema.Struct({
-    success: Schema.Literal("advance parent", "audit only"),
-    failure: Schema.Literal("fail Generation", "audit only"),
-  }),
-  parameters: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
-})
-
-const ContractIdentifier = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/))
-const PositiveVersion = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_000_000))
+export const ContractIdentifier = Schema.String.pipe(
+  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/),
+)
+export const PositiveVersion = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(1_000_000),
+)
 const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
+const DurableStagePayloadBytes = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(MAX_STAGE_REQUEST_BYTES),
+)
+const ProviderModel = Schema.String.pipe(
+  Schema.pattern(/^[^\s/]+\/[^\s/]+$/),
+  Schema.maxLength(256),
+)
 
-export const StageInputContract = Schema.Struct({
-  schemaId: ContractIdentifier,
-  schemaVersion: PositiveVersion,
-  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_048_576)),
+export const StageContractRef = Schema.Struct({
+  name: ContractIdentifier,
+  contractVersion: PositiveVersion,
 })
+export type StageContractRef = typeof StageContractRef.Type
 
-export const StageProducerDefinition = Schema.Struct({
-  harnessId: ContractIdentifier,
-  harnessVersion: PositiveVersion,
-  agent: ContractIdentifier,
-  model: Schema.String.pipe(Schema.pattern(/^[^\s/]+\/[^\s/]+$/), Schema.maxLength(256)),
-  timeoutMs: BoundedMilliseconds,
-  retry: Schema.Struct({
-    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
-    backoffMs: BoundedMilliseconds,
-  }),
+export const PolicyReference = Schema.Struct({
+  name: ContractIdentifier,
+  version: PositiveVersion,
 })
+export type PolicyReference = typeof PolicyReference.Type
 
-export const StageOutputContract = Schema.Union(
+export const StageOutputPolicy = Schema.Union(
   Schema.Struct({
     _tag: Schema.Literal("Artifact"),
     pathTemplate: BoundedText(512),
@@ -213,32 +212,95 @@ export const StageActivationPolicy = Schema.Union(
   Schema.Struct({ mode: Schema.Literal("enabled", "disabled") }),
   Schema.Struct({
     mode: Schema.Literal("conditional"),
-    policyId: ContractIdentifier,
-    policyVersion: PositiveVersion,
+    policy: PolicyReference,
     decision: Schema.Literal("enabled", "disabled"),
+    reason: BoundedText(1_000),
   }),
 )
 
-export const WorkflowStageDefinition = Schema.Struct({
+export const StageRetryPolicy = Schema.Struct({
+  maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+  backoffMs: BoundedMilliseconds,
+})
+
+export const StageDefinition = Schema.Struct({
   key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z0-9_-]{0,63}$/)),
   kind: Schema.Literal("document", "implementation"),
+  contract: StageContractRef,
   activation: StageActivationPolicy,
   definitionVersion: PositiveVersion,
-  inputContract: StageInputContract,
-  producer: StageProducerDefinition,
-  outputContract: StageOutputContract,
+  maxEncodedInputBytes: DurableStagePayloadBytes,
+  producer: Schema.Struct({
+    harness: AgentHarnessRef,
+    agent: ContractIdentifier,
+    model: ProviderModel,
+    timeoutMs: BoundedMilliseconds,
+    retry: StageRetryPolicy,
+  }),
+  outputPolicy: StageOutputPolicy,
   reviewPolicy: StageReviewPolicy,
   humanGatePolicy: StageHumanGatePolicy,
-  initialOperations: Schema.Array(WorkflowInitialOperationDefinition).pipe(Schema.maxItems(16)),
+  designPolicy: Schema.optional(PolicyReference),
+  promotionPolicy: Schema.optional(PolicyReference),
+  structurePolicy: Schema.optional(PolicyReference),
 })
+export type StageDefinition = typeof StageDefinition.Type
+
+export const ExecutableStageSnapshot = Schema.Struct({
+  sequencePosition: Schema.Int.pipe(Schema.positive()),
+  stageDefinitionSha256: Sha256,
+  definition: StageDefinition,
+  contractRegistrationSha256: Sha256,
+  harnessRegistrationSha256: Sha256,
+})
+export type ExecutableStageSnapshot = typeof ExecutableStageSnapshot.Type
 
 export const WorkflowDefinition = Schema.Struct({
   contractVersion: Schema.Literal(1),
   definitionVersion: PositiveVersion,
-  stages: Schema.Array(WorkflowStageDefinition).pipe(Schema.maxItems(32)),
+  stages: Schema.Array(StageDefinition).pipe(Schema.maxItems(32)),
 })
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
 export type SourceResolver = (source: string) => boolean
+
+export type WorkflowDefinitionValidationReason =
+  | "no_considered_stage"
+  | "no_runnable_stage"
+  | "duplicate_stage_key"
+  | "invalid_activation_prerequisite"
+  | "invalid_stage_order"
+  | "unsupported_bound"
+  | "unsupported_policy"
+  | "unsafe_artifact_path"
+  | "unknown_contract_reference"
+  | "unknown_harness_reference"
+  | "incompatible_kind"
+  | "incompatible_output"
+  | "incompatible_definition"
+  | "registration_hash_mismatch"
+  | "unavailable_agent_model"
+
+export class WorkflowDefinitionValidationError extends Data.TaggedError(
+  "WorkflowDefinitionValidationError",
+)<{
+  readonly phase: "pure" | "contract" | "harness" | "availability"
+  readonly reason: WorkflowDefinitionValidationReason
+  readonly workflowDefinitionSha256?: string
+  readonly stageKey?: string
+  readonly sequencePosition?: number
+  readonly contractRef?: StageContractRef
+  readonly harnessRef?: typeof AgentHarnessRef.Type
+  readonly expectedRegistrationSha256?: string
+  readonly actualRegistrationSha256?: string
+  readonly cause?: string
+}> {}
+
+export function isEffectivelyEnabled(stage: StageDefinition): boolean {
+  return (
+    stage.activation.mode === "enabled" ||
+    (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")
+  )
+}
 
 export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
   return canonicalSha256({
@@ -248,52 +310,132 @@ export function workflowDefinitionSha256(definition: WorkflowDefinition): string
   })
 }
 
+export function stageDefinitionSha256(definition: StageDefinition): string {
+  return canonicalSha256({
+    contractVersion: 1,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
+export function stageSnapshotsMatchWorkflowDefinition(
+  definition: WorkflowDefinition,
+  snapshots: ReadonlyArray<ExecutableStageSnapshot>,
+): boolean {
+  return (
+    snapshots.length === definition.stages.length &&
+    snapshots.every((snapshot, index) => {
+      const currentStage = definition.stages[index]
+      return (
+        currentStage !== undefined &&
+        snapshot.sequencePosition === index + 1 &&
+        snapshot.stageDefinitionSha256 === stageDefinitionSha256(snapshot.definition) &&
+        stageDefinitionSha256(snapshot.definition) === stageDefinitionSha256(currentStage)
+      )
+    })
+  )
+}
+
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
-  if (
-    !definition.stages.some(
-      (stage) =>
-        stage.activation.mode === "enabled" ||
-        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
-    )
-  ) {
-    throw new Error("Workflow definition must contain at least one runnable stage")
+  const definitionSha256 = workflowDefinitionSha256(definition)
+  if (definition.stages.length === 0) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_considered_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
   }
   const keys = new Set<string>()
-  for (const stage of definition.stages) {
-    if (keys.has(stage.key)) throw new Error(`Duplicate workflow stage key: ${stage.key}`)
+  let enabledDesignPosition: number | undefined
+  let previousKnownStageRank = 0
+  for (const [index, stage] of definition.stages.entries()) {
+    const diagnostic = {
+      phase: "pure" as const,
+      workflowDefinitionSha256: definitionSha256,
+      stageKey: stage.key,
+      sequencePosition: index + 1,
+    }
+    if (keys.has(stage.key)) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "duplicate_stage_key",
+      })
+    }
     keys.add(stage.key)
-    const operationKinds = new Set<string>()
-    for (const operation of stage.initialOperations) {
-      if (operationKinds.has(operation.kind)) {
-        throw new Error(`Duplicate initial ${operation.kind} operation for stage: ${stage.key}`)
-      }
-      operationKinds.add(operation.kind)
-    }
-    if (!operationKinds.has("StageProduce") || !operationKinds.has("ArtifactPublish")) {
-      throw new Error(
-        `Workflow stage must declare StageProduce and ArtifactPublish operations: ${stage.key}`,
-      )
-    }
-    if (
-      (stage.activation.mode === "enabled" ||
-        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")) &&
-      !stage.initialOperations.some((operation) => operation.state === "ready")
-    ) {
-      throw new Error(`Workflow definition has no runnable stage operation: ${stage.key}`)
-    }
     if (
       stage.reviewPolicy.mode === "automated" &&
       stage.reviewPolicy.minimumContributions > stage.reviewPolicy.maximumContributions
     ) {
-      throw new Error(`Stage review minimum exceeds maximum: ${stage.key}`)
+      throw new WorkflowDefinitionValidationError({ ...diagnostic, reason: "unsupported_bound" })
     }
     if (
-      stage.outputContract._tag === "Artifact" &&
-      !isSafeArtifactPathTemplate(stage.outputContract.pathTemplate)
+      stage.outputPolicy._tag === "Artifact" &&
+      !isSafeArtifactPathTemplate(stage.outputPolicy.pathTemplate)
     ) {
-      throw new Error(`Invalid artifact path template for stage: ${stage.key}`)
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsafe_artifact_path",
+      })
     }
+
+    const stageName = [
+      "questions",
+      "research",
+      "design",
+      "structure",
+      "plan",
+      "implementation",
+    ].includes(stage.key)
+      ? stage.key
+      : undefined
+    const knownRank =
+      stageName === undefined
+        ? undefined
+        : ["questions", "research", "design", "structure", "plan", "implementation"].indexOf(
+            stageName,
+          ) + 1
+    if (knownRank !== undefined && knownRank > 0) {
+      if (knownRank <= previousKnownStageRank) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_stage_order",
+        })
+      }
+      previousKnownStageRank = knownRank
+    }
+    if (stageName === "design") {
+      if (!isEffectivelyEnabled(stage)) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_activation_prerequisite",
+        })
+      }
+      enabledDesignPosition = index + 1
+    }
+    if (stageName === "structure" && enabledDesignPosition === undefined) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "invalid_stage_order",
+      })
+    }
+    if (
+      (stage.designPolicy !== undefined && stageName !== "design") ||
+      (stage.promotionPolicy !== undefined && stageName !== "design") ||
+      (stage.structurePolicy !== undefined && stageName !== "structure")
+    ) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsupported_policy",
+      })
+    }
+  }
+  if (!definition.stages.some(isEffectivelyEnabled)) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_runnable_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
   }
   return definition
 }

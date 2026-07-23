@@ -7,23 +7,36 @@ import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
-import {
-  Automation,
-  OpenCodeAutomationAdapter,
-  makePullRequestHarnessDefinitions,
-} from "./opencode"
+import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
+import { WorkflowDefinitionValidationError } from "./qrspi/domain"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
-import { QrspiStoreLive } from "./qrspi/store"
+import { QrspiStoreDataError, QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
-import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
+import {
+  WorkflowStart,
+  WorkflowStartLive,
+  WorkflowStartUnauthorized,
+  closedWorkflowStart,
+  toWorkflowStartValidationError,
+} from "./qrspi/workflow-start"
+import {
+  StageCatalog,
+  StageCatalogError,
+  TrustedStageCatalog,
+  questionsStageContract,
+  type StageContractRegistration,
+} from "./qrspi/stage-catalog"
 import { SessionAccessResolver } from "./session-access"
 
-export const makeLiveLayer = (config: AppConfig) => {
+export const makeLiveLayer = (
+  config: AppConfig,
+  stageContracts: ReadonlyArray<StageContractRegistration> = [questionsStageContract],
+) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
@@ -33,13 +46,13 @@ export const makeLiveLayer = (config: AppConfig) => {
     throwOnError: true,
   })
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClient))
-  const definitions = makePullRequestHarnessDefinitions({
+  const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
   })
   const agentHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
-    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+    new TrustedAgentHarnessCatalog(Object.values(definitions)),
     {
       serverId: config.openCode.serverId,
       endpointAlias: config.openCode.endpointAlias,
@@ -51,9 +64,24 @@ export const makeLiveLayer = (config: AppConfig) => {
     endpointAlias: config.openCode.endpointAlias,
     attachUrl: config.openCode.attachUrl,
   })
+  const stageCatalogLayer = Layer.effect(
+    StageCatalog,
+    Effect.try({
+      try: () => new TrustedStageCatalog(stageContracts).port(),
+      catch: (cause) =>
+        cause instanceof StageCatalogError
+          ? cause
+          : new StageCatalogError({
+              reason: "malformed_registration",
+              reference: "<catalog>",
+              cause: String(cause),
+            }),
+    }),
+  )
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
+          preflight: Effect.void,
           start: () =>
             Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
         })
@@ -72,6 +100,8 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(
             Layer.mergeAll(
               QrspiStoreLive,
+              Layer.succeed(AgentHarness, agentHarness),
+              stageCatalogLayer,
               Layer.succeed(
                 TicketSource,
                 new BeadsCliTicketSource(
@@ -116,6 +146,16 @@ export const makeLiveLayer = (config: AppConfig) => {
                 }).pipe(Effect.provide(WorkflowStoreLive)),
               ),
             ),
+          ),
+          Layer.catchAll((error) =>
+            error instanceof WorkflowDefinitionValidationError ||
+            error instanceof QrspiStoreDataError ||
+            error instanceof StageCatalogError
+              ? Layer.succeed(
+                  WorkflowStart,
+                  closedWorkflowStart(toWorkflowStartValidationError(error)),
+                )
+              : Layer.fail(error),
           ),
         )
   return Layer.mergeAll(

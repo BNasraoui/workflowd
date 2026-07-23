@@ -572,15 +572,69 @@ export const reconciliationObservationSequence = Effect.gen(function* () {
   `
 })
 
+const qrspiStageDefinitions = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE qrspi_stage_definitions (
+      stage_definition_sha256 TEXT NOT NULL CHECK (
+        length(stage_definition_sha256) = 64
+          AND stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      workflow_definition_sha256 TEXT NOT NULL
+        REFERENCES qrspi_workflow_definitions (definition_sha256),
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      sequence_position INTEGER NOT NULL CHECK (sequence_position > 0),
+      definition_json TEXT NOT NULL CHECK (
+        json_valid(definition_json) = 1 AND json_type(definition_json, '$') = 'object'
+      ),
+      contract_name TEXT NOT NULL,
+      contract_version INTEGER NOT NULL CHECK (contract_version > 0),
+      contract_registration_sha256 TEXT NOT NULL CHECK (
+        length(contract_registration_sha256) = 64
+          AND contract_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      harness_name TEXT NOT NULL,
+      harness_version INTEGER NOT NULL CHECK (harness_version > 0),
+      harness_registration_sha256 TEXT NOT NULL CHECK (
+        length(harness_registration_sha256) = 64
+          AND harness_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_definition_sha256, stage_definition_sha256),
+      UNIQUE (workflow_definition_sha256, stage_key),
+      UNIQUE (workflow_definition_sha256, sequence_position)
+    ) STRICT
+  `
+})
+
+const qrspiGenerationFormat = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    ALTER TABLE qrspi_generations
+    ADD COLUMN generation_format TEXT NOT NULL DEFAULT 'legacy'
+      CHECK (generation_format IN ('legacy', 'stage_snapshots_v1'))
+  `
+})
+
+const migrationsThrough0008 = {
+  "0001_initial_schema": initialSchema,
+  "0002_agent_harness": agentHarnessSchema,
+  "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
+  "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
+  "0005_qrspi_workflow_start": qrspiWorkflowStart,
+  "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
+  "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
+  "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+}
+
+export const runStoreMigrationsThrough0008 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0008),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    "0001_initial_schema": initialSchema,
-    "0002_agent_harness": agentHarnessSchema,
-    "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
-    "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
-    "0005_qrspi_workflow_start": qrspiWorkflowStart,
-    "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
-    "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
-    "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+    ...migrationsThrough0008,
+    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+    "0010_qrspi_generation_format": qrspiGenerationFormat,
   }),
 })

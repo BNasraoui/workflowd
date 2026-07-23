@@ -396,22 +396,18 @@ describe("QRSPI ticket boundary", () => {
         {
           key: "questions",
           kind: "document",
+          contract: { name: "qrspi.questions", contractVersion: 1 },
           activation: { mode: "enabled" },
           definitionVersion: 2,
-          inputContract: {
-            schemaId: "qrspi.questions.input",
-            schemaVersion: 1,
-            maxEncodedBytes: 16_384,
-          },
+          maxEncodedInputBytes: 16_384,
           producer: {
-            harnessId: "opencode",
-            harnessVersion: 1,
+            harness: { name: "opencode", version: 1 },
             agent: "qrspi-questions",
             model: "openai/gpt-5.6-sol",
             timeoutMs: 60_000,
             retry: { maxAttempts: 3, backoffMs: 1_000 },
           },
-          outputContract: {
+          outputPolicy: {
             _tag: "Artifact",
             pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
             mediaType: "text/markdown",
@@ -424,7 +420,6 @@ describe("QRSPI ticket boundary", () => {
             maximumRevisions: 2,
           },
           humanGatePolicy: { mode: "on_escalation" },
-          initialOperations: requiredInitialOperations(),
         },
       ],
     } as const
@@ -445,7 +440,7 @@ describe("QRSPI ticket boundary", () => {
       "C:/tmp/questions.md",
     ]) {
       expect(() => normalizeWorkflowDefinition(workflowDefinition(pathTemplate))).toThrow(
-        "artifact path template",
+        expect.objectContaining({ reason: "unsafe_artifact_path" }),
       )
     }
   })
@@ -453,42 +448,127 @@ describe("QRSPI ticket boundary", () => {
   test("rejects workflow definitions without an enabled runnable stage", () => {
     expect(() =>
       normalizeWorkflowDefinition({ contractVersion: 1, definitionVersion: 1, stages: [] }),
-    ).toThrow("runnable stage")
+    ).toThrow(expect.objectContaining({ reason: "no_considered_stage" }))
   })
 
-  test("rejects an enabled stage whose initial operations are all blocked", () => {
+  test("rejects malformed stable contract and harness references", () => {
     const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
 
-    expect(() =>
-      normalizeWorkflowDefinition({
-        ...definition,
-        stages: [
-          {
-            ...definition.stages[0],
-            initialOperations: requiredInitialOperations().map((operation) => ({
-              ...operation,
-              state: "blocked" as const,
-            })),
-          },
-        ],
-      }),
-    ).toThrow("runnable stage")
+    for (const stage of [
+      { ...definition.stages[0], contract: { name: "", contractVersion: 1 } },
+      {
+        ...definition.stages[0],
+        producer: {
+          ...definition.stages[0]!.producer,
+          harness: { name: "invalid harness", version: 1 },
+        },
+      },
+    ]) {
+      expect(() => normalizeWorkflowDefinition({ ...definition, stages: [stage] })).toThrow()
+    }
   })
 
-  test("rejects artifact stages without producer and publication operations", () => {
+  test("requires a bounded non-empty reason for conditional activation", () => {
     const definition = workflowDefinition("docs/qrspi/{ticketId}/questions.md")
 
-    expect(() =>
+    for (const reason of ["", "x".repeat(1_001)]) {
+      expect(() =>
+        normalizeWorkflowDefinition({
+          ...definition,
+          stages: [
+            {
+              ...definition.stages[0],
+              activation: {
+                mode: "conditional",
+                policy: { name: "qrspi.activation", version: 1 },
+                decision: "enabled",
+                reason,
+              },
+            },
+          ],
+        }),
+      ).toThrow()
+    }
+  })
+
+  test.each([
+    {
+      name: "an empty workflow",
+      stages: [],
+      reason: "no_considered_stage",
+    },
+    {
+      name: "a workflow with no effectively enabled stage",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          activation: { mode: "disabled" },
+        },
+      ],
+      reason: "no_runnable_stage",
+    },
+    {
+      name: "a disabled Design stage",
+      stages: [
+        workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          key: "design",
+          contract: { name: "qrspi.design", contractVersion: 1 },
+          activation: { mode: "disabled" },
+        },
+      ],
+      reason: "invalid_activation_prerequisite",
+      stageKey: "design",
+      sequencePosition: 2,
+    },
+    {
+      name: "Structure before Design",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          key: "structure",
+          contract: { name: "qrspi.structure", contractVersion: 1 },
+        },
+      ],
+      reason: "invalid_stage_order",
+      stageKey: "structure",
+      sequencePosition: 1,
+    },
+    {
+      name: "a specialized policy on the wrong stage",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          designPolicy: { name: "qrspi.design-policy", version: 1 },
+        },
+      ],
+      reason: "unsupported_policy",
+      stageKey: "questions",
+      sequencePosition: 1,
+    },
+  ])("reports stable pure diagnostics for $name", (fixture) => {
+    let failure: unknown
+    try {
       normalizeWorkflowDefinition({
-        ...definition,
-        stages: [
-          {
-            ...definition.stages[0],
-            initialOperations: [requiredInitialOperations()[0]],
-          },
-        ],
-      }),
-    ).toThrow("StageProduce and ArtifactPublish")
+        contractVersion: 1,
+        definitionVersion: 1,
+        stages: fixture.stages,
+      })
+    } catch (cause) {
+      failure = cause
+    }
+
+    expect(failure).toMatchObject({
+      _tag: "WorkflowDefinitionValidationError",
+      phase: "pure",
+      reason: fixture.reason,
+      workflowDefinitionSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      ...(fixture.stageKey === undefined ? {} : { stageKey: fixture.stageKey }),
+      ...(fixture.sequencePosition === undefined
+        ? {}
+        : { sequencePosition: fixture.sequencePosition }),
+    })
   })
 })
 
@@ -520,41 +600,21 @@ function workflowDefinition(pathTemplate: string) {
       {
         key: "questions",
         kind: "document",
+        contract: { name: "qrspi.questions", contractVersion: 1 },
         activation: { mode: "enabled" },
         definitionVersion: 1,
-        inputContract: {
-          schemaId: "qrspi.questions.input",
-          schemaVersion: 1,
-          maxEncodedBytes: 16_384,
-        },
+        maxEncodedInputBytes: 16_384,
         producer: {
-          harnessId: "opencode",
-          harnessVersion: 1,
+          harness: { name: "opencode", version: 1 },
           agent: "qrspi-questions",
           model: "openai/gpt-5.6-sol",
           timeoutMs: 60_000,
           retry: { maxAttempts: 1, backoffMs: 1_000 },
         },
-        outputContract: { _tag: "Artifact", pathTemplate, mediaType: "text/markdown" },
+        outputPolicy: { _tag: "Artifact", pathTemplate, mediaType: "text/markdown" },
         reviewPolicy: { mode: "none" },
         humanGatePolicy: { mode: "none" },
-        initialOperations: requiredInitialOperations(),
       },
     ],
   }
-}
-
-function requiredInitialOperations() {
-  return [
-    {
-      kind: "StageProduce" as const,
-      state: "ready" as const,
-      parentEffect: { success: "advance parent" as const, failure: "fail Generation" as const },
-    },
-    {
-      kind: "ArtifactPublish" as const,
-      state: "blocked" as const,
-      parentEffect: { success: "advance parent" as const, failure: "fail Generation" as const },
-    },
-  ]
 }

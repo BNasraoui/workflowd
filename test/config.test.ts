@@ -16,40 +16,24 @@ const qrspiDefinition = {
     {
       key: "questions",
       kind: "document",
+      contract: { name: "qrspi.questions", contractVersion: 1 },
       activation: { mode: "enabled" },
       definitionVersion: 1,
-      inputContract: {
-        schemaId: "qrspi.questions.input",
-        schemaVersion: 1,
-        maxEncodedBytes: 16_384,
-      },
+      maxEncodedInputBytes: 16_384,
       producer: {
-        harnessId: "opencode",
-        harnessVersion: 1,
+        harness: { name: "opencode", version: 1 },
         agent: "qrspi-questions",
         model: "openai/gpt-5.6-sol",
         timeoutMs: 60_000,
         retry: { maxAttempts: 3, backoffMs: 1_000 },
       },
-      outputContract: {
+      outputPolicy: {
         _tag: "Artifact",
         pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
         mediaType: "text/markdown",
       },
       reviewPolicy: { mode: "none" },
       humanGatePolicy: { mode: "none" },
-      initialOperations: [
-        {
-          kind: "StageProduce",
-          state: "ready",
-          parentEffect: { success: "advance parent", failure: "fail Generation" },
-        },
-        {
-          kind: "ArtifactPublish",
-          state: "blocked",
-          parentEffect: { success: "advance parent", failure: "fail Generation" },
-        },
-      ],
     },
   ],
 } as const

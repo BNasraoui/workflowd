@@ -6,6 +6,7 @@ import {
   OpenCodeAutomationAdapter,
   OpenCodeAutomationError,
   RunPullRequestAutomationInput,
+  makeOpenCodeHarnessDefinitions,
   makePullRequestHarnessDefinitions,
 } from "../src/opencode"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
@@ -61,6 +62,26 @@ const execution = {
 }
 
 describe("OpenCodeAutomationAdapter", () => {
+  test("keeps PR registrations distinct when the stage harness is registered", () => {
+    const definitions = makeOpenCodeHarnessDefinitions(config)
+    const catalog = new TrustedAgentHarnessCatalog(Object.values(definitions))
+
+    expect(catalog.describe(definitions.review.ref).ref).toEqual({
+      name: "opencode.pr-review",
+      version: 1,
+    })
+    expect(catalog.describe(definitions.fix.ref).ref).toEqual({
+      name: "opencode.pr-fix",
+      version: 1,
+    })
+    expect(catalog.describe(definitions.stage.ref).ref).toEqual({
+      name: "opencode",
+      version: 1,
+    })
+    expect(definitions.review.prompt(input)).not.toBe(definitions.fix.prompt(input))
+    expect(definitions.review.outputSchema).not.toBe(definitions.fix.outputSchema)
+  })
+
   test("requests and decodes structured review output from session events", async () => {
     const prompts: Array<Parameters<OpenCodeAdapter["promptSession"]>[0]> = []
     let statusChecks = 0

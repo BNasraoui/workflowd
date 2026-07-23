@@ -4,6 +4,7 @@ import {
   type AgentHarnessDefinition,
   type AgentHarnessPort,
   AgentHarnessError,
+  MAX_STAGE_REQUEST_BYTES,
   type PreparedAgentWork,
 } from "./agent-harness"
 import { FixResult as FixResultSchema, type FixResult } from "./domain/fix-result"
@@ -68,6 +69,8 @@ export type AutomationPort = {
 
 export const Automation = Context.GenericTag<AutomationPort>("workflowd/Automation")
 
+export const stageHarnessRef = { name: "opencode", version: 1 } as const
+
 export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConfig) {
   const retryPolicy = {
     maxAttempts: 3,
@@ -81,6 +84,7 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     typeof ReviewResultSchema.Encoded
   > = {
     ref: { name: "opencode.pr-review", version: 1 },
+    implementationRevision: "opencode.pr-review.v1",
     agent: config.reviewerAgent,
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
@@ -100,6 +104,7 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     typeof FixResultSchema.Encoded
   > = {
     ref: { name: "opencode.pr-fix", version: 1 },
+    implementationRevision: "opencode.pr-fix.v1",
     agent: config.fixerAgent,
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
@@ -117,6 +122,30 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
 
 export type PullRequestHarnessDefinitions = ReturnType<typeof makePullRequestHarnessDefinitions>
 
+export function makeOpenCodeHarnessDefinitions(config: OpenCodeAutomationConfig) {
+  const pullRequest = makePullRequestHarnessDefinitions(config)
+  const stage: AgentHarnessDefinition<unknown, unknown, unknown, unknown> = {
+    ref: stageHarnessRef,
+    implementationRevision: "opencode.qrspi-stage.v1",
+    agent: "qrspi-stage",
+    model: "openai/gpt-5.6-sol",
+    inputSchema: Schema.Unknown,
+    outputSchema: Schema.Unknown,
+    maxInputBytes: MAX_STAGE_REQUEST_BYTES,
+    maxOutputBytes: 4 * 1024 * 1024,
+    promptContract: "qrspi-stage-capability",
+    title: () => "QRSPI stage",
+    prompt: () => "QRSPI stage capability registration",
+    timeoutMs: config.timeoutMs,
+    retryPolicy: {
+      maxAttempts: 3,
+      structuredOutputRetryCount: 2,
+      invalidOutput: "retry",
+    },
+  }
+  return { ...pullRequest, stage } as const
+}
+
 export class OpenCodeAutomationAdapter implements AutomationPort {
   constructor(
     private readonly harness: AgentHarnessPort,
@@ -128,9 +157,9 @@ export class OpenCodeAutomationAdapter implements AutomationPort {
   ): Effect.Effect<void, OpenCodeAutomationError> =>
     this.harness
       .validateAvailability({
-        refs: input.fixWorkEnabled
-          ? [this.definitions.review.ref, this.definitions.fix.ref]
-          : [this.definitions.review.ref],
+        selections: input.fixWorkEnabled
+          ? [this.definitions.review, this.definitions.fix]
+          : [this.definitions.review],
         ...(input.directory === undefined ? {} : { directory: input.directory }),
       })
       .pipe(Effect.mapError(toAutomationError))

@@ -4,12 +4,17 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
 import { runStoreMigrations } from "../store/migrations"
 import {
   RepositoryReference,
+  ExecutableStageSnapshot,
+  StageDefinition,
   WorkflowDefinition,
   WorkflowStartInput,
   WorkflowStartOutput,
   canonicalSha256,
+  isEffectivelyEnabled,
+  stageDefinitionSha256,
   workflowDefinitionSha256,
   type TicketRevision,
+  type ExecutableStageSnapshot as ExecutableStageSnapshotType,
 } from "./domain"
 
 const OperationState = Schema.Literal(
@@ -95,7 +100,35 @@ const WorkflowScope = Schema.Struct({
   _tag: Schema.Literal("WorkflowScope"),
   workflowId: Schema.NonEmptyString,
 })
+const LegacyWorkflowStartInput = Schema.Struct({
+  contractVersion: Schema.Literal(1),
+  repository: RepositoryReference,
+  ticket: WorkflowStartInput.fields.ticket,
+  ticketRevisionSha256: WorkflowStartInput.fields.ticketRevisionSha256,
+  workflowDefinitionSha256: WorkflowStartInput.fields.workflowDefinitionSha256,
+  baseRef: WorkflowStartInput.fields.baseRef,
+  baseSha: WorkflowStartInput.fields.baseSha,
+  branchName: WorkflowStartInput.fields.branchName,
+})
+const PersistedWorkflowStartInput = Schema.Union(WorkflowStartInput, LegacyWorkflowStartInput)
 const decodeOutput = Schema.decodeUnknown(Schema.parseJson(WorkflowStartOutput))
+
+const CurrentGenerationSnapshotRow = Schema.Struct({
+  workflow_id: Schema.NonEmptyString,
+  generation: Schema.Int.pipe(Schema.positive()),
+  workflow_definition_sha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  workflow_definition_json: Schema.NullOr(Schema.String),
+  stage_definition_sha256: Schema.NullOr(Schema.String),
+  stage_key: Schema.NullOr(Schema.String),
+  sequence_position: Schema.NullOr(Schema.Number),
+  definition_json: Schema.NullOr(Schema.String),
+  contract_name: Schema.NullOr(Schema.String),
+  contract_version: Schema.NullOr(Schema.Number),
+  contract_registration_sha256: Schema.NullOr(Schema.String),
+  harness_name: Schema.NullOr(Schema.String),
+  harness_version: Schema.NullOr(Schema.Number),
+  harness_registration_sha256: Schema.NullOr(Schema.String),
+})
 
 export type PrepareStartInput = {
   readonly workflowId: string
@@ -124,15 +157,27 @@ export type CompleteStartInput = {
     readonly headRef: string
     readonly sha: string
   }
+  readonly stageSnapshots: ReadonlyArray<ExecutableStageSnapshotType>
   readonly now: Date
 }
 
 export type WorkflowStartTerminalRetryPolicy = "retryable" | "operator_required"
 
+export type CurrentGenerationSnapshotSet = {
+  readonly workflowId: string
+  readonly generation: number
+  readonly workflowDefinitionSha256: string
+  readonly snapshots: ReadonlyArray<ExecutableStageSnapshotType>
+}
+
 type StoreError =
   SqlError | QrspiStoreDataError | WorkflowStartCurrentnessError | WorkflowStartRetryExhaustedError
 
 export type QrspiStorePort = {
+  readonly loadCurrentGenerationSnapshotSets: () => Effect.Effect<
+    ReadonlyArray<CurrentGenerationSnapshotSet>,
+    SqlError | QrspiStoreDataError
+  >
   readonly getCurrentCursor: (workflowId: string) => Effect.Effect<
     {
       readonly generation: number
@@ -219,9 +264,16 @@ export type QrspiStorePort = {
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
 
 export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")<{
-  readonly record: "workflow_operation" | "workflow_definition"
+  readonly record: "workflow_operation" | "workflow_definition" | "stage_definition"
   readonly recordId: string
   readonly message: string
+  readonly reason?:
+    "malformed" | "missing" | "duplicate" | "reordered" | "hash_mismatch" | "identity_mismatch"
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly sequencePosition?: number
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
 }> {}
 
 export class WorkflowStartCurrentnessError extends Data.TaggedError(
@@ -232,8 +284,211 @@ export class WorkflowStartRetryExhaustedError extends Data.TaggedError(
   "WorkflowStartRetryExhaustedError",
 )<{ readonly operationId: string }> {}
 
-const dataError = (record: QrspiStoreDataError["record"], recordId: string, cause: unknown) =>
-  new QrspiStoreDataError({ record, recordId, message: String(cause) })
+type StoreDataErrorDetails = {
+  readonly reason?: QrspiStoreDataError["reason"]
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly sequencePosition?: number
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
+}
+
+const dataError = (
+  record: QrspiStoreDataError["record"],
+  recordId: string,
+  cause: unknown,
+  details: StoreDataErrorDetails = {},
+) =>
+  new QrspiStoreDataError({
+    record,
+    recordId,
+    message: String(cause),
+    ...(details.reason === undefined ? {} : { reason: details.reason }),
+    ...(details.workflowId === undefined ? {} : { workflowId: details.workflowId }),
+    ...(details.generation === undefined ? {} : { generation: details.generation }),
+    ...(details.sequencePosition === undefined
+      ? {}
+      : { sequencePosition: details.sequencePosition }),
+    ...(details.expectedSha256 === undefined ? {} : { expectedSha256: details.expectedSha256 }),
+    ...(details.actualSha256 === undefined ? {} : { actualSha256: details.actualSha256 }),
+  })
+
+function decodeCurrentGenerationSnapshotSet(
+  rows: ReadonlyArray<typeof CurrentGenerationSnapshotRow.Type>,
+) {
+  const first = rows[0]!
+  const identity = {
+    workflowId: first.workflow_id,
+    generation: first.generation,
+  }
+  return Effect.gen(function* () {
+    if (first.workflow_definition_json === null) {
+      return yield* Effect.fail(
+        dataError("workflow_definition", first.workflow_definition_sha256, "missing definition", {
+          ...identity,
+          reason: "missing",
+        }),
+      )
+    }
+    const workflowDefinition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+      first.workflow_definition_json,
+    ).pipe(
+      Effect.mapError((cause) =>
+        dataError("workflow_definition", first.workflow_definition_sha256, cause, {
+          ...identity,
+          reason: "malformed",
+        }),
+      ),
+    )
+    const actualWorkflowSha256 = workflowDefinitionSha256(workflowDefinition)
+    if (actualWorkflowSha256 !== first.workflow_definition_sha256) {
+      return yield* Effect.fail(
+        dataError("workflow_definition", first.workflow_definition_sha256, "hash mismatch", {
+          ...identity,
+          reason: "hash_mismatch",
+          expectedSha256: first.workflow_definition_sha256,
+          actualSha256: actualWorkflowSha256,
+        }),
+      )
+    }
+    if (rows.some((row) => row.stage_definition_sha256 === null)) {
+      return yield* Effect.fail(
+        dataError("stage_definition", first.workflow_definition_sha256, "missing snapshot set", {
+          ...identity,
+          reason: "missing",
+        }),
+      )
+    }
+    if (rows.length !== workflowDefinition.stages.length) {
+      return yield* Effect.fail(
+        dataError(
+          "stage_definition",
+          first.workflow_definition_sha256,
+          "snapshot count does not match workflow definition",
+          { ...identity, reason: rows.length === 0 ? "missing" : "identity_mismatch" },
+        ),
+      )
+    }
+    const seenPositions = new Set<number>()
+    const seenKeys = new Set<string>()
+    const snapshots = yield* Effect.forEach(
+      rows,
+      (row, index) =>
+        Effect.gen(function* () {
+          const recordId = row.stage_definition_sha256!
+          const sequencePosition = row.sequence_position
+          if (
+            row.workflow_id !== first.workflow_id ||
+            row.generation !== first.generation ||
+            row.workflow_definition_sha256 !== first.workflow_definition_sha256 ||
+            row.workflow_definition_json !== first.workflow_definition_json
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "generation identity changed within set", {
+                ...identity,
+                reason: "identity_mismatch",
+              }),
+            )
+          }
+          if (sequencePosition === null || !Number.isInteger(sequencePosition)) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "malformed sequence position", {
+                ...identity,
+                reason: "malformed",
+              }),
+            )
+          }
+          if (
+            seenPositions.has(sequencePosition) ||
+            (row.stage_key !== null && seenKeys.has(row.stage_key))
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "duplicate snapshot identity", {
+                ...identity,
+                sequencePosition,
+                reason: "duplicate",
+              }),
+            )
+          }
+          seenPositions.add(sequencePosition)
+          if (row.stage_key !== null) seenKeys.add(row.stage_key)
+          if (sequencePosition !== index + 1) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "snapshot sequence is reordered", {
+                ...identity,
+                sequencePosition,
+                reason: "reordered",
+              }),
+            )
+          }
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(StageDefinition))(
+            row.definition_json,
+          ).pipe(
+            Effect.mapError((cause) =>
+              dataError("stage_definition", recordId, cause, {
+                ...identity,
+                sequencePosition,
+                reason: "malformed",
+              }),
+            ),
+          )
+          const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
+            sequencePosition,
+            stageDefinitionSha256: recordId,
+            definition,
+            contractRegistrationSha256: row.contract_registration_sha256,
+            harnessRegistrationSha256: row.harness_registration_sha256,
+          }).pipe(
+            Effect.mapError((cause) =>
+              dataError("stage_definition", recordId, cause, {
+                ...identity,
+                sequencePosition,
+                reason: "malformed",
+              }),
+            ),
+          )
+          const actualStageSha256 = stageDefinitionSha256(snapshot.definition)
+          if (actualStageSha256 !== recordId) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "hash mismatch", {
+                ...identity,
+                sequencePosition,
+                reason: "hash_mismatch",
+                expectedSha256: recordId,
+                actualSha256: actualStageSha256,
+              }),
+            )
+          }
+          const configuredStage = workflowDefinition.stages[index]
+          if (
+            configuredStage === undefined ||
+            row.stage_key !== definition.key ||
+            row.contract_name !== definition.contract.name ||
+            row.contract_version !== definition.contract.contractVersion ||
+            row.harness_name !== definition.producer.harness.name ||
+            row.harness_version !== definition.producer.harness.version ||
+            canonicalSha256(configuredStage) !== canonicalSha256(definition)
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "snapshot columns do not match definition", {
+                ...identity,
+                sequencePosition,
+                reason: "identity_mismatch",
+              }),
+            )
+          }
+          return snapshot
+        }),
+      { concurrency: 1 },
+    )
+    return {
+      workflowId: first.workflow_id,
+      generation: first.generation,
+      workflowDefinitionSha256: first.workflow_definition_sha256,
+      snapshots,
+    } satisfies CurrentGenerationSnapshotSet
+  })
+}
 
 function make(sql: SqlClient.SqlClient): QrspiStorePort {
   const transaction = <A, E>(effect: Effect.Effect<A, E>) => sql.withTransaction(effect)
@@ -264,6 +519,61 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    loadCurrentGenerationSnapshotSets: () =>
+      Effect.gen(function* () {
+        const rawRows = yield* sql<Record<string, unknown>>`
+          SELECT
+            generation.workflow_id,
+            generation.generation,
+            generation.workflow_definition_sha256,
+            workflow_definition.definition_json AS workflow_definition_json,
+            stage.stage_definition_sha256,
+            stage.stage_key,
+            stage.sequence_position,
+            stage.definition_json,
+            stage.contract_name,
+            stage.contract_version,
+            stage.contract_registration_sha256,
+            stage.harness_name,
+            stage.harness_version,
+            stage.harness_registration_sha256
+          FROM qrspi_generations AS generation
+          LEFT JOIN qrspi_workflow_definitions AS workflow_definition
+            ON workflow_definition.definition_sha256 = generation.workflow_definition_sha256
+          LEFT JOIN qrspi_stage_definitions AS stage
+            ON stage.workflow_definition_sha256 = generation.workflow_definition_sha256
+          WHERE generation.is_current = 1
+            AND generation.generation_format = 'stage_snapshots_v1'
+          ORDER BY generation.workflow_id, generation.generation, stage.sequence_position
+        `
+        const rows = yield* Effect.forEach(
+          rawRows,
+          (raw) =>
+            Schema.decodeUnknown(CurrentGenerationSnapshotRow)(raw).pipe(
+              Effect.mapError((cause) =>
+                dataError(
+                  "stage_definition",
+                  typeof raw.workflow_id === "string" ? raw.workflow_id : "unreadable",
+                  cause,
+                  { reason: "malformed" },
+                ),
+              ),
+            ),
+          { concurrency: 1 },
+        )
+        const grouped = new Map<string, Array<typeof CurrentGenerationSnapshotRow.Type>>()
+        for (const row of rows) {
+          const key = `${row.workflow_id}\u0000${row.generation}`
+          const group = grouped.get(key)
+          if (group === undefined) grouped.set(key, [row])
+          else group.push(row)
+        }
+        return yield* Effect.forEach(
+          grouped.values(),
+          (generationRows) => decodeCurrentGenerationSnapshotSet(generationRows),
+          { concurrency: 1 },
+        )
+      }),
     getCurrentCursor: (workflowId) =>
       sql<{
         readonly generation: number
@@ -735,6 +1045,58 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               dataError("workflow_definition", input.workflowDefinitionSha256, "hash mismatch"),
             )
           }
+          if (input.stageSnapshots.length !== definition.stages.length) {
+            return yield* Effect.fail(
+              dataError(
+                "stage_definition",
+                input.workflowDefinitionSha256,
+                "snapshot count does not match workflow definition",
+              ),
+            )
+          }
+          const snapshots = yield* Effect.forEach(
+            input.stageSnapshots,
+            (suppliedSnapshot, index) =>
+              Effect.gen(function* () {
+                const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)(
+                  suppliedSnapshot,
+                ).pipe(
+                  Effect.mapError((cause) =>
+                    dataError("stage_definition", suppliedSnapshot.stageDefinitionSha256, cause),
+                  ),
+                )
+                const configuredStage = definition.stages[index]
+                if (
+                  configuredStage === undefined ||
+                  snapshot.sequencePosition !== index + 1 ||
+                  snapshot.stageDefinitionSha256 !== stageDefinitionSha256(snapshot.definition) ||
+                  snapshot.definition.key !== configuredStage.key ||
+                  canonicalSha256(snapshot.definition) !== canonicalSha256(configuredStage) ||
+                  canonicalSha256(snapshot.definition.contract) !==
+                    canonicalSha256(configuredStage.contract) ||
+                  canonicalSha256(snapshot.definition.producer.harness) !==
+                    canonicalSha256(configuredStage.producer.harness)
+                ) {
+                  return yield* Effect.fail(
+                    dataError(
+                      "stage_definition",
+                      snapshot.stageDefinitionSha256,
+                      "snapshot does not match workflow definition order",
+                    ),
+                  )
+                }
+                return snapshot
+              }),
+            { concurrency: 1 },
+          )
+          if (canonicalSha256(snapshots) !== persistedInput.stageSnapshotsSha256) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "supplied stage snapshots do not match persisted WorkflowStart input",
+              }),
+            )
+          }
           yield* sql`
             UPDATE qrspi_generations SET
               state = CASE
@@ -779,32 +1141,84 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           }).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", input.operationId, cause)),
           )
+          for (const snapshot of snapshots) {
+            const persisted = yield* sql<{ readonly stage_definition_sha256: string }>`
+              INSERT INTO qrspi_stage_definitions (
+                stage_definition_sha256, workflow_definition_sha256, stage_key,
+                sequence_position, definition_json, contract_name, contract_version,
+                contract_registration_sha256, harness_name, harness_version,
+                harness_registration_sha256, created_at
+              ) VALUES (
+                ${snapshot.stageDefinitionSha256}, ${input.workflowDefinitionSha256},
+                ${snapshot.definition.key}, ${snapshot.sequencePosition},
+                ${JSON.stringify(snapshot.definition)}, ${snapshot.definition.contract.name},
+                ${snapshot.definition.contract.contractVersion},
+                ${snapshot.contractRegistrationSha256}, ${snapshot.definition.producer.harness.name},
+                ${snapshot.definition.producer.harness.version},
+                ${snapshot.harnessRegistrationSha256}, ${input.now.toISOString()}
+              ) ON CONFLICT (workflow_definition_sha256, stage_definition_sha256) DO UPDATE SET
+                stage_definition_sha256 = excluded.stage_definition_sha256
+              WHERE qrspi_stage_definitions.stage_key = excluded.stage_key
+                AND qrspi_stage_definitions.sequence_position = excluded.sequence_position
+                AND qrspi_stage_definitions.definition_json = excluded.definition_json
+                AND qrspi_stage_definitions.contract_name = excluded.contract_name
+                AND qrspi_stage_definitions.contract_version = excluded.contract_version
+                AND qrspi_stage_definitions.contract_registration_sha256 =
+                  excluded.contract_registration_sha256
+                AND qrspi_stage_definitions.harness_name = excluded.harness_name
+                AND qrspi_stage_definitions.harness_version = excluded.harness_version
+                AND qrspi_stage_definitions.harness_registration_sha256 =
+                  excluded.harness_registration_sha256
+              RETURNING stage_definition_sha256
+            `
+            if (persisted.length !== 1) {
+              return yield* Effect.fail(
+                dataError(
+                  "stage_definition",
+                  snapshot.stageDefinitionSha256,
+                  "persisted snapshot association or registration identity does not match",
+                  { reason: "identity_mismatch" },
+                ),
+              )
+            }
+          }
           yield* sql`
             INSERT INTO qrspi_generations (
               workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
               root_sha, current_head_sha, ticket_revision_sha256,
-              workflow_definition_sha256, state, is_current, created_at, updated_at
+              workflow_definition_sha256, generation_format, state, is_current, created_at,
+              updated_at
             ) VALUES (
               ${input.workflowId}, ${generation}, ${input.repositoryJson}, ${input.baseRef},
               ${input.baseSha}, ${input.branchName}, ${input.rootSha}, ${input.rootSha},
-              ${input.ticketRevisionSha256}, ${input.workflowDefinitionSha256}, 'running', 1,
-              ${input.now.toISOString()}, ${input.now.toISOString()}
+              ${input.ticketRevisionSha256}, ${input.workflowDefinitionSha256},
+              'stage_snapshots_v1', 'running', 1, ${input.now.toISOString()},
+              ${input.now.toISOString()}
             )
           `
-          const firstStage = definition.stages.find(
-            (stage) =>
-              stage.activation.mode === "enabled" ||
-              (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
-          )
+          const firstStage = snapshots.find(({ definition: stage }) =>
+            isEffectivelyEnabled(stage),
+          )?.definition
           if (firstStage !== undefined) {
-            for (const initial of firstStage.initialOperations) {
+            const initialOperations = [
+              {
+                kind: "StageProduce" as const,
+                state: "ready" as const,
+                maxAttempts: firstStage.producer.retry.maxAttempts,
+              },
+              {
+                kind: "ArtifactPublish" as const,
+                state: "blocked" as const,
+                maxAttempts: 3,
+              },
+            ]
+            for (const initial of initialOperations) {
               const logical = `${input.workflowId}:${generation}:${initial.kind}:${firstStage.key}:1`
               const childInput = {
                 stageKey: firstStage.key,
                 stageKind: firstStage.kind,
                 stageRevision: 1,
                 workflowDefinitionSha256: input.workflowDefinitionSha256,
-                ...(initial.parameters === undefined ? {} : { parameters: initial.parameters }),
               }
               yield* insertOperation(sql, {
                 operationId: `${logical}:1`,
@@ -817,9 +1231,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 inputSha256: canonicalSha256(childInput),
                 state: initial.state,
                 attempt: 0,
-                maxAttempts:
-                  initial.kind === "StageProduce" ? firstStage.producer.retry.maxAttempts : 3,
-                parentEffect: initial.parentEffect,
+                maxAttempts: initial.maxAttempts,
+                parentEffect: { success: "advance parent", failure: "fail Generation" },
                 now: input.now,
               })
             }
@@ -849,7 +1262,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
       )
       const [scope, operationInput] = yield* Effect.all([
         Schema.decodeUnknown(Schema.parseJson(WorkflowScope))(row.scope_json),
-        Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(row.input_json),
+        Schema.decodeUnknown(Schema.parseJson(PersistedWorkflowStartInput))(row.input_json),
         Schema.decodeUnknown(JsonObjectText)(row.parent_effect_json),
         row.external_intent_json === null
           ? Effect.void

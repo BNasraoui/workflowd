@@ -78,6 +78,10 @@ function workflowStartStatus(error: WorkflowStartError): number {
       return 409
     case "TicketSourceError":
     case "QrspiRepositoryError":
+    case "StageCatalogError":
+    case "AgentHarnessError":
+    case "WorkflowDefinitionValidationError":
+    case "WorkflowStartValidationError":
     case "SqlError":
       return 503
     case "QrspiStoreDataError":

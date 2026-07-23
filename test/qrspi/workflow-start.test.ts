@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Effect, Fiber, Layer, Schema } from "effect"
+import { AgentHarness, AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
 import {
   QrspiRepository,
   QrspiRepositoryError,
@@ -14,14 +15,29 @@ import {
   type TicketSourcePort,
 } from "../../src/qrspi/ports"
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
-import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
+import {
+  StageCatalog,
+  TrustedStageCatalog,
+  type StageContract,
+} from "../../src/qrspi/stage-catalog"
+import {
+  WorkflowStart,
+  WorkflowStartLive,
+  makeWorkflowStart,
+  type WorkflowStartOptions,
+} from "../../src/qrspi/workflow-start"
 import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
   WorkflowStartRequest,
+  canonicalSha256,
+  stageSnapshotsMatchWorkflowDefinition,
+  stageDefinitionSha256,
   workflowIdFor,
   type RepositoryReference,
+  type StageDefinition,
 } from "../../src/qrspi/domain"
+import { runStoreMigrationsThrough0008 } from "../../src/store/migrations"
 
 const directories: string[] = []
 afterEach(async () => {
@@ -33,6 +49,18 @@ const repository = {
   repositoryId: "42",
   repositoryFullName: "example-owner/example",
 } as const
+
+function stageSnapshot(definition: StageDefinition = options.workflowDefinition.stages[0]) {
+  return {
+    sequencePosition: 1,
+    stageDefinitionSha256: stageDefinitionSha256(definition),
+    definition,
+    contractRegistrationSha256: new TrustedStageCatalog([questionsContract]).descriptor(
+      definition.contract,
+    ).registrationSha256,
+    harnessRegistrationSha256: "b".repeat(64),
+  }
+}
 const ticketReference = {
   tracker: "beads",
   trackerInstanceId: "workspace-42",
@@ -199,31 +227,63 @@ function fakes(options: FakeOptions = {}) {
   }
 }
 
-function layer(filename: string, fake: ReturnType<typeof fakes>) {
+const StageRequest = Schema.Struct({ ticket: Schema.String })
+const StageResult = Schema.Struct({ text: Schema.String })
+const questionsContract: StageContract<
+  typeof StageRequest.Type,
+  typeof StageRequest.Encoded,
+  typeof StageResult.Type,
+  typeof StageResult.Encoded
+> = {
+  ref: { name: "qrspi.questions", contractVersion: 1 },
+  implementationRevision: "qrspi.questions.v1",
+  kind: "document",
+  requestSchema: StageRequest,
+  resultSchema: StageResult,
+  maxRequestBytes: 16_384,
+  maxResultBytes: 16_384,
+  compatibility: () => undefined,
+  assembleRequest: () => ({ ticket: "fixture" }),
+  buildTask: () => ({ title: "questions", prompt: "questions", resultSchema: StageResult }),
+  prepareOutput: (result) => ({ _tag: "Document", text: result.text }),
+}
+
+function layer(
+  filename: string,
+  fake: ReturnType<typeof fakes>,
+  validateAvailability: AgentHarnessPort["validateAvailability"] = () => Effect.void,
+) {
   const database = SqliteClient.layer({ filename })
+  const catalog = new TrustedStageCatalog([questionsContract])
+  const harness: AgentHarnessPort = {
+    describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+    validateAvailability,
+    prepare: () => Effect.die("unused"),
+    createSession: () => Effect.die("unused"),
+    resumeSession: () => Effect.die("unused"),
+    abortSession: () => Effect.die("unused"),
+  }
   return Layer.mergeAll(
     QrspiStoreLive.pipe(Layer.provideMerge(database)),
     Layer.succeed(TicketSource, fake.tickets),
     Layer.succeed(QrspiRepository, fake.repositories),
+    Layer.succeed(StageCatalog, catalog.port()),
+    Layer.succeed(AgentHarness, harness),
   )
 }
 
 const trustedStageSemantics = {
+  contract: { name: "qrspi.questions", contractVersion: 1 },
   definitionVersion: 1,
-  inputContract: {
-    schemaId: "qrspi.stage.input",
-    schemaVersion: 1,
-    maxEncodedBytes: 16_384,
-  },
+  maxEncodedInputBytes: 16_384,
   producer: {
-    harnessId: "opencode",
-    harnessVersion: 1,
+    harness: { name: "opencode", version: 1 },
     agent: "qrspi-producer",
     model: "openai/gpt-5.6-sol",
     timeoutMs: 60_000,
     retry: { maxAttempts: 3, backoffMs: 1_000 },
   },
-  outputContract: {
+  outputPolicy: {
     _tag: "Artifact" as const,
     pathTemplate: "docs/qrspi/{ticketId}/{stageKey}.md",
     mediaType: "text/markdown",
@@ -245,18 +305,6 @@ const options = {
         kind: "document",
         activation: { mode: "enabled" },
         ...trustedStageSemantics,
-        initialOperations: [
-          {
-            kind: "StageProduce",
-            state: "ready",
-            parentEffect: { success: "advance parent", failure: "fail Generation" },
-          },
-          {
-            kind: "ArtifactPublish",
-            state: "blocked",
-            parentEffect: { success: "advance parent", failure: "fail Generation" },
-          },
-        ],
       },
     ],
   },
@@ -311,6 +359,32 @@ async function counts(filename: string, fake: ReturnType<typeof fakes>) {
   )
 }
 
+test("rejects carried snapshots with stale hashes, order, or stage definitions", () => {
+  const snapshot = stageSnapshot()
+  const otherDefinition = { ...snapshot.definition, key: "research" }
+
+  expect(stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [snapshot])).toBe(true)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      { ...snapshot, sequencePosition: 2 },
+    ]),
+  ).toBe(false)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      { ...snapshot, stageDefinitionSha256: "c".repeat(64) },
+    ]),
+  ).toBe(false)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      {
+        ...snapshot,
+        definition: otherDefinition,
+        stageDefinitionSha256: stageDefinitionSha256(otherDefinition),
+      },
+    ]),
+  ).toBe(false)
+})
+
 describe("WorkflowStart integration", () => {
   test("creates one Ready generation and atomic initial blocked/ready operations", async () => {
     const filename = await databasePath()
@@ -336,7 +410,7 @@ describe("WorkflowStart integration", () => {
     )
     expect(JSON.parse(definition[0]!.definition_json)).toEqual(options.workflowDefinition)
     expect(definition[0]!.definition_sha256).toBe(
-      "c1110ceb7e0487eeb3910e530cbd1a9f484a76f8c6124cbd93dd7fde8782cc74",
+      "e05321d4a4c672bb20e91ffc910b5241b5168357272ac100b5ecf80869997b01",
     )
     if (result._tag !== "Started") throw new Error("Expected started workflow")
     const observations = await Effect.runPromise(
@@ -829,6 +903,7 @@ describe("WorkflowStart integration", () => {
           baseSha: persisted.baseSha,
           rootSha: baseSha,
           authoritativeObservation: { headRef: persisted.branchName, sha: baseSha },
+          stageSnapshots: [stageSnapshot()],
           now: options.now(),
         }
         const exit = yield* QrspiStore.pipe(
@@ -845,10 +920,13 @@ describe("WorkflowStart integration", () => {
         const generations = yield* sql<{ readonly count: number }>`
           SELECT count(*) AS count FROM qrspi_generations
         `
+        const snapshots = yield* sql<{ readonly count: number }>`
+          SELECT count(*) AS count FROM qrspi_stage_definitions
+        `
         const children = yield* sql<{ readonly count: number }>`
           SELECT count(*) AS count FROM workflow_operations WHERE kind != 'WorkflowStart'
         `
-        return { exit, operations, generations, children }
+        return { exit, operations, generations, snapshots, children }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
@@ -866,7 +944,55 @@ describe("WorkflowStart integration", () => {
       },
     ])
     expect(Number(result.generations[0]?.count)).toBe(0)
+    expect(Number(result.snapshots[0]?.count)).toBe(0)
     expect(Number(result.children[0]?.count)).toBe(0)
+  })
+
+  test("rejects altered registration hashes before creating a generation or children", async () => {
+    const filename = await databasePath()
+    const fake = fakes({ unknownAfterAcceptance: true })
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartUncertain" })
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{ readonly operation_id: string; readonly input_json: string }>`
+          SELECT operation_id, input_json FROM workflow_operations WHERE kind = 'WorkflowStart'
+        `
+        const persisted = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
+          rows[0]!.input_json,
+        )
+        const store = yield* QrspiStore
+        return yield* store
+          .completeStart({
+            operationId: rows[0]!.operation_id,
+            workflowId: workflowIdFor(repository, ticketReference),
+            branchName: persisted.branchName,
+            ticketRevisionSha256: persisted.ticketRevisionSha256,
+            workflowDefinitionSha256: persisted.workflowDefinitionSha256,
+            repositoryJson: JSON.stringify(repository),
+            baseRef: persisted.baseRef,
+            baseSha: persisted.baseSha,
+            rootSha: baseSha,
+            authoritativeObservation: { headRef: persisted.branchName, sha: baseSha },
+            stageSnapshots: [
+              {
+                ...stageSnapshot(),
+                contractRegistrationSha256: "a".repeat(64),
+                harnessRegistrationSha256: "c".repeat(64),
+              },
+            ],
+            now: options.now(),
+          })
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "WorkflowStartCurrentnessError" },
+    })
+    expect(await counts(filename, fake)).toEqual([0, 1, 1])
   })
 
   test("recovers an intended branch after a hard crash on the final leased attempt", async () => {
@@ -1012,7 +1138,7 @@ describe("WorkflowStart integration", () => {
         ...options,
         workflowDefinition: { contractVersion: 1, definitionVersion: 1, stages: [] },
       }),
-    ).toThrow("runnable stage")
+    ).toThrow(expect.objectContaining({ reason: "no_considered_stage" }))
   })
 
   test("creates only operations declared by the trusted workflow definition", async () => {
@@ -1030,18 +1156,6 @@ describe("WorkflowStart integration", () => {
               kind: "document",
               activation: { mode: "enabled" },
               ...trustedStageSemantics,
-              initialOperations: [
-                {
-                  kind: "StageProduce",
-                  state: "ready",
-                  parentEffect: { success: "advance parent", failure: "fail Generation" },
-                },
-                {
-                  kind: "ArtifactPublish",
-                  state: "blocked",
-                  parentEffect: { success: "advance parent", failure: "fail Generation" },
-                },
-              ],
             },
           ],
         },
@@ -1103,6 +1217,7 @@ describe("WorkflowStart integration", () => {
             baseSha,
             rootSha: baseSha,
             authoritativeObservation: { headRef: "feature/missing", sha: baseSha },
+            stageSnapshots: [stageSnapshot()],
             now: new Date("2026-07-21T05:00:00.000Z"),
           })
           .pipe(Effect.either)
@@ -1142,6 +1257,7 @@ describe("WorkflowStart integration", () => {
             baseSha: "e".repeat(40),
             rootSha: baseSha,
             authoritativeObservation: { headRef: persisted.branchName, sha: baseSha },
+            stageSnapshots: [stageSnapshot()],
             now: options.now(),
           })
           .pipe(Effect.either)
@@ -1450,5 +1566,716 @@ describe("WorkflowStart integration", () => {
       ).rejects.toBeDefined()
     }
     expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+})
+
+describe("Phase 1: Trusted stage snapshots", () => {
+  test("persists one immutable snapshot and derives its two child operations", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+
+    await start(filename, fake)
+
+    const persisted = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const snapshots = yield* sql`
+          SELECT
+            stage_definition_sha256,
+            workflow_definition_sha256,
+            stage_key,
+            sequence_position,
+            contract_name,
+            contract_version,
+            contract_registration_sha256,
+            harness_name,
+            harness_version,
+            harness_registration_sha256
+          FROM qrspi_stage_definitions
+        `
+        const children = yield* sql<{
+          readonly kind: string
+          readonly state: string
+          readonly max_attempts: number
+          readonly parent_effect_json: string
+        }>`
+          SELECT kind, state, max_attempts, parent_effect_json
+          FROM workflow_operations
+          WHERE kind IN ('StageProduce', 'ArtifactPublish')
+          ORDER BY CASE kind WHEN 'StageProduce' THEN 1 ELSE 2 END
+        `
+        const generations = yield* sql<{ readonly generation_format: string }>`
+          SELECT generation_format FROM qrspi_generations
+        `
+        return { children, generations, snapshots }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(persisted.snapshots).toHaveLength(1)
+    expect(persisted.generations).toEqual([{ generation_format: "stage_snapshots_v1" }])
+    expect(persisted.snapshots[0]).toMatchObject({
+      stage_key: "questions",
+      sequence_position: 1,
+      contract_name: "qrspi.questions",
+      contract_version: 1,
+      harness_name: "opencode",
+      harness_version: 1,
+      stage_definition_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      workflow_definition_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      contract_registration_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      harness_registration_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    })
+    expect(
+      persisted.children.map((row) => ({
+        ...row,
+        parent_effect_json: JSON.parse(row.parent_effect_json),
+      })),
+    ).toEqual([
+      {
+        kind: "StageProduce",
+        state: "ready",
+        max_attempts: 3,
+        parent_effect_json: { success: "advance parent", failure: "fail Generation" },
+      },
+      {
+        kind: "ArtifactPublish",
+        state: "blocked",
+        max_attempts: 3,
+        parent_effect_json: { success: "advance parent", failure: "fail Generation" },
+      },
+    ])
+  })
+
+  test("validates availability before durable WorkflowStart work", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const selections: Array<unknown> = []
+    const result = await Effect.runPromise(
+      makeWorkflowStart(options)(request).pipe(
+        Effect.provide(
+          layer(filename, fake, (input) => {
+            selections.push(...input.selections)
+            return Effect.fail(
+              new AgentHarnessError({
+                operation: "validate OpenCode availability",
+                cause: new Error("unavailable"),
+                retryable: true,
+              }),
+            )
+          }),
+        ),
+        Effect.either,
+      ),
+    )
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "availability",
+        reason: "unavailable_agent_model",
+      },
+    })
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "qrspi-producer",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+    const durableCounts = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* Effect.all([
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM qrspi_workflows`,
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM qrspi_ticket_revisions`,
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM qrspi_workflow_definitions`,
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM workflow_operations`,
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM qrspi_generations`,
+          sql<{ readonly count: number }>`SELECT count(*) AS count FROM qrspi_stage_definitions`,
+        ])
+        return rows.map((row) => Number(row[0]?.count ?? 0))
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(durableCounts).toEqual([0, 0, 0, 0, 0, 0])
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
+  test("revalidates availability after branch creation before creating a Generation", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    let availabilityChecks = 0
+    const result = await Effect.runPromise(
+      makeWorkflowStart(options)(request).pipe(
+        Effect.provide(
+          layer(filename, fake, () => {
+            availabilityChecks += 1
+            return availabilityChecks === 1
+              ? Effect.void
+              : Effect.fail(
+                  new AgentHarnessError({
+                    operation: "validate OpenCode availability",
+                    cause: new Error("became unavailable"),
+                    retryable: true,
+                  }),
+                )
+          }),
+        ),
+        Effect.either,
+      ),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "availability",
+        reason: "unavailable_agent_model",
+      },
+    })
+    expect(availabilityChecks).toBe(2)
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
+    const durableCounts = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const generations = yield* sql<{ readonly count: number }>`
+          SELECT count(*) AS count FROM qrspi_generations
+        `
+        const children = yield* sql<{ readonly count: number }>`
+          SELECT count(*) AS count FROM workflow_operations
+          WHERE kind IN ('StageProduce', 'ArtifactPublish')
+        `
+        return [Number(generations[0]?.count ?? 0), Number(children[0]?.count ?? 0)]
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(durableCounts).toEqual([0, 0])
+  })
+})
+
+describe("Phase 2: Ordered workflow definition validation", () => {
+  test("reports the first invalid configured stage before durable or external work", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const invalidFirst = {
+      ...options.workflowDefinition.stages[0],
+      key: "unknown",
+      contract: { name: "qrspi.unknown", contractVersion: 1 },
+      activation: { mode: "disabled" as const },
+    }
+    const validSecond = {
+      ...options.workflowDefinition.stages[0],
+      key: "questions",
+    }
+    const result = await Effect.runPromise(
+      makeWorkflowStart({
+        ...options,
+        workflowDefinition: {
+          ...options.workflowDefinition,
+          stages: [invalidFirst, validSecond],
+        },
+      })(request).pipe(Effect.provide(layer(filename, fake)), Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "contract",
+        reason: "unknown_contract_reference",
+        stageKey: "unknown",
+        sequencePosition: 1,
+        contractRef: invalidFirst.contract,
+      },
+    })
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
+  test("persists every stage in declaration order and deduplicates first-seen availability selections", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const selections: Array<unknown> = []
+    const firstStage = {
+      ...options.workflowDefinition.stages[0],
+      key: "questions",
+      activation: { mode: "disabled" as const },
+      producer: {
+        ...options.workflowDefinition.stages[0].producer,
+        agent: "shared-agent",
+      },
+    }
+    const secondStage = {
+      ...firstStage,
+      key: "research",
+      activation: {
+        mode: "conditional" as const,
+        policy: { name: "qrspi.activation", version: 1 },
+        decision: "disabled" as const,
+        reason: "Research is not required for this ticket.",
+      },
+    }
+    const thirdStage = {
+      ...firstStage,
+      key: "plan",
+      activation: { mode: "enabled" as const },
+      producer: {
+        ...firstStage.producer,
+        agent: "plan-agent",
+        retry: { maxAttempts: 7, backoffMs: 1_000 },
+      },
+    }
+    const fourthStage = {
+      ...firstStage,
+      key: "implementation",
+      activation: { mode: "enabled" as const },
+    }
+    const multiStageOptions: WorkflowStartOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [firstStage, secondStage, thirdStage, fourthStage],
+      },
+    }
+
+    await Effect.runPromise(
+      makeWorkflowStart(multiStageOptions)(request).pipe(
+        Effect.provide(
+          layer(filename, fake, (input) => {
+            selections.push(...input.selections)
+            return Effect.void
+          }),
+        ),
+      ),
+    )
+
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "shared-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "plan-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "shared-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "plan-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+    const persisted = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const snapshots = yield* sql<{
+          readonly sequence_position: number
+          readonly stage_key: string
+        }>`
+          SELECT sequence_position, stage_key FROM qrspi_stage_definitions
+          ORDER BY sequence_position
+        `
+        const producer = yield* sql<{
+          readonly input_json: string
+          readonly max_attempts: number
+        }>`
+          SELECT input_json, max_attempts FROM workflow_operations WHERE kind = 'StageProduce'
+        `
+        return { producer, snapshots }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(persisted.snapshots.map((row) => [row.sequence_position, row.stage_key])).toEqual([
+      [1, "questions"],
+      [2, "research"],
+      [3, "plan"],
+      [4, "implementation"],
+    ])
+    expect(persisted.producer).toHaveLength(1)
+    expect(JSON.parse(persisted.producer[0]!.input_json)).toMatchObject({ stageKey: "plan" })
+    expect(persisted.producer[0]!.max_attempts).toBe(7)
+  })
+})
+
+describe("Phase 3: Persisted identity preflight", () => {
+  test("supersedes a current WorkflowStart operation created through migration 0008", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const timestamp = options.now().toISOString()
+    const legacyInput = {
+      contractVersion: 1,
+      repository,
+      ticket: ticketReference,
+      ticketRevisionSha256: "a".repeat(64),
+      workflowDefinitionSha256: "b".repeat(64),
+      baseRef: options.baseRef,
+      baseSha,
+      branchName: "legacy-branch",
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = ON`
+        yield* runStoreMigrationsThrough0008
+        yield* sql`
+          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+          VALUES (${workflowId}, ${legacyInput.branchName}, ${timestamp}, ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO workflow_operations (
+            operation_id, logical_operation_id, operation_revision, retry_of, kind,
+            scope_json, input_json, input_sha256, output_json, state, is_current,
+            attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+            external_intent_json, external_observation_json, observation_attempts,
+            max_observation_attempts, parent_effect_json, last_error, created_at, updated_at
+          ) VALUES (
+            'legacy-start', ${`workflow-start:${workflowId}`}, 1, NULL, 'WorkflowStart',
+            ${JSON.stringify({ _tag: "WorkflowScope", workflowId })},
+            ${JSON.stringify(legacyInput)}, ${canonicalSha256(legacyInput)}, NULL, 'ready', 1,
+            0, 3, NULL, NULL, NULL, ${timestamp}, NULL, NULL, 0, 5, '{}', NULL,
+            ${timestamp}, ${timestamp}
+          )
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    await expect(start(filename, fake)).resolves.toMatchObject({ _tag: "Started", generation: 1 })
+    const operations = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{
+          readonly operation_id: string
+          readonly state: string
+          readonly is_current: number
+        }>`
+          SELECT operation_id, state, is_current FROM workflow_operations
+          WHERE logical_operation_id = ${`workflow-start:${workflowId}`}
+          ORDER BY operation_revision
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    expect(operations).toEqual([
+      { operation_id: "legacy-start", state: "superseded", is_current: 0 },
+      { operation_id: `${workflowId}:start:2`, state: "succeeded", is_current: 1 },
+    ])
+  })
+
+  test("keeps QRSPI available after upgrading a current generation created through migration 0008", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const workflowId = "legacy-workflow"
+    const ticketRevisionSha256 = "a".repeat(64)
+    const workflowDefinitionSha256 = "b".repeat(64)
+    const timestamp = options.now().toISOString()
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = ON`
+        yield* runStoreMigrationsThrough0008
+        yield* sql`
+          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+          VALUES (${workflowId}, 'legacy-branch', ${timestamp}, ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_ticket_revisions (
+            workflow_id, ticket_revision_sha256, revision_json, checked_at
+          ) VALUES (${workflowId}, ${ticketRevisionSha256}, '{}', ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256, definition_json, created_at
+          ) VALUES (${workflowDefinitionSha256}, '{"legacy":true}', ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_generations (
+            workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+            root_sha, current_head_sha, ticket_revision_sha256,
+            workflow_definition_sha256, state, is_current, created_at, updated_at
+          ) VALUES (
+            ${workflowId}, 1, '{}', 'main', ${baseSha}, 'legacy-branch', ${baseSha},
+            ${baseSha}, ${ticketRevisionSha256}, ${workflowDefinitionSha256}, 'running', 1,
+            ${timestamp}, ${timestamp}
+          )
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+    const generations = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly generation_format: string }>`
+          SELECT generation_format FROM qrspi_generations WHERE workflow_id = ${workflowId}
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    expect(generations).toEqual([{ generation_format: "legacy" }])
+  })
+
+  test("reloads snapshot sets for workflows that share an unchanged stage", async () => {
+    const filename = await databasePath()
+    const firstFake = fakes()
+    await start(filename, firstFake)
+
+    const secondTicketReference = {
+      ...ticketReference,
+      nativeTicketId: "workflowd-vs3.4",
+    }
+    const secondTicket = {
+      ...readyTicket,
+      reference: secondTicketReference,
+      title: "Extend a QRSPI workflow",
+    }
+    const secondFake = fakes({ ticket: secondTicket })
+    const sharedStage = options.workflowDefinition.stages[0]
+    const secondOptions: WorkflowStartOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [
+          sharedStage,
+          {
+            ...sharedStage,
+            key: "research",
+            activation: { mode: "enabled" },
+          },
+        ],
+      },
+    }
+    await startWithOptions(filename, secondFake, secondOptions, {
+      ...request,
+      ticket: secondTicketReference,
+    })
+
+    const snapshotSets = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        return yield* store.loadCurrentGenerationSnapshotSets()
+      }).pipe(Effect.provide(layer(filename, secondFake))),
+    )
+
+    expect(snapshotSets).toHaveLength(2)
+    expect(
+      snapshotSets
+        .map(({ snapshots }) => snapshots.map(({ definition }) => definition.key))
+        .sort((left, right) => left.length - right.length),
+    ).toEqual([["questions"], ["questions", "research"]])
+  })
+
+  test("loads ordered snapshots for current generations after restart", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+
+    const snapshotSets = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        return yield* store.loadCurrentGenerationSnapshotSets()
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(snapshotSets).toEqual([
+      expect.objectContaining({
+        generation: 1,
+        snapshots: [
+          expect.objectContaining({
+            sequencePosition: 1,
+            definition: expect.objectContaining({ key: "questions" }),
+          }),
+        ],
+      }),
+    ])
+  })
+
+  test("preflights configured and persisted identity on a fresh service", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const workflowStart = yield* WorkflowStart
+        yield* workflowStart.preflight
+      }).pipe(
+        Effect.provide(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
+  })
+
+  test("runs enabled QRSPI preflight while constructing the live service", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const selections: Array<unknown> = []
+    const dependencies = layer(filename, fake, (input) => {
+      selections.push(...input.selections)
+      return Effect.void
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(Layer.build(WorkflowStartLive(options).pipe(Layer.provide(dependencies)))),
+    )
+
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "qrspi-producer",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+  })
+
+  test("re-runs persisted availability preflight before accepting a workflow start", async () => {
+    const filename = await databasePath()
+    await start(filename, fakes())
+    const nextTicketReference = {
+      ...ticketReference,
+      nativeTicketId: "workflowd-vs3.4",
+    }
+    const fake = fakes({
+      ticket: {
+        ...readyTicket,
+        reference: nextTicketReference,
+        title: "Start another QRSPI workflow",
+      },
+    })
+    const nextOptions: WorkflowStartOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: options.workflowDefinition.stages.map((stage) => ({
+          ...stage,
+          producer: { ...stage.producer, agent: "next-qrspi-producer" },
+        })),
+      },
+    }
+    let persistedSelectionAvailable = true
+    const dependencies = layer(filename, fake, ({ selections }) => {
+      const unavailable = selections.find(({ agent }) => agent === "qrspi-producer")
+      return persistedSelectionAvailable || unavailable === undefined
+        ? Effect.void
+        : Effect.fail(
+            new AgentHarnessError({
+              operation: "validate OpenCode availability",
+              cause: new Error("persisted selection became unavailable"),
+              retryable: true,
+              selection: unavailable,
+            }),
+          )
+    })
+    const before = await counts(filename, fake)
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const workflowStart = yield* WorkflowStart
+        persistedSelectionAvailable = false
+        return yield* workflowStart
+          .start({ ...request, ticket: nextTicketReference })
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(WorkflowStartLive(nextOptions).pipe(Layer.provide(dependencies)))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "availability",
+        reason: "unavailable_agent_model",
+        stageKey: "questions",
+      },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
+  test("rejects a missing workflow definition without new work", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const before = await counts(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = OFF`
+        yield* sql`DELETE FROM qrspi_workflow_definitions`
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+
+    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
+      _tag: "Some",
+      value: { _tag: "QrspiStoreDataError", record: "workflow_definition", reason: "missing" },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
+  })
+
+  test.each([
+    {
+      name: "missing snapshot set",
+      mutation: "DELETE FROM qrspi_stage_definitions",
+      reason: "missing",
+    },
+    {
+      name: "malformed snapshot JSON",
+      mutation: "UPDATE qrspi_stage_definitions SET definition_json = '{}'",
+      reason: "malformed",
+    },
+    {
+      name: "cross-column contract identity",
+      mutation: "UPDATE qrspi_stage_definitions SET contract_name = 'qrspi.changed'",
+      reason: "identity_mismatch",
+    },
+    {
+      name: "stage definition hash mismatch",
+      mutation:
+        "UPDATE qrspi_stage_definitions SET definition_json = json_set(definition_json, '$.definitionVersion', 2)",
+      reason: "hash_mismatch",
+    },
+    {
+      name: "reordered sequence",
+      mutation: "UPDATE qrspi_stage_definitions SET sequence_position = 2",
+      reason: "reordered",
+    },
+  ])("rejects $name without new work", async ({ mutation, reason }) => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const before = await counts(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql.unsafe(mutation)
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+
+    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
+      _tag: "Some",
+      value: { _tag: "QrspiStoreDataError", reason },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
   })
 })

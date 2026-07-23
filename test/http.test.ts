@@ -7,6 +7,7 @@ import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore } from "../src/store/contracts"
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
+import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
 const TestLayer = WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))
@@ -324,4 +325,41 @@ describe("routeRequest", () => {
 
     expect(response.status).toBe(500)
   })
+
+  test.each([
+    ["unknown_contract_reference", "contract"],
+    ["unavailable_agent_model", "availability"],
+    ["hash_mismatch", "persisted"],
+  ] as const)(
+    "returns a bounded 503 response for closed QRSPI reason %s",
+    async (reason, phase) => {
+      const response = await Effect.runPromise(
+        routeRequest(
+          new Request("http://localhost/workflows/qrspi", {
+            method: "POST",
+            body: "{}",
+            headers: { authorization: "Bearer kickoff-secret" },
+          }),
+          {
+            webhookSecret: "secret",
+            now: new Date("2026-07-19T12:00:00.000Z"),
+            qrspi: {
+              token: "kickoff-secret",
+              start: () =>
+                Effect.fail(
+                  new WorkflowStartValidationError({
+                    phase,
+                    reason,
+                    cause: "must not cross the HTTP boundary",
+                  }),
+                ),
+            },
+          },
+        ).pipe(Effect.provide(TestLayer)),
+      )
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: "WorkflowStartValidationError" })
+    },
+  )
 })
