@@ -1,0 +1,15 @@
+{
+  "contractVersion": 1,
+  "responseKind": "LocalDogfoodGateOverride",
+  "responseMode": "local_dogfood_auto_approval",
+  "decision": "approve",
+  "packageSha256": "7b6422410f3dfcdd34bc2c1c20194f9798431285579011dd092390c1586b17f7",
+  "bindingSha256": "c248e455334ba80374d43b964d057f43c455062abb46d8f2338cf657f91b7449",
+  "designRevision": 4,
+  "actor": {
+    "name": "Ben Nasraoui",
+    "identity": "nasraouiprojects@gmail.com"
+  },
+  "simulationOnly": true,
+  "effect": "authorize_local_dogfood_provenance_promotion"
+}
