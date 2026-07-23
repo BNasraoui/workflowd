@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
+import { AgentHarnessRef } from "../agent-harness"
 
 const BoundedText = (maximum: number) =>
   Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
@@ -149,39 +150,36 @@ export const WorkflowStartInput = Schema.Struct({
   branchName: BoundedText(256),
 })
 
-export const WorkflowInitialOperationDefinition = Schema.Struct({
-  kind: Schema.Literal("StageProduce", "ArtifactPublish"),
-  state: Schema.Literal("ready", "blocked"),
-  parentEffect: Schema.Struct({
-    success: Schema.Literal("advance parent", "audit only"),
-    failure: Schema.Literal("fail Generation", "audit only"),
-  }),
-  parameters: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.Unknown })),
-})
-
-const ContractIdentifier = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/))
-const PositiveVersion = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_000_000))
+export const ContractIdentifier = Schema.String.pipe(
+  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/),
+)
+export const PositiveVersion = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(1_000_000),
+)
 const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
+const DurableStagePayloadBytes = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(65_536),
+)
+const ProviderModel = Schema.String.pipe(
+  Schema.pattern(/^[^\s/]+\/[^\s/]+$/),
+  Schema.maxLength(256),
+)
 
-export const StageInputContract = Schema.Struct({
-  schemaId: ContractIdentifier,
-  schemaVersion: PositiveVersion,
-  maxEncodedBytes: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(1_048_576)),
+export const StageContractRef = Schema.Struct({
+  name: ContractIdentifier,
+  contractVersion: PositiveVersion,
 })
+export type StageContractRef = typeof StageContractRef.Type
 
-export const StageProducerDefinition = Schema.Struct({
-  harnessId: ContractIdentifier,
-  harnessVersion: PositiveVersion,
-  agent: ContractIdentifier,
-  model: Schema.String.pipe(Schema.pattern(/^[^\s/]+\/[^\s/]+$/), Schema.maxLength(256)),
-  timeoutMs: BoundedMilliseconds,
-  retry: Schema.Struct({
-    maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
-    backoffMs: BoundedMilliseconds,
-  }),
+export const PolicyReference = Schema.Struct({
+  name: ContractIdentifier,
+  version: PositiveVersion,
 })
+export type PolicyReference = typeof PolicyReference.Type
 
-export const StageOutputContract = Schema.Union(
+export const StageOutputPolicy = Schema.Union(
   Schema.Struct({
     _tag: Schema.Literal("Artifact"),
     pathTemplate: BoundedText(512),
@@ -213,29 +211,53 @@ export const StageActivationPolicy = Schema.Union(
   Schema.Struct({ mode: Schema.Literal("enabled", "disabled") }),
   Schema.Struct({
     mode: Schema.Literal("conditional"),
-    policyId: ContractIdentifier,
-    policyVersion: PositiveVersion,
+    policy: PolicyReference,
     decision: Schema.Literal("enabled", "disabled"),
+    reason: BoundedText(1_000),
   }),
 )
 
-export const WorkflowStageDefinition = Schema.Struct({
+export const StageRetryPolicy = Schema.Struct({
+  maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+  backoffMs: BoundedMilliseconds,
+})
+
+export const StageDefinition = Schema.Struct({
   key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z0-9_-]{0,63}$/)),
   kind: Schema.Literal("document", "implementation"),
+  contract: StageContractRef,
   activation: StageActivationPolicy,
   definitionVersion: PositiveVersion,
-  inputContract: StageInputContract,
-  producer: StageProducerDefinition,
-  outputContract: StageOutputContract,
+  maxEncodedInputBytes: DurableStagePayloadBytes,
+  producer: Schema.Struct({
+    harness: AgentHarnessRef,
+    agent: ContractIdentifier,
+    model: ProviderModel,
+    timeoutMs: BoundedMilliseconds,
+    retry: StageRetryPolicy,
+  }),
+  outputPolicy: StageOutputPolicy,
   reviewPolicy: StageReviewPolicy,
   humanGatePolicy: StageHumanGatePolicy,
-  initialOperations: Schema.Array(WorkflowInitialOperationDefinition).pipe(Schema.maxItems(16)),
+  designPolicy: Schema.optional(PolicyReference),
+  promotionPolicy: Schema.optional(PolicyReference),
+  structurePolicy: Schema.optional(PolicyReference),
 })
+export type StageDefinition = typeof StageDefinition.Type
+
+export const ExecutableStageSnapshot = Schema.Struct({
+  sequencePosition: Schema.Int.pipe(Schema.positive()),
+  stageDefinitionSha256: Sha256,
+  definition: StageDefinition,
+  contractRegistrationSha256: Sha256,
+  harnessRegistrationSha256: Sha256,
+})
+export type ExecutableStageSnapshot = typeof ExecutableStageSnapshot.Type
 
 export const WorkflowDefinition = Schema.Struct({
   contractVersion: Schema.Literal(1),
   definitionVersion: PositiveVersion,
-  stages: Schema.Array(WorkflowStageDefinition).pipe(Schema.maxItems(32)),
+  stages: Schema.Array(StageDefinition).pipe(Schema.maxItems(32)),
 })
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
 export type SourceResolver = (source: string) => boolean
@@ -243,6 +265,14 @@ export type SourceResolver = (source: string) => boolean
 export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
   return canonicalSha256({
     contractVersion: definition.contractVersion,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
+export function stageDefinitionSha256(definition: StageDefinition): string {
+  return canonicalSha256({
+    contractVersion: 1,
     normalizationVersion: "RFC8785-NFC-1",
     definition,
   })
@@ -263,25 +293,6 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
   for (const stage of definition.stages) {
     if (keys.has(stage.key)) throw new Error(`Duplicate workflow stage key: ${stage.key}`)
     keys.add(stage.key)
-    const operationKinds = new Set<string>()
-    for (const operation of stage.initialOperations) {
-      if (operationKinds.has(operation.kind)) {
-        throw new Error(`Duplicate initial ${operation.kind} operation for stage: ${stage.key}`)
-      }
-      operationKinds.add(operation.kind)
-    }
-    if (!operationKinds.has("StageProduce") || !operationKinds.has("ArtifactPublish")) {
-      throw new Error(
-        `Workflow stage must declare StageProduce and ArtifactPublish operations: ${stage.key}`,
-      )
-    }
-    if (
-      (stage.activation.mode === "enabled" ||
-        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")) &&
-      !stage.initialOperations.some((operation) => operation.state === "ready")
-    ) {
-      throw new Error(`Workflow definition has no runnable stage operation: ${stage.key}`)
-    }
     if (
       stage.reviewPolicy.mode === "automated" &&
       stage.reviewPolicy.minimumContributions > stage.reviewPolicy.maximumContributions
@@ -289,8 +300,8 @@ export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition 
       throw new Error(`Stage review minimum exceeds maximum: ${stage.key}`)
     }
     if (
-      stage.outputContract._tag === "Artifact" &&
-      !isSafeArtifactPathTemplate(stage.outputContract.pathTemplate)
+      stage.outputPolicy._tag === "Artifact" &&
+      !isSafeArtifactPathTemplate(stage.outputPolicy.pathTemplate)
     ) {
       throw new Error(`Invalid artifact path template for stage: ${stage.key}`)
     }

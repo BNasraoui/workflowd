@@ -91,6 +91,7 @@ const makeWorkerLayer = (options: {
       ...options.automation,
     }),
     Layer.succeed(AgentHarness, {
+      describe: () => Effect.die("unused"),
       validateAvailability: () => Effect.die("unused"),
       prepare: () => Effect.die("unused"),
       createSession: (prepared) => Effect.succeed(sessionReference(prepared)),

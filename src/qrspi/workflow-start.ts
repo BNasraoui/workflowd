@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Exit, Layer, Schema } from "effect"
+import { AgentHarness, type AgentHarnessError } from "../agent-harness"
 import {
   RepositoryReference,
   Ticket,
@@ -25,6 +26,11 @@ import {
   type TicketSourceError,
 } from "./ports"
 import { QrspiStore, type QrspiStoreDataError, type StartRecord } from "./store"
+import {
+  StageCatalog,
+  type StageCatalogError,
+  resolveFirstStage,
+} from "./stage-catalog"
 
 export class WorkflowStartUnauthorized extends Data.TaggedError("WorkflowStartUnauthorized")<{
   readonly reason: string
@@ -81,6 +87,8 @@ export type WorkflowStartError =
   | TicketSourceError
   | QrspiRepositoryError
   | QrspiStoreDataError
+  | StageCatalogError
+  | AgentHarnessError
   | SqlError
 
 export type WorkflowStartPort = {
@@ -95,12 +103,16 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       const tickets = yield* TicketSource
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
+      const stageCatalog = yield* StageCatalog
+      const agentHarness = yield* AgentHarness
       return WorkflowStart.of({
         start: (input) =>
           makeWorkflowStart(options)(input).pipe(
             Effect.provideService(TicketSource, tickets),
             Effect.provideService(QrspiRepository, repositories),
             Effect.provideService(QrspiStore, store),
+            Effect.provideService(StageCatalog, stageCatalog),
+            Effect.provideService(AgentHarness, agentHarness),
           ),
       })
     }),
@@ -139,6 +151,8 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
       const tickets = yield* TicketSource
       const repositories = yield* QrspiRepository
       const store = yield* QrspiStore
+      const stageCatalog = yield* StageCatalog
+      const agentHarness = yield* AgentHarness
       const ticket = yield* readTicket(tickets, request.ticket)
       const checked = checkTicket(ticket, now(), request.readinessJudgment, options.sourceResolver)
       if (checked._tag === "NeedsWork") return checked
@@ -178,6 +192,11 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           new WorkflowStartConflict({ reason: "Base target requires reconciliation" }),
         )
       }
+      const stageSnapshot = yield* resolveFirstStage({
+        definition: workflowDefinition,
+        stageCatalog,
+        agentHarness,
+      })
       const selectedBranchName = yield* store.resolveBranch(workflowId, proposedBranchName, now())
       const input = {
         contractVersion: 1 as const,
@@ -589,6 +608,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           baseSha: inspection.baseSha,
           rootSha: observed.sha,
           authoritativeObservation: { headRef: operation.branchName, sha: observed.sha },
+          stageSnapshots: [stageSnapshot],
           now: now(),
         })
         .pipe(

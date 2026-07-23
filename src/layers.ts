@@ -10,7 +10,7 @@ import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adap
 import {
   Automation,
   OpenCodeAutomationAdapter,
-  makePullRequestHarnessDefinitions,
+  makeOpenCodeHarnessDefinitions,
 } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
@@ -21,6 +21,11 @@ import { QrspiRepository, TicketSource } from "./qrspi/ports"
 import { QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
 import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
+import {
+  StageCatalog,
+  TrustedStageCatalog,
+  questionsStageContract,
+} from "./qrspi/stage-catalog"
 import { SessionAccessResolver } from "./session-access"
 
 export const makeLiveLayer = (config: AppConfig) => {
@@ -33,13 +38,13 @@ export const makeLiveLayer = (config: AppConfig) => {
     throwOnError: true,
   })
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClient))
-  const definitions = makePullRequestHarnessDefinitions({
+  const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
   })
   const agentHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
-    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+    new TrustedAgentHarnessCatalog(Object.values(definitions)),
     {
       serverId: config.openCode.serverId,
       endpointAlias: config.openCode.endpointAlias,
@@ -51,6 +56,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     endpointAlias: config.openCode.endpointAlias,
     attachUrl: config.openCode.attachUrl,
   })
+  const stageCatalog = new TrustedStageCatalog([questionsStageContract])
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
@@ -72,6 +78,8 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(
             Layer.mergeAll(
               QrspiStoreLive,
+              Layer.succeed(AgentHarness, agentHarness),
+              Layer.succeed(StageCatalog, stageCatalog.port()),
               Layer.succeed(
                 TicketSource,
                 new BeadsCliTicketSource(
@@ -146,6 +154,7 @@ export const makeLiveLayer = (config: AppConfig) => {
       ),
     ),
     Layer.succeed(AgentHarness, agentHarness),
+    Layer.succeed(StageCatalog, stageCatalog.port()),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
     qrspiLayer,

@@ -4,12 +4,15 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
 import { runStoreMigrations } from "../store/migrations"
 import {
   RepositoryReference,
+  ExecutableStageSnapshot,
   WorkflowDefinition,
   WorkflowStartInput,
   WorkflowStartOutput,
   canonicalSha256,
+  stageDefinitionSha256,
   workflowDefinitionSha256,
   type TicketRevision,
+  type ExecutableStageSnapshot as ExecutableStageSnapshotType,
 } from "./domain"
 
 const OperationState = Schema.Literal(
@@ -124,6 +127,7 @@ export type CompleteStartInput = {
     readonly headRef: string
     readonly sha: string
   }
+  readonly stageSnapshots: ReadonlyArray<ExecutableStageSnapshotType>
   readonly now: Date
 }
 
@@ -219,7 +223,7 @@ export type QrspiStorePort = {
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
 
 export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")<{
-  readonly record: "workflow_operation" | "workflow_definition"
+  readonly record: "workflow_operation" | "workflow_definition" | "stage_definition"
   readonly recordId: string
   readonly message: string
 }> {}
@@ -735,6 +739,42 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               dataError("workflow_definition", input.workflowDefinitionSha256, "hash mismatch"),
             )
           }
+          if (input.stageSnapshots.length !== 1) {
+            return yield* Effect.fail(
+              dataError("stage_definition", input.workflowDefinitionSha256, "expected one snapshot"),
+            )
+          }
+          const suppliedSnapshot = input.stageSnapshots[0]
+          const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)(
+            suppliedSnapshot,
+          ).pipe(
+            Effect.mapError((cause) =>
+              dataError(
+                "stage_definition",
+                suppliedSnapshot?.stageDefinitionSha256 ?? "unreadable",
+                cause,
+              ),
+            ),
+          )
+          const configuredStage = definition.stages[snapshot.sequencePosition - 1]
+          if (
+            configuredStage === undefined ||
+            snapshot.stageDefinitionSha256 !== stageDefinitionSha256(snapshot.definition) ||
+            snapshot.definition.key !== configuredStage.key ||
+            canonicalSha256(snapshot.definition) !== canonicalSha256(configuredStage) ||
+            canonicalSha256(snapshot.definition.contract) !==
+              canonicalSha256(configuredStage.contract) ||
+            canonicalSha256(snapshot.definition.producer.harness) !==
+              canonicalSha256(configuredStage.producer.harness)
+          ) {
+            return yield* Effect.fail(
+              dataError(
+                "stage_definition",
+                snapshot.stageDefinitionSha256,
+                "snapshot does not match workflow definition",
+              ),
+            )
+          }
           yield* sql`
             UPDATE qrspi_generations SET
               state = CASE
@@ -780,6 +820,22 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             Effect.mapError((cause) => dataError("workflow_operation", input.operationId, cause)),
           )
           yield* sql`
+            INSERT INTO qrspi_stage_definitions (
+              stage_definition_sha256, workflow_definition_sha256, stage_key,
+              sequence_position, definition_json, contract_name, contract_version,
+              contract_registration_sha256, harness_name, harness_version,
+              harness_registration_sha256, created_at
+            ) VALUES (
+              ${snapshot.stageDefinitionSha256}, ${input.workflowDefinitionSha256},
+              ${snapshot.definition.key}, ${snapshot.sequencePosition},
+              ${JSON.stringify(snapshot.definition)}, ${snapshot.definition.contract.name},
+              ${snapshot.definition.contract.contractVersion},
+              ${snapshot.contractRegistrationSha256}, ${snapshot.definition.producer.harness.name},
+              ${snapshot.definition.producer.harness.version},
+              ${snapshot.harnessRegistrationSha256}, ${input.now.toISOString()}
+            ) ON CONFLICT (stage_definition_sha256) DO NOTHING
+          `
+          yield* sql`
             INSERT INTO qrspi_generations (
               workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
               root_sha, current_head_sha, ticket_revision_sha256,
@@ -797,14 +853,25 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
           )
           if (firstStage !== undefined) {
-            for (const initial of firstStage.initialOperations) {
+            const initialOperations = [
+              {
+                kind: "StageProduce" as const,
+                state: "ready" as const,
+                maxAttempts: firstStage.producer.retry.maxAttempts,
+              },
+              {
+                kind: "ArtifactPublish" as const,
+                state: "blocked" as const,
+                maxAttempts: 3,
+              },
+            ]
+            for (const initial of initialOperations) {
               const logical = `${input.workflowId}:${generation}:${initial.kind}:${firstStage.key}:1`
               const childInput = {
                 stageKey: firstStage.key,
                 stageKind: firstStage.kind,
                 stageRevision: 1,
                 workflowDefinitionSha256: input.workflowDefinitionSha256,
-                ...(initial.parameters === undefined ? {} : { parameters: initial.parameters }),
               }
               yield* insertOperation(sql, {
                 operationId: `${logical}:1`,
@@ -817,9 +884,8 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 inputSha256: canonicalSha256(childInput),
                 state: initial.state,
                 attempt: 0,
-                maxAttempts:
-                  initial.kind === "StageProduce" ? firstStage.producer.retry.maxAttempts : 3,
-                parentEffect: initial.parentEffect,
+                maxAttempts: initial.maxAttempts,
+                parentEffect: { success: "advance parent", failure: "fail Generation" },
                 now: input.now,
               })
             }

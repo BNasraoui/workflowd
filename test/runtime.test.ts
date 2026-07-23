@@ -228,6 +228,7 @@ describe("runHookService startup", () => {
         prepareFix: () => Effect.die("must not fix"),
       }),
       Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("must not describe harness"),
         validateAvailability: () => Effect.die("must not validate harness"),
         prepare: () => Effect.die("must not prepare harness"),
         createSession: () => Effect.die("must not create session"),
@@ -287,6 +288,7 @@ describe("runHookService startup", () => {
         prepareFix: () => Effect.die("unexpected fix"),
       }),
       Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("unexpected harness description"),
         validateAvailability: () => Effect.die("unexpected harness validation"),
         prepare: () => Effect.die("unexpected harness preparation"),
         createSession: () => Effect.die("unexpected session creation"),

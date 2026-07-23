@@ -36,6 +36,17 @@ export const AgentHarnessRef = Schema.Struct({
 })
 export type AgentHarnessRef = typeof AgentHarnessRef.Type
 
+export type AgentHarnessDescriptor = {
+  readonly ref: AgentHarnessRef
+  readonly registrationSha256: string
+}
+
+export type AgentHarnessSelection = {
+  readonly ref: AgentHarnessRef
+  readonly agent: string
+  readonly model: string
+}
+
 export const AgentRetryPolicy = Schema.Struct({
   maxAttempts: PositiveInt.pipe(Schema.lessThanOrEqualTo(10)),
   structuredOutputRetryCount: Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(10)),
@@ -292,10 +303,15 @@ export class TrustedAgentHarnessCatalog {
   }
 
   definition(ref: AgentHarnessRef): HarnessRegistration {
-    return this.registration(ref).definition
+    return this.#registration(ref).definition
   }
 
-  registration(ref: AgentHarnessRef): RegisteredDefinition {
+  describe(ref: AgentHarnessRef): AgentHarnessDescriptor {
+    const registration = this.#registration(ref)
+    return { ref: registration.definition.ref, registrationSha256: registration.definitionHash }
+  }
+
+  #registration(ref: AgentHarnessRef): RegisteredDefinition {
     const decoded = Schema.decodeUnknownSync(AgentHarnessRef)(ref)
     const key = referenceKey(decoded)
     const registration = this.#byReference.get(key)
@@ -306,7 +322,7 @@ export class TrustedAgentHarnessCatalog {
   }
 
   registrationFor(definition: HarnessRegistration): RegisteredDefinition {
-    const registration = this.registration(definition.ref)
+    const registration = this.#registration(definition.ref)
     if (registration.source !== definition) {
       throw new Error(`Untrusted AgentHarness definition ${referenceKey(definition.ref)}`)
     }
@@ -315,8 +331,11 @@ export class TrustedAgentHarnessCatalog {
 }
 
 export type AgentHarnessPort = {
+  readonly describe: (
+    ref: AgentHarnessRef,
+  ) => Effect.Effect<AgentHarnessDescriptor, AgentHarnessError>
   readonly validateAvailability: (input: {
-    readonly refs: ReadonlyArray<AgentHarnessRef>
+    readonly selections: ReadonlyArray<AgentHarnessSelection>
     readonly directory?: string
   }) => Effect.Effect<void, AgentHarnessError>
   readonly prepare: <Input, InputEncoded, Output, OutputEncoded>(
@@ -347,18 +366,24 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
     this.#config = Schema.decodeUnknownSync(HarnessConfig)(config)
   }
 
+  readonly describe: AgentHarnessPort["describe"] = (ref) =>
+    Effect.try({
+      try: () => this.catalog.describe(ref),
+      catch: (cause) => this.error("describe harness", cause, false),
+    })
+
   readonly validateAvailability: AgentHarnessPort["validateAvailability"] = (input) =>
     Effect.forEach(
-      input.refs,
-      (ref) => {
-        const registration = this.resolve(ref, "select harness")
-        return Effect.flatMap(registration, ({ definition }) =>
+      input.selections,
+      (selection) => {
+        const descriptor = this.describe(selection.ref)
+        return Effect.flatMap(descriptor, () =>
           this.attempt("validate OpenCode availability", true, (signal) =>
             this.adapter.validateAvailability(
               {
                 ...(input.directory === undefined ? {} : { directory: input.directory }),
-                agents: [definition.agent],
-                model: parseModel(definition.model),
+                agents: [selection.agent],
+                model: parseModel(selection.model),
               },
               signal,
             ),
@@ -524,13 +549,6 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       },
       prepared.outputSchema,
     )
-  }
-
-  private resolve(ref: AgentHarnessRef, operation: string) {
-    return Effect.try({
-      try: () => this.catalog.registration(ref),
-      catch: (cause) => this.error(operation, cause, false),
-    })
   }
 
   private attempt<A>(

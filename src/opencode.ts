@@ -68,6 +68,8 @@ export type AutomationPort = {
 
 export const Automation = Context.GenericTag<AutomationPort>("workflowd/Automation")
 
+export const stageHarnessRef = { name: "opencode", version: 1 } as const
+
 export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConfig) {
   const retryPolicy = {
     maxAttempts: 3,
@@ -117,6 +119,29 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
 
 export type PullRequestHarnessDefinitions = ReturnType<typeof makePullRequestHarnessDefinitions>
 
+export function makeOpenCodeHarnessDefinitions(config: OpenCodeAutomationConfig) {
+  const pullRequest = makePullRequestHarnessDefinitions(config)
+  const stage: AgentHarnessDefinition<unknown, unknown, unknown, unknown> = {
+    ref: stageHarnessRef,
+    agent: "qrspi-stage",
+    model: "openai/gpt-5.6-sol",
+    inputSchema: Schema.Unknown,
+    outputSchema: Schema.Unknown,
+    maxInputBytes: 64 * 1024,
+    maxOutputBytes: 4 * 1024 * 1024,
+    promptContract: "qrspi-stage-capability",
+    title: () => "QRSPI stage",
+    prompt: () => "QRSPI stage capability registration",
+    timeoutMs: config.timeoutMs,
+    retryPolicy: {
+      maxAttempts: 3,
+      structuredOutputRetryCount: 2,
+      invalidOutput: "retry",
+    },
+  }
+  return { ...pullRequest, stage } as const
+}
+
 export class OpenCodeAutomationAdapter implements AutomationPort {
   constructor(
     private readonly harness: AgentHarnessPort,
@@ -128,9 +153,9 @@ export class OpenCodeAutomationAdapter implements AutomationPort {
   ): Effect.Effect<void, OpenCodeAutomationError> =>
     this.harness
       .validateAvailability({
-        refs: input.fixWorkEnabled
-          ? [this.definitions.review.ref, this.definitions.fix.ref]
-          : [this.definitions.review.ref],
+        selections: input.fixWorkEnabled
+          ? [this.definitions.review, this.definitions.fix]
+          : [this.definitions.review],
         ...(input.directory === undefined ? {} : { directory: input.directory }),
       })
       .pipe(Effect.mapError(toAutomationError))

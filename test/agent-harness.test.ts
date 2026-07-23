@@ -527,3 +527,42 @@ describe("OpenCodeAgentHarness", () => {
     expect(failure.retryable).toBe(false)
   })
 })
+describe("TrustedAgentHarnessCatalog descriptor-only lookup", () => {
+  test("exposes descriptor-only metadata without internal registration details", () => {
+    const catalog = new TrustedAgentHarnessCatalog([fixtureDefinition])
+
+    const descriptor = catalog.describe(fixtureDefinition.ref)
+
+    expect(descriptor).toMatchObject({
+      ref: fixtureDefinition.ref,
+      registrationSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    })
+    expect(Object.keys(descriptor).sort()).toEqual(["ref", "registrationSha256"])
+    expect(descriptor).not.toHaveProperty("inputSchema")
+    expect(descriptor).not.toHaveProperty("outputSchema")
+    expect(descriptor).not.toHaveProperty("promptContract")
+  })
+
+  test("validates selected agent and model availability", async () => {
+    const catalog = new TrustedAgentHarnessCatalog([fixtureDefinition])
+    const calls: Array<unknown> = []
+    const adapter = makeAdapter({ validateAvailability: async (input) => void calls.push(input) })
+
+    const harness = new OpenCodeAgentHarness(
+      adapter,
+      catalog,
+      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+    )
+
+    const selections = [
+      {
+        ref: fixtureDefinition.ref,
+        agent: "fixture-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+    ]
+
+    await Effect.runPromise(harness.validateAvailability({ selections }))
+    expect(calls).toEqual([{ agents: ["fixture-agent"], model: { providerID: "openai", modelID: "gpt-5.6-sol" } }])
+  })
+})

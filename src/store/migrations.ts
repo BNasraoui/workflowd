@@ -572,6 +572,40 @@ export const reconciliationObservationSequence = Effect.gen(function* () {
   `
 })
 
+const qrspiStageDefinitions = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE qrspi_stage_definitions (
+      stage_definition_sha256 TEXT PRIMARY KEY CHECK (
+        length(stage_definition_sha256) = 64
+          AND stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      workflow_definition_sha256 TEXT NOT NULL
+        REFERENCES qrspi_workflow_definitions (definition_sha256),
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      sequence_position INTEGER NOT NULL CHECK (sequence_position > 0),
+      definition_json TEXT NOT NULL CHECK (
+        json_valid(definition_json) = 1 AND json_type(definition_json, '$') = 'object'
+      ),
+      contract_name TEXT NOT NULL,
+      contract_version INTEGER NOT NULL CHECK (contract_version > 0),
+      contract_registration_sha256 TEXT NOT NULL CHECK (
+        length(contract_registration_sha256) = 64
+          AND contract_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      harness_name TEXT NOT NULL,
+      harness_version INTEGER NOT NULL CHECK (harness_version > 0),
+      harness_registration_sha256 TEXT NOT NULL CHECK (
+        length(harness_registration_sha256) = 64
+          AND harness_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      UNIQUE (workflow_definition_sha256, stage_key),
+      UNIQUE (workflow_definition_sha256, sequence_position)
+    ) STRICT
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     "0001_initial_schema": initialSchema,
@@ -582,5 +616,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
     "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
     "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
   }),
 })

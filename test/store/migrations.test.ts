@@ -124,7 +124,8 @@ describe("strict initial store schema", () => {
             'webhook_deliveries', 'pull_requests', 'jobs', 'publications',
             'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
-            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations'
+            'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
+            'qrspi_stage_definitions'
           )
           ORDER BY name
         `
@@ -143,8 +144,9 @@ describe("strict initial store schema", () => {
       { migration_id: 6, name: "fix_publication_signing_evidence" },
       { migration_id: 7, name: "reconciliation_observation_watermark" },
       { migration_id: 8, name: "reconciliation_observation_sequence" },
+      { migration_id: 9, name: "qrspi_stage_definitions" },
     ])
-    expect(result.tables).toHaveLength(13)
+    expect(result.tables).toHaveLength(14)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -545,5 +547,291 @@ describe("strict initial store schema", () => {
     expect(plans[2]).toContain("commands_claimable")
     expect(plans[3]).toContain("reconciliations_claimable")
     expect(plans[4]).toContain("publications_identity")
+  })
+})
+
+
+describe("migration 9: qrspi_stage_definitions strict table", () => {
+  test("creates strict table with SHA-256 primary key validation", async () => {
+    const result = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const tableInfo = yield* sql`
+          SELECT name, pk
+          FROM pragma_table_info('qrspi_stage_definitions')
+          WHERE name = 'stage_definition_sha256'
+        `
+        const table = yield* sql`
+          SELECT strict FROM pragma_table_list WHERE name = 'qrspi_stage_definitions'
+        `
+        const foreignKeys = yield* sql`
+          SELECT sql FROM sqlite_master
+          WHERE type = 'table' AND name = 'qrspi_stage_definitions'
+        `
+        return { table, tableInfo, foreignKeys }
+      }),
+    )
+
+    expect(result.tableInfo).toHaveLength(1)
+    expect(result.tableInfo[0]?.name).toBe("stage_definition_sha256")
+    expect(result.table).toEqual([{ strict: 1 }])
+    expect(result.foreignKeys[0]?.sql).toContain("STRICT")
+    expect(result.foreignKeys[0]?.sql).toContain("PRIMARY KEY")
+    expect(result.foreignKeys[0]?.sql).toContain(
+      "length(stage_definition_sha256) = 64"
+    )
+    expect(result.foreignKeys[0]?.sql).toContain(
+      "stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'"
+    )
+  })
+
+  test("enforces workflow_definition foreign key constraint", async () => {
+    const wasRejected = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = ON`
+        return yield* rejected(sql`
+          INSERT INTO qrspi_stage_definitions (
+            stage_definition_sha256,
+            workflow_definition_sha256,
+            stage_key,
+            sequence_position,
+            definition_json,
+            contract_name,
+            contract_version,
+            contract_registration_sha256,
+            harness_name,
+            harness_version,
+            harness_registration_sha256,
+            created_at
+          ) VALUES (
+            ${"a".repeat(64)},
+            ${"b".repeat(64)},
+            'test-stage',
+            1,
+            '{}',
+            'test-contract',
+            1,
+            ${"c".repeat(64)},
+            'opencode',
+            1,
+            ${"d".repeat(64)},
+            '2026-07-21T05:00:00.000Z'
+          )
+        `)
+      }),
+    )
+
+    expect(wasRejected).toBe(true)
+  })
+
+  test("validates JSON object structure in definition_json", async () => {
+    const wasRejected = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        // First insert a valid workflow definition
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256,
+            definition_json,
+            created_at
+          ) VALUES (
+            ${"b".repeat(64)},
+            '{}',
+            '2026-07-21T05:00:00.000Z'
+          )
+        `
+        yield* sql`PRAGMA foreign_keys = OFF`
+        return yield* rejected(sql`
+          INSERT INTO qrspi_stage_definitions (
+            stage_definition_sha256,
+            workflow_definition_sha256,
+            stage_key,
+            sequence_position,
+            definition_json,
+            contract_name,
+            contract_version,
+            contract_registration_sha256,
+            harness_name,
+            harness_version,
+            harness_registration_sha256,
+            created_at
+          ) VALUES (
+            ${"a".repeat(64)},
+            ${"b".repeat(64)},
+            'test-stage',
+            1,
+            'not-a-json-object',
+            'test-contract',
+            1,
+            ${"c".repeat(64)},
+            'opencode',
+            1,
+            ${"d".repeat(64)},
+            '2026-07-21T05:00:00.000Z'
+          )
+        `)
+      }),
+    )
+
+    expect(wasRejected).toBe(true)
+  })
+
+  test("enforces stage_key length and sequence_position constraints", async () => {
+    const results = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256,
+            definition_json,
+            created_at
+          ) VALUES (
+            ${"b".repeat(64)},
+            '{}',
+            '2026-07-21T05:00:00.000Z'
+          )
+        `
+        yield* sql`PRAGMA foreign_keys = OFF`
+        return yield* Effect.all([
+          rejected(sql`
+            INSERT INTO qrspi_stage_definitions (
+              stage_definition_sha256,
+              workflow_definition_sha256,
+              stage_key,
+              sequence_position,
+              definition_json,
+              contract_name,
+              contract_version,
+              contract_registration_sha256,
+              harness_name,
+              harness_version,
+              harness_registration_sha256,
+              created_at
+            ) VALUES (
+              ${"a".repeat(64)},
+              ${"b".repeat(64)},
+              '',
+              1,
+              '{}',
+              'test-contract',
+              1,
+              ${"c".repeat(64)},
+              'opencode',
+              1,
+              ${"d".repeat(64)},
+              '2026-07-21T05:00:00.000Z'
+            )
+          `),
+          rejected(sql`
+            INSERT INTO qrspi_stage_definitions (
+              stage_definition_sha256,
+              workflow_definition_sha256,
+              stage_key,
+              sequence_position,
+              definition_json,
+              contract_name,
+              contract_version,
+              contract_registration_sha256,
+              harness_name,
+              harness_version,
+              harness_registration_sha256,
+              created_at
+            ) VALUES (
+              ${"e".repeat(64)},
+              ${"b".repeat(64)},
+              'test-stage',
+              0,
+              '{}',
+              'test-contract',
+              1,
+              ${"c".repeat(64)},
+              'opencode',
+              1,
+              ${"d".repeat(64)},
+              '2026-07-21T05:00:00.000Z'
+            )
+          `),
+        ])
+      }),
+    )
+
+    expect(results).toEqual([true, true])
+  })
+
+  test("enforces workflow-scoped key and order uniqueness", async () => {
+    const wasRejected = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const workflowSha256 = "b".repeat(64)
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256,
+            definition_json,
+            created_at
+          ) VALUES (${workflowSha256}, '{}', '2026-07-21T05:00:00.000Z')
+        `
+        yield* sql`
+          INSERT INTO qrspi_stage_definitions (
+            stage_definition_sha256,
+            workflow_definition_sha256,
+            stage_key,
+            sequence_position,
+            definition_json,
+            contract_name,
+            contract_version,
+            contract_registration_sha256,
+            harness_name,
+            harness_version,
+            harness_registration_sha256,
+            created_at
+          ) VALUES (
+            ${"a".repeat(64)},
+            ${workflowSha256},
+            'test-stage',
+            1,
+            '{}',
+            'test-contract',
+            1,
+            ${"c".repeat(64)},
+            'opencode',
+            1,
+            ${"d".repeat(64)},
+            '2026-07-21T05:00:00.000Z'
+          )
+        `
+        return yield* rejected(sql`
+          INSERT INTO qrspi_stage_definitions (
+            stage_definition_sha256,
+            workflow_definition_sha256,
+            stage_key,
+            sequence_position,
+            definition_json,
+            contract_name,
+            contract_version,
+            contract_registration_sha256,
+            harness_name,
+            harness_version,
+            harness_registration_sha256,
+            created_at
+          ) VALUES (
+            ${"e".repeat(64)},
+            ${workflowSha256},
+            'test-stage',
+            2,
+            '{}',
+            'test-contract',
+            1,
+            ${"c".repeat(64)},
+            'opencode',
+            1,
+            ${"d".repeat(64)},
+            '2026-07-21T05:00:00.000Z'
+          )
+        `)
+      }),
+    )
+
+    expect(wasRejected).toBe(true)
   })
 })
