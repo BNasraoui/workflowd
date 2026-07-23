@@ -101,6 +101,7 @@ export type SessionReference = typeof SessionReference.Type
 
 export type AgentHarnessDefinition<Input, InputEncoded, Output, OutputEncoded> = {
   readonly ref: AgentHarnessRef
+  readonly implementationRevision: string
   readonly agent: string
   readonly model: string
   readonly inputSchema: Schema.Schema<Input, InputEncoded, never>
@@ -180,9 +181,11 @@ export class AgentHarnessError extends Data.TaggedError("AgentHarnessError")<{
 
 type HarnessRegistration = {
   readonly ref: AgentHarnessRef
+  readonly implementationRevision?: unknown
 }
 
 type RuntimeDefinition = HarnessRegistration & {
+  readonly implementationRevision: string
   readonly agent: string
   readonly model: string
   readonly inputSchema: Schema.Schema<unknown, unknown, unknown>
@@ -204,6 +207,7 @@ type RegisteredDefinition = {
 
 const DefinitionMetadata = Schema.Struct({
   ref: AgentHarnessRef,
+  implementationRevision: BoundedIdentifier,
   agent: Schema.String.pipe(
     Schema.minLength(1),
     Schema.maxLength(64),
@@ -241,6 +245,7 @@ const referenceKey = (ref: AgentHarnessRef) => `${ref.name}@${ref.version}`
 
 function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefinition {
   const invalid = () => new Error(`Invalid AgentHarness definition ${referenceKey(definition.ref)}`)
+  if (typeof definition.implementationRevision !== "string") throw invalid()
   if (!("agent" in definition) || typeof definition.agent !== "string") throw invalid()
   if (!("model" in definition) || typeof definition.model !== "string") throw invalid()
   if (!("inputSchema" in definition) || !Schema.isSchema(definition.inputSchema)) throw invalid()
@@ -256,6 +261,7 @@ function decodeRuntimeDefinition(definition: HarnessRegistration): RuntimeDefini
   if (!("retryPolicy" in definition)) throw invalid()
   return {
     ref: definition.ref,
+    implementationRevision: definition.implementationRevision,
     agent: definition.agent,
     model: definition.model,
     inputSchema: definition.inputSchema,
@@ -641,6 +647,7 @@ function definitionHash(
     .update(
       canonicalJson({
         ref: definition.ref,
+        implementationRevision: definition.implementationRevision,
         agent: definition.agent,
         model: definition.model,
         promptContract: definition.promptContract,

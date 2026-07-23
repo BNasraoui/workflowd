@@ -31,6 +31,7 @@ function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter 
 
 const fixtureDefinition = {
   ref: { name: "fixture.summary", version: 1 },
+  implementationRevision: "fixture.summary.v1",
   agent: "fixture-agent",
   model: "openai/gpt-5.6-sol",
   inputSchema: Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) }),

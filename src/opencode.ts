@@ -83,6 +83,7 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     typeof ReviewResultSchema.Encoded
   > = {
     ref: { name: "opencode.pr-review", version: 1 },
+    implementationRevision: "opencode.pr-review.v1",
     agent: config.reviewerAgent,
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
@@ -102,6 +103,7 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     typeof FixResultSchema.Encoded
   > = {
     ref: { name: "opencode.pr-fix", version: 1 },
+    implementationRevision: "opencode.pr-fix.v1",
     agent: config.fixerAgent,
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
@@ -123,6 +125,7 @@ export function makeOpenCodeHarnessDefinitions(config: OpenCodeAutomationConfig)
   const pullRequest = makePullRequestHarnessDefinitions(config)
   const stage: AgentHarnessDefinition<unknown, unknown, unknown, unknown> = {
     ref: stageHarnessRef,
+    implementationRevision: "opencode.qrspi-stage.v1",
     agent: "qrspi-stage",
     model: "openai/gpt-5.6-sol",
     inputSchema: Schema.Unknown,

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
-import { AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
+import {
+  AgentHarnessError,
+  TrustedAgentHarnessCatalog,
+  type AgentHarnessPort,
+} from "../../src/agent-harness"
 import { workflowDefinitionSha256 } from "../../src/qrspi/domain"
 import {
   TrustedStageCatalog,
@@ -541,8 +545,28 @@ describe("persisted stage snapshots", () => {
   test("validates descriptor identity and availability without executable contract calls", async () => {
     const catalog = new TrustedStageCatalog([fixtureContract])
     const selections: Array<unknown> = []
+    const harnessDefinition = {
+      ref: { name: "opencode", version: 1 },
+      implementationRevision: "opencode.v1",
+      agent: "fixture-agent",
+      model: "openai/gpt-5.6-sol",
+      inputSchema: Schema.Unknown,
+      outputSchema: Schema.Unknown,
+      maxInputBytes: 1_024,
+      maxOutputBytes: 1_024,
+      promptContract: "fixture-stage",
+      title: () => "fixture",
+      prompt: () => "fixture",
+      timeoutMs: 1_000,
+      retryPolicy: {
+        maxAttempts: 1,
+        structuredOutputRetryCount: 0,
+        invalidOutput: "fail" as const,
+      },
+    }
+    const harnessCatalog = new TrustedAgentHarnessCatalog([harnessDefinition])
     const harness: AgentHarnessPort = {
-      describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+      describe: (ref) => Effect.succeed(harnessCatalog.describe(ref)),
       validateAvailability: (input) => {
         selections.push(...input.selections)
         return Effect.void
@@ -746,7 +770,33 @@ describe("persisted stage snapshots", () => {
         phase: "harness",
         reason: "registration_hash_mismatch",
         expectedRegistrationSha256: "d".repeat(64),
-        actualRegistrationSha256: "b".repeat(64),
+        actualRegistrationSha256: harnessCatalog.describe(harnessDefinition.ref).registrationSha256,
+      },
+    })
+
+    const changedHarnessCatalog = new TrustedAgentHarnessCatalog([
+      { ...harnessDefinition, implementationRevision: "opencode.v2" },
+    ])
+    const changedHarnessImplementation = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: catalog.port(),
+        agentHarness: {
+          ...harness,
+          describe: (ref) => Effect.succeed(changedHarnessCatalog.describe(ref)),
+        },
+      }).pipe(Effect.either),
+    )
+    expect(changedHarnessImplementation).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "harness",
+        reason: "registration_hash_mismatch",
+        expectedRegistrationSha256: harnessCatalog.describe(harnessDefinition.ref)
+          .registrationSha256,
+        actualRegistrationSha256: changedHarnessCatalog.describe(harnessDefinition.ref)
+          .registrationSha256,
       },
     })
   })
