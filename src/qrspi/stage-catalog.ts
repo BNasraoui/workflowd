@@ -55,6 +55,9 @@ type StageContractRegistration = {
   readonly maxRequestBytes?: unknown
   readonly maxResultBytes?: unknown
   readonly compatibility?: (definition: StageDefinition) => void
+  readonly assembleRequest?: unknown
+  readonly buildTask?: unknown
+  readonly prepareOutput?: unknown
 }
 
 export type StageContractDescriptor = {
@@ -112,6 +115,15 @@ export class TrustedStageCatalog {
         }
         if (typeof source.compatibility !== "function") {
           throw new Error("compatibility must be a function")
+        }
+        if (typeof source.assembleRequest !== "function") {
+          throw new Error("assembleRequest must be a function")
+        }
+        if (typeof source.buildTask !== "function") {
+          throw new Error("buildTask must be a function")
+        }
+        if (typeof source.prepareOutput !== "function") {
+          throw new Error("prepareOutput must be a function")
         }
         requestSchema = source.requestSchema
         resultSchema = source.resultSchema
@@ -324,61 +336,81 @@ export const validatePersistedSnapshots = (input: {
               }),
             )
           }
-          const contract = yield* input.stageCatalog
-            .describe(snapshot.definition.contract)
-            .pipe(
-              Effect.mapError((cause) =>
-                validationError(
-                  "contract",
-                  "unknown_contract_reference",
-                  snapshot.definition,
-                  snapshot.sequencePosition,
-                  cause,
-                  input.workflowDefinitionSha256,
-                ),
-              ),
-            )
-          if (contract.registrationSha256 !== snapshot.contractRegistrationSha256) {
-            return yield* Effect.fail(
-              new WorkflowDefinitionValidationError({
-                phase: "contract",
-                reason: "registration_hash_mismatch",
-                ...fields,
-                expectedRegistrationSha256: snapshot.contractRegistrationSha256,
-                actualRegistrationSha256: contract.registrationSha256,
-              }),
-            )
-          }
-          const harness = yield* input.agentHarness
-            .describe(snapshot.definition.producer.harness)
-            .pipe(
-              Effect.mapError((cause) =>
-                validationError(
-                  "harness",
-                  "unknown_harness_reference",
-                  snapshot.definition,
-                  snapshot.sequencePosition,
-                  cause,
-                  input.workflowDefinitionSha256,
-                ),
-              ),
-            )
-          if (harness.registrationSha256 !== snapshot.harnessRegistrationSha256) {
-            return yield* Effect.fail(
-              new WorkflowDefinitionValidationError({
-                phase: "harness",
-                reason: "registration_hash_mismatch",
-                ...fields,
-                expectedRegistrationSha256: snapshot.harnessRegistrationSha256,
-                actualRegistrationSha256: harness.registrationSha256,
-              }),
-            )
-          }
         }),
       { concurrency: 1, discard: true },
     )
+    const definition = yield* Effect.try({
+      try: () =>
+        normalizeWorkflowDefinition({
+          contractVersion: 1,
+          definitionVersion: 1,
+          stages: input.snapshots.map((snapshot) => snapshot.definition),
+        }),
+      catch: (cause) => {
+        if (cause instanceof WorkflowDefinitionValidationError) {
+          return new WorkflowDefinitionValidationError({
+            phase: cause.phase,
+            reason: cause.reason,
+            workflowDefinitionSha256: input.workflowDefinitionSha256,
+            ...(cause.stageKey === undefined ? {} : { stageKey: cause.stageKey }),
+            ...(cause.sequencePosition === undefined
+              ? {}
+              : { sequencePosition: cause.sequencePosition }),
+            ...(cause.cause === undefined ? {} : { cause: cause.cause }),
+          })
+        }
+        return validationError(
+          "pure",
+          "incompatible_definition",
+          undefined,
+          undefined,
+          cause,
+          input.workflowDefinitionSha256,
+        )
+      },
+    })
+    const validatedSnapshots = yield* Effect.forEach(
+      definition.stages,
+      (stage, index) =>
+        resolveExecutableSnapshot(input, input.workflowDefinitionSha256, stage, index + 1).pipe(
+          Effect.flatMap((validated) => {
+            const persisted = input.snapshots[index]!
+            const fields = {
+              workflowDefinitionSha256: input.workflowDefinitionSha256,
+              stageKey: stage.key,
+              sequencePosition: index + 1,
+              contractRef: stage.contract,
+              harnessRef: stage.producer.harness,
+            }
+            if (validated.contractRegistrationSha256 !== persisted.contractRegistrationSha256) {
+              return Effect.fail(
+                new WorkflowDefinitionValidationError({
+                  phase: "contract",
+                  reason: "registration_hash_mismatch",
+                  ...fields,
+                  expectedRegistrationSha256: persisted.contractRegistrationSha256,
+                  actualRegistrationSha256: validated.contractRegistrationSha256,
+                }),
+              )
+            }
+            if (validated.harnessRegistrationSha256 !== persisted.harnessRegistrationSha256) {
+              return Effect.fail(
+                new WorkflowDefinitionValidationError({
+                  phase: "harness",
+                  reason: "registration_hash_mismatch",
+                  ...fields,
+                  expectedRegistrationSha256: persisted.harnessRegistrationSha256,
+                  actualRegistrationSha256: validated.harnessRegistrationSha256,
+                }),
+              )
+            }
+            return Effect.succeed(validated)
+          }),
+        ),
+      { concurrency: 1 },
+    )
     const selections = firstSeenSelections(
-      input.snapshots.map(({ definition: stage }) => ({
+      validatedSnapshots.map(({ definition: stage }) => ({
         ref: stage.producer.harness,
         agent: stage.producer.agent,
         model: stage.producer.model,
@@ -474,12 +506,19 @@ function resolveExecutableSnapshot(
       )
     }
     const policyRefs = [
-      ...(stage.activation.mode === "conditional" ? [stage.activation.policy] : []),
-      stage.designPolicy,
-      stage.promotionPolicy,
-      stage.structurePolicy,
-    ].filter((ref) => ref !== undefined)
-    if (policyRefs.some((ref) => ref.version !== 1)) {
+      ...(stage.activation.mode === "conditional"
+        ? ([[stage.activation.policy, "qrspi.activation"]] as const)
+        : []),
+      [stage.designPolicy, "qrspi.design-policy"] as const,
+      [stage.promotionPolicy, "qrspi.promotion-policy"] as const,
+      [stage.structurePolicy, "qrspi.structure-policy"] as const,
+    ]
+    if (
+      policyRefs.some(
+        ([ref, supportedName]) =>
+          ref !== undefined && (ref.name !== supportedName || ref.version !== 1),
+      )
+    ) {
       return yield* Effect.fail(
         new WorkflowDefinitionValidationError({
           phase: "contract",

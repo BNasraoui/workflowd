@@ -134,10 +134,15 @@ describe("TrustedStageCatalog", () => {
     )
   })
 
-  test("rejects malformed metadata, schemas, and durable envelope bounds", () => {
+  test("rejects malformed metadata, schemas, closures, and durable envelope bounds", () => {
+    const { compatibility: _compatibility, ...withoutCompatibility } = fixtureContract
     for (const registration of [
       { ...fixtureContract, ref: { name: "", contractVersion: 1 } },
       { ...fixtureContract, requestSchema: "not-a-schema" },
+      withoutCompatibility,
+      { ...fixtureContract, assembleRequest: undefined },
+      { ...fixtureContract, buildTask: undefined },
+      { ...fixtureContract, prepareOutput: undefined },
       { ...fixtureContract, maxRequestBytes: 64 * 1024 + 1 },
       { ...fixtureContract, maxResultBytes: 4 * 1024 * 1024 + 1 },
     ]) {
@@ -210,6 +215,66 @@ describe("TrustedStageCatalog", () => {
         sequencePosition: 1,
       },
     })
+  })
+
+  test("rejects unknown policy names as well as unsupported versions", async () => {
+    const catalog = new TrustedStageCatalog([fixtureContract])
+    const harness: AgentHarnessPort = {
+      describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+      validateAvailability: () => Effect.void,
+      prepare: () => Effect.die("unused"),
+      createSession: () => Effect.die("unused"),
+      resumeSession: () => Effect.die("unused"),
+      abortSession: () => Effect.die("unused"),
+    }
+    const stage = {
+      key: "fixture",
+      kind: "document" as const,
+      contract: fixtureContract.ref,
+      activation: {
+        mode: "conditional" as const,
+        policy: { name: "qrspi.activation", version: 1 },
+        decision: "enabled" as const,
+        reason: "fixture",
+      },
+      definitionVersion: 1,
+      maxEncodedInputBytes: 1_024,
+      producer: {
+        harness: { name: "opencode", version: 1 },
+        agent: "fixture-agent",
+        model: "openai/gpt-5.6-sol",
+        timeoutMs: 1_000,
+        retry: { maxAttempts: 1, backoffMs: 1 },
+      },
+      outputPolicy: {
+        _tag: "Artifact" as const,
+        pathTemplate: "docs/fixture.md",
+        mediaType: "text/markdown",
+      },
+      reviewPolicy: { mode: "none" as const },
+      humanGatePolicy: { mode: "none" as const },
+    }
+
+    for (const policy of [
+      { name: "unregistered-policy", version: 1 },
+      { name: "qrspi.activation", version: 2 },
+    ]) {
+      const result = await Effect.runPromise(
+        validateWorkflowDefinition({
+          definition: {
+            contractVersion: 1,
+            definitionVersion: 1,
+            stages: [{ ...stage, activation: { ...stage.activation, policy } }],
+          },
+          stageCatalog: catalog.port(),
+          agentHarness: harness,
+        }).pipe(Effect.either),
+      )
+      expect(result).toMatchObject({
+        _tag: "Left",
+        left: { phase: "contract", reason: "unsupported_policy", stageKey: "fixture" },
+      })
+    }
   })
 
   test("maps an availability failure to the exact selected stage", async () => {
@@ -391,6 +456,80 @@ describe("TrustedStageCatalog", () => {
 })
 
 describe("persisted stage snapshots", () => {
+  test("reruns contract compatibility before accepting persisted stages", async () => {
+    const catalog = new TrustedStageCatalog([fixtureContract])
+    const harness: AgentHarnessPort = {
+      describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+      validateAvailability: () => Effect.void,
+      prepare: () => Effect.die("unused"),
+      createSession: () => Effect.die("unused"),
+      resumeSession: () => Effect.die("unused"),
+      abortSession: () => Effect.die("unused"),
+    }
+    const definition = {
+      contractVersion: 1,
+      definitionVersion: 1,
+      stages: [
+        {
+          key: "fixture",
+          kind: "document",
+          contract: fixtureContract.ref,
+          activation: { mode: "enabled" },
+          definitionVersion: 1,
+          maxEncodedInputBytes: 1_024,
+          producer: {
+            harness: { name: "opencode", version: 1 },
+            agent: "fixture-agent",
+            model: "openai/gpt-5.6-sol",
+            timeoutMs: 1_000,
+            retry: { maxAttempts: 1, backoffMs: 1 },
+          },
+          outputPolicy: {
+            _tag: "Artifact",
+            pathTemplate: "docs/fixture.md",
+            mediaType: "text/markdown",
+          },
+          reviewPolicy: { mode: "none" },
+          humanGatePolicy: { mode: "none" },
+        },
+      ],
+    } as const
+    const validated = await Effect.runPromise(
+      validateWorkflowDefinition({
+        definition,
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }),
+    )
+    const incompatibleCatalog = new TrustedStageCatalog([
+      {
+        ...fixtureContract,
+        compatibility: () => {
+          throw new Error("persisted stage is no longer compatible")
+        },
+      },
+    ])
+
+    const result = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: incompatibleCatalog.port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "contract",
+        reason: "incompatible_definition",
+        stageKey: "fixture",
+        sequencePosition: 1,
+      },
+    })
+  })
+
   test("validates descriptor identity and availability without executable contract calls", async () => {
     const catalog = new TrustedStageCatalog([fixtureContract])
     const selections: Array<unknown> = []
