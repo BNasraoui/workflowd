@@ -604,6 +604,39 @@ describe("persisted stage snapshots", () => {
       },
     ])
 
+    const unavailable = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: catalog.port(),
+        agentHarness: {
+          ...harness,
+          validateAvailability: ({ selections }) => {
+            const selection = selections[0]!
+            return Effect.fail(
+              new AgentHarnessError({
+                operation: "validate OpenCode availability",
+                cause: new Error("unavailable"),
+                retryable: true,
+                selection,
+              }),
+            )
+          },
+        },
+      }).pipe(Effect.either),
+    )
+    expect(unavailable).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "availability",
+        reason: "unavailable_agent_model",
+        stageKey: "fixture",
+        sequencePosition: 1,
+        contractRef: fixtureContract.ref,
+        harnessRef: { name: "opencode", version: 1 },
+      },
+    })
+
     const changed = await Effect.runPromise(
       validatePersistedSnapshots({
         workflowDefinitionSha256: workflowDefinitionSha256(definition),

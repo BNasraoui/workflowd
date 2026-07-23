@@ -3,6 +3,7 @@ import {
   MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
   type AgentHarnessPort,
+  type AgentHarnessSelection,
 } from "../agent-harness"
 import {
   ExecutableStageSnapshot,
@@ -285,17 +286,7 @@ export const validateWorkflowDefinition = (input: {
     )
     yield* input.agentHarness.validateAvailability({ selections }).pipe(
       Effect.mapError((cause) => {
-        const failedSnapshot =
-          cause.selection === undefined
-            ? undefined
-            : stageSnapshots.find(
-                ({ definition: stage }) =>
-                  canonicalSha256({
-                    ref: stage.producer.harness,
-                    agent: stage.producer.agent,
-                    model: stage.producer.model,
-                  }) === canonicalSha256(cause.selection),
-              )
+        const failedSnapshot = snapshotForSelection(stageSnapshots, cause.selection)
         return new WorkflowDefinitionValidationError({
           phase: "availability",
           reason: "unavailable_agent_model",
@@ -426,17 +417,41 @@ export const validatePersistedSnapshots = (input: {
       })),
     )
     yield* input.agentHarness.validateAvailability({ selections }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new WorkflowDefinitionValidationError({
-            phase: "availability",
-            reason: "unavailable_agent_model",
-            workflowDefinitionSha256: input.workflowDefinitionSha256,
-            cause: boundedCause(cause),
-          }),
-      ),
+      Effect.mapError((cause) => {
+        const failedSnapshot = snapshotForSelection(validatedSnapshots, cause.selection)
+        return new WorkflowDefinitionValidationError({
+          phase: "availability",
+          reason: "unavailable_agent_model",
+          workflowDefinitionSha256: input.workflowDefinitionSha256,
+          ...(failedSnapshot === undefined
+            ? {}
+            : {
+                stageKey: failedSnapshot.definition.key,
+                sequencePosition: failedSnapshot.sequencePosition,
+                contractRef: failedSnapshot.definition.contract,
+                harnessRef: failedSnapshot.definition.producer.harness,
+              }),
+          cause: boundedCause(cause),
+        })
+      }),
     )
   })
+
+function snapshotForSelection(
+  snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>,
+  selection: AgentHarnessSelection | undefined,
+) {
+  if (selection === undefined) return undefined
+  const selectionSha256 = canonicalSha256(selection)
+  return snapshots.find(
+    ({ definition: stage }) =>
+      canonicalSha256({
+        ref: stage.producer.harness,
+        agent: stage.producer.agent,
+        model: stage.producer.model,
+      }) === selectionSha256,
+  )
+}
 
 function resolveExecutableSnapshot(
   input: { readonly stageCatalog: StageCatalogPort; readonly agentHarness: AgentHarnessPort },
