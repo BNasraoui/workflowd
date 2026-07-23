@@ -30,6 +30,7 @@ import { QrspiStore, type QrspiStoreDataError, type StartRecord } from "./store"
 import {
   StageCatalog,
   type StageCatalogError,
+  validatePersistedSnapshots,
   validateWorkflowDefinition,
 } from "./stage-catalog"
 
@@ -94,6 +95,7 @@ export type WorkflowStartError =
   | SqlError
 
 export type WorkflowStartPort = {
+  readonly preflight: Effect.Effect<void, WorkflowStartError>
   readonly start: (input: unknown) => Effect.Effect<WorkflowStartResult, WorkflowStartError>
 }
 export const WorkflowStart = Context.GenericTag<WorkflowStartPort>("workflowd/qrspi/WorkflowStart")
@@ -107,7 +109,14 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       const store = yield* QrspiStore
       const stageCatalog = yield* StageCatalog
       const agentHarness = yield* AgentHarness
+      const preflight = makeWorkflowStartPreflight(options).pipe(
+        Effect.provideService(QrspiStore, store),
+        Effect.provideService(StageCatalog, stageCatalog),
+        Effect.provideService(AgentHarness, agentHarness),
+      )
+      yield* preflight
       return WorkflowStart.of({
+        preflight,
         start: (input) =>
           makeWorkflowStart(options)(input).pipe(
             Effect.provideService(TicketSource, tickets),
@@ -119,6 +128,31 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       })
     }),
   )
+
+export function makeWorkflowStartPreflight(options: WorkflowStartOptions) {
+  return Effect.gen(function* () {
+    const store = yield* QrspiStore
+    const stageCatalog = yield* StageCatalog
+    const agentHarness = yield* AgentHarness
+    yield* validateWorkflowDefinition({
+      definition: options.workflowDefinition,
+      stageCatalog,
+      agentHarness,
+    })
+    const snapshotSets = yield* store.loadCurrentGenerationSnapshotSets()
+    yield* Effect.forEach(
+      snapshotSets,
+      (snapshotSet) =>
+        validatePersistedSnapshots({
+          workflowDefinitionSha256: snapshotSet.workflowDefinitionSha256,
+          snapshots: snapshotSet.snapshots,
+          stageCatalog,
+          agentHarness,
+        }),
+      { concurrency: 1, discard: true },
+    )
+  })
+}
 
 export function makeWorkflowStart(options: WorkflowStartOptions) {
   const now = options.now ?? (() => new Date())

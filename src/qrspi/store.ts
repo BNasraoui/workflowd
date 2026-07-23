@@ -5,6 +5,7 @@ import { runStoreMigrations } from "../store/migrations"
 import {
   RepositoryReference,
   ExecutableStageSnapshot,
+  StageDefinition,
   WorkflowDefinition,
   WorkflowStartInput,
   WorkflowStartOutput,
@@ -101,6 +102,23 @@ const WorkflowScope = Schema.Struct({
 })
 const decodeOutput = Schema.decodeUnknown(Schema.parseJson(WorkflowStartOutput))
 
+const CurrentGenerationSnapshotRow = Schema.Struct({
+  workflow_id: Schema.NonEmptyString,
+  generation: Schema.Int.pipe(Schema.positive()),
+  workflow_definition_sha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  workflow_definition_json: Schema.String,
+  stage_definition_sha256: Schema.NullOr(Schema.String),
+  stage_key: Schema.NullOr(Schema.String),
+  sequence_position: Schema.NullOr(Schema.Number),
+  definition_json: Schema.NullOr(Schema.String),
+  contract_name: Schema.NullOr(Schema.String),
+  contract_version: Schema.NullOr(Schema.Number),
+  contract_registration_sha256: Schema.NullOr(Schema.String),
+  harness_name: Schema.NullOr(Schema.String),
+  harness_version: Schema.NullOr(Schema.Number),
+  harness_registration_sha256: Schema.NullOr(Schema.String),
+})
+
 export type PrepareStartInput = {
   readonly workflowId: string
   readonly proposedBranchName: string
@@ -134,10 +152,21 @@ export type CompleteStartInput = {
 
 export type WorkflowStartTerminalRetryPolicy = "retryable" | "operator_required"
 
+export type CurrentGenerationSnapshotSet = {
+  readonly workflowId: string
+  readonly generation: number
+  readonly workflowDefinitionSha256: string
+  readonly snapshots: ReadonlyArray<ExecutableStageSnapshotType>
+}
+
 type StoreError =
   SqlError | QrspiStoreDataError | WorkflowStartCurrentnessError | WorkflowStartRetryExhaustedError
 
 export type QrspiStorePort = {
+  readonly loadCurrentGenerationSnapshotSets: () => Effect.Effect<
+    ReadonlyArray<CurrentGenerationSnapshotSet>,
+    SqlError | QrspiStoreDataError
+  >
   readonly getCurrentCursor: (workflowId: string) => Effect.Effect<
     {
       readonly generation: number
@@ -227,6 +256,13 @@ export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")
   readonly record: "workflow_operation" | "workflow_definition" | "stage_definition"
   readonly recordId: string
   readonly message: string
+  readonly reason?:
+    "malformed" | "missing" | "duplicate" | "reordered" | "hash_mismatch" | "identity_mismatch"
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly sequencePosition?: number
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
 }> {}
 
 export class WorkflowStartCurrentnessError extends Data.TaggedError(
@@ -237,8 +273,203 @@ export class WorkflowStartRetryExhaustedError extends Data.TaggedError(
   "WorkflowStartRetryExhaustedError",
 )<{ readonly operationId: string }> {}
 
-const dataError = (record: QrspiStoreDataError["record"], recordId: string, cause: unknown) =>
-  new QrspiStoreDataError({ record, recordId, message: String(cause) })
+type StoreDataErrorDetails = {
+  readonly reason?: QrspiStoreDataError["reason"]
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly sequencePosition?: number
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
+}
+
+const dataError = (
+  record: QrspiStoreDataError["record"],
+  recordId: string,
+  cause: unknown,
+  details: StoreDataErrorDetails = {},
+) =>
+  new QrspiStoreDataError({
+    record,
+    recordId,
+    message: String(cause),
+    ...(details.reason === undefined ? {} : { reason: details.reason }),
+    ...(details.workflowId === undefined ? {} : { workflowId: details.workflowId }),
+    ...(details.generation === undefined ? {} : { generation: details.generation }),
+    ...(details.sequencePosition === undefined
+      ? {}
+      : { sequencePosition: details.sequencePosition }),
+    ...(details.expectedSha256 === undefined ? {} : { expectedSha256: details.expectedSha256 }),
+    ...(details.actualSha256 === undefined ? {} : { actualSha256: details.actualSha256 }),
+  })
+
+function decodeCurrentGenerationSnapshotSet(
+  rows: ReadonlyArray<typeof CurrentGenerationSnapshotRow.Type>,
+) {
+  const first = rows[0]!
+  const identity = {
+    workflowId: first.workflow_id,
+    generation: first.generation,
+  }
+  return Effect.gen(function* () {
+    const workflowDefinition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
+      first.workflow_definition_json,
+    ).pipe(
+      Effect.mapError((cause) =>
+        dataError("workflow_definition", first.workflow_definition_sha256, cause, {
+          ...identity,
+          reason: "malformed",
+        }),
+      ),
+    )
+    const actualWorkflowSha256 = workflowDefinitionSha256(workflowDefinition)
+    if (actualWorkflowSha256 !== first.workflow_definition_sha256) {
+      return yield* Effect.fail(
+        dataError("workflow_definition", first.workflow_definition_sha256, "hash mismatch", {
+          ...identity,
+          reason: "hash_mismatch",
+          expectedSha256: first.workflow_definition_sha256,
+          actualSha256: actualWorkflowSha256,
+        }),
+      )
+    }
+    if (rows.some((row) => row.stage_definition_sha256 === null)) {
+      return yield* Effect.fail(
+        dataError("stage_definition", first.workflow_definition_sha256, "missing snapshot set", {
+          ...identity,
+          reason: "missing",
+        }),
+      )
+    }
+    if (rows.length !== workflowDefinition.stages.length) {
+      return yield* Effect.fail(
+        dataError(
+          "stage_definition",
+          first.workflow_definition_sha256,
+          "snapshot count does not match workflow definition",
+          { ...identity, reason: rows.length === 0 ? "missing" : "identity_mismatch" },
+        ),
+      )
+    }
+    const seenPositions = new Set<number>()
+    const seenKeys = new Set<string>()
+    const snapshots = yield* Effect.forEach(
+      rows,
+      (row, index) =>
+        Effect.gen(function* () {
+          const recordId = row.stage_definition_sha256!
+          const sequencePosition = row.sequence_position
+          if (
+            row.workflow_id !== first.workflow_id ||
+            row.generation !== first.generation ||
+            row.workflow_definition_sha256 !== first.workflow_definition_sha256 ||
+            row.workflow_definition_json !== first.workflow_definition_json
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "generation identity changed within set", {
+                ...identity,
+                reason: "identity_mismatch",
+              }),
+            )
+          }
+          if (sequencePosition === null || !Number.isInteger(sequencePosition)) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "malformed sequence position", {
+                ...identity,
+                reason: "malformed",
+              }),
+            )
+          }
+          if (
+            seenPositions.has(sequencePosition) ||
+            (row.stage_key !== null && seenKeys.has(row.stage_key))
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "duplicate snapshot identity", {
+                ...identity,
+                sequencePosition,
+                reason: "duplicate",
+              }),
+            )
+          }
+          seenPositions.add(sequencePosition)
+          if (row.stage_key !== null) seenKeys.add(row.stage_key)
+          if (sequencePosition !== index + 1) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "snapshot sequence is reordered", {
+                ...identity,
+                sequencePosition,
+                reason: "reordered",
+              }),
+            )
+          }
+          const definition = yield* Schema.decodeUnknown(Schema.parseJson(StageDefinition))(
+            row.definition_json,
+          ).pipe(
+            Effect.mapError((cause) =>
+              dataError("stage_definition", recordId, cause, {
+                ...identity,
+                sequencePosition,
+                reason: "malformed",
+              }),
+            ),
+          )
+          const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
+            sequencePosition,
+            stageDefinitionSha256: recordId,
+            definition,
+            contractRegistrationSha256: row.contract_registration_sha256,
+            harnessRegistrationSha256: row.harness_registration_sha256,
+          }).pipe(
+            Effect.mapError((cause) =>
+              dataError("stage_definition", recordId, cause, {
+                ...identity,
+                sequencePosition,
+                reason: "malformed",
+              }),
+            ),
+          )
+          const actualStageSha256 = stageDefinitionSha256(snapshot.definition)
+          if (actualStageSha256 !== recordId) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "hash mismatch", {
+                ...identity,
+                sequencePosition,
+                reason: "hash_mismatch",
+                expectedSha256: recordId,
+                actualSha256: actualStageSha256,
+              }),
+            )
+          }
+          const configuredStage = workflowDefinition.stages[index]
+          if (
+            configuredStage === undefined ||
+            row.stage_key !== definition.key ||
+            row.contract_name !== definition.contract.name ||
+            row.contract_version !== definition.contract.contractVersion ||
+            row.harness_name !== definition.producer.harness.name ||
+            row.harness_version !== definition.producer.harness.version ||
+            canonicalSha256(configuredStage) !== canonicalSha256(definition)
+          ) {
+            return yield* Effect.fail(
+              dataError("stage_definition", recordId, "snapshot columns do not match definition", {
+                ...identity,
+                sequencePosition,
+                reason: "identity_mismatch",
+              }),
+            )
+          }
+          return snapshot
+        }),
+      { concurrency: 1 },
+    )
+    return {
+      workflowId: first.workflow_id,
+      generation: first.generation,
+      workflowDefinitionSha256: first.workflow_definition_sha256,
+      snapshots,
+    } satisfies CurrentGenerationSnapshotSet
+  })
+}
 
 function make(sql: SqlClient.SqlClient): QrspiStorePort {
   const transaction = <A, E>(effect: Effect.Effect<A, E>) => sql.withTransaction(effect)
@@ -269,6 +500,60 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    loadCurrentGenerationSnapshotSets: () =>
+      Effect.gen(function* () {
+        const rawRows = yield* sql<Record<string, unknown>>`
+          SELECT
+            generation.workflow_id,
+            generation.generation,
+            generation.workflow_definition_sha256,
+            workflow_definition.definition_json AS workflow_definition_json,
+            stage.stage_definition_sha256,
+            stage.stage_key,
+            stage.sequence_position,
+            stage.definition_json,
+            stage.contract_name,
+            stage.contract_version,
+            stage.contract_registration_sha256,
+            stage.harness_name,
+            stage.harness_version,
+            stage.harness_registration_sha256
+          FROM qrspi_generations AS generation
+          JOIN qrspi_workflow_definitions AS workflow_definition
+            ON workflow_definition.definition_sha256 = generation.workflow_definition_sha256
+          LEFT JOIN qrspi_stage_definitions AS stage
+            ON stage.workflow_definition_sha256 = generation.workflow_definition_sha256
+          WHERE generation.is_current = 1
+          ORDER BY generation.workflow_id, generation.generation, stage.sequence_position
+        `
+        const rows = yield* Effect.forEach(
+          rawRows,
+          (raw) =>
+            Schema.decodeUnknown(CurrentGenerationSnapshotRow)(raw).pipe(
+              Effect.mapError((cause) =>
+                dataError(
+                  "stage_definition",
+                  typeof raw.workflow_id === "string" ? raw.workflow_id : "unreadable",
+                  cause,
+                  { reason: "malformed" },
+                ),
+              ),
+            ),
+          { concurrency: 1 },
+        )
+        const grouped = new Map<string, Array<typeof CurrentGenerationSnapshotRow.Type>>()
+        for (const row of rows) {
+          const key = `${row.workflow_id}\u0000${row.generation}`
+          const group = grouped.get(key)
+          if (group === undefined) grouped.set(key, [row])
+          else group.push(row)
+        }
+        return yield* Effect.forEach(
+          grouped.values(),
+          (generationRows) => decodeCurrentGenerationSnapshotSet(generationRows),
+          { concurrency: 1 },
+        )
+      }),
     getCurrentCursor: (workflowId) =>
       sql<{
         readonly generation: number

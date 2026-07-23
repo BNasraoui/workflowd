@@ -5,11 +5,7 @@ import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Effect, Fiber, Layer, Schema } from "effect"
-import {
-  AgentHarness,
-  AgentHarnessError,
-  type AgentHarnessPort,
-} from "../../src/agent-harness"
+import { AgentHarness, AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
 import {
   QrspiRepository,
   QrspiRepositoryError,
@@ -24,7 +20,12 @@ import {
   TrustedStageCatalog,
   type StageContract,
 } from "../../src/qrspi/stage-catalog"
-import { makeWorkflowStart, type WorkflowStartOptions } from "../../src/qrspi/workflow-start"
+import {
+  WorkflowStart,
+  WorkflowStartLive,
+  makeWorkflowStart,
+  type WorkflowStartOptions,
+} from "../../src/qrspi/workflow-start"
 import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
@@ -249,8 +250,7 @@ function layer(
   const database = SqliteClient.layer({ filename })
   const catalog = new TrustedStageCatalog([questionsContract])
   const harness: AgentHarnessPort = {
-    describe: (ref) =>
-      Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+    describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
     validateAvailability,
     prepare: () => Effect.die("unused"),
     createSession: () => Effect.die("unused"),
@@ -1490,7 +1490,6 @@ describe("WorkflowStart integration", () => {
   })
 })
 
-
 describe("Phase 1: Trusted stage snapshots", () => {
   test("persists one immutable snapshot and derives its two child operations", async () => {
     const filename = await databasePath()
@@ -1754,5 +1753,123 @@ describe("Phase 2: Ordered workflow definition validation", () => {
     expect(persisted.producer).toHaveLength(1)
     expect(JSON.parse(persisted.producer[0]!.input_json)).toMatchObject({ stageKey: "plan" })
     expect(persisted.producer[0]!.max_attempts).toBe(7)
+  })
+})
+
+describe("Phase 3: Persisted identity preflight", () => {
+  test("loads ordered snapshots for current generations after restart", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+
+    const snapshotSets = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* QrspiStore
+        return yield* store.loadCurrentGenerationSnapshotSets()
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(snapshotSets).toEqual([
+      expect.objectContaining({
+        generation: 1,
+        snapshots: [
+          expect.objectContaining({
+            sequencePosition: 1,
+            definition: expect.objectContaining({ key: "questions" }),
+          }),
+        ],
+      }),
+    ])
+  })
+
+  test("preflights configured and persisted identity on a fresh service", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const workflowStart = yield* WorkflowStart
+        yield* workflowStart.preflight
+      }).pipe(
+        Effect.provide(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
+  })
+
+  test("runs enabled QRSPI preflight while constructing the live service", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const selections: Array<unknown> = []
+    const dependencies = layer(filename, fake, (input) => {
+      selections.push(...input.selections)
+      return Effect.void
+    })
+
+    await Effect.runPromise(
+      Effect.scoped(Layer.build(WorkflowStartLive(options).pipe(Layer.provide(dependencies)))),
+    )
+
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "qrspi-producer",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+  })
+
+  test.each([
+    {
+      name: "missing snapshot set",
+      mutation: "DELETE FROM qrspi_stage_definitions",
+      reason: "missing",
+    },
+    {
+      name: "malformed snapshot JSON",
+      mutation: "UPDATE qrspi_stage_definitions SET definition_json = '{}'",
+      reason: "malformed",
+    },
+    {
+      name: "cross-column contract identity",
+      mutation: "UPDATE qrspi_stage_definitions SET contract_name = 'qrspi.changed'",
+      reason: "identity_mismatch",
+    },
+    {
+      name: "stage definition hash mismatch",
+      mutation:
+        "UPDATE qrspi_stage_definitions SET definition_json = json_set(definition_json, '$.definitionVersion', 2)",
+      reason: "hash_mismatch",
+    },
+    {
+      name: "reordered sequence",
+      mutation: "UPDATE qrspi_stage_definitions SET sequence_position = 2",
+      reason: "reordered",
+    },
+  ])("rejects $name without new work", async ({ mutation, reason }) => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const before = await counts(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql.unsafe(mutation)
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+
+    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
+      _tag: "Some",
+      value: { _tag: "QrspiStoreDataError", reason },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
   })
 })

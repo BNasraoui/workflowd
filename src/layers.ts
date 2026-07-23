@@ -60,6 +60,7 @@ export const makeLiveLayer = (config: AppConfig) => {
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
+          preflight: Effect.void,
           start: () =>
             Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
         })

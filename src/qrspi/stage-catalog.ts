@@ -286,6 +286,109 @@ export const validateWorkflowDefinition = (input: {
     return { definition, stageSnapshots } as const
   })
 
+export const validatePersistedSnapshots = (input: {
+  readonly workflowDefinitionSha256: string
+  readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
+  readonly stageCatalog: StageCatalogPort
+  readonly agentHarness: AgentHarnessPort
+}) =>
+  Effect.gen(function* () {
+    yield* Effect.forEach(
+      input.snapshots,
+      (snapshot, index) =>
+        Effect.gen(function* () {
+          const fields = {
+            workflowDefinitionSha256: input.workflowDefinitionSha256,
+            stageKey: snapshot.definition.key,
+            sequencePosition: snapshot.sequencePosition,
+            contractRef: snapshot.definition.contract,
+            harnessRef: snapshot.definition.producer.harness,
+          }
+          if (
+            snapshot.sequencePosition !== index + 1 ||
+            snapshot.stageDefinitionSha256 !== stageDefinitionSha256(snapshot.definition)
+          ) {
+            return yield* Effect.fail(
+              new WorkflowDefinitionValidationError({
+                phase: "pure",
+                reason: "invalid_stage_order",
+                ...fields,
+              }),
+            )
+          }
+          const contract = yield* input.stageCatalog
+            .describe(snapshot.definition.contract)
+            .pipe(
+              Effect.mapError((cause) =>
+                validationError(
+                  "contract",
+                  "unknown_contract_reference",
+                  snapshot.definition,
+                  snapshot.sequencePosition,
+                  cause,
+                  input.workflowDefinitionSha256,
+                ),
+              ),
+            )
+          if (contract.registrationSha256 !== snapshot.contractRegistrationSha256) {
+            return yield* Effect.fail(
+              new WorkflowDefinitionValidationError({
+                phase: "contract",
+                reason: "registration_hash_mismatch",
+                ...fields,
+                expectedRegistrationSha256: snapshot.contractRegistrationSha256,
+                actualRegistrationSha256: contract.registrationSha256,
+              }),
+            )
+          }
+          const harness = yield* input.agentHarness
+            .describe(snapshot.definition.producer.harness)
+            .pipe(
+              Effect.mapError((cause) =>
+                validationError(
+                  "harness",
+                  "unknown_harness_reference",
+                  snapshot.definition,
+                  snapshot.sequencePosition,
+                  cause,
+                  input.workflowDefinitionSha256,
+                ),
+              ),
+            )
+          if (harness.registrationSha256 !== snapshot.harnessRegistrationSha256) {
+            return yield* Effect.fail(
+              new WorkflowDefinitionValidationError({
+                phase: "harness",
+                reason: "registration_hash_mismatch",
+                ...fields,
+                expectedRegistrationSha256: snapshot.harnessRegistrationSha256,
+                actualRegistrationSha256: harness.registrationSha256,
+              }),
+            )
+          }
+        }),
+      { concurrency: 1, discard: true },
+    )
+    const selections = firstSeenSelections(
+      input.snapshots.map(({ definition: stage }) => ({
+        ref: stage.producer.harness,
+        agent: stage.producer.agent,
+        model: stage.producer.model,
+      })),
+    )
+    yield* input.agentHarness.validateAvailability({ selections }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new WorkflowDefinitionValidationError({
+            phase: "availability",
+            reason: "unavailable_agent_model",
+            workflowDefinitionSha256: input.workflowDefinitionSha256,
+            cause: boundedCause(cause),
+          }),
+      ),
+    )
+  })
+
 function resolveExecutableSnapshot(
   input: { readonly stageCatalog: StageCatalogPort; readonly agentHarness: AgentHarnessPort },
   workflowSha256: string,

@@ -276,6 +276,7 @@ export type WorkflowDefinitionValidationReason =
   | "incompatible_kind"
   | "incompatible_output"
   | "incompatible_definition"
+  | "registration_hash_mismatch"
   | "unavailable_agent_model"
 
 export class WorkflowDefinitionValidationError extends Data.TaggedError(
@@ -288,6 +289,8 @@ export class WorkflowDefinitionValidationError extends Data.TaggedError(
   readonly sequencePosition?: number
   readonly contractRef?: StageContractRef
   readonly harnessRef?: typeof AgentHarnessRef.Type
+  readonly expectedRegistrationSha256?: string
+  readonly actualRegistrationSha256?: string
   readonly cause?: string
 }> {}
 

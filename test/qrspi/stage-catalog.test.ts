@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
+import { workflowDefinitionSha256 } from "../../src/qrspi/domain"
 import {
   TrustedStageCatalog,
+  validatePersistedSnapshots,
   validateWorkflowDefinition,
   type StageContract,
 } from "../../src/qrspi/stage-catalog"
@@ -55,9 +57,9 @@ describe("TrustedStageCatalog", () => {
       expect.objectContaining({ reason: "duplicate_reference" }),
     )
     const catalog = new TrustedStageCatalog([fixtureContract])
-    expect(() =>
-      catalog.descriptor({ name: "fixture.missing", contractVersion: 1 }),
-    ).toThrow(expect.objectContaining({ reason: "unknown_reference" }))
+    expect(() => catalog.descriptor({ name: "fixture.missing", contractVersion: 1 })).toThrow(
+      expect.objectContaining({ reason: "unknown_reference" }),
+    )
     expect(() => catalog.registrationFor({ ...fixtureContract })).toThrow(
       expect.objectContaining({ reason: "untrusted_source" }),
     )
@@ -314,6 +316,166 @@ describe("TrustedStageCatalog", () => {
         sequencePosition: 1,
         contractRef: fixtureContract.ref,
         harnessRef: fixture.harnessRef,
+      },
+    })
+  })
+})
+
+describe("persisted stage snapshots", () => {
+  test("validates descriptor identity and availability without executable contract calls", async () => {
+    const catalog = new TrustedStageCatalog([fixtureContract])
+    const selections: Array<unknown> = []
+    const harness: AgentHarnessPort = {
+      describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+      validateAvailability: (input) => {
+        selections.push(...input.selections)
+        return Effect.void
+      },
+      prepare: () => Effect.die("unused"),
+      createSession: () => Effect.die("unused"),
+      resumeSession: () => Effect.die("unused"),
+      abortSession: () => Effect.die("unused"),
+    }
+    const definition = {
+      contractVersion: 1,
+      definitionVersion: 1,
+      stages: [
+        {
+          key: "fixture",
+          kind: "document",
+          contract: fixtureContract.ref,
+          activation: { mode: "enabled" },
+          definitionVersion: 1,
+          maxEncodedInputBytes: 1_024,
+          producer: {
+            harness: { name: "opencode", version: 1 },
+            agent: "fixture-agent",
+            model: "openai/gpt-5.6-sol",
+            timeoutMs: 1_000,
+            retry: { maxAttempts: 1, backoffMs: 1 },
+          },
+          outputPolicy: {
+            _tag: "Artifact",
+            pathTemplate: "docs/fixture.md",
+            mediaType: "text/markdown",
+          },
+          reviewPolicy: { mode: "none" },
+          humanGatePolicy: { mode: "none" },
+        },
+      ],
+    } as const
+    const validated = await Effect.runPromise(
+      validateWorkflowDefinition({
+        definition,
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }),
+    )
+    selections.length = 0
+    await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }),
+    )
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "fixture-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+
+    const changed = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: [
+          {
+            ...validated.stageSnapshots[0]!,
+            contractRegistrationSha256: "c".repeat(64),
+          },
+        ],
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+    expect(changed).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "contract",
+        reason: "registration_hash_mismatch",
+        expectedRegistrationSha256: "c".repeat(64),
+        actualRegistrationSha256: catalog.descriptor(fixtureContract.ref).registrationSha256,
+      },
+    })
+
+    const missingContract = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: new TrustedStageCatalog([]).port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+    expect(missingContract).toMatchObject({
+      _tag: "Left",
+      left: {
+        reason: "unknown_contract_reference",
+        stageKey: "fixture",
+        sequencePosition: 1,
+      },
+    })
+
+    const missingHarness = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: catalog.port(),
+        agentHarness: {
+          ...harness,
+          describe: () =>
+            Effect.fail(
+              new AgentHarnessError({
+                operation: "describe harness",
+                cause: new Error("missing harness"),
+                retryable: false,
+              }),
+            ),
+        },
+      }).pipe(Effect.either),
+    )
+    expect(missingHarness).toMatchObject({
+      _tag: "Left",
+      left: {
+        reason: "unknown_harness_reference",
+        stageKey: "fixture",
+        sequencePosition: 1,
+      },
+    })
+
+    const changedHarness = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: [
+          {
+            ...validated.stageSnapshots[0]!,
+            harnessRegistrationSha256: "d".repeat(64),
+          },
+        ],
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+    expect(changedHarness).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "harness",
+        reason: "registration_hash_mismatch",
+        expectedRegistrationSha256: "d".repeat(64),
+        actualRegistrationSha256: "b".repeat(64),
       },
     })
   })
