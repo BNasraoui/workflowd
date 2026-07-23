@@ -145,6 +145,7 @@ export const WorkflowStartInput = Schema.Struct({
   ticket: TicketReference,
   ticketRevisionSha256: Sha256,
   workflowDefinitionSha256: Sha256,
+  stageSnapshotsSha256: Sha256,
   baseRef: BoundedText(256),
   baseSha: GitSha,
   branchName: BoundedText(256),

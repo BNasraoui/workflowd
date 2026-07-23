@@ -54,7 +54,9 @@ function stageSnapshot(definition: StageDefinition = options.workflowDefinition.
     sequencePosition: 1,
     stageDefinitionSha256: stageDefinitionSha256(definition),
     definition,
-    contractRegistrationSha256: "a".repeat(64),
+    contractRegistrationSha256: new TrustedStageCatalog([questionsContract]).descriptor(
+      definition.contract,
+    ).registrationSha256,
     harnessRegistrationSha256: "b".repeat(64),
   }
 }
@@ -943,6 +945,53 @@ describe("WorkflowStart integration", () => {
     expect(Number(result.generations[0]?.count)).toBe(0)
     expect(Number(result.snapshots[0]?.count)).toBe(0)
     expect(Number(result.children[0]?.count)).toBe(0)
+  })
+
+  test("rejects altered registration hashes before creating a generation or children", async () => {
+    const filename = await databasePath()
+    const fake = fakes({ unknownAfterAcceptance: true })
+    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartUncertain" })
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{ readonly operation_id: string; readonly input_json: string }>`
+          SELECT operation_id, input_json FROM workflow_operations WHERE kind = 'WorkflowStart'
+        `
+        const persisted = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
+          rows[0]!.input_json,
+        )
+        const store = yield* QrspiStore
+        return yield* store
+          .completeStart({
+            operationId: rows[0]!.operation_id,
+            workflowId: workflowIdFor(repository, ticketReference),
+            branchName: persisted.branchName,
+            ticketRevisionSha256: persisted.ticketRevisionSha256,
+            workflowDefinitionSha256: persisted.workflowDefinitionSha256,
+            repositoryJson: JSON.stringify(repository),
+            baseRef: persisted.baseRef,
+            baseSha: persisted.baseSha,
+            rootSha: baseSha,
+            authoritativeObservation: { headRef: persisted.branchName, sha: baseSha },
+            stageSnapshots: [
+              {
+                ...stageSnapshot(),
+                contractRegistrationSha256: "a".repeat(64),
+                harnessRegistrationSha256: "c".repeat(64),
+              },
+            ],
+            now: options.now(),
+          })
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "WorkflowStartCurrentnessError" },
+    })
+    expect(await counts(filename, fake)).toEqual([0, 1, 1])
   })
 
   test("recovers an intended branch after a hard crash on the final leased attempt", async () => {

@@ -1070,6 +1070,14 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               }),
             { concurrency: 1 },
           )
+          if (canonicalSha256(snapshots) !== persistedInput.stageSnapshotsSha256) {
+            return yield* Effect.fail(
+              new WorkflowStartCurrentnessError({
+                operationId: input.operationId,
+                reason: "supplied stage snapshots do not match persisted WorkflowStart input",
+              }),
+            )
+          }
           yield* sql`
             UPDATE qrspi_generations SET
               state = CASE

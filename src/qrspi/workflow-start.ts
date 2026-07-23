@@ -300,6 +300,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         ticket: request.ticket,
         ticketRevisionSha256: checked.ticketRevision.ticketRevisionSha256,
         workflowDefinitionSha256: definitionSha256,
+        stageSnapshotsSha256: canonicalSha256(validatedDefinition.stageSnapshots),
         baseRef: inspection.baseRef,
         baseSha: inspection.baseSha,
         branchName: selectedBranchName,
