@@ -46,7 +46,7 @@ export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
   ) => PreparedDocumentOutput | PreparedImplementationStepOutput
 }
 
-type StageContractRegistration = {
+export type StageContractRegistration = {
   readonly ref: StageContractRef
   readonly implementationRevision?: unknown
   readonly kind?: unknown
@@ -97,6 +97,15 @@ const RegistrationMetadata = Schema.Struct({
 
 const referenceKey = (ref: StageContractRef) => `${ref.name}@${ref.contractVersion}`
 
+function diagnosticReference(source: unknown): string {
+  if (source === null || typeof source !== "object" || !("ref" in source)) return "<missing>"
+  try {
+    return (JSON.stringify(source.ref) ?? String(source.ref)).slice(0, 256)
+  } catch {
+    return "<unserializable>"
+  }
+}
+
 export class TrustedStageCatalog {
   readonly #byReference = new Map<string, RuntimeRegistration>()
 
@@ -139,7 +148,7 @@ export class TrustedStageCatalog {
       } catch (cause) {
         throw new StageCatalogError({
           reason: "malformed_registration",
-          reference: referenceKey(source.ref),
+          reference: diagnosticReference(source),
           cause: String(cause),
         })
       }

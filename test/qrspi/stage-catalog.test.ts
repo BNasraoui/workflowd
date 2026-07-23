@@ -152,6 +152,14 @@ describe("TrustedStageCatalog", () => {
     }
   })
 
+  test("reports malformed missing and non-object references as typed catalog errors", () => {
+    for (const ref of [undefined, null, "not-a-reference"]) {
+      expect(() => {
+        Reflect.construct(TrustedStageCatalog, [[{ ...fixtureContract, ref }]])
+      }).toThrow(expect.objectContaining({ reason: "malformed_registration" }))
+    }
+  })
+
   test("runs compatibility through the exact trusted source", async () => {
     const incompatible = {
       ...fixtureContract,

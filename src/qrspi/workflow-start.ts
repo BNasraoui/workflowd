@@ -32,7 +32,7 @@ import {
 import { QrspiStore, type QrspiStoreDataError, type StartRecord } from "./store"
 import {
   StageCatalog,
-  type StageCatalogError,
+  StageCatalogError,
   validatePersistedSnapshots,
   validateWorkflowDefinition,
 } from "./stage-catalog"
@@ -64,7 +64,10 @@ export class WorkflowStartRetryExhausted extends Data.TaggedError("WorkflowStart
 
 export type WorkflowStartValidationDiagnostic = {
   readonly phase: WorkflowDefinitionValidationError["phase"] | "persisted"
-  readonly reason: WorkflowDefinitionValidationReason | NonNullable<QrspiStoreDataError["reason"]>
+  readonly reason:
+    | WorkflowDefinitionValidationReason
+    | NonNullable<QrspiStoreDataError["reason"]>
+    | StageCatalogError["reason"]
   readonly workflowDefinitionSha256?: string
   readonly workflowId?: string
   readonly generation?: number
@@ -162,13 +165,22 @@ export const closedWorkflowStart = (error: WorkflowStartValidationError): Workfl
 })
 
 export function toWorkflowStartValidationError(
-  error: WorkflowDefinitionValidationError | QrspiStoreDataError,
+  error: WorkflowDefinitionValidationError | QrspiStoreDataError | StageCatalogError,
 ): WorkflowStartValidationError {
   if (error._tag === "WorkflowDefinitionValidationError") {
     const { _tag: _, ...diagnostic } = error
     return new WorkflowStartValidationError({
       ...diagnostic,
       ...(error.cause === undefined ? {} : { cause: boundedCause(error.cause) }),
+    })
+  }
+  if (error._tag === "StageCatalogError") {
+    return new WorkflowStartValidationError({
+      phase: "contract",
+      reason: error.reason,
+      cause: boundedCause(
+        error.cause === undefined ? error.reference : `${error.reference}: ${error.cause}`,
+      ),
     })
   }
   return new WorkflowStartValidationError({

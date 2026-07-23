@@ -13,6 +13,7 @@ import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkflowStart } from "../src/qrspi/workflow-start"
+import { questionsStageContract } from "../src/qrspi/stage-catalog"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -194,6 +195,60 @@ test("keeps unrelated services available when configured QRSPI is closed", async
         _tag: "WorkflowStartValidationError",
         phase: "contract",
         reason: "unknown_contract_reference",
+      },
+    })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("keeps unrelated services available when stage catalog construction fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-invalid-catalog-"))
+  try {
+    const privateKeyPath = join(directory, "github.pem")
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
+    const config = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+      },
+      { home: directory },
+    )
+    const Live = makeLiveLayer(config, [questionsStageContract, questionsStageContract]).pipe(
+      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const github = yield* GitHub
+        const automation = yield* Automation
+        const workflowStart = yield* WorkflowStart
+        return {
+          methods: [store.claimNextJob, github.publishReview, automation.prepareReview],
+          closed: yield* Effect.either(workflowStart.start({})),
+        }
+      }).pipe(Effect.provide(Live)),
+    )
+
+    expect(result.methods.every((method) => typeof method === "function")).toBe(true)
+    expect(result.closed).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowStartValidationError",
+        phase: "contract",
+        reason: "duplicate_reference",
       },
     })
   } finally {
