@@ -5,6 +5,7 @@ import {
   type AgentHarnessPort,
   type AgentHarnessSelection,
 } from "../agent-harness"
+import { stageHarnessRef } from "../opencode"
 import {
   ExecutableStageSnapshot,
   StageContractRef,
@@ -565,6 +566,18 @@ function resolveExecutableSnapshot(
           ),
         ),
       )
+    if (
+      harness.ref.name !== stageHarnessRef.name ||
+      harness.ref.version !== stageHarnessRef.version
+    ) {
+      return yield* Effect.fail(
+        new WorkflowDefinitionValidationError({
+          phase: "harness",
+          reason: "incompatible_definition",
+          ...fields,
+        }),
+      )
+    }
     return yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
       sequencePosition,
       stageDefinitionSha256: stageDefinitionSha256(stage),

@@ -6,6 +6,7 @@ import {
   TrustedAgentHarnessCatalog,
   type AgentHarnessPort,
 } from "../../src/agent-harness"
+import { makeOpenCodeHarnessDefinitions } from "../../src/opencode"
 import { workflowDefinitionSha256 } from "../../src/qrspi/domain"
 import {
   TrustedStageCatalog,
@@ -293,6 +294,71 @@ describe("TrustedStageCatalog", () => {
         left: { phase: "contract", reason: "unsupported_policy", stageKey: "fixture" },
       })
     }
+  })
+
+  test("rejects a registered pull-request harness for stage execution", async () => {
+    const catalog = new TrustedStageCatalog([fixtureContract])
+    const definitions = makeOpenCodeHarnessDefinitions({
+      reviewerAgent: "pr-reviewer",
+      fixerAgent: "pr-fixer",
+      model: "openai/gpt-5.6-sol",
+      pollIntervalMs: 100,
+      timeoutMs: 1_000,
+    })
+    const harnessCatalog = new TrustedAgentHarnessCatalog(Object.values(definitions))
+    const harness: AgentHarnessPort = {
+      describe: (ref) => Effect.succeed(harnessCatalog.describe(ref)),
+      validateAvailability: () => Effect.void,
+      prepare: () => Effect.die("unused"),
+      createSession: () => Effect.die("unused"),
+      resumeSession: () => Effect.die("unused"),
+      abortSession: () => Effect.die("unused"),
+    }
+
+    const result = await Effect.runPromise(
+      validateWorkflowDefinition({
+        definition: {
+          contractVersion: 1,
+          definitionVersion: 1,
+          stages: [
+            {
+              key: "fixture",
+              kind: "document",
+              contract: fixtureContract.ref,
+              activation: { mode: "enabled" },
+              definitionVersion: 1,
+              maxEncodedInputBytes: 1_024,
+              producer: {
+                harness: definitions.review.ref,
+                agent: "pr-reviewer",
+                model: "openai/gpt-5.6-sol",
+                timeoutMs: 1_000,
+                retry: { maxAttempts: 1, backoffMs: 1 },
+              },
+              outputPolicy: {
+                _tag: "Artifact",
+                pathTemplate: "docs/fixture.md",
+                mediaType: "text/markdown",
+              },
+              reviewPolicy: { mode: "none" },
+              humanGatePolicy: { mode: "none" },
+            },
+          ],
+        },
+        stageCatalog: catalog.port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "harness",
+        reason: "incompatible_definition",
+        stageKey: "fixture",
+        harnessRef: definitions.review.ref,
+      },
+    })
   })
 
   test("maps an availability failure to the exact selected stage", async () => {
