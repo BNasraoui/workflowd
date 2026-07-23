@@ -30,6 +30,7 @@ import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
   WorkflowStartRequest,
+  canonicalSha256,
   stageSnapshotsMatchWorkflowDefinition,
   stageDefinitionSha256,
   workflowIdFor,
@@ -1899,6 +1900,71 @@ describe("Phase 2: Ordered workflow definition validation", () => {
 })
 
 describe("Phase 3: Persisted identity preflight", () => {
+  test("supersedes a current WorkflowStart operation created through migration 0008", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const workflowId = workflowIdFor(repository, ticketReference)
+    const timestamp = options.now().toISOString()
+    const legacyInput = {
+      contractVersion: 1,
+      repository,
+      ticket: ticketReference,
+      ticketRevisionSha256: "a".repeat(64),
+      workflowDefinitionSha256: "b".repeat(64),
+      baseRef: options.baseRef,
+      baseSha,
+      branchName: "legacy-branch",
+    }
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = ON`
+        yield* runStoreMigrationsThrough0008
+        yield* sql`
+          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+          VALUES (${workflowId}, ${legacyInput.branchName}, ${timestamp}, ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO workflow_operations (
+            operation_id, logical_operation_id, operation_revision, retry_of, kind,
+            scope_json, input_json, input_sha256, output_json, state, is_current,
+            attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+            external_intent_json, external_observation_json, observation_attempts,
+            max_observation_attempts, parent_effect_json, last_error, created_at, updated_at
+          ) VALUES (
+            'legacy-start', ${`workflow-start:${workflowId}`}, 1, NULL, 'WorkflowStart',
+            ${JSON.stringify({ _tag: "WorkflowScope", workflowId })},
+            ${JSON.stringify(legacyInput)}, ${canonicalSha256(legacyInput)}, NULL, 'ready', 1,
+            0, 3, NULL, NULL, NULL, ${timestamp}, NULL, NULL, 0, 5, '{}', NULL,
+            ${timestamp}, ${timestamp}
+          )
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    await expect(start(filename, fake)).resolves.toMatchObject({ _tag: "Started", generation: 1 })
+    const operations = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{
+          readonly operation_id: string
+          readonly state: string
+          readonly is_current: number
+        }>`
+          SELECT operation_id, state, is_current FROM workflow_operations
+          WHERE logical_operation_id = ${`workflow-start:${workflowId}`}
+          ORDER BY operation_revision
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    expect(operations).toEqual([
+      { operation_id: "legacy-start", state: "superseded", is_current: 0 },
+      { operation_id: `${workflowId}:start:2`, state: "succeeded", is_current: 1 },
+    ])
+  })
+
   test("keeps QRSPI available after upgrading a current generation created through migration 0008", async () => {
     const filename = await databasePath()
     const fake = fakes()

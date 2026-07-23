@@ -100,6 +100,17 @@ const WorkflowScope = Schema.Struct({
   _tag: Schema.Literal("WorkflowScope"),
   workflowId: Schema.NonEmptyString,
 })
+const LegacyWorkflowStartInput = Schema.Struct({
+  contractVersion: Schema.Literal(1),
+  repository: RepositoryReference,
+  ticket: WorkflowStartInput.fields.ticket,
+  ticketRevisionSha256: WorkflowStartInput.fields.ticketRevisionSha256,
+  workflowDefinitionSha256: WorkflowStartInput.fields.workflowDefinitionSha256,
+  baseRef: WorkflowStartInput.fields.baseRef,
+  baseSha: WorkflowStartInput.fields.baseSha,
+  branchName: WorkflowStartInput.fields.branchName,
+})
+const PersistedWorkflowStartInput = Schema.Union(WorkflowStartInput, LegacyWorkflowStartInput)
 const decodeOutput = Schema.decodeUnknown(Schema.parseJson(WorkflowStartOutput))
 
 const CurrentGenerationSnapshotRow = Schema.Struct({
@@ -1243,7 +1254,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
       )
       const [scope, operationInput] = yield* Effect.all([
         Schema.decodeUnknown(Schema.parseJson(WorkflowScope))(row.scope_json),
-        Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(row.input_json),
+        Schema.decodeUnknown(Schema.parseJson(PersistedWorkflowStartInput))(row.input_json),
         Schema.decodeUnknown(JsonObjectText)(row.parent_effect_json),
         row.external_intent_json === null
           ? Effect.void
