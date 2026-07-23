@@ -81,6 +81,7 @@ function workflowStartStatus(error: WorkflowStartError): number {
     case "StageCatalogError":
     case "AgentHarnessError":
     case "WorkflowDefinitionValidationError":
+    case "WorkflowStartValidationError":
     case "SqlError":
       return 503
     case "QrspiStoreDataError":

@@ -548,11 +548,11 @@ describe("TrustedAgentHarnessCatalog descriptor-only lookup", () => {
     const calls: Array<unknown> = []
     const adapter = makeAdapter({ validateAvailability: async (input) => void calls.push(input) })
 
-    const harness = new OpenCodeAgentHarness(
-      adapter,
-      catalog,
-      { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
-    )
+    const harness = new OpenCodeAgentHarness(adapter, catalog, {
+      serverId: "opencode-primary",
+      endpointAlias: "private-opencode",
+      pollIntervalMs: 1,
+    })
 
     const selections = [
       {
@@ -563,6 +563,8 @@ describe("TrustedAgentHarnessCatalog descriptor-only lookup", () => {
     ]
 
     await Effect.runPromise(harness.validateAvailability({ selections }))
-    expect(calls).toEqual([{ agents: ["fixture-agent"], model: { providerID: "openai", modelID: "gpt-5.6-sol" } }])
+    expect(calls).toEqual([
+      { agents: ["fixture-agent"], model: { providerID: "openai", modelID: "gpt-5.6-sol" } },
+    ])
   })
 })

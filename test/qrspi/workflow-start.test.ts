@@ -30,6 +30,7 @@ import type { JsonValue } from "../../src/json"
 import {
   WorkflowStartInput,
   WorkflowStartRequest,
+  stageSnapshotsMatchWorkflowDefinition,
   stageDefinitionSha256,
   workflowIdFor,
   type RepositoryReference,
@@ -352,6 +353,32 @@ async function counts(filename: string, fake: ReturnType<typeof fakes>) {
     }).pipe(Effect.provide(layer(filename, fake))),
   )
 }
+
+test("rejects carried snapshots with stale hashes, order, or stage definitions", () => {
+  const snapshot = stageSnapshot()
+  const otherDefinition = { ...snapshot.definition, key: "research" }
+
+  expect(stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [snapshot])).toBe(true)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      { ...snapshot, sequencePosition: 2 },
+    ]),
+  ).toBe(false)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      { ...snapshot, stageDefinitionSha256: "c".repeat(64) },
+    ]),
+  ).toBe(false)
+  expect(
+    stageSnapshotsMatchWorkflowDefinition(options.workflowDefinition, [
+      {
+        ...snapshot,
+        definition: otherDefinition,
+        stageDefinitionSha256: stageDefinitionSha256(otherDefinition),
+      },
+    ]),
+  ).toBe(false)
+})
 
 describe("WorkflowStart integration", () => {
   test("creates one Ready generation and atomic initial blocked/ready operations", async () => {

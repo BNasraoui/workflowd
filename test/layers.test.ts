@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
@@ -131,6 +131,76 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
   }
 })
 
+test("keeps unrelated services available when configured QRSPI is closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-closed-"))
+  try {
+    const privateKeyPath = join(directory, "github.pem")
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
+    const config = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
+          ...qrspiDefinition,
+          stages: [
+            {
+              ...qrspiDefinition.stages[0],
+              contract: { name: "qrspi.missing", contractVersion: 1 },
+            },
+          ],
+        }),
+      },
+      { home: directory },
+    )
+    const Live = makeLiveLayer(config).pipe(
+      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const github = yield* GitHub
+        const automation = yield* Automation
+        const agentHarness = yield* AgentHarness
+        const workspace = yield* Workspace
+        const workflowStart = yield* WorkflowStart
+        return {
+          methods: [
+            store.claimNextJob,
+            github.publishReview,
+            automation.prepareReview,
+            agentHarness.createSession,
+            workspace.prepareReview,
+          ],
+          closed: yield* Effect.either(workflowStart.start({})),
+        }
+      }).pipe(Effect.provide(Live)),
+    )
+
+    expect(result.methods.every((method) => typeof method === "function")).toBe(true)
+    expect(result.closed).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowStartValidationError",
+        phase: "contract",
+        reason: "unknown_contract_reference",
+      },
+    })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test("fails live composition when the configured GitHub key cannot be read", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-missing-key-"))
   try {
@@ -157,7 +227,10 @@ test("fails live composition when the configured GitHub key cannot be read", asy
 
     const exit = await Effect.runPromiseExit(Effect.scoped(Layer.build(Live)))
 
-    expect(exit._tag).toBe("Failure")
+    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
+      _tag: "Some",
+      value: expect.any(Error),
+    })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

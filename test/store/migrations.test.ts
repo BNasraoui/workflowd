@@ -550,7 +550,6 @@ describe("strict initial store schema", () => {
   })
 })
 
-
 describe("migration 9: qrspi_stage_definitions strict table", () => {
   test("creates strict table with SHA-256 primary key validation", async () => {
     const result = await runWithDatabase(
@@ -577,12 +576,8 @@ describe("migration 9: qrspi_stage_definitions strict table", () => {
     expect(result.table).toEqual([{ strict: 1 }])
     expect(result.foreignKeys[0]?.sql).toContain("STRICT")
     expect(result.foreignKeys[0]?.sql).toContain("PRIMARY KEY")
-    expect(result.foreignKeys[0]?.sql).toContain(
-      "length(stage_definition_sha256) = 64"
-    )
-    expect(result.foreignKeys[0]?.sql).toContain(
-      "stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'"
-    )
+    expect(result.foreignKeys[0]?.sql).toContain("length(stage_definition_sha256) = 64")
+    expect(result.foreignKeys[0]?.sql).toContain("stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'")
   })
 
   test("enforces workflow_definition foreign key constraint", async () => {

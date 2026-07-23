@@ -317,6 +317,24 @@ export function stageDefinitionSha256(definition: StageDefinition): string {
   })
 }
 
+export function stageSnapshotsMatchWorkflowDefinition(
+  definition: WorkflowDefinition,
+  snapshots: ReadonlyArray<ExecutableStageSnapshot>,
+): boolean {
+  return (
+    snapshots.length === definition.stages.length &&
+    snapshots.every((snapshot, index) => {
+      const currentStage = definition.stages[index]
+      return (
+        currentStage !== undefined &&
+        snapshot.sequencePosition === index + 1 &&
+        snapshot.stageDefinitionSha256 === stageDefinitionSha256(snapshot.definition) &&
+        stageDefinitionSha256(snapshot.definition) === stageDefinitionSha256(currentStage)
+      )
+    })
+  )
+}
+
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
   const definitionSha256 = workflowDefinitionSha256(definition)

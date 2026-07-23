@@ -10,12 +10,15 @@ import {
   canonicalSha256,
   checkTicket,
   normalizeWorkflowDefinition,
+  stageSnapshotsMatchWorkflowDefinition,
   workflowDefinitionSha256,
   workflowIdFor,
   type TicketCheck,
   type TicketReadinessJudgment,
   type SourceResolver,
+  type ExecutableStageSnapshot,
   type WorkflowDefinition,
+  type WorkflowDefinitionValidationReason,
   type WorkflowDefinitionValidationError,
   type WorkflowStartOutput,
 } from "./domain"
@@ -59,6 +62,29 @@ export class WorkflowStartRetryExhausted extends Data.TaggedError("WorkflowStart
   readonly reason: string
 }> {}
 
+export type WorkflowStartValidationDiagnostic = {
+  readonly phase: WorkflowDefinitionValidationError["phase"] | "persisted"
+  readonly reason: WorkflowDefinitionValidationReason | NonNullable<QrspiStoreDataError["reason"]>
+  readonly workflowDefinitionSha256?: string
+  readonly workflowId?: string
+  readonly generation?: number
+  readonly stageKey?: string
+  readonly sequencePosition?: number
+  readonly contractRef?: WorkflowDefinitionValidationError["contractRef"]
+  readonly harnessRef?: WorkflowDefinitionValidationError["harnessRef"]
+  readonly expectedRegistrationSha256?: string
+  readonly actualRegistrationSha256?: string
+  readonly expectedSha256?: string
+  readonly actualSha256?: string
+  readonly record?: QrspiStoreDataError["record"]
+  readonly recordId?: string
+  readonly cause?: string
+}
+
+export class WorkflowStartValidationError extends Data.TaggedError(
+  "WorkflowStartValidationError",
+)<WorkflowStartValidationDiagnostic> {}
+
 export type WorkflowStartOptions = {
   readonly binding: {
     readonly repository: typeof RepositoryReference.Type
@@ -86,6 +112,7 @@ export type WorkflowStartError =
   | WorkflowStartUncertain
   | WorkflowStartNeedsOperator
   | WorkflowStartRetryExhausted
+  | WorkflowStartValidationError
   | TicketSourceError
   | QrspiRepositoryError
   | QrspiStoreDataError
@@ -128,6 +155,39 @@ export const WorkflowStartLive = (options: WorkflowStartOptions) =>
       })
     }),
   )
+
+export const closedWorkflowStart = (error: WorkflowStartValidationError): WorkflowStartPort => ({
+  preflight: Effect.fail(error),
+  start: () => Effect.fail(error),
+})
+
+export function toWorkflowStartValidationError(
+  error: WorkflowDefinitionValidationError | QrspiStoreDataError,
+): WorkflowStartValidationError {
+  if (error._tag === "WorkflowDefinitionValidationError") {
+    const { _tag: _, ...diagnostic } = error
+    return new WorkflowStartValidationError({
+      ...diagnostic,
+      ...(error.cause === undefined ? {} : { cause: boundedCause(error.cause) }),
+    })
+  }
+  return new WorkflowStartValidationError({
+    phase: "persisted",
+    reason: error.reason ?? "malformed",
+    record: error.record,
+    recordId: error.recordId,
+    ...(error.workflowId === undefined ? {} : { workflowId: error.workflowId }),
+    ...(error.generation === undefined ? {} : { generation: error.generation }),
+    ...(error.sequencePosition === undefined ? {} : { sequencePosition: error.sequencePosition }),
+    ...(error.expectedSha256 === undefined ? {} : { expectedSha256: error.expectedSha256 }),
+    ...(error.actualSha256 === undefined ? {} : { actualSha256: error.actualSha256 }),
+    cause: boundedCause(error.message),
+  })
+}
+
+function boundedCause(cause: unknown): string {
+  return String(cause).slice(0, 1_000)
+}
 
 export function makeWorkflowStartPreflight(options: WorkflowStartOptions) {
   return Effect.gen(function* () {
@@ -429,6 +489,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           branchName: operation.branchName,
           workflowDefinitionSha256: definitionSha256,
           workflowDefinition,
+          stageSnapshots: validatedDefinition.stageSnapshots,
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
           expectedRootSha: operation.output.rootSha,
           readinessJudgment: request.readinessJudgment,
@@ -623,6 +684,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
         branchName: operation.branchName,
         workflowDefinitionSha256: definitionSha256,
         workflowDefinition,
+        stageSnapshots: validatedDefinition.stageSnapshots,
         previousTrustedSha: currentCursor?.currentHeadSha ?? null,
         expectedRootSha: observed.sha,
         readinessJudgment: request.readinessJudgment,
@@ -676,6 +738,7 @@ function finalRecheck(input: {
   readonly branchName: string
   readonly workflowDefinitionSha256: string
   readonly workflowDefinition: WorkflowDefinition
+  readonly stageSnapshots: ReadonlyArray<ExecutableStageSnapshot>
   readonly previousTrustedSha: string | null
   readonly expectedRootSha: string
   readonly readinessJudgment: TicketReadinessJudgment
@@ -716,7 +779,8 @@ function finalRecheck(input: {
       finalBranch._tag !== "Accepted" ||
       (finalBranch._tag === "Accepted" && finalBranch.sha !== input.expectedRootSha) ||
       finalOpenPr ||
-      input.workflowDefinitionSha256 !== workflowDefinitionSha256(input.workflowDefinition)
+      input.workflowDefinitionSha256 !== workflowDefinitionSha256(input.workflowDefinition) ||
+      !stageSnapshotsMatchWorkflowDefinition(input.workflowDefinition, input.stageSnapshots)
     ) {
       if (input.onChanged !== undefined) yield* input.onChanged()
       return yield* Effect.fail(

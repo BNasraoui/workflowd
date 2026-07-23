@@ -11,6 +11,8 @@ import {
 
 const FixtureRequest = Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) })
 const FixtureResult = Schema.Struct({ summary: Schema.String.pipe(Schema.maxLength(100)) })
+const ImplementationRequest = Schema.Struct({ baseSha: Schema.String.pipe(Schema.length(40)) })
+const ImplementationResult = Schema.Struct({ commitSha: Schema.String.pipe(Schema.length(40)) })
 
 const fixtureContract: StageContract<
   typeof FixtureRequest.Type,
@@ -28,6 +30,28 @@ const fixtureContract: StageContract<
   assembleRequest: () => ({ text: "fixture" }),
   buildTask: () => ({ title: "fixture", prompt: "fixture", resultSchema: FixtureResult }),
   prepareOutput: (result) => ({ _tag: "Document", text: result.summary }),
+}
+
+const fixtureImplementationContract: StageContract<
+  typeof ImplementationRequest.Type,
+  typeof ImplementationRequest.Encoded,
+  typeof ImplementationResult.Type,
+  typeof ImplementationResult.Encoded
+> = {
+  ref: { name: "fixture.implementation", contractVersion: 1 },
+  kind: "implementation",
+  requestSchema: ImplementationRequest,
+  resultSchema: ImplementationResult,
+  maxRequestBytes: 2_048,
+  maxResultBytes: 2_048,
+  compatibility: () => undefined,
+  assembleRequest: () => ({ baseSha: "a".repeat(40) }),
+  buildTask: () => ({
+    title: "implement fixture",
+    prompt: "implement fixture",
+    resultSchema: ImplementationResult,
+  }),
+  prepareOutput: (result) => ({ _tag: "ImplementationStep", value: result }),
 }
 
 describe("TrustedStageCatalog", () => {
@@ -52,6 +76,31 @@ describe("TrustedStageCatalog", () => {
     })
   })
 
+  test("extends the catalog with a second typed contract by registration alone", () => {
+    const catalog = new TrustedStageCatalog([fixtureContract, fixtureImplementationContract])
+    const registration = catalog.registrationFor(fixtureImplementationContract)
+    const request = Schema.decodeUnknownSync(registration.requestSchema)({
+      baseSha: "a".repeat(40),
+    })
+    const result = Schema.decodeUnknownSync(registration.resultSchema)({
+      commitSha: "b".repeat(40),
+    })
+
+    expect(catalog.descriptor(fixtureContract.ref).kind).toBe("document")
+    expect(registration.descriptor).toMatchObject({
+      ref: fixtureImplementationContract.ref,
+      kind: "implementation",
+    })
+    expect(registration.source.buildTask(request)).toMatchObject({
+      title: "implement fixture",
+      resultSchema: ImplementationResult,
+    })
+    expect(registration.source.prepareOutput(result, {})).toEqual({
+      _tag: "ImplementationStep",
+      value: { commitSha: "b".repeat(40) },
+    })
+  })
+
   test("rejects duplicate, unknown, and lookalike registrations with stable reasons", () => {
     expect(() => new TrustedStageCatalog([fixtureContract, fixtureContract])).toThrow(
       expect.objectContaining({ reason: "duplicate_reference" }),
@@ -72,7 +121,7 @@ describe("TrustedStageCatalog", () => {
       { ...fixtureContract, maxRequestBytes: 64 * 1024 + 1 },
       { ...fixtureContract, maxResultBytes: 4 * 1024 * 1024 + 1 },
     ]) {
-      expect(() => new TrustedStageCatalog([registration as typeof fixtureContract])).toThrow(
+      expect(() => new TrustedStageCatalog([registration])).toThrow(
         expect.objectContaining({ reason: "malformed_registration" }),
       )
     }

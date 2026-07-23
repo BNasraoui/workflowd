@@ -7,25 +7,24 @@ import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
-import {
-  Automation,
-  OpenCodeAutomationAdapter,
-  makeOpenCodeHarnessDefinitions,
-} from "./opencode"
+import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { BeadsCliTicketSource, GitHubQrspiRepository } from "./qrspi/adapters"
+import { WorkflowDefinitionValidationError } from "./qrspi/domain"
 import { QrspiRepository, TicketSource } from "./qrspi/ports"
-import { QrspiStoreLive } from "./qrspi/store"
+import { QrspiStoreDataError, QrspiStoreLive } from "./qrspi/store"
 import { makeWorkspaceSourceResolver } from "./qrspi/source-resolver"
-import { WorkflowStart, WorkflowStartLive, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 import {
-  StageCatalog,
-  TrustedStageCatalog,
-  questionsStageContract,
-} from "./qrspi/stage-catalog"
+  WorkflowStart,
+  WorkflowStartLive,
+  WorkflowStartUnauthorized,
+  closedWorkflowStart,
+  toWorkflowStartValidationError,
+} from "./qrspi/workflow-start"
+import { StageCatalog, TrustedStageCatalog, questionsStageContract } from "./qrspi/stage-catalog"
 import { SessionAccessResolver } from "./session-access"
 
 export const makeLiveLayer = (config: AppConfig) => {
@@ -125,6 +124,15 @@ export const makeLiveLayer = (config: AppConfig) => {
                 }).pipe(Effect.provide(WorkflowStoreLive)),
               ),
             ),
+          ),
+          Layer.catchAll((error) =>
+            error instanceof WorkflowDefinitionValidationError ||
+            error instanceof QrspiStoreDataError
+              ? Layer.succeed(
+                  WorkflowStart,
+                  closedWorkflowStart(toWorkflowStartValidationError(error)),
+                )
+              : Layer.fail(error),
           ),
         )
   return Layer.mergeAll(

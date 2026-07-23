@@ -47,6 +47,12 @@ export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
 
 type StageContractRegistration = {
   readonly ref: StageContractRef
+  readonly kind?: unknown
+  readonly requestSchema?: unknown
+  readonly resultSchema?: unknown
+  readonly maxRequestBytes?: unknown
+  readonly maxResultBytes?: unknown
+  readonly compatibility?: (definition: StageDefinition) => void
 }
 
 export type StageContractDescriptor = {
@@ -71,8 +77,8 @@ export class StageCatalogError extends Data.TaggedError("StageCatalogError")<{
 type RuntimeRegistration = {
   readonly source: StageContractRegistration
   readonly descriptor: StageContractDescriptor
-  readonly requestSchema: Schema.Schema<unknown, unknown, never>
-  readonly resultSchema: Schema.Schema<unknown, unknown, never>
+  readonly requestSchema: Schema.Schema.Any
+  readonly resultSchema: Schema.Schema.Any
   readonly compatibility: (definition: StageDefinition) => void
 }
 
@@ -91,23 +97,22 @@ export class TrustedStageCatalog {
   constructor(registrations: ReadonlyArray<StageContractRegistration>) {
     for (const source of registrations) {
       let metadata: typeof RegistrationMetadata.Type
-      let requestSchema: Schema.Schema<unknown, unknown, never>
-      let resultSchema: Schema.Schema<unknown, unknown, never>
+      let requestSchema: Schema.Schema.Any
+      let resultSchema: Schema.Schema.Any
       let compatibility: (definition: StageDefinition) => void
       let requestJsonSchema: object
       let resultJsonSchema: object
       try {
-        const candidate = source as unknown as Record<string, unknown>
-        metadata = Schema.decodeUnknownSync(RegistrationMetadata)(candidate)
-        if (!Schema.isSchema(candidate.requestSchema) || !Schema.isSchema(candidate.resultSchema)) {
+        metadata = Schema.decodeUnknownSync(RegistrationMetadata)(source)
+        if (!Schema.isSchema(source.requestSchema) || !Schema.isSchema(source.resultSchema)) {
           throw new Error("requestSchema and resultSchema must be Effect Schemas")
         }
-        if (typeof candidate.compatibility !== "function") {
+        if (typeof source.compatibility !== "function") {
           throw new Error("compatibility must be a function")
         }
-        requestSchema = candidate.requestSchema as Schema.Schema<unknown, unknown, never>
-        resultSchema = candidate.resultSchema as Schema.Schema<unknown, unknown, never>
-        compatibility = candidate.compatibility as (definition: StageDefinition) => void
+        requestSchema = source.requestSchema
+        resultSchema = source.resultSchema
+        compatibility = source.compatibility
         requestJsonSchema = JSONSchema.make(requestSchema)
         resultJsonSchema = JSONSchema.make(resultSchema)
         if (
@@ -151,7 +156,7 @@ export class TrustedStageCatalog {
     } catch (cause) {
       throw new StageCatalogError({
         reason: "unknown_reference",
-        reference: String(ref),
+        reference: JSON.stringify(ref),
         cause: String(cause),
       })
     }
@@ -403,34 +408,38 @@ function resolveExecutableSnapshot(
     harnessRef: stage.producer.harness,
   }
   return Effect.gen(function* () {
-    const contract = yield* input.stageCatalog.describe(stage.contract).pipe(
-      Effect.mapError((cause) =>
-        validationError(
-          "contract",
-          cause.reason === "unknown_reference"
-            ? "unknown_contract_reference"
-            : "incompatible_definition",
-          stage,
-          sequencePosition,
-          cause,
-          workflowSha256,
+    const contract = yield* input.stageCatalog
+      .describe(stage.contract)
+      .pipe(
+        Effect.mapError((cause) =>
+          validationError(
+            "contract",
+            cause.reason === "unknown_reference"
+              ? "unknown_contract_reference"
+              : "incompatible_definition",
+            stage,
+            sequencePosition,
+            cause,
+            workflowSha256,
+          ),
         ),
-      ),
-    )
-    yield* input.stageCatalog.validateCompatibility(stage).pipe(
-      Effect.mapError((cause) =>
-        validationError(
-          "contract",
-          cause.reason === "unknown_reference"
-            ? "unknown_contract_reference"
-            : "incompatible_definition",
-          stage,
-          sequencePosition,
-          cause,
-          workflowSha256,
+      )
+    yield* input.stageCatalog
+      .validateCompatibility(stage)
+      .pipe(
+        Effect.mapError((cause) =>
+          validationError(
+            "contract",
+            cause.reason === "unknown_reference"
+              ? "unknown_contract_reference"
+              : "incompatible_definition",
+            stage,
+            sequencePosition,
+            cause,
+            workflowSha256,
+          ),
         ),
-      ),
-    )
+      )
     if (contract.kind !== stage.kind) {
       return yield* Effect.fail(
         new WorkflowDefinitionValidationError({
@@ -451,8 +460,7 @@ function resolveExecutableSnapshot(
     }
     if (
       (stage.kind === "document" && stage.outputPolicy._tag !== "Artifact") ||
-      (stage.kind === "implementation" &&
-        stage.outputPolicy._tag !== "ImplementationCheckpoint")
+      (stage.kind === "implementation" && stage.outputPolicy._tag !== "ImplementationCheckpoint")
     ) {
       return yield* Effect.fail(
         new WorkflowDefinitionValidationError({
@@ -477,11 +485,31 @@ function resolveExecutableSnapshot(
         }),
       )
     }
-    const harness = yield* input.agentHarness.describe(stage.producer.harness).pipe(
+    const harness = yield* input.agentHarness
+      .describe(stage.producer.harness)
+      .pipe(
+        Effect.mapError((cause) =>
+          validationError(
+            "harness",
+            "unknown_harness_reference",
+            stage,
+            sequencePosition,
+            cause,
+            workflowSha256,
+          ),
+        ),
+      )
+    return yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
+      sequencePosition,
+      stageDefinitionSha256: stageDefinitionSha256(stage),
+      definition: stage,
+      contractRegistrationSha256: contract.registrationSha256,
+      harnessRegistrationSha256: harness.registrationSha256,
+    }).pipe(
       Effect.mapError((cause) =>
         validationError(
-          "harness",
-          "unknown_harness_reference",
+          "pure",
+          "incompatible_definition",
           stage,
           sequencePosition,
           cause,
@@ -489,13 +517,6 @@ function resolveExecutableSnapshot(
         ),
       ),
     )
-    return Schema.decodeUnknownSync(ExecutableStageSnapshot)({
-      sequencePosition,
-      stageDefinitionSha256: stageDefinitionSha256(stage),
-      definition: stage,
-      contractRegistrationSha256: contract.registrationSha256,
-      harnessRegistrationSha256: harness.registrationSha256,
-    })
   })
 }
 

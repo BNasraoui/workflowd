@@ -464,9 +464,7 @@ describe("QRSPI ticket boundary", () => {
         },
       },
     ]) {
-      expect(() =>
-        normalizeWorkflowDefinition({ ...definition, stages: [stage] }),
-      ).toThrow()
+      expect(() => normalizeWorkflowDefinition({ ...definition, stages: [stage] })).toThrow()
     }
   })
 

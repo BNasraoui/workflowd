@@ -14,6 +14,40 @@ import {
 } from "../src/runtime"
 import { WorkflowStoreLive } from "../src/store"
 import { Workspace } from "../src/workspace"
+import {
+  WorkflowStart,
+  WorkflowStartValidationError,
+  closedWorkflowStart,
+} from "../src/qrspi/workflow-start"
+
+const qrspiDefinition = {
+  contractVersion: 1,
+  definitionVersion: 1,
+  stages: [
+    {
+      key: "questions",
+      kind: "document",
+      contract: { name: "qrspi.questions", contractVersion: 1 },
+      activation: { mode: "enabled" },
+      definitionVersion: 1,
+      maxEncodedInputBytes: 16_384,
+      producer: {
+        harness: { name: "opencode", version: 1 },
+        agent: "qrspi-questions",
+        model: "openai/gpt-5.6-sol",
+        timeoutMs: 60_000,
+        retry: { maxAttempts: 3, backoffMs: 1_000 },
+      },
+      outputPolicy: {
+        _tag: "Artifact",
+        pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
+        mediaType: "text/markdown",
+      },
+      reviewPolicy: { mode: "none" },
+      humanGatePolicy: { mode: "none" },
+    },
+  ],
+}
 
 describe("serveHookHttp", () => {
   test("stops the listener and joins interrupted in-flight request effects", async () => {
@@ -263,6 +297,13 @@ describe("runHookService startup", () => {
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
         WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/tmp",
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
       },
       { home: "/tmp" },
     )
@@ -300,6 +341,15 @@ describe("runHookService startup", () => {
         prepareFix: () => Effect.die("unexpected fix workspace"),
         publishFix: () => Effect.die("unexpected fix publication"),
       }),
+      Layer.succeed(
+        WorkflowStart,
+        closedWorkflowStart(
+          new WorkflowStartValidationError({
+            phase: "availability",
+            reason: "unavailable_agent_model",
+          }),
+        ),
+      ),
     )
 
     const result = await Effect.runPromise(
@@ -318,13 +368,32 @@ describe("runHookService startup", () => {
           const response = yield* Effect.tryPromise(() =>
             fetch(`http://${server.hostname}:${server.port}/health`),
           )
-          return { status: response.status, body: yield* Effect.promise(() => response.json()) }
+          const qrspiResponse = yield* Effect.tryPromise(() =>
+            fetch(`http://${server.hostname}:${server.port}/workflows/qrspi`, {
+              method: "POST",
+              body: "{}",
+              headers: { authorization: "Bearer kickoff-secret" },
+            }),
+          )
+          return {
+            health: {
+              status: response.status,
+              body: yield* Effect.promise(() => response.json()),
+            },
+            qrspi: {
+              status: qrspiResponse.status,
+              body: yield* Effect.promise(() => qrspiResponse.json()),
+            },
+          }
         }),
       ).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
     )
 
     expect(validations).toBe(1)
     expect(observedWorkers).toEqual(new Set(["job", "publication", "reconciliation", "command"]))
-    expect(result).toEqual({ status: 200, body: { status: "ok" } })
+    expect(result).toEqual({
+      health: { status: 200, body: { status: "ok" } },
+      qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
+    })
   })
 })

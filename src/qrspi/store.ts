@@ -1042,11 +1042,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                   suppliedSnapshot,
                 ).pipe(
                   Effect.mapError((cause) =>
-                    dataError(
-                      "stage_definition",
-                      suppliedSnapshot.stageDefinitionSha256,
-                      cause,
-                    ),
+                    dataError("stage_definition", suppliedSnapshot.stageDefinitionSha256, cause),
                   ),
                 )
                 const configuredStage = definition.stages[index]
