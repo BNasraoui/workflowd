@@ -36,6 +36,7 @@ import {
   type RepositoryReference,
   type StageDefinition,
 } from "../../src/qrspi/domain"
+import { runStoreMigrationsThrough0008 } from "../../src/store/migrations"
 
 const directories: string[] = []
 afterEach(async () => {
@@ -1553,11 +1554,15 @@ describe("Phase 1: Trusted stage snapshots", () => {
           WHERE kind IN ('StageProduce', 'ArtifactPublish')
           ORDER BY CASE kind WHEN 'StageProduce' THEN 1 ELSE 2 END
         `
-        return { children, snapshots }
+        const generations = yield* sql<{ readonly generation_format: string }>`
+          SELECT generation_format FROM qrspi_generations
+        `
+        return { children, generations, snapshots }
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(persisted.snapshots).toHaveLength(1)
+    expect(persisted.generations).toEqual([{ generation_format: "stage_snapshots_v1" }])
     expect(persisted.snapshots[0]).toMatchObject({
       stage_key: "questions",
       sequence_position: 1,
@@ -1845,6 +1850,64 @@ describe("Phase 2: Ordered workflow definition validation", () => {
 })
 
 describe("Phase 3: Persisted identity preflight", () => {
+  test("keeps QRSPI available after upgrading a current generation created through migration 0008", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const workflowId = "legacy-workflow"
+    const ticketRevisionSha256 = "a".repeat(64)
+    const workflowDefinitionSha256 = "b".repeat(64)
+    const timestamp = options.now().toISOString()
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = ON`
+        yield* runStoreMigrationsThrough0008
+        yield* sql`
+          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+          VALUES (${workflowId}, 'legacy-branch', ${timestamp}, ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_ticket_revisions (
+            workflow_id, ticket_revision_sha256, revision_json, checked_at
+          ) VALUES (${workflowId}, ${ticketRevisionSha256}, '{}', ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_workflow_definitions (
+            definition_sha256, definition_json, created_at
+          ) VALUES (${workflowDefinitionSha256}, '{"legacy":true}', ${timestamp})
+        `
+        yield* sql`
+          INSERT INTO qrspi_generations (
+            workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+            root_sha, current_head_sha, ticket_revision_sha256,
+            workflow_definition_sha256, state, is_current, created_at, updated_at
+          ) VALUES (
+            ${workflowId}, 1, '{}', 'main', ${baseSha}, 'legacy-branch', ${baseSha},
+            ${baseSha}, ${ticketRevisionSha256}, ${workflowDefinitionSha256}, 'running', 1,
+            ${timestamp}, ${timestamp}
+          )
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+    const generations = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        return yield* sql<{ readonly generation_format: string }>`
+          SELECT generation_format FROM qrspi_generations WHERE workflow_id = ${workflowId}
+        `
+      }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+    )
+
+    expect(generations).toEqual([{ generation_format: "legacy" }])
+  })
+
   test("reloads snapshot sets for workflows that share an unchanged stage", async () => {
     const filename = await databasePath()
     const firstFake = fakes()

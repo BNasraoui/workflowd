@@ -145,6 +145,7 @@ describe("strict initial store schema", () => {
       { migration_id: 7, name: "reconciliation_observation_watermark" },
       { migration_id: 8, name: "reconciliation_observation_sequence" },
       { migration_id: 9, name: "qrspi_stage_definitions" },
+      { migration_id: 10, name: "qrspi_generation_format" },
     ])
     expect(result.tables).toHaveLength(14)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

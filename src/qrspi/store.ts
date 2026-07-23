@@ -524,6 +524,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
           LEFT JOIN qrspi_stage_definitions AS stage
             ON stage.workflow_definition_sha256 = generation.workflow_definition_sha256
           WHERE generation.is_current = 1
+            AND generation.generation_format = 'stage_snapshots_v1'
           ORDER BY generation.workflow_id, generation.generation, stage.sequence_position
         `
         const rows = yield* Effect.forEach(
@@ -1158,12 +1159,14 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             INSERT INTO qrspi_generations (
               workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
               root_sha, current_head_sha, ticket_revision_sha256,
-              workflow_definition_sha256, state, is_current, created_at, updated_at
+              workflow_definition_sha256, generation_format, state, is_current, created_at,
+              updated_at
             ) VALUES (
               ${input.workflowId}, ${generation}, ${input.repositoryJson}, ${input.baseRef},
               ${input.baseSha}, ${input.branchName}, ${input.rootSha}, ${input.rootSha},
-              ${input.ticketRevisionSha256}, ${input.workflowDefinitionSha256}, 'running', 1,
-              ${input.now.toISOString()}, ${input.now.toISOString()}
+              ${input.ticketRevisionSha256}, ${input.workflowDefinitionSha256},
+              'stage_snapshots_v1', 'running', 1, ${input.now.toISOString()},
+              ${input.now.toISOString()}
             )
           `
           const firstStage = snapshots.find(({ definition: stage }) =>

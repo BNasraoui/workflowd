@@ -607,16 +607,34 @@ const qrspiStageDefinitions = Effect.gen(function* () {
   `
 })
 
+const qrspiGenerationFormat = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    ALTER TABLE qrspi_generations
+    ADD COLUMN generation_format TEXT NOT NULL DEFAULT 'legacy'
+      CHECK (generation_format IN ('legacy', 'stage_snapshots_v1'))
+  `
+})
+
+const migrationsThrough0008 = {
+  "0001_initial_schema": initialSchema,
+  "0002_agent_harness": agentHarnessSchema,
+  "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
+  "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
+  "0005_qrspi_workflow_start": qrspiWorkflowStart,
+  "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
+  "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
+  "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+}
+
+export const runStoreMigrationsThrough0008 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0008),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    "0001_initial_schema": initialSchema,
-    "0002_agent_harness": agentHarnessSchema,
-    "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
-    "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
-    "0005_qrspi_workflow_start": qrspiWorkflowStart,
-    "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
-    "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
-    "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+    ...migrationsThrough0008,
     "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+    "0010_qrspi_generation_format": qrspiGenerationFormat,
   }),
 })
