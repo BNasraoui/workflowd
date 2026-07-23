@@ -9,7 +9,10 @@ import {
   StageContractRef,
   type StageDefinition,
   type WorkflowDefinition,
+  WorkflowDefinitionValidationError,
+  normalizeWorkflowDefinition,
   stageDefinitionSha256,
+  workflowDefinitionSha256,
 } from "./domain"
 import { canonicalSha256 } from "./domain"
 
@@ -225,54 +228,217 @@ export type StageCatalogPort = {
 
 export const StageCatalog = Context.GenericTag<StageCatalogPort>("workflowd/qrspi/StageCatalog")
 
-export const resolveFirstStage = (input: {
+export const validateWorkflowDefinition = (input: {
   readonly definition: WorkflowDefinition
   readonly stageCatalog: StageCatalogPort
   readonly agentHarness: AgentHarnessPort
 }) =>
   Effect.gen(function* () {
-    const stage = input.definition.stages.find(
-      (candidate) =>
-        candidate.activation.mode === "enabled" ||
-        (candidate.activation.mode === "conditional" && candidate.activation.decision === "enabled"),
+    const definition = yield* Effect.try({
+      try: () => normalizeWorkflowDefinition(input.definition),
+      catch: (cause) =>
+        cause instanceof WorkflowDefinitionValidationError
+          ? cause
+          : validationError("pure", "incompatible_definition", undefined, undefined, cause),
+    })
+    const workflowSha256 = workflowDefinitionSha256(definition)
+    const stageSnapshots = yield* Effect.forEach(
+      definition.stages,
+      (stage, index) => resolveExecutableSnapshot(input, workflowSha256, stage, index + 1),
+      { concurrency: 1 },
     )
-    if (stage === undefined) {
+    const selections = firstSeenSelections(
+      stageSnapshots.map(({ definition: stage }) => ({
+        ref: stage.producer.harness,
+        agent: stage.producer.agent,
+        model: stage.producer.model,
+      })),
+    )
+    yield* input.agentHarness.validateAvailability({ selections }).pipe(
+      Effect.mapError((cause) => {
+        const failedSnapshot =
+          cause.selection === undefined
+            ? undefined
+            : stageSnapshots.find(
+                ({ definition: stage }) =>
+                  canonicalSha256({
+                    ref: stage.producer.harness,
+                    agent: stage.producer.agent,
+                    model: stage.producer.model,
+                  }) === canonicalSha256(cause.selection),
+              )
+        return new WorkflowDefinitionValidationError({
+          phase: "availability",
+          reason: "unavailable_agent_model",
+          workflowDefinitionSha256: workflowSha256,
+          ...(failedSnapshot === undefined
+            ? {}
+            : {
+                stageKey: failedSnapshot.definition.key,
+                sequencePosition: failedSnapshot.sequencePosition,
+                contractRef: failedSnapshot.definition.contract,
+                harnessRef: failedSnapshot.definition.producer.harness,
+              }),
+          cause: boundedCause(cause),
+        })
+      }),
+    )
+    return { definition, stageSnapshots } as const
+  })
+
+function resolveExecutableSnapshot(
+  input: { readonly stageCatalog: StageCatalogPort; readonly agentHarness: AgentHarnessPort },
+  workflowSha256: string,
+  stage: StageDefinition,
+  sequencePosition: number,
+) {
+  const fields = {
+    workflowDefinitionSha256: workflowSha256,
+    stageKey: stage.key,
+    sequencePosition,
+    contractRef: stage.contract,
+    harnessRef: stage.producer.harness,
+  }
+  return Effect.gen(function* () {
+    const contract = yield* input.stageCatalog.describe(stage.contract).pipe(
+      Effect.mapError((cause) =>
+        validationError(
+          "contract",
+          cause.reason === "unknown_reference"
+            ? "unknown_contract_reference"
+            : "incompatible_definition",
+          stage,
+          sequencePosition,
+          cause,
+          workflowSha256,
+        ),
+      ),
+    )
+    yield* input.stageCatalog.validateCompatibility(stage).pipe(
+      Effect.mapError((cause) =>
+        validationError(
+          "contract",
+          cause.reason === "unknown_reference"
+            ? "unknown_contract_reference"
+            : "incompatible_definition",
+          stage,
+          sequencePosition,
+          cause,
+          workflowSha256,
+        ),
+      ),
+    )
+    if (contract.kind !== stage.kind) {
       return yield* Effect.fail(
-        new StageCatalogError({ reason: "incompatible_definition", reference: "missing-stage" }),
-      )
-    }
-    const contract = yield* input.stageCatalog.describe(stage.contract)
-    yield* input.stageCatalog.validateCompatibility(stage)
-    if (
-      contract.kind !== stage.kind ||
-      stage.maxEncodedInputBytes > contract.maxRequestBytes ||
-      (stage.kind === "document" && stage.outputPolicy._tag !== "Artifact")
-    ) {
-      return yield* Effect.fail(
-        new StageCatalogError({
-          reason: "incompatible_definition",
-          reference: referenceKey(stage.contract),
+        new WorkflowDefinitionValidationError({
+          phase: "contract",
+          reason: "incompatible_kind",
+          ...fields,
         }),
       )
     }
-    const harness = yield* input.agentHarness.describe(stage.producer.harness)
-    yield* input.agentHarness.validateAvailability({
-      selections: [
-        {
-          ref: stage.producer.harness,
-          agent: stage.producer.agent,
-          model: stage.producer.model,
-        },
-      ],
-    })
+    if (stage.maxEncodedInputBytes > contract.maxRequestBytes) {
+      return yield* Effect.fail(
+        new WorkflowDefinitionValidationError({
+          phase: "contract",
+          reason: "unsupported_bound",
+          ...fields,
+        }),
+      )
+    }
+    if (
+      (stage.kind === "document" && stage.outputPolicy._tag !== "Artifact") ||
+      (stage.kind === "implementation" &&
+        stage.outputPolicy._tag !== "ImplementationCheckpoint")
+    ) {
+      return yield* Effect.fail(
+        new WorkflowDefinitionValidationError({
+          phase: "contract",
+          reason: "incompatible_output",
+          ...fields,
+        }),
+      )
+    }
+    const policyRefs = [
+      ...(stage.activation.mode === "conditional" ? [stage.activation.policy] : []),
+      stage.designPolicy,
+      stage.promotionPolicy,
+      stage.structurePolicy,
+    ].filter((ref) => ref !== undefined)
+    if (policyRefs.some((ref) => ref.version !== 1)) {
+      return yield* Effect.fail(
+        new WorkflowDefinitionValidationError({
+          phase: "contract",
+          reason: "unsupported_policy",
+          ...fields,
+        }),
+      )
+    }
+    const harness = yield* input.agentHarness.describe(stage.producer.harness).pipe(
+      Effect.mapError((cause) =>
+        validationError(
+          "harness",
+          "unknown_harness_reference",
+          stage,
+          sequencePosition,
+          cause,
+          workflowSha256,
+        ),
+      ),
+    )
     return Schema.decodeUnknownSync(ExecutableStageSnapshot)({
-      sequencePosition: input.definition.stages.indexOf(stage) + 1,
+      sequencePosition,
       stageDefinitionSha256: stageDefinitionSha256(stage),
       definition: stage,
       contractRegistrationSha256: contract.registrationSha256,
       harnessRegistrationSha256: harness.registrationSha256,
     })
   })
+}
+
+function firstSeenSelections(
+  selections: ReadonlyArray<{
+    readonly ref: { readonly name: string; readonly version: number }
+    readonly agent: string
+    readonly model: string
+  }>,
+) {
+  const seen = new Set<string>()
+  return selections.filter((selection) => {
+    const key = canonicalSha256(selection)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function validationError(
+  phase: WorkflowDefinitionValidationError["phase"],
+  reason: WorkflowDefinitionValidationError["reason"],
+  stage: StageDefinition | undefined,
+  sequencePosition: number | undefined,
+  cause?: unknown,
+  workflowSha256?: string,
+) {
+  return new WorkflowDefinitionValidationError({
+    phase,
+    reason,
+    ...(workflowSha256 === undefined ? {} : { workflowDefinitionSha256: workflowSha256 }),
+    ...(stage === undefined
+      ? {}
+      : {
+          stageKey: stage.key,
+          contractRef: stage.contract,
+          harnessRef: stage.producer.harness,
+        }),
+    ...(sequencePosition === undefined ? {} : { sequencePosition }),
+    ...(cause === undefined ? {} : { cause: boundedCause(cause) }),
+  })
+}
+
+function boundedCause(cause: unknown): string {
+  return String(cause).slice(0, 1_000)
+}
 
 export const QuestionsStageRequest = Schema.Struct({ ticket: Schema.Unknown })
 export const QuestionsStageResult = Schema.Struct({ text: Schema.String })

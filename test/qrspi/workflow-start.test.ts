@@ -1059,7 +1059,7 @@ describe("WorkflowStart integration", () => {
         ...options,
         workflowDefinition: { contractVersion: 1, definitionVersion: 1, stages: [] },
       }),
-    ).toThrow("runnable stage")
+    ).toThrow(expect.objectContaining({ reason: "no_considered_stage" }))
   })
 
   test("creates only operations declared by the trusted workflow definition", async () => {
@@ -1585,7 +1585,14 @@ describe("Phase 1: Trusted stage snapshots", () => {
         Effect.either,
       ),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "AgentHarnessError" } })
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "availability",
+        reason: "unavailable_agent_model",
+      },
+    })
     expect(selections).toEqual([
       {
         ref: { name: "opencode", version: 1 },
@@ -1609,5 +1616,143 @@ describe("Phase 1: Trusted stage snapshots", () => {
     )
     expect(durableCounts).toEqual([0, 0, 0, 0, 0, 0])
     expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+})
+
+describe("Phase 2: Ordered workflow definition validation", () => {
+  test("reports the first invalid configured stage before durable or external work", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const invalidFirst = {
+      ...options.workflowDefinition.stages[0],
+      key: "unknown",
+      contract: { name: "qrspi.unknown", contractVersion: 1 },
+      activation: { mode: "disabled" as const },
+    }
+    const validSecond = {
+      ...options.workflowDefinition.stages[0],
+      key: "questions",
+    }
+    const result = await Effect.runPromise(
+      makeWorkflowStart({
+        ...options,
+        workflowDefinition: {
+          ...options.workflowDefinition,
+          stages: [invalidFirst, validSecond],
+        },
+      })(request).pipe(Effect.provide(layer(filename, fake)), Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "WorkflowDefinitionValidationError",
+        phase: "contract",
+        reason: "unknown_contract_reference",
+        stageKey: "unknown",
+        sequencePosition: 1,
+        contractRef: invalidFirst.contract,
+      },
+    })
+    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+  })
+
+  test("persists every stage in declaration order and deduplicates first-seen availability selections", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    const selections: Array<unknown> = []
+    const firstStage = {
+      ...options.workflowDefinition.stages[0],
+      key: "questions",
+      activation: { mode: "disabled" as const },
+      producer: {
+        ...options.workflowDefinition.stages[0].producer,
+        agent: "shared-agent",
+      },
+    }
+    const secondStage = {
+      ...firstStage,
+      key: "research",
+      activation: {
+        mode: "conditional" as const,
+        policy: { name: "qrspi.activation", version: 1 },
+        decision: "disabled" as const,
+        reason: "Research is not required for this ticket.",
+      },
+    }
+    const thirdStage = {
+      ...firstStage,
+      key: "plan",
+      activation: { mode: "enabled" as const },
+      producer: {
+        ...firstStage.producer,
+        agent: "plan-agent",
+        retry: { maxAttempts: 7, backoffMs: 1_000 },
+      },
+    }
+    const fourthStage = {
+      ...firstStage,
+      key: "implementation",
+      activation: { mode: "enabled" as const },
+    }
+    const multiStageOptions: WorkflowStartOptions = {
+      ...options,
+      workflowDefinition: {
+        ...options.workflowDefinition,
+        stages: [firstStage, secondStage, thirdStage, fourthStage],
+      },
+    }
+
+    await Effect.runPromise(
+      makeWorkflowStart(multiStageOptions)(request).pipe(
+        Effect.provide(
+          layer(filename, fake, (input) => {
+            selections.push(...input.selections)
+            return Effect.void
+          }),
+        ),
+      ),
+    )
+
+    expect(selections).toEqual([
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "shared-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+      {
+        ref: { name: "opencode", version: 1 },
+        agent: "plan-agent",
+        model: "openai/gpt-5.6-sol",
+      },
+    ])
+    const persisted = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const snapshots = yield* sql<{
+          readonly sequence_position: number
+          readonly stage_key: string
+        }>`
+          SELECT sequence_position, stage_key FROM qrspi_stage_definitions
+          ORDER BY sequence_position
+        `
+        const producer = yield* sql<{
+          readonly input_json: string
+          readonly max_attempts: number
+        }>`
+          SELECT input_json, max_attempts FROM workflow_operations WHERE kind = 'StageProduce'
+        `
+        return { producer, snapshots }
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(persisted.snapshots.map((row) => [row.sequence_position, row.stage_key])).toEqual([
+      [1, "questions"],
+      [2, "research"],
+      [3, "plan"],
+      [4, "implementation"],
+    ])
+    expect(persisted.producer).toHaveLength(1)
+    expect(JSON.parse(persisted.producer[0]!.input_json)).toMatchObject({ stageKey: "plan" })
+    expect(persisted.producer[0]!.max_attempts).toBe(7)
   })
 })

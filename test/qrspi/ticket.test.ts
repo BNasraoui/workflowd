@@ -440,7 +440,7 @@ describe("QRSPI ticket boundary", () => {
       "C:/tmp/questions.md",
     ]) {
       expect(() => normalizeWorkflowDefinition(workflowDefinition(pathTemplate))).toThrow(
-        "artifact path template",
+        expect.objectContaining({ reason: "unsafe_artifact_path" }),
       )
     }
   })
@@ -448,7 +448,7 @@ describe("QRSPI ticket boundary", () => {
   test("rejects workflow definitions without an enabled runnable stage", () => {
     expect(() =>
       normalizeWorkflowDefinition({ contractVersion: 1, definitionVersion: 1, stages: [] }),
-    ).toThrow("runnable stage")
+    ).toThrow(expect.objectContaining({ reason: "no_considered_stage" }))
   })
 
   test("rejects malformed stable contract and harness references", () => {
@@ -491,6 +491,86 @@ describe("QRSPI ticket boundary", () => {
         }),
       ).toThrow()
     }
+  })
+
+  test.each([
+    {
+      name: "an empty workflow",
+      stages: [],
+      reason: "no_considered_stage",
+    },
+    {
+      name: "a workflow with no effectively enabled stage",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          activation: { mode: "disabled" },
+        },
+      ],
+      reason: "no_runnable_stage",
+    },
+    {
+      name: "a disabled Design stage",
+      stages: [
+        workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          key: "design",
+          contract: { name: "qrspi.design", contractVersion: 1 },
+          activation: { mode: "disabled" },
+        },
+      ],
+      reason: "invalid_activation_prerequisite",
+      stageKey: "design",
+      sequencePosition: 2,
+    },
+    {
+      name: "Structure before Design",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          key: "structure",
+          contract: { name: "qrspi.structure", contractVersion: 1 },
+        },
+      ],
+      reason: "invalid_stage_order",
+      stageKey: "structure",
+      sequencePosition: 1,
+    },
+    {
+      name: "a specialized policy on the wrong stage",
+      stages: [
+        {
+          ...workflowDefinition("docs/qrspi/{ticketId}/questions.md").stages[0],
+          designPolicy: { name: "qrspi.design-policy", version: 1 },
+        },
+      ],
+      reason: "unsupported_policy",
+      stageKey: "questions",
+      sequencePosition: 1,
+    },
+  ])("reports stable pure diagnostics for $name", (fixture) => {
+    let failure: unknown
+    try {
+      normalizeWorkflowDefinition({
+        contractVersion: 1,
+        definitionVersion: 1,
+        stages: fixture.stages,
+      })
+    } catch (cause) {
+      failure = cause
+    }
+
+    expect(failure).toMatchObject({
+      _tag: "WorkflowDefinitionValidationError",
+      phase: "pure",
+      reason: fixture.reason,
+      workflowDefinitionSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      ...(fixture.stageKey === undefined ? {} : { stageKey: fixture.stageKey }),
+      ...(fixture.sequencePosition === undefined
+        ? {}
+        : { sequencePosition: fixture.sequencePosition }),
+    })
   })
 })
 

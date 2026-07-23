@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { Schema } from "effect"
+import { Data, Schema } from "effect"
 import { AgentHarnessRef } from "../agent-harness"
 
 const BoundedText = (maximum: number) =>
@@ -262,6 +262,42 @@ export const WorkflowDefinition = Schema.Struct({
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
 export type SourceResolver = (source: string) => boolean
 
+export type WorkflowDefinitionValidationReason =
+  | "no_considered_stage"
+  | "no_runnable_stage"
+  | "duplicate_stage_key"
+  | "invalid_activation_prerequisite"
+  | "invalid_stage_order"
+  | "unsupported_bound"
+  | "unsupported_policy"
+  | "unsafe_artifact_path"
+  | "unknown_contract_reference"
+  | "unknown_harness_reference"
+  | "incompatible_kind"
+  | "incompatible_output"
+  | "incompatible_definition"
+  | "unavailable_agent_model"
+
+export class WorkflowDefinitionValidationError extends Data.TaggedError(
+  "WorkflowDefinitionValidationError",
+)<{
+  readonly phase: "pure" | "contract" | "harness" | "availability"
+  readonly reason: WorkflowDefinitionValidationReason
+  readonly workflowDefinitionSha256?: string
+  readonly stageKey?: string
+  readonly sequencePosition?: number
+  readonly contractRef?: StageContractRef
+  readonly harnessRef?: typeof AgentHarnessRef.Type
+  readonly cause?: string
+}> {}
+
+export function isEffectivelyEnabled(stage: StageDefinition): boolean {
+  return (
+    stage.activation.mode === "enabled" ||
+    (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")
+  )
+}
+
 export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
   return canonicalSha256({
     contractVersion: definition.contractVersion,
@@ -280,31 +316,104 @@ export function stageDefinitionSha256(definition: StageDefinition): string {
 
 export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
   const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
-  if (
-    !definition.stages.some(
-      (stage) =>
-        stage.activation.mode === "enabled" ||
-        (stage.activation.mode === "conditional" && stage.activation.decision === "enabled"),
-    )
-  ) {
-    throw new Error("Workflow definition must contain at least one runnable stage")
+  const definitionSha256 = workflowDefinitionSha256(definition)
+  if (definition.stages.length === 0) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_considered_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
   }
   const keys = new Set<string>()
-  for (const stage of definition.stages) {
-    if (keys.has(stage.key)) throw new Error(`Duplicate workflow stage key: ${stage.key}`)
+  let enabledDesignPosition: number | undefined
+  let previousKnownStageRank = 0
+  for (const [index, stage] of definition.stages.entries()) {
+    const diagnostic = {
+      phase: "pure" as const,
+      workflowDefinitionSha256: definitionSha256,
+      stageKey: stage.key,
+      sequencePosition: index + 1,
+    }
+    if (keys.has(stage.key)) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "duplicate_stage_key",
+      })
+    }
     keys.add(stage.key)
     if (
       stage.reviewPolicy.mode === "automated" &&
       stage.reviewPolicy.minimumContributions > stage.reviewPolicy.maximumContributions
     ) {
-      throw new Error(`Stage review minimum exceeds maximum: ${stage.key}`)
+      throw new WorkflowDefinitionValidationError({ ...diagnostic, reason: "unsupported_bound" })
     }
     if (
       stage.outputPolicy._tag === "Artifact" &&
       !isSafeArtifactPathTemplate(stage.outputPolicy.pathTemplate)
     ) {
-      throw new Error(`Invalid artifact path template for stage: ${stage.key}`)
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsafe_artifact_path",
+      })
     }
+
+    const stageName = [
+      "questions",
+      "research",
+      "design",
+      "structure",
+      "plan",
+      "implementation",
+    ].includes(stage.key)
+      ? stage.key
+      : undefined
+    const knownRank =
+      stageName === undefined
+        ? undefined
+        : ["questions", "research", "design", "structure", "plan", "implementation"].indexOf(
+            stageName,
+          ) + 1
+    if (knownRank !== undefined && knownRank > 0) {
+      if (knownRank <= previousKnownStageRank) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_stage_order",
+        })
+      }
+      previousKnownStageRank = knownRank
+    }
+    if (stageName === "design") {
+      if (!isEffectivelyEnabled(stage)) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_activation_prerequisite",
+        })
+      }
+      enabledDesignPosition = index + 1
+    }
+    if (stageName === "structure" && enabledDesignPosition === undefined) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "invalid_stage_order",
+      })
+    }
+    if (
+      (stage.designPolicy !== undefined && stageName !== "design") ||
+      (stage.promotionPolicy !== undefined && stageName !== "design") ||
+      (stage.structurePolicy !== undefined && stageName !== "structure")
+    ) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsupported_policy",
+      })
+    }
+  }
+  if (!definition.stages.some(isEffectivelyEnabled)) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_runnable_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
   }
   return definition
 }

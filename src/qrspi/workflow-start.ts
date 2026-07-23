@@ -16,6 +16,7 @@ import {
   type TicketReadinessJudgment,
   type SourceResolver,
   type WorkflowDefinition,
+  type WorkflowDefinitionValidationError,
   type WorkflowStartOutput,
 } from "./domain"
 import {
@@ -29,7 +30,7 @@ import { QrspiStore, type QrspiStoreDataError, type StartRecord } from "./store"
 import {
   StageCatalog,
   type StageCatalogError,
-  resolveFirstStage,
+  validateWorkflowDefinition,
 } from "./stage-catalog"
 
 export class WorkflowStartUnauthorized extends Data.TaggedError("WorkflowStartUnauthorized")<{
@@ -89,6 +90,7 @@ export type WorkflowStartError =
   | QrspiStoreDataError
   | StageCatalogError
   | AgentHarnessError
+  | WorkflowDefinitionValidationError
   | SqlError
 
 export type WorkflowStartPort = {
@@ -192,7 +194,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           new WorkflowStartConflict({ reason: "Base target requires reconciliation" }),
         )
       }
-      const stageSnapshot = yield* resolveFirstStage({
+      const validatedDefinition = yield* validateWorkflowDefinition({
         definition: workflowDefinition,
         stageCatalog,
         agentHarness,
@@ -608,7 +610,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           baseSha: inspection.baseSha,
           rootSha: observed.sha,
           authoritativeObservation: { headRef: operation.branchName, sha: observed.sha },
-          stageSnapshots: [stageSnapshot],
+          stageSnapshots: validatedDefinition.stageSnapshots,
           now: now(),
         })
         .pipe(

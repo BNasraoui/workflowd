@@ -175,6 +175,7 @@ export class AgentHarnessError extends Data.TaggedError("AgentHarnessError")<{
   readonly operation: string
   readonly cause: Error
   readonly retryable: boolean
+  readonly selection?: AgentHarnessSelection
 }> {}
 
 type HarnessRegistration = {
@@ -387,6 +388,16 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
               },
               signal,
             ),
+          ),
+        ).pipe(
+          Effect.mapError(
+            (error) =>
+              new AgentHarnessError({
+                operation: error.operation,
+                cause: error.cause,
+                retryable: error.retryable,
+                selection,
+              }),
           ),
         )
       },
