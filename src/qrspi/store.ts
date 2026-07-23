@@ -1114,7 +1114,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             Effect.mapError((cause) => dataError("workflow_operation", input.operationId, cause)),
           )
           for (const snapshot of snapshots) {
-            yield* sql`
+            const persisted = yield* sql<{ readonly stage_definition_sha256: string }>`
               INSERT INTO qrspi_stage_definitions (
                 stage_definition_sha256, workflow_definition_sha256, stage_key,
                 sequence_position, definition_json, contract_name, contract_version,
@@ -1128,8 +1128,31 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 ${snapshot.contractRegistrationSha256}, ${snapshot.definition.producer.harness.name},
                 ${snapshot.definition.producer.harness.version},
                 ${snapshot.harnessRegistrationSha256}, ${input.now.toISOString()}
-              ) ON CONFLICT (stage_definition_sha256) DO NOTHING
+              ) ON CONFLICT (workflow_definition_sha256, stage_definition_sha256) DO UPDATE SET
+                stage_definition_sha256 = excluded.stage_definition_sha256
+              WHERE qrspi_stage_definitions.stage_key = excluded.stage_key
+                AND qrspi_stage_definitions.sequence_position = excluded.sequence_position
+                AND qrspi_stage_definitions.definition_json = excluded.definition_json
+                AND qrspi_stage_definitions.contract_name = excluded.contract_name
+                AND qrspi_stage_definitions.contract_version = excluded.contract_version
+                AND qrspi_stage_definitions.contract_registration_sha256 =
+                  excluded.contract_registration_sha256
+                AND qrspi_stage_definitions.harness_name = excluded.harness_name
+                AND qrspi_stage_definitions.harness_version = excluded.harness_version
+                AND qrspi_stage_definitions.harness_registration_sha256 =
+                  excluded.harness_registration_sha256
+              RETURNING stage_definition_sha256
             `
+            if (persisted.length !== 1) {
+              return yield* Effect.fail(
+                dataError(
+                  "stage_definition",
+                  snapshot.stageDefinitionSha256,
+                  "persisted snapshot association or registration identity does not match",
+                  { reason: "identity_mismatch" },
+                ),
+              )
+            }
           }
           yield* sql`
             INSERT INTO qrspi_generations (

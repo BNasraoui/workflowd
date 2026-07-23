@@ -21,6 +21,7 @@ const fixtureContract: StageContract<
   typeof FixtureResult.Encoded
 > = {
   ref: { name: "fixture.document", contractVersion: 1 },
+  implementationRevision: "fixture.document.v1",
   kind: "document",
   requestSchema: FixtureRequest,
   resultSchema: FixtureResult,
@@ -39,6 +40,7 @@ const fixtureImplementationContract: StageContract<
   typeof ImplementationResult.Encoded
 > = {
   ref: { name: "fixture.implementation", contractVersion: 1 },
+  implementationRevision: "fixture.implementation.v1",
   kind: "implementation",
   requestSchema: ImplementationRequest,
   resultSchema: ImplementationResult,
@@ -74,6 +76,24 @@ describe("TrustedStageCatalog", () => {
     expect(Schema.decodeUnknownSync(registration.requestSchema)({ text: "typed" })).toEqual({
       text: "typed",
     })
+  })
+
+  test("includes the trusted executable implementation revision in registration identity", () => {
+    const firstRegistration = {
+      ...fixtureContract,
+      implementationRevision: "fixture.document.v1",
+    }
+    const changedRegistration = {
+      ...fixtureContract,
+      implementationRevision: "fixture.document.v2",
+    }
+
+    const first = new TrustedStageCatalog([firstRegistration])
+    const changed = new TrustedStageCatalog([changedRegistration])
+
+    expect(first.descriptor(fixtureContract.ref).registrationSha256).not.toBe(
+      changed.descriptor(fixtureContract.ref).registrationSha256,
+    )
   })
 
   test("extends the catalog with a second typed contract by registration alone", () => {
@@ -458,6 +478,28 @@ describe("persisted stage snapshots", () => {
         reason: "registration_hash_mismatch",
         expectedRegistrationSha256: "c".repeat(64),
         actualRegistrationSha256: catalog.descriptor(fixtureContract.ref).registrationSha256,
+      },
+    })
+
+    const changedImplementation = new TrustedStageCatalog([
+      { ...fixtureContract, implementationRevision: "fixture.document.v2" },
+    ])
+    const changedImplementationResult = await Effect.runPromise(
+      validatePersistedSnapshots({
+        workflowDefinitionSha256: workflowDefinitionSha256(definition),
+        snapshots: validated.stageSnapshots,
+        stageCatalog: changedImplementation.port(),
+        agentHarness: harness,
+      }).pipe(Effect.either),
+    )
+    expect(changedImplementationResult).toMatchObject({
+      _tag: "Left",
+      left: {
+        phase: "contract",
+        reason: "registration_hash_mismatch",
+        expectedRegistrationSha256: catalog.descriptor(fixtureContract.ref).registrationSha256,
+        actualRegistrationSha256: changedImplementation.descriptor(fixtureContract.ref)
+          .registrationSha256,
       },
     })
 

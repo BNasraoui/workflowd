@@ -143,6 +143,7 @@ Each built-in contract remains locally typed:
 ```ts
 type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
   readonly ref: StageContractRef
+  readonly implementationRevision: string
   readonly kind: "document" | "implementation"
   readonly requestSchema: Schema.Schema<Request, RequestEncoded, never>
   readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
@@ -196,7 +197,7 @@ Add one strict table through the existing Effect SQL migration path:
 
 ```sql
 CREATE TABLE qrspi_stage_definitions (
-  stage_definition_sha256 TEXT PRIMARY KEY,
+  stage_definition_sha256 TEXT NOT NULL,
   workflow_definition_sha256 TEXT NOT NULL
     REFERENCES qrspi_workflow_definitions(definition_sha256),
   stage_key TEXT NOT NULL,
@@ -209,6 +210,7 @@ CREATE TABLE qrspi_stage_definitions (
   harness_version INTEGER NOT NULL CHECK (harness_version > 0),
   harness_registration_sha256 TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  PRIMARY KEY (workflow_definition_sha256, stage_definition_sha256),
   UNIQUE (workflow_definition_sha256, stage_key),
   UNIQUE (workflow_definition_sha256, sequence_position)
 ) STRICT;

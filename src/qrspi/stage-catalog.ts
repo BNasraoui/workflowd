@@ -31,6 +31,7 @@ export type AgentTask<Result, ResultEncoded> = {
 
 export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
   readonly ref: StageContractRef
+  readonly implementationRevision: string
   readonly kind: StageDefinition["kind"]
   readonly requestSchema: Schema.Schema<Request, RequestEncoded, never>
   readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
@@ -47,6 +48,7 @@ export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
 
 type StageContractRegistration = {
   readonly ref: StageContractRef
+  readonly implementationRevision?: unknown
   readonly kind?: unknown
   readonly requestSchema?: unknown
   readonly resultSchema?: unknown
@@ -84,6 +86,7 @@ type RuntimeRegistration = {
 
 const RegistrationMetadata = Schema.Struct({
   ref: StageContractRef,
+  implementationRevision: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
   kind: Schema.Literal("document", "implementation"),
   maxRequestBytes: Schema.Int.pipe(Schema.positive()),
   maxResultBytes: Schema.Int.pipe(Schema.positive()),
@@ -574,6 +577,7 @@ export const questionsStageContract: StageContract<
   typeof QuestionsStageResult.Encoded
 > = {
   ref: { name: "qrspi.questions", contractVersion: 1 },
+  implementationRevision: "qrspi.questions.v1",
   kind: "document",
   requestSchema: QuestionsStageRequest,
   resultSchema: QuestionsStageResult,

@@ -576,7 +576,7 @@ const qrspiStageDefinitions = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   yield* sql`
     CREATE TABLE qrspi_stage_definitions (
-      stage_definition_sha256 TEXT PRIMARY KEY CHECK (
+      stage_definition_sha256 TEXT NOT NULL CHECK (
         length(stage_definition_sha256) = 64
           AND stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'
       ),
@@ -600,6 +600,7 @@ const qrspiStageDefinitions = Effect.gen(function* () {
           AND harness_registration_sha256 NOT GLOB '*[^0-9a-f]*'
       ),
       created_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_definition_sha256, stage_definition_sha256),
       UNIQUE (workflow_definition_sha256, stage_key),
       UNIQUE (workflow_definition_sha256, sequence_position)
     ) STRICT

@@ -694,6 +694,12 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           store.supersedeStart(operation.operationId, "authoritative input changed", now()),
       })
 
+      const freshValidatedDefinition = yield* validateWorkflowDefinition({
+        definition: workflowDefinition,
+        stageCatalog,
+        agentHarness,
+      })
+
       return yield* store
         .completeStart({
           operationId: operation.operationId,
@@ -706,7 +712,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           baseSha: inspection.baseSha,
           rootSha: observed.sha,
           authoritativeObservation: { headRef: operation.branchName, sha: observed.sha },
-          stageSnapshots: validatedDefinition.stageSnapshots,
+          stageSnapshots: freshValidatedDefinition.stageSnapshots,
           now: now(),
         })
         .pipe(
