@@ -117,7 +117,7 @@ const CurrentGenerationSnapshotRow = Schema.Struct({
   workflow_id: Schema.NonEmptyString,
   generation: Schema.Int.pipe(Schema.positive()),
   workflow_definition_sha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
-  workflow_definition_json: Schema.String,
+  workflow_definition_json: Schema.NullOr(Schema.String),
   stage_definition_sha256: Schema.NullOr(Schema.String),
   stage_key: Schema.NullOr(Schema.String),
   sequence_position: Schema.NullOr(Schema.Number),
@@ -322,6 +322,14 @@ function decodeCurrentGenerationSnapshotSet(
     generation: first.generation,
   }
   return Effect.gen(function* () {
+    if (first.workflow_definition_json === null) {
+      return yield* Effect.fail(
+        dataError("workflow_definition", first.workflow_definition_sha256, "missing definition", {
+          ...identity,
+          reason: "missing",
+        }),
+      )
+    }
     const workflowDefinition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
       first.workflow_definition_json,
     ).pipe(
@@ -530,7 +538,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             stage.harness_version,
             stage.harness_registration_sha256
           FROM qrspi_generations AS generation
-          JOIN qrspi_workflow_definitions AS workflow_definition
+          LEFT JOIN qrspi_workflow_definitions AS workflow_definition
             ON workflow_definition.definition_sha256 = generation.workflow_definition_sha256
           LEFT JOIN qrspi_stage_definitions AS stage
             ON stage.workflow_definition_sha256 = generation.workflow_definition_sha256

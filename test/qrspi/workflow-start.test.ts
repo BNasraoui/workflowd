@@ -2199,6 +2199,33 @@ describe("Phase 3: Persisted identity preflight", () => {
     expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
   })
 
+  test("rejects a missing workflow definition without new work", async () => {
+    const filename = await databasePath()
+    const fake = fakes()
+    await start(filename, fake)
+    const before = await counts(filename, fake)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`PRAGMA foreign_keys = OFF`
+        yield* sql`DELETE FROM qrspi_workflow_definitions`
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(
+        Layer.build(WorkflowStartLive(options).pipe(Layer.provide(layer(filename, fake)))),
+      ),
+    )
+
+    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
+      _tag: "Some",
+      value: { _tag: "QrspiStoreDataError", record: "workflow_definition", reason: "missing" },
+    })
+    expect(await counts(filename, fake)).toEqual(before)
+    expect(fake.counts()).toMatchObject({ createCalls: 1 })
+  })
+
   test.each([
     {
       name: "missing snapshot set",
