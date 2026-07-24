@@ -7,6 +7,7 @@ import {
   RepositoryTarget,
   RevisionIntent,
   TicketRevisionReference,
+  compareAcceptedPredecessorCurrentness,
   type ExactArtifactSource,
   type StageSourceRole,
 } from "./contracts/common"
@@ -47,6 +48,7 @@ export const assembleExactStageSources = (input: {
   readonly workflowDefinition: typeof WorkflowDefinition.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
+  readonly currentAcceptedPointers: ReadonlyArray<unknown>
   readonly revisionIntent?: unknown
   readonly maxSourceBytes: number
   readonly repository: QrspiRepositoryPort
@@ -94,6 +96,7 @@ function decodeAuthority(input: {
   readonly workflowDefinition: typeof WorkflowDefinition.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
+  readonly currentAcceptedPointers: ReadonlyArray<unknown>
   readonly revisionIntent?: unknown
 }) {
   const scope = Schema.decodeUnknownSync(ExactStageScope)(input.scope)
@@ -103,6 +106,9 @@ function decodeAuthority(input: {
   const snapshots = Schema.decodeUnknownSync(Schema.Array(ExecutableStageSnapshot))(input.snapshots)
   const pointers = Schema.decodeUnknownSync(Schema.Array(AcceptedPredecessorPointer))(
     input.acceptedPointers,
+  )
+  const currentPointers = Schema.decodeUnknownSync(Schema.Array(AcceptedPredecessorPointer))(
+    input.currentAcceptedPointers,
   )
   const revisionIntent =
     input.revisionIntent === undefined
@@ -155,8 +161,17 @@ function decodeAuthority(input: {
       ...(role === undefined ? {} : { role }),
     })
   }
+  if (currentPointers.length !== expected.length) {
+    throw identityError(undefined, undefined, expected.length, currentPointers.length)
+  }
   for (const [index, expectedSource] of expected.entries()) {
     const pointer = pointers[index]!
+    const currentPointer = currentPointers[index]!
+    const currentMismatch = pointerMismatch(currentPointer, expectedSource, scope, target)
+    if (currentMismatch !== undefined) throw currentMismatch
+    if (compareAcceptedPredecessorCurrentness(currentPointer, pointer, index) !== undefined) {
+      throw identityError(expectedSource.role, index, currentPointer, pointer)
+    }
     const mismatch = pointerMismatch(pointer, expectedSource, scope, target)
     if (mismatch !== undefined) throw mismatch
   }

@@ -211,6 +211,7 @@ function repositoryReader(
 const assemblyInput = (
   repository: QrspiRepositoryPort,
   pointers: ReadonlyArray<unknown> = [acceptedPointer],
+  currentAcceptedPointers: ReadonlyArray<unknown> = [acceptedPointer],
 ) => ({
   scope: selectedScope,
   ticketRevision,
@@ -218,6 +219,7 @@ const assemblyInput = (
   workflowDefinition,
   snapshots,
   acceptedPointers: pointers,
+  currentAcceptedPointers,
   maxSourceBytes: 32 * 1024,
   repository,
 })
@@ -289,7 +291,7 @@ describe("trusted Research source assembly", () => {
     const reader = repositoryReader({ bytes })
 
     const result = await Effect.runPromise(
-      assembleExactStageSources(assemblyInput(reader.port, [bomPointer])),
+      assembleExactStageSources(assemblyInput(reader.port, [bomPointer], [bomPointer])),
     )
 
     expect(result.sources[0]?.content).toBe(`\ufeff${sourceContent}`)
@@ -350,6 +352,40 @@ describe("trusted Research source assembly", () => {
     expect(reader.calls()).toBe(0)
   })
 
+  test("rejects a consistently rehashed substitute for the current accepted pointer before I/O", async () => {
+    const reader = repositoryReader()
+    const substitutedArtifact = {
+      ...sourceArtifact,
+      stageRevision: sourceArtifact.stageRevision + 1,
+      commitSha: gitSha("7"),
+      path: "artifacts/substituted-questions.md",
+      blobSha: gitSha("8"),
+      contentSha256: sha("9"),
+    }
+    const substitutedIdentity = {
+      ...acceptedIdentity,
+      acceptedStageRevision: substitutedArtifact.stageRevision,
+      artifact: substitutedArtifact,
+    }
+    const substitutedPointer = {
+      ...substitutedIdentity,
+      pointerSha256: canonicalSha256(substitutedIdentity),
+    }
+
+    const result = await Effect.runPromise(
+      assembleExactStageSources({
+        ...assemblyInput(reader.port, [substitutedPointer]),
+        currentAcceptedPointers: [acceptedPointer],
+      }).pipe(Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "StageSourceAssemblyError", reason: "identity_mismatch" },
+    })
+    expect(reader.calls()).toBe(0)
+  })
+
   test("allows no Questions pointer when Questions is disabled", async () => {
     const reader = repositoryReader()
     const disabledQuestions = stage("questions", false)
@@ -368,7 +404,7 @@ describe("trusted Research source assembly", () => {
 
     const result = await Effect.runPromise(
       assembleExactStageSources({
-        ...assemblyInput(reader.port, []),
+        ...assemblyInput(reader.port, [], []),
         workflowDefinition: disabledWorkflowDefinition,
         scope: {
           ...selectedScope,
@@ -523,6 +559,7 @@ describe("generalized document predecessor assembly through Plan", () => {
         workflowDefinition: matrixWorkflowDefinition,
         snapshots: matrixSnapshots,
         acceptedPointers: pointers,
+        currentAcceptedPointers: pointers,
         maxSourceBytes: 32 * 1024,
         repository,
       },
@@ -675,6 +712,7 @@ describe("Implementation predecessor assembly", () => {
         workflowDefinition: implementationWorkflowDefinition,
         snapshots: implementationSnapshots,
         acceptedPointers: pointers,
+        currentAcceptedPointers: pointers,
         maxSourceBytes: 32 * 1024,
         repository,
       }),
