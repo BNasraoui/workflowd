@@ -19,6 +19,7 @@ import {
   researchStageContract,
   type AcceptedPredecessorPointer,
   type ArtifactReference,
+  type ExactStageScope,
 } from "../../src/qrspi/contracts"
 import { TrustedStageCatalog } from "../../src/qrspi/stage-catalog"
 import { canonicalSha256 } from "../../src/qrspi/domain"
@@ -70,7 +71,7 @@ function ticketRevision(): TicketRevisionType {
 
 function replayAuthorityFor(
   contract: (typeof builtInStageContracts)[number],
-  sources: {
+  sources: ExactStageScope & {
     readonly stageKey: string
     readonly stageDefinitionSha256: string
     readonly sources: ReadonlyArray<{
@@ -82,6 +83,15 @@ function replayAuthorityFor(
 ) {
   const catalog = new TrustedStageCatalog(builtInStageContracts)
   return {
+    scope: {
+      workflowId: sources.workflowId,
+      generation: sources.generation,
+      stageKey: sources.stageKey,
+      runOrdinal: sources.runOrdinal,
+      stageRevision: sources.stageRevision,
+      workflowDefinitionSha256: sources.workflowDefinitionSha256,
+      stageDefinitionSha256: sources.stageDefinitionSha256,
+    },
     stageSnapshot: {
       stageKey: sources.stageKey,
       stageDefinitionSha256: sources.stageDefinitionSha256,
@@ -635,6 +645,34 @@ describe("complete built-in contract replay", () => {
         ),
       ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
     })
+
+  test.each([
+    ["generation", { generation: 2 }],
+    ["run ordinal", { runOrdinal: 2 }],
+    ["stage revision", { stageRevision: 2 }],
+    ["workflow definition", { workflowDefinitionSha256: "f".repeat(64) }],
+  ] as const)("rejects rehashed wrong-%s replay scope", async (_name, replacement) => {
+    const contract = builtInStageContracts[0]
+    const currentScope = sourcesFor("questions")
+    const substitutedScope = { ...currentScope, ...replacement }
+    const input = encodeStageProduceInput(substitutedScope, contract.ref, {
+      _tag: "QuestionsRequest",
+      sources: substitutedScope,
+    })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({
+            input,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(contract, currentScope),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+  })
 
   test("rejects unexpected durable request fields", async () => {
     const contract = builtInStageContracts[0]

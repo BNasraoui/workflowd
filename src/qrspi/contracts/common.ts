@@ -386,6 +386,16 @@ export const StageProduceInput = StageProduceInputBase.pipe(
       return "sourceSetSha256 does not match ordered source identities"
     }
   }),
+  Schema.filter((value) => {
+    try {
+      const nestedScope = Schema.decodeUnknownSync(ExactStageScope)(requestSources(value.request))
+      return canonicalSha256(value.scope) === canonicalSha256(nestedScope)
+        ? true
+        : "scope does not match request sources"
+    } catch {
+      return "scope does not match request sources"
+    }
+  }),
 )
 export type StageProduceInput = typeof StageProduceInput.Type
 
@@ -393,13 +403,20 @@ export const encodeStageProduceInput = (
   scope: ExactStageScope,
   contract: typeof StageContractRef.Type,
   decodedRequest: JsonValue,
-): StageProduceInput => ({
-  contractVersion: 1,
-  scope,
-  contract,
-  request: decodedRequest,
-  requestSha256: canonicalSha256(decodedRequest),
-})
+): StageProduceInput => {
+  const encodedScope = Schema.decodeUnknownSync(ExactStageScope)(scope)
+  const nestedScope = Schema.decodeUnknownSync(ExactStageScope)(requestSources(decodedRequest))
+  if (canonicalSha256(encodedScope) !== canonicalSha256(nestedScope)) {
+    throw new Error("scope does not match request sources")
+  }
+  return {
+    contractVersion: 1,
+    scope: encodedScope,
+    contract,
+    request: decodedRequest,
+    requestSha256: canonicalSha256(decodedRequest),
+  }
+}
 
 export const BoundedTaskTitle = boundedUtf8(MAX_TASK_TITLE_BYTES, "Task title")
 export const BoundedTaskPrompt = boundedUtf8(MAX_TASK_PROMPT_BYTES, "Task prompt")

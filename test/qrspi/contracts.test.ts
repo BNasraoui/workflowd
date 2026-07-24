@@ -10,6 +10,7 @@ import {
 } from "../../src/qrspi/domain"
 import {
   ExactStageSources,
+  type ExactStageScope,
   ImplementationRequest,
   ImplementationResult,
   DesignRequest,
@@ -300,7 +301,7 @@ function verifiedTicketRevision() {
 
 function replayAuthorityFor(
   contract: (typeof builtInStageContracts)[number],
-  exactSources: {
+  exactSources: ExactStageScope & {
     readonly stageKey: string
     readonly stageDefinitionSha256: string
     readonly sources: ReadonlyArray<{
@@ -312,6 +313,15 @@ function replayAuthorityFor(
 ) {
   const catalog = new TrustedStageCatalog(builtInStageContracts)
   return {
+    scope: {
+      workflowId: exactSources.workflowId,
+      generation: exactSources.generation,
+      stageKey: exactSources.stageKey,
+      runOrdinal: exactSources.runOrdinal,
+      stageRevision: exactSources.stageRevision,
+      workflowDefinitionSha256: exactSources.workflowDefinitionSha256,
+      stageDefinitionSha256: exactSources.stageDefinitionSha256,
+    },
     stageSnapshot: {
       stageKey: exactSources.stageKey,
       stageDefinitionSha256: exactSources.stageDefinitionSha256,
@@ -372,6 +382,23 @@ describe("shared exact stage contracts", () => {
     )
 
     expect(() => Schema.decodeUnknownSync(StageProduceInput)(encoded)).toThrow("sourceSetSha256")
+  })
+
+  test("rejects mismatched outer and nested stage scopes", () => {
+    const request = { _tag: "QuestionsRequest", sources }
+    const encoded = encodeStageProduceInput(
+      scope,
+      { name: "qrspi.questions", contractVersion: 1 },
+      request,
+    )
+    const mismatched = {
+      ...encoded,
+      scope: { ...scope, runOrdinal: scope.runOrdinal + 1 },
+    }
+
+    expect(() => Schema.decodeUnknownSync(StageProduceInput)(mismatched)).toThrow(
+      "scope does not match request sources",
+    )
   })
 
   test("bounds a maximum-cardinality source envelope at the exact encoded boundary", () => {

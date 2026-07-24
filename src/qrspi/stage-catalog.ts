@@ -26,6 +26,7 @@ import {
   BoundedTaskPrompt,
   BoundedTaskTitle,
   AcceptedPredecessorPointer,
+  ExactStageScope,
   ExactStageSources,
   PreparedStageOutput,
   StageExecutionContext,
@@ -43,6 +44,7 @@ const ReplaySnapshotAuthority = Schema.Struct({
 })
 
 const StageReplayAuthority = Schema.Struct({
+  scope: ExactStageScope,
   stageSnapshot: Schema.Struct({
     ...ReplaySnapshotAuthority.fields,
     maxEncodedInputBytes: Schema.Int.pipe(Schema.positive()),
@@ -403,6 +405,7 @@ export class TrustedStageCatalog {
           const sources = requestSourcesOf(request, registration.descriptor.ref)
           if (
             canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
+            canonicalSha256(replayAuthority.scope) !== canonicalSha256(durableInput.scope) ||
             !matchesSelectedSnapshot(replayAuthority, sources, registration.descriptor) ||
             !matchesPredecessorAuthority(replayAuthority, sources, this) ||
             sources.ticketRevision.workflowId !== durableInput.scope.workflowId ||
