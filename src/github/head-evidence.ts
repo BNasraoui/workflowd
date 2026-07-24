@@ -7,7 +7,7 @@ import {
   type SonarEvidence,
 } from "../domain/head-evidence"
 import { normalizeError } from "../errors"
-import type { GitHubInstallationAdapter, GitHubWorkflowJob } from "./adapter"
+import type { GitHubCheckRun, GitHubInstallationAdapter, GitHubWorkflowJob } from "./adapter"
 
 export type SonarResponse = { readonly status: number; readonly body: unknown }
 export type SonarRequest = (path: string, signal?: AbortSignal) => Promise<SonarResponse>
@@ -147,16 +147,22 @@ async function appendCheckRuns(
     request: { signal },
   })) {
     for (const check of page) {
-      if (check.name === undefined) continue
-      retainCheck(collected, check.name, {
-        name: check.name,
-        state: checkRunState(check.status, check.conclusion),
-        ...(check.conclusion == null ? {} : { conclusion: check.conclusion }),
-        ...(check.detailsUrl == null ? {} : { detailsUrl: check.detailsUrl }),
-        ...(check.summary == null ? {} : { summary: sanitizeUntrustedText(check.summary, 2_000) }),
-      })
+      const normalized = normalizeCheckRun(check)
+      if (normalized === undefined) continue
+      retainCheck(collected, normalized.name, normalized)
       if (collected.truncated) return
     }
+  }
+}
+
+function normalizeCheckRun(check: GitHubCheckRun): CheckEvidence | undefined {
+  if (check.name === undefined) return undefined
+  return {
+    name: check.name,
+    state: checkRunState(check.status, check.conclusion),
+    ...(check.conclusion == null ? {} : { conclusion: check.conclusion }),
+    ...(check.detailsUrl == null ? {} : { detailsUrl: check.detailsUrl }),
+    ...(check.summary == null ? {} : { summary: sanitizeUntrustedText(check.summary, 2_000) }),
   }
 }
 
@@ -231,10 +237,10 @@ function classifyChecks(collected: CollectedChecks) {
 function collectFailedJobLogs(
   input: CollectHeadEvidenceInput,
 ): Effect.Effect<ReadonlyMap<string, string>, HeadEvidenceError> {
+  const logs = new Map<string, string>()
   return attempt("collect failed Actions job logs", async (signal) => {
-    const logs = new Map<string, string>()
     const listRuns = input.client.listWorkflowRunPages
-    if (listRuns === undefined || !canCollectJobLogs(input.client)) return logs
+    if (listRuns === undefined || !canCollectJobLogs(input.client)) return
     const bounds = { retained: 0, runsSeen: 0, jobsSeen: 0 }
     for await (const runs of listRuns({
       ...input.repository,
@@ -244,13 +250,12 @@ function collectFailedJobLogs(
     })) {
       for (const run of runs) {
         bounds.runsSeen += 1
-        if (bounds.runsSeen > 20 || bounds.retained >= 3) return logs
+        if (bounds.runsSeen > 20 || bounds.retained >= 3) return
         if (run.headSha !== input.target.headSha || run.conclusion === "success") continue
         await appendRunJobLogs(input, run.id, signal, logs, bounds)
       }
     }
-    return logs
-  })
+  }).pipe(Effect.as(logs))
 }
 
 type LogBounds = { retained: number; runsSeen: number; jobsSeen: number }
