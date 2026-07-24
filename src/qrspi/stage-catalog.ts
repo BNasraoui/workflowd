@@ -10,15 +10,16 @@ import { JsonValueSchema, type JsonValue } from "../json"
 import {
   ExecutableStageSnapshot,
   StageContractRef,
+  TicketRevision,
   type StageDefinition,
   type WorkflowDefinition,
   WorkflowDefinitionValidationError,
   normalizeWorkflowDefinition,
   stageDefinitionSha256,
+  ticketRevisionSha256For,
   workflowDefinitionSha256,
 } from "./domain"
 import { canonicalSha256 } from "./domain"
-import type { TicketRevision } from "./domain"
 import {
   BoundedTaskPrompt,
   BoundedTaskTitle,
@@ -357,6 +358,7 @@ export class TrustedStageCatalog {
             throw catalogError("request_too_large", registration.descriptor.ref)
           }
           const durableInput = Schema.decodeUnknownSync(StageProduceInput)(input.input)
+          const ticketRevision = Schema.decodeUnknownSync(TicketRevision)(input.ticketRevision)
           const durableSources = requestSourcesOf(durableInput.request, registration.descriptor.ref)
           if (durableSources.stageKey !== registration.descriptor.stageKey) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)
@@ -366,8 +368,9 @@ export class TrustedStageCatalog {
           if (
             canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
             sources.ticketRevision.workflowId !== durableInput.scope.workflowId ||
-            input.ticketRevision.ticketRevisionSha256 !==
-              sources.ticketRevision.ticketRevisionSha256
+            ticketRevision.ticketRevisionSha256 !== sources.ticketRevision.ticketRevisionSha256 ||
+            ticketRevisionSha256For(ticketRevision.readyTicket, ticketRevision.scenarioCoverage) !==
+              ticketRevision.ticketRevisionSha256
           ) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)
           }
@@ -410,6 +413,9 @@ export class TrustedStageCatalog {
           }
           const result = Schema.decodeUnknownSync(registration.resultSchema)(input.result)
           const context = Schema.decodeUnknownSync(StageExecutionContext)(input.context)
+          if (context.scope.stageKey !== registration.descriptor.stageKey) {
+            throw catalogError("identity_mismatch", registration.descriptor.ref)
+          }
           try {
             const output = Schema.decodeUnknownSync(PreparedStageOutput)(
               registration.prepareOutput(result, context),

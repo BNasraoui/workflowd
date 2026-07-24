@@ -487,6 +487,42 @@ describe("exact Questions contract through erased catalog execution", () => {
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
   })
 
+  test("rejects changed ticket semantics that retain the referenced hash", async () => {
+    const catalog = new TrustedStageCatalog([questionsStageContract]).port()
+    const durableInput = encodeStageProduceInput(scope, questionsStageContract.ref, {
+      _tag: "QuestionsRequest",
+      sources,
+    })
+    const changedTicket = {
+      ...verifiedTicket,
+      readyTicket: { ...verifiedTicket.readyTicket, title: "Substituted ticket authority" },
+    }
+
+    expect(
+      await Effect.runPromise(
+        catalog
+          .buildTask({ input: durableInput, ticketRevision: changedTicket })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+  })
+
+  test("rejects an execution context for a different stage", async () => {
+    const catalog = new TrustedStageCatalog([questionsStageContract]).port()
+
+    expect(
+      await Effect.runPromise(
+        catalog
+          .prepareOutput({
+            contract: questionsStageContract.ref,
+            result: { _tag: "Questions", document: "# Questions" },
+            context: { scope: researchScope, target },
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+  })
+
   test("rejects predecessor authority for Questions during assembly and replay", async () => {
     const catalog = new TrustedStageCatalog([questionsStageContract]).port()
     const invalidSources = {
