@@ -1,0 +1,56 @@
+{
+  "contractVersion": 1,
+  "mode": "local-qrispi",
+  "workflowId": "workflowd-workflowd-vs3.4.3:workflowd-vs3.4.3",
+  "generation": 1,
+  "designRevision": 3,
+  "repositoryBase": "50be40c936c696c4030bd2a2cbb6c9a0bdc8f375",
+  "workflowDefinitionSha256": "d29e5e6a9b478b84cb2aef90d46f57c2dace34c84dd60a6d558a50f8b4a6460a",
+  "design": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-discussion-stage-runtime-state.md",
+    "sha256": "17c3922e7b3143717cd7eda2ab6cece974b255f97a4e7b8ae80ba1fbe6a3ef2c"
+  },
+  "ownershipReport": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-boundary-review-r3.md",
+    "sha256": "2d9cd8e96b485ea3e899e42632af999c4ce31ded2612444d8a8eca141823a667"
+  },
+  "sources": [
+    {
+      "role": "questions",
+      "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/01-research-questions-stage-runtime-state.md",
+      "sha256": "0230c0957a44461749e9cd57598d1805601f337dc807fbaeec8de267a7e2e0dd"
+    },
+    {
+      "role": "research",
+      "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/02-research-stage-runtime-state.md",
+      "sha256": "d3bd713578742ccdce8de5a7bf3d00cbc92af88a24db04ae69219a07abde4f98"
+    }
+  ],
+  "sourceSetSha256": "7a7eea7fceb21095ede2114cfba5ad664922fb2b7e19a9af64e06bfc2585836e",
+  "designPolicy": {
+    "revision": "local.design-acceptance@1",
+    "sha256": "d29e5e6a9b478b84cb2aef90d46f57c2dace34c84dd60a6d558a50f8b4a6460a"
+  },
+  "promotionPolicy": {
+    "revision": "local.provenance-promotion@1",
+    "sha256": "1d927801f1eb5e32f42f48e423adb8111f12402c26317973bb857394ba9a4010"
+  },
+  "structurePolicy": {
+    "revision": "local.structure@1",
+    "sha256": "7e3df52ceec1b52749745682f9d0dbd2a0a3c7b6640affd913b5958fb94951e6"
+  },
+  "policies": {
+    "designBoundary": {
+      "ref": "local.design-boundary@1",
+      "sha256": "7e211a6e38147b47724e5d6e23198a8556ddbc32863e12ac5815a9892048e83a"
+    },
+    "impactRisk": {
+      "ref": "local.impact-risk@1",
+      "sha256": "fca8e7391d1a244f5121053474e5dae18ed89faad34cf8ac325ee764e888391b"
+    },
+    "structure": {
+      "ref": "local.structure@1",
+      "sha256": "7e3df52ceec1b52749745682f9d0dbd2a0a3c7b6640affd913b5958fb94951e6"
+    }
+  }
+}

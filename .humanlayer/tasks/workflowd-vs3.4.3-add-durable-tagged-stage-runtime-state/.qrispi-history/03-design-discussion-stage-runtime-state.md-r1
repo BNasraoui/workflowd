@@ -1,0 +1,314 @@
+---
+task: workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state
+type: design-discussion
+repo: BNasraoui/workflowd
+branch: opencode/workflowd-vs3.4.3
+sha: 50be40c936c696c4030bd2a2cbb6c9a0bdc8f375
+---
+
+### Summary of change request
+
+Add the durable runtime state that connects the six typed QRSPI stage contracts to the existing WorkflowStart and WorkflowOperation foundation. The runtime must retain tagged StageRun and StageRevision history, implementation steps, exact references, guarded pointers, diagnostics, and the operation relationships later capabilities need. Every transition must decode durable data and atomically reject stale Generation, revision, pointer, or lease authority.
+
+### Current State
+
+- A workflow can be started or restarted, and a confirmed ticket branch creates one current Generation with immutable workflow and stage-definition snapshots.
+- The first enabled stage receives shared production and publication operations, but there is no durable run or revision record tying those operations to stage progress.
+- Exact stage requests already carry run, revision, source, definition, and repository identity, but the database cannot retain document revisions, implementation revisions, ordered implementation steps, or accepted-revision pointers.
+- Operation retries, leases, external intent, uncertain observations, terminal outcomes, and immutable operation history are durable. Equivalent stage-level fencing and history do not yet exist.
+- Existing Generations and seeded stage operations predate the full stage runtime and do not contain enough facts to reconstruct it safely.
+
+### Desired End State
+
+- A new-format Generation creates durable runs for every considered stage, skips conditional-disabled stages explicitly, activates the first runnable stage, and allocates its first pending revision in the same transaction that completes WorkflowStart.
+- StageRun owns stage progression and its pending, published, and accepted revision pointers. Successors consume only the exact accepted revision.
+- Every StageRevision has common identity and lifecycle data plus exactly one tagged document or implementation record. Implementation revisions retain ordered step records and a final checkpoint.
+- Production, publication, and later neighboring operations remain in the shared WorkflowOperation lifecycle while durable foreign-key relationships tie each physical operation to one revision or implementation step.
+- Every state-changing store method checks the current Generation, run, revision, operation revision, pointer values, and applicable lease or external-observation authority in one transaction. A zero-row guarded update returns a typed stale outcome and never retries with weaker predicates.
+- Durable JSON is Schema-decoded, identity-checked, and hash-checked before use. Corrupt mutable work is quarantined with exact diagnostics; corrupt immutable authority records block progress without guessed repairs.
+- Restart loads the same run, pointer, lease, intent, observation, and diagnostic state. Existing incomplete-format Generations remain preserved and dormant until normal WorkflowStart creates a fully validated successor Generation.
+
+### What we're not doing
+
+- Adding stage-specific queues, workers, stores, Context tags, or dispatch conditionals.
+- Implementing producer agents, artifact publication, review, gate, owner-handoff, Provenance, route, or generic pull-request reconciliation workers.
+- Adding service status, readiness projection, aggregate capacity policy, or owner lifecycle state.
+- Converting old seeded stage operations into inferred runs, revisions, sessions, publications, checkpoints, or accepted pointers.
+- Reopening terminal history, advancing from producer output alone, or discovering accepted inputs from mutable paths or latest-row queries.
+
+### Proposed End State Architecture
+
+Before:
+
+```mermaid
+flowchart LR
+  WS[WorkflowStart] --> G[Current Generation]
+  G --> SD[Executable stage snapshots]
+  G --> SP[StageProduce operation]
+  G --> AP[ArtifactPublish operation]
+  SP -. exact input only .-> ES[ExactStageScope]
+  AP -. no durable revision owner .-> ES
+```
+
+After:
+
+```mermaid
+flowchart LR
+  WS[WorkflowStart] --> G[Current Generation]
+  G --> SD[Executable stage snapshots]
+  G --> SR[Current StageRun]
+  SR -->|pending / published / accepted| REV[Common StageRevision]
+  REV -->|Document| DR[Document revision]
+  REV -->|Implementation| IR[Implementation revision]
+  IR --> STEP[Ordered implementation steps]
+  DR --> OP[Shared WorkflowOperations]
+  STEP --> OP
+  DR --> AR[Immutable artifact reference]
+  STEP --> CR[Immutable commit reference]
+  IR --> CP[Immutable checkpoint]
+  OP --> INTENT[Intent and observation]
+```
+
+The durable model has three layers:
+
+1. `qrspi_stage_runs` stores one historical run row per `(workflow_id, generation, stage_key, run_ordinal)`. A partial unique index permits one current run per stage in a Generation. The row owns run state and nullable composite foreign keys for pending, published, and accepted revisions.
+2. `qrspi_stage_revisions` stores common revision identity, run association, tag, lifecycle state, exact source-set JSON and hash, and timestamps. Document and implementation payload tables use one-to-one primary/foreign keys so each revision has one valid shape rather than a nullable union.
+3. Implementation steps and immutable artifact, commit, and checkpoint references remain separate child records. Revision or step rows uniquely reference the existing physical WorkflowOperation rows that produce and publish them.
+
+The store performs cross-row progression in explicit transactions rather than SQL triggers. SQL enforces local shape, keys, foreign keys, state literals, positive ordinals, and one-current-row rules. Effect Schemas and store methods enforce semantic identity, hash equality, allowed state transitions, lease authority, and coordinated pointer movement.
+
+New Generation initialization follows this transaction:
+
+```text
+validate current WorkflowStart, definition, and snapshots
+retire prior current Generation and its active operations
+insert next Generation and executable snapshots
+insert no run for explicitly disabled stages
+insert terminal skipped runs for conditionally disabled stages
+insert blocked runs for remaining stages
+activate the first non-skipped run
+allocate its first common and tagged revision
+insert ready producer and blocked publication operations
+link both operations to the revision or first implementation step
+set the Generation stage/run cursor
+succeed WorkflowStart
+```
+
+Every later transition uses compare-and-set semantics:
+
+```text
+BEGIN
+  decode and verify all durable rows
+  require expected current Generation and Generation format
+  require expected current run, state, and pointer values
+  require expected revision, kind, source hash, and step position
+  require expected current physical operation revision
+  require matching unexpired lease when external authority is exercised
+  UPDATE ... WHERE every required fence still matches RETURNING ...
+  if zero rows: return Stale without applying child or parent effects
+  apply pointer, operation, reference, and parent effects
+COMMIT
+```
+
+### Design Questions
+
+None. The human explicitly auto-approved the recommended option at every design gate.
+
+### Resolved Design Questions
+
+#### How should run and revision records be divided?
+
+Use a mutable StageRun aggregate, a common immutable-identity StageRevision row, and separate one-to-one document and implementation payload rows. Implementation steps are ordered child rows of an implementation revision. This follows the normative tagged union while allowing common lifecycle and pointer checks without nullable variant columns.
+
+Rejected alternatives: one wide nullable revision table would permit false document/implementation combinations; wholly separate revision tables would duplicate identity, monotonic allocation, source-set, and lifecycle rules; encoding the full record only as JSON would weaken relational identity and current-pointer constraints.
+
+#### Which record owns current and accepted pointers?
+
+The Generation owns only the linear current stage/run cursor and current Git head. Each StageRun owns pending, published, and accepted revision pointers as nullable composite foreign keys to revisions from that same run. One current StageRun is allowed per `(workflow, generation, stage)`, and revision numbers increase monotonically across run ordinals for that stage.
+
+Rejected alternatives: deriving pointers from the newest row is ambiguous after abandonment or review; putting every revision pointer on Generation mixes linear workflow position with per-stage history; storing only operation references cannot express acceptance authority.
+
+#### How should document and implementation execution share WorkflowOperation?
+
+Keep `workflow_operations` as the single lease, retry, external-effect, observation, and terminal-history envelope. A document revision uniquely references its producer and publication operations. Each implementation step uniquely references its own producer and publication operations. Typed operation input repeats exact stage scope and hashes, while relational ownership gives the authoritative revision association.
+
+Rejected alternatives: per-stage operation tables or workers would duplicate the shared lifecycle; one pair of operations on the implementation revision cannot represent ordered commits and restart between steps; trusting only nested JSON would leave operation-to-revision ownership unenforced.
+
+#### Where should invariants be enforced?
+
+Use `STRICT` SQLite tables, checks, composite foreign keys, unique constraints, and partial current indexes for local storage invariants. Use Schema decoding, canonical hashes, identity comparison, and transaction-scoped compare-and-set updates for cross-record and semantic invariants. Do not add SQL triggers for workflow progression.
+
+Rejected alternatives: SQL-only enforcement cannot validate canonical nested identities or Effect Schema contracts; application-only enforcement permits malformed direct writes and duplicate current pointers; triggers would hide progression logic and make typed stale outcomes and tests harder to reason about.
+
+#### What must fence a state-changing transition?
+
+Every transition rechecks all applicable authority: WorkflowId, current Generation and format, exact repository and definition identity, current StageRun and run state, pending/published/accepted pointers, StageRevision identity and tag, source hash, implementation position, current physical operation revision, attempt, lease token and expiry, and any bound external SHA or observation. A guarded update returning zero rows is a typed stale result or reconciliation input; it is never retried with fewer predicates.
+
+Rejected alternatives: checking only the operation lease misses Generation and pointer replacement; checking currentness before a later unguarded update creates a race; throwing an unclassified SQL error for zero rows loses the expected stale-work path.
+
+#### How should revision replacement preserve history?
+
+Allocate `max(stage_revision) + 1` within the stage identity, retain the prior revision, mark its nonterminal lifecycle abandoned or superseded as appropriate, supersede its nonterminal operations, clear stale pending and accepted pointers, insert the replacement revision and operations, then install the new pending pointer in one transaction. Operation retry revisions remain distinct from StageRevision replacement.
+
+Rejected alternatives: mutating a terminal revision destroys audit history; reusing a revision number makes immutable references ambiguous; treating terminal publication failure as an operation retry can bind new publication intent to an already terminal revision.
+
+#### How should malformed durable state be handled?
+
+Decode each row with Effect Schema using excess-property rejection, compare nested identity to relational columns, and recompute canonical hashes before transition logic. If a mutable operation or revision still has readable identity, quarantine that exact work as `data_error`, clear lease or workspace authority, preserve the diagnostic, and apply no success or successor effect. Corrupt immutable ticket, definition, snapshot, or reference authority blocks preflight or the current transition without fabricating repairs.
+
+Rejected alternatives: best-effort decoding can advance the wrong work; quarantining unrelated rows broadens failure scope; rewriting immutable authority data would hide corruption; treating wrong-kind rows as the expected record would violate relational ownership.
+
+#### How should restart and legacy Generations behave?
+
+Add only numbered append-only migrations. Fresh new-format rows resume from durable leases, pointers, intent, observations, and diagnostics. Existing Generations and child operations remain byte-for-byte historical facts and receive no inferred StageRun or StageRevision records. The new claimer requires a relational new-format revision association; an old current Generation remains dormant until exact supersession and normal WorkflowStart create a validated successor.
+
+Rejected alternatives: eager conversion would invent missing workspace, checkpoint, final-SHA, and publication facts; claiming old seeded operations under the new runtime would bypass required fences; deleting old rows would lose terminal and uncertain-effect history.
+
+#### Which neighboring records belong in this capability?
+
+Persist the QRSPI-owned relationship and identity seams required by later work: immutable artifact/commit/checkpoint references, exact operation ownership, and local handoff or reconciliation references needed to fence stage state. Do not implement external owner queues, review/gate/Provenance/route lifecycles, or generic pull-request reconciliation behavior. Later capabilities populate and act on these relationships through their own typed ports.
+
+Rejected alternatives: omitting the relationships would force later migrations to weaken current transitions; implementing neighboring workers here would cross accepted ownership and capability boundaries.
+
+#### What is the testing boundary?
+
+Test the domain Schemas and store transition family against real SQLite. Migration tests inspect table shape, strictness, checks, foreign keys, and partial indexes. Store tests cover each tagged variant, monotonic replacement, all stale fence dimensions, rollback, corruption quarantine, and terminal-history retention. File-backed tests start from the previous migration runner, reopen the same file with the current layer, and prove legacy preservation plus new-format restart recovery.
+
+Rejected alternatives: mock-only store tests cannot prove SQL constraints or rollback; migration snapshots alone cannot prove semantic fencing; in-memory-only tests cannot prove upgrade and restart behavior.
+
+### Patterns to follow
+
+These show the patterns found in the existing codebase that will be followed to implement the proposed end state architecture.
+
+#### Append-only strict migrations
+
+Number new migrations after the current frontier and retain a historical runner for file-backed upgrade fixtures - `src/store/migrations.ts:575-640`.
+
+```ts
+yield* sql`
+  CREATE TABLE qrspi_stage_definitions (
+    stage_definition_sha256 TEXT NOT NULL,
+    definition_json TEXT NOT NULL CHECK (
+      json_valid(definition_json) = 1
+        AND json_type(definition_json, '$') = 'object'
+    ),
+    PRIMARY KEY (workflow_definition_sha256, stage_definition_sha256)
+  ) STRICT
+`
+
+export const runStoreMigrations = Migrator.make({})({
+  loader: Migrator.fromRecord({
+    ...migrationsThrough0008,
+    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+    "0010_qrspi_generation_format": qrspiGenerationFormat,
+  }),
+})
+```
+
+The stage-runtime migration will use the same strict local checks and append-only registration. Existing rows will be classified, not rebuilt.
+
+#### Immutable history with one guarded current row
+
+Use composite historical identity plus a partial unique index, then retire the old pointer before inserting its monotonic successor in one transaction - `src/store/migrations.ts:471-530`, `src/qrspi/store.ts:799-849`.
+
+```sql
+UNIQUE (logical_operation_id, operation_revision);
+
+CREATE UNIQUE INDEX workflow_operations_current
+ON workflow_operations (logical_operation_id)
+WHERE is_current = 1;
+```
+
+```ts
+const revisions = yield* sql<{ readonly revision: number }>`
+  SELECT coalesce(max(operation_revision), 0) + 1 AS revision
+  FROM workflow_operations
+  WHERE logical_operation_id = ${logicalOperationId}
+`
+```
+
+StageRun currentness and StageRevision allocation will follow this pattern without updating historical identities in place.
+
+#### Lease and currentness compare-and-set
+
+Put every authority predicate in the mutation and map zero returned rows to stale - `src/qrspi/store.ts:915-948`.
+
+```ts
+sql<{ readonly operation_id: string }>`
+  UPDATE workflow_operations
+  SET external_intent_json = ${intentJson}, updated_at = ${now.toISOString()}
+  WHERE operation_id = ${operationId}
+    AND state = 'leased'
+    AND is_current = 1
+    AND lease_token = ${leaseToken}
+    AND lease_until > ${now.toISOString()}
+  RETURNING operation_id
+`.pipe(Effect.map((rows) => (rows.length === 1 ? "recorded" : "stale")))
+```
+
+Stage-runtime mutations will add Generation, run, revision, pointer, source, and step predicates to the same compare-and-set boundary.
+
+#### Schema decode, semantic identity, and quarantine
+
+Decode strict JSON, compare tags, recompute hashes, and quarantine only the identified mutable work - `src/qrspi/store.ts:534-597`.
+
+```ts
+const input = yield* Schema.decodeUnknown(Schema.parseJson(StageProduceInput), {
+  onExcessProperty: "error",
+})(row.input_json)
+
+const actualSha256 = canonicalSha256(input)
+if (actualSha256 !== row.input_sha256) {
+  return yield* Effect.fail(dataError(
+    "workflow_operation",
+    operationId,
+    "operation input hash does not match",
+    { reason: "hash_mismatch", expectedSha256: row.input_sha256, actualSha256 },
+  ))
+}
+```
+
+```ts
+UPDATE workflow_operations
+SET state = 'data_error',
+    lease_owner = NULL,
+    lease_token = NULL,
+    lease_until = NULL,
+    terminal_failure_reason = ${error.message}
+WHERE operation_id = ${error.recordId}
+```
+
+The new decoders will perform equivalent relational-key, nested-identity, tag, ordering, and hash checks before any pointer can advance.
+
+#### Preserve distinct tagged output shapes
+
+Share the union boundary without forcing document and implementation values into one payload - `src/qrspi/contracts/common.ts:388-400`, `src/qrspi/contracts/implementation.ts:59-74`.
+
+```ts
+export const PreparedStageOutput = Schema.Union(
+  Schema.TaggedStruct("Document", {
+    text: BoundedMarkdown(MAX_DOCUMENT_RESULT_BYTES),
+  }),
+  Schema.TaggedStruct("ImplementationStep", {
+    value: JsonValueSchema,
+  }),
+)
+```
+
+The durable StageRevision Schema will preserve the same discriminated boundary while each variant decodes from its own relational payload record.
+
+#### File-backed upgrade and restart coverage
+
+Create a database at the prior migration frontier, close the layer, then construct a fresh current layer around the same file - `test/qrspi/workflow-start.test.ts:1938-2060`.
+
+```ts
+yield* runStoreMigrationsThrough0008
+yield* sql`INSERT INTO workflow_operations (...) VALUES (...)`
+
+await expect(start(filename, fake)).resolves.toMatchObject({
+  _tag: "Started",
+  generation: 1,
+})
+```
+
+Stage-runtime tests will use the current pre-runtime migration runner as their fixture boundary and will assert both unchanged legacy rows and recoverable new-format rows after reopening.

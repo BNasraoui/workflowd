@@ -1,0 +1,23 @@
+{
+  "contractVersion": 1,
+  "status": "confirmed",
+  "requestId": "workflowd-vs3-4-3-g1-design-r3-package-67779296",
+  "requestSha256": "15db067b1c18cd45b867ef8855cdca33185d152cc5a513ad8f60b4c892a3d207",
+  "packageSha256": "677792962f365f0b08a9e909fd7b01963e690ac81196863c2cd6745788cc45b6",
+  "gateResponseSha256": "cd8b46a4f6707f12a083e924b5a71599b35bdc73f2f4fb057284c733169694fa",
+  "authoritativeObservation": {
+    "mode": "local_content_addressed_compatibility",
+    "selectionComplete": true,
+    "productionProvenancePublication": false
+  },
+  "graphSnapshot": {
+    "identity": "local-qrispi:sha256:6550358d90c7f32355ad3943a14ba84fe41f422665da3ba1c65002fdc1073df2",
+    "repositoryIdentity": "local-qrispi-compatibility",
+    "sha256": "6550358d90c7f32355ad3943a14ba84fe41f422665da3ba1c65002fdc1073df2",
+    "commit": null,
+    "graphRoot": null,
+    "exactExportPath": ".humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-provenance-promotion-result-r3-graph-export.json",
+    "exactExportSha256": "6550358d90c7f32355ad3943a14ba84fe41f422665da3ba1c65002fdc1073df2",
+    "productionAuthority": false
+  }
+}

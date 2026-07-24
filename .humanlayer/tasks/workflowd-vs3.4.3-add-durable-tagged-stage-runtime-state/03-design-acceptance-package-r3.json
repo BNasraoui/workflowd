@@ -1,0 +1,25 @@
+{
+  "contractVersion": 1,
+  "status": "ready_for_local_gate",
+  "designRevision": 3,
+  "binding": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-acceptance-binding-r3.json",
+    "sha256": "34d7b9ea9325aa1a4b2f9c9276649e5773c2cb194dfdbad52c9d7648a26a28dd"
+  },
+  "design": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-discussion-stage-runtime-state.md",
+    "sha256": "17c3922e7b3143717cd7eda2ab6cece974b255f97a4e7b8ae80ba1fbe6a3ef2c"
+  },
+  "ownershipReport": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-boundary-review-r3.md",
+    "sha256": "2d9cd8e96b485ea3e899e42632af999c4ce31ded2612444d8a8eca141823a667"
+  },
+  "impactReport": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-impact-risk-review-r3.md",
+    "sha256": "4a9439c9d5a333df1537d5067c0c32bf38d982c21da5026fb399082f69ea901c"
+  },
+  "synthesis": {
+    "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-acceptance-synthesis-r3.md",
+    "sha256": "9c2680e6032d37bfebba8865bdddec6ef1d25ef2af5800ded669c05d85b1d9ac"
+  }
+}

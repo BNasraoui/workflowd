@@ -1,0 +1,220 @@
+{
+  "contractVersion": 1,
+  "artifactKind": "local_design_gate_response",
+  "packageSha256": "677792962f365f0b08a9e909fd7b01963e690ac81196863c2cd6745788cc45b6",
+  "bindingSha256": "34d7b9ea9325aa1a4b2f9c9276649e5773c2cb194dfdbad52c9d7648a26a28dd",
+  "responseMode": {
+    "kind": "local_recommended_answer",
+    "humanAuthorizedRecommendedAnswer": true,
+    "localAutoApprovalApplicable": true,
+    "localAutoApprovalApplied": true,
+    "reason": "The human explicitly authorized the local runner to apply the recommended answer. The exact bound synthesis outcome is Accept and recommends approval of unchanged Design revision 3 with every control, verification obligation, conditional residual-risk disposition, uncertainty, owner, and before-exposure condition retained."
+  },
+  "subject": {
+    "workflowId": "workflowd-workflowd-vs3.4.3:workflowd-vs3.4.3",
+    "generation": 1,
+    "designRevision": 3,
+    "package": {
+      "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-acceptance-package-r3.json",
+      "sha256": "677792962f365f0b08a9e909fd7b01963e690ac81196863c2cd6745788cc45b6",
+      "localBytesVerified": true
+    },
+    "binding": {
+      "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-acceptance-binding-r3.json",
+      "sha256": "34d7b9ea9325aa1a4b2f9c9276649e5773c2cb194dfdbad52c9d7648a26a28dd",
+      "localBytesVerified": true
+    },
+    "synthesis": {
+      "path": "/home/ben/Documents/repos/workflowd-workflowd-vs3.4.3/.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-acceptance-synthesis-r3.md",
+      "sha256": "9c2680e6032d37bfebba8865bdddec6ef1d25ef2af5800ded669c05d85b1d9ac",
+      "outcome": "Accept",
+      "localBytesVerified": true
+    }
+  },
+  "decision": "approve",
+  "decisionRationale": "Apply the human-authorized recommended local answer: approve unchanged Design revision 3 for this compatibility workflow. The boundary verdict is ScopeClean, the impact verdict is ImpactReady, and synthesis requests neither a Design revision nor a human risk decision. Approval retains every listed obligation and conditional risk disposition and does not assert that any control or verification has passed.",
+  "gateValidity": {
+    "localGateDecisionRecorded": true,
+    "durableAcceptanceGateEstablished": false,
+    "expectedGateRevision": null,
+    "authenticatedHumanIdentity": null,
+    "authenticationEstablished": false,
+    "localDesignApproved": true,
+    "productionDesignAccepted": false,
+    "promotionAuthorized": false,
+    "provenancePromotionObserved": false,
+    "graphSnapshotPresent": false,
+    "structureAuthorized": false
+  },
+  "requiredChanges": [],
+  "controlDecisions": [
+    {
+      "id": "C1",
+      "decision": "retain_required",
+      "risks": ["R1", "R4"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Implementation",
+      "obligation": "Enforce strict SQL shape, keys, states, and currentness plus strict Schema tag, identity, ordering, and canonical-hash checks before any runtime record is used.",
+      "waived": false
+    },
+    {
+      "id": "C2",
+      "decision": "retain_required",
+      "risks": ["R2"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Implementation",
+      "obligation": "Put every applicable Generation, format, run, revision, pointer, source, operation revision, lease, and observation predicate in the same transaction as the state change.",
+      "waived": false
+    },
+    {
+      "id": "C3",
+      "decision": "retain_required",
+      "risks": ["R3"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "BeforeExposure",
+      "obligation": "Permit executable runtime installation only through the exact guarded stage_snapshots_v1 bootstrap; reject placeholder authority or effect facts and caller identity mismatch.",
+      "waived": false
+    },
+    {
+      "id": "C4",
+      "decision": "retain_required",
+      "risks": ["R1", "R4"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Runtime",
+      "obligation": "In one guarded transaction, write or recover one bounded diagnostic, abandon the corrupt nonterminal revision, terminate its run as data_error, clear pointers and authority, and release no successor or replacement.",
+      "waived": false
+    },
+    {
+      "id": "C5",
+      "decision": "retain_required",
+      "risks": ["R4"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Runtime",
+      "obligation": "Preserve intent, observation, commits, and workspace custody for uncertain effects while superseding only safe children and fencing further producer mutation.",
+      "waived": false
+    },
+    {
+      "id": "C6",
+      "decision": "retain_required",
+      "risks": ["R5"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "BeforeExposure",
+      "obligation": "Classify legacy, stage_snapshots_v1, stage_runtime_v1, and partial or incompatible state explicitly and return exact local diagnostics at read, claim, and preflight boundaries.",
+      "waived": false
+    },
+    {
+      "id": "C7",
+      "decision": "retain_required",
+      "risks": ["R1", "R2", "R3", "R4"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Runtime",
+      "obligation": "Return bounded typed data, stale, and incompatible diagnostics at the failing boundary and persist the revision diagnostic when readable corrupt identity exists.",
+      "waived": false
+    },
+    {
+      "id": "C8",
+      "decision": "retain_required",
+      "risks": ["R2", "R3"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Recovery",
+      "obligation": "Reload exact current state after stale, crash, or lost response; retry only by exact identity and return the existing complete bootstrap when it matches.",
+      "waived": false
+    },
+    {
+      "id": "C9",
+      "decision": "retain_required",
+      "risks": ["R2", "R3"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Implementation",
+      "obligation": "Roll back the full transaction when any guarded write affects zero rows or any child or parent write fails.",
+      "waived": false
+    },
+    {
+      "id": "C10",
+      "decision": "retain_required",
+      "risks": ["R5"],
+      "owner": "workflowd-vs3.4.11",
+      "phase": "BeforeExposure",
+      "obligation": "Before ordinary runtime exposure, classify and exactly supersede only bound dormant legacy work, verify the result, then permit ordinary authenticated WorkflowStart to create a successor.",
+      "waived": false
+    },
+    {
+      "id": "C11",
+      "decision": "retain_required",
+      "risks": ["R5"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "BeforeExposure",
+      "obligation": "Require stage_runtime_v1 and exact relational revision or step ownership in every stage claimer so unsupported and unowned work remains nonclaimable.",
+      "waived": false
+    },
+    {
+      "id": "C12",
+      "decision": "retain_required",
+      "risks": ["R5"],
+      "owner": "workflowd-vs3.4.3",
+      "phase": "Implementation",
+      "obligation": "Use append-only migrations, preserve shipped legacy Generations and operations byte-for-byte, and infer no run, revision, session, publication, checkpoint, or accepted pointer.",
+      "waived": false
+    }
+  ],
+  "residualRiskDecisions": [
+    {
+      "id": "R1",
+      "name": "malformed authority",
+      "decision": "not_accepted_as_satisfied",
+      "disposition": "NonMaterial only after C1, C4, and C7 pass V1 and V4. No matrix score is assigned because implementation-defect frequency is unknown. Corrupt authority must be rejected or contained before effect, and no trusted content may be reconstructed.",
+      "conditionsOutstanding": true,
+      "waived": false
+    },
+    {
+      "id": "R2",
+      "name": "stale advancement",
+      "decision": "not_accepted_as_satisfied",
+      "disposition": "NonMaterial only after C2 and C7-C9 pass V2 with all-dimension compare-and-set, rollback, and reload evidence. No matrix score is assigned because implementation-defect frequency is unknown.",
+      "conditionsOutstanding": true,
+      "waived": false
+    },
+    {
+      "id": "R3",
+      "name": "unsafe bootstrap",
+      "decision": "not_accepted_as_satisfied",
+      "disposition": "NonMaterial only after C3 and C7-C9 pass V3, unsupported placeholders remain nonclaimable, and complete pre-bootstrap and post-bootstrap recovery is proven. No matrix score is assigned.",
+      "conditionsOutstanding": true,
+      "waived": false
+    },
+    {
+      "id": "R4",
+      "name": "corrupt aggregate with uncertain effects",
+      "decision": "not_accepted_as_satisfied",
+      "disposition": "NonMaterial for D3 containment only after C1, C4, C5, and C7 pass V4 and prove a valid terminal stall with retained evidence and no successor authority. Future business recovery is not accepted or assumed; uncertainty about its timing remains high.",
+      "conditionsOutstanding": true,
+      "waived": false
+    },
+    {
+      "id": "R5",
+      "name": "legacy or partial-format exposure",
+      "decision": "not_accepted_as_satisfied",
+      "disposition": "NonMaterial only under C6 and C10-C12, enforced format containment, and the downstream before-exposure sequence proven by V5 and V6. Likelihood remains unknown and uncertainty remains medium until both current-ticket and downstream evidence pass.",
+      "conditionsOutstanding": true,
+      "waived": false
+    }
+  ],
+  "humanRiskDecision": {
+    "requestedByImpactReport": false,
+    "decisionMade": false,
+    "reason": "The impact report requested no human risk decision. This response preserves every conditional disposition and does not waive controls, verification, uncertainty, ownership, or before-exposure conditions."
+  },
+  "contractScenarioDispositions": {
+    "revision3VersusRevision2": "Only revision 3 inputs were considered. Revision 2 reports, decisions, responses, approvals, promotions, and snapshots remain stale and unusable for revision 3.",
+    "uncertainPublicationRecovery": "Local approval does not authorize or establish promotion. Any absent, partial, conflicting, or uncertain publication keeps Structure blocked; workflowd-vs3.9 must observe authoritative state before retrying the same deterministic identities.",
+    "evidenceOnlyGraphExtension": "Later evidence links would not stale Structure if accepted semantic identities, versions, meaning, and authority remained unchanged, but this local response asserts no production-accepted Design, Structure authority, or graph snapshot.",
+    "approvedSemanticSupersession": "Any approved change to an in-scope requirement, rule, decision, control, residual-risk disposition, or ownership edge must identify affected dependency closure and require affected Structure and Plan outputs to be reevaluated."
+  },
+  "authorityLimitations": [
+    "This response discloses local auto-approval under the human's authorization; it is not an authenticated durable production GateResponse.",
+    "It approves unchanged Design revision 3 only for the local compatibility workflow and does not establish production Design acceptance or durable gate authority.",
+    "It does not claim Git publication and does not create promotion authority or a ProvenancePromotionRequest.",
+    "It does not establish authoritative Provenance observation or a graph snapshot.",
+    "It does not release or authorize Structure."
+  ]
+}
