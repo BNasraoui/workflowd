@@ -104,6 +104,16 @@ export type Name = string
     ).toMatchObject({ passed: true, missingFiles: [] })
   })
 
+  test("uses available coverage even when a file was marked non-executable", () => {
+    expect(
+      evaluateChangedLineCoverage(
+        new Map([["src/model.ts", new Set([1])]]),
+        new Map([["src/model.ts", new Map([[1, 0]])]]),
+        new Set(["src/model.ts"]),
+      ),
+    ).toMatchObject({ passed: false, total: 1, uncovered: ["src/model.ts:1"] })
+  })
+
   test("uses separate base and head endpoints rather than merge-base syntax", () => {
     const base = "a".repeat(40)
     const head = "b".repeat(40)
