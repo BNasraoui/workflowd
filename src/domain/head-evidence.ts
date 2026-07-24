@@ -193,34 +193,53 @@ function mergeabilityFindings(mergeability: MergeabilityEvidence): Array<ReviewF
 }
 
 export function sanitizeUntrustedText(value: string, maxLength: number): string {
-  const sanitized = value
-    // CI logs are untrusted terminal output, so these expressions intentionally remove controls.
-    // eslint-disable-next-line no-control-regex
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-    .replace(
-      /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi,
-      "[REDACTED PRIVATE KEY]",
-    )
-    .replace(/\bauthorization\s*:[^\r\n]*/gi, "Authorization: [REDACTED]")
-    .replace(
-      /\b[-A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[-A-Z0-9_]*\s*[=:][^\r\n]*/gi,
-      (assignment) => `${assignment.slice(0, assignment.search(/[=:]/) + 1)}[REDACTED]`,
-    )
-    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, redactUrlCredential)
+  const sanitized = redactUrlCredentials(
+    value
+      // CI logs are untrusted terminal output, so these expressions intentionally remove controls.
+      // eslint-disable-next-line no-control-regex
+      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+      .replace(
+        /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi,
+        "[REDACTED PRIVATE KEY]",
+      )
+      .replace(/\bauthorization\s*:[^\r\n]*/gi, "Authorization: [REDACTED]")
+      .replace(
+        /\b[-A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[-A-Z0-9_]*\s*[=:][^\r\n]*/gi,
+        (assignment) => `${assignment.slice(0, assignment.search(/[=:]/) + 1)}[REDACTED]`,
+      ),
+  )
   if (sanitized.length <= maxLength) return sanitized
   const marker = "\n[truncated by workflowd]"
   return `${sanitized.slice(0, Math.max(0, maxLength - marker.length))}${marker}`
 }
 
+function redactUrlCredentials(value: string): string {
+  let result = ""
+  let tokenStart = 0
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index < value.length && !isWhitespace(value[index]!)) continue
+    result += redactUrlCredential(value.slice(tokenStart, index))
+    if (index < value.length) result += value[index]
+    tokenStart = index + 1
+  }
+  return result
+}
+
 function redactUrlCredential(value: string): string {
-  const authorityStart = value.indexOf("://") + 3
+  const schemeEnd = value.indexOf("://")
+  if (schemeEnd === -1) return value
+  const authorityStart = schemeEnd + 3
   const authorityEnd = firstIndexOf(value, authorityStart, ["/", "?", "#"])
   const at = value.lastIndexOf("@", authorityEnd - 1)
   const separator = value.indexOf(":", authorityStart)
   if (at < authorityStart || separator < authorityStart || separator >= at) return value
   return `${value.slice(0, separator + 1)}[REDACTED]${value.slice(at)}`
+}
+
+function isWhitespace(character: string): boolean {
+  return character === " " || character === "\t" || character === "\n" || character === "\r"
 }
 
 function firstIndexOf(value: string, start: number, delimiters: ReadonlyArray<string>): number {
