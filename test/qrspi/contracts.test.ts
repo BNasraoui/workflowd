@@ -25,6 +25,7 @@ import {
   PlanResult,
   QuestionsRequest,
   QuestionsResult,
+  type RepositoryTarget,
   ResearchRequest,
   ResearchResult,
   StructureAuthority,
@@ -304,6 +305,7 @@ function replayAuthorityFor(
   exactSources: ExactStageScope & {
     readonly stageKey: string
     readonly stageDefinitionSha256: string
+    readonly target: RepositoryTarget
     readonly sources: ReadonlyArray<{
       readonly acceptedPointer: ReturnType<typeof acceptedPointerFor>
       readonly artifact: typeof researchArtifact
@@ -313,6 +315,7 @@ function replayAuthorityFor(
 ) {
   const catalog = new TrustedStageCatalog(builtInStageContracts)
   return {
+    target: exactSources.target,
     scope: {
       workflowId: exactSources.workflowId,
       generation: exactSources.generation,

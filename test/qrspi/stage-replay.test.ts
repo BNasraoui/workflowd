@@ -20,6 +20,7 @@ import {
   type AcceptedPredecessorPointer,
   type ArtifactReference,
   type ExactStageScope,
+  type RepositoryTarget,
 } from "../../src/qrspi/contracts"
 import { TrustedStageCatalog } from "../../src/qrspi/stage-catalog"
 import { canonicalSha256 } from "../../src/qrspi/domain"
@@ -74,6 +75,7 @@ function replayAuthorityFor(
   sources: ExactStageScope & {
     readonly stageKey: string
     readonly stageDefinitionSha256: string
+    readonly target: RepositoryTarget
     readonly sources: ReadonlyArray<{
       readonly acceptedPointer: AcceptedPredecessorPointer
       readonly artifact: ArtifactReference
@@ -83,6 +85,7 @@ function replayAuthorityFor(
 ) {
   const catalog = new TrustedStageCatalog(builtInStageContracts)
   return {
+    target: sources.target,
     scope: {
       workflowId: sources.workflowId,
       generation: sources.generation,
@@ -835,6 +838,32 @@ describe("complete built-in contract replay", () => {
     const contract = builtInStageContracts[0]
     const currentScope = sourcesFor("questions")
     const substitutedScope = { ...currentScope, ...replacement }
+    const input = encodeStageProduceInput(substitutedScope, contract.ref, {
+      _tag: "QuestionsRequest",
+      sources: substitutedScope,
+    })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({
+            input,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(contract, currentScope),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+  })
+
+  test("rejects a rehashed substituted repository target", async () => {
+    const contract = builtInStageContracts[0]
+    const currentScope = sourcesFor("questions")
+    const substitutedScope = {
+      ...currentScope,
+      target: { ...currentScope.target, headRef: "workflow/substituted" },
+    }
     const input = encodeStageProduceInput(substitutedScope, contract.ref, {
       _tag: "QuestionsRequest",
       sources: substitutedScope,

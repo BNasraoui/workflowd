@@ -207,6 +207,7 @@ describe("TrustedStageCatalog", () => {
       ticketRevisionSha256,
     })
     const replayAuthority = {
+      target: exactSources.target,
       scope: {
         workflowId: exactSources.workflowId,
         generation: exactSources.generation,

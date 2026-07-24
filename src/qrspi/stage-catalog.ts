@@ -29,6 +29,7 @@ import {
   ExactStageScope,
   ExactStageSources,
   PreparedStageOutput,
+  RepositoryTarget,
   StageExecutionContext,
   StageProduceInput,
   StageKey,
@@ -44,6 +45,7 @@ const ReplaySnapshotAuthority = Schema.Struct({
 })
 
 const StageReplayAuthority = Schema.Struct({
+  target: RepositoryTarget,
   scope: ExactStageScope,
   stageSnapshot: Schema.Struct({
     ...ReplaySnapshotAuthority.fields,
@@ -409,6 +411,7 @@ export class TrustedStageCatalog {
           if (
             canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
             canonicalSha256(replayAuthority.scope) !== canonicalSha256(durableInput.scope) ||
+            !matchesRepositoryTarget(replayAuthority.target, sources.target) ||
             !matchesSelectedSnapshot(replayAuthority, sources, registration.descriptor) ||
             !matchesPredecessorAuthority(replayAuthority, sources, this) ||
             sources.ticketRevision.workflowId !== durableInput.scope.workflowId ||
@@ -562,6 +565,15 @@ function scopeOf(sources: ExactStageSources) {
     workflowDefinitionSha256: sources.workflowDefinitionSha256,
     stageDefinitionSha256: sources.stageDefinitionSha256,
   }
+}
+
+function matchesRepositoryTarget(left: RepositoryTarget, right: RepositoryTarget): boolean {
+  return (
+    left.repository.providerInstanceId === right.repository.providerInstanceId &&
+    left.repository.repositoryId === right.repository.repositoryId &&
+    left.headRef === right.headRef &&
+    left.expectedParentSha === right.expectedParentSha
+  )
 }
 
 function matchesSelectedSnapshot(
