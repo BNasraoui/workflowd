@@ -34,6 +34,22 @@ describe("changed-line coverage", () => {
     expect(changed.get("src/é.ts")).toEqual(new Set([1]))
   })
 
+  test("does not treat added increment statements as destination headers", () => {
+    const changed = parseChangedLines(`diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1 +1,2 @@
+ const counter = 0
++++ counter
+@@ -8 +9 @@
+-old
++replacement
+`)
+
+    expect(changed.get("src/a.ts")).toEqual(new Set([1, 2, 9]))
+    expect(changed.has("counter")).toBe(false)
+  })
+
   test("parses and combines Bun LCOV line hits", () => {
     const coverage = parseLcov(`TN:
 SF:src/a.ts

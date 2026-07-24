@@ -28,13 +28,20 @@ export function buildExactDiffArguments(baseSha: string, headSha: string): Reado
 export function parseChangedLines(diff: string): Map<string, Set<number>> {
   const changed = new Map<string, Set<number>>()
   let path: string | undefined
+  let inFileHeader = false
   for (const line of diff.replaceAll("\r\n", "\n").split("\n")) {
-    if (line.startsWith("+++ ")) {
+    if (line.startsWith("diff --git ")) {
+      inFileHeader = true
+      path = undefined
+      continue
+    }
+    if (inFileHeader && line.startsWith("+++ ")) {
       const value = decodeGitPath(line.slice(4))
       path = value === "/dev/null" ? undefined : value.replace(/^b\//, "")
       continue
     }
     if (!line.startsWith("@@ ")) continue
+    inFileHeader = false
     const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
     if (hunk === null || path === undefined) throw new Error(`Malformed diff hunk: ${line}`)
     const start = Number(hunk[1])
