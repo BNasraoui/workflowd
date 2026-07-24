@@ -112,3 +112,34 @@ describe("durable Fix Work currentness", () => {
     ).toBe(false)
   })
 })
+
+test("uses the same exact-target lease currentness gate while collecting review evidence", async () => {
+  const current = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "review-evidence-currentness",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        samplePullRequestEvent,
+      )
+      const review = yield* store.claimNextJob({
+        workerId: "evidence-reviewer",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 120_000,
+      })
+      if (review === null || review._tag !== "ReviewWork") throw new Error("expected review")
+      return yield* store.isJobCurrent(
+        review.id,
+        "evidence-reviewer",
+        new Date("2026-07-20T12:01:30.000Z"),
+      )
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(current).toBe(true)
+})

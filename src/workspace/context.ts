@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect } from "effect"
 import type { FixWork, ReviewWork, Work } from "../domain/work"
+import type { HeadEvidence } from "../domain/head-evidence"
 import type { JsonSerializable } from "../json"
 import { runWorkspaceCommand, runWorkspaceCommandBytes } from "./command"
 import { WorkspaceError } from "./errors"
@@ -151,7 +152,7 @@ export class ReviewContextFiles {
     )
   }
 
-  prepareReview(work: ReviewWork, resolved: ResolvedWorktree) {
+  prepareReview(work: ReviewWork, resolved: ResolvedWorktree, evidence?: HeadEvidence) {
     return Effect.gen(this, function* () {
       yield* this.#cleanupExisting(resolved.directory)
       yield* this.#requireClean(resolved.directory, "check worktree status")
@@ -168,7 +169,7 @@ export class ReviewContextFiles {
           }),
         )
       }
-      yield* this.#write(work, resolved.directory)
+      yield* this.#write(work, resolved.directory, evidence)
       return {
         directory: resolved.directory,
         ...(resolved.managed ? { directoryCleanupScheduled: true as const } : {}),
@@ -176,7 +177,7 @@ export class ReviewContextFiles {
     })
   }
 
-  prepareFix(work: FixWork, resolved: ResolvedWorktree) {
+  prepareFix(work: FixWork, resolved: ResolvedWorktree, evidence?: HeadEvidence) {
     return Effect.gen(this, function* () {
       yield* this.#cleanupExisting(resolved.directory)
       if (this.#gitSigningKey !== undefined) {
@@ -194,7 +195,7 @@ export class ReviewContextFiles {
         )
       }
       const recovery = yield* this.#fixes.recover(work, resolved.directory, head)
-      yield* this.#write(work, resolved.directory)
+      yield* this.#write(work, resolved.directory, evidence)
       return { directory: resolved.directory, recovery } satisfies Omit<
         FixWorkspace,
         "markCompleted"
@@ -281,7 +282,7 @@ export class ReviewContextFiles {
     return runGit("resolve review head", directory, "rev-parse", "HEAD")
   }
 
-  #write(work: Work, directory: string) {
+  #write(work: Work, directory: string, evidence?: HeadEvidence) {
     return Effect.gen(this, function* () {
       yield* runGit(
         "verify base commit",
@@ -292,7 +293,7 @@ export class ReviewContextFiles {
       )
       const contextDirectory = join(directory, ".workflowd")
       const temporaryContext = join(directory, `.workflowd-${randomUUID()}`)
-      yield* this.#populate(work, directory, temporaryContext, contextDirectory).pipe(
+      yield* this.#populate(work, evidence, directory, temporaryContext, contextDirectory).pipe(
         Effect.ensuring(
           filesystemTransition("remove temporary review context", () =>
             rm(temporaryContext, { recursive: true, force: true }),
@@ -302,7 +303,13 @@ export class ReviewContextFiles {
     })
   }
 
-  #populate(work: Work, directory: string, temporaryContext: string, contextDirectory: string) {
+  #populate(
+    work: Work,
+    evidence: HeadEvidence | undefined,
+    directory: string,
+    temporaryContext: string,
+    contextDirectory: string,
+  ) {
     return Effect.gen(this, function* () {
       yield* filesystemEffect("create review context directory", () => mkdir(temporaryContext))
       yield* filesystemEffect("write review context owner", (signal) =>
@@ -344,6 +351,14 @@ export class ReviewContextFiles {
         headSha: work.target.headSha,
         generation: work.generation,
       })
+      if (evidence !== undefined) {
+        yield* this.#writeJson(
+          "write exact-head evidence",
+          temporaryContext,
+          "evidence.json",
+          evidence,
+        )
+      }
       if (work._tag === "FixWork") {
         yield* this.#writeJson(
           "write review findings",

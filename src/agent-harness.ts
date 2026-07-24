@@ -12,8 +12,6 @@ import type { OpenCodeAdapter, OpenCodeModel } from "./opencode/adapter"
 import { StructuredSession, StructuredSessionError } from "./opencode/structured-session"
 
 export {
-  AgentLaunchIntentEnvelope,
-  AgentOutputEnvelope,
   MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
   MAX_STAGE_REQUEST_BYTES,

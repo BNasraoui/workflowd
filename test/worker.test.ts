@@ -11,7 +11,7 @@ import {
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
 import { ReviewResult } from "../src/domain/review-result"
-import { GitHub, type GitHubPort } from "../src/github"
+import { GitHub, GitHubClientError, type GitHubPort } from "../src/github"
 import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
 import type { OpenCodeAdapter } from "../src/opencode/adapter"
 import { SessionAccessResolver } from "../src/session-access"
@@ -43,6 +43,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   recordAgentSessionCleanupFailure: () => Effect.succeed("pending"),
   shouldCancelJob: () => Effect.succeed(false),
   rescheduleJob: () => Effect.die("unused"),
+  supersedeJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
   completeFixJob: () => Effect.die("unused"),
   isTrustedBranchPublication: () => Effect.succeed(null),
@@ -54,7 +55,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   recordAgentSessionReference: () => Effect.succeed("recorded"),
   claimNextPublication: () => Effect.succeed(null),
   isPublicationCurrent: () => Effect.succeed(false),
-  isJobCurrent: () => Effect.succeed(false),
+  isJobCurrent: () => Effect.succeed(true),
   completePublication: () => Effect.die("unused"),
   reschedulePublication: () => Effect.die("unused"),
   ingestCommand: () => Effect.die("unused"),
@@ -82,6 +83,19 @@ const makeWorkerLayer = (options: {
     Layer.succeed(GitHub, {
       publishReview: () => Effect.die("unused"),
       fetchPullRequestSnapshot: () => Effect.die("unused"),
+      collectHeadEvidence: ({ target }) =>
+        Effect.succeed({
+          headSha: target.headSha,
+          ci: { state: "available", checks: [] },
+          sonar: {
+            state: "pass",
+            headSha: target.headSha,
+            unresolvedIssueCount: 0,
+            duplicatedNewLinesPercent: 0,
+            findings: [],
+          },
+          mergeability: { state: "mergeable" },
+        }),
       ...options.github,
     }),
     Layer.succeed(Automation, {
@@ -674,6 +688,294 @@ describe("Review Work processing", () => {
     ])
   })
 
+  test("deterministically overrides passing reviewer prose with exact-head failed CI evidence", async () => {
+    const job = makeReviewWork()
+    let completedReview: typeof ReviewResult.Type | undefined
+    let workspaceEvidence: unknown
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeAgentReviewJob: (input) =>
+                Effect.sync(() => {
+                  completedReview = input.review
+                  return "completed" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed({
+                  headSha: job.target.headSha,
+                  ci: {
+                    state: "available" as const,
+                    checks: [{ name: "Tests", state: "failure" as const, conclusion: "failure" }],
+                  },
+                  sonar: {
+                    state: "pass" as const,
+                    headSha: job.target.headSha,
+                    unresolvedIssueCount: 0,
+                    duplicatedNewLinesPercent: 0,
+                    findings: [],
+                  },
+                  mergeability: { state: "mergeable" as const },
+                }),
+            },
+            workspace: {
+              prepareReview: (_work, evidence) =>
+                Effect.sync(() => {
+                  workspaceEvidence = evidence
+                  return { directory: "/tmp/review" }
+                }),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({ verdict: "pass", summary: "Looks good.", findings: [] }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(workspaceEvidence).toBeDefined()
+    expect(completedReview).toMatchObject({
+      verdict: "changes_requested",
+      findings: [{ title: "Required check did not succeed: Tests" }],
+    })
+  })
+
+  test("recollects evidence after review before gating or enqueueing Fix Work", async () => {
+    const job = makeReviewWork({ author: "example-owner" })
+    let collections = 0
+    let completedReview: typeof ReviewResult.Type | undefined
+    let autoFix = true
+    const exactHeadEvidence = (state: "failure" | "success") => ({
+      headSha: job.target.headSha,
+      ci: {
+        state: "available" as const,
+        checks: [
+          { name: "Required checks", state },
+          { name: "SonarCloud Code Analysis", state: "success" as const },
+          { name: "CodeQL (JavaScript/TypeScript)", state: "success" as const },
+        ],
+      },
+      sonar: {
+        state: "pass" as const,
+        headSha: job.target.headSha,
+        unresolvedIssueCount: 0,
+        duplicatedNewLinesPercent: 0,
+        findings: [],
+      },
+      mergeability: { state: "mergeable" as const },
+    })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["example-owner"],
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeAgentReviewJob: (input) =>
+                Effect.sync(() => {
+                  completedReview = input.review
+                  autoFix = input.autoFix
+                  return "completed" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed(exactHeadEvidence(++collections === 1 ? "failure" : "success")),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({ verdict: "pass", summary: "Looks good.", findings: [] }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(collections).toBe(2)
+    expect(completedReview?.verdict).toBe("pass")
+    expect(autoFix).toBe(false)
+  })
+
+  test("completes a finished review when recollected evidence becomes pending", async () => {
+    const job = makeReviewWork()
+    let collections = 0
+    let launches = 0
+    let completedReview: typeof ReviewResult.Type | undefined
+    let rescheduled = false
+    const readyEvidence = {
+      headSha: job.target.headSha,
+      ci: { state: "available" as const, checks: [] },
+      sonar: {
+        state: "pass" as const,
+        headSha: job.target.headSha,
+        unresolvedIssueCount: 0,
+        duplicatedNewLinesPercent: 0,
+        findings: [],
+      },
+      mergeability: { state: "mergeable" as const },
+    }
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeAgentReviewJob: (input) =>
+                Effect.sync(() => {
+                  completedReview = input.review
+                  return "completed" as const
+                }),
+              rescheduleJob: () =>
+                Effect.sync(() => {
+                  rescheduled = true
+                  return "retry" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed(
+                  ++collections === 1
+                    ? readyEvidence
+                    : {
+                        ...readyEvidence,
+                        ci: {
+                          state: "available" as const,
+                          checks: [{ name: "Required checks", state: "pending" as const }],
+                        },
+                      },
+                ),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () => {
+                launches += 1
+                return Effect.succeed({
+                  verdict: "changes_requested",
+                  summary: "Agent found a defect.",
+                  findings: [{ severity: "high", title: "Defect", body: "Fix it." }],
+                })
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(collections).toBe(2)
+    expect(launches).toBe(1)
+    expect(rescheduled).toBe(false)
+    expect(completedReview?.findings[0]?.title).toBe("Defect")
+  })
+
+  test("retries pending exact-head evidence without launching the reviewer", async () => {
+    const job = makeReviewWork()
+    let prepared = false
+    let rescheduled = false
+    let maxAttempts = 0
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              rescheduleJob: (input) =>
+                Effect.sync(() => {
+                  rescheduled = true
+                  maxAttempts = input.maxAttempts
+                  return "retry" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed({
+                  headSha: job.target.headSha,
+                  ci: {
+                    state: "available" as const,
+                    checks: [{ name: "Tests", state: "pending" as const }],
+                  },
+                  sonar: { state: "pending" as const },
+                  mergeability: { state: "pending" as const },
+                }),
+            },
+            workspace: {
+              prepareReview: () => {
+                prepared = true
+                return Effect.die("must not prepare pending work")
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(rescheduled).toBe(true)
+    expect(prepared).toBe(false)
+    expect(maxAttempts).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
+  test("durably supersedes review work when evidence collection detects a stale target", async () => {
+    const job = makeReviewWork()
+    let prepared = false
+    let durableState = "leased"
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              supersedeJob: () =>
+                Effect.sync(() => {
+                  durableState = "superseded"
+                  return "superseded" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed({
+                  headSha: job.target.headSha,
+                  ci: { state: "stale" as const, reason: "Target changed.", checks: [] },
+                  sonar: { state: "stale" as const, reason: "Target changed." },
+                  mergeability: { state: "unavailable" as const, reason: "Target changed." },
+                }),
+            },
+            workspace: {
+              prepareReview: () => {
+                prepared = true
+                return Effect.die("must not prepare stale work")
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("superseded")
+    expect(durableState).toBe("superseded")
+    expect(prepared).toBe(false)
+  })
+
   test("queues a fixer after findings on an agent-owned PR", async () => {
     const enqueued: Array<number> = []
     const job = makeReviewWork({ author: "example-owner" })
@@ -963,7 +1265,9 @@ describe("Fix Work processing", () => {
       ),
     )
 
-    expect(checks).toEqual(["14:fixer-currentness:2026-07-19T12:00:00.000Z"])
+    expect(checks).toHaveLength(3)
+    expect(checks.every((check) => check.startsWith("14:fixer-currentness:"))).toBe(true)
+    expect(checks.at(-1)).toBe("14:fixer-currentness:2026-07-19T12:00:00.000Z")
   })
 
   test("recovers an already-pushed job without invoking the fixer again", async () => {
@@ -1138,6 +1442,44 @@ describe("runJobIteration", () => {
 })
 
 describe("runPublicationIteration", () => {
+  test("keeps pending analyzer publication evidence retryable without exhausting attempts", async () => {
+    let maxAttempts = 0
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-pending",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextPublication: () => Effect.succeed(makePublication()),
+              reschedulePublication: (input) =>
+                Effect.sync(() => {
+                  maxAttempts = input.maxAttempts
+                  return "retry" as const
+                }),
+            },
+            github: {
+              publishReview: () =>
+                Effect.fail(
+                  new GitHubClientError({
+                    operation: "wait for exact-head evidence before publication",
+                    cause: new Error("Sonar pending"),
+                  }),
+                ),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(maxAttempts).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
   test("passes GitHub a durable currentness guard for the claimed Publication", async () => {
     const calls: Array<string> = []
     const publication = makePublication()
@@ -1384,6 +1726,7 @@ describe("runReconciliationIteration", () => {
             makeStoreLayer(),
             Layer.succeed(GitHub, {
               publishReview: () => Effect.die("must not publish"),
+              collectHeadEvidence: () => Effect.die("must not collect evidence"),
               fetchPullRequestSnapshot: () =>
                 Effect.succeed({
                   _tag: "AuthoritativePullRequestSnapshot" as const,
@@ -1480,6 +1823,7 @@ describe("runReconciliationIteration", () => {
             makeStoreLayer(),
             Layer.succeed(GitHub, {
               publishReview: () => Effect.die("must not publish"),
+              collectHeadEvidence: () => Effect.die("must not collect evidence"),
               fetchPullRequestSnapshot: () =>
                 Effect.gen(function* () {
                   fetches += 1

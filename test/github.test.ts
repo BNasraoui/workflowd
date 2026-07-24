@@ -9,6 +9,7 @@ import type {
   GitHubIssueComment,
   GitHubPullRequestData,
 } from "../src/github/adapter"
+import type { SonarRequest } from "../src/github/head-evidence"
 
 const headSha = "a".repeat(40)
 const alwaysCurrent = () => Effect.succeed(true)
@@ -25,6 +26,33 @@ const sessionReference: SessionReference = {
   leaseToken: "lease-token-123456",
   createdAt: "2026-07-21T12:00:00.000Z",
   state: "succeeded",
+}
+
+const passingSonar: SonarRequest = async (path) => {
+  if (path.startsWith("/api/project_pull_requests/list")) {
+    return { status: 200, body: { pullRequests: [{ key: "7", commit: { sha: headSha } }] } }
+  }
+  if (path.startsWith("/api/issues/search")) {
+    return { status: 200, body: { paging: { total: 0 }, issues: [] } }
+  }
+  return {
+    status: 200,
+    body: {
+      component: {
+        measures: [{ metric: "new_duplicated_lines_density", periods: [{ value: "0" }] }],
+      },
+    },
+  }
+}
+
+class TestGitHubAppAdapter extends GitHubAppAdapter {
+  constructor(
+    appId: number,
+    getClient: ConstructorParameters<typeof GitHubAppAdapter>[1],
+    sessionAccess?: ConstructorParameters<typeof GitHubAppAdapter>[2],
+  ) {
+    super(appId, getClient, sessionAccess, passingSonar)
+  }
 }
 
 type RecordingInputs = {
@@ -90,6 +118,8 @@ function makePullRequestData(): GitHubPullRequestData {
       state: "open",
       updatedAt: "2026-07-19T10:00:00Z",
     },
+    mergeable: true,
+    mergeableState: "clean",
   }
 }
 
@@ -196,7 +226,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       sessionReference,
       sessionExecutionState: "succeeded",
     })
-    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient, {
       resolve: () =>
         Effect.succeed({
           _tag: "Available" as const,
@@ -222,7 +252,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       sessionReference,
       sessionExecutionState: "succeeded",
     })
-    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient, {
       resolve: () =>
         Effect.succeed({
           _tag: "Unavailable" as const,
@@ -251,7 +281,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       sessionExecutionState: "succeeded",
     })
     let resolved = false
-    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient, {
       resolve: () => {
         resolved = true
         return Effect.die("must not resolve a foreign workflow")
@@ -283,7 +313,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       sessionReference,
       sessionExecutionState: "succeeded",
     })
-    const client = new GitHubAppAdapter(12_345, recording.getClient, {
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient, {
       resolve: () =>
         Effect.succeed({
           _tag: "Available" as const,
@@ -302,7 +332,7 @@ describe("GitHubAppAdapter.publishReview", () => {
   test("creates the sticky comment and per-SHA Check Run with valid abortable payloads", async () => {
     const recording = makeRecordingClient()
     const currentnessTimes: Array<Date> = []
-    const client: GitHubPort = new GitHubAppAdapter(12_345, recording.getClient)
+    const client: GitHubPort = new TestGitHubAppAdapter(12_345, recording.getClient)
     const publication: PublicationType = {
       ...makePublication(),
       review: {
@@ -334,14 +364,19 @@ describe("GitHubAppAdapter.publishReview", () => {
     expect(currentnessTimes.every((now) => now instanceof Date)).toBe(true)
     expect(recording.calls.map((call) => call.method)).toEqual([
       "pulls.get",
+      "pulls.get",
+      "checks.listForRef",
+      "pulls.get",
       "issues.listComments",
       "issues.createComment",
       "checks.listForRef",
       "checks.create",
     ])
-    expect(callInput(recording.calls, "checks.listForRef")).toMatchObject({
-      app_id: 12_345,
-    })
+    expect(
+      recording.calls.some(
+        (call) => call.method === "checks.listForRef" && call.input.app_id === 12_345,
+      ),
+    ).toBe(true)
     expect(callInput(recording.calls, "checks.create")).toMatchObject({
       conclusion: "action_required",
       external_id: "review:42:7:1",
@@ -374,7 +409,7 @@ describe("GitHubAppAdapter.publishReview", () => {
           pullRequest: { ...pullRequest.pullRequest, ...changedTarget },
         },
       })
-      const client = new GitHubAppAdapter(12_345, recording.getClient)
+      const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
       const result = await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
@@ -396,7 +431,7 @@ describe("GitHubAppAdapter.publishReview", () => {
           pullRequest: { ...pullRequest.pullRequest, ...ineligible },
         },
       })
-      const client = new GitHubAppAdapter(12_345, recording.getClient)
+      const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
       const result = await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
@@ -407,19 +442,27 @@ describe("GitHubAppAdapter.publishReview", () => {
 
   test("suppresses all writes when superseded after claim and before the comment mutation", async () => {
     const recording = makeRecordingClient()
-    const client = new GitHubAppAdapter(12_345, recording.getClient)
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
     const result = await Effect.runPromise(
       client.publishReview(makePublication(), () => Effect.succeed(false)),
     )
 
     expect(result).toBe("stale")
-    expect(recording.calls.map((call) => call.method)).toEqual(["pulls.get", "issues.listComments"])
+    expect(recording.calls.map((call) => call.method)).toEqual([
+      "pulls.get",
+      "pulls.get",
+      "checks.listForRef",
+      "pulls.get",
+      "issues.listComments",
+    ])
   })
 
   test("suppresses a stale check after the comment and lets the latest publication reassert owned output", async () => {
     const comments: Array<GitHubIssueComment> = []
-    const checks: Array<GitHubCheckRun> = []
+    const checks: Array<GitHubCheckRun> = [
+      { id: 20, name: "Required checks", status: "completed", conclusion: "success" },
+    ]
     const writes: Array<string> = []
     const adapter: GitHubInstallationAdapter = {
       getPullRequest: async () => makePullRequestData(),
@@ -461,7 +504,7 @@ describe("GitHubAppAdapter.publishReview", () => {
         return input.check_run_id
       },
     }
-    const client = new GitHubAppAdapter(12_345, async () => adapter)
+    const client = new TestGitHubAppAdapter(12_345, async () => adapter)
     let oldGuardCalls = 0
 
     const oldResult = await Effect.runPromise(
@@ -480,7 +523,7 @@ describe("GitHubAppAdapter.publishReview", () => {
     expect(latestResult).toBe("published")
     expect(writes).toEqual(["comment:create", "comment:update", "check:create"])
     expect(comments[0]?.body).toContain("Latest review.")
-    expect(checks[0]?.externalId).toBe("review:42:7:1:2")
+    expect(checks.at(-1)?.externalId).toBe("review:42:7:1:2")
   })
 
   test("ignores matching sticky comments and Check Runs owned by another app", async () => {
@@ -498,7 +541,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       ],
       checkRunPages: [[{ id: 100, externalId: "review:42:7:1", appId: 999 }]],
     })
-    const client = new GitHubAppAdapter(12_345, recording.getClient)
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
     await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
@@ -522,12 +565,12 @@ describe("GitHubAppAdapter.publishReview", () => {
         [{ id: 6, externalId: "review:42:7:1", appId: 12_345 }],
       ],
     })
-    const client = new GitHubAppAdapter(12_345, recording.getClient)
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
     await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
 
     expect(recording.calls.filter((call) => call.method === "issues.listComments")).toHaveLength(2)
-    expect(recording.calls.filter((call) => call.method === "checks.listForRef")).toHaveLength(2)
+    expect(recording.calls.filter((call) => call.method === "checks.listForRef")).toHaveLength(5)
     expect(callInput(recording.calls, "issues.updateComment")).toMatchObject({
       comment_id: 2,
     })
@@ -566,7 +609,7 @@ describe("GitHubAppAdapter.publishReview", () => {
       },
       updateCheckRun: async () => 33,
     }
-    const client = new GitHubAppAdapter(12_345, async () => adapter)
+    const client = new TestGitHubAppAdapter(12_345, async () => adapter)
 
     const failure = await Effect.runPromise(
       Effect.flip(client.publishReview(makePublication(), alwaysCurrent)),
@@ -583,7 +626,7 @@ describe("GitHubAppAdapter.publishReview", () => {
 
   test("bounds oversized Check Run output while preserving review metadata", async () => {
     const recording = makeRecordingClient()
-    const client = new GitHubAppAdapter(12_345, recording.getClient)
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
     const publication = Schema.decodeUnknownSync(Publication)({
       ...makePublication(),
@@ -607,12 +650,46 @@ describe("GitHubAppAdapter.publishReview", () => {
     expect(input.output?.text).toContain("<!-- workflowd:review:42:7 -->")
     expect(input.output?.text).toContain(`Commit: \`${headSha}\``)
   })
+
+  test("reuses the exact-target publication gate to block a confirmed merge conflict", async () => {
+    const pullRequest = makePullRequestData()
+    const recording = makeRecordingClient({
+      pullRequest: { ...pullRequest, mergeable: false, mergeableState: "dirty" },
+    })
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
+
+    await Effect.runPromise(client.publishReview(makePublication(), alwaysCurrent))
+
+    const comment = callInput(recording.calls, "issues.createComment")
+    expect(comment.body).toContain("Verdict: **Changes requested**")
+    expect(comment.body).toContain("Pull request has merge conflicts")
+    expect(callInput(recording.calls, "checks.create")).toMatchObject({
+      conclusion: "action_required",
+      head_sha: headSha,
+    })
+  })
+
+  test("publishes no pass while exact-target mergeability is pending", async () => {
+    const pullRequest = makePullRequestData()
+    const recording = makeRecordingClient({
+      pullRequest: { ...pullRequest, mergeable: null, mergeableState: "unknown" },
+    })
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
+
+    const error = await Effect.runPromise(
+      Effect.flip(client.publishReview(makePublication(), alwaysCurrent)),
+    )
+
+    expect(error).toBeInstanceOf(GitHubClientError)
+    expect(recording.calls.map((call) => call.method)).not.toContain("issues.createComment")
+    expect(recording.calls.map((call) => call.method)).not.toContain("checks.create")
+  })
 })
 
 describe("GitHubAppAdapter.fetchPullRequestSnapshot", () => {
   test("returns the authoritative normalized pull request shape", async () => {
     const recording = makeRecordingClient()
-    const client = new GitHubAppAdapter(12_345, recording.getClient)
+    const client = new TestGitHubAppAdapter(12_345, recording.getClient)
 
     const snapshot = await Effect.runPromise(
       client.fetchPullRequestSnapshot({

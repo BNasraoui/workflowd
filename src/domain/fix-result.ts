@@ -1,4 +1,4 @@
-import { JSONSchema, Schema } from "effect"
+import { Schema } from "effect"
 import { GitObjectId } from "./identifiers"
 
 const FixSummary = Schema.NonEmptyString.pipe(Schema.maxLength(4_000))
@@ -15,5 +15,3 @@ const NoChanges = Schema.TaggedStruct("NoChanges", {
 
 export const FixResult = Schema.Union(CommitPrepared, NoChanges)
 export type FixResult = typeof FixResult.Type
-
-export const FixResultJsonSchema = JSONSchema.make(FixResult)

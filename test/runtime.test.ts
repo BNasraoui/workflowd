@@ -242,6 +242,7 @@ describe("runHookService startup", () => {
           githubCalls += 1
           return Effect.die("must not publish")
         },
+        collectHeadEvidence: () => Effect.die("must not collect evidence"),
       }),
       Layer.succeed(Automation, {
         validateAvailability: () =>
@@ -319,6 +320,7 @@ describe("runHookService startup", () => {
       Layer.succeed(GitHub, {
         fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
         publishReview: () => Effect.die("unexpected publish"),
+        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
       }),
       Layer.succeed(Automation, {
         validateAvailability: () =>

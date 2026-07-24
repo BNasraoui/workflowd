@@ -1,6 +1,7 @@
 [test]
 # Bun applies thresholds per covered file rather than to the aggregate result.
-coverageThreshold = { lines = 0.6, functions = 0.6 }
+coverageThreshold = { lines = 0.6, functions = 0.6, statements = 0.6 }
+coverageReporter = ["text", "lcov"]
 coveragePathIgnorePatterns = [
   "src/store/errors.ts",
   "src/workspace/errors.ts",

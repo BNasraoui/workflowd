@@ -20,6 +20,46 @@ const delivery = (deliveryId: string, action: string, receivedAt: string) => ({
 })
 
 describe("expired lease authority", () => {
+  test("persists a superseded disposition for stale evidence while the lease is current", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const sql = yield* SqlClient.SqlClient
+        yield* store.ingestPullRequest(
+          delivery("stale-evidence-pr", "opened", "2026-07-20T12:00:00.000Z"),
+          samplePullRequestEvent,
+        )
+        const review = yield* store.claimNextJob({
+          workerId: "stale-evidence-reviewer",
+          now: new Date("2026-07-20T13:00:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (review === null) throw new Error("expected review")
+        const disposition = yield* store.supersedeJob({
+          jobId: review.id,
+          workerId: "stale-evidence-reviewer",
+          supersededAt: new Date("2026-07-20T13:00:01.000Z"),
+          reason: "Pull request target changed during evidence collection.",
+        })
+        const rows = yield* sql<{
+          readonly state: string
+          readonly lease_owner: string | null
+          readonly last_error: string | null
+        }>`SELECT state, lease_owner, last_error FROM jobs WHERE id = ${review.id}`
+        return { disposition, row: rows[0] }
+      }).pipe(Effect.provide(makeStoreLayer())),
+    )
+
+    expect(result).toEqual({
+      disposition: "superseded",
+      row: {
+        state: "superseded",
+        lease_owner: null,
+        last_error: "Pull request target changed during evidence collection.",
+      },
+    })
+  })
+
   test("rejects review cancellation and completion at exact expiry", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
