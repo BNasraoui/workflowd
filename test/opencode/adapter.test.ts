@@ -100,9 +100,59 @@ describe("OpenCodeAdapter.subscribeSessionEvents", () => {
       break
     }
 
+    expect(subscriptionSignal).not.toBe(caller.signal)
     expect(subscriptionSignal?.aborted).toBe(true)
     expect(sourceFinalized).toBe(true)
     expect(caller.signal.aborted).toBe(false)
+  })
+
+  test("forwards caller cancellation to the SDK subscription", async () => {
+    let subscriptionSignal: AbortSignal | undefined
+    let markSubscriptionStarted: () => void = () => undefined
+    const subscriptionStarted = new Promise<void>((resolve) => {
+      markSubscriptionStarted = resolve
+    })
+    const client = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeEvents: async (_input, signal) => {
+        subscriptionSignal = signal
+        markSubscriptionStarted()
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              await new Promise<void>((resolve) => {
+                if (signal.aborted) resolve()
+                else signal.addEventListener("abort", () => resolve(), { once: true })
+              })
+              return { done: true, value: undefined } as const
+            },
+          }),
+        }
+      },
+      getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      listAgents: async () => [],
+      listProviders: async () => [],
+    } satisfies OpenCodeSdkClient
+    const adapter = new SdkOpenCodeAdapter(client)
+    const caller = new AbortController()
+    const events = await adapter.subscribeSessionEvents(
+      { directory: "/tmp/worktree" },
+      caller.signal,
+    )
+
+    const completion = events[Symbol.asyncIterator]().next()
+    await subscriptionStarted
+    const reason = new Error("caller cancelled")
+    caller.abort(reason)
+
+    expect(await completion).toEqual({ done: true, value: undefined })
+    expect(subscriptionSignal).not.toBe(caller.signal)
+    expect(subscriptionSignal?.aborted).toBe(true)
+    expect(subscriptionSignal?.reason).toBe(reason)
   })
 })
 
@@ -243,13 +293,18 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
     { type: "session.error", sessionID: "ses_1" },
   ])
   expect(await adapter.abortSession(sessionInput, signal)).toBe(true)
+  const subscriptionSignal = calls[5]?.signal
+  expect(subscriptionSignal).toBeDefined()
+  if (subscriptionSignal === undefined) throw new Error("Subscription call was not recorded")
+  expect(subscriptionSignal).not.toBe(signal)
+  expect(subscriptionSignal?.aborted).toBe(true)
   expect(calls).toEqual([
     { operation: "create", input: createInput, signal },
     { operation: "prompt", input: promptInput, signal },
     { operation: "status", input: { directory: "/repo" }, signal },
     { operation: "exists", input: sessionInput, signal },
     { operation: "messages", input: sessionInput, signal },
-    { operation: "subscribe", input: { directory: "/repo" }, signal },
+    { operation: "subscribe", input: { directory: "/repo" }, signal: subscriptionSignal },
     { operation: "abort", input: sessionInput, signal },
   ])
 })
