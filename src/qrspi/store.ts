@@ -9,11 +9,12 @@ import {
   WorkflowDefinition,
   WorkflowStartInput,
   WorkflowStartOutput,
+  TicketRevision,
   canonicalSha256,
   isEffectivelyEnabled,
   stageDefinitionSha256,
+  ticketRevisionSha256For,
   workflowDefinitionSha256,
-  type TicketRevision,
   type ExecutableStageSnapshot as ExecutableStageSnapshotType,
 } from "./domain"
 
@@ -112,6 +113,15 @@ const LegacyWorkflowStartInput = Schema.Struct({
 })
 const PersistedWorkflowStartInput = Schema.Union(WorkflowStartInput, LegacyWorkflowStartInput)
 const decodeOutput = Schema.decodeUnknown(Schema.parseJson(WorkflowStartOutput))
+const PersistedTicketRevision = Schema.Struct({
+  ...TicketRevision.fields,
+  checkedAt: Schema.DateFromString,
+})
+const TicketRevisionRow = Schema.Struct({
+  workflow_id: Schema.NonEmptyString,
+  ticket_revision_sha256: WorkflowStartInput.fields.ticketRevisionSha256,
+  revision_json: Schema.String,
+})
 
 const CurrentGenerationSnapshotRow = Schema.Struct({
   workflow_id: Schema.NonEmptyString,
@@ -259,12 +269,17 @@ export type QrspiStorePort = {
   readonly completeStart: (
     input: CompleteStartInput,
   ) => Effect.Effect<WorkflowStartOutput, StoreError>
+  readonly readTicketRevision: (input: {
+    readonly workflowId: string
+    readonly ticketRevisionSha256: string
+  }) => Effect.Effect<TicketRevision, SqlError | QrspiStoreDataError>
 }
 
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
 
 export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")<{
-  readonly record: "workflow_operation" | "workflow_definition" | "stage_definition"
+  readonly record:
+    "workflow_operation" | "workflow_definition" | "stage_definition" | "ticket_revision"
   readonly recordId: string
   readonly message: string
   readonly reason?:
@@ -519,6 +534,68 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    readTicketRevision: (input) =>
+      Effect.gen(function* () {
+        const rows = yield* sql<Record<string, unknown>>`
+          SELECT workflow_id, ticket_revision_sha256, revision_json
+          FROM qrspi_ticket_revisions
+          WHERE workflow_id = ${input.workflowId}
+            AND ticket_revision_sha256 = ${input.ticketRevisionSha256}
+        `
+        const raw = rows[0]
+        const recordId = `${input.workflowId}/${input.ticketRevisionSha256}`
+        if (raw === undefined) {
+          return yield* Effect.fail(
+            dataError("ticket_revision", recordId, "ticket revision not found", {
+              reason: "missing",
+              workflowId: input.workflowId,
+            }),
+          )
+        }
+        const row = yield* Schema.decodeUnknown(TicketRevisionRow)(raw).pipe(
+          Effect.mapError((cause) =>
+            dataError("ticket_revision", recordId, cause, {
+              reason: "malformed",
+              workflowId: input.workflowId,
+            }),
+          ),
+        )
+        const revision = yield* Schema.decodeUnknown(Schema.parseJson(PersistedTicketRevision))(
+          row.revision_json,
+        ).pipe(
+          Effect.mapError((cause) =>
+            dataError("ticket_revision", recordId, cause, {
+              reason: "malformed",
+              workflowId: input.workflowId,
+            }),
+          ),
+        )
+        if (revision.ticketRevisionSha256 !== row.ticket_revision_sha256) {
+          return yield* Effect.fail(
+            dataError("ticket_revision", recordId, "stored key does not match nested identity", {
+              reason: "identity_mismatch",
+              workflowId: input.workflowId,
+              expectedSha256: row.ticket_revision_sha256,
+              actualSha256: revision.ticketRevisionSha256,
+            }),
+          )
+        }
+        const actualSha256 = ticketRevisionSha256For(
+          revision.readyTicket,
+          revision.scenarioCoverage,
+        )
+        if (actualSha256 !== revision.ticketRevisionSha256) {
+          return yield* Effect.fail(
+            dataError("ticket_revision", recordId, "ticket semantic identity does not match", {
+              reason: "hash_mismatch",
+              workflowId: input.workflowId,
+              expectedSha256: revision.ticketRevisionSha256,
+              actualSha256,
+            }),
+          )
+        }
+        return revision
+      }),
     loadCurrentGenerationSnapshotSets: () =>
       Effect.gen(function* () {
         const rawRows = yield* sql<Record<string, unknown>>`

@@ -24,6 +24,17 @@ const RawBead = Schema.Struct({
 })
 const RawBeads = Schema.Array(RawBead).pipe(Schema.itemsCount(1))
 
+const RawArtifactContent = Schema.Struct({
+  type: Schema.Literal("file"),
+  path: Schema.String,
+  sha: Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+  encoding: Schema.Literal("base64"),
+  content: Schema.String.pipe(
+    Schema.pattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  ),
+  size: Schema.Int.pipe(Schema.nonNegative()),
+})
+
 export class BeadsCliTicketSource implements TicketSourcePort {
   constructor(
     private readonly workspace: string,
@@ -167,6 +178,9 @@ type QrspiOctokit = {
           }
         }
       }>
+      readonly getContent?: (
+        input: Parameters<RepositoriesApi["getContent"]>[0],
+      ) => Promise<{ readonly data: unknown }>
     }
     readonly pulls: {
       readonly list: (
@@ -192,6 +206,44 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
     private readonly client: OctokitProvider,
     private readonly isTrustedPublication: TrustedPublicationVerifier = () => Promise.resolve(null),
   ) {}
+
+  readonly readArtifact: QrspiRepositoryPort["readArtifact"] = (input) =>
+    this.attempt("read exact repository artifact", async (signal) => {
+      if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
+        throw new Error("Artifact byte ceiling must be a non-negative safe integer")
+      }
+      const { owner, repo } = repositoryName(input.repository)
+      const client = await this.client(this.config.installationId)
+      if (client.rest.repos.getContent === undefined) {
+        throw new Error("GitHub content API is unavailable")
+      }
+      const response = await client.rest.repos.getContent({
+        owner,
+        repo,
+        path: input.path,
+        ref: input.commitSha,
+        request: { signal },
+      })
+      const content = Schema.decodeUnknownSync(RawArtifactContent)(response.data)
+      const bytes = Uint8Array.from(Buffer.from(content.content, "base64"))
+      if (
+        bytes.byteLength !== content.size ||
+        Buffer.from(bytes).toString("base64") !== content.content
+      ) {
+        throw new Error("GitHub returned malformed base64 artifact content")
+      }
+      if (bytes.byteLength > input.maxBytes) {
+        throw new Error(
+          `Artifact exceeded ${input.maxBytes} bytes: observed ${bytes.byteLength} bytes`,
+        )
+      }
+      return {
+        commitSha: input.commitSha,
+        path: content.path,
+        blobSha: content.sha,
+        bytes,
+      }
+    })
 
   readonly inspect: QrspiRepositoryPort["inspect"] = (input) =>
     this.attempt("inspect repository target", async (signal) => {

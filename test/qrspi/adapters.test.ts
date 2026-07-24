@@ -34,6 +34,123 @@ const qrspiConfig = {
 } satisfies QrspiConfig
 
 describe("QRSPI external adapters", () => {
+  test("reads exact immutable artifact bytes at the requested cap", async () => {
+    const calls: Array<unknown> = []
+    const content = new TextEncoder().encode("éx")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async (input: unknown) => {
+            calls.push(input)
+            return {
+              data: {
+                type: "file",
+                path: "artifacts/questions.md",
+                sha: "b".repeat(40),
+                encoding: "base64",
+                content: Buffer.from(content).toString("base64"),
+                size: content.byteLength,
+              },
+            }
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const result = await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: content.byteLength,
+      }),
+    )
+
+    expect(calls).toEqual([
+      {
+        owner: "example-owner",
+        repo: "example",
+        path: "artifacts/questions.md",
+        ref: "a".repeat(40),
+        request: { signal: expect.any(AbortSignal) },
+      },
+    ])
+    expect(result).toEqual({
+      commitSha: "a".repeat(40),
+      path: "artifacts/questions.md",
+      blobSha: "b".repeat(40),
+      bytes: content,
+    })
+  })
+
+  test.each([
+    ["one byte over", { size: 4, content: Buffer.from("éx").toString("base64") }, 3],
+    ["malformed base64", { size: 1, content: "***" }, 10],
+    ["directory response", [{ type: "file" }], 10],
+  ] as const)("rejects an exact artifact %s response", async (_name, data, maxBytes) => {
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async () => ({
+            data: Array.isArray(data)
+              ? data
+              : {
+                  type: "file",
+                  path: "artifacts/questions.md",
+                  sha: "b".repeat(40),
+                  encoding: "base64",
+                  ...data,
+                },
+          }),
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+  })
+
+  test("maps an exact artifact timeout through the repository error channel", async () => {
+    const adapter = new GitHubQrspiRepository(
+      { ...qrspiConfig, repositoryOperationTimeoutMs: 10 },
+      async () => await new Promise(() => undefined),
+    )
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 10,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "QrspiRepositoryError", operation: "read exact repository artifact" },
+    })
+  })
+
   test("reads Beads through its readonly bounded command envelope", async () => {
     let command: ReadonlyArray<string> = []
     const source = new BeadsCliTicketSource("/srv/repository", "workspace-42", {
