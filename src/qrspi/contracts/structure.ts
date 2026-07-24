@@ -14,12 +14,13 @@ import { structurePolicyReference } from "./design"
 
 const StructureSources = ExactStageSources.pipe(
   Schema.filter((sources) =>
+    sources.sources.filter(({ role }) => role === "Design").length === 1 &&
     isOrderedRoleSubsequence(
       sources.sources.map(({ role }) => role),
       ["Design", "Research", "Questions"],
     )
       ? true
-      : "Structure accepts only the Design/Research/Questions predecessor subsequence",
+      : "Structure requires exactly one Design predecessor followed by Research/Questions",
   ),
 )
 
@@ -35,8 +36,13 @@ export const StructureRequest = Schema.Struct({
       authority.graph.repository.providerInstanceId ===
         sources.target.repository.providerInstanceId &&
       authority.graph.repository.repositoryId === sources.target.repository.repositoryId
-    return authority.acceptancePackage.workflowId === sources.workflowId &&
+    const designSource = sources.sources.find(({ role }) => role === "Design")
+    return designSource !== undefined &&
+      authority.acceptancePackage.workflowId === sources.workflowId &&
       authority.acceptancePackage.generation === sources.generation &&
+      authority.acceptancePackage.designStageRevision ===
+        designSource.acceptedPointer.acceptedStageRevision &&
+      authority.acceptancePackage.designStageRevision === designSource.artifact.stageRevision &&
       sameRepository
       ? true
       : "Structure authority is outside the exact stage scope"
@@ -86,6 +92,10 @@ export const structureStageContract = {
     authority: {
       ticketRevision: request.sources.ticketRevision,
       sources: request.sources.sources,
+      ...(request.sources.revisionIntent === undefined
+        ? {}
+        : { revisionIntent: request.sources.revisionIntent }),
+      structureAuthority: request.authority,
     },
     resultSchema: StructureResult,
   }),

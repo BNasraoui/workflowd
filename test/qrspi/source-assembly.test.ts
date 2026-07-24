@@ -10,8 +10,10 @@ import {
 import {
   canonicalSha256,
   stageDefinitionSha256,
+  workflowDefinitionSha256,
   type ExecutableStageSnapshot,
   type StageDefinition,
+  type WorkflowDefinition,
 } from "../../src/qrspi/domain"
 import { QrspiRepositoryError, type QrspiRepositoryPort } from "../../src/qrspi/ports"
 import { assembleExactStageSources } from "../../src/qrspi/source-assembly"
@@ -122,6 +124,11 @@ const stage = (key: "questions" | "research", enabled = true): StageDefinition =
 
 const questionsDefinition = stage("questions")
 const researchDefinition = stage("research")
+const workflowDefinition: WorkflowDefinition = {
+  contractVersion: 1,
+  definitionVersion: 1,
+  stages: [questionsDefinition, researchDefinition],
+}
 const snapshots: ReadonlyArray<ExecutableStageSnapshot> = [
   {
     sequencePosition: 1,
@@ -159,7 +166,7 @@ const selectedScope = {
   stageKey: "research",
   runOrdinal: 1,
   stageRevision: 1,
-  workflowDefinitionSha256: sha("5"),
+  workflowDefinitionSha256: workflowDefinitionSha256(workflowDefinition),
   stageDefinitionSha256: snapshots[1]!.stageDefinitionSha256,
 }
 const target = {
@@ -208,6 +215,7 @@ const assemblyInput = (
   scope: selectedScope,
   ticketRevision,
   target,
+  workflowDefinition,
   snapshots,
   acceptedPointers: pointers,
   maxSourceBytes: 32 * 1024,
@@ -242,6 +250,29 @@ describe("trusted Research source assembly", () => {
     )
 
     expect(result.revisionIntent).toEqual(revisionIntent)
+  })
+
+  test("rejects snapshots labeled with a different rehashed workflow definition before I/O", async () => {
+    const reader = repositoryReader()
+    const differentDefinition: WorkflowDefinition = {
+      ...workflowDefinition,
+      definitionVersion: 2,
+    }
+    const result = await Effect.runPromise(
+      assembleExactStageSources({
+        ...assemblyInput(reader.port),
+        scope: {
+          ...selectedScope,
+          workflowDefinitionSha256: workflowDefinitionSha256(differentDefinition),
+        },
+      }).pipe(Effect.either),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "StageSourceAssemblyError", reason: "selected_snapshot_mismatch" },
+    })
+    expect(reader.calls()).toBe(0)
   })
 
   test("preserves a leading UTF-8 BOM in exact source content", async () => {
@@ -330,10 +361,19 @@ describe("trusted Research source assembly", () => {
       },
       snapshots[1]!,
     ]
+    const disabledWorkflowDefinition = {
+      ...workflowDefinition,
+      stages: [disabledQuestions, researchDefinition],
+    }
 
     const result = await Effect.runPromise(
       assembleExactStageSources({
         ...assemblyInput(reader.port, []),
+        workflowDefinition: disabledWorkflowDefinition,
+        scope: {
+          ...selectedScope,
+          workflowDefinitionSha256: workflowDefinitionSha256(disabledWorkflowDefinition),
+        },
         snapshots: disabledSnapshots,
       }),
     )
@@ -415,6 +455,11 @@ describe("generalized document predecessor assembly through Plan", () => {
       contractRegistrationSha256: sha(String(index + 1)),
       harnessRegistrationSha256: sha(String(index + 5)),
     }))
+    const matrixWorkflowDefinition: WorkflowDefinition = {
+      contractVersion: 1,
+      definitionVersion: 1,
+      stages: definitions,
+    }
     const artifacts = keys.map((key, index) => {
       const content = `# ${roles[key]}`
       return {
@@ -470,10 +515,12 @@ describe("generalized document predecessor assembly through Plan", () => {
         scope: {
           ...selectedScope,
           stageKey: "plan",
+          workflowDefinitionSha256: workflowDefinitionSha256(matrixWorkflowDefinition),
           stageDefinitionSha256: matrixSnapshots[4]!.stageDefinitionSha256,
         },
         ticketRevision,
         target: { ...target, expectedParentSha: gitSha("f") },
+        workflowDefinition: matrixWorkflowDefinition,
         snapshots: matrixSnapshots,
         acceptedPointers: pointers,
         maxSourceBytes: 32 * 1024,
@@ -568,6 +615,11 @@ describe("Implementation predecessor assembly", () => {
       contractRegistrationSha256: sha(String(index + 1)),
       harnessRegistrationSha256: sha(String(index + 2)),
     }))
+    const implementationWorkflowDefinition: WorkflowDefinition = {
+      contractVersion: 1,
+      definitionVersion: 1,
+      stages: definitions,
+    }
     const artifacts = keys.map((key, index) => {
       const content = `# ${roles[index]}`
       return {
@@ -615,10 +667,12 @@ describe("Implementation predecessor assembly", () => {
         scope: {
           ...selectedScope,
           stageKey: "implementation",
+          workflowDefinitionSha256: workflowDefinitionSha256(implementationWorkflowDefinition),
           stageDefinitionSha256: implementationSnapshots[5]!.stageDefinitionSha256,
         },
         ticketRevision,
         target: { ...target, expectedParentSha: gitSha("f") },
+        workflowDefinition: implementationWorkflowDefinition,
         snapshots: implementationSnapshots,
         acceptedPointers: pointers,
         maxSourceBytes: 32 * 1024,

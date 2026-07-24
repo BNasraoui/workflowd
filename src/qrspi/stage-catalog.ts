@@ -28,6 +28,7 @@ import {
   StageExecutionContext,
   StageProduceInput,
   StageTaskAuthority,
+  StructureAuthority,
 } from "./contracts/common"
 
 export type PreparedDocumentOutput = { readonly _tag: "Document"; readonly text: string }
@@ -384,6 +385,10 @@ export class TrustedStageCatalog {
                 canonicalSha256({
                   ticketRevision: sources.ticketRevision,
                   sources: sources.sources,
+                  ...(sources.revisionIntent === undefined
+                    ? {}
+                    : { revisionIntent: sources.revisionIntent }),
+                  ...structureTaskAuthority(request),
                 }) ||
               task.resultSchema !== registration.resultSchema
             ) {
@@ -490,6 +495,13 @@ function requestSourcesOf(request: unknown, ref: StageContractRef): ExactStageSo
     throw catalogError("malformed_request", ref)
   }
   return Schema.decodeUnknownSync(ExactStageSources)(request.sources)
+}
+
+function structureTaskAuthority(request: unknown) {
+  if (request === null || typeof request !== "object" || !("authority" in request)) return {}
+  return {
+    structureAuthority: Schema.decodeUnknownSync(StructureAuthority)(request.authority),
+  }
 }
 
 function scopeOf(sources: ExactStageSources) {

@@ -12,9 +12,12 @@ import {
 } from "./contracts/common"
 import {
   ExecutableStageSnapshot,
+  WorkflowDefinition,
   canonicalSha256,
   isEffectivelyEnabled,
   stageDefinitionSha256,
+  stageSnapshotsMatchWorkflowDefinition,
+  workflowDefinitionSha256,
   type RepositoryReference,
 } from "./domain"
 import type { QrspiRepositoryError, QrspiRepositoryPort } from "./ports"
@@ -41,6 +44,7 @@ export const assembleExactStageSources = (input: {
   readonly scope: ExactStageScope
   readonly ticketRevision: typeof TicketRevisionReference.Type
   readonly target: typeof RepositoryTarget.Type
+  readonly workflowDefinition: typeof WorkflowDefinition.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
   readonly revisionIntent?: unknown
@@ -87,6 +91,7 @@ function decodeAuthority(input: {
   readonly scope: ExactStageScope
   readonly ticketRevision: typeof TicketRevisionReference.Type
   readonly target: typeof RepositoryTarget.Type
+  readonly workflowDefinition: typeof WorkflowDefinition.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
   readonly revisionIntent?: unknown
@@ -94,6 +99,7 @@ function decodeAuthority(input: {
   const scope = Schema.decodeUnknownSync(ExactStageScope)(input.scope)
   const ticketRevision = Schema.decodeUnknownSync(TicketRevisionReference)(input.ticketRevision)
   const target = Schema.decodeUnknownSync(RepositoryTarget)(input.target)
+  const workflowDefinition = Schema.decodeUnknownSync(WorkflowDefinition)(input.workflowDefinition)
   const snapshots = Schema.decodeUnknownSync(Schema.Array(ExecutableStageSnapshot))(input.snapshots)
   const pointers = Schema.decodeUnknownSync(Schema.Array(AcceptedPredecessorPointer))(
     input.acceptedPointers,
@@ -102,6 +108,12 @@ function decodeAuthority(input: {
     input.revisionIntent === undefined
       ? undefined
       : Schema.decodeUnknownSync(RevisionIntent)(input.revisionIntent)
+  if (
+    scope.workflowDefinitionSha256 !== workflowDefinitionSha256(workflowDefinition) ||
+    !stageSnapshotsMatchWorkflowDefinition(workflowDefinition, snapshots)
+  ) {
+    throw new StageSourceAssemblyError({ reason: "selected_snapshot_mismatch" })
+  }
   const selectedIndex = snapshots.findIndex(
     (snapshot) =>
       snapshot.definition.key === scope.stageKey &&

@@ -214,6 +214,9 @@ describe("Research request replay", () => {
     )
 
     expect(task.authority.sources).toEqual([source])
+    expect(task.authority.revisionIntent).toEqual({
+      reason: "Revise the accepted Research output",
+    })
     expect(persisted.request.sources.revisionIntent).toEqual({
       reason: "Revise the accepted Research output",
     })
@@ -256,19 +259,56 @@ describe("complete built-in contract replay", () => {
     headRef: "workflow/replay",
     expectedParentSha: "d".repeat(40),
   }
-  const sourcesFor = (stageKey: string) => ({
-    workflowId,
-    generation: 1,
-    stageKey,
-    runOrdinal: 1,
-    stageRevision: 1,
-    workflowDefinitionSha256: "b".repeat(64),
-    stageDefinitionSha256: canonicalSha256({ stageKey }),
-    ticketRevision: { workflowId, ticketRevisionSha256: original.ticketRevisionSha256 },
-    sources: [] as const,
-    sourceSetSha256: canonicalSha256([]),
-    target,
-  })
+  const sourcesFor = (stageKey: string) => {
+    const base = {
+      workflowId,
+      generation: 1,
+      stageKey,
+      runOrdinal: 1,
+      stageRevision: 1,
+      workflowDefinitionSha256: "b".repeat(64),
+      stageDefinitionSha256: canonicalSha256({ stageKey }),
+      ticketRevision: { workflowId, ticketRevisionSha256: original.ticketRevisionSha256 },
+      sources: [] as const,
+      sourceSetSha256: canonicalSha256([]),
+      target,
+    }
+    if (stageKey !== "structure") return base
+    const content = "# Accepted Design"
+    const artifact = {
+      repository: target.repository,
+      workflowId,
+      generation: 1,
+      stageKey: "design",
+      stageRevision: 1,
+      commitSha: "6".repeat(40),
+      path: "artifacts/design.md",
+      blobSha: "7".repeat(40),
+      contentSha256: createHash("sha256").update(content).digest("hex"),
+      mediaType: "text/markdown",
+    }
+    const identity = {
+      role: "Design" as const,
+      snapshotSha256: "8".repeat(64),
+      runOrdinal: 1,
+      acceptedStageRevision: 1,
+      targetParentSha: target.expectedParentSha,
+      contract: { name: "qrspi.design", contractVersion: 1 },
+      contractRegistrationSha256: "9".repeat(64),
+      artifact,
+    }
+    const source = {
+      role: "Design" as const,
+      artifact,
+      acceptedPointer: { ...identity, pointerSha256: canonicalSha256(identity) },
+      content,
+    }
+    return {
+      ...base,
+      sources: [source],
+      sourceSetSha256: canonicalSha256([{ role: "Design", artifact }]),
+    }
+  }
   const structureAuthority = {
     acceptancePackage: {
       workflowId,
@@ -384,7 +424,8 @@ describe("complete built-in contract replay", () => {
       expect(replayedTask).toEqual(firstTask)
       expect(replayedTask.authority).toEqual({
         ticketRevision: scope.ticketRevision,
-        sources: [],
+        sources: scope.sources,
+        ...(fixture.stageKey === "structure" ? { structureAuthority } : {}),
       })
       const firstOutput = await Effect.runPromise(
         before.prepareOutput({

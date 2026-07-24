@@ -872,7 +872,45 @@ describe("exact Structure contract through erased catalog execution", () => {
     expect(task.authority).toEqual({
       ticketRevision,
       sources: [structureDesignSource, designResearchSource, researchSource],
+      structureAuthority,
     })
+  })
+
+  test("requires exactly one accepted Design predecessor", () => {
+    const withoutDesign = {
+      ...structureSources,
+      sources: [designResearchSource, researchSource],
+      sourceSetSha256: canonicalSha256([
+        { role: "Research", artifact: designResearchArtifact },
+        { role: "Questions", artifact: researchArtifact },
+      ]),
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(StructureRequest)({
+        _tag: "StructureRequest",
+        sources: withoutDesign,
+        structurePolicy: { name: "qrspi.structure-policy", version: 1 },
+        authority: structureAuthority,
+      }),
+    ).toThrow()
+  })
+
+  test("rejects owner authority for a different accepted Design revision", () => {
+    const revision = 2
+    const mismatchedAuthority = {
+      ...structureAuthority,
+      acceptancePackage: { ...structureAuthority.acceptancePackage, designStageRevision: revision },
+      gateResponse: { ...structureAuthority.gateResponse, designStageRevision: revision },
+      promotionResult: { ...structureAuthority.promotionResult, designStageRevision: revision },
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(StructureRequest)({
+        _tag: "StructureRequest",
+        sources: structureSources,
+        structurePolicy: { name: "qrspi.structure-policy", version: 1 },
+        authority: mismatchedAuthority,
+      }),
+    ).toThrow()
   })
 
   test.each([

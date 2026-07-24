@@ -335,6 +335,8 @@ export type ExactStageSources = typeof ExactStageSources.Type
 export const StageTaskAuthority = Schema.Struct({
   ticketRevision: TicketRevisionReference,
   sources: TechnicalSources,
+  revisionIntent: Schema.optional(RevisionIntent),
+  structureAuthority: Schema.optional(StructureAuthority),
 })
 export type StageTaskAuthority = typeof StageTaskAuthority.Type
 

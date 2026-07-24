@@ -111,6 +111,9 @@ export const implementationStageContract = {
     authority: {
       ticketRevision: request.sources.ticketRevision,
       sources: request.sources.sources,
+      ...(request.sources.revisionIntent === undefined
+        ? {}
+        : { revisionIntent: request.sources.revisionIntent }),
     },
     resultSchema: ImplementationResult,
   }),
