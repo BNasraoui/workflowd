@@ -82,7 +82,14 @@ function processReviewWork(
         pullRequestNumber: work.pullRequestNumber,
         target: work.target,
       })
-      if (evidence.ci.state === "stale") return "stale" as const
+      if (evidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: evidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
       const preflight = gateReviewWithHeadEvidence(
         { verdict: "pass", summary: "Evidence preflight.", findings: [] },
         evidence,
@@ -166,7 +173,14 @@ function processReviewWork(
         pullRequestNumber: work.pullRequestNumber,
         target: work.target,
       })
-      if (freshEvidence.ci.state === "stale") return "stale" as const
+      if (freshEvidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: freshEvidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
       const gated = gateReviewWithHeadEvidence(sessionResult.review, freshEvidence)
       if (gated._tag === "Pending") {
         return yield* Effect.fail(new EvidencePending({ reason: gated.reason }))
@@ -220,7 +234,14 @@ function processFixWork(
         pullRequestNumber: work.pullRequestNumber,
         target: work.target,
       })
-      if (evidence.ci.state === "stale") return "stale" as const
+      if (evidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: evidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
       const currentAfterCollection = new Date(
         yield* Effect.clockWith((clock) => clock.currentTimeMillis),
       )

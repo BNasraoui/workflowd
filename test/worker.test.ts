@@ -43,6 +43,7 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   recordAgentSessionCleanupFailure: () => Effect.succeed("pending"),
   shouldCancelJob: () => Effect.succeed(false),
   rescheduleJob: () => Effect.die("unused"),
+  supersedeJob: () => Effect.die("unused"),
   completeReviewJob: () => Effect.die("unused"),
   completeFixJob: () => Effect.die("unused"),
   isTrustedBranchPublication: () => Effect.succeed(null),
@@ -858,15 +859,23 @@ describe("Review Work processing", () => {
     expect(maxAttempts).toBe(Number.MAX_SAFE_INTEGER)
   })
 
-  test("abandons review work when evidence collection detects a stale target", async () => {
+  test("durably supersedes review work when evidence collection detects a stale target", async () => {
     const job = makeReviewWork()
     let prepared = false
+    let durableState = "leased"
 
     const result = await Effect.runPromise(
       runJobIteration(jobOptions).pipe(
         Effect.provide(
           makeWorkerLayer({
-            store: { claimNextJob: () => Effect.succeed(job) },
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              supersedeJob: () =>
+                Effect.sync(() => {
+                  durableState = "superseded"
+                  return "superseded" as const
+                }),
+            },
             github: {
               collectHeadEvidence: () =>
                 Effect.succeed({
@@ -887,7 +896,8 @@ describe("Review Work processing", () => {
       ),
     )
 
-    expect(result).toBe("stale")
+    expect(result).toBe("superseded")
+    expect(durableState).toBe("superseded")
     expect(prepared).toBe(false)
   })
 

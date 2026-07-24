@@ -13,6 +13,8 @@ const target = {
   headSha,
 }
 
+const workflowdRepository = { owner: "BNasraoui", repo: "workflowd" } as const
+
 function pull(head = headSha) {
   return {
     repository: { id: 1, fullName: "owner/repo", name: "repo", owner: "owner" },
@@ -148,7 +150,7 @@ describe("collectHeadEvidence", () => {
               },
             ]),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -166,13 +168,46 @@ describe("collectHeadEvidence", () => {
   })
 
   test.each([
+    [{ owner: "owner", repo: "repo" }, target],
+    [workflowdRepository, { ...target, baseRef: "release" }],
+  ] as const)(
+    "does not require Workflowd-specific checks or Sonar outside the Workflowd main gate",
+    async (repository, reviewTarget) => {
+      let sonarRequested = false
+      const evidence = await Effect.runPromise(
+        collectHeadEvidence({
+          client: github({
+            getPullRequest: async () => ({
+              ...pull(),
+              pullRequest: { ...pull().pullRequest, baseRef: reviewTarget.baseRef },
+            }),
+            listCheckRunPages: () => onePage([]),
+          }),
+          repository,
+          pullRequestNumber: 7,
+          target: reviewTarget,
+          workflowdAppId,
+          sonarRequest: async () => {
+            sonarRequested = true
+            throw new Error("must not request repository-specific Sonar evidence")
+          },
+        }),
+      )
+
+      expect(evidence.ci).toEqual({ state: "available", checks: [] })
+      expect(evidence.sonar).toMatchObject({ state: "pass", headSha })
+      expect(sonarRequested).toBe(false)
+    },
+  )
+
+  test.each([
     ["missing", sonar({ prPresent: false })],
     ["stale", sonar({ head: "c".repeat(40) })],
   ] as const)("fails closed for %s Sonar evidence", async (state, sonarRequest) => {
     const evidence = await Effect.runPromise(
       collectHeadEvidence({
         client: github(),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -190,7 +225,7 @@ describe("collectHeadEvidence", () => {
         client: github({
           getPullRequest: async () => pull(++reads === 1 ? headSha : "d".repeat(40)),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -214,7 +249,7 @@ describe("collectHeadEvidence", () => {
           },
         }),
       }),
-      repository: { owner: "owner", repo: "repo" },
+      repository: workflowdRepository,
       pullRequestNumber: 7,
       target,
       workflowdAppId,
@@ -258,7 +293,7 @@ describe("collectHeadEvidence", () => {
           downloadWorkflowJobLog: async () =>
             "\u001b[31mfailed\u001b[0m\nAuthorization: Bearer secret\n" + "x".repeat(20_000),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -287,7 +322,7 @@ describe("collectHeadEvidence", () => {
       const evidence = await Effect.runPromise(
         collectHeadEvidence({
           client: github({ listCheckRunPages: () => onePage(checks) }),
-          repository: { owner: "owner", repo: "repo" },
+          repository: workflowdRepository,
           pullRequestNumber: 7,
           target,
           workflowdAppId,
@@ -318,7 +353,7 @@ describe("collectHeadEvidence", () => {
               })),
             ),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -354,7 +389,7 @@ describe("collectHeadEvidence", () => {
               },
             ]),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -382,7 +417,7 @@ describe("collectHeadEvidence", () => {
               },
             ]),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,
@@ -402,7 +437,7 @@ describe("collectHeadEvidence", () => {
           listCommitStatusPages: () =>
             onePage([{ context: "Workflowd PR Gate", state: "failure" }]),
         }),
-        repository: { owner: "owner", repo: "repo" },
+        repository: workflowdRepository,
         pullRequestNumber: 7,
         target,
         workflowdAppId,

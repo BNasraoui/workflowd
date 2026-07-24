@@ -70,6 +70,7 @@ export function collectHeadEvidence(
   input: CollectHeadEvidenceInput,
 ): Effect.Effect<HeadEvidence, HeadEvidenceError> {
   return Effect.gen(function* () {
+    const policy = qualityGatePolicy(input.repository, input.target.baseRef)
     const before = yield* attempt("get pull request before evidence collection", (signal) =>
       input.client.getPullRequest({
         ...input.repository,
@@ -79,12 +80,15 @@ export function collectHeadEvidence(
     )
     if (!matchesTarget(before.pullRequest, input.target)) return staleEvidence(input.target.headSha)
 
-    const checks = yield* collectChecks(input)
-    const sonar = yield* collectSonar(input).pipe(
-      Effect.catchAll((error) =>
-        Effect.succeed({ state: "unavailable", reason: error.cause.message } as const),
-      ),
-    )
+    const checks = yield* collectChecks(input, policy.requiredCheckContexts)
+    const sonar =
+      policy.sonarProjectKey === undefined
+        ? passingSonarEvidence(input.target.headSha)
+        : yield* collectSonar(input, policy.sonarProjectKey).pipe(
+            Effect.catchAll((error) =>
+              Effect.succeed({ state: "unavailable", reason: error.cause.message } as const),
+            ),
+          )
     const after = yield* attempt("get pull request after evidence collection", (signal) =>
       input.client.getPullRequest({
         ...input.repository,
@@ -103,7 +107,10 @@ export function collectHeadEvidence(
   })
 }
 
-function collectChecks(input: CollectHeadEvidenceInput) {
+function collectChecks(
+  input: CollectHeadEvidenceInput,
+  policyRequiredContexts: ReadonlyArray<string>,
+) {
   return Effect.gen(function* () {
     const checks = yield* attempt("list exact-head check runs", async (signal) => {
       const collected: CollectedChecks = {
@@ -116,7 +123,7 @@ function collectChecks(input: CollectHeadEvidenceInput) {
       return collected
     }).pipe(
       Effect.map((collected) =>
-        classifyChecks(collected, input.requiredCheckContexts ?? repositoryRequiredCheckContexts),
+        classifyChecks(collected, input.requiredCheckContexts ?? policyRequiredContexts),
       ),
       Effect.catchAll((error) =>
         Effect.succeed({
@@ -353,9 +360,9 @@ async function appendJobPageLogs(
 
 function collectSonar(
   input: CollectHeadEvidenceInput,
+  project: string,
 ): Effect.Effect<SonarEvidence, HeadEvidenceError> {
   return Effect.gen(function* () {
-    const project = `${input.repository.owner}_${input.repository.repo}`
     const pullRequest = String(input.pullRequestNumber)
     const listPath = `/api/project_pull_requests/list?project=${encodeURIComponent(project)}`
     const first = yield* sonarJson(input.sonarRequest, listPath, SonarPullRequests)
@@ -416,6 +423,35 @@ function collectSonar(
       findings,
     }
   })
+}
+
+function qualityGatePolicy(
+  repository: CollectHeadEvidenceInput["repository"],
+  baseRef: string,
+): {
+  readonly requiredCheckContexts: ReadonlyArray<string>
+  readonly sonarProjectKey?: string
+} {
+  const isWorkflowdMain =
+    repository.owner.toLowerCase() === "bnasraoui" &&
+    repository.repo.toLowerCase() === "workflowd" &&
+    baseRef === "main"
+  return isWorkflowdMain
+    ? {
+        requiredCheckContexts: repositoryRequiredCheckContexts,
+        sonarProjectKey: "BNasraoui_workflowd",
+      }
+    : { requiredCheckContexts: [] }
+}
+
+function passingSonarEvidence(headSha: string): SonarEvidence {
+  return {
+    state: "pass",
+    headSha,
+    unresolvedIssueCount: 0,
+    duplicatedNewLinesPercent: 0,
+    findings: [],
+  }
 }
 
 function sonarJson<A, I>(
