@@ -29,6 +29,33 @@ const requested = {
 }
 
 describe("OpenCodeAdapter.subscribeSessionEvents", () => {
+  test("does not open the SDK subscription before iteration starts", async () => {
+    let subscriptionStarted = false
+    const client = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeEvents: async () => {
+        subscriptionStarted = true
+        return (async function* () {})()
+      },
+      getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      listAgents: async () => [],
+      listProviders: async () => [],
+    } satisfies OpenCodeSdkClient
+    const adapter = new SdkOpenCodeAdapter(client)
+
+    const events = await adapter.subscribeSessionEvents(
+      { directory: "/tmp/worktree" },
+      new AbortController().signal,
+    )
+    await events[Symbol.asyncIterator]().return?.()
+
+    expect(subscriptionStarted).toBe(false)
+  })
+
   test("aborts and finalizes a live SDK subscription when consumption stops early", async () => {
     let subscriptionSignal: AbortSignal | undefined
     let sourceFinalized = false

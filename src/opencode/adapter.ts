@@ -156,30 +156,16 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     await this.client.promptSession(input, signal)
   }
 
-  async subscribeSessionEvents(
+  subscribeSessionEvents(
     input: OpenCodeSessionDirectoryInput,
     signal: AbortSignal,
   ): Promise<AsyncIterable<OpenCodeSessionEvent>> {
-    const controller = new AbortController()
-    const interrupt = () => controller.abort(signal.reason)
-    if (signal.aborted) interrupt()
-    else signal.addEventListener("abort", interrupt, { once: true })
-
-    let cleanedUp = false
-    const cleanup = () => {
-      if (cleanedUp) return
-      cleanedUp = true
-      signal.removeEventListener("abort", interrupt)
-      controller.abort()
-    }
-
-    try {
-      const events = await this.client.subscribeEvents(input, controller.signal)
-      return normalizeEvents(events, cleanup)
-    } catch (cause) {
-      cleanup()
-      throw cause
-    }
+    return Promise.resolve(
+      normalizeEvents(
+        (subscriptionSignal) => this.client.subscribeEvents(input, subscriptionSignal),
+        signal,
+      ),
+    )
   }
 
   async getSessionStatus(
@@ -312,10 +298,24 @@ function normalizeAssistantMessage(message: AssistantMessage): OpenCodeAssistant
 }
 
 async function* normalizeEvents(
-  stream: AsyncIterable<Event>,
-  cleanup: () => void,
+  subscribe: (signal: AbortSignal) => Promise<AsyncIterable<Event>>,
+  signal: AbortSignal,
 ): AsyncIterable<OpenCodeSessionEvent> {
+  const controller = new AbortController()
+  const interrupt = () => controller.abort(signal.reason)
+  if (signal.aborted) interrupt()
+  else signal.addEventListener("abort", interrupt, { once: true })
+
+  let cleanedUp = false
+  const cleanup = () => {
+    if (cleanedUp) return
+    cleanedUp = true
+    signal.removeEventListener("abort", interrupt)
+    controller.abort()
+  }
+
   try {
+    const stream = await subscribe(controller.signal)
     for await (const event of stream) {
       switch (event.type) {
         case "message.updated":
