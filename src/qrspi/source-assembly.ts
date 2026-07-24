@@ -4,6 +4,7 @@ import {
   AcceptedPredecessorPointer,
   ExactStageScope,
   ExactStageSources,
+  MAX_STAGE_SOURCE_BYTES,
   RepositoryTarget,
   RevisionIntent,
   TicketRevisionReference,
@@ -66,7 +67,13 @@ export const assembleExactStageSources = (input: {
     })
     const sources = yield* Effect.forEach(
       authority.pointers,
-      (pointer, index) => readSource(input.repository, pointer, index, input.maxSourceBytes),
+      (pointer, index) =>
+        readSource(
+          input.repository,
+          pointer,
+          index,
+          Math.min(input.maxSourceBytes, MAX_STAGE_SOURCE_BYTES),
+        ),
       { concurrency: 1 },
     )
     const sourceSetSha256 = canonicalSha256(

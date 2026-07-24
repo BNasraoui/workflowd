@@ -15,7 +15,7 @@ import {
 } from "../domain"
 
 export const MAX_DOCUMENT_RESULT_BYTES = 256 * 1024
-export const MAX_STAGE_SOURCE_BYTES = 32 * 1024
+export const MAX_STAGE_SOURCE_BYTES = 16 * 1024
 export const MAX_EXACT_STAGE_SOURCES_BYTES = 24 * 1024
 export const MAX_TASK_TITLE_BYTES = 256
 export const MAX_TASK_PROMPT_BYTES = 4 * 1024

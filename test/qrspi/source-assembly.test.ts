@@ -5,6 +5,7 @@ import {
   AcceptedPredecessorPointer,
   ArtifactReference,
   ExactArtifactSource,
+  MAX_STAGE_SOURCE_BYTES,
   compareAcceptedPredecessorCurrentness,
 } from "../../src/qrspi/contracts"
 import {
@@ -241,6 +242,29 @@ describe("trusted Research source assembly", () => {
       canonicalSha256([{ role: "Questions", artifact: sourceArtifact }]),
     )
     expect(reader.calls()).toBe(1)
+  })
+
+  test("assembles one source at the advertised individual byte boundary", async () => {
+    const content = "x".repeat(MAX_STAGE_SOURCE_BYTES)
+    const boundedArtifact = {
+      ...sourceArtifact,
+      contentSha256: createHash("sha256").update(content).digest("hex"),
+    }
+    const boundedIdentity = { ...acceptedIdentity, artifact: boundedArtifact }
+    const boundedPointer = {
+      ...boundedIdentity,
+      pointerSha256: canonicalSha256(boundedIdentity),
+    }
+    const reader = repositoryReader({ bytes: new TextEncoder().encode(content) })
+
+    const result = await Effect.runPromise(
+      assembleExactStageSources({
+        ...assemblyInput(reader.port, [boundedPointer], [boundedPointer]),
+        maxSourceBytes: MAX_STAGE_SOURCE_BYTES,
+      }),
+    )
+
+    expect(Buffer.byteLength(result.sources[0]!.content, "utf8")).toBe(MAX_STAGE_SOURCE_BYTES)
   })
 
   test("preserves revision intent in assembled exact sources", async () => {
