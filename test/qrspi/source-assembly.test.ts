@@ -584,6 +584,28 @@ describe("generalized document predecessor assembly through Plan", () => {
     },
   )
 
+  test("accepts predecessor revisions with successive parent SHAs", async () => {
+    const fixture = matrixInput([true, true, true, true])
+    const pointers = fixture.pointers.map(({ pointerSha256: _, ...pointer }, index) => {
+      const identity = { ...pointer, targetParentSha: gitSha(String(index + 1)) }
+      return { ...identity, pointerSha256: canonicalSha256(identity) }
+    })
+
+    const result = await Effect.runPromise(
+      assembleExactStageSources({
+        ...fixture.input,
+        target: { ...fixture.input.target, expectedParentSha: gitSha("9") },
+        acceptedPointers: pointers,
+        currentAcceptedPointers: pointers,
+      }),
+    )
+
+    expect(result.sources.map(({ acceptedPointer }) => acceptedPointer.targetParentSha)).toEqual(
+      pointers.map(({ targetParentSha }) => targetParentSha),
+    )
+    expect(result.target.expectedParentSha).toBe(gitSha("9"))
+  })
+
   test.each([
     [
       "role",

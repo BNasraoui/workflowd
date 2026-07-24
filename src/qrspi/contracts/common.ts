@@ -319,8 +319,7 @@ export const ExactStageSources = ExactStageSourcesBase.pipe(
           artifact.stageKey === expectedStageKey &&
           artifact.repository.providerInstanceId === repository.providerInstanceId &&
           artifact.repository.repositoryId === repository.repositoryId &&
-          acceptedPointer.acceptedStageRevision === artifact.stageRevision &&
-          acceptedPointer.targetParentSha === value.target.expectedParentSha
+          acceptedPointer.acceptedStageRevision === artifact.stageRevision
         )
       })
     return valid ? true : "Source authority does not match the request scope and target"

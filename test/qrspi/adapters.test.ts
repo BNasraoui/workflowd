@@ -42,6 +42,13 @@ describe("QRSPI external adapters", () => {
         repos: {
           get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
           getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
           getContent: async (input: unknown) => {
             calls.push(input)
             return {
@@ -119,6 +126,45 @@ describe("QRSPI external adapters", () => {
     expect(contentCalls).toBe(0)
   })
 
+  test("rejects artifact content when GitHub observes a different commit", async () => {
+    let contentCalls = 0
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "c".repeat(40),
+              parents: [{ sha: "d".repeat(40) }],
+              commit: { message: "substituted commit" },
+            },
+          }),
+          getContent: async () => {
+            contentCalls += 1
+            throw new Error("must not read content from a substituted commit")
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 100,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    expect(contentCalls).toBe(0)
+  })
+
   test("uses the observed canonical repository name after a stable-identity rename", async () => {
     const calls: Array<unknown> = []
     const bytes = new TextEncoder().encode("renamed repository content")
@@ -127,6 +173,13 @@ describe("QRSPI external adapters", () => {
         repos: {
           get: async () => ({ data: { id: 42, full_name: "renamed-owner/renamed" } }),
           getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
           getContent: async (input: unknown) => {
             calls.push(input)
             return {
@@ -175,6 +228,13 @@ describe("QRSPI external adapters", () => {
         repos: {
           get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
           getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
           getContent: async () => ({
             data: {
               type: "file",
@@ -213,6 +273,13 @@ describe("QRSPI external adapters", () => {
         repos: {
           get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
           getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
           getContent: async () => ({
             data: Array.isArray(data)
               ? data

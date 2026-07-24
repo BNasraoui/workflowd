@@ -212,17 +212,8 @@ function pointerMismatch(
     return mismatch(target.repository, artifact.repository)
   if (artifact.stageKey !== snapshot.definition.key)
     return mismatch(snapshot.definition.key, artifact.stageKey)
-  if (
-    pointer.acceptedStageRevision !== artifact.stageRevision ||
-    pointer.targetParentSha !== target.expectedParentSha
-  )
-    return mismatch(
-      {
-        stageRevision: pointer.acceptedStageRevision,
-        targetParentSha: target.expectedParentSha,
-      },
-      { stageRevision: artifact.stageRevision, targetParentSha: pointer.targetParentSha },
-    )
+  if (pointer.acceptedStageRevision !== artifact.stageRevision)
+    return mismatch(pointer.acceptedStageRevision, artifact.stageRevision)
   if (
     canonicalSha256({
       contract: pointer.contract,

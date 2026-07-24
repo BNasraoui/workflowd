@@ -231,11 +231,26 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         throw new Error("Repository locator resolved to a different stable identity")
       }
       const { owner, repo } = repositoryName(observed)
+      if (client.rest.repos.getCommit === undefined) {
+        throw new Error("GitHub commit API is unavailable")
+      }
+      const commitResponse = await client.rest.repos.getCommit({
+        owner,
+        repo,
+        ref: input.commitSha,
+        request: { signal },
+      })
+      const observedCommitSha = Schema.decodeUnknownSync(
+        Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+      )(commitResponse.data.sha)
+      if (observedCommitSha !== input.commitSha) {
+        throw new Error("GitHub resolved the artifact reference to a different commit")
+      }
       const response = await client.rest.repos.getContent({
         owner,
         repo,
         path: input.path,
-        ref: input.commitSha,
+        ref: observedCommitSha,
         request: { signal },
       })
       const content = Schema.decodeUnknownSync(RawArtifactContent)(response.data)
@@ -258,7 +273,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         )
       }
       return {
-        commitSha: input.commitSha,
+        commitSha: observedCommitSha,
         path: content.path,
         blobSha: content.sha,
         bytes,
