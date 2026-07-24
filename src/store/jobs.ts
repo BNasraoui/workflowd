@@ -596,7 +596,7 @@ export function makeJobOperations(
           UPDATE agent_executions
           SET state = 'superseded', updated_at = ${timestamp}
           WHERE job_id = ${input.jobId}
-          AND state IN ('launch_intent', 'session_ready')
+          AND state = 'launch_intent'
         `
         return "superseded" as const
       }).pipe(sql.withTransaction),

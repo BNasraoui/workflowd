@@ -849,6 +849,67 @@ test("marks explicitly retried and terminally failed agent executions inactive",
   })
 })
 
+test("keeps a reviewer session claimable when post-review evidence supersedes its job", async () => {
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* WorkflowStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.ingestPullRequest(
+        {
+          deliveryId: "post-review-stale-evidence",
+          event: "pull_request",
+          action: "opened",
+          payload: "{}",
+          receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+        },
+        samplePullRequestEvent,
+      )
+      const work = yield* store.claimNextJob({
+        workerId: "agent-worker",
+        now: new Date("2026-07-20T12:01:00.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      if (work === null) throw new Error("expected review work")
+      const execution = makeExecution(
+        work,
+        "15555555-5555-4555-8555-555555555555",
+        "25555555-5555-4555-8555-555555555555",
+        "2026-07-20T12:01:01.000Z",
+      )
+      yield* store.recordAgentLaunchIntent({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:01.000Z"),
+        intent: execution.intent,
+      })
+      yield* store.recordAgentSessionReference({
+        jobId: work.id,
+        workerId: "agent-worker",
+        recordedAt: new Date("2026-07-20T12:01:02.000Z"),
+        reference: execution.reference,
+      })
+
+      const superseded = yield* store.supersedeJob({
+        jobId: work.id,
+        workerId: "agent-worker",
+        supersededAt: new Date("2026-07-20T12:01:03.000Z"),
+        reason: "Post-review evidence no longer matches the target.",
+      })
+      const cleanup = yield* store.claimExpiredAgentSession({
+        workerId: "cleanup-worker",
+        now: new Date("2026-07-20T12:01:04.000Z"),
+        leaseDurationMs: 60_000,
+      })
+      const executions = yield* sql`SELECT state FROM agent_executions`
+      return { superseded, cleanup, executions }
+    }).pipe(Effect.provide(makeStoreLayer())),
+  )
+
+  expect(result.superseded).toBe("superseded")
+  expect(result.cleanup?.nativeSessionId).toBe("ses_1")
+  expect(result.executions).toEqual([{ state: "session_ready" }])
+})
+
 test("supersedes the session and rejects output from an older generation", async () => {
   const result = await Effect.runPromise(
     Effect.gen(function* () {
