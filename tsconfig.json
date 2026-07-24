@@ -40,5 +40,5 @@
     ],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "skills/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts", "skills/**/*.ts"]
 }

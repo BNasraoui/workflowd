@@ -4,6 +4,7 @@ import { collectHeadEvidence } from "../src/github/head-evidence"
 import type { GitHubInstallationAdapter } from "../src/github/adapter"
 
 const headSha = "a".repeat(40)
+const workflowdAppId = 10
 const target = {
   baseRef: "main",
   baseSha: "b".repeat(40),
@@ -35,22 +36,31 @@ async function* onePage<A>(items: ReadonlyArray<A>) {
   yield items
 }
 
+const requiredCheckRuns = [
+  { id: 101, name: "Required checks", status: "completed", conclusion: "success", appId: 20 },
+  {
+    id: 102,
+    name: "SonarCloud Code Analysis",
+    status: "completed",
+    conclusion: "success",
+    appId: 21,
+  },
+  {
+    id: 103,
+    name: "CodeQL (JavaScript/TypeScript)",
+    status: "completed",
+    conclusion: "success",
+    appId: 22,
+  },
+]
+
 function github(overrides: Partial<GitHubInstallationAdapter> = {}): GitHubInstallationAdapter {
   return {
     getPullRequest: async () => pull(),
     listIssueCommentPages: () => onePage([]),
     createIssueComment: async () => 1,
     updateIssueComment: async () => 1,
-    listCheckRunPages: () =>
-      onePage([
-        {
-          id: 1,
-          name: "Tests",
-          status: "completed",
-          conclusion: "success",
-          appId: 10,
-        },
-      ]),
+    listCheckRunPages: () => onePage(requiredCheckRuns),
     listWorkflowRunPages: () => onePage([]),
     listWorkflowJobPages: () => onePage([]),
     downloadWorkflowJobLog: async () => "",
@@ -120,6 +130,7 @@ describe("collectHeadEvidence", () => {
         client: github({
           listCheckRunPages: () =>
             onePage([
+              ...requiredCheckRuns,
               {
                 id: 2,
                 name: "SonarCloud Code Analysis",
@@ -131,15 +142,17 @@ describe("collectHeadEvidence", () => {
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest: sonar({ issues: 1 }),
       }),
     )
 
     expect(evidence.headSha).toBe(headSha)
-    expect(evidence.ci.checks[0]).toMatchObject({
-      name: "SonarCloud Code Analysis",
-      state: "success",
-    })
+    expect(
+      evidence.ci.checks.some(
+        (check) => check.name === "SonarCloud Code Analysis" && check.state === "success",
+      ),
+    ).toBe(true)
     expect(evidence.sonar).toMatchObject({ state: "fail", unresolvedIssueCount: 1 })
   })
 
@@ -153,6 +166,7 @@ describe("collectHeadEvidence", () => {
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest,
       }),
     )
@@ -170,6 +184,7 @@ describe("collectHeadEvidence", () => {
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest: sonar(),
       }),
     )
@@ -193,6 +208,7 @@ describe("collectHeadEvidence", () => {
       repository: { owner: "owner", repo: "repo" },
       pullRequestNumber: 7,
       target,
+      workflowdAppId,
       sonarRequest: sonar(),
     }
 
@@ -208,8 +224,22 @@ describe("collectHeadEvidence", () => {
         client: github({
           listCheckRunPages: () =>
             onePage([
-              { id: 1, name: "OpenCode Review", status: "in_progress" },
-              { id: 2, name: "Workflowd PR Gate", status: "completed", conclusion: "failure" },
+              ...requiredCheckRuns,
+              {
+                id: 1,
+                name: "OpenCode Review",
+                status: "in_progress",
+                appId: workflowdAppId,
+                externalId: "review:1",
+              },
+              {
+                id: 2,
+                name: "Workflowd PR Gate",
+                status: "completed",
+                conclusion: "failure",
+                appId: workflowdAppId,
+                externalId: "gate:1",
+              },
               { id: 3, name: "Tests", status: "completed", conclusion: "failure" },
             ]),
           listWorkflowRunPages: () =>
@@ -222,15 +252,17 @@ describe("collectHeadEvidence", () => {
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest: sonar(),
       }),
     )
 
-    expect(evidence.ci.checks.map((check) => check.name)).toEqual(["Tests"])
-    expect(evidence.ci.checks[0]?.log?.length).toBeLessThanOrEqual(8_000)
-    expect(evidence.ci.checks[0]?.log).not.toContain("secret")
-    expect(evidence.ci.checks[0]?.log).not.toContain("\u001b")
-    expect(evidence.ci.checks[0]?.log).toContain("UNTRUSTED CI LOG")
+    const tests = evidence.ci.checks.find((check) => check.name === "Tests")
+    expect(evidence.ci.checks.map((check) => check.name)).not.toContain("OpenCode Review")
+    expect(tests?.log?.length).toBeLessThanOrEqual(8_000)
+    expect(tests?.log).not.toContain("secret")
+    expect(tests?.log).not.toContain("\u001b")
+    expect(tests?.log).toContain("UNTRUSTED CI LOG")
   })
 
   test("fails closed when exact-head check evidence is missing or exceeds its bound", async () => {
@@ -249,6 +281,7 @@ describe("collectHeadEvidence", () => {
           repository: { owner: "owner", repo: "repo" },
           pullRequestNumber: 7,
           target,
+          workflowdAppId,
           sonarRequest: sonar(),
         }),
       )
@@ -258,18 +291,23 @@ describe("collectHeadEvidence", () => {
     }
   })
 
-  test("collects legacy commit statuses and does not wait on self checks", async () => {
+  test("deduplicates legacy statuses so the newest context state controls gating", async () => {
     const evidence = await Effect.runPromise(
       collectHeadEvidence({
         client: github({
-          listCheckRunPages: () =>
-            onePage([{ id: 1, name: "OpenCode Review", status: "in_progress" }]),
+          listCheckRunPages: () => onePage(requiredCheckRuns),
           listCommitStatusPages: () =>
             onePage([
               {
                 context: "legacy/security",
+                state: "success",
+                description: "scan passed",
+                targetUrl: "https://github.test/status/2",
+              },
+              {
+                context: "legacy/security",
                 state: "failure",
-                description: "scan failed",
+                description: "obsolete failure",
                 targetUrl: "https://github.test/status/1",
               },
             ]),
@@ -277,27 +315,67 @@ describe("collectHeadEvidence", () => {
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest: sonar(),
       }),
     )
 
-    expect(evidence.ci).toMatchObject({
-      state: "available",
-      checks: [{ name: "legacy/security", state: "failure", conclusion: "failure" }],
-    })
+    const legacy = evidence.ci.checks.filter((check) => check.name === "legacy/security")
+    expect(legacy).toHaveLength(1)
+    expect(legacy[0]).toMatchObject({ state: "success", conclusion: "success" })
+  })
 
+  test("excludes only check runs authenticated as owned by this GitHub App", async () => {
     const selfOnly = await Effect.runPromise(
       collectHeadEvidence({
         client: github({
           listCheckRunPages: () =>
-            onePage([{ id: 1, name: "OpenCode Review", status: "in_progress" }]),
+            onePage([
+              {
+                id: 1,
+                name: "OpenCode Review",
+                status: "in_progress",
+                appId: workflowdAppId,
+                externalId: "review:1",
+              },
+            ]),
         }),
         repository: { owner: "owner", repo: "repo" },
         pullRequestNumber: 7,
         target,
+        workflowdAppId,
         sonarRequest: sonar(),
       }),
     )
-    expect(selfOnly.ci).toEqual({ state: "available", checks: [] })
+    expect(selfOnly.ci).toMatchObject({ state: "unavailable", checks: [] })
+
+    const spoofed = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          listCheckRunPages: () =>
+            onePage([
+              ...requiredCheckRuns,
+              { id: 2, name: "OpenCode Review", status: "in_progress", appId: 999 },
+            ]),
+          listCommitStatusPages: () =>
+            onePage([{ context: "Workflowd PR Gate", state: "failure" }]),
+        }),
+        repository: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+    expect(
+      spoofed.ci.checks.some(
+        (check) => check.name === "OpenCode Review" && check.state === "pending",
+      ),
+    ).toBe(true)
+    expect(
+      spoofed.ci.checks.some(
+        (check) => check.name === "Workflowd PR Gate" && check.state === "failure",
+      ),
+    ).toBe(true)
   })
 })

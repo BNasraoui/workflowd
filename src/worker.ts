@@ -160,7 +160,14 @@ function processReviewWork(
         yield* abortSession()
         return "stale" as const
       }
-      const gated = gateReviewWithHeadEvidence(sessionResult.review, evidence)
+      const freshEvidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (freshEvidence.ci.state === "stale") return "stale" as const
+      const gated = gateReviewWithHeadEvidence(sessionResult.review, freshEvidence)
       if (gated._tag === "Pending") {
         return yield* Effect.fail(new EvidencePending({ reason: gated.reason }))
       }
@@ -344,7 +351,7 @@ type AgentFailureContext = {
   readonly retryPolicy: { readonly maxAttempts: number }
 }
 
-export function runJobIteration(options: {
+type JobIterationOptions = {
   readonly workerId: string
   readonly leaseDurationMs: number
   readonly maxAttempts: number
@@ -354,7 +361,9 @@ export function runJobIteration(options: {
   readonly trustedAgentUsers: ReadonlyArray<string>
   readonly fixWorkEnabled: boolean
   readonly now: () => Date
-}) {
+}
+
+function cleanupExpiredAgentSessions(options: JobIterationOptions) {
   return Effect.gen(function* () {
     const store = yield* WorkflowStore
     const harness = yield* AgentHarness
@@ -364,22 +373,50 @@ export function runJobIteration(options: {
         now: options.now(),
         leaseDurationMs: options.leaseDurationMs,
       })
-      if (expiredSession === null) break
+      if (expiredSession === null) return
       const cleanup = yield* Effect.exit(harness.abortSession(expiredSession))
-      if (Exit.isFailure(cleanup)) {
-        yield* store.recordAgentSessionCleanupFailure({
-          sessionReferenceId: expiredSession.sessionReferenceId,
-          workerId: options.workerId,
-          failedAt: options.now(),
-          error: Cause.pretty(cleanup.cause),
-        })
-        yield* Effect.logWarning(
-          `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
-        )
-        break
+      if (Exit.isSuccess(cleanup)) {
+        yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
+        continue
       }
-      yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
+      yield* store.recordAgentSessionCleanupFailure({
+        sessionReferenceId: expiredSession.sessionReferenceId,
+        workerId: options.workerId,
+        failedAt: options.now(),
+        error: Cause.pretty(cleanup.cause),
+      })
+      yield* Effect.logWarning(
+        `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
+      )
+      return
     }
+  })
+}
+
+function jobOperation(
+  work: ReviewWork | FixWork,
+  options: JobIterationOptions,
+  onPrepared: (intent: AgentFailureContext) => void,
+  onAbortFailure: () => void,
+) {
+  if (work._tag === "ReviewWork") {
+    return processReviewWork(
+      work,
+      options.workerId,
+      options.agentBranchPrefixes,
+      options.trustedAgentUsers,
+      options.fixWorkEnabled,
+      onPrepared,
+      onAbortFailure,
+    )
+  }
+  return processFixWork(work, options.workerId, onPrepared, onAbortFailure)
+}
+
+export function runJobIteration(options: JobIterationOptions) {
+  return Effect.gen(function* () {
+    const store = yield* WorkflowStore
+    yield* cleanupExpiredAgentSessions(options)
     const work = yield* store.claimNextJob({
       workerId: options.workerId,
       now: options.now(),
@@ -410,22 +447,9 @@ export function runJobIteration(options: {
     const captureAgentFailureContext = (intent: AgentFailureContext) => {
       agentFailureContext = intent
     }
-    const operation =
-      work._tag === "ReviewWork"
-        ? processReviewWork(
-            work,
-            options.workerId,
-            options.agentBranchPrefixes,
-            options.trustedAgentUsers,
-            options.fixWorkEnabled,
-            captureAgentFailureContext,
-            () => {
-              agentAbortFailed = true
-            },
-          )
-        : processFixWork(work, options.workerId, captureAgentFailureContext, () => {
-            agentAbortFailed = true
-          })
+    const operation = jobOperation(work, options, captureAgentFailureContext, () => {
+      agentAbortFailed = true
+    })
     const exit = yield* Effect.exit(
       interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
         store.shouldCancelJob(work.id, options.workerId, options.now()),

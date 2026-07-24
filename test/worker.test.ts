@@ -746,6 +746,70 @@ describe("Review Work processing", () => {
     })
   })
 
+  test("recollects evidence after review before gating or enqueueing Fix Work", async () => {
+    const job = makeReviewWork({ author: "example-owner" })
+    let collections = 0
+    let completedReview: typeof ReviewResult.Type | undefined
+    let autoFix = true
+    const exactHeadEvidence = (state: "failure" | "success") => ({
+      headSha: job.target.headSha,
+      ci: {
+        state: "available" as const,
+        checks: [
+          { name: "Required checks", state },
+          { name: "SonarCloud Code Analysis", state: "success" as const },
+          { name: "CodeQL (JavaScript/TypeScript)", state: "success" as const },
+        ],
+      },
+      sonar: {
+        state: "pass" as const,
+        headSha: job.target.headSha,
+        unresolvedIssueCount: 0,
+        duplicatedNewLinesPercent: 0,
+        findings: [],
+      },
+      mergeability: { state: "mergeable" as const },
+    })
+
+    await Effect.runPromise(
+      runJobIteration({
+        ...jobOptions,
+        agentBranchPrefixes: ["opencode/"],
+        trustedAgentUsers: ["example-owner"],
+        fixWorkEnabled: true,
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeAgentReviewJob: (input) =>
+                Effect.sync(() => {
+                  completedReview = input.review
+                  autoFix = input.autoFix
+                  return "completed" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed(exactHeadEvidence(++collections === 1 ? "failure" : "success")),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () =>
+                Effect.succeed({ verdict: "pass", summary: "Looks good.", findings: [] }),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(collections).toBe(2)
+    expect(completedReview?.verdict).toBe("pass")
+    expect(autoFix).toBe(false)
+  })
+
   test("retries pending exact-head evidence without launching the reviewer", async () => {
     const job = makeReviewWork()
     let prepared = false

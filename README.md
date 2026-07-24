@@ -77,7 +77,7 @@ Repository permissions:
 - Pull requests: Read and write
 - Issues: Read and write
 - Checks: Read and write
-- Actions: Read-only (required to collect bounded failed-job logs for the exact PR head)
+- Actions: Read-only (required to collect failed-job log excerpts for the exact PR head)
 - Metadata: Read-only
 
 Install the App on every repository that should be automated. Existing installations must be re-approved after adding Actions read permission. Generate a private key and store it outside the repository with mode `0600`.
@@ -86,7 +86,9 @@ Install the App on every repository that should be automated. Existing installat
 
 This public repository uses **SonarQube Cloud Automatic Analysis**. Import `BNasraoui/workflowd` into SonarQube Cloud, keep Automatic Analysis enabled, and do not add `SONAR_TOKEN`: Workflowd reads the public PR analysis APIs and CI must not replace Automatic Analysis with a scanner workflow. For the exact PR head, automated approval requires zero unresolved new Sonar issues of any severity and no more than 1% duplicated new lines. Missing, stale, unavailable, or failed evidence blocks approval; genuinely pending analysis is retried without publishing a pass.
 
-The repository also runs blocking Knip and `bun audit --audit-level=high` checks, per-covered-file Bun line/function/statement thresholds, and CodeQL JavaScript/TypeScript analysis on PRs, main, and a weekly schedule. Failed Actions logs and analyzer findings are bounded, sanitized, explicitly treated as untrusted, and supplied to both review and Fix Work. Workflowd's own `OpenCode Review` and `Workflowd PR Gate` contexts are excluded from evidence waiting to prevent cycles.
+The repository also runs blocking Knip and `bun audit --audit-level=high` checks, per-covered-file Bun line/function/statement thresholds, an 80% exact-base/head changed-executable-line gate from Bun LCOV, and CodeQL JavaScript/TypeScript analysis on PRs, main, and a weekly schedule. Approval requires the exact-head `Required checks`, `SonarCloud Code Analysis`, and `CodeQL (JavaScript/TypeScript)` contexts; missing contexts fail closed. Workflowd excludes a check run only when GitHub identifies both this App's app ID and its non-empty external identity, never from a caller-controlled check or legacy-status name.
+
+Failed Actions log **retention** is bounded to three sanitized 8,000-character excerpts and is explicitly treated as untrusted input for review and Fix Work. GitHub's REST job-log endpoint returns the downloaded payload before Workflowd can sanitize and truncate it, so the transport download itself is not claimed to be byte-bounded.
 
 A repository administrator must update the `main` ruleset after these workflows first run:
 

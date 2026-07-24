@@ -74,6 +74,7 @@ export class GitHubAppAdapter implements GitHubPort {
         pullRequestNumber: input.pullRequestNumber,
         target: input.target,
         sonarRequest: this.sonarRequest,
+        workflowdAppId: this.appId,
       }).pipe(
         Effect.mapError(
           (error) =>

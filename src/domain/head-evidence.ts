@@ -50,7 +50,11 @@ export type GatedReview =
   | { readonly _tag: "Pending"; readonly reason: string }
   | { readonly _tag: "Ready"; readonly review: ReviewResult }
 
-const selfCheckNames = new Set(["OpenCode Review", "Workflowd PR Gate"])
+export const repositoryRequiredCheckContexts = [
+  "Required checks",
+  "SonarCloud Code Analysis",
+  "CodeQL (JavaScript/TypeScript)",
+] as const
 const evidencePath = ".workflowd/evidence.json"
 const gateSummaryPrefix = "Automated gates did not pass. Reviewer summary: "
 
@@ -58,11 +62,10 @@ export function gateReviewWithHeadEvidence(
   review: ReviewResult,
   evidence: HeadEvidence,
 ): GatedReview {
-  const requiredChecks = evidence.ci.checks.filter((check) => !selfCheckNames.has(check.name))
-  const pending = pendingReason(requiredChecks, evidence)
+  const pending = pendingReason(evidence.ci.checks, evidence)
   if (pending !== undefined) return { _tag: "Pending", reason: pending }
   const findings = [
-    ...ciFindings(evidence.ci, requiredChecks),
+    ...ciFindings(evidence.ci),
     ...sonarFindings(evidence),
     ...mergeabilityFindings(evidence.mergeability),
   ]
@@ -90,7 +93,7 @@ function pendingReason(
     : undefined
 }
 
-function ciFindings(ci: CiEvidence, checks: ReadonlyArray<CheckEvidence>): Array<ReviewFinding> {
+function ciFindings(ci: CiEvidence): Array<ReviewFinding> {
   const findings: Array<ReviewFinding> = []
   if (ci.state !== "available") {
     findings.push({
@@ -100,7 +103,7 @@ function ciFindings(ci: CiEvidence, checks: ReadonlyArray<CheckEvidence>): Array
       path: evidencePath,
     })
   }
-  for (const check of checks) {
+  for (const check of ci.checks) {
     if (check.state !== "failure") continue
     const details = [
       `Conclusion: ${check.conclusion ?? "non-success"}.`,

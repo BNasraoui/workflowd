@@ -1,0 +1,150 @@
+const changedCoveragePercent = 80
+const excludedSourceFiles = new Set([
+  "src/store/errors.ts",
+  "src/workspace/errors.ts",
+  "src/qrspi/ports.ts",
+])
+
+export type ChangedLines = ReadonlyMap<string, ReadonlySet<number>>
+export type LineCoverage = ReadonlyMap<string, ReadonlyMap<number, number>>
+
+export function buildExactDiffArguments(baseSha: string, headSha: string): ReadonlyArray<string> {
+  const fullSha = /^[0-9a-f]{40}$/i
+  if (!fullSha.test(baseSha) || !fullSha.test(headSha)) {
+    throw new Error("Base and head revisions must be full Git SHAs")
+  }
+  return [
+    "diff",
+    "--unified=0",
+    "--no-color",
+    "--no-ext-diff",
+    "--diff-filter=ACMR",
+    baseSha,
+    headSha,
+    "--",
+  ]
+}
+
+export function parseChangedLines(diff: string): Map<string, Set<number>> {
+  const changed = new Map<string, Set<number>>()
+  let path: string | undefined
+  for (const line of diff.replaceAll("\r\n", "\n").split("\n")) {
+    if (line.startsWith("+++ ")) {
+      const value = line.slice(4)
+      path = value === "/dev/null" ? undefined : value.replace(/^b\//, "")
+      continue
+    }
+    if (!line.startsWith("@@ ")) continue
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    if (hunk === null || path === undefined) throw new Error(`Malformed diff hunk: ${line}`)
+    const start = Number(hunk[1])
+    const count = hunk[2] === undefined ? 1 : Number(hunk[2])
+    const lines = changed.get(path) ?? new Set<number>()
+    for (let offset = 0; offset < count; offset += 1) lines.add(start + offset)
+    changed.set(path, lines)
+  }
+  return changed
+}
+
+export function parseLcov(
+  lcov: string,
+  repositoryRoot = process.cwd(),
+): Map<string, Map<number, number>> {
+  const coverage = new Map<string, Map<number, number>>()
+  let path: string | undefined
+  for (const line of lcov.replaceAll("\r\n", "\n").split("\n")) {
+    if (line.startsWith("SF:")) {
+      path = normalizeSourcePath(line.slice(3), repositoryRoot)
+      if (path === "") throw new Error("LCOV source path is empty")
+      continue
+    }
+    if (!line.startsWith("DA:")) continue
+    if (path === undefined) throw new Error("LCOV DA record appears before SF")
+    const record = /^DA:(\d+),(\d+)(?:,[^,]+)?$/.exec(line)
+    if (record === null) throw new Error(`Malformed LCOV line record: ${line}`)
+    const lineNumber = Number(record[1])
+    const hits = Number(record[2])
+    const file = coverage.get(path) ?? new Map<number, number>()
+    file.set(lineNumber, (file.get(lineNumber) ?? 0) + hits)
+    coverage.set(path, file)
+  }
+  return coverage
+}
+
+function normalizeSourcePath(path: string, repositoryRoot: string): string {
+  const normalized = path.replaceAll("\\", "/")
+  const root = repositoryRoot.replaceAll("\\", "/").replace(/\/$/, "")
+  return normalized.startsWith(`${root}/`)
+    ? normalized.slice(root.length + 1)
+    : normalized.replace(/^\.\//, "")
+}
+
+function eligibleSource(path: string): boolean {
+  return path.startsWith("src/") && path.endsWith(".ts") && !excludedSourceFiles.has(path)
+}
+
+export function evaluateChangedLineCoverage(changed: ChangedLines, coverage: LineCoverage) {
+  const missingFiles: Array<string> = []
+  const uncovered: Array<string> = []
+  let covered = 0
+  let total = 0
+  for (const [path, changedLines] of changed) {
+    if (!eligibleSource(path)) continue
+    const fileCoverage = coverage.get(path)
+    if (fileCoverage === undefined) {
+      missingFiles.push(path)
+      continue
+    }
+    for (const line of changedLines) {
+      const hits = fileCoverage.get(line)
+      if (hits === undefined) continue
+      total += 1
+      if (hits > 0) covered += 1
+      else uncovered.push(`${path}:${line}`)
+    }
+  }
+  missingFiles.sort()
+  uncovered.sort()
+  return {
+    passed:
+      missingFiles.length === 0 && (total === 0 || covered * 100 >= total * changedCoveragePercent),
+    covered,
+    total,
+    uncovered,
+    missingFiles,
+  }
+}
+
+async function main(): Promise<void> {
+  const [baseSha, headSha] = Bun.argv.slice(2)
+  if (baseSha === undefined || headSha === undefined) {
+    throw new Error("Usage: bun run coverage:changed <base-sha> <head-sha>")
+  }
+  const subprocess = Bun.spawn(["git", ...buildExactDiffArguments(baseSha, headSha)], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, diff, error] = await Promise.all([
+    subprocess.exited,
+    new Response(subprocess.stdout).text(),
+    new Response(subprocess.stderr).text(),
+  ])
+  if (exitCode !== 0) throw new Error(`git diff failed: ${error.trim()}`)
+  const lcovFile = Bun.file("coverage/lcov.info")
+  if (!(await lcovFile.exists())) throw new Error("coverage/lcov.info does not exist")
+  const result = evaluateChangedLineCoverage(
+    parseChangedLines(diff),
+    parseLcov(await lcovFile.text()),
+  )
+  const percent = result.total === 0 ? 100 : (result.covered / result.total) * 100
+  console.log(
+    `Changed executable line coverage: ${result.covered}/${result.total} (${percent.toFixed(2)}%)`,
+  )
+  if (result.uncovered.length > 0) console.error(`Uncovered lines:\n${result.uncovered.join("\n")}`)
+  if (result.missingFiles.length > 0) {
+    console.error(`Changed source files missing from LCOV:\n${result.missingFiles.join("\n")}`)
+  }
+  if (!result.passed) process.exitCode = 1
+}
+
+if (import.meta.main) await main()

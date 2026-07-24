@@ -8,6 +8,7 @@
     "start": "bun src/main.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
+    "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
