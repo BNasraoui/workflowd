@@ -602,6 +602,7 @@ function matchesPredecessorAuthority(
       snapshot.stageDefinitionSha256 === source.acceptedPointer.snapshotSha256 &&
       canonicalSha256(snapshot.contract) === canonicalSha256(source.acceptedPointer.contract) &&
       snapshot.contractRegistrationSha256 === source.acceptedPointer.contractRegistrationSha256 &&
+      descriptor.stageKey === snapshot.stageKey &&
       descriptor.registrationSha256 === source.acceptedPointer.contractRegistrationSha256
     )
   })

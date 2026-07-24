@@ -674,6 +674,50 @@ describe("complete built-in contract replay", () => {
     ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
   })
 
+  test("rejects a predecessor pointer and snapshot relabeled with another built-in contract", async () => {
+    const catalog = new TrustedStageCatalog(builtInStageContracts)
+    const contract = builtInStageContracts.find(({ ref }) => ref.name === "qrspi.structure")!
+    const scope = sourcesFor("structure")
+    const source = scope.sources[0]!
+    const { pointerSha256: _pointerSha256, ...pointerIdentity } = source.acceptedPointer
+    const substitutedIdentity = {
+      ...pointerIdentity,
+      contract: researchStageContract.ref,
+      contractRegistrationSha256: catalog.descriptor(researchStageContract.ref).registrationSha256,
+    }
+    const substitutedScope = {
+      ...scope,
+      sources: [
+        {
+          ...source,
+          acceptedPointer: {
+            ...substitutedIdentity,
+            pointerSha256: canonicalSha256(substitutedIdentity),
+          },
+        },
+      ],
+    }
+    const input = encodeStageProduceInput(substitutedScope, contract.ref, {
+      _tag: "StructureRequest",
+      sources: substitutedScope,
+      structurePolicy: { name: "qrspi.structure-policy", version: 1 },
+      authority: structureAuthority,
+    })
+
+    expect(
+      await Effect.runPromise(
+        catalog
+          .port()
+          .buildTask({
+            input,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(contract, substitutedScope),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+  })
+
   test("rejects unexpected durable request fields", async () => {
     const contract = builtInStageContracts[0]
     const scope = sourcesFor("questions")
