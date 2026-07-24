@@ -10,18 +10,31 @@ import {
   TicketRevision,
   ticketRevisionSha256For,
   type TicketRevision as TicketRevisionType,
+  workflowIdFor,
 } from "../../src/qrspi/domain"
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
 import {
   builtInStageContracts,
   encodeStageProduceInput,
   researchStageContract,
+  type AcceptedPredecessorPointer,
+  type ArtifactReference,
 } from "../../src/qrspi/contracts"
 import { TrustedStageCatalog } from "../../src/qrspi/stage-catalog"
 import { canonicalSha256 } from "../../src/qrspi/domain"
 
 const directories: string[] = []
-const workflowId = `wf_${"a".repeat(64)}`
+const repository = {
+  providerInstanceId: "github-app-1",
+  repositoryId: "repository-1",
+  repositoryFullName: "owner/repository",
+}
+const ticketReference = {
+  tracker: "beads" as const,
+  trackerInstanceId: "workspace-42",
+  nativeTicketId: "workflowd-vs3.4.2",
+}
+const workflowId = workflowIdFor(repository, ticketReference)
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })))
@@ -30,9 +43,7 @@ afterEach(async () => {
 function ticketRevision(): TicketRevisionType {
   const readyTicket = {
     reference: {
-      tracker: "beads" as const,
-      trackerInstanceId: "workspace-42",
-      nativeTicketId: "workflowd-vs3.4.2",
+      ...ticketReference,
     },
     issueType: "feature" as const,
     title: "Build exact Questions replay",
@@ -55,6 +66,37 @@ function ticketRevision(): TicketRevisionType {
     checkedAt: new Date("2026-07-24T00:00:00.000Z"),
     ticketRevisionSha256: ticketRevisionSha256For(readyTicket, scenarioCoverage),
   })
+}
+
+function replayAuthorityFor(
+  contract: (typeof builtInStageContracts)[number],
+  sources: {
+    readonly stageKey: string
+    readonly stageDefinitionSha256: string
+    readonly sources: ReadonlyArray<{
+      readonly acceptedPointer: AcceptedPredecessorPointer
+      readonly artifact: ArtifactReference
+    }>
+  },
+  maxEncodedInputBytes = contract.maxRequestBytes,
+) {
+  const catalog = new TrustedStageCatalog(builtInStageContracts)
+  return {
+    stageSnapshot: {
+      stageKey: sources.stageKey,
+      stageDefinitionSha256: sources.stageDefinitionSha256,
+      contract: contract.ref,
+      contractRegistrationSha256: catalog.descriptor(contract.ref).registrationSha256,
+      maxEncodedInputBytes,
+    },
+    predecessorSnapshots: sources.sources.map(({ acceptedPointer, artifact }) => ({
+      stageKey: artifact.stageKey,
+      stageDefinitionSha256: acceptedPointer.snapshotSha256,
+      contract: acceptedPointer.contract,
+      contractRegistrationSha256: acceptedPointer.contractRegistrationSha256,
+    })),
+    acceptedPointers: sources.sources.map(({ acceptedPointer }) => acceptedPointer),
+  }
 }
 
 type Mutation = "valid" | "missing" | "malformed" | "nested_hash" | "semantic" | "wrong_workflow"
@@ -146,11 +188,7 @@ describe("Research request replay", () => {
     }
     const content = "persisted questio\u0301ns"
     const artifact = {
-      repository: {
-        providerInstanceId: "github-app-1",
-        repositoryId: "repository-1",
-        repositoryFullName: "owner/repository",
-      },
+      repository,
       workflowId,
       generation: 1,
       stageKey: "questions",
@@ -173,7 +211,10 @@ describe("Research request replay", () => {
       acceptedStageRevision: artifact.stageRevision,
       targetParentSha: target.expectedParentSha,
       contract: { name: "qrspi.questions", contractVersion: 1 },
-      contractRegistrationSha256: "3".repeat(64),
+      contractRegistrationSha256: new TrustedStageCatalog(builtInStageContracts).descriptor({
+        name: "qrspi.questions",
+        contractVersion: 1,
+      }).registrationSha256,
       artifact,
     }
     const source = {
@@ -208,9 +249,11 @@ describe("Research request replay", () => {
     void repositoryThatMustNotRun
 
     const task = await Effect.runPromise(
-      new TrustedStageCatalog([researchStageContract])
-        .port()
-        .buildTask({ input: persisted, ticketRevision: original }),
+      new TrustedStageCatalog(builtInStageContracts).port().buildTask({
+        input: persisted,
+        ticketRevision: original,
+        replayAuthority: replayAuthorityFor(researchStageContract, sources),
+      }),
     )
 
     expect(task.authority.sources).toEqual([source])
@@ -221,6 +264,75 @@ describe("Research request replay", () => {
       reason: "Revise the accepted Research output",
     })
     expect(repositoryCalls).toBe(0)
+
+    const ticketFromAnotherWorkflow = Schema.decodeUnknownSync(TicketRevision)({
+      ...original,
+      readyTicket: {
+        ...original.readyTicket,
+        reference: { ...original.readyTicket.reference, nativeTicketId: "another-ticket" },
+      },
+    })
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({
+            input: persisted,
+            ticketRevision: ticketFromAnotherWorkflow,
+            replayAuthority: replayAuthorityFor(researchStageContract, sources),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+
+    const forgedIdentity = {
+      ...source.acceptedPointer,
+      snapshotSha256: "f".repeat(64),
+      contractRegistrationSha256: "e".repeat(64),
+      pointerSha256: undefined,
+    }
+    const { pointerSha256: _, ...forgedPointerIdentity } = forgedIdentity
+    const forgedSource = {
+      ...source,
+      acceptedPointer: {
+        ...forgedPointerIdentity,
+        pointerSha256: canonicalSha256(forgedPointerIdentity),
+      },
+    }
+    const forgedSources = { ...sources, sources: [forgedSource] }
+    const forgedInput = encodeStageProduceInput(scope, researchStageContract.ref, {
+      _tag: "ResearchRequest",
+      sources: forgedSources,
+    })
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({
+            input: forgedInput,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(researchStageContract, sources),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({
+            input: persisted,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(
+              researchStageContract,
+              sources,
+              Buffer.byteLength(JSON.stringify(persisted.request), "utf8") - 1,
+            ),
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "request_too_large" } })
 
     for (const substitutedContent of ["substituted questions", content.normalize("NFC")]) {
       const substitutedRequest = {
@@ -238,9 +350,16 @@ describe("Research request replay", () => {
 
       expect(
         await Effect.runPromise(
-          new TrustedStageCatalog([researchStageContract])
+          new TrustedStageCatalog(builtInStageContracts)
             .port()
-            .buildTask({ input: substituted, ticketRevision: original })
+            .buildTask({
+              input: substituted,
+              ticketRevision: original,
+              replayAuthority: replayAuthorityFor(
+                researchStageContract,
+                substitutedRequest.sources,
+              ),
+            })
             .pipe(Effect.either),
         ),
       ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
@@ -272,9 +391,13 @@ describe("Research request replay", () => {
 
     expect(
       await Effect.runPromise(
-        new TrustedStageCatalog([researchStageContract])
+        new TrustedStageCatalog(builtInStageContracts)
           .port()
-          .buildTask({ input: pathSubstituted, ticketRevision: original })
+          .buildTask({
+            input: pathSubstituted,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(researchStageContract, pathSubstitutedSources),
+          })
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
@@ -327,7 +450,10 @@ describe("complete built-in contract replay", () => {
       acceptedStageRevision: 1,
       targetParentSha: target.expectedParentSha,
       contract: { name: "qrspi.design", contractVersion: 1 },
-      contractRegistrationSha256: "9".repeat(64),
+      contractRegistrationSha256: new TrustedStageCatalog(builtInStageContracts).descriptor({
+        name: "qrspi.design",
+        contractVersion: 1,
+      }).registrationSha256,
       artifact,
     }
     const source = {
@@ -448,10 +574,18 @@ describe("complete built-in contract replay", () => {
       const before = new TrustedStageCatalog(builtInStageContracts).port()
       const after = new TrustedStageCatalog(builtInStageContracts).port()
       const firstTask = await Effect.runPromise(
-        before.buildTask({ input: persisted, ticketRevision: original }),
+        before.buildTask({
+          input: persisted,
+          ticketRevision: original,
+          replayAuthority: replayAuthorityFor(contract, scope),
+        }),
       )
       const replayedTask = await Effect.runPromise(
-        after.buildTask({ input: persisted, ticketRevision: original }),
+        after.buildTask({
+          input: persisted,
+          ticketRevision: original,
+          replayAuthority: replayAuthorityFor(contract, scope),
+        }),
       )
       expect(persisted.requestSha256).toBe(canonicalSha256(request))
       expect(replayedTask).toEqual(firstTask)
@@ -492,7 +626,11 @@ describe("complete built-in contract replay", () => {
         await Effect.runPromise(
           new TrustedStageCatalog(builtInStageContracts)
             .port()
-            .buildTask({ input, ticketRevision: original })
+            .buildTask({
+              input,
+              ticketRevision: original,
+              replayAuthority: replayAuthorityFor(contract, wrongScope),
+            })
             .pipe(Effect.either),
         ),
       ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
@@ -511,7 +649,11 @@ describe("complete built-in contract replay", () => {
       await Effect.runPromise(
         new TrustedStageCatalog(builtInStageContracts)
           .port()
-          .buildTask({ input, ticketRevision: original })
+          .buildTask({
+            input,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(contract, scope),
+          })
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
@@ -529,7 +671,11 @@ describe("complete built-in contract replay", () => {
       await Effect.runPromise(
         new TrustedStageCatalog(builtInStageContracts)
           .port()
-          .buildTask({ input, ticketRevision: original })
+          .buildTask({
+            input,
+            ticketRevision: original,
+            replayAuthority: replayAuthorityFor(contract, scope),
+          })
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })

@@ -11,6 +11,7 @@ import {
   TicketRevision,
   canonicalSha256,
   ticketRevisionSha256For,
+  workflowIdFor,
   workflowDefinitionSha256,
 } from "../../src/qrspi/domain"
 import {
@@ -141,7 +142,8 @@ describe("TrustedStageCatalog", () => {
     })
     const selected = makeContract("selected")
     const unselected = makeContract("unselected")
-    const port = new TrustedStageCatalog([selected, unselected]).port()
+    const trustedCatalog = new TrustedStageCatalog([selected, unselected])
+    const port = trustedCatalog.port()
     const readyTicket = {
       reference: {
         tracker: "beads" as const,
@@ -164,8 +166,14 @@ describe("TrustedStageCatalog", () => {
     }
     const scenarioCoverage = [[0]]
     const ticketRevisionSha256 = ticketRevisionSha256For(readyTicket, scenarioCoverage)
+    const repository = {
+      providerInstanceId: "provider",
+      repositoryId: "repository",
+      repositoryFullName: "owner/repository",
+    }
+    const workflowId = workflowIdFor(repository, readyTicket.reference)
     const exactSources = {
-      workflowId: `wf_${"a".repeat(64)}`,
+      workflowId,
       generation: 1,
       stageKey: "fixture",
       runOrdinal: 1,
@@ -173,17 +181,13 @@ describe("TrustedStageCatalog", () => {
       workflowDefinitionSha256: "b".repeat(64),
       stageDefinitionSha256: "c".repeat(64),
       ticketRevision: {
-        workflowId: `wf_${"a".repeat(64)}`,
+        workflowId,
         ticketRevisionSha256,
       },
       sources: [] as const,
       sourceSetSha256: canonicalSha256([]),
       target: {
-        repository: {
-          providerInstanceId: "provider",
-          repositoryId: "repository",
-          repositoryFullName: "owner/repository",
-        },
+        repository,
         headRef: "refs/heads/workflow",
         expectedParentSha: "e".repeat(40),
       },
@@ -202,7 +206,18 @@ describe("TrustedStageCatalog", () => {
       checkedAt: new Date("2026-07-24T00:00:00.000Z"),
       ticketRevisionSha256,
     })
-    await Effect.runPromise(port.buildTask({ input, ticketRevision }))
+    const replayAuthority = {
+      stageSnapshot: {
+        stageKey: exactSources.stageKey,
+        stageDefinitionSha256: exactSources.stageDefinitionSha256,
+        contract: selected.ref,
+        contractRegistrationSha256: trustedCatalog.descriptor(selected.ref).registrationSha256,
+        maxEncodedInputBytes: 8_192,
+      },
+      predecessorSnapshots: [],
+      acceptedPointers: [],
+    }
+    await Effect.runPromise(port.buildTask({ input, ticketRevision, replayAuthority }))
     await Effect.runPromise(
       port.prepareOutput({
         contract: selected.ref,
@@ -216,7 +231,9 @@ describe("TrustedStageCatalog", () => {
     })
     expect(
       await Effect.runPromise(
-        port.buildTask({ input: malformedInput, ticketRevision }).pipe(Effect.either),
+        port
+          .buildTask({ input: malformedInput, ticketRevision, replayAuthority })
+          .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
     expect(

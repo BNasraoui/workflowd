@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { createHash } from "node:crypto"
 import { MAX_STAGE_REQUEST_BYTES } from "../../src/agent-harness"
-import { TicketRevision, canonicalSha256, ticketRevisionSha256For } from "../../src/qrspi/domain"
+import {
+  TicketRevision,
+  canonicalSha256,
+  ticketRevisionSha256For,
+  workflowIdFor,
+} from "../../src/qrspi/domain"
 import {
   ExactStageSources,
   ImplementationRequest,
@@ -31,13 +36,24 @@ import {
   planStageContract,
   researchStageContract,
   structureStageContract,
+  builtInStageContracts,
 } from "../../src/qrspi/contracts"
 import { TrustedStageCatalog } from "../../src/qrspi/stage-catalog"
 
 const sha = (character: string) => character.repeat(64)
 const contentSha256 = (content: string) => createHash("sha256").update(content).digest("hex")
+const repository = {
+  providerInstanceId: "github-app-1",
+  repositoryId: "repository-1",
+  repositoryFullName: "owner/repository",
+}
+const ticketReference = {
+  tracker: "beads" as const,
+  trackerInstanceId: "workspace-42",
+  nativeTicketId: "workflowd-vs3.4.2",
+}
 const scope = {
-  workflowId: `wf_${sha("a")}`,
+  workflowId: workflowIdFor(repository, ticketReference),
   generation: 1,
   stageKey: "questions",
   runOrdinal: 1,
@@ -51,11 +67,7 @@ const ticketRevision = {
   ticketRevisionSha256: verifiedTicket.ticketRevisionSha256,
 }
 const target = {
-  repository: {
-    providerInstanceId: "github-app-1",
-    repositoryId: "repository-1",
-    repositoryFullName: "owner/repository",
-  },
+  repository,
   headRef: "refs/heads/workflow",
   expectedParentSha: "e".repeat(40),
 }
@@ -91,7 +103,10 @@ function acceptedPointerFor(
     acceptedStageRevision: artifact.stageRevision,
     targetParentSha: target.expectedParentSha,
     contract: { name: `qrspi.${role.toLowerCase()}`, contractVersion: 1 },
-    contractRegistrationSha256: sha(marker),
+    contractRegistrationSha256: new TrustedStageCatalog(builtInStageContracts).descriptor({
+      name: `qrspi.${role.toLowerCase()}`,
+      contractVersion: 1,
+    }).registrationSha256,
     artifact,
   }
   return { ...identity, pointerSha256: canonicalSha256(identity) }
@@ -259,11 +274,7 @@ const implementationSources = {
 
 function verifiedTicketRevision() {
   const readyTicket = {
-    reference: {
-      tracker: "beads" as const,
-      trackerInstanceId: "workspace-42",
-      nativeTicketId: "workflowd-vs3.4.2",
-    },
+    reference: ticketReference,
     issueType: "feature" as const,
     title: "Build exact Questions replay",
     description: "Persist and replay one exact typed Questions request.",
@@ -285,6 +296,37 @@ function verifiedTicketRevision() {
     checkedAt: new Date("2026-07-24T00:00:00.000Z"),
     ticketRevisionSha256: ticketRevisionSha256For(readyTicket, scenarioCoverage),
   })
+}
+
+function replayAuthorityFor(
+  contract: (typeof builtInStageContracts)[number],
+  exactSources: {
+    readonly stageKey: string
+    readonly stageDefinitionSha256: string
+    readonly sources: ReadonlyArray<{
+      readonly acceptedPointer: ReturnType<typeof acceptedPointerFor>
+      readonly artifact: typeof researchArtifact
+    }>
+  },
+  maxEncodedInputBytes = contract.maxRequestBytes,
+) {
+  const catalog = new TrustedStageCatalog(builtInStageContracts)
+  return {
+    stageSnapshot: {
+      stageKey: exactSources.stageKey,
+      stageDefinitionSha256: exactSources.stageDefinitionSha256,
+      contract: contract.ref,
+      contractRegistrationSha256: catalog.descriptor(contract.ref).registrationSha256,
+      maxEncodedInputBytes,
+    },
+    predecessorSnapshots: exactSources.sources.map(({ acceptedPointer, artifact }) => ({
+      stageKey: artifact.stageKey,
+      stageDefinitionSha256: acceptedPointer.snapshotSha256,
+      contract: acceptedPointer.contract,
+      contractRegistrationSha256: acceptedPointer.contractRegistrationSha256,
+    })),
+    acceptedPointers: exactSources.sources.map(({ acceptedPointer }) => acceptedPointer),
+  }
 }
 
 describe("shared exact stage contracts", () => {
@@ -428,7 +470,11 @@ describe("exact Questions contract through erased catalog execution", () => {
     expect(Schema.decodeUnknownSync(StageProduceInput)(durableInput)).toEqual(durableInput)
 
     const task = await Effect.runPromise(
-      catalog.buildTask({ input: durableInput, ticketRevision: verifiedTicket }),
+      catalog.buildTask({
+        input: durableInput,
+        ticketRevision: verifiedTicket,
+        replayAuthority: replayAuthorityFor(questionsStageContract, sources),
+      }),
     )
     expect(task).toMatchObject({
       title: "Answer workflow questions",
@@ -461,7 +507,11 @@ describe("exact Questions contract through erased catalog execution", () => {
     expect(
       await Effect.runPromise(
         catalog
-          .buildTask({ input: badRequest, ticketRevision: verifiedTicket })
+          .buildTask({
+            input: badRequest,
+            ticketRevision: verifiedTicket,
+            replayAuthority: replayAuthorityFor(questionsStageContract, sources),
+          })
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
@@ -471,7 +521,13 @@ describe("exact Questions contract through erased catalog execution", () => {
     })
     expect(
       await Effect.runPromise(
-        catalog.buildTask({ input: validRequest, ticketRevision: wrongTicket }).pipe(Effect.either),
+        catalog
+          .buildTask({
+            input: validRequest,
+            ticketRevision: wrongTicket,
+            replayAuthority: replayAuthorityFor(questionsStageContract, sources),
+          })
+          .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
     expect(
@@ -501,7 +557,11 @@ describe("exact Questions contract through erased catalog execution", () => {
     expect(
       await Effect.runPromise(
         catalog
-          .buildTask({ input: durableInput, ticketRevision: changedTicket })
+          .buildTask({
+            input: durableInput,
+            ticketRevision: changedTicket,
+            replayAuthority: replayAuthorityFor(questionsStageContract, sources),
+          })
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
@@ -550,6 +610,7 @@ describe("exact Questions contract through erased catalog execution", () => {
           .buildTask({
             input: encodeStageProduceInput(scope, questionsStageContract.ref, request),
             ticketRevision: verifiedTicket,
+            replayAuthority: replayAuthorityFor(questionsStageContract, invalidSources),
           })
           .pipe(Effect.either),
       ),
@@ -646,6 +707,7 @@ describe("exact Research contract through erased catalog execution", () => {
       catalog.buildTask({
         input: encodeStageProduceInput(researchScope, researchStageContract.ref, request),
         ticketRevision: verifiedTicket,
+        replayAuthority: replayAuthorityFor(researchStageContract, researchSources),
       }),
     )
     expect(task).toMatchObject({
@@ -683,6 +745,7 @@ describe("exact Research contract through erased catalog execution", () => {
               sources: researchSources,
             }),
             ticketRevision: verifiedTicket,
+            replayAuthority: replayAuthorityFor(researchStageContract, researchSources),
           })
           .pipe(Effect.either),
       ),
@@ -703,7 +766,13 @@ describe("exact Research contract through erased catalog execution", () => {
 
     expect(
       await Effect.runPromise(
-        catalog.buildTask({ input, ticketRevision: verifiedTicket }).pipe(Effect.either),
+        catalog
+          .buildTask({
+            input,
+            ticketRevision: verifiedTicket,
+            replayAuthority: replayAuthorityFor(researchStageContract, changedSources),
+          })
+          .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
   })
@@ -720,6 +789,7 @@ describe("exact Research contract through erased catalog execution", () => {
           .buildTask({
             input: encodeStageProduceInput(researchScope, researchStageContract.ref, request),
             ticketRevision: verifiedTicket,
+            replayAuthority: replayAuthorityFor(researchStageContract, oversizedSources),
           })
           .pipe(Effect.either),
       ),
@@ -847,7 +917,7 @@ describe("exact Structure contract through erased catalog execution", () => {
     expect(Schema.decodeUnknownSync(StructureAuthority)(structureAuthority)).toEqual(
       structureAuthority,
     )
-    const catalog = new TrustedStageCatalog([structureStageContract]).port()
+    const catalog = new TrustedStageCatalog(builtInStageContracts).port()
     const request = await Effect.runPromise(
       catalog.assembleRequest({
         contract: structureStageContract.ref,
@@ -867,6 +937,7 @@ describe("exact Structure contract through erased catalog execution", () => {
       catalog.buildTask({
         input: encodeStageProduceInput(structureScope, structureStageContract.ref, request),
         ticketRevision: verifiedTicket,
+        replayAuthority: replayAuthorityFor(structureStageContract, structureSources),
       }),
     )
     expect(task.authority).toEqual({
@@ -971,7 +1042,7 @@ describe("exact Structure contract through erased catalog execution", () => {
 
 describe("exact Plan contract through erased catalog execution", () => {
   test("assembles, rebuilds ordered authority, and prepares only Plan results", async () => {
-    const catalog = new TrustedStageCatalog([planStageContract]).port()
+    const catalog = new TrustedStageCatalog(builtInStageContracts).port()
     const request = await Effect.runPromise(
       catalog.assembleRequest({
         contract: planStageContract.ref,
@@ -987,6 +1058,7 @@ describe("exact Plan contract through erased catalog execution", () => {
       catalog.buildTask({
         input: encodeStageProduceInput(planScope, planStageContract.ref, request),
         ticketRevision: verifiedTicket,
+        replayAuthority: replayAuthorityFor(planStageContract, planSources),
       }),
     )
     expect(task.authority).toEqual({
@@ -1038,7 +1110,7 @@ describe("exact Implementation contract through erased catalog execution", () =>
   }
 
   test("assembles all predecessors and preserves non-final and final prepared commits", async () => {
-    const catalog = new TrustedStageCatalog([implementationStageContract]).port()
+    const catalog = new TrustedStageCatalog(builtInStageContracts).port()
     const request = await Effect.runPromise(
       catalog.assembleRequest({
         contract: implementationStageContract.ref,
@@ -1061,6 +1133,7 @@ describe("exact Implementation contract through erased catalog execution", () =>
           request,
         ),
         ticketRevision: verifiedTicket,
+        replayAuthority: replayAuthorityFor(implementationStageContract, implementationSources),
       }),
     )
     expect(task.authority).toEqual({

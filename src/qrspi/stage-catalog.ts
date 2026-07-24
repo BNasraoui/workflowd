@@ -9,6 +9,7 @@ import { stageHarnessRef } from "../opencode"
 import { JsonValueSchema, type JsonValue } from "../json"
 import {
   ExecutableStageSnapshot,
+  Sha256,
   StageContractRef,
   TicketRevision,
   type StageDefinition,
@@ -17,19 +18,39 @@ import {
   normalizeWorkflowDefinition,
   stageDefinitionSha256,
   ticketRevisionSha256For,
+  workflowIdFor,
   workflowDefinitionSha256,
 } from "./domain"
 import { canonicalSha256 } from "./domain"
 import {
   BoundedTaskPrompt,
   BoundedTaskTitle,
+  AcceptedPredecessorPointer,
   ExactStageSources,
   PreparedStageOutput,
   StageExecutionContext,
   StageProduceInput,
+  StageKey,
   StageTaskAuthority,
   StructureAuthority,
 } from "./contracts/common"
+
+const ReplaySnapshotAuthority = Schema.Struct({
+  stageKey: StageKey,
+  stageDefinitionSha256: Sha256,
+  contract: StageContractRef,
+  contractRegistrationSha256: Sha256,
+})
+
+const StageReplayAuthority = Schema.Struct({
+  stageSnapshot: Schema.Struct({
+    ...ReplaySnapshotAuthority.fields,
+    maxEncodedInputBytes: Schema.Int.pipe(Schema.positive()),
+  }),
+  predecessorSnapshots: Schema.Array(ReplaySnapshotAuthority).pipe(Schema.maxItems(5)),
+  acceptedPointers: Schema.Array(AcceptedPredecessorPointer).pipe(Schema.maxItems(5)),
+})
+export type StageReplayAuthority = typeof StageReplayAuthority.Type
 
 export type PreparedDocumentOutput = { readonly _tag: "Document"; readonly text: string }
 export type PreparedImplementationStepOutput = {
@@ -356,11 +377,16 @@ export class TrustedStageCatalog {
       Effect.try({
         try: () => {
           const registration = this.#registration(diagnosticContract(input.input))
+          const replayAuthority = Schema.decodeUnknownSync(StageReplayAuthority)(
+            input.replayAuthority,
+          )
           if (
             input.input !== null &&
             typeof input.input === "object" &&
             "request" in input.input &&
-            encodedBytes(input.input.request) > registration.descriptor.maxRequestBytes
+            (encodedBytes(input.input.request) > registration.descriptor.maxRequestBytes ||
+              encodedBytes(input.input.request) >
+                replayAuthority.stageSnapshot.maxEncodedInputBytes)
           ) {
             throw catalogError("request_too_large", registration.descriptor.ref)
           }
@@ -377,8 +403,12 @@ export class TrustedStageCatalog {
           const sources = requestSourcesOf(request, registration.descriptor.ref)
           if (
             canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
+            !matchesSelectedSnapshot(replayAuthority, sources, registration.descriptor) ||
+            !matchesPredecessorAuthority(replayAuthority, sources, this) ||
             sources.ticketRevision.workflowId !== durableInput.scope.workflowId ||
             ticketRevision.ticketRevisionSha256 !== sources.ticketRevision.ticketRevisionSha256 ||
+            workflowIdFor(sources.target.repository, ticketRevision.readyTicket.reference) !==
+              sources.workflowId ||
             ticketRevisionSha256For(ticketRevision.readyTicket, ticketRevision.scenarioCoverage) !==
               ticketRevision.ticketRevisionSha256
           ) {
@@ -528,6 +558,52 @@ function scopeOf(sources: ExactStageSources) {
   }
 }
 
+function matchesSelectedSnapshot(
+  authority: StageReplayAuthority,
+  sources: ExactStageSources,
+  descriptor: StageContractDescriptor,
+): boolean {
+  const snapshot = authority.stageSnapshot
+  return (
+    snapshot.stageKey === sources.stageKey &&
+    snapshot.stageDefinitionSha256 === sources.stageDefinitionSha256 &&
+    canonicalSha256(snapshot.contract) === canonicalSha256(descriptor.ref) &&
+    snapshot.contractRegistrationSha256 === descriptor.registrationSha256
+  )
+}
+
+function matchesPredecessorAuthority(
+  authority: StageReplayAuthority,
+  sources: ExactStageSources,
+  catalog: TrustedStageCatalog,
+): boolean {
+  if (
+    authority.acceptedPointers.length !== sources.sources.length ||
+    authority.predecessorSnapshots.length !== sources.sources.length
+  ) {
+    return false
+  }
+  return sources.sources.every((source, index) => {
+    const acceptedPointer = authority.acceptedPointers[index]
+    const snapshot = authority.predecessorSnapshots[index]
+    if (acceptedPointer === undefined || snapshot === undefined) return false
+    let descriptor: StageContractDescriptor
+    try {
+      descriptor = catalog.descriptor(source.acceptedPointer.contract)
+    } catch {
+      return false
+    }
+    return (
+      canonicalSha256(source.acceptedPointer) === canonicalSha256(acceptedPointer) &&
+      snapshot.stageKey === source.artifact.stageKey &&
+      snapshot.stageDefinitionSha256 === source.acceptedPointer.snapshotSha256 &&
+      canonicalSha256(snapshot.contract) === canonicalSha256(source.acceptedPointer.contract) &&
+      snapshot.contractRegistrationSha256 === source.acceptedPointer.contractRegistrationSha256 &&
+      descriptor.registrationSha256 === source.acceptedPointer.contractRegistrationSha256
+    )
+  })
+}
+
 export type StageCatalogPort = {
   readonly describe: (
     ref: StageContractRef,
@@ -544,6 +620,7 @@ export type StageCatalogPort = {
   readonly buildTask: (input: {
     readonly input: unknown
     readonly ticketRevision: TicketRevision
+    readonly replayAuthority: StageReplayAuthority
   }) => Effect.Effect<AgentTask<unknown, unknown>, StageCatalogError>
   readonly prepareOutput: (input: {
     readonly contract: StageContractRef
