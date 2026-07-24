@@ -570,6 +570,72 @@ describe("complete built-in contract replay", () => {
     },
   ] as const
 
+  test("rejects a rehashed nested request when the durable operation input hash is unchanged", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-stage-operation-replay-"))
+    directories.push(directory)
+    const database = SqliteClient.layer({ filename: join(directory, "workflowd.db") })
+    const storeLayer = QrspiStoreLive.pipe(Layer.provideMerge(database))
+    const scope = sourcesFor("implementation")
+    const contract = builtInStageContracts.find(({ ref }) => ref.name === "qrspi.implementation")!
+    const request = {
+      _tag: "ImplementationRequest",
+      sources: scope,
+      checkpointPosition: 1,
+      expectedParentSha: target.expectedParentSha,
+    } as const
+    const input = encodeStageProduceInput(scope, contract.ref, request)
+    const operationId = "stage-produce:implementation:1"
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const store = yield* QrspiStore
+        const now = "2026-07-24T00:00:00.000Z"
+        yield* sql`
+          INSERT INTO workflow_operations (
+            operation_id, logical_operation_id, operation_revision, retry_of, kind,
+            scope_json, input_json, input_sha256, output_json, state, is_current,
+            attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+            external_intent_json, external_observation_json, observation_attempts,
+            max_observation_attempts, parent_effect_json, last_error,
+            terminal_failure_reason, terminal_retry_policy, created_at, updated_at
+          ) VALUES (
+            ${operationId}, ${operationId}, 1, NULL, 'StageProduce',
+            ${JSON.stringify({ _tag: "WorkflowScope", workflowId })}, ${JSON.stringify(input)},
+            ${canonicalSha256(input)}, NULL, 'ready', 1, 0, 3, NULL, NULL, NULL, ${now},
+            NULL, NULL, 0, 5, '{}', NULL, NULL, NULL, ${now}, ${now}
+          )
+        `
+        const corruptedRequest = {
+          ...request,
+          checkpointPosition: 2,
+        }
+        const corruptedInput = {
+          ...input,
+          request: corruptedRequest,
+          requestSha256: canonicalSha256(corruptedRequest),
+        }
+        yield* sql`
+          UPDATE workflow_operations
+          SET input_json = ${JSON.stringify(corruptedInput)}
+          WHERE operation_id = ${operationId}
+        `
+
+        return yield* store.readStageProduceInput(operationId).pipe(Effect.either)
+      }).pipe(Effect.provide(storeLayer)),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "QrspiStoreDataError",
+        record: "workflow_operation",
+        recordId: operationId,
+        reason: "hash_mismatch",
+      },
+    })
+  })
+
   for (const fixture of fixtures)
     test(`round trips ${fixture.stageKey} without mutable rediscovery`, async () => {
       const calls = { tracker: 0, repository: 0 }

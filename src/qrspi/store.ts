@@ -17,6 +17,7 @@ import {
   workflowDefinitionSha256,
   type ExecutableStageSnapshot as ExecutableStageSnapshotType,
 } from "./domain"
+import { StageProduceInput, type StageProduceInput as StageProduceInputType } from "./contracts"
 
 const OperationState = Schema.Literal(
   "blocked",
@@ -121,6 +122,12 @@ const TicketRevisionRow = Schema.Struct({
   workflow_id: Schema.NonEmptyString,
   ticket_revision_sha256: WorkflowStartInput.fields.ticketRevisionSha256,
   revision_json: Schema.String,
+})
+const StageProduceOperationRow = Schema.Struct({
+  operation_id: Schema.NonEmptyString,
+  kind: Schema.String,
+  input_json: Schema.String,
+  input_sha256: Schema.String,
 })
 
 const CurrentGenerationSnapshotRow = Schema.Struct({
@@ -273,6 +280,9 @@ export type QrspiStorePort = {
     readonly workflowId: string
     readonly ticketRevisionSha256: string
   }) => Effect.Effect<TicketRevision, SqlError | QrspiStoreDataError>
+  readonly readStageProduceInput: (
+    operationId: string,
+  ) => Effect.Effect<StageProduceInputType, SqlError | QrspiStoreDataError>
 }
 
 export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
@@ -534,6 +544,54 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    readStageProduceInput: (operationId) => {
+      const read = Effect.gen(function* () {
+        const rows = yield* sql<Record<string, unknown>>`
+          SELECT operation_id, kind, input_json, input_sha256
+          FROM workflow_operations
+          WHERE operation_id = ${operationId}
+        `
+        const raw = rows[0]
+        if (raw === undefined) {
+          return yield* Effect.fail(
+            dataError("workflow_operation", operationId, "stage produce operation not found", {
+              reason: "missing",
+            }),
+          )
+        }
+        const row = yield* Schema.decodeUnknown(StageProduceOperationRow)(raw).pipe(
+          Effect.mapError((cause) =>
+            dataError("workflow_operation", operationId, cause, { reason: "malformed" }),
+          ),
+        )
+        if (row.kind !== "StageProduce") {
+          return yield* Effect.fail(
+            dataError("workflow_operation", operationId, "operation kind is not StageProduce", {
+              reason: "identity_mismatch",
+            }),
+          )
+        }
+        const input = yield* Schema.decodeUnknown(Schema.parseJson(StageProduceInput))(
+          row.input_json,
+        ).pipe(
+          Effect.mapError((cause) =>
+            dataError("workflow_operation", operationId, cause, { reason: "malformed" }),
+          ),
+        )
+        const actualSha256 = canonicalSha256(input)
+        if (actualSha256 !== row.input_sha256) {
+          return yield* Effect.fail(
+            dataError("workflow_operation", operationId, "operation input hash does not match", {
+              reason: "hash_mismatch",
+              expectedSha256: row.input_sha256,
+              actualSha256,
+            }),
+          )
+        }
+        return input
+      })
+      return read.pipe(Effect.catchTag("QrspiStoreDataError", quarantine))
+    },
     readTicketRevision: (input) =>
       Effect.gen(function* () {
         const rows = yield* sql<Record<string, unknown>>`
