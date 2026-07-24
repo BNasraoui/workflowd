@@ -15,6 +15,7 @@ import {
   type TicketSourcePort,
 } from "../../src/qrspi/ports"
 import { QrspiStore, QrspiStoreLive } from "../../src/qrspi/store"
+import { StageProduceInput } from "../../src/qrspi/contracts"
 import {
   StageCatalog,
   TrustedStageCatalog,
@@ -27,6 +28,7 @@ import {
   type WorkflowStartOptions,
 } from "../../src/qrspi/workflow-start"
 import type { JsonValue } from "../../src/json"
+import { JsonText } from "../../src/json"
 import {
   WorkflowStartInput,
   WorkflowStartRequest,
@@ -147,6 +149,13 @@ function fakes(options: FakeOptions = {}) {
     return branchSha
   }
   const repositories = {
+    readArtifact: () =>
+      Effect.fail(
+        new QrspiRepositoryError({
+          operation: "read exact repository artifact",
+          cause: new Error("not configured by WorkflowStart tests"),
+        }),
+      ),
     inspect: () =>
       options.inspectError === undefined
         ? Effect.succeed({
@@ -236,6 +245,7 @@ const questionsContract: StageContract<
   typeof StageResult.Encoded
 > = {
   ref: { name: "qrspi.questions", contractVersion: 1 },
+  stageKey: "questions",
   implementationRevision: "qrspi.questions.v1",
   kind: "document",
   requestSchema: StageRequest,
@@ -244,7 +254,15 @@ const questionsContract: StageContract<
   maxResultBytes: 16_384,
   compatibility: () => undefined,
   assembleRequest: () => ({ ticket: "fixture" }),
-  buildTask: () => ({ title: "questions", prompt: "questions", resultSchema: StageResult }),
+  buildTask: () => ({
+    title: "questions",
+    prompt: "questions",
+    authority: {
+      ticketRevision: { workflowId: "fixture", ticketRevisionSha256: "a".repeat(64) },
+      sources: [],
+    },
+    resultSchema: StageResult,
+  }),
   prepareOutput: (result) => ({ _tag: "Document", text: result.text }),
 }
 
@@ -411,6 +429,24 @@ describe("WorkflowStart integration", () => {
     expect(JSON.parse(definition[0]!.definition_json)).toEqual(options.workflowDefinition)
     expect(definition[0]!.definition_sha256).toBe(
       "e05321d4a4c672bb20e91ffc910b5241b5168357272ac100b5ecf80869997b01",
+    )
+    const stageProduceInput = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{ readonly input_json: string }>`
+          SELECT input_json FROM workflow_operations WHERE kind = 'StageProduce'
+        `
+        return Schema.decodeUnknownSync(JsonText)(rows[0]!.input_json)
+      }).pipe(Effect.provide(layer(filename, fake))),
+    )
+    expect(stageProduceInput).toEqual({
+      stageKey: "questions",
+      stageKind: "document",
+      stageRevision: 1,
+      workflowDefinitionSha256: definition[0]!.definition_sha256,
+    })
+    expect(() => Schema.decodeUnknownSync(StageProduceInput)(stageProduceInput)).toThrow(
+      "contractVersion",
     )
     if (result._tag !== "Started") throw new Error("Expected started workflow")
     const observations = await Effect.runPromise(

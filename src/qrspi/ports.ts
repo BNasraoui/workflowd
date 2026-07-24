@@ -35,6 +35,20 @@ export type AcceptedBranchObservation =
   | { readonly _tag: "UnknownHistory"; readonly sha: string }
 
 export type QrspiRepositoryPort = {
+  readonly readArtifact: (input: {
+    readonly repository: RepositoryReference
+    readonly commitSha: string
+    readonly path: string
+    readonly maxBytes: number
+  }) => Effect.Effect<
+    {
+      readonly commitSha: string
+      readonly path: string
+      readonly blobSha: string
+      readonly bytes: Uint8Array
+    },
+    QrspiRepositoryError
+  >
   readonly inspect: (input: {
     readonly repository: RepositoryReference
     readonly baseRef: string

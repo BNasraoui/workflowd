@@ -28,6 +28,146 @@ const requested = {
   model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
 }
 
+describe("OpenCodeAdapter.subscribeSessionEvents", () => {
+  test("does not open the SDK subscription before iteration starts", async () => {
+    let subscriptionStarted = false
+    const client = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeEvents: async () => {
+        subscriptionStarted = true
+        return (async function* () {})()
+      },
+      getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      listAgents: async () => [],
+      listProviders: async () => [],
+    } satisfies OpenCodeSdkClient
+    const adapter = new SdkOpenCodeAdapter(client)
+
+    const events = await adapter.subscribeSessionEvents(
+      { directory: "/tmp/worktree" },
+      new AbortController().signal,
+    )
+    await events[Symbol.asyncIterator]().return?.()
+
+    expect(subscriptionStarted).toBe(false)
+  })
+
+  test("aborts and finalizes a live SDK subscription when consumption stops early", async () => {
+    let subscriptionSignal: AbortSignal | undefined
+    const lifecycle: Array<"abort" | "return"> = []
+    const client = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeEvents: async (_input, signal) => {
+        subscriptionSignal = signal
+        const recordAbort = () => lifecycle.push("abort")
+        signal.addEventListener("abort", recordAbort)
+        let yielded = false
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              if (yielded) return new Promise<never>(() => undefined)
+              yielded = true
+              return {
+                done: false as const,
+                value: {
+                  id: "evt_1",
+                  type: "session.idle",
+                  properties: { sessionID: "ses_1" },
+                } satisfies Event,
+              }
+            },
+            return: async () => {
+              signal.removeEventListener("abort", recordAbort)
+              lifecycle.push("return")
+              return { done: true as const, value: undefined }
+            },
+          }),
+        }
+      },
+      getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      listAgents: async () => [],
+      listProviders: async () => [],
+    } satisfies OpenCodeSdkClient
+    const adapter = new SdkOpenCodeAdapter(client)
+    const caller = new AbortController()
+
+    const events = await adapter.subscribeSessionEvents(
+      { directory: "/tmp/worktree" },
+      caller.signal,
+    )
+    for await (const event of events) {
+      expect(event).toEqual({
+        type: "session.status",
+        sessionID: "ses_1",
+        status: { type: "idle" },
+      })
+      break
+    }
+
+    expect(subscriptionSignal).not.toBe(caller.signal)
+    expect(subscriptionSignal?.aborted).toBe(true)
+    expect(lifecycle).toEqual(["abort", "return"])
+    expect(caller.signal.aborted).toBe(false)
+  })
+
+  test("forwards caller cancellation to the SDK subscription", async () => {
+    let subscriptionSignal: AbortSignal | undefined
+    let markSubscriptionStarted: () => void = () => undefined
+    const subscriptionStarted = new Promise<void>((resolve) => {
+      markSubscriptionStarted = resolve
+    })
+    const client = {
+      createSession: async () => ({ id: "unused" }),
+      promptSession: async () => undefined,
+      subscribeEvents: async (_input, signal) => {
+        subscriptionSignal = signal
+        markSubscriptionStarted()
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              await new Promise<void>((resolve) => {
+                if (signal.aborted) resolve()
+                else signal.addEventListener("abort", () => resolve(), { once: true })
+              })
+              return { done: true, value: undefined } as const
+            },
+          }),
+        }
+      },
+      getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
+      listSessionMessages: async () => [],
+      abortSession: async () => true,
+      listAgents: async () => [],
+      listProviders: async () => [],
+    } satisfies OpenCodeSdkClient
+    const adapter = new SdkOpenCodeAdapter(client)
+    const caller = new AbortController()
+    const events = await adapter.subscribeSessionEvents(
+      { directory: "/tmp/worktree" },
+      caller.signal,
+    )
+
+    const completion = events[Symbol.asyncIterator]().next()
+    await subscriptionStarted
+    const reason = new Error("caller cancelled")
+    caller.abort(reason)
+
+    expect(await completion).toEqual({ done: true, value: undefined })
+    expect(subscriptionSignal).not.toBe(caller.signal)
+    expect(subscriptionSignal?.aborted).toBe(true)
+    expect(subscriptionSignal?.reason).toBe(reason)
+  })
+})
+
 describe("OpenCodeAdapter.validateAvailability", () => {
   test("accepts configured agents and a configured provider model", async () => {
     const adapter = availabilityAdapter(
@@ -165,13 +305,18 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
     { type: "session.error", sessionID: "ses_1" },
   ])
   expect(await adapter.abortSession(sessionInput, signal)).toBe(true)
+  const subscriptionSignal = calls[5]?.signal
+  expect(subscriptionSignal).toBeDefined()
+  if (subscriptionSignal === undefined) throw new Error("Subscription call was not recorded")
+  expect(subscriptionSignal).not.toBe(signal)
+  expect(subscriptionSignal?.aborted).toBe(true)
   expect(calls).toEqual([
     { operation: "create", input: createInput, signal },
     { operation: "prompt", input: promptInput, signal },
     { operation: "status", input: { directory: "/repo" }, signal },
     { operation: "exists", input: sessionInput, signal },
     { operation: "messages", input: sessionInput, signal },
-    { operation: "subscribe", input: { directory: "/repo" }, signal },
+    { operation: "subscribe", input: { directory: "/repo" }, signal: subscriptionSignal },
     { operation: "abort", input: sessionInput, signal },
   ])
 })

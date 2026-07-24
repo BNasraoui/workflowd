@@ -7,10 +7,25 @@ import {
   type AgentHarnessPort,
 } from "../../src/agent-harness"
 import { makeOpenCodeHarnessDefinitions } from "../../src/opencode"
-import { workflowDefinitionSha256 } from "../../src/qrspi/domain"
+import {
+  TicketRevision,
+  canonicalSha256,
+  ticketRevisionSha256For,
+  workflowIdFor,
+  workflowDefinitionSha256,
+} from "../../src/qrspi/domain"
+import {
+  ExactStageSources,
+  builtInStageContracts,
+  designStageContract,
+  encodeStageProduceInput,
+  planStageContract,
+  questionsStageContract,
+  researchStageContract,
+  structureStageContract,
+} from "../../src/qrspi/contracts"
 import {
   TrustedStageCatalog,
-  questionsStageContract,
   validatePersistedSnapshots,
   validateWorkflowDefinition,
   type StageContract,
@@ -18,8 +33,6 @@ import {
 
 const FixtureRequest = Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) })
 const FixtureResult = Schema.Struct({ summary: Schema.String.pipe(Schema.maxLength(100)) })
-const ImplementationRequest = Schema.Struct({ baseSha: Schema.String.pipe(Schema.length(40)) })
-const ImplementationResult = Schema.Struct({ commitSha: Schema.String.pipe(Schema.length(40)) })
 
 const fixtureContract: StageContract<
   typeof FixtureRequest.Type,
@@ -28,6 +41,7 @@ const fixtureContract: StageContract<
   typeof FixtureResult.Encoded
 > = {
   ref: { name: "fixture.document", contractVersion: 1 },
+  stageKey: "fixture",
   implementationRevision: "fixture.document.v1",
   kind: "document",
   requestSchema: FixtureRequest,
@@ -36,34 +50,219 @@ const fixtureContract: StageContract<
   maxResultBytes: 1_024,
   compatibility: () => undefined,
   assembleRequest: () => ({ text: "fixture" }),
-  buildTask: () => ({ title: "fixture", prompt: "fixture", resultSchema: FixtureResult }),
+  buildTask: () => ({
+    title: "fixture",
+    prompt: "fixture",
+    authority: {
+      ticketRevision: { workflowId: "fixture", ticketRevisionSha256: "a".repeat(64) },
+      sources: [],
+    },
+    resultSchema: FixtureResult,
+  }),
   prepareOutput: (result) => ({ _tag: "Document", text: result.summary }),
 }
 
-const fixtureImplementationContract: StageContract<
-  typeof ImplementationRequest.Type,
-  typeof ImplementationRequest.Encoded,
-  typeof ImplementationResult.Type,
-  typeof ImplementationResult.Encoded
-> = {
-  ref: { name: "fixture.implementation", contractVersion: 1 },
-  implementationRevision: "fixture.implementation.v1",
-  kind: "implementation",
-  requestSchema: ImplementationRequest,
-  resultSchema: ImplementationResult,
-  maxRequestBytes: 2_048,
-  maxResultBytes: 2_048,
-  compatibility: () => undefined,
-  assembleRequest: () => ({ baseSha: "a".repeat(40) }),
-  buildTask: () => ({
-    title: "implement fixture",
-    prompt: "implement fixture",
-    resultSchema: ImplementationResult,
-  }),
-  prepareOutput: (result) => ({ _tag: "ImplementationStep", value: result }),
+const invalidDocumentOutputContract: typeof fixtureContract = {
+  ...fixtureContract,
+  // @ts-expect-error Document contracts cannot prepare implementation output.
+  prepareOutput: () => ({ _tag: "ImplementationStep", value: {} }),
 }
 
+// @ts-expect-error Implementation contracts cannot prepare document output.
+const invalidImplementationOutputContract: StageContract<
+  typeof FixtureRequest.Type,
+  typeof FixtureRequest.Encoded,
+  typeof FixtureResult.Type,
+  typeof FixtureResult.Encoded
+> = {
+  ...fixtureContract,
+  kind: "implementation",
+  prepareOutput: () => ({ _tag: "Document", text: "wrong" }),
+}
+
+void invalidDocumentOutputContract
+void invalidImplementationOutputContract
+
 describe("TrustedStageCatalog", () => {
+  test("registers the explicit six built-in contracts in stage order", () => {
+    expect(builtInStageContracts.map(({ ref }) => ref)).toEqual([
+      { name: "qrspi.questions", contractVersion: 1 },
+      { name: "qrspi.research", contractVersion: 1 },
+      { name: "qrspi.design", contractVersion: 1 },
+      { name: "qrspi.structure", contractVersion: 1 },
+      { name: "qrspi.plan", contractVersion: 1 },
+      { name: "qrspi.implementation", contractVersion: 1 },
+    ])
+    const catalog = new TrustedStageCatalog(builtInStageContracts)
+    expect(
+      new Set(builtInStageContracts.map(({ ref }) => catalog.descriptor(ref).registrationSha256))
+        .size,
+    ).toBe(6)
+  })
+  test("erased execution invokes only the selected registration closures", async () => {
+    const calls = {
+      selected: { assemble: 0, build: 0, prepare: 0 },
+      unselected: { assemble: 0, build: 0, prepare: 0 },
+    }
+    const Request = Schema.Struct({
+      _tag: Schema.Literal("FixtureRequest"),
+      sources: ExactStageSources,
+    })
+    const Result = Schema.Struct({ _tag: Schema.Literal("Fixture"), document: Schema.String })
+    const makeContract = (name: "selected" | "unselected") => ({
+      ref: { name: `fixture.${name}`, contractVersion: 1 },
+      stageKey: "fixture",
+      implementationRevision: `fixture.${name}.v1`,
+      kind: "document" as const,
+      requestSchema: Request,
+      resultSchema: Result,
+      maxRequestBytes: 8_192,
+      maxResultBytes: 8_192,
+      compatibility: () => undefined,
+      assembleRequest: (exactSources: typeof ExactStageSources.Type) => {
+        calls[name].assemble += 1
+        return { _tag: "FixtureRequest" as const, sources: exactSources }
+      },
+      buildTask: (request: typeof Request.Type) => {
+        calls[name].build += 1
+        return {
+          title: name,
+          prompt: name,
+          authority: {
+            ticketRevision: request.sources.ticketRevision,
+            sources: request.sources.sources,
+          },
+          resultSchema: Result,
+        }
+      },
+      prepareOutput: (result: typeof Result.Type) => {
+        calls[name].prepare += 1
+        return { _tag: "Document" as const, text: result.document }
+      },
+    })
+    const selected = makeContract("selected")
+    const unselected = makeContract("unselected")
+    const trustedCatalog = new TrustedStageCatalog([selected, unselected])
+    const port = trustedCatalog.port()
+    const readyTicket = {
+      reference: {
+        tracker: "beads" as const,
+        trackerInstanceId: "workspace",
+        nativeTicketId: "fixture",
+      },
+      issueType: "feature" as const,
+      title: "Exercise selected closures",
+      description: "Verify generic erased dispatch.",
+      sources: ["https://example.test/source"],
+      acceptanceCriteria: ["Only selected closures run."],
+      scenarios: [
+        {
+          name: "Dispatch",
+          given: "two registrations",
+          when: "one is selected",
+          then: "the other remains idle",
+        },
+      ],
+    }
+    const scenarioCoverage = [[0]]
+    const ticketRevisionSha256 = ticketRevisionSha256For(readyTicket, scenarioCoverage)
+    const repository = {
+      providerInstanceId: "provider",
+      repositoryId: "repository",
+      repositoryFullName: "owner/repository",
+    }
+    const workflowId = workflowIdFor(repository, readyTicket.reference)
+    const exactSources = {
+      workflowId,
+      generation: 1,
+      stageKey: "fixture",
+      runOrdinal: 1,
+      stageRevision: 1,
+      workflowDefinitionSha256: "b".repeat(64),
+      stageDefinitionSha256: "c".repeat(64),
+      ticketRevision: {
+        workflowId,
+        ticketRevisionSha256,
+      },
+      sources: [] as const,
+      sourceSetSha256: canonicalSha256([]),
+      target: {
+        repository,
+        headRef: "refs/heads/workflow",
+        expectedParentSha: "e".repeat(40),
+      },
+    }
+    const request = await Effect.runPromise(
+      port.assembleRequest({
+        contract: selected.ref,
+        sources: exactSources,
+        maxEncodedInputBytes: 8_192,
+      }),
+    )
+    const input = encodeStageProduceInput(exactSources, selected.ref, request)
+    const ticketRevision = Schema.decodeUnknownSync(TicketRevision)({
+      readyTicket,
+      scenarioCoverage,
+      checkedAt: new Date("2026-07-24T00:00:00.000Z"),
+      ticketRevisionSha256,
+    })
+    const replayAuthority = {
+      target: exactSources.target,
+      scope: {
+        workflowId: exactSources.workflowId,
+        generation: exactSources.generation,
+        stageKey: exactSources.stageKey,
+        runOrdinal: exactSources.runOrdinal,
+        stageRevision: exactSources.stageRevision,
+        workflowDefinitionSha256: exactSources.workflowDefinitionSha256,
+        stageDefinitionSha256: exactSources.stageDefinitionSha256,
+      },
+      stageSnapshot: {
+        stageKey: exactSources.stageKey,
+        stageDefinitionSha256: exactSources.stageDefinitionSha256,
+        contract: selected.ref,
+        contractRegistrationSha256: trustedCatalog.descriptor(selected.ref).registrationSha256,
+        maxEncodedInputBytes: 8_192,
+      },
+      predecessorSnapshots: [],
+      acceptedPointers: [],
+    }
+    await Effect.runPromise(port.buildTask({ input, ticketRevision, replayAuthority }))
+    await Effect.runPromise(
+      port.prepareOutput({
+        contract: selected.ref,
+        result: { _tag: "Fixture", document: "selected" },
+        context: { scope: exactSources, target: exactSources.target },
+      }),
+    )
+    const malformedInput = encodeStageProduceInput(exactSources, selected.ref, {
+      _tag: "OtherRequest",
+      sources: exactSources,
+    })
+    expect(
+      await Effect.runPromise(
+        port
+          .buildTask({ input: malformedInput, ticketRevision, replayAuthority })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    expect(
+      await Effect.runPromise(
+        port
+          .prepareOutput({
+            contract: selected.ref,
+            result: { _tag: "OtherResult", document: "selected" },
+            context: { scope: exactSources, target: exactSources.target },
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+
+    expect(calls).toEqual({
+      selected: { assemble: 1, build: 1, prepare: 1 },
+      unselected: { assemble: 0, build: 0, prepare: 0 },
+    })
+  })
   test("returns a stable descriptor and restores the exact typed registration", () => {
     const first = new TrustedStageCatalog([fixtureContract])
     const second = new TrustedStageCatalog([fixtureContract])
@@ -103,31 +302,6 @@ describe("TrustedStageCatalog", () => {
     )
   })
 
-  test("extends the catalog with a second typed contract by registration alone", () => {
-    const catalog = new TrustedStageCatalog([fixtureContract, fixtureImplementationContract])
-    const registration = catalog.registrationFor(fixtureImplementationContract)
-    const request = Schema.decodeUnknownSync(registration.requestSchema)({
-      baseSha: "a".repeat(40),
-    })
-    const result = Schema.decodeUnknownSync(registration.resultSchema)({
-      commitSha: "b".repeat(40),
-    })
-
-    expect(catalog.descriptor(fixtureContract.ref).kind).toBe("document")
-    expect(registration.descriptor).toMatchObject({
-      ref: fixtureImplementationContract.ref,
-      kind: "implementation",
-    })
-    expect(registration.source.buildTask(request)).toMatchObject({
-      title: "implement fixture",
-      resultSchema: ImplementationResult,
-    })
-    expect(registration.source.prepareOutput(result, {})).toEqual({
-      _tag: "ImplementationStep",
-      value: { commitSha: "b".repeat(40) },
-    })
-  })
-
   test("rejects duplicate, unknown, and lookalike registrations with stable reasons", () => {
     expect(() => new TrustedStageCatalog([fixtureContract, fixtureContract])).toThrow(
       expect.objectContaining({ reason: "duplicate_reference" }),
@@ -139,6 +313,60 @@ describe("TrustedStageCatalog", () => {
     expect(() => catalog.registrationFor({ ...fixtureContract })).toThrow(
       expect.objectContaining({ reason: "untrusted_source" }),
     )
+  })
+
+  test("rejects prepared output tags that contradict the trusted stage kind", async () => {
+    const documentReturningImplementation = {
+      ...fixtureContract,
+      implementationRevision: "fixture.document.wrong-output.v1",
+      prepareOutput: () => ({
+        _tag: "ImplementationStep" as const,
+        value: { commitSha: "a".repeat(40) },
+      }),
+    }
+    const implementationReturningDocument = {
+      ...fixtureContract,
+      implementationRevision: "fixture.implementation.wrong-output.v1",
+      kind: "implementation" as const,
+      prepareOutput: () => ({ _tag: "Document" as const, text: "wrong kind" }),
+    }
+    const context = {
+      scope: {
+        workflowId: `wf_${"a".repeat(64)}`,
+        generation: 1,
+        stageKey: "fixture",
+        runOrdinal: 1,
+        stageRevision: 1,
+        workflowDefinitionSha256: "b".repeat(64),
+        stageDefinitionSha256: "c".repeat(64),
+      },
+      target: {
+        repository: {
+          providerInstanceId: "provider",
+          repositoryId: "repository",
+          repositoryFullName: "owner/repository",
+        },
+        headRef: "refs/heads/fixture",
+        expectedParentSha: "d".repeat(40),
+      },
+    }
+
+    for (const contract of [documentReturningImplementation, implementationReturningDocument]) {
+      const result = await Effect.runPromise(
+        new TrustedStageCatalog([contract])
+          .port()
+          .prepareOutput({
+            contract: contract.ref,
+            result: { summary: "fixture" },
+            context,
+          })
+          .pipe(Effect.either),
+      )
+      expect(result).toMatchObject({
+        _tag: "Left",
+        left: { reason: "malformed_output" },
+      })
+    }
   })
 
   test("rejects malformed metadata, schemas, closures, and durable envelope bounds", () => {
@@ -871,5 +1099,287 @@ describe("persisted stage snapshots", () => {
           .registrationSha256,
       },
     })
+  })
+})
+
+describe("Questions and Research contract compatibility", () => {
+  const definitionFor = (stageKey: "questions" | "research") => ({
+    key: stageKey,
+    kind: "document" as const,
+    contract: { name: `qrspi.${stageKey}`, contractVersion: 1 },
+    activation: { mode: "enabled" as const },
+    definitionVersion: 1,
+    maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+    producer: {
+      harness: { name: "opencode", version: 1 },
+      agent: `${stageKey}-agent`,
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      retry: { maxAttempts: 1, backoffMs: 1 },
+    },
+    outputPolicy: {
+      _tag: "Artifact" as const,
+      pathTemplate: `artifacts/${stageKey}.md`,
+      mediaType: "text/markdown",
+    },
+    reviewPolicy: { mode: "none" as const },
+    humanGatePolicy: { mode: "none" as const },
+  })
+
+  test.each([
+    [questionsStageContract, "questions"],
+    [researchStageContract, "research"],
+  ] as const)("rejects non-Markdown and specialized %s definitions", async (contract, stageKey) => {
+    const catalog = new TrustedStageCatalog([contract]).port()
+    const definition = definitionFor(stageKey)
+    for (const change of [
+      { outputPolicy: { ...definition.outputPolicy, mediaType: "application/json" } },
+      { designPolicy: { name: "qrspi.design-policy", version: 1 } },
+    ]) {
+      expect(
+        await Effect.runPromise(
+          catalog.validateCompatibility({ ...definition, ...change }).pipe(Effect.either),
+        ),
+      ).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+    }
+  })
+
+  test.each([
+    [questionsStageContract, "questions"],
+    [researchStageContract, "research"],
+  ] as const)(
+    "reapplies %s media compatibility to persisted snapshots",
+    async (contract, stageKey) => {
+      const catalog = new TrustedStageCatalog([contract])
+      const definition = {
+        ...definitionFor(stageKey),
+        outputPolicy: {
+          ...definitionFor(stageKey).outputPolicy,
+          mediaType: "application/json",
+        },
+      }
+      const harness: AgentHarnessPort = {
+        describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+        validateAvailability: () => Effect.void,
+        prepare: () => Effect.die("unused"),
+        createSession: () => Effect.die("unused"),
+        resumeSession: () => Effect.die("unused"),
+        abortSession: () => Effect.die("unused"),
+      }
+      const snapshot = {
+        sequencePosition: 1,
+        stageDefinitionSha256: canonicalSha256({
+          contractVersion: 1,
+          normalizationVersion: "RFC8785-NFC-1",
+          definition,
+        }),
+        definition,
+        contractRegistrationSha256: catalog.descriptor(contract.ref).registrationSha256,
+        harnessRegistrationSha256: "b".repeat(64),
+      }
+
+      expect(
+        await Effect.runPromise(
+          validatePersistedSnapshots({
+            workflowDefinitionSha256: "a".repeat(64),
+            snapshots: [snapshot],
+            stageCatalog: catalog.port(),
+            agentHarness: harness,
+          }).pipe(Effect.either),
+        ),
+      ).toMatchObject({
+        _tag: "Left",
+        left: { phase: "contract", reason: "incompatible_definition", stageKey },
+      })
+    },
+  )
+})
+
+describe("Design contract compatibility", () => {
+  const designDefinition = {
+    key: "design",
+    kind: "document" as const,
+    contract: { name: "qrspi.design", contractVersion: 1 },
+    activation: { mode: "enabled" as const },
+    definitionVersion: 1,
+    maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+    producer: {
+      harness: { name: "opencode", version: 1 },
+      agent: "design-agent",
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      retry: { maxAttempts: 1, backoffMs: 1 },
+    },
+    outputPolicy: {
+      _tag: "Artifact" as const,
+      pathTemplate: "artifacts/design.md",
+      mediaType: "text/markdown",
+    },
+    reviewPolicy: { mode: "none" as const },
+    humanGatePolicy: { mode: "none" as const },
+    designPolicy: { name: "qrspi.design-policy", version: 1 },
+    promotionPolicy: { name: "qrspi.promotion-policy", version: 1 },
+  }
+
+  test.each([
+    ["missing Design policy", { designPolicy: undefined }],
+    ["changed Design policy", { designPolicy: { name: "qrspi.other", version: 1 } }],
+    ["missing promotion policy", { promotionPolicy: undefined }],
+    ["changed promotion policy", { promotionPolicy: { name: "qrspi.other", version: 1 } }],
+    [
+      "wrong media type",
+      { outputPolicy: { ...designDefinition.outputPolicy, mediaType: "text/plain" } },
+    ],
+  ])("rejects %s in fresh compatibility", async (_name, change) => {
+    const result = await Effect.runPromise(
+      new TrustedStageCatalog([designStageContract])
+        .port()
+        .validateCompatibility({ ...designDefinition, ...change })
+        .pipe(Effect.either),
+    )
+    expect(result).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+  })
+
+  test("reapplies Design compatibility to persisted snapshots", async () => {
+    const catalog = new TrustedStageCatalog([designStageContract])
+    const harness: AgentHarnessPort = {
+      describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+      validateAvailability: () => Effect.void,
+      prepare: () => Effect.die("unused"),
+      createSession: () => Effect.die("unused"),
+      resumeSession: () => Effect.die("unused"),
+      abortSession: () => Effect.die("unused"),
+    }
+    const snapshot = {
+      sequencePosition: 1,
+      stageDefinitionSha256: canonicalSha256({
+        contractVersion: 1,
+        normalizationVersion: "RFC8785-NFC-1",
+        definition: designDefinition,
+      }),
+      definition: designDefinition,
+      contractRegistrationSha256: catalog.descriptor(designStageContract.ref).registrationSha256,
+      harnessRegistrationSha256: "b".repeat(64),
+    }
+    const { promotionPolicy: _promotionPolicy, ...missingPromotionPolicy } = designDefinition
+    const incompatible = {
+      ...snapshot,
+      definition: missingPromotionPolicy,
+    }
+    incompatible.stageDefinitionSha256 = canonicalSha256({
+      contractVersion: 1,
+      normalizationVersion: "RFC8785-NFC-1",
+      definition: incompatible.definition,
+    })
+
+    expect(
+      await Effect.runPromise(
+        validatePersistedSnapshots({
+          workflowDefinitionSha256: "a".repeat(64),
+          snapshots: [incompatible],
+          stageCatalog: catalog.port(),
+          agentHarness: harness,
+        }).pipe(Effect.either),
+      ),
+    ).toMatchObject({
+      _tag: "Left",
+      left: { phase: "contract", reason: "incompatible_definition", stageKey: "design" },
+    })
+  })
+})
+
+describe("Structure contract compatibility", () => {
+  const definition = {
+    key: "structure",
+    kind: "document" as const,
+    contract: { name: "qrspi.structure", contractVersion: 1 },
+    activation: { mode: "enabled" as const },
+    definitionVersion: 1,
+    maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+    producer: {
+      harness: { name: "opencode", version: 1 },
+      agent: "structure-agent",
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      retry: { maxAttempts: 1, backoffMs: 1 },
+    },
+    outputPolicy: {
+      _tag: "Artifact" as const,
+      pathTemplate: "artifacts/structure.md",
+      mediaType: "text/markdown",
+    },
+    reviewPolicy: { mode: "none" as const },
+    humanGatePolicy: { mode: "none" as const },
+    structurePolicy: { name: "qrspi.structure-policy", version: 1 },
+  }
+
+  test.each([
+    ["missing Structure policy", { structurePolicy: undefined }],
+    ["changed Structure policy", { structurePolicy: { name: "qrspi.other", version: 1 } }],
+    ["wrong output", { outputPolicy: { ...definition.outputPolicy, mediaType: "text/plain" } }],
+  ])("rejects %s", async (_name, change) => {
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog([structureStageContract])
+          .port()
+          .validateCompatibility({ ...definition, ...change })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+  })
+})
+
+describe("Plan erased dispatch", () => {
+  test("invokes only the selected Plan closures", async () => {
+    const calls = { plan: 0, other: 0 }
+    const selected = {
+      ...planStageContract,
+      implementationRevision: "qrspi.plan.closure-test.v1",
+      assembleRequest: (...args: Parameters<typeof planStageContract.assembleRequest>) => {
+        calls.plan += 1
+        return planStageContract.assembleRequest(...args)
+      },
+    }
+    const unselected = {
+      ...questionsStageContract,
+      implementationRevision: "qrspi.questions.closure-test.v1",
+      assembleRequest: (...args: Parameters<typeof questionsStageContract.assembleRequest>) => {
+        calls.other += 1
+        return questionsStageContract.assembleRequest(...args)
+      },
+    }
+    const exactSources = {
+      workflowId: `wf_${"a".repeat(64)}`,
+      generation: 1,
+      stageKey: "plan",
+      runOrdinal: 1,
+      stageRevision: 1,
+      workflowDefinitionSha256: "b".repeat(64),
+      stageDefinitionSha256: "c".repeat(64),
+      ticketRevision: {
+        workflowId: `wf_${"a".repeat(64)}`,
+        ticketRevisionSha256: "d".repeat(64),
+      },
+      sources: [] as const,
+      sourceSetSha256: canonicalSha256([]),
+      target: {
+        repository: {
+          providerInstanceId: "provider",
+          repositoryId: "repository",
+          repositoryFullName: "owner/repository",
+        },
+        headRef: "workflow/plan",
+        expectedParentSha: "e".repeat(40),
+      },
+    }
+
+    await Effect.runPromise(
+      new TrustedStageCatalog([unselected, selected]).port().assembleRequest({
+        contract: selected.ref,
+        sources: exactSources,
+        maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+      }),
+    )
+    expect(calls).toEqual({ plan: 1, other: 0 })
   })
 })

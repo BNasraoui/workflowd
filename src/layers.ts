@@ -24,19 +24,11 @@ import {
   closedWorkflowStart,
   toWorkflowStartValidationError,
 } from "./qrspi/workflow-start"
-import {
-  StageCatalog,
-  StageCatalogError,
-  TrustedStageCatalog,
-  questionsStageContract,
-  type StageContractRegistration,
-} from "./qrspi/stage-catalog"
+import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
+import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
 
-export const makeLiveLayer = (
-  config: AppConfig,
-  stageContracts: ReadonlyArray<StageContractRegistration> = [questionsStageContract],
-) => {
+export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
@@ -67,7 +59,7 @@ export const makeLiveLayer = (
   const stageCatalogLayer = Layer.effect(
     StageCatalog,
     Effect.try({
-      try: () => new TrustedStageCatalog(stageContracts).port(),
+      try: () => new TrustedStageCatalog(builtInStageContracts).port(),
       catch: (cause) =>
         cause instanceof StageCatalogError
           ? cause
