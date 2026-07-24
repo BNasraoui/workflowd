@@ -83,7 +83,51 @@ function eligibleSource(path: string): boolean {
   return path.startsWith("src/") && path.endsWith(".ts") && !excludedSourceFiles.has(path)
 }
 
-export function evaluateChangedLineCoverage(changed: ChangedLines, coverage: LineCoverage) {
+export function hasRuntimeStatements(source: string): boolean {
+  const file = ts.createSourceFile(
+    "source.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  )
+  return file.statements.some((statement) => !isTypeOnlyStatement(statement))
+}
+
+function isTypeOnlyStatement(statement: ts.Statement): boolean {
+  if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) return true
+  if (
+    ts.canHaveModifiers(statement) &&
+    ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)
+  ) {
+    return true
+  }
+  if (ts.isImportDeclaration(statement)) {
+    const clause = statement.importClause
+    if (clause === undefined || clause.name !== undefined) return false
+    if (clause.isTypeOnly) return true
+    return (
+      clause.namedBindings !== undefined &&
+      ts.isNamedImports(clause.namedBindings) &&
+      clause.namedBindings.elements.every((element) => element.isTypeOnly)
+    )
+  }
+  if (ts.isExportDeclaration(statement)) {
+    if (statement.isTypeOnly) return true
+    return (
+      statement.exportClause !== undefined &&
+      ts.isNamedExports(statement.exportClause) &&
+      statement.exportClause.elements.every((element) => element.isTypeOnly)
+    )
+  }
+  return false
+}
+
+export function evaluateChangedLineCoverage(
+  changed: ChangedLines,
+  coverage: LineCoverage,
+  nonExecutableFiles: ReadonlySet<string> = new Set(),
+) {
   const missingFiles: Array<string> = []
   const uncovered: Array<string> = []
   let covered = 0
@@ -92,7 +136,7 @@ export function evaluateChangedLineCoverage(changed: ChangedLines, coverage: Lin
     if (!eligibleSource(path)) continue
     const fileCoverage = coverage.get(path)
     if (fileCoverage === undefined) {
-      missingFiles.push(path)
+      if (!nonExecutableFiles.has(path)) missingFiles.push(path)
       continue
     }
     for (const line of changedLines) {
@@ -132,10 +176,17 @@ async function main(): Promise<void> {
   if (exitCode !== 0) throw new Error(`git diff failed: ${error.trim()}`)
   const lcovFile = Bun.file("coverage/lcov.info")
   if (!(await lcovFile.exists())) throw new Error("coverage/lcov.info does not exist")
-  const result = evaluateChangedLineCoverage(
-    parseChangedLines(diff),
-    parseLcov(await lcovFile.text()),
-  )
+  const changed = parseChangedLines(diff)
+  const coverage = parseLcov(await lcovFile.text())
+  const nonExecutableFiles = new Set<string>()
+  for (const path of changed.keys()) {
+    if (coverage.has(path)) continue
+    const sourceFile = Bun.file(path)
+    if ((await sourceFile.exists()) && !hasRuntimeStatements(await sourceFile.text())) {
+      nonExecutableFiles.add(path)
+    }
+  }
+  const result = evaluateChangedLineCoverage(changed, coverage, nonExecutableFiles)
   const percent = result.total === 0 ? 100 : (result.covered / result.total) * 100
   console.log(
     `Changed executable line coverage: ${result.covered}/${result.total} (${percent.toFixed(2)}%)`,
@@ -148,3 +199,4 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) await main()
+import ts from "typescript"

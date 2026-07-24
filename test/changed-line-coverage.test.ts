@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   buildExactDiffArguments,
   evaluateChangedLineCoverage,
+  hasRuntimeStatements,
   parseChangedLines,
   parseLcov,
 } from "../scripts/check-changed-line-coverage"
@@ -85,6 +86,22 @@ end_of_record
 
     const missing = evaluateChangedLineCoverage(new Map([["src/new.ts", new Set([1])]]), new Map())
     expect(missing).toMatchObject({ passed: false, missingFiles: ["src/new.ts"] })
+  })
+
+  test("does not treat type-only source as missing executable coverage", () => {
+    const source = `import type { Effect } from "effect"
+export interface Port { readonly run: () => Effect<void> }
+export type Name = string
+`
+    expect(hasRuntimeStatements(source)).toBe(false)
+    expect(hasRuntimeStatements("export const value = 1")).toBe(true)
+    expect(
+      evaluateChangedLineCoverage(
+        new Map([["src/model.ts", new Set([1, 2, 3])]]),
+        new Map(),
+        new Set(["src/model.ts"]),
+      ),
+    ).toMatchObject({ passed: true, missingFiles: [] })
   })
 
   test("uses separate base and head endpoints rather than merge-base syntax", () => {
