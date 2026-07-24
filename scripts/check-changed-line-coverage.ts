@@ -36,21 +36,33 @@ export function parseChangedLines(diff: string): Map<string, Set<number>> {
       continue
     }
     if (inFileHeader && line.startsWith("+++ ")) {
-      const value = decodeGitPath(line.slice(4))
-      path = value === "/dev/null" ? undefined : value.replace(/^b\//, "")
+      path = destinationPath(line)
       continue
     }
     if (!line.startsWith("@@ ")) continue
     inFileHeader = false
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
-    if (hunk === null || path === undefined) throw new Error(`Malformed diff hunk: ${line}`)
-    const start = Number(hunk[1])
-    const count = hunk[2] === undefined ? 1 : Number(hunk[2])
-    const lines = changed.get(path) ?? new Set<number>()
-    for (let offset = 0; offset < count; offset += 1) lines.add(start + offset)
-    changed.set(path, lines)
+    appendChangedHunk(changed, path, line)
   }
   return changed
+}
+
+function destinationPath(header: string): string | undefined {
+  const value = decodeGitPath(header.slice(4))
+  return value === "/dev/null" ? undefined : value.replace(/^b\//, "")
+}
+
+function appendChangedHunk(
+  changed: Map<string, Set<number>>,
+  path: string | undefined,
+  header: string,
+): void {
+  const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(header)
+  if (hunk === null || path === undefined) throw new Error(`Malformed diff hunk: ${header}`)
+  const start = Number(hunk[1])
+  const count = hunk[2] === undefined ? 1 : Number(hunk[2])
+  const lines = changed.get(path) ?? new Set<number>()
+  for (let offset = 0; offset < count; offset += 1) lines.add(start + offset)
+  changed.set(path, lines)
 }
 
 function decodeGitPath(value: string): string {

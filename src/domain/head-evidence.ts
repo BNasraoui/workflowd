@@ -208,10 +208,28 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
       /\b[-A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[-A-Z0-9_]*\s*[=:][^\r\n]*/gi,
       (assignment) => `${assignment.slice(0, assignment.search(/[=:]/) + 1)}[REDACTED]`,
     )
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
+    .replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, redactUrlCredential)
   if (sanitized.length <= maxLength) return sanitized
   const marker = "\n[truncated by workflowd]"
   return `${sanitized.slice(0, Math.max(0, maxLength - marker.length))}${marker}`
+}
+
+function redactUrlCredential(value: string): string {
+  const authorityStart = value.indexOf("://") + 3
+  const authorityEnd = firstIndexOf(value, authorityStart, ["/", "?", "#"])
+  const at = value.lastIndexOf("@", authorityEnd - 1)
+  const separator = value.indexOf(":", authorityStart)
+  if (at < authorityStart || separator < authorityStart || separator >= at) return value
+  return `${value.slice(0, separator + 1)}[REDACTED]${value.slice(at)}`
+}
+
+function firstIndexOf(value: string, start: number, delimiters: ReadonlyArray<string>): number {
+  let result = value.length
+  for (const delimiter of delimiters) {
+    const index = value.indexOf(delimiter, start)
+    if (index !== -1 && index < result) result = index
+  }
+  return result
 }
 
 export function stripHeadEvidenceFindings(review: ReviewResult): ReviewResult {
