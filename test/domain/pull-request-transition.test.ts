@@ -102,7 +102,11 @@ describe("pull request transition decisions", () => {
       { headSha: "c".repeat(40), updatedAt: pullRequest.updatedAt },
       "RequestReconciliation",
     ],
-    ["missing-timestamp target change", { headSha: "c".repeat(40), updatedAt: undefined }, "RequestReconciliation"],
+    [
+      "missing-timestamp target change",
+      { headSha: "c".repeat(40), updatedAt: undefined },
+      "RequestReconciliation",
+    ],
   ])("classifies a %s observation", (_, changes, expectedTag) => {
     const decision = decidePullRequestTransition(
       tracked,
@@ -141,10 +145,7 @@ describe("pull request transition decisions", () => {
   })
 
   test("queues a Review Request when edited changes the exact Review Target", () => {
-    const decision = decidePullRequestTransition(
-      tracked,
-      edited({ baseRef: "release" }),
-    )
+    const decision = decidePullRequestTransition(tracked, edited({ baseRef: "release" }))
 
     expect(decision._tag).toBe("ApplySnapshot")
     if (decision._tag === "ApplySnapshot") {
@@ -176,10 +177,7 @@ describe("pull request transition decisions", () => {
       reviewRequestActive: false,
     })
 
-    const decision = decidePullRequestTransition(
-      observedWithoutReview,
-      edited({}),
-    )
+    const decision = decidePullRequestTransition(observedWithoutReview, edited({}))
 
     expect(decision._tag).toBe("ApplySnapshot")
     if (decision._tag === "ApplySnapshot") {

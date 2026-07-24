@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Logger } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore } from "../src/store/contracts"
+import { TicketSourceError } from "../src/qrspi/ports"
+import { QrspiStoreDataError } from "../src/qrspi/store"
+import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
 const TestLayer = WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))
@@ -59,7 +62,11 @@ describe("handleGitHubWebhook", () => {
           now: new Date("2026-07-19T12:01:00.000Z"),
           leaseDurationMs: 60_000,
         })
-        return { body: yield* Effect.promise(() => response.json()), job, response }
+        return {
+          body: yield* Effect.promise(() => response.json()),
+          job,
+          response,
+        }
       }).pipe(Effect.provide(TestLayer)),
     )
 
@@ -70,7 +77,10 @@ describe("handleGitHubWebhook", () => {
 
   test("rejects a webhook body above the configured limit", async () => {
     const secret = "webhook-secret"
-    const oversized = JSON.stringify({ action: "opened", padding: "x".repeat(200) })
+    const oversized = JSON.stringify({
+      action: "opened",
+      padding: "x".repeat(200),
+    })
     const signature = `sha256=${createHmac("sha256", secret).update(oversized).digest("hex")}`
     const request = new Request("http://localhost/hooks/github", {
       method: "POST",
@@ -91,6 +101,44 @@ describe("handleGitHubWebhook", () => {
     )
 
     expect(response.status).toBe(413)
+  })
+
+  test("returns 500 when the webhook body cannot be read", async () => {
+    const logs: Array<{ readonly level: string; readonly message: unknown }> = []
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      logs.push({ level: logLevel.label, message })
+    })
+    class UnreadableRequest extends Request {
+      override readonly arrayBuffer = (): Promise<ArrayBuffer> =>
+        Promise.reject(new Error("body unavailable"))
+    }
+
+    const request = new UnreadableRequest("http://localhost/hooks/github", {
+      method: "POST",
+      headers: {
+        "x-github-delivery": "delivery-http-unreadable",
+        "x-github-event": "pull_request",
+      },
+    })
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: "webhook-secret",
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(TestLayer),
+        Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
+      ),
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ error: "internal server error" })
+    expect(logs).toEqual([
+      {
+        level: "ERROR",
+        message: ["Webhook ingestion failed"],
+      },
+    ])
   })
 
   test("returns 400 for a malformed pull request domain identifier", async () => {
@@ -170,4 +218,148 @@ describe("routeRequest", () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ status: "ok" })
   })
+
+  test("authenticates and decodes QRSPI kickoff before invoking the trusted handler", async () => {
+    let calls = 0
+    const start = (input: unknown) => {
+      calls += 1
+      return Effect.succeed({ received: input })
+    }
+    const body = {
+      repository: {
+        providerInstanceId: "github-app-123",
+        repositoryId: "42",
+        repositoryFullName: "example-owner/example",
+      },
+      ticket: {
+        tracker: "beads",
+        trackerInstanceId: "workspace-42",
+        nativeTicketId: "workflowd-vs3.3",
+      },
+    }
+    const unauthorized = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/qrspi", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { authorization: "Bearer wrong" },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          qrspi: { token: "kickoff-secret", start },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+    const authorized = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/qrspi", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: {
+            authorization: "Bearer kickoff-secret",
+            "content-type": "application/json",
+          },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          qrspi: { token: "kickoff-secret", start },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(unauthorized.status).toBe(401)
+    expect(authorized.status).toBe(202)
+    expect(calls).toBe(1)
+    expect(await authorized.json()).toEqual({ received: body })
+  })
+
+  test("returns 503 for QRSPI ticket-source infrastructure failure", async () => {
+    const response = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/qrspi", {
+          method: "POST",
+          body: "{}",
+          headers: { authorization: "Bearer kickoff-secret" },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          qrspi: {
+            token: "kickoff-secret",
+            start: () => Effect.fail(new TicketSourceError({ cause: new Error("bd unavailable") })),
+          },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(503)
+  })
+
+  test("returns 500 for corrupt durable QRSPI state", async () => {
+    const response = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/qrspi", {
+          method: "POST",
+          body: "{}",
+          headers: { authorization: "Bearer kickoff-secret" },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          qrspi: {
+            token: "kickoff-secret",
+            start: () =>
+              Effect.fail(
+                new QrspiStoreDataError({
+                  record: "workflow_operation",
+                  recordId: "corrupt",
+                  message: "invalid input",
+                }),
+              ),
+          },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(500)
+  })
+
+  test.each([
+    ["unknown_contract_reference", "contract"],
+    ["unavailable_agent_model", "availability"],
+    ["hash_mismatch", "persisted"],
+  ] as const)(
+    "returns a bounded 503 response for closed QRSPI reason %s",
+    async (reason, phase) => {
+      const response = await Effect.runPromise(
+        routeRequest(
+          new Request("http://localhost/workflows/qrspi", {
+            method: "POST",
+            body: "{}",
+            headers: { authorization: "Bearer kickoff-secret" },
+          }),
+          {
+            webhookSecret: "secret",
+            now: new Date("2026-07-19T12:00:00.000Z"),
+            qrspi: {
+              token: "kickoff-secret",
+              start: () =>
+                Effect.fail(
+                  new WorkflowStartValidationError({
+                    phase,
+                    reason,
+                    cause: "must not cross the HTTP boundary",
+                  }),
+                ),
+            },
+          },
+        ).pipe(Effect.provide(TestLayer)),
+      )
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: "WorkflowStartValidationError" })
+    },
+  )
 })

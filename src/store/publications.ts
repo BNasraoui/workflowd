@@ -8,10 +8,7 @@ import { SqlLeaseQueue } from "./lease"
 
 type PublicationOperations = Pick<
   WorkflowStorePort,
-  | "claimNextPublication"
-  | "completePublication"
-  | "isPublicationCurrent"
-  | "reschedulePublication"
+  "claimNextPublication" | "completePublication" | "isPublicationCurrent" | "reschedulePublication"
 >
 
 export function makePublicationOperations(sql: SqlClient): PublicationOperations {
@@ -34,6 +31,17 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         generation,
         review_request_number,
         review_json,
+        session_reference_id,
+        (
+          SELECT execution.session_reference_json
+          FROM agent_executions AS execution
+          WHERE execution.session_reference_id = publications.session_reference_id
+        ) AS session_reference_json,
+        (
+          SELECT execution.state
+          FROM agent_executions AS execution
+          WHERE execution.session_reference_id = publications.session_reference_id
+        ) AS session_execution_state,
         attempts
     `),
     decode: decodePublicationRow,
@@ -55,8 +63,9 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
 
     completePublication: (input) =>
       Effect.gen(function* () {
-        const published = input.outcome === "published"
-          ? yield* sql<{ readonly id: number }>`
+        const published =
+          input.outcome === "published"
+            ? yield* sql<{ readonly id: number }>`
             UPDATE publications AS candidate
             SET state = 'succeeded', lease_owner = NULL, lease_until = NULL,
               last_error = NULL, updated_at = ${input.completedAt.toISOString()}
@@ -68,7 +77,7 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
             AND ${currentness.latestReviewRequest}
             RETURNING id
           `
-          : []
+            : []
         if (published.length > 0) return "completed" as const
         yield* sql`
           UPDATE publications
@@ -81,7 +90,6 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         `
         return "stale" as const
       }).pipe(sql.withTransaction),
-    reschedulePublication: (input) =>
-      queue.reschedule({ ...input, id: input.publicationId }),
+    reschedulePublication: (input) => queue.reschedule({ ...input, id: input.publicationId }),
   }
 }

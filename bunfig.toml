@@ -1,0 +1,8 @@
+[test]
+# Bun applies thresholds per covered file rather than to the aggregate result.
+coverageThreshold = { lines = 0.6, functions = 0.6 }
+coveragePathIgnorePatterns = [
+  "src/store/errors.ts",
+  "src/workspace/errors.ts",
+  "src/qrspi/ports.ts",
+]

@@ -1,4 +1,5 @@
 import type { Publication } from "../domain/publication"
+import type { SessionAccess } from "../session-access"
 
 const COMMENT_MAX_LENGTH = 65_536
 const CHECK_OUTPUT_MAX_LENGTH = 65_535
@@ -17,11 +18,12 @@ export function reviewMarker(publication: Publication): string {
   return `<!-- workflowd:review:${publication.repositoryId}:${publication.pullRequestNumber} -->`
 }
 
-export function renderReviewComment(publication: Publication): string {
+export function renderReviewComment(
+  publication: Publication,
+  sessionAccess?: SessionAccess,
+): string {
   const verdict =
-    publication.review.verdict === "pass"
-      ? "No changes requested"
-      : "Changes requested"
+    publication.review.verdict === "pass" ? "No changes requested" : "Changes requested"
   const findings = publication.review.findings
     .map((finding, index) => {
       const location = finding.path
@@ -31,8 +33,14 @@ export function renderReviewComment(publication: Publication): string {
     })
     .join("\n\n")
 
-  return truncate(
-    `${reviewMarker(publication)}
+  const session =
+    sessionAccess === undefined
+      ? ""
+      : sessionAccess._tag === "Available"
+        ? `\n\n### Resume agent session\n\n\`\`\`sh\n${sessionAccess.command}\n\`\`\``
+        : `\n\n### Resume agent session\n\nSession unavailable: \`${sessionAccess.reason}\` (reference \`${sessionAccess.sessionReferenceId}\`).`
+
+  const review = `${reviewMarker(publication)}
 ## OpenCode Review
 
 Commit: \`${publication.target.headSha}\`
@@ -43,19 +51,18 @@ ${publication.review.summary}
 
 ### Findings
 
-${findings || "No actionable findings."}
+${findings || "No actionable findings."}`
+  const attribution = `${session}
 
-_Generated for review generation ${publication.generation}._`,
-    COMMENT_MAX_LENGTH,
-  )
+_Generated for review generation ${publication.generation}._`
+  return `${truncate(review, COMMENT_MAX_LENGTH - attribution.length)}${attribution}`
 }
 
 export function presentReviewCheck(
   publication: Publication,
   comment: string,
 ): ReviewCheckPresentation {
-  const conclusion =
-    publication.review.verdict === "pass" ? "success" : "action_required"
+  const conclusion = publication.review.verdict === "pass" ? "success" : "action_required"
   return {
     conclusion,
     output: {

@@ -8,7 +8,7 @@ import { runWorkspaceCommand, runWorkspaceCommandBytes } from "./command"
 import { WorkspaceError } from "./errors"
 import { filesystemEffect, filesystemTransition, pathExists } from "./filesystem"
 import type { FixWorkspace, ResolvedWorktree, ReviewWorkspace } from "./model"
-import type { fixPublication } from "./fix"
+import type { FixPublication } from "./fix"
 
 const contextOwner = "workflowd:v1\n"
 const contextMarker = ".managed-by-workflowd"
@@ -30,54 +30,65 @@ function runGit(operation: string, directory: string, ...args: ReadonlyArray<str
 
 export class ReviewContextFiles {
   readonly #maxDiffBytes: number
-  readonly #fixes: typeof fixPublication
+  readonly #fixes: FixPublication
+  readonly #gitSigningKey: string | undefined
 
-  constructor(maxDiffBytes: number, fixes: typeof fixPublication) {
+  constructor(maxDiffBytes: number, fixes: FixPublication, gitSigningKey?: string) {
     this.#maxDiffBytes = maxDiffBytes
     this.#fixes = fixes
+    this.#gitSigningKey = gitSigningKey
   }
 
   cleanup(directory: string) {
     return Effect.gen(function* () {
       const contextDirectory = join(directory, ".workflowd")
-      const tracked = yield* runGit("verify review context is untracked", directory,
-        "ls-files", "--cached", "--", ".workflowd")
+      const tracked = yield* runGit(
+        "verify review context is untracked",
+        directory,
+        "ls-files",
+        "--cached",
+        "--",
+        ".workflowd",
+      )
       if (tracked !== "") {
         return yield* Effect.fail(
           new WorkspaceError({
             operation: "remove review context",
-            cause: new Error(
-              `Refusing to remove tracked context ${contextDirectory}`,
-            ),
+            cause: new Error(`Refusing to remove tracked context ${contextDirectory}`),
           }),
         )
       }
       if (!(yield* pathExists(contextDirectory))) return
       const owner = yield* filesystemEffect("read review context owner", (signal) =>
-        readFile(join(contextDirectory, contextMarker), { encoding: "utf8", signal }),
+        readFile(join(contextDirectory, contextMarker), {
+          encoding: "utf8",
+          signal,
+        }),
       ).pipe(Effect.option)
       if (owner._tag === "None" || owner.value !== contextOwner) {
         return yield* Effect.fail(
           new WorkspaceError({
             operation: "remove review context",
-            cause: new Error(
-              `Refusing to remove unowned context ${contextDirectory}`,
-            ),
+            cause: new Error(`Refusing to remove unowned context ${contextDirectory}`),
           }),
         )
       }
       yield* filesystemTransition("remove review context", () =>
         rm(contextDirectory, { recursive: true, force: true }),
       )
-      const remaining = yield* runGit("verify review context cleanup", directory,
-        "status", "--porcelain", "--", ".workflowd")
+      const remaining = yield* runGit(
+        "verify review context cleanup",
+        directory,
+        "status",
+        "--porcelain",
+        "--",
+        ".workflowd",
+      )
       if (remaining !== "") {
         return yield* Effect.fail(
           new WorkspaceError({
             operation: "verify review context cleanup",
-            cause: new Error(
-              `Review context remains staged or tracked in ${directory}`,
-            ),
+            cause: new Error(`Review context remains staged or tracked in ${directory}`),
           }),
         )
       }
@@ -87,28 +98,51 @@ export class ReviewContextFiles {
   installExclusion(directory: string) {
     return Effect.acquireRelease(
       Effect.gen(function* () {
-        yield* runGit("enable worktree-specific Git config", directory,
-          "config", "extensions.worktreeConfig", "true")
-        const previous = yield* runGit("read review context exclusion", directory,
-          "config", "--worktree", "--get", "core.excludesFile").pipe(Effect.option)
-        const gitDirectory = yield* runGit("resolve worktree Git directory", directory,
-          "rev-parse", "--absolute-git-dir")
+        yield* runGit(
+          "enable worktree-specific Git config",
+          directory,
+          "config",
+          "extensions.worktreeConfig",
+          "true",
+        )
+        const previous = yield* runGit(
+          "read review context exclusion",
+          directory,
+          "config",
+          "--worktree",
+          "--get",
+          "core.excludesFile",
+        ).pipe(Effect.option)
+        const gitDirectory = yield* runGit(
+          "resolve worktree Git directory",
+          directory,
+          "rev-parse",
+          "--absolute-git-dir",
+        )
         const exclusion = join(gitDirectory, `workflowd-exclude-${randomUUID()}`)
         yield* filesystemEffect("write review context exclusion", (signal) =>
           writeFile(exclusion, "/.workflowd/\n", { mode: 0o600, signal }),
         )
-        yield* runGit("install review context exclusion", directory,
-          "config", "--worktree", "core.excludesFile", exclusion)
+        yield* runGit(
+          "install review context exclusion",
+          directory,
+          "config",
+          "--worktree",
+          "core.excludesFile",
+          exclusion,
+        )
         return { exclusion, previous }
       }),
       ({ exclusion, previous }) =>
         Effect.gen(function* () {
-          const restore = previous._tag === "Some"
-            ? ["config", "--worktree", "core.excludesFile", previous.value]
-            : ["config", "--worktree", "--unset-all", "core.excludesFile"]
-          const operation = previous._tag === "Some"
-            ? "restore review context exclusion"
-            : "remove review context exclusion"
+          const restore =
+            previous._tag === "Some"
+              ? ["config", "--worktree", "core.excludesFile", previous.value]
+              : ["config", "--worktree", "--unset-all", "core.excludesFile"]
+          const operation =
+            previous._tag === "Some"
+              ? "restore review context exclusion"
+              : "remove review context exclusion"
           yield* runGit(operation, directory, ...restore).pipe(Effect.ignore)
           yield* filesystemTransition("remove review context exclusion", () =>
             rm(exclusion, { force: true }),
@@ -123,10 +157,7 @@ export class ReviewContextFiles {
       yield* this.#requireClean(resolved.directory, "check worktree status")
       if (resolved.pull) {
         yield* this.#pull(resolved.directory)
-        yield* this.#requireClean(
-          resolved.directory,
-          "check worktree status after pull",
-        )
+        yield* this.#requireClean(resolved.directory, "check worktree status after pull")
       }
       const head = yield* this.#head(resolved.directory)
       if (head !== work.target.headSha) {
@@ -138,13 +169,19 @@ export class ReviewContextFiles {
         )
       }
       yield* this.#write(work, resolved.directory)
-      return { directory: resolved.directory } satisfies ReviewWorkspace
+      return {
+        directory: resolved.directory,
+        ...(resolved.managed ? { directoryCleanupScheduled: true as const } : {}),
+      } satisfies ReviewWorkspace
     })
   }
 
   prepareFix(work: FixWork, resolved: ResolvedWorktree) {
     return Effect.gen(this, function* () {
       yield* this.#cleanupExisting(resolved.directory)
+      if (this.#gitSigningKey !== undefined) {
+        yield* this.#configureSigning(resolved.directory, this.#gitSigningKey)
+      }
       const initialStatus = yield* this.#fixes.worktreeStatus(resolved.directory)
       if (resolved.pull && initialStatus === "") yield* this.#pull(resolved.directory)
       const head = yield* this.#head(resolved.directory)
@@ -152,9 +189,7 @@ export class ReviewContextFiles {
         return yield* Effect.fail(
           new WorkspaceError({
             operation: "recover dirty fix worktree",
-            cause: new Error(
-              `Dirty worktree moved from ${work.target.headSha} to ${head}`,
-            ),
+            cause: new Error(`Dirty worktree moved from ${work.target.headSha} to ${head}`),
           }),
         )
       }
@@ -167,6 +202,48 @@ export class ReviewContextFiles {
     })
   }
 
+  #configureSigning(directory: string, signingKey: string) {
+    const settings = [
+      ["gpg.format", "openpgp"],
+      ["user.signingKey", signingKey],
+      ["commit.gpgSign", "true"],
+    ] as const
+    return Effect.gen(function* () {
+      const previous = yield* Effect.forEach(settings, ([name]) =>
+        runGit(
+          "read fixer signing configuration",
+          directory,
+          "config",
+          "--worktree",
+          "--get",
+          name,
+        ).pipe(Effect.option),
+      )
+      yield* Effect.addFinalizer(() =>
+        Effect.forEach(settings, ([name], index) => {
+          const value = previous[index]!
+          const args =
+            value._tag === "Some"
+              ? ["config", "--worktree", name, value.value]
+              : ["config", "--worktree", "--unset-all", name]
+          return runGit("restore fixer signing configuration", directory, ...args).pipe(
+            Effect.ignore,
+          )
+        }).pipe(Effect.asVoid),
+      )
+      yield* Effect.forEach(settings, ([name, value]) =>
+        runGit(
+          "configure controller commit signing",
+          directory,
+          "config",
+          "--worktree",
+          name,
+          value,
+        ),
+      )
+    })
+  }
+
   #cleanupExisting(directory: string) {
     const contextDirectory = join(directory, ".workflowd")
     return pathExists(contextDirectory).pipe(
@@ -175,17 +252,14 @@ export class ReviewContextFiles {
   }
 
   #requireClean(directory: string, operation: string) {
-    return runGit(operation, directory, "status", "--porcelain",
-      "--untracked-files=all").pipe(
+    return runGit(operation, directory, "status", "--porcelain", "--untracked-files=all").pipe(
       Effect.flatMap((status) =>
         status === ""
           ? Effect.void
           : Effect.fail(
               new WorkspaceError({
                 operation,
-                cause: new Error(
-                  `Refusing to review dirty worktree ${directory}`,
-                ),
+                cause: new Error(`Refusing to review dirty worktree ${directory}`),
               }),
             ),
       ),
@@ -193,8 +267,14 @@ export class ReviewContextFiles {
   }
 
   #pull(directory: string) {
-    return runGit("pull review worktree", directory, "-c",
-      "core.hooksPath=/dev/null", "pull", "--ff-only")
+    return runGit(
+      "pull review worktree",
+      directory,
+      "-c",
+      "core.hooksPath=/dev/null",
+      "pull",
+      "--ff-only",
+    )
   }
 
   #head(directory: string) {
@@ -203,8 +283,13 @@ export class ReviewContextFiles {
 
   #write(work: Work, directory: string) {
     return Effect.gen(this, function* () {
-      yield* runGit("verify base commit", directory,
-        "cat-file", "-e", `${work.target.baseSha}^{commit}`)
+      yield* runGit(
+        "verify base commit",
+        directory,
+        "cat-file",
+        "-e",
+        `${work.target.baseSha}^{commit}`,
+      )
       const contextDirectory = join(directory, ".workflowd")
       const temporaryContext = join(directory, `.workflowd-${randomUUID()}`)
       yield* this.#populate(work, directory, temporaryContext, contextDirectory).pipe(
@@ -217,16 +302,9 @@ export class ReviewContextFiles {
     })
   }
 
-  #populate(
-    work: Work,
-    directory: string,
-    temporaryContext: string,
-    contextDirectory: string,
-  ) {
+  #populate(work: Work, directory: string, temporaryContext: string, contextDirectory: string) {
     return Effect.gen(this, function* () {
-      yield* filesystemEffect("create review context directory", () =>
-        mkdir(temporaryContext),
-      )
+      yield* filesystemEffect("create review context directory", () => mkdir(temporaryContext))
       yield* filesystemEffect("write review context owner", (signal) =>
         writeFile(join(temporaryContext, contextMarker), contextOwner, {
           mode: 0o600,
@@ -280,12 +358,7 @@ export class ReviewContextFiles {
     })
   }
 
-  #writeJson(
-    operation: string,
-    directory: string,
-    filename: string,
-    value: JsonSerializable,
-  ) {
+  #writeJson(operation: string, directory: string, filename: string, value: JsonSerializable) {
     return filesystemEffect(operation, (signal) =>
       writeFile(join(directory, filename), `${JSON.stringify(value, null, 2)}\n`, {
         mode: 0o600,

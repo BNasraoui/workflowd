@@ -5,9 +5,15 @@ import type {
   SessionStatus,
 } from "@opencode-ai/sdk/v2/client"
 
-export type OpenCodeModel = { readonly providerID: string; readonly modelID: string }
+export type OpenCodeModel = {
+  readonly providerID: string
+  readonly modelID: string
+}
 
-type OpenCodeCreateSessionInput = { readonly directory: string; readonly title: string }
+type OpenCodeCreateSessionInput = {
+  readonly directory: string
+  readonly title: string
+}
 
 type OpenCodeSession = { readonly id: string }
 
@@ -27,7 +33,10 @@ export type OpenCodePromptSessionInput = {
   }>
 }
 
-type OpenCodeSessionInput = { readonly sessionID: string; readonly directory: string }
+type OpenCodeSessionInput = {
+  readonly sessionID: string
+  readonly directory: string
+}
 
 type OpenCodeSessionDirectoryInput = { readonly directory: string }
 type OpenCodeSdkDirectoryInput = { readonly directory?: string }
@@ -56,9 +65,16 @@ export type OpenCodeSessionEvent =
       readonly error?: AssistantMessage["error"]
     }
 
-type OpenCodeAvailabilityInput = { readonly directory?: string; readonly agents: ReadonlyArray<string>; readonly model: OpenCodeModel }
+type OpenCodeAvailabilityInput = {
+  readonly directory?: string
+  readonly agents: ReadonlyArray<string>
+  readonly model: OpenCodeModel
+}
 
-type OpenCodeProviderAvailability = { readonly id: string; readonly modelIDs: ReadonlyArray<string> }
+type OpenCodeProviderAvailability = {
+  readonly id: string
+  readonly modelIDs: ReadonlyArray<string>
+}
 type AdapterCall<Input, Output> = (input: Input, signal: AbortSignal) => Promise<Output>
 
 export type OpenCodeSdkClient = {
@@ -69,10 +85,8 @@ export type OpenCodeSdkClient = {
     OpenCodeSessionDirectoryInput,
     Readonly<Record<string, SessionStatus | undefined>>
   >
-  readonly listSessionMessages: AdapterCall<
-    OpenCodeSessionInput,
-    ReadonlyArray<AssistantMessage>
-  >
+  readonly sessionExists: AdapterCall<OpenCodeSessionInput, boolean>
+  readonly listSessionMessages: AdapterCall<OpenCodeSessionInput, ReadonlyArray<AssistantMessage>>
   readonly abortSession: AdapterCall<OpenCodeSessionInput, boolean>
   readonly listAgents: AdapterCall<OpenCodeSdkDirectoryInput, ReadonlyArray<string>>
   readonly listProviders: AdapterCall<
@@ -84,9 +98,16 @@ export type OpenCodeSdkClient = {
 export type OpenCodeAdapter = {
   readonly createSession: AdapterCall<OpenCodeCreateSessionInput, OpenCodeSession>
   readonly promptSession: AdapterCall<OpenCodePromptSessionInput, void>
-  readonly subscribeSessionEvents: AdapterCall<OpenCodeSessionDirectoryInput, AsyncIterable<OpenCodeSessionEvent>>
+  readonly subscribeSessionEvents: AdapterCall<
+    OpenCodeSessionDirectoryInput,
+    AsyncIterable<OpenCodeSessionEvent>
+  >
   readonly getSessionStatus: AdapterCall<OpenCodeSessionInput, SessionStatus | undefined>
-  readonly listSessionMessages: AdapterCall<OpenCodeSessionInput, ReadonlyArray<OpenCodeAssistantMessage>>
+  readonly sessionExists: AdapterCall<OpenCodeSessionInput, boolean>
+  readonly listSessionMessages: AdapterCall<
+    OpenCodeSessionInput,
+    ReadonlyArray<OpenCodeAssistantMessage>
+  >
   readonly abortSession: AdapterCall<OpenCodeSessionInput, boolean>
   readonly validateAvailability: AdapterCall<OpenCodeAvailabilityInput, void>
 }
@@ -113,13 +134,8 @@ function validateOpenCodeAvailability(
   const provider = availableProviders.find(
     (candidate) => candidate.id === requested.model.providerID,
   )
-  if (
-    provider === undefined ||
-    !provider.modelIDs.includes(requested.model.modelID)
-  ) {
-    unavailable.push(
-      `model ${requested.model.providerID}/${requested.model.modelID}`,
-    )
+  if (provider === undefined || !provider.modelIDs.includes(requested.model.modelID)) {
+    unavailable.push(`model ${requested.model.providerID}/${requested.model.modelID}`)
   }
   if (unavailable.length > 0) {
     throw new OpenCodeAvailabilityError(unavailable)
@@ -136,10 +152,7 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     return this.client.createSession(input, signal)
   }
 
-  async promptSession(
-    input: OpenCodePromptSessionInput,
-    signal: AbortSignal,
-  ): Promise<void> {
+  async promptSession(input: OpenCodePromptSessionInput, signal: AbortSignal): Promise<void> {
     await this.client.promptSession(input, signal)
   }
 
@@ -173,35 +186,27 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     input: OpenCodeSessionInput,
     signal: AbortSignal,
   ): Promise<SessionStatus | undefined> {
-    const statuses = await this.client.getSessionStatuses(
-      { directory: input.directory },
-      signal,
-    )
+    const statuses = await this.client.getSessionStatuses({ directory: input.directory }, signal)
     return statuses[input.sessionID]
+  }
+
+  async sessionExists(input: OpenCodeSessionInput, signal: AbortSignal): Promise<boolean> {
+    return this.client.sessionExists(input, signal)
   }
 
   async listSessionMessages(
     input: OpenCodeSessionInput,
     signal: AbortSignal,
   ): Promise<ReadonlyArray<OpenCodeAssistantMessage>> {
-    return (await this.client.listSessionMessages(input, signal)).map(
-      normalizeAssistantMessage,
-    )
+    return (await this.client.listSessionMessages(input, signal)).map(normalizeAssistantMessage)
   }
 
-  async abortSession(
-    input: OpenCodeSessionInput,
-    signal: AbortSignal,
-  ): Promise<boolean> {
+  async abortSession(input: OpenCodeSessionInput, signal: AbortSignal): Promise<boolean> {
     return this.client.abortSession(input, signal)
   }
 
-  async validateAvailability(
-    input: OpenCodeAvailabilityInput,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const parameters =
-      input.directory === undefined ? {} : { directory: input.directory }
+  async validateAvailability(input: OpenCodeAvailabilityInput, signal: AbortSignal): Promise<void> {
+    const parameters = input.directory === undefined ? {} : { directory: input.directory }
     const [agents, providers] = await Promise.all([
       this.client.listAgents(parameters, signal),
       this.client.listProviders(parameters, signal),
@@ -213,10 +218,16 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
 export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient {
   return {
     createSession: async (input, signal) => {
-      const response = await client.session.create<true>(input, {
-        signal,
-        throwOnError: true,
-      })
+      const response = await client.session.create<true>(
+        {
+          directory: input.directory,
+          title: input.title,
+        },
+        {
+          signal,
+          throwOnError: true,
+        },
+      )
       return { id: response.data.id }
     },
     promptSession: async (input, signal) => {
@@ -246,6 +257,12 @@ export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient
         throwOnError: true,
       })
       return response.data
+    },
+    sessionExists: async (input, signal) => {
+      const response = await client.session.get(input, { signal, throwOnError: false })
+      if (response.data !== undefined) return true
+      if (response.response.status === 404) return false
+      throw new Error(`OpenCode session probe failed with HTTP ${response.response.status}`)
     },
     listSessionMessages: async (input, signal) => {
       const response = await client.session.messages<true>(
@@ -285,15 +302,11 @@ export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient
   }
 }
 
-function normalizeAssistantMessage(
-  message: AssistantMessage,
-): OpenCodeAssistantMessage {
+function normalizeAssistantMessage(message: AssistantMessage): OpenCodeAssistantMessage {
   return {
     role: message.role,
     time: message.time,
-    ...(message.structured === undefined
-      ? {}
-      : { structured: message.structured }),
+    ...(message.structured === undefined ? {} : { structured: message.structured }),
     ...(message.error === undefined ? {} : { error: message.error }),
   }
 }

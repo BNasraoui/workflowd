@@ -5,6 +5,7 @@ import type { WorkspaceError } from "./errors"
 
 export type ReviewWorkspace = {
   readonly directory: string
+  readonly directoryCleanupScheduled?: true
 }
 
 export type FixWorkspace = ReviewWorkspace & {
@@ -12,9 +13,7 @@ export type FixWorkspace = ReviewWorkspace & {
   readonly markCompleted: () => void
 }
 
-export type DurableJobCurrentness = (
-  now: Date,
-) => Effect.Effect<boolean, WorkspaceError>
+export type DurableJobCurrentness = (now: Date) => Effect.Effect<boolean, WorkspaceError>
 
 export type GitWorkspaceConfig = {
   readonly localRepositories: ReadonlyArray<string>
@@ -23,21 +22,20 @@ export type GitWorkspaceConfig = {
   readonly worktreeRoot: string
   readonly remoteUrl?: (repositoryFullName: string) => string
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 export type WorkspacePort = {
   readonly prepareReview: (
     work: ReviewWork,
   ) => Effect.Effect<ReviewWorkspace, WorkspaceError, Scope.Scope>
-  readonly prepareFix: (
-    work: FixWork,
-  ) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
+  readonly prepareFix: (work: FixWork) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
   readonly publishFix: (
     work: FixWork,
     workspace: FixWorkspace,
     result: FixResult | undefined,
     isCurrent: DurableJobCurrentness,
-  ) => Effect.Effect<void, WorkspaceError>
+  ) => Effect.Effect<string | null, WorkspaceError>
 }
 
 export type ResolvedWorktree = {

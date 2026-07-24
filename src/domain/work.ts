@@ -29,10 +29,7 @@ const WorkFields = {
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
-export const ReviewWork = Schema.TaggedStruct(
-  "ReviewWork",
-  WorkFields,
-).annotations(exact)
+export const ReviewWork = Schema.TaggedStruct("ReviewWork", WorkFields).annotations(exact)
 export type ReviewWork = typeof ReviewWork.Type
 
 export const FixWork = Schema.TaggedStruct("FixWork", {

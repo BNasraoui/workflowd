@@ -48,19 +48,15 @@ export const AuthoritativePullRequestSnapshot = Schema.TaggedStruct(
     ...PullRequestData.fields,
   },
 ).annotations(exact)
-export type AuthoritativePullRequestSnapshot =
-  typeof AuthoritativePullRequestSnapshot.Type
+export type AuthoritativePullRequestSnapshot = typeof AuthoritativePullRequestSnapshot.Type
 
-export const TrackedPullRequestState = Schema.TaggedStruct(
-  "TrackedPullRequestState",
-  {
-    installationId: PositiveInt,
-    ...PullRequestData.fields,
-    generation: GenerationNumber,
-    latestReviewRequestNumber: Schema.optional(ReviewRequestNumber),
-    reviewRequestActive: Schema.Boolean,
-  },
-).annotations(exact)
+export const TrackedPullRequestState = Schema.TaggedStruct("TrackedPullRequestState", {
+  installationId: PositiveInt,
+  ...PullRequestData.fields,
+  generation: GenerationNumber,
+  latestReviewRequestNumber: Schema.optional(ReviewRequestNumber),
+  reviewRequestActive: Schema.Boolean,
+}).annotations(exact)
 export type TrackedPullRequestState = typeof TrackedPullRequestState.Type
 
 export type PullRequestTransitionIntent = Data.TaggedEnum<{
@@ -72,23 +68,19 @@ export type PullRequestTransitionIntent = Data.TaggedEnum<{
   }
 }>
 
-export const PullRequestTransitionIntent =
-  Data.taggedEnum<PullRequestTransitionIntent>()
+export const PullRequestTransitionIntent = Data.taggedEnum<PullRequestTransitionIntent>()
 
 export type PullRequestTransitionDecision = Data.TaggedEnum<{
   IgnoreObservation: { readonly generation: GenerationNumber }
   RequestReconciliation: { readonly generation: GenerationNumber }
   ApplySnapshot: {
-    readonly snapshot:
-      | PullRequestObservation
-      | AuthoritativePullRequestSnapshot
+    readonly snapshot: PullRequestObservation | AuthoritativePullRequestSnapshot
     readonly generation: GenerationNumber
     readonly intents: ReadonlyArray<PullRequestTransitionIntent>
   }
 }>
 
-export const PullRequestTransitionDecision =
-  Data.taggedEnum<PullRequestTransitionDecision>()
+export const PullRequestTransitionDecision = Data.taggedEnum<PullRequestTransitionDecision>()
 
 const reviewableActions = new Set([
   "opened",
@@ -119,14 +111,9 @@ const sameTarget = (left: PullRequestRef, right: PullRequestRef) => {
 }
 
 const sameObservedState = (left: PullRequestRef, right: PullRequestRef) =>
-  sameTarget(left, right) &&
-  left.draft === right.draft &&
-  left.state === right.state
+  sameTarget(left, right) && left.draft === right.draft && left.state === right.state
 
-const generationFor = (
-  current: TrackedPullRequestState | undefined,
-  pullRequest: PullRequestRef,
-) =>
+const generationFor = (current: TrackedPullRequestState | undefined, pullRequest: PullRequestRef) =>
   Schema.decodeSync(GenerationNumber)(
     current === undefined
       ? 1
@@ -142,23 +129,16 @@ const observationDisposition = (
   const previousTime = previous.updatedAt
   const observedTime = observed.updatedAt
 
-  if (
-    previousTime !== undefined &&
-    observedTime !== undefined &&
-    observedTime < previousTime
-  ) {
+  if (previousTime !== undefined && observedTime !== undefined && observedTime < previousTime) {
     return "stale" as const
   }
 
-  const missingTimestamp =
-    previousTime === undefined || observedTime === undefined
+  const missingTimestamp = previousTime === undefined || observedTime === undefined
   const terminalRegression =
     (previous.state === "closed" &&
       observed.state === "open" &&
       observation.action !== "reopened") ||
-    (previous.draft &&
-      !observed.draft &&
-      observation.action !== "ready_for_review")
+    (previous.draft && !observed.draft && observation.action !== "ready_for_review")
 
   return (previousTime !== undefined &&
     observedTime !== undefined &&
@@ -173,13 +153,10 @@ const observationDisposition = (
     : ("ordered" as const)
 }
 
-const isReviewable = (
-  snapshot: PullRequestObservation | AuthoritativePullRequestSnapshot,
-) =>
+const isReviewable = (snapshot: PullRequestObservation | AuthoritativePullRequestSnapshot) =>
   snapshot.pullRequest.state === "open" &&
   !snapshot.pullRequest.draft &&
-  (snapshot._tag === "AuthoritativePullRequestSnapshot" ||
-    reviewableActions.has(snapshot.action))
+  (snapshot._tag === "AuthoritativePullRequestSnapshot" || reviewableActions.has(snapshot.action))
 
 const nextReviewRequestNumber = (
   current: TrackedPullRequestState | undefined,
@@ -196,11 +173,9 @@ const nextReviewRequestNumber = (
 
   const resumed =
     (snapshot._tag === "PullRequest" &&
-      (snapshot.action === "reopened" ||
-        snapshot.action === "ready_for_review")) ||
+      (snapshot.action === "reopened" || snapshot.action === "ready_for_review")) ||
     (snapshot._tag === "AuthoritativePullRequestSnapshot" &&
-      ((current.pullRequest.state === "closed" &&
-        snapshot.pullRequest.state === "open") ||
+      ((current.pullRequest.state === "closed" && snapshot.pullRequest.state === "open") ||
         (current.pullRequest.draft && !snapshot.pullRequest.draft)))
 
   if (resumed && !current.reviewRequestActive) {
@@ -234,16 +209,10 @@ export function decidePullRequestTransition(
   const generation = generationFor(current, snapshot.pullRequest)
   const intents: Array<PullRequestTransitionIntent> = []
   if (current !== undefined && current.generation !== generation) {
-    intents.push(
-      PullRequestTransitionIntent.SupersedeGeneration({ generation }),
-    )
+    intents.push(PullRequestTransitionIntent.SupersedeGeneration({ generation }))
   }
 
-  const reviewRequestNumber = nextReviewRequestNumber(
-    current,
-    snapshot,
-    generation,
-  )
+  const reviewRequestNumber = nextReviewRequestNumber(current, snapshot, generation)
   if (reviewRequestNumber !== null) {
     intents.push(PullRequestTransitionIntent.QueueReview({ reviewRequestNumber }))
     if (
@@ -258,10 +227,7 @@ export function decidePullRequestTransition(
         }),
       )
     }
-  } else if (
-    snapshot.pullRequest.draft ||
-    snapshot.pullRequest.state !== "open"
-  ) {
+  } else if (snapshot.pullRequest.draft || snapshot.pullRequest.state !== "open") {
     intents.push(
       PullRequestTransitionIntent.SupersedeReviewRequests({
         generation,

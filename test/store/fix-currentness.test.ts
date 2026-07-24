@@ -2,15 +2,15 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { Effect } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
-import {
-  changesRequestedReview,
-  makeStoreLayer,
-  samplePullRequestEvent,
-} from "./harness"
+import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./harness"
 
 const currentAt = new Date("2026-07-20T13:00:30.000Z")
 
-const checkCurrentness = (mutation?: string, now = currentAt) =>
+const checkCurrentness = (
+  mutation?: string,
+  now = currentAt,
+  mutationTiming: "before-claim" | "after-claim" = "after-claim",
+) =>
   Effect.runPromise(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
@@ -50,18 +50,16 @@ const checkCurrentness = (mutation?: string, now = currentAt) =>
         completedAt: new Date("2026-07-20T12:02:01.000Z"),
         outcome: "published",
       })
+      if (mutation !== undefined && mutationTiming === "before-claim") yield* sql.unsafe(mutation)
       const fix = yield* store.claimNextJob({
         workerId: "fix-currentness-worker",
         now: new Date("2026-07-20T13:00:00.000Z"),
         leaseDurationMs: 60_000,
       })
+      if (fix === null && mutationTiming === "before-claim") return false
       if (fix === null || fix._tag !== "FixWork") throw new Error("expected fix")
-      if (mutation !== undefined) yield* sql.unsafe(mutation)
-      return yield* store.isJobCurrent(
-        fix.id,
-        "fix-currentness-worker",
-        now,
-      )
+      if (mutation !== undefined && mutationTiming === "after-claim") yield* sql.unsafe(mutation)
+      return yield* store.isJobCurrent(fix.id, "fix-currentness-worker", now)
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
@@ -88,26 +86,29 @@ describe("durable Fix Work currentness", () => {
     ["closed pull request", "UPDATE pull_requests SET state = 'closed'"],
     ["draft pull request", "UPDATE pull_requests SET draft = TRUE"],
     ["changed base ref", "UPDATE pull_requests SET base_ref = 'release'"],
-    [
-      "changed base SHA",
-      `UPDATE pull_requests SET base_sha = '${"b".repeat(40)}'`,
-    ],
+    ["changed base SHA", `UPDATE pull_requests SET base_sha = '${"b".repeat(40)}'`],
     ["changed head ref", "UPDATE pull_requests SET head_ref = 'other'"],
+    ["changed author", "UPDATE pull_requests SET author = 'untrusted-collaborator'"],
     [
       "changed head repository",
       "UPDATE pull_requests SET head_repository_full_name = 'other/repository'",
     ],
-    [
-      "changed head SHA",
-      `UPDATE pull_requests SET head_sha = '${"c".repeat(40)}'`,
-    ],
+    ["changed head SHA", `UPDATE pull_requests SET head_sha = '${"c".repeat(40)}'`],
   ])("rejects %s before push", async (_label, mutation) => {
     expect(await checkCurrentness(mutation)).toBe(false)
   })
 
   test("rejects the lease at exact expiry", async () => {
+    expect(await checkCurrentness(undefined, new Date("2026-07-20T13:01:00.000Z"))).toBe(false)
+  })
+
+  test("does not claim queued Fix Work after the persisted author changes", async () => {
     expect(
-      await checkCurrentness(undefined, new Date("2026-07-20T13:01:00.000Z")),
+      await checkCurrentness(
+        "UPDATE pull_requests SET author = 'untrusted-collaborator'",
+        currentAt,
+        "before-claim",
+      ),
     ).toBe(false)
   })
 })

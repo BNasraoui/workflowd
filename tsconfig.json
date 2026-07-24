@@ -10,7 +10,35 @@
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "diagnostics": true,
+        "diagnosticsName": true,
+        "refactors": false,
+        "quickinfo": false,
+        "completions": false,
+        "goto": false,
+        "inlays": false,
+        "renames": false,
+        "missingDiagnosticNextLine": "off",
+        "includeSuggestionsInTsc": false,
+        "excludeExternalLibrariesWhenSkipLibCheck": true,
+        "diagnosticSeverity": {
+          "effectInVoidSuccess": "error",
+          "effectInFailure": "error",
+          "lazyPromiseInEffectSync": "error",
+          "layerMergeAllWithDependencies": "error",
+          "scopeInLayerEffect": "error",
+          "duplicatePackage": "error",
+          "unsafeEffectTypeAssertion": "error",
+          "unknownInEffectCatch": "error",
+          "returnEffectInGen": "error",
+          "catchUnfailableEffect": "error"
+        }
+      }
+    ],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "skills/**/*.ts"]
 }

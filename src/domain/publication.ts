@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { SessionReference } from "../agent-harness"
 import {
   AttemptNumber,
   GenerationNumber,
@@ -21,6 +22,13 @@ export const Publication = Schema.Struct({
   generation: GenerationNumber,
   reviewRequestNumber: ReviewRequestNumber,
   review: ReviewResult,
+  sessionReferenceId: Schema.optional(
+    Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  ),
+  sessionReference: Schema.optional(SessionReference),
+  sessionExecutionState: Schema.optional(
+    Schema.Literal("launch_intent", "session_ready", "succeeded", "failed", "superseded"),
+  ),
   attempt: AttemptNumber,
 })
 

@@ -12,6 +12,69 @@ import {
 } from "./harness"
 
 describe("persisted row decoding", () => {
+  test("fails pull request transitions through the typed channel for corrupt stored state", async () => {
+    const result = await runWithStore(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const sql = yield* SqlClient.SqlClient
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "codec-pull-request-initial",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date("2026-07-19T12:00:00.000Z"),
+          },
+          samplePullRequestEvent,
+        )
+        yield* sql`PRAGMA ignore_check_constraints = ON`
+        yield* sql`
+          UPDATE pull_requests
+          SET base_sha = 'invalid-sha'
+          WHERE repository_id = 42
+          AND pull_request_number = 7
+        `
+        yield* sql`PRAGMA ignore_check_constraints = OFF`
+
+        const transition = yield* Effect.either(
+          store.ingestPullRequest(
+            {
+              deliveryId: "codec-pull-request-transition",
+              event: "pull_request",
+              action: "synchronize",
+              payload: "{}",
+              receivedAt: new Date("2026-07-19T12:01:00.000Z"),
+            },
+            decodePullRequestEvent({
+              ...samplePullRequestEvent,
+              action: "synchronize",
+              pullRequest: {
+                ...samplePullRequestEvent.pullRequest,
+                updatedAt: "2026-07-19T12:01:00.000Z",
+              },
+            }),
+          ),
+        )
+        const deliveries = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM webhook_deliveries
+          WHERE delivery_id = 'codec-pull-request-transition'
+        `
+        return { transition, deliveryCount: deliveries[0]?.count ?? 0 }
+      }),
+    )
+
+    expect(Either.isLeft(result.transition)).toBe(true)
+    if (Either.isRight(result.transition)) throw new Error("expected StoreDataError")
+    expect(result.transition.left).toBeInstanceOf(StoreDataError)
+    expect(result.transition.left).toMatchObject({
+      field: "row",
+      record: "pull_request",
+      recordId: 0,
+    })
+    expect(result.deliveryCount).toBe(0)
+  })
+
   test("quarantines an invalid ReviewWork row and claims the next valid row", async () => {
     const result = await runWithStore(
       Effect.gen(function* () {
@@ -350,9 +413,7 @@ describe("persisted row decoding", () => {
         yield* sql`UPDATE publications SET review_json = ${JSON.stringify({
           verdict: "pass",
           summary: "A passing review cannot contain findings.",
-          findings: [
-            { severity: "high", title: "Contradiction", body: "Invalid." },
-          ],
+          findings: [{ severity: "high", title: "Contradiction", body: "Invalid." }],
         })}`
         yield* sql`PRAGMA ignore_check_constraints = OFF`
         yield* store.ingestCommand(

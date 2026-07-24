@@ -19,19 +19,17 @@ function worktreeStatus(directory: string) {
   )
 }
 
-function recover(work: FixWork, directory: string, head: string) {
+function recover(work: FixWork, directory: string, head: string, gitSigningKey?: string) {
   return Effect.gen(function* () {
     if (head === work.target.headSha) return "none" as const
-    yield* verifyCommit(work, directory, head)
+    yield* verifyCommit(work, directory, head, gitSigningKey)
     const remote = yield* remoteHead(work, directory)
     if (remote === head) return "pushed" as const
     if (remote === work.target.headSha) return "committed" as const
     return yield* Effect.fail(
       new WorkspaceError({
         operation: "recover fix publication",
-        cause: new Error(
-          `Remote branch is ${remote}, expected ${work.target.headSha} or ${head}`,
-        ),
+        cause: new Error(`Remote branch is ${remote}, expected ${work.target.headSha} or ${head}`),
       }),
     )
   })
@@ -42,6 +40,7 @@ function publish(
   workspace: FixWorkspace,
   result: FixResult | undefined,
   isCurrent: DurableJobCurrentness,
+  gitSigningKey?: string,
 ) {
   return Effect.gen(function* () {
     const status = yield* worktreeStatus(workspace.directory)
@@ -72,10 +71,15 @@ function publish(
           }),
         )
       }
-      return
+      return null
     }
 
-    yield* verifyCommit(work, workspace.directory, head)
+    const controllerSigningFingerprint = yield* verifyCommit(
+      work,
+      workspace.directory,
+      head,
+      gitSigningKey,
+    )
     if (result?._tag === "CommitPrepared" && result.commitSha !== head) {
       return yield* Effect.fail(
         new WorkspaceError({
@@ -85,9 +89,7 @@ function publish(
       )
     }
     if (remote === work.target.headSha) {
-      const now = new Date(
-        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
-      )
+      const now = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       if (!(yield* isCurrent(now))) {
         return yield* Effect.fail(
           new WorkspaceError({
@@ -124,6 +126,7 @@ function publish(
         }),
       )
     }
+    return controllerSigningFingerprint
   })
 }
 
@@ -148,7 +151,7 @@ function remoteHead(work: FixWork, directory: string) {
   })
 }
 
-function verifyCommit(work: FixWork, directory: string, head: string) {
+function verifyCommit(work: FixWork, directory: string, head: string, gitSigningKey?: string) {
   return Effect.gen(function* () {
     if (head === work.target.headSha) {
       return yield* Effect.fail(
@@ -158,14 +161,22 @@ function verifyCommit(work: FixWork, directory: string, head: string) {
         }),
       )
     }
-    yield* runGit(
+    const parents = yield* runGit(
       "verify fix ancestry",
       directory,
-      "merge-base",
-      "--is-ancestor",
-      work.target.headSha,
+      "show",
+      "-s",
+      "--format=%P",
       head,
     )
+    if (parents !== work.target.headSha) {
+      return yield* Effect.fail(
+        new WorkspaceError({
+          operation: "verify fix ancestry",
+          cause: new Error(`Commit ${head} must have sole parent ${work.target.headSha}`),
+        }),
+      )
+    }
     const message = yield* runGit(
       "verify fix commit ownership",
       directory,
@@ -174,7 +185,8 @@ function verifyCommit(work: FixWork, directory: string, head: string) {
       "--format=%B",
       head,
     )
-    if (!message.includes(`Workflowd-Job: ${work.id}`)) {
+    const jobIds = [...message.matchAll(/^Workflowd-Job: ([1-9]\d*)$/gm)]
+    if (jobIds.length !== 1 || Number(jobIds[0]?.[1]) !== work.id) {
       return yield* Effect.fail(
         new WorkspaceError({
           operation: "verify fix commit ownership",
@@ -182,7 +194,47 @@ function verifyCommit(work: FixWork, directory: string, head: string) {
         }),
       )
     }
+    if (gitSigningKey !== undefined) {
+      const signature = yield* runGit(
+        "verify controller fix signature",
+        directory,
+        "log",
+        "-1",
+        "--format=%G?%x00%GF%x00%GP",
+        head,
+      )
+      const [status, fingerprint, primaryFingerprint] = signature.split("\0")
+      if (
+        (status !== "G" && status !== "U") ||
+        ![fingerprint, primaryFingerprint].some(
+          (observed) => observed?.toLowerCase() === gitSigningKey.toLowerCase(),
+        )
+      ) {
+        return yield* Effect.fail(
+          new WorkspaceError({
+            operation: "verify controller fix signature",
+            cause: new Error(`Commit ${head} is not signed by the configured controller key`),
+          }),
+        )
+      }
+      return gitSigningKey.toLowerCase()
+    }
+    return null
   })
 }
 
-export const fixPublication = { publish, recover, worktreeStatus }
+export function makeFixPublication(gitSigningKey?: string) {
+  return {
+    publish: (
+      work: FixWork,
+      workspace: FixWorkspace,
+      result: FixResult | undefined,
+      isCurrent: DurableJobCurrentness,
+    ) => publish(work, workspace, result, isCurrent, gitSigningKey),
+    recover: (work: FixWork, directory: string, head: string) =>
+      recover(work, directory, head, gitSigningKey),
+    worktreeStatus,
+  }
+}
+
+export type FixPublication = ReturnType<typeof makeFixPublication>

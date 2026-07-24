@@ -16,6 +16,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       WHERE ${pullRequestIdentity}
       AND candidate.generation = current_pr.generation
       AND candidate.expected_head_sha = current_pr.head_sha
+      AND LOWER(candidate.author) = LOWER(current_pr.author)
       AND ${reviewablePullRequest}
     )
   `)
@@ -59,6 +60,11 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
       AND candidate.cancel_requested = FALSE
+      AND NOT EXISTS (
+        SELECT 1 FROM agent_executions AS active_execution
+        WHERE active_execution.job_id = candidate.id
+        AND active_execution.state = 'session_ready'
+      )
       AND ${currentJob}
       AND ${latestReviewRequest}
       AND (

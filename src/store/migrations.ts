@@ -1,5 +1,6 @@
 import { Migrator, SqlClient } from "@effect/sql"
 import { Effect } from "effect"
+import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -268,6 +269,372 @@ const initialSchema = Effect.gen(function* () {
     ON reconciliations (state, run_at, lease_until, id)`
 })
 
+const agentHarnessSchema = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE agent_executions (
+      session_reference_id TEXT PRIMARY KEY CHECK (
+        length(session_reference_id) BETWEEN 1 AND 128
+      ),
+      job_id INTEGER NOT NULL CHECK (job_id > 0),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      lease_token TEXT NOT NULL CHECK (length(lease_token) BETWEEN 16 AND 128),
+      launch_intent_json TEXT NOT NULL CHECK (
+        json_valid(launch_intent_json) = 1
+          AND json_type(launch_intent_json, '$') = 'object'
+      ),
+      session_reference_json TEXT CHECK (
+        session_reference_json IS NULL OR (
+          json_valid(session_reference_json) = 1
+            AND json_type(session_reference_json, '$') = 'object'
+            AND length(session_reference_json) <= 16384
+        )
+      ),
+      output_json TEXT CHECK (
+        output_json IS NULL OR (
+          json_valid(output_json) = 1
+        )
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'launch_intent', 'session_ready', 'succeeded', 'failed', 'superseded'
+      )),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (state = 'launch_intent'
+          AND session_reference_json IS NULL AND output_json IS NULL)
+        OR (state = 'session_ready'
+          AND session_reference_json IS NOT NULL AND output_json IS NULL)
+        OR (state = 'succeeded'
+          AND session_reference_json IS NOT NULL AND output_json IS NOT NULL)
+        OR state IN ('failed', 'superseded')
+      ),
+      FOREIGN KEY (job_id) REFERENCES jobs (id) ON DELETE CASCADE
+    ) STRICT
+  `
+  yield* sql`
+    ALTER TABLE publications ADD COLUMN session_reference_id TEXT
+      REFERENCES agent_executions (session_reference_id) ON DELETE SET NULL
+      CHECK (
+        session_reference_id IS NULL OR length(session_reference_id) BETWEEN 1 AND 128
+      )
+  `
+  yield* sql`CREATE INDEX agent_executions_job ON agent_executions (job_id, attempt)`
+})
+
+const agentSessionCleanupLeases = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_owner TEXT`
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_lease_until TEXT`
+  yield* sql`
+    ALTER TABLE agent_executions
+    ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0)
+  `
+})
+
+const agentSessionRecoveryAndPayloadEnvelopes = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    ALTER TABLE agent_executions ADD COLUMN cleanup_disposition TEXT
+      CHECK (cleanup_disposition IN ('operator_required', 'data_error'))
+  `
+  yield* sql`ALTER TABLE agent_executions ADD COLUMN cleanup_last_error TEXT`
+  const oversized = yield* sql<{ readonly count: number }>`
+    SELECT count(*) AS count
+    FROM agent_executions
+    WHERE length(CAST(launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        output_json IS NOT NULL
+        AND length(CAST(output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+  `
+  if (Number(oversized[0]?.count ?? 0) > 0) {
+    return yield* Effect.fail(
+      new Error("Existing agent execution payload exceeds the durable envelope"),
+    )
+  }
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_insert
+    BEFORE INSERT ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+  yield* sql.unsafe(`
+    CREATE TRIGGER agent_execution_payload_update
+    BEFORE UPDATE OF launch_intent_json, output_json ON agent_executions
+    WHEN length(CAST(NEW.launch_intent_json AS BLOB)) > ${MAX_AGENT_LAUNCH_INTENT_BYTES}
+      OR (
+        NEW.output_json IS NOT NULL
+        AND length(CAST(NEW.output_json AS BLOB)) > ${MAX_AGENT_OUTPUT_BYTES}
+      )
+    BEGIN
+      SELECT RAISE(ABORT, 'agent execution payload exceeds durable envelope');
+    END
+  `)
+})
+
+const qrspiWorkflowStart = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE qrspi_workflows (
+      workflow_id TEXT PRIMARY KEY CHECK (length(workflow_id) BETWEEN 1 AND 256),
+      branch_name TEXT NOT NULL CHECK (length(branch_name) BETWEEN 1 AND 256),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_ticket_revisions (
+      workflow_id TEXT NOT NULL REFERENCES qrspi_workflows (workflow_id),
+      ticket_revision_sha256 TEXT NOT NULL CHECK (
+        length(ticket_revision_sha256) = 64
+          AND ticket_revision_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      revision_json TEXT NOT NULL CHECK (
+        json_valid(revision_json) = 1 AND json_type(revision_json, '$') = 'object'
+      ),
+      checked_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, ticket_revision_sha256)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_workflow_definitions (
+      definition_sha256 TEXT PRIMARY KEY CHECK (
+        length(definition_sha256) = 64
+          AND definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      definition_json TEXT NOT NULL CHECK (
+        json_valid(definition_json) = 1 AND json_type(definition_json, '$') = 'object'
+      ),
+      created_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE workflow_operations (
+      operation_id TEXT PRIMARY KEY CHECK (length(operation_id) BETWEEN 1 AND 512),
+      logical_operation_id TEXT NOT NULL CHECK (length(logical_operation_id) BETWEEN 1 AND 512),
+      operation_revision INTEGER NOT NULL CHECK (operation_revision > 0),
+      retry_of TEXT REFERENCES workflow_operations (operation_id),
+      kind TEXT NOT NULL CHECK (kind IN (
+        'WorkflowStart', 'StageProduce', 'ArtifactPublish', 'ReviewContribute',
+        'ReviewSynthesize', 'TicketUpdate', 'TargetReconcile', 'ProvenancePublish',
+        'PrePullRequestVerify', 'PullRequestPublish', 'PullRequestRetire',
+        'GenericReviewHandoff'
+      )),
+      scope_json TEXT NOT NULL CHECK (
+        json_valid(scope_json) = 1 AND json_type(scope_json, '$') = 'object'
+      ),
+      input_json TEXT NOT NULL CHECK (
+        json_valid(input_json) = 1 AND json_type(input_json, '$') = 'object'
+      ),
+      input_sha256 TEXT NOT NULL CHECK (length(input_sha256) = 64),
+      output_json TEXT CHECK (
+        output_json IS NULL OR (json_valid(output_json) = 1 AND json_type(output_json, '$') = 'object')
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'blocked', 'ready', 'leased', 'waiting_external', 'waiting_human',
+        'succeeded', 'failed', 'cancelled', 'superseded', 'data_error'
+      )),
+      is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+      attempt INTEGER NOT NULL CHECK (attempt >= 0),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts > 0 AND attempt <= max_attempts),
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_until TEXT,
+      run_at TEXT NOT NULL,
+      external_intent_json TEXT CHECK (
+        external_intent_json IS NULL OR json_valid(external_intent_json) = 1
+      ),
+      external_observation_json TEXT CHECK (
+        external_observation_json IS NULL OR json_valid(external_observation_json) = 1
+      ),
+      observation_attempts INTEGER NOT NULL CHECK (observation_attempts >= 0),
+      max_observation_attempts INTEGER NOT NULL CHECK (max_observation_attempts > 0),
+      parent_effect_json TEXT NOT NULL CHECK (json_valid(parent_effect_json) = 1),
+      last_error TEXT,
+      terminal_failure_reason TEXT,
+      terminal_retry_policy TEXT CHECK (terminal_retry_policy IN (
+        'retryable', 'retry_budget_exhausted', 'operator_required', 'cancelled', 'data_error'
+      )),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (logical_operation_id, operation_revision),
+      CHECK ((state = 'leased') =
+        (lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_until IS NOT NULL)),
+      CHECK (
+        kind != 'WorkflowStart' OR state NOT IN ('failed', 'cancelled', 'data_error') OR
+        (terminal_failure_reason IS NOT NULL AND terminal_retry_policy IS NOT NULL)
+      ),
+      CHECK (
+        kind != 'WorkflowStart' OR state != 'waiting_human' OR
+        (terminal_failure_reason IS NOT NULL AND terminal_retry_policy = 'operator_required')
+      ),
+      CHECK (terminal_retry_policy != 'retryable' OR state = 'failed')
+    ) STRICT
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX workflow_operations_current
+    ON workflow_operations (logical_operation_id) WHERE is_current = 1
+  `
+  yield* sql`
+    CREATE INDEX workflow_operations_claimable
+    ON workflow_operations (state, run_at, lease_until, operation_id)
+  `
+  yield* sql`
+    CREATE TABLE workflow_operation_gates (
+      operation_id TEXT PRIMARY KEY REFERENCES workflow_operations (operation_id),
+      state TEXT NOT NULL CHECK (state IN ('pending', 'answered', 'cancelled')),
+      reason TEXT NOT NULL CHECK (length(reason) > 0),
+      created_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_generations (
+      workflow_id TEXT NOT NULL REFERENCES qrspi_workflows (workflow_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      repository_json TEXT NOT NULL CHECK (
+        json_valid(repository_json) = 1 AND json_type(repository_json, '$') = 'object'
+      ),
+      base_ref TEXT NOT NULL CHECK (length(base_ref) > 0),
+      base_sha TEXT NOT NULL CHECK (length(base_sha) IN (40, 64)),
+      head_ref TEXT NOT NULL CHECK (length(head_ref) > 0),
+      root_sha TEXT NOT NULL CHECK (length(root_sha) IN (40, 64)),
+      current_head_sha TEXT NOT NULL CHECK (length(current_head_sha) IN (40, 64)),
+      ticket_revision_sha256 TEXT NOT NULL,
+      workflow_definition_sha256 TEXT NOT NULL
+        REFERENCES qrspi_workflow_definitions (definition_sha256),
+      state TEXT NOT NULL CHECK (state IN (
+        'running', 'waiting_ticket', 'waiting_human', 'reconciling', 'finalizing',
+        'completed', 'rejected', 'cancelled', 'failed', 'superseded'
+      )),
+      is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation),
+      FOREIGN KEY (workflow_id, ticket_revision_sha256)
+        REFERENCES qrspi_ticket_revisions (workflow_id, ticket_revision_sha256)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_generations_current
+    ON qrspi_generations (workflow_id) WHERE is_current = 1
+  `
+})
+
+const fixPublicationSigningEvidence = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    ALTER TABLE jobs ADD COLUMN controller_signing_fingerprint TEXT CHECK (
+      controller_signing_fingerprint IS NULL OR (
+        length(controller_signing_fingerprint) IN (40, 64)
+        AND controller_signing_fingerprint NOT GLOB '*[^0-9a-fA-F]*'
+      )
+    )
+  `
+})
+
+const reconciliationObservationWatermark = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE reconciliations ADD COLUMN observation_received_at TEXT`
+  yield* sql`
+    UPDATE reconciliations
+    SET observation_received_at = created_at
+  `
+})
+
+export const reconciliationObservationSequence = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE webhook_deliveries ADD COLUMN observation_sequence INTEGER`
+  yield* sql`UPDATE webhook_deliveries SET observation_sequence = rowid`
+  yield* sql`
+    CREATE UNIQUE INDEX webhook_deliveries_observation_sequence
+    ON webhook_deliveries (observation_sequence)
+  `
+  yield* sql`ALTER TABLE reconciliations ADD COLUMN observation_sequence INTEGER`
+  yield* sql`
+    UPDATE reconciliations
+    SET
+      observation_received_at = updated_at,
+      observation_sequence = COALESCE(
+        (SELECT MAX(observation_sequence) FROM webhook_deliveries),
+        0
+      )
+  `
+})
+
+const qrspiStageDefinitions = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE qrspi_stage_definitions (
+      stage_definition_sha256 TEXT NOT NULL CHECK (
+        length(stage_definition_sha256) = 64
+          AND stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      workflow_definition_sha256 TEXT NOT NULL
+        REFERENCES qrspi_workflow_definitions (definition_sha256),
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      sequence_position INTEGER NOT NULL CHECK (sequence_position > 0),
+      definition_json TEXT NOT NULL CHECK (
+        json_valid(definition_json) = 1 AND json_type(definition_json, '$') = 'object'
+      ),
+      contract_name TEXT NOT NULL,
+      contract_version INTEGER NOT NULL CHECK (contract_version > 0),
+      contract_registration_sha256 TEXT NOT NULL CHECK (
+        length(contract_registration_sha256) = 64
+          AND contract_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      harness_name TEXT NOT NULL,
+      harness_version INTEGER NOT NULL CHECK (harness_version > 0),
+      harness_registration_sha256 TEXT NOT NULL CHECK (
+        length(harness_registration_sha256) = 64
+          AND harness_registration_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_definition_sha256, stage_definition_sha256),
+      UNIQUE (workflow_definition_sha256, stage_key),
+      UNIQUE (workflow_definition_sha256, sequence_position)
+    ) STRICT
+  `
+})
+
+const qrspiGenerationFormat = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    ALTER TABLE qrspi_generations
+    ADD COLUMN generation_format TEXT NOT NULL DEFAULT 'legacy'
+      CHECK (generation_format IN ('legacy', 'stage_snapshots_v1'))
+  `
+})
+
+const migrationsThrough0008 = {
+  "0001_initial_schema": initialSchema,
+  "0002_agent_harness": agentHarnessSchema,
+  "0003_agent_session_cleanup_leases": agentSessionCleanupLeases,
+  "0004_agent_session_recovery_and_payload_envelopes": agentSessionRecoveryAndPayloadEnvelopes,
+  "0005_qrspi_workflow_start": qrspiWorkflowStart,
+  "0006_fix_publication_signing_evidence": fixPublicationSigningEvidence,
+  "0007_reconciliation_observation_watermark": reconciliationObservationWatermark,
+  "0008_reconciliation_observation_sequence": reconciliationObservationSequence,
+}
+
+export const runStoreMigrationsThrough0008 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0008),
+})
+
 export const runStoreMigrations = Migrator.make({})({
-  loader: Migrator.fromRecord({ "0001_initial_schema": initialSchema }),
+  loader: Migrator.fromRecord({
+    ...migrationsThrough0008,
+    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+    "0010_qrspi_generation_format": qrspiGenerationFormat,
+  }),
 })

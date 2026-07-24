@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/domain"
 
 interface HttpConfig {
   readonly host: string
@@ -28,10 +29,14 @@ interface WorkspaceConfig {
   readonly worktreeRegistry: string
   readonly localRepositories: ReadonlyArray<string>
   readonly maxDiffBytes: number
+  readonly gitSigningKey?: string
 }
 
 interface OpenCodeConfig {
   readonly baseUrl: string
+  readonly attachUrl: string
+  readonly serverId: string
+  readonly endpointAlias: string
   readonly username: string
   readonly password: string
   readonly model: string
@@ -48,7 +53,25 @@ interface WorkerConfig {
   readonly publicationTimeoutMs: number
   readonly publicationLeaseDurationMs: number
   readonly agentBranchPrefixes: ReadonlyArray<string>
+  readonly trustedAgentUsers: ReadonlyArray<string>
   readonly commandUsers: ReadonlyArray<string>
+}
+
+export interface QrspiConfig {
+  readonly token: string
+  readonly installationId: number
+  readonly repository: {
+    readonly providerInstanceId: string
+    readonly repositoryId: string
+    readonly repositoryFullName: string
+  }
+  readonly trackerInstanceId: string
+  readonly beadsWorkspace: string
+  readonly baseRef: string
+  readonly repositoryOperationTimeoutMs: number
+  readonly operationCompletionMarginMs: number
+  readonly leaseDurationMs: number
+  readonly workflowDefinition: WorkflowDefinition
 }
 
 export interface AppConfig {
@@ -59,6 +82,7 @@ export interface AppConfig {
   readonly workspace: WorkspaceConfig
   readonly openCode: OpenCodeConfig
   readonly worker: WorkerConfig
+  readonly qrspi?: QrspiConfig
 }
 
 export interface ConfigLoadOptions {
@@ -107,6 +131,20 @@ function httpUrl(value: string, name: string): string {
   }
 }
 
+function credentialFreeHttpUrl(value: string, name: string): string {
+  const normalized = httpUrl(value, name)
+  const parsed = new URL(normalized)
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new Error(`${name} must not include credentials`)
+  }
+  return normalized
+}
+
 function agentId(value: string, name: string): string {
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,63})$/.test(value)) {
     throw new Error(`${name} must be a valid agent ID`)
@@ -124,9 +162,7 @@ function modelId(value: string): string {
 function branchPrefixes(value: string | undefined): ReadonlyArray<string> {
   const values = (value ?? "opencode/,plan/").split(",").map((item) => item.trim())
   if (values.length === 0 || values.some((item) => item === "")) {
-    throw new Error(
-      "WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes",
-    )
+    throw new Error("WORKFLOWD_AGENT_BRANCH_PREFIXES must contain non-empty prefixes")
   }
   return values
 }
@@ -142,9 +178,21 @@ function commandUsers(value: string | undefined): ReadonlyArray<string> {
         item.includes("--"),
     )
   ) {
-    throw new Error(
-      "WORKFLOWD_COMMAND_USERS must contain valid GitHub users",
+    throw new Error("WORKFLOWD_COMMAND_USERS must contain valid GitHub users")
+  }
+  return values
+}
+
+function trustedAgentUsers(value: string | undefined): ReadonlyArray<string> {
+  if (value === undefined || value.trim() === "") return []
+  const values = value.split(",").map((item) => item.trim().toLowerCase())
+  if (
+    values.some(
+      (item) =>
+        !/^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?(?:\[bot\])?$/.test(item) || item.includes("--"),
     )
+  ) {
+    throw new Error("WORKFLOWD_TRUSTED_AGENT_USERS must contain valid GitHub users")
   }
   return values
 }
@@ -212,9 +260,7 @@ export async function loadConfig(
     "WORKFLOWD_JOB_LEASE_MS",
   )
   if (jobLeaseDurationMs <= jobTimeoutMs) {
-    throw new Error(
-      "WORKFLOWD_JOB_LEASE_MS must be greater than WORKFLOWD_JOB_TIMEOUT_MS",
-    )
+    throw new Error("WORKFLOWD_JOB_LEASE_MS must be greater than WORKFLOWD_JOB_TIMEOUT_MS")
   }
   const publicationTimeoutMs = positiveInteger(
     env.WORKFLOWD_PUBLICATION_TIMEOUT_MS,
@@ -231,6 +277,26 @@ export async function loadConfig(
       "WORKFLOWD_PUBLICATION_LEASE_MS must be greater than WORKFLOWD_PUBLICATION_TIMEOUT_MS",
     )
   }
+  const qrspi = loadQrspiConfig(env)
+  const fixWorkEnabled = booleanSetting(
+    env.WORKFLOWD_FIX_WORK_ENABLED,
+    "WORKFLOWD_FIX_WORK_ENABLED",
+  )
+  const configuredTrustedAgentUsers = trustedAgentUsers(env.WORKFLOWD_TRUSTED_AGENT_USERS)
+  const gitSigningKey = env.WORKFLOWD_GIT_SIGNING_KEY
+  if (fixWorkEnabled && gitSigningKey === undefined) {
+    throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
+  }
+  if (fixWorkEnabled && configuredTrustedAgentUsers.length === 0) {
+    throw new Error("WORKFLOWD_TRUSTED_AGENT_USERS is required when Fix Work is enabled")
+  }
+  if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
+    throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
+  }
+  const openCodeBaseUrl = httpUrl(
+    env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
+    "OPENCODE_SERVER_URL",
+  )
 
   return {
     http: {
@@ -251,21 +317,14 @@ export async function loadConfig(
       databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db"),
     },
     fixWork: {
-      enabled: booleanSetting(
-        env.WORKFLOWD_FIX_WORK_ENABLED,
-        "WORKFLOWD_FIX_WORK_ENABLED",
-      ),
+      enabled: fixWorkEnabled,
     },
     workspace: {
-      repositoryRoot:
-        env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
-      worktreeRoot:
-        env.WORKFLOWD_WORKTREE_ROOT ?? join(cacheRoot, "worktrees"),
+      repositoryRoot: env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
+      worktreeRoot: env.WORKFLOWD_WORKTREE_ROOT ?? join(cacheRoot, "worktrees"),
       worktreeRegistry:
-        env.OPENCODE_WORKTREE_REGISTRY ??
-        join(home, ".local/share/opencode/worktree-jobs"),
-      localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ??
-        join(home, "Documents/repos"))
+        env.OPENCODE_WORKTREE_REGISTRY ?? join(home, ".local/share/opencode/worktree-jobs"),
+      localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ?? join(home, "Documents/repos"))
         .split(":")
         .filter(Boolean),
       maxDiffBytes: positiveInteger(
@@ -273,28 +332,35 @@ export async function loadConfig(
         2_000_000,
         "WORKFLOWD_MAX_DIFF_BYTES",
       ),
+      ...(gitSigningKey === undefined ? {} : { gitSigningKey }),
     },
     openCode: {
-      baseUrl: httpUrl(
-        env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
-        "OPENCODE_SERVER_URL",
+      baseUrl: openCodeBaseUrl,
+      attachUrl: credentialFreeHttpUrl(
+        required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
+        "WORKFLOWD_OPENCODE_ATTACH_URL",
+      ),
+      serverId: agentId(
+        env.WORKFLOWD_OPENCODE_SERVER_ID ?? "opencode-primary",
+        "WORKFLOWD_OPENCODE_SERVER_ID",
+      ),
+      endpointAlias: agentId(
+        env.WORKFLOWD_OPENCODE_ENDPOINT_ALIAS ?? "private-opencode",
+        "WORKFLOWD_OPENCODE_ENDPOINT_ALIAS",
       ),
       username: required(
-        { OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode" },
+        {
+          OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode",
+        },
         "OPENCODE_SERVER_USERNAME",
       ),
       password: openCodePassword,
-      model: modelId(
-        env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol",
-      ),
+      model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
       reviewerAgent: agentId(
         env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
         "WORKFLOWD_REVIEWER_AGENT",
       ),
-      fixerAgent: agentId(
-        env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer",
-        "WORKFLOWD_FIXER_AGENT",
-      ),
+      fixerAgent: agentId(env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer", "WORKFLOWD_FIXER_AGENT"),
       pollIntervalMs: positiveInteger(
         env.WORKFLOWD_OPENCODE_POLL_INTERVAL_MS,
         1_000,
@@ -316,10 +382,88 @@ export async function loadConfig(
       jobLeaseDurationMs,
       publicationTimeoutMs,
       publicationLeaseDurationMs,
-      agentBranchPrefixes: branchPrefixes(
-        env.WORKFLOWD_AGENT_BRANCH_PREFIXES,
-      ),
+      agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
+      trustedAgentUsers: configuredTrustedAgentUsers,
       commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
     },
+    ...(qrspi === undefined ? {} : { qrspi }),
+  }
+}
+
+function loadQrspiConfig(env: Record<string, string | undefined>): QrspiConfig | undefined {
+  const token = env.WORKFLOWD_QRSPI_TOKEN
+  const names = [
+    "WORKFLOWD_QRSPI_INSTALLATION_ID",
+    "WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID",
+    "WORKFLOWD_QRSPI_REPOSITORY_ID",
+    "WORKFLOWD_QRSPI_REPOSITORY",
+    "WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID",
+    "WORKFLOWD_QRSPI_BEADS_WORKSPACE",
+    "WORKFLOWD_QRSPI_DEFINITION_JSON",
+    "WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS",
+    "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
+    "WORKFLOWD_QRSPI_LEASE_MS",
+    "WORKFLOWD_QRSPI_BASE_REF",
+  ] as const
+  if (token === undefined) {
+    if (names.some((name) => env[name] !== undefined)) {
+      throw new Error("WORKFLOWD_QRSPI_TOKEN is required when QRSPI settings are present")
+    }
+    return undefined
+  }
+  if (token.length < 8) throw new Error("WORKFLOWD_QRSPI_TOKEN must contain at least 8 characters")
+  const repositoryFullName = required(env, "WORKFLOWD_QRSPI_REPOSITORY")
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repositoryFullName)) {
+    throw new Error("WORKFLOWD_QRSPI_REPOSITORY must use owner/name syntax")
+  }
+  const definitionJson = required(env, "WORKFLOWD_QRSPI_DEFINITION_JSON")
+  let workflowDefinition: WorkflowDefinition
+  try {
+    workflowDefinition = normalizeWorkflowDefinition(JSON.parse(definitionJson))
+  } catch (cause) {
+    throw new Error("WORKFLOWD_QRSPI_DEFINITION_JSON must be a valid workflow definition", {
+      cause,
+    })
+  }
+  const appId = positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID")
+  const repositoryOperationTimeoutMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS,
+    30_000,
+    "WORKFLOWD_QRSPI_REPOSITORY_TIMEOUT_MS",
+  )
+  const operationCompletionMarginMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS,
+    10_000,
+    "WORKFLOWD_QRSPI_COMPLETION_MARGIN_MS",
+  )
+  const leaseDurationMs = positiveInteger(
+    env.WORKFLOWD_QRSPI_LEASE_MS,
+    60_000,
+    "WORKFLOWD_QRSPI_LEASE_MS",
+  )
+  if (leaseDurationMs <= repositoryOperationTimeoutMs + operationCompletionMarginMs) {
+    throw new Error(
+      "WORKFLOWD_QRSPI_LEASE_MS must be greater than repository timeout plus completion margin",
+    )
+  }
+  return {
+    token,
+    installationId: positiveInteger(
+      required(env, "WORKFLOWD_QRSPI_INSTALLATION_ID"),
+      0,
+      "WORKFLOWD_QRSPI_INSTALLATION_ID",
+    ),
+    repository: {
+      providerInstanceId: env.WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID ?? `github-app-${appId}`,
+      repositoryId: required(env, "WORKFLOWD_QRSPI_REPOSITORY_ID"),
+      repositoryFullName,
+    },
+    trackerInstanceId: required(env, "WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID"),
+    beadsWorkspace: required(env, "WORKFLOWD_QRSPI_BEADS_WORKSPACE"),
+    baseRef: env.WORKFLOWD_QRSPI_BASE_REF ?? "main",
+    repositoryOperationTimeoutMs,
+    operationCompletionMarginMs,
+    leaseDurationMs,
+    workflowDefinition,
   }
 }

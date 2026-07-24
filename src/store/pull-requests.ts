@@ -6,13 +6,14 @@ import {
   TrackedPullRequestState,
   decidePullRequestTransition,
 } from "../domain/pull-request-transition"
+import { StoreDataError } from "./errors"
 import type { makeSharedStoreOperations } from "./shared"
 
 type PullRequestTransitionInput = {
   readonly appliedAt: Date
+  readonly observationSequence?: number
   readonly snapshot:
-    | typeof PullRequestObservation.Encoded
-    | typeof AuthoritativePullRequestSnapshot.Encoded
+    typeof PullRequestObservation.Encoded | typeof AuthoritativePullRequestSnapshot.Encoded
 }
 
 type PullRequestRow = {
@@ -36,11 +37,18 @@ type PullRequestRow = {
   readonly review_request_active: number
 }
 
-const decodeTracked = Schema.decodeUnknownSync(TrackedPullRequestState)
-const decodeObservation = Schema.decodeUnknownSync(PullRequestObservation)
-const decodeAuthoritative = Schema.decodeUnknownSync(
-  AuthoritativePullRequestSnapshot,
-)
+const decodeTracked = (row: unknown) =>
+  Schema.decodeUnknown(TrackedPullRequestState)(row).pipe(
+    Effect.mapError(
+      (error) =>
+        new StoreDataError({
+          record: "pull_request",
+          recordId: 0,
+          field: "row",
+          message: String(error),
+        }),
+    ),
+  )
 
 export function makePullRequestTransition(
   sql: SqlClient,
@@ -53,8 +61,10 @@ export function makePullRequestTransition(
     Effect.gen(function* () {
       const snapshot =
         input.snapshot._tag === "PullRequest"
-          ? decodeObservation(input.snapshot)
-          : decodeAuthoritative(input.snapshot)
+          ? yield* Schema.decodeUnknown(PullRequestObservation)(input.snapshot).pipe(Effect.orDie)
+          : yield* Schema.decodeUnknown(AuthoritativePullRequestSnapshot)(input.snapshot).pipe(
+              Effect.orDie,
+            )
       const { pullRequest, repository } = snapshot
       const existing = yield* sql<PullRequestRow>`
         SELECT
@@ -84,7 +94,7 @@ export function makePullRequestTransition(
       const current =
         row === undefined
           ? undefined
-          : decodeTracked({
+          : yield* decodeTracked({
               _tag: "TrackedPullRequestState",
               installationId: row.installation_id,
               repository: {
@@ -103,16 +113,13 @@ export function makePullRequestTransition(
                 headRepositoryFullName: row.head_repository_full_name,
                 headSha: row.head_sha,
                 state: row.state,
-                ...(row.github_updated_at === null
-                  ? {}
-                  : { updatedAt: row.github_updated_at }),
+                ...(row.github_updated_at === null ? {} : { updatedAt: row.github_updated_at }),
               },
               generation: row.generation,
               ...(row.latest_review_request_number === null
                 ? {}
                 : {
-                    latestReviewRequestNumber:
-                      row.latest_review_request_number,
+                    latestReviewRequestNumber: row.latest_review_request_number,
                   }),
               reviewRequestActive: Boolean(row.review_request_active),
             })
@@ -123,6 +130,10 @@ export function makePullRequestTransition(
       }
       if (decision._tag === "RequestReconciliation") {
         const timestamp = input.appliedAt.toISOString()
+        const observationSequence = input.observationSequence
+        if (observationSequence === undefined) {
+          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+        }
         yield* sql`
           INSERT INTO reconciliations (
             installation_id,
@@ -131,6 +142,8 @@ export function makePullRequestTransition(
             pull_request_number,
             state,
             run_at,
+            observation_received_at,
+            observation_sequence,
             created_at,
             updated_at
           ) VALUES (
@@ -140,6 +153,8 @@ export function makePullRequestTransition(
             ${pullRequest.number},
             'ready',
             ${timestamp},
+            ${timestamp},
+            ${observationSequence},
             ${timestamp},
             ${timestamp}
           )
@@ -152,8 +167,15 @@ export function makePullRequestTransition(
             lease_owner = NULL,
             lease_until = NULL,
             last_error = NULL,
+            observation_received_at = excluded.observation_received_at,
+            observation_sequence = excluded.observation_sequence,
             updated_at = excluded.updated_at
-          WHERE reconciliations.state IN ('succeeded', 'failed', 'data_error')
+          WHERE reconciliations.observation_sequence IS NULL
+          OR excluded.observation_received_at > reconciliations.observation_received_at
+          OR (
+            excluded.observation_received_at = reconciliations.observation_received_at
+            AND excluded.observation_sequence > reconciliations.observation_sequence
+          )
         `
         return {
           status: "reconciliation_enqueued",
@@ -163,6 +185,10 @@ export function makePullRequestTransition(
 
       const timestamp = input.appliedAt.toISOString()
       if (snapshot._tag === "PullRequest") {
+        const observationSequence = input.observationSequence
+        if (observationSequence === undefined) {
+          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+        }
         yield* sql`
           UPDATE reconciliations
           SET
@@ -174,9 +200,33 @@ export function makePullRequestTransition(
             last_error = NULL,
             updated_at = ${timestamp}
           WHERE repository_id = ${repository.id}
-          AND pull_request_number = ${pullRequest.number}
-          AND state IN ('ready', 'leased', 'retry_scheduled')
-        `
+            AND pull_request_number = ${pullRequest.number}
+            AND state IN ('ready', 'leased', 'retry_scheduled')
+            AND (
+              observation_sequence IS NULL
+              OR observation_received_at < ${timestamp}
+              OR (
+                observation_received_at = ${timestamp}
+                AND observation_sequence < ${observationSequence}
+              )
+            )
+          `
+        yield* sql`
+            UPDATE reconciliations
+            SET
+              observation_received_at = ${timestamp},
+              observation_sequence = ${observationSequence}
+            WHERE repository_id = ${repository.id}
+            AND pull_request_number = ${pullRequest.number}
+            AND (
+              observation_sequence IS NULL
+              OR observation_received_at < ${timestamp}
+              OR (
+                observation_received_at = ${timestamp}
+                AND observation_sequence < ${observationSequence}
+              )
+            )
+          `
       }
       for (const intent of decision.intents) {
         if (intent._tag === "SupersedeGeneration") {
@@ -189,10 +239,7 @@ export function makePullRequestTransition(
             timestamp,
           })
         }
-        if (
-          intent._tag === "SupersedeReviewRequests" &&
-          intent.scope === "current-generation"
-        ) {
+        if (intent._tag === "SupersedeReviewRequests" && intent.scope === "current-generation") {
           yield* shared.supersedePullRequestWork({
             repositoryId: repository.id,
             pullRequestNumber: pullRequest.number,
@@ -263,9 +310,7 @@ export function makePullRequestTransition(
           updated_at = excluded.updated_at
       `
 
-      const queue = decision.intents.find(
-        (intent) => intent._tag === "QueueReview",
-      )
+      const queue = decision.intents.find((intent) => intent._tag === "QueueReview")
       if (queue === undefined || queue._tag !== "QueueReview") {
         return { status: "ignored", generation: decision.generation } as const
       }
@@ -316,8 +361,7 @@ export function makePullRequestTransition(
         reviewJob !== undefined &&
         decision.intents.some(
           (intent) =>
-            intent._tag === "SupersedeReviewRequests" &&
-            intent.scope === "earlier-review-requests",
+            intent._tag === "SupersedeReviewRequests" && intent.scope === "earlier-review-requests",
         )
       ) {
         yield* shared.supersedeOlderReviewWork({

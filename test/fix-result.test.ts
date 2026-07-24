@@ -2,16 +2,15 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { FixResult } from "../src/domain/fix-result"
 
-const decode = (input: unknown) =>
-  Effect.runPromise(Schema.decodeUnknown(FixResult)(input))
+const decode = (input: unknown) => Effect.runPromise(Schema.decodeUnknown(FixResult)(input))
 
 describe("FixResult", () => {
   test("decodes a completed fixer result", async () => {
     const result = await decode({
-        _tag: "CommitPrepared",
-        summary: "Added an idempotency key and regression coverage.",
-        commitSha: "a".repeat(40),
-      })
+      _tag: "CommitPrepared",
+      summary: "Added an idempotency key and regression coverage.",
+      commitSha: "a".repeat(40),
+    })
 
     expect(result._tag).toBe("CommitPrepared")
   })

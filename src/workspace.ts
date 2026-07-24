@@ -2,13 +2,10 @@ import { Context, Effect, Ref, type Scope } from "effect"
 import type { FixResult } from "./domain/fix-result"
 import type { FixWork, ReviewWork, Work } from "./domain/work"
 import { ReviewContextFiles } from "./workspace/context"
-import {
-  ExistingWorktreeDiscovery,
-  LocalRepositoryCatalog,
-} from "./workspace/discovery"
+import { ExistingWorktreeDiscovery, LocalRepositoryCatalog } from "./workspace/discovery"
 import { ManagedWorkspaceLifecycle } from "./workspace/managed"
 import { ScopedKeyedLock } from "./workspace/locks"
-import { fixPublication } from "./workspace/fix"
+import { makeFixPublication } from "./workspace/fix"
 import type {
   GitWorkspaceConfig,
   WorkspacePort,
@@ -43,21 +40,15 @@ export class GitWorkspaceAdapter implements WorkspacePort {
     this.#catalog = new LocalRepositoryCatalog(config.localRepositories, {
       ttlMs: 1_000,
     })
-    this.#discovery = new ExistingWorktreeDiscovery(
-      config,
-      remoteUrl,
-      this.#catalog,
-    )
+    this.#discovery = new ExistingWorktreeDiscovery(config, remoteUrl, this.#catalog)
     this.#managed = new ManagedWorkspaceLifecycle(config, remoteUrl)
-    this.#fixes = fixPublication
-    this.#context = new ReviewContextFiles(config.maxDiffBytes, this.#fixes)
+    this.#fixes = makeFixPublication(config.gitSigningKey)
+    this.#context = new ReviewContextFiles(config.maxDiffBytes, this.#fixes, config.gitSigningKey)
   }
 
   prepareReview(work: ReviewWork) {
     return Effect.gen(this, function* () {
-      const resolved = yield* this.#resolve(work, (workspace) =>
-        this.#removeManaged(workspace),
-      )
+      const resolved = yield* this.#resolve(work, (workspace) => this.#removeManaged(workspace))
       yield* this.#acquireContext(resolved)
       return yield* this.#context.prepareReview(work, resolved)
     })
@@ -68,9 +59,7 @@ export class GitWorkspaceAdapter implements WorkspacePort {
       const completed = yield* Ref.make(false)
       const resolved = yield* this.#resolve(work, (workspace) =>
         Ref.get(completed).pipe(
-          Effect.flatMap((done) =>
-            done ? this.#removeManaged(workspace) : Effect.void,
-          ),
+          Effect.flatMap((done) => (done ? this.#removeManaged(workspace) : Effect.void)),
         ),
       )
       yield* this.#acquireContext(resolved)
@@ -108,16 +97,16 @@ export class GitWorkspaceAdapter implements WorkspacePort {
       yield* this.#worktreeLocks.acquire(resolved.directory)
       yield* this.#context.installExclusion(resolved.directory)
       yield* Effect.addFinalizer(() =>
-        this.#context.cleanup(resolved.directory).pipe(
-          Effect.catchAll((error) => Effect.logWarning(error)),
-        ),
+        this.#context
+          .cleanup(resolved.directory)
+          .pipe(Effect.catchAll((error) => Effect.logWarning(error))),
       )
     })
   }
 
   #removeManaged(workspace: ResolvedWorktree) {
-    return this.#managed.remove(workspace.repository, workspace.directory).pipe(
-      Effect.catchAll((error) => Effect.logWarning(error)),
-    )
+    return this.#managed
+      .remove(workspace.repository, workspace.directory)
+      .pipe(Effect.catchAll((error) => Effect.logWarning(error)))
   }
 }

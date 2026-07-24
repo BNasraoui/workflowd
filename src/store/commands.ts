@@ -1,11 +1,8 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Effect } from "effect"
-import { decideFixEligibility } from "../domain/transaction-policy"
-import {
-  decodeCommandRow,
-  decodePublicationReviewRow,
-} from "./codecs"
+import { decideFixCandidate } from "../domain/transaction-policy"
+import { decodeCommandRow, decodePublicationReviewRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import type { StoreDataError } from "./errors"
@@ -15,10 +12,7 @@ import type { AgentCommand } from "./model"
 import type { makeSharedStoreOperations } from "./shared"
 type CommandOperations = Pick<
   WorkflowStorePort,
-  | "claimNextCommand"
-  | "executeCommand"
-  | "ingestCommand"
-  | "rescheduleCommand"
+  "claimNextCommand" | "executeCommand" | "ingestCommand" | "rescheduleCommand"
 >
 type ClaimedCommand = {
   readonly command: "review" | "fix" | "status"
@@ -93,12 +87,7 @@ export class SqlCommandStore implements CommandOperations {
         disposition =
           pullRequest === undefined
             ? "stale"
-            : yield* this.dispatchCommand(
-                command,
-                pullRequest,
-                timestamp,
-                input.fixWorkEnabled,
-              )
+            : yield* this.dispatchCommand(command, pullRequest, timestamp, input.fixWorkEnabled)
       }
       yield* this.#sql`
         UPDATE commands
@@ -289,15 +278,15 @@ export class SqlCommandStore implements CommandOperations {
       const row = reviews[0]
       if (row === undefined) return "noop" as const
       const review = yield* decodePublicationReviewRow(row)
-      const eligibility = decideFixEligibility({
+      const eligibility = decideFixCandidate({
         repositoryFullName: pullRequest.repository_full_name,
         headRepositoryFullName: pullRequest.head_repository_full_name,
         review: review.review,
       })
       if (eligibility._tag === "Ineligible")
         return eligibility.reason === "different-repository"
-          ? "denied" as const
-          : "noop" as const
+          ? ("denied" as const)
+          : ("noop" as const)
 
       const fixes = yield* this.#support.enqueueFixFromReview({
         headRepositoryFullName: pullRequest.head_repository_full_name,

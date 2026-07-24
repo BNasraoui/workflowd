@@ -1,0 +1,131 @@
+{
+  "skill_name": "impact-risk-reviewer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "An ImpactReady report that preserves a Critical current rating while recognizing the Design's complete controls and low residual risk.",
+      "files": ["evals/fixtures/impact-ready.md"],
+      "expectations": [
+        "The Subject binds change-101@rev-3, design-change-101@rev-4, scope-change-101@rev-4, sources-change-101@rev-2, gen-18, and design-acceptance-v2.",
+        "The Verdict section contains only ImpactReady and the report does not treat ImpactReady as risk-free or approved.",
+        "Both numbered Design decisions receive one stable parent D ID and each parent has evidence-backed dispositions for all eight required surfaces; child IDs appear only for a real semantic split and resolve to their source parent.",
+        "The transaction-limit risk records Severe impact and Likely likelihood as 20/Critical under 5x5-v1, while retaining both axes, exposure basis, uncertainty, and qualitative evidence.",
+        "The residual rating names the assumed controls and records Minor impact and Rare likelihood as 2/Low without using either score to choose the verdict.",
+        "The control coverage and ledger address prevention, detection, containment, and recovery with one owner, ownership class, phase, and verification target for every required control.",
+        "The proportionate Verification Plan combines compatible claims into stable V obligations that prove checkpoint resume, duplicate prevention, isolated staging, atomic publication, alerting, containment, and reconciled recovery without becoming a general implementation test plan."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "A ReviseDesign report that traces the unsafe external-effect ordering to exact Design corrections and verifiable controls.",
+      "files": ["evals/fixtures/design-revision-required.md"],
+      "expectations": [
+        "The Subject binds the exact change-202 review identity and the Source Inventory examines every supplied source.",
+        "The Verdict section contains only ReviseDesign.",
+        "The risk evidence chain connects process loss after provider acceptance, the missing local write, retry with a new random key, duplicate external delivery, and violation of the ticket outcomes.",
+        "The report traces both Design decisions across all eight surfaces and identifies the material interface, external-effect, data, operations, and user impacts.",
+        "The required Design action durably records intent and a stable key before sending, reuses that key on retry, and reconciles by that key before a new attempt.",
+        "The control model covers prevention, detection, containment, and recovery with complete ownership, phase, and V references rather than treating monitoring or inspection as recovery.",
+        "The Verification Plan includes proportionate deterministic fault injection at the provider-accepted/local-write interruption window and proves one logical delivery plus local reconciliation without decomposing a general test suite.",
+        "The report records an exact 5x5 rating only if evidence supports both axis anchors and one exposure basis; otherwise it marks the unsupported axis Unknown and omits the score without weakening the ReviseDesign rationale."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "A NeedsRiskDecision report that preserves complete technical controls and asks one human question about the long-outage tradeoff.",
+      "files": ["evals/fixtures/residual-risk-decision.md"],
+      "expectations": [
+        "The Subject and Source Inventory bind the exact change-303 artifacts and distinguish the unresolved decision from unavailable technical evidence.",
+        "The Verdict section contains only NeedsRiskDecision and does not claim that a Design revision is currently required.",
+        "The report identifies the evidence-backed residual risk of an outage beyond the retained queue window, marks its unsupported likelihood Unknown without a score, and does not convert the absence of a twelve-month observation into zero likelihood.",
+        "All feasible prevention, detection, containment, and recovery controls remain in the control ledger with owners, phases, and proportionate deterministic V obligations, while an unresolved control choice is recorded PendingDecision rather than filled by an unrelated control.",
+        "The report does not assign a control to DownstreamTicket:status-view-64 merely because that ticket consumes delayed and final states; downstream control ownership requires an explicit lifecycle assignment.",
+        "For the outage-beyond-retention risk, prevention is PendingDecision or otherwise explicitly unresolved rather than attributed to encryption, alert readiness, or another control that does not prevent the stated trigger or consequence.",
+        "The residual-risk row is Material with NeedsDecision and does not record acceptance by the reviewer, operator, or privacy owner.",
+        "Human Risk Decision contains exactly one answerable question bound to design-change-303@rev-6 and the affected R IDs.",
+        "The one question presents expiry and resubmission, longer retention with privacy and cost exposure, and feature unavailability as options without selecting one."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "An ImpactReady report that retains a narrow event seam, assigns the downstream control lifecycle to its explicit owner, and proves safe sequencing.",
+      "files": ["evals/fixtures/downstream-owned-control.md"],
+      "expectations": [
+        "The Subject binds the exact change-404 review identity and the report returns only ImpactReady.",
+        "The decision and surface trace identifies the compliance gap caused by publication before downstream readiness.",
+        "The report keeps the typed outbox event and default-off activation guard as the current ticket's RequiredEnablingSeam without redoing the ScopeClean ownership review.",
+        "Retention, search, alerting, operational response, and recovery controls name DownstreamTicket:control-archive-405 and do not become current-ticket implementation obligations.",
+        "The default-off guard, versioned readiness signal, withdrawal behavior, and bounded outbox replay form an explicit safe sequence before exposure.",
+        "Every required producer and downstream control has an owner, phase, verification target, and stable V reference.",
+        "The proportionate Verification Plan combines deterministic component, contract, monitoring, and recovery evidence for transaction coupling, stable identity, schema compatibility, activation, withdrawal, and replay.",
+        "Detection of transaction-event divergence or duplicate logical identity uses a control that distinguishes that failure, such as downstream missing or incompatible-event alerting; producer pending-age or publication-failure metrics and verification alone are not mislabeled as that detection control.",
+        "The report records an exact 5x5 rating only where evidence supports both axes and their exposure basis; its ImpactReady rationale remains valid with all numeric ratings removed."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "A NeedsRiskDecision report that fails closed on unavailable deployment-order evidence without inventing a risk score or Design defect.",
+      "files": ["evals/fixtures/unavailable-evidence.md"],
+      "expectations": [
+        "The Source Inventory marks deployment-order@unknown Unavailable rather than ConfirmedAbsent and records its missing revision, completeness, ordering, rollback, owner, and execution evidence.",
+        "The Verdict section contains only NeedsRiskDecision and does not require a Design change from the available evidence.",
+        "Both Design decisions are traced across all eight surfaces, with unavailable deployment evidence kept distinct from NoMaterialImpact.",
+        "The report identifies the material uncertainty that a new application instance may start before the additive migration and cause ordinary rollout writes to fail.",
+        "The unknown deployment behavior receives no fabricated impact level, likelihood level, score, band, or midpoint.",
+        "Available compatibility controls and their proportionate deterministic database, serialization, capability, and rollback verification remain recorded.",
+        "Rollback compatibility is not labeled recovery of an already failed user write without evidence of retry or reconciliation; that recovery disposition remains Missing, PendingDecision, or otherwise explicitly unsupported.",
+        "Unavailable deployment evidence does not create new required controls, enabling seams, or owners that are absent from the ticket, ownership report, Design, and issue graph.",
+        "Human Risk Decision asks exactly one question bound to design-change-505@rev-5 with the options to obtain versioned ordering evidence, prevent deployment, or accept the stated uncertainty."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "An ImpactReady report focused on the supported calculation risk that excludes generic hazards without creating obligations for them.",
+      "files": ["evals/fixtures/unsupported-speculation.md"],
+      "expectations": [
+        "The Subject binds the exact change-606 review identity and the Verdict section contains only ImpactReady.",
+        "The single Design decision has all eight surface dispositions, including evidence-backed NoMaterialImpact rows for I/O, configuration, external effects, and neighboring-ticket lifecycle concerns.",
+        "The Risk Register retains the evidence-backed intermediate-rounding failure mode, its affected outcome, materiality, characterization, and controls.",
+        "The proportionate Verification Plan combines deterministic table-driven and property checks for the six regressions, sign symmetry, unchanged non-half values, and absence of intermediate rounding without becoming a general test plan.",
+        "Credential leakage, third-party outage, queue backlog, browser compatibility, and database corruption appear in Excluded Speculation with their missing evidence links.",
+        "Excluded speculative candidates receive no R IDs, score, band, control obligation, or effect on the verdict.",
+        "The report does not invent a generic test-layer checklist or broaden the current ticket beyond the documented calculation boundary.",
+        "The report records an exact 5x5 rating only if evidence supports both axes and one exposure basis; otherwise it marks the unsupported axis Unknown and omits the score without changing materiality or verdict."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "A ReviseDesign report that preserves a separate residual-risk tradeoff while applying first-match verdict precedence.",
+      "files": ["evals/fixtures/verdict-precedence.md"],
+      "expectations": [
+        "The Subject binds the exact change-707 review identity and the Verdict section contains only ReviseDesign.",
+        "The report identifies the evidence-backed irreversible-effect ordering defect and names the exact Design decision that must change.",
+        "The separate capacity tradeoff remains in the risk and residual-decision records rather than disappearing behind the Design defect.",
+        "ReviseDesign wins the collision because the first matching verdict rule applies before NeedsRiskDecision, and the report states that a new Design revision invalidates the current residual-risk analysis.",
+        "The Human Risk Decision does not accept or answer the capacity tradeoff and defers its exact question to the next Design revision.",
+        "Control coverage uses Missing or PendingDecision where appropriate instead of inventing controls, owners, or verification obligations to force completeness."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Review the boundary-clean Design in the supplied fixture before human Design approval. Return the complete Impact and Risk Review report and do not change any source.",
+      "expected_output": "An ImpactReady report that accepts the canonical upstream ownership-report shape through its separate authoritative binding envelope.",
+      "files": ["evals/fixtures/upstream-handoff.md"],
+      "expectations": [
+        "The reviewer accepts the complete canonical Design Boundary Review even though it has no Subject section, because binding-change-808@rev-1 separately binds its exact identity and sha256:scope808 digest.",
+        "The Subject records change-808@rev-2, design-change-808@rev-3, scope-change-808@artifact-1, binding-change-808@rev-1, sources-change-808@rev-2, gen-93, and design-acceptance-v2.",
+        "The Source Inventory examines the canonical ownership report and authoritative binding as separate sources and does not claim that the report itself contains the missing workflow identities.",
+        "The Verdict section contains only ImpactReady and does not refuse the handoff or request another ownership review.",
+        "The single Design decision has all eight surface dispositions and retains only the evidence-backed stale-readiness failure mode.",
+        "The report never infers, invents, or reconstructs an ownership-report digest, source-set identity, workflow Generation, or policy revision from the upstream report contents."
+      ]
+    }
+  ]
+}

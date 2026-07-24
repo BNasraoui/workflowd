@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Schema } from "effect"
 import type { OpenCodeAdapter } from "../../src/opencode/adapter"
-import {
-  StructuredSession,
-  StructuredSessionError,
-} from "../../src/opencode/structured-session"
+import { StructuredSession, StructuredSessionError } from "../../src/opencode/structured-session"
 
 async function* events(
   ...values: ReadonlyArray<
@@ -18,14 +15,13 @@ async function* events(
   yield* values
 }
 
-function makeAdapter(
-  overrides: Partial<OpenCodeAdapter> = {},
-): OpenCodeAdapter {
+function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
     createSession: async () => ({ id: "ses_structured" }),
     promptSession: async () => undefined,
     subscribeSessionEvents: async () => events(),
     getSessionStatus: async () => ({ type: "busy" }),
+    sessionExists: async () => true,
     listSessionMessages: async () => [],
     abortSession: async () => true,
     validateAvailability: async () => undefined,
@@ -45,11 +41,86 @@ const request = {
   },
   prompt: "Review the pull request.",
   pollIntervalMs: 0,
+  maxOutputBytes: 4 * 1024 * 1024,
 }
 
 const resultSchema = Schema.Struct({ verdict: Schema.Literal("pass") })
 
 describe("StructuredSession", () => {
+  test("rejects schema-valid structured output beyond the durable output envelope", async () => {
+    const adapter = makeAdapter({
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_structured",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: { value: "x".repeat(4 * 1024 * 1024) },
+          },
+        }),
+    })
+    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(5 * 1024 * 1024)) })
+
+    await expect(new StructuredSession(adapter, request, schema).run()).rejects.toThrow(
+      "decode structured session output",
+    )
+  })
+
+  test("rejects structured output beyond the trusted harness declaration", async () => {
+    const adapter = makeAdapter({
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_structured",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: { value: "x".repeat(100) },
+          },
+        }),
+    })
+    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(100)) })
+
+    await expect(
+      new StructuredSession(adapter, { ...request, maxOutputBytes: 50 }, schema).run(),
+    ).rejects.toThrow("decode structured session output")
+  })
+
+  test("creates a native session without prompting until the caller resumes it", async () => {
+    const actions: Array<string> = []
+    const adapter = makeAdapter({
+      createSession: async () => {
+        actions.push("create")
+        return { id: "ses_checkpointed" }
+      },
+      promptSession: async () => {
+        actions.push("prompt")
+      },
+      subscribeSessionEvents: async () =>
+        events({
+          type: "message.updated",
+          sessionID: "ses_checkpointed",
+          message: {
+            role: "assistant",
+            time: { created: 1, completed: 2 },
+            structured: { verdict: "pass" },
+          },
+        }),
+    })
+    const session = new StructuredSession(adapter, request, resultSchema)
+
+    const created = await session.create()
+
+    expect(created).toEqual({ sessionID: "ses_checkpointed", directory: "/tmp/worktree" })
+    expect(actions).toEqual(["create"])
+
+    const result = await session.resume(created)
+
+    expect(result).toEqual({ verdict: "pass" })
+    expect(actions).toEqual(["create", "prompt"])
+  })
+
   test("reconnects the event subscription before using the status fallback", async () => {
     let subscriptions = 0
     let statusChecks = 0
@@ -105,7 +176,7 @@ describe("StructuredSession", () => {
     expect(messageLists).toBe(1)
   })
 
-  test("fails and aborts an idle async prompt without a terminal message", async () => {
+  test("leaves cleanup to the caller after an idle prompt fails", async () => {
     let aborts = 0
     const adapter = makeAdapter({
       subscribeSessionEvents: async () => {
@@ -121,10 +192,10 @@ describe("StructuredSession", () => {
     await expect(
       new StructuredSession(adapter, request, resultSchema).run(),
     ).rejects.toBeInstanceOf(StructuredSessionError)
-    expect(aborts).toBe(1)
+    expect(aborts).toBe(0)
   })
 
-  test("settles and aborts the session when the caller cancels waiting", async () => {
+  test("settles without taking over cleanup when the caller cancels waiting", async () => {
     const controller = new AbortController()
     const prompted = Promise.withResolvers<void>()
     let aborts = 0
@@ -139,14 +210,12 @@ describe("StructuredSession", () => {
       },
     })
 
-    const execution = new StructuredSession(adapter, request, resultSchema).run(
-      controller.signal,
-    )
+    const execution = new StructuredSession(adapter, request, resultSchema).run(controller.signal)
     await prompted.promise
     controller.abort(new Error("job cancelled"))
 
     await expect(execution).rejects.toBeInstanceOf(StructuredSessionError)
-    expect(aborts).toBe(1)
+    expect(aborts).toBe(0)
   })
 
   test("rejects malformed structured output at the session seam", async () => {

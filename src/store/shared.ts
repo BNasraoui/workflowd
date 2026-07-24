@@ -1,28 +1,30 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
 import { Effect } from "effect"
 import type { ReviewResult } from "../domain/review-result"
-import { decideFixEligibility } from "../domain/transaction-policy"
+import { decideFixCandidate } from "../domain/transaction-policy"
 import type { DeliveryInput } from "./model"
 import { makeCurrentnessPolicy } from "./currentness"
 
 export function makeSharedStoreOperations(sql: SqlClient) {
   const currentness = makeCurrentnessPolicy(sql)
   const insertDelivery = (delivery: DeliveryInput) =>
-    sql<{ readonly delivery_id: string }>`
+    sql<{ readonly delivery_id: string; readonly observation_sequence: number }>`
       INSERT OR IGNORE INTO webhook_deliveries (
         delivery_id,
         event,
         action,
         payload,
-        received_at
+        received_at,
+        observation_sequence
       ) VALUES (
         ${delivery.deliveryId},
         ${delivery.event},
         ${delivery.action},
         ${delivery.payload},
-        ${delivery.receivedAt.toISOString()}
+        ${delivery.receivedAt.toISOString()},
+        (SELECT COALESCE(MAX(observation_sequence), 0) + 1 FROM webhook_deliveries)
       )
-      RETURNING delivery_id
+      RETURNING delivery_id, observation_sequence
     `
 
   const supersedeOlderReviewWork = (input: {
@@ -32,6 +34,23 @@ export function makeSharedStoreOperations(sql: SqlClient) {
     readonly timestamp: string
   }) =>
     Effect.gen(function* () {
+      yield* sql`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${input.timestamp}
+        WHERE state = 'launch_intent'
+        AND job_id IN (
+          SELECT id FROM jobs
+          WHERE kind = 'fix'
+          AND repository_id = ${input.repositoryId}
+          AND pull_request_number = ${input.pullRequestNumber}
+          AND generation = (
+            SELECT generation FROM jobs WHERE id = ${input.reviewJobId}
+          )
+          AND review_request_number < (
+            SELECT review_request_number FROM jobs WHERE id = ${input.reviewJobId}
+          )
+        )
+      `
       yield* sql`
         UPDATE publications
         SET
@@ -82,6 +101,20 @@ export function makeSharedStoreOperations(sql: SqlClient) {
   }) =>
     Effect.gen(function* () {
       yield* sql`
+        UPDATE agent_executions
+        SET state = 'superseded', updated_at = ${input.timestamp}
+        WHERE state = 'launch_intent'
+        AND job_id IN (
+          SELECT id FROM jobs
+          WHERE repository_id = ${input.repositoryId}
+          AND pull_request_number = ${input.pullRequestNumber}
+          AND (
+            generation < ${input.generation}
+            OR (${input.includeCurrentGeneration} AND generation = ${input.generation})
+          )
+        )
+      `
+      yield* sql`
         UPDATE jobs
         SET
           state = 'superseded',
@@ -130,7 +163,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
     readonly reviewJobId: number
     readonly requeueFailed: boolean
   }) => {
-    const eligible = decideFixEligibility(input)._tag === "Eligible"
+    const eligible = decideFixCandidate(input)._tag === "Eligible"
     return sql<{ readonly id: number }>`
       INSERT INTO jobs (
         kind,

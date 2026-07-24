@@ -7,6 +7,7 @@ import type { LeaseClaim } from "./model"
 type LeaseTable = "commands" | "jobs" | "publications" | "reconciliations"
 type LeaseQueueConfig<Value> = {
   readonly table: LeaseTable
+  readonly beforeClaim?: (claimedAt: string) => Effect.Effect<void, SqlError>
   readonly claimableId: (now: string) => Fragment
   readonly returning: Fragment
   readonly decode: (row: unknown) => Effect.Effect<Value, StoreDataError>
@@ -36,6 +37,9 @@ export class SqlLeaseQueue<Value> {
     const { claimedAt, leaseUntil } = durableLeasePolicy.claim(input)
     const { table } = this.config
     return Effect.gen(this, function* () {
+      if (this.config.beforeClaim !== undefined) {
+        yield* this.config.beforeClaim(claimedAt)
+      }
       yield* this.sql`
         UPDATE ${this.sql(table)}
         SET

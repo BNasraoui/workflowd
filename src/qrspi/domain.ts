@@ -1,0 +1,721 @@
+import { createHash } from "node:crypto"
+import { Data, Schema } from "effect"
+import { AgentHarnessRef, MAX_STAGE_REQUEST_BYTES } from "../agent-harness"
+
+const BoundedText = (maximum: number) =>
+  Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
+const Sha256 = Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/))
+const GitSha = Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/))
+
+export const RepositoryReference = Schema.Struct({
+  providerInstanceId: BoundedText(128),
+  repositoryId: BoundedText(128),
+  repositoryFullName: Schema.String.pipe(
+    Schema.pattern(/^[^/\s]+\/[^/\s]+$/),
+    Schema.maxLength(256),
+  ),
+})
+export type RepositoryReference = typeof RepositoryReference.Type
+
+export const TicketReference = Schema.Struct({
+  tracker: Schema.Literal("beads"),
+  trackerInstanceId: BoundedText(128),
+  nativeTicketId: Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
+})
+export type TicketReference = typeof TicketReference.Type
+
+const RawText = (maximum: number) => Schema.String.pipe(Schema.maxLength(maximum))
+const OptionalRawText = (maximum: number) => Schema.optional(RawText(maximum))
+
+export const TicketScenario = Schema.Struct({
+  name: OptionalRawText(200),
+  given: OptionalRawText(2_000),
+  when: OptionalRawText(2_000),
+  then: OptionalRawText(2_000),
+  covers: Schema.optional(
+    Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
+      Schema.maxItems(100),
+    ),
+  ),
+})
+
+const ReadyTicketScenario = Schema.Struct({
+  name: BoundedText(200),
+  given: BoundedText(2_000),
+  when: BoundedText(2_000),
+  then: BoundedText(2_000),
+  covers: TicketScenario.fields.covers,
+})
+
+export const Ticket = Schema.Struct({
+  reference: TicketReference,
+  issueType: Schema.Literal("bug", "feature", "task", "epic", "chore", "decision"),
+  title: OptionalRawText(500),
+  userStory: OptionalRawText(4_000),
+  description: OptionalRawText(20_000),
+  sources: Schema.optional(Schema.Array(RawText(2_000)).pipe(Schema.maxItems(100))),
+  outOfScope: Schema.optional(Schema.Array(RawText(4_000)).pipe(Schema.maxItems(100))),
+  acceptanceCriteria: Schema.optional(Schema.Array(RawText(4_000)).pipe(Schema.maxItems(100))),
+  scenarios: Schema.optional(Schema.Array(TicketScenario).pipe(Schema.maxItems(100))),
+  sourceRevision: Schema.optional(BoundedText(256)),
+})
+export type Ticket = typeof Ticket.Type
+
+export const ReadyTicket = Schema.Struct({
+  ...Ticket.fields,
+  title: BoundedText(500),
+  description: BoundedText(20_000),
+  sources: Schema.Array(BoundedText(2_000)).pipe(Schema.minItems(1), Schema.maxItems(100)),
+  acceptanceCriteria: Schema.Array(BoundedText(4_000)).pipe(
+    Schema.minItems(1),
+    Schema.maxItems(100),
+  ),
+  scenarios: Schema.Array(ReadyTicketScenario).pipe(Schema.minItems(1), Schema.maxItems(100)),
+})
+export type ReadyTicket = typeof ReadyTicket.Type
+
+export const TicketProblemCode = Schema.Literal(
+  "missing_title",
+  "unclear_title",
+  "missing_description",
+  "unclear_product_outcome",
+  "missing_user_story",
+  "inappropriate_user_story",
+  "missing_acceptance_criteria",
+  "unobservable_acceptance_criterion",
+  "missing_scenarios",
+  "invalid_scenario",
+  "uncovered_acceptance_criterion",
+  "unresolved_source",
+  "contradictory_product_direction",
+)
+export const TicketProblem = Schema.Struct({ code: TicketProblemCode, message: BoundedText(1_000) })
+export type TicketProblem = typeof TicketProblem.Type
+
+export const TicketRevision = Schema.Struct({
+  readyTicket: ReadyTicket,
+  scenarioCoverage: Schema.Array(Schema.Array(Schema.Int.pipe(Schema.nonNegative()))),
+  sourceRevision: Schema.optional(BoundedText(256)),
+  checkedAt: Schema.DateFromSelf,
+  ticketRevisionSha256: Sha256,
+})
+export type TicketRevision = typeof TicketRevision.Type
+
+export const TicketCheck = Schema.Union(
+  Schema.Struct({
+    _tag: Schema.Literal("Ready"),
+    readyTicket: ReadyTicket,
+    ticketRevision: TicketRevision,
+    checkedAt: Schema.DateFromSelf,
+  }),
+  Schema.Struct({
+    _tag: Schema.Literal("NeedsWork"),
+    ticket: Ticket,
+    problems: Schema.NonEmptyArray(TicketProblem),
+    checkedAt: Schema.DateFromSelf,
+  }),
+)
+export type TicketCheck = typeof TicketCheck.Type
+
+export const TicketReadinessJudgment = Schema.Struct({
+  userStory: Schema.Literal("required", "optional", "forbidden"),
+  productDirection: Schema.Literal("consistent", "contradictory"),
+  productOutcome: Schema.Literal("clear", "unclear"),
+  acceptanceCriteriaObservability: Schema.Array(Schema.Literal("observable", "unobservable")).pipe(
+    Schema.maxItems(100),
+  ),
+  scenarioCoverage: Schema.Array(
+    Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
+      Schema.maxItems(100),
+    ),
+  ).pipe(Schema.maxItems(100)),
+})
+export type TicketReadinessJudgment = typeof TicketReadinessJudgment.Type
+
+export const WorkflowStartRequest = Schema.Struct({
+  repository: RepositoryReference,
+  ticket: TicketReference,
+  readinessJudgment: TicketReadinessJudgment,
+})
+export type WorkflowStartRequest = typeof WorkflowStartRequest.Type
+
+export const WorkflowStartInput = Schema.Struct({
+  contractVersion: Schema.Literal(1),
+  repository: RepositoryReference,
+  ticket: TicketReference,
+  ticketRevisionSha256: Sha256,
+  workflowDefinitionSha256: Sha256,
+  stageSnapshotsSha256: Sha256,
+  baseRef: BoundedText(256),
+  baseSha: GitSha,
+  branchName: BoundedText(256),
+})
+
+export const ContractIdentifier = Schema.String.pipe(
+  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/),
+)
+export const PositiveVersion = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(1_000_000),
+)
+const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
+const DurableStagePayloadBytes = Schema.Int.pipe(
+  Schema.positive(),
+  Schema.lessThanOrEqualTo(MAX_STAGE_REQUEST_BYTES),
+)
+const ProviderModel = Schema.String.pipe(
+  Schema.pattern(/^[^\s/]+\/[^\s/]+$/),
+  Schema.maxLength(256),
+)
+
+export const StageContractRef = Schema.Struct({
+  name: ContractIdentifier,
+  contractVersion: PositiveVersion,
+})
+export type StageContractRef = typeof StageContractRef.Type
+
+export const PolicyReference = Schema.Struct({
+  name: ContractIdentifier,
+  version: PositiveVersion,
+})
+export type PolicyReference = typeof PolicyReference.Type
+
+export const StageOutputPolicy = Schema.Union(
+  Schema.Struct({
+    _tag: Schema.Literal("Artifact"),
+    pathTemplate: BoundedText(512),
+    mediaType: BoundedText(128),
+  }),
+  Schema.Struct({
+    _tag: Schema.Literal("ImplementationCheckpoint"),
+    contractId: ContractIdentifier,
+    contractVersion: PositiveVersion,
+  }),
+)
+
+export const StageReviewPolicy = Schema.Union(
+  Schema.Struct({ mode: Schema.Literal("none") }),
+  Schema.Struct({
+    mode: Schema.Literal("automated"),
+    minimumContributions: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+    maximumContributions: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+    deadlineMs: BoundedMilliseconds,
+    maximumRevisions: Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(20)),
+  }),
+)
+
+export const StageHumanGatePolicy = Schema.Struct({
+  mode: Schema.Literal("none", "required", "on_escalation"),
+})
+
+export const StageActivationPolicy = Schema.Union(
+  Schema.Struct({ mode: Schema.Literal("enabled", "disabled") }),
+  Schema.Struct({
+    mode: Schema.Literal("conditional"),
+    policy: PolicyReference,
+    decision: Schema.Literal("enabled", "disabled"),
+    reason: BoundedText(1_000),
+  }),
+)
+
+export const StageRetryPolicy = Schema.Struct({
+  maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+  backoffMs: BoundedMilliseconds,
+})
+
+export const StageDefinition = Schema.Struct({
+  key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z0-9_-]{0,63}$/)),
+  kind: Schema.Literal("document", "implementation"),
+  contract: StageContractRef,
+  activation: StageActivationPolicy,
+  definitionVersion: PositiveVersion,
+  maxEncodedInputBytes: DurableStagePayloadBytes,
+  producer: Schema.Struct({
+    harness: AgentHarnessRef,
+    agent: ContractIdentifier,
+    model: ProviderModel,
+    timeoutMs: BoundedMilliseconds,
+    retry: StageRetryPolicy,
+  }),
+  outputPolicy: StageOutputPolicy,
+  reviewPolicy: StageReviewPolicy,
+  humanGatePolicy: StageHumanGatePolicy,
+  designPolicy: Schema.optional(PolicyReference),
+  promotionPolicy: Schema.optional(PolicyReference),
+  structurePolicy: Schema.optional(PolicyReference),
+})
+export type StageDefinition = typeof StageDefinition.Type
+
+export const ExecutableStageSnapshot = Schema.Struct({
+  sequencePosition: Schema.Int.pipe(Schema.positive()),
+  stageDefinitionSha256: Sha256,
+  definition: StageDefinition,
+  contractRegistrationSha256: Sha256,
+  harnessRegistrationSha256: Sha256,
+})
+export type ExecutableStageSnapshot = typeof ExecutableStageSnapshot.Type
+
+export const WorkflowDefinition = Schema.Struct({
+  contractVersion: Schema.Literal(1),
+  definitionVersion: PositiveVersion,
+  stages: Schema.Array(StageDefinition).pipe(Schema.maxItems(32)),
+})
+export type WorkflowDefinition = typeof WorkflowDefinition.Type
+export type SourceResolver = (source: string) => boolean
+
+export type WorkflowDefinitionValidationReason =
+  | "no_considered_stage"
+  | "no_runnable_stage"
+  | "duplicate_stage_key"
+  | "invalid_activation_prerequisite"
+  | "invalid_stage_order"
+  | "unsupported_bound"
+  | "unsupported_policy"
+  | "unsafe_artifact_path"
+  | "unknown_contract_reference"
+  | "unknown_harness_reference"
+  | "incompatible_kind"
+  | "incompatible_output"
+  | "incompatible_definition"
+  | "registration_hash_mismatch"
+  | "unavailable_agent_model"
+
+export class WorkflowDefinitionValidationError extends Data.TaggedError(
+  "WorkflowDefinitionValidationError",
+)<{
+  readonly phase: "pure" | "contract" | "harness" | "availability"
+  readonly reason: WorkflowDefinitionValidationReason
+  readonly workflowDefinitionSha256?: string
+  readonly stageKey?: string
+  readonly sequencePosition?: number
+  readonly contractRef?: StageContractRef
+  readonly harnessRef?: typeof AgentHarnessRef.Type
+  readonly expectedRegistrationSha256?: string
+  readonly actualRegistrationSha256?: string
+  readonly cause?: string
+}> {}
+
+export function isEffectivelyEnabled(stage: StageDefinition): boolean {
+  return (
+    stage.activation.mode === "enabled" ||
+    (stage.activation.mode === "conditional" && stage.activation.decision === "enabled")
+  )
+}
+
+export function workflowDefinitionSha256(definition: WorkflowDefinition): string {
+  return canonicalSha256({
+    contractVersion: definition.contractVersion,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
+export function stageDefinitionSha256(definition: StageDefinition): string {
+  return canonicalSha256({
+    contractVersion: 1,
+    normalizationVersion: "RFC8785-NFC-1",
+    definition,
+  })
+}
+
+export function stageSnapshotsMatchWorkflowDefinition(
+  definition: WorkflowDefinition,
+  snapshots: ReadonlyArray<ExecutableStageSnapshot>,
+): boolean {
+  return (
+    snapshots.length === definition.stages.length &&
+    snapshots.every((snapshot, index) => {
+      const currentStage = definition.stages[index]
+      return (
+        currentStage !== undefined &&
+        snapshot.sequencePosition === index + 1 &&
+        snapshot.stageDefinitionSha256 === stageDefinitionSha256(snapshot.definition) &&
+        stageDefinitionSha256(snapshot.definition) === stageDefinitionSha256(currentStage)
+      )
+    })
+  )
+}
+
+export function normalizeWorkflowDefinition(input: unknown): WorkflowDefinition {
+  const definition = Schema.decodeUnknownSync(WorkflowDefinition)(input)
+  const definitionSha256 = workflowDefinitionSha256(definition)
+  if (definition.stages.length === 0) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_considered_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
+  }
+  const keys = new Set<string>()
+  let enabledDesignPosition: number | undefined
+  let previousKnownStageRank = 0
+  for (const [index, stage] of definition.stages.entries()) {
+    const diagnostic = {
+      phase: "pure" as const,
+      workflowDefinitionSha256: definitionSha256,
+      stageKey: stage.key,
+      sequencePosition: index + 1,
+    }
+    if (keys.has(stage.key)) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "duplicate_stage_key",
+      })
+    }
+    keys.add(stage.key)
+    if (
+      stage.reviewPolicy.mode === "automated" &&
+      stage.reviewPolicy.minimumContributions > stage.reviewPolicy.maximumContributions
+    ) {
+      throw new WorkflowDefinitionValidationError({ ...diagnostic, reason: "unsupported_bound" })
+    }
+    if (
+      stage.outputPolicy._tag === "Artifact" &&
+      !isSafeArtifactPathTemplate(stage.outputPolicy.pathTemplate)
+    ) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsafe_artifact_path",
+      })
+    }
+
+    const stageName = [
+      "questions",
+      "research",
+      "design",
+      "structure",
+      "plan",
+      "implementation",
+    ].includes(stage.key)
+      ? stage.key
+      : undefined
+    const knownRank =
+      stageName === undefined
+        ? undefined
+        : ["questions", "research", "design", "structure", "plan", "implementation"].indexOf(
+            stageName,
+          ) + 1
+    if (knownRank !== undefined && knownRank > 0) {
+      if (knownRank <= previousKnownStageRank) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_stage_order",
+        })
+      }
+      previousKnownStageRank = knownRank
+    }
+    if (stageName === "design") {
+      if (!isEffectivelyEnabled(stage)) {
+        throw new WorkflowDefinitionValidationError({
+          ...diagnostic,
+          reason: "invalid_activation_prerequisite",
+        })
+      }
+      enabledDesignPosition = index + 1
+    }
+    if (stageName === "structure" && enabledDesignPosition === undefined) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "invalid_stage_order",
+      })
+    }
+    if (
+      (stage.designPolicy !== undefined && stageName !== "design") ||
+      (stage.promotionPolicy !== undefined && stageName !== "design") ||
+      (stage.structurePolicy !== undefined && stageName !== "structure")
+    ) {
+      throw new WorkflowDefinitionValidationError({
+        ...diagnostic,
+        reason: "unsupported_policy",
+      })
+    }
+  }
+  if (!definition.stages.some(isEffectivelyEnabled)) {
+    throw new WorkflowDefinitionValidationError({
+      phase: "pure",
+      reason: "no_runnable_stage",
+      workflowDefinitionSha256: definitionSha256,
+    })
+  }
+  return definition
+}
+
+function isSafeArtifactPathTemplate(pathTemplate: string): boolean {
+  if (
+    pathTemplate.startsWith("/") ||
+    pathTemplate.includes("\\") ||
+    /^[A-Za-z]:/.test(pathTemplate)
+  ) {
+    return false
+  }
+  const segments = pathTemplate.split("/")
+  return segments.every(
+    (segment) =>
+      segment !== "" &&
+      segment !== "." &&
+      segment !== ".." &&
+      segment.toLowerCase() !== ".git" &&
+      /^(?:[A-Za-z0-9._-]|\{(?:ticketId|stageKey)\})+$/.test(segment),
+  )
+}
+
+export const WorkflowStartOutput = Schema.Struct({
+  _tag: Schema.Literal("Started"),
+  workflowId: BoundedText(256),
+  generation: Schema.Int.pipe(Schema.positive()),
+  branchName: BoundedText(256),
+  rootSha: GitSha,
+  ticketRevisionSha256: Sha256,
+})
+export type WorkflowStartOutput = typeof WorkflowStartOutput.Type
+
+export function workflowIdFor(repository: RepositoryReference, ticket: TicketReference): string {
+  return `wf_${canonicalSha256({
+    contractVersion: 1,
+    repository: {
+      providerInstanceId: repository.providerInstanceId,
+      repositoryId: repository.repositoryId,
+    },
+    ticket: {
+      tracker: ticket.tracker,
+      trackerInstanceId: ticket.trackerInstanceId,
+      nativeTicketId: ticket.nativeTicketId,
+    },
+  })}`
+}
+
+function problem(code: TicketProblem["code"], message: string): TicketProblem {
+  return { code, message }
+}
+
+export function checkTicket(
+  ticket: Ticket,
+  checkedAt: Date,
+  judgment: TicketReadinessJudgment,
+  resolveSource: SourceResolver = () => false,
+): TicketCheck {
+  const problems: TicketProblem[] = []
+  if (ticket.title === undefined || ticket.title.trim() === "")
+    problems.push(problem("missing_title", "Add a title naming the change."))
+  else if (isLowInformation(ticket.title))
+    problems.push(problem("unclear_title", "Replace the placeholder with a specific title."))
+  if (ticket.description === undefined || ticket.description.trim() === "")
+    problems.push(
+      problem("missing_description", "Describe current behavior and the desired outcome."),
+    )
+  else if (isLowInformation(ticket.description) || judgment.productOutcome === "unclear")
+    problems.push(
+      problem("unclear_product_outcome", "Replace the placeholder with a product outcome."),
+    )
+  if (judgment.userStory === "required" && !ticket.userStory?.trim())
+    problems.push(problem("missing_user_story", "Add the actor, capability, and value."))
+  if (judgment.userStory === "forbidden" && ticket.userStory?.trim())
+    problems.push(
+      problem("inappropriate_user_story", "Remove the user story when it does not help the work."),
+    )
+  if (judgment.productDirection === "contradictory")
+    problems.push(
+      problem(
+        "contradictory_product_direction",
+        "Resolve the contradictory product direction before starting technical work.",
+      ),
+    )
+  if (ticket.acceptanceCriteria === undefined || ticket.acceptanceCriteria.length === 0)
+    problems.push(problem("missing_acceptance_criteria", "Add observable acceptance criteria."))
+  else if (
+    ticket.acceptanceCriteria.some(
+      (criterion, index) =>
+        isUnobservableCriterion(criterion) ||
+        judgment.acceptanceCriteriaObservability[index] !== "observable",
+    )
+  )
+    problems.push(
+      problem("unobservable_acceptance_criterion", "Make every acceptance criterion observable."),
+    )
+  if (ticket.scenarios === undefined || ticket.scenarios.length === 0)
+    problems.push(problem("missing_scenarios", "Add named Given/When/Then scenarios."))
+  else if (
+    ticket.scenarios.some(
+      (scenario) =>
+        !scenario.name?.trim() ||
+        !scenario.given?.trim() ||
+        !scenario.when?.trim() ||
+        !scenario.then?.trim() ||
+        isLowInformation(scenario.name) ||
+        isLowInformation(scenario.given) ||
+        isLowInformation(scenario.when) ||
+        isLowInformation(scenario.then),
+    )
+  )
+    problems.push(problem("invalid_scenario", "Complete each named Given/When/Then scenario."))
+  if (
+    ticket.sources === undefined ||
+    ticket.sources.length === 0 ||
+    ticket.sources.some((source) => !sourceCanResolveLocally(source, resolveSource))
+  )
+    problems.push(problem("unresolved_source", "Add at least one resolvable source reference."))
+
+  const criteria = ticket.acceptanceCriteria ?? []
+  const scenarios = ticket.scenarios ?? []
+  const scenarioCoverage = criteria.map((_, criterion) =>
+    [...new Set(judgment.scenarioCoverage[criterion] ?? [])].filter(
+      (scenario) => scenarios[scenario] !== undefined,
+    ),
+  )
+  for (let index = 0; index < criteria.length; index += 1) {
+    if (scenarioCoverage[index]?.length === 0) {
+      problems.push(
+        problem(
+          "uncovered_acceptance_criterion",
+          `Acceptance criterion ${index + 1} is not covered by a scenario.`,
+        ),
+      )
+    }
+  }
+  if (problems.length > 0) {
+    const [first, ...rest] = problems
+    if (first === undefined) throw new Error("Ticket problem collection unexpectedly empty")
+    return { _tag: "NeedsWork", ticket, problems: [first, ...rest], checkedAt }
+  }
+
+  const readyTicket = Schema.decodeUnknownSync(ReadyTicket)(ticket)
+  const product = {
+    issueType: readyTicket.issueType,
+    title: readyTicket.title,
+    ...(readyTicket.userStory === undefined ? {} : { userStory: readyTicket.userStory }),
+    description: readyTicket.description,
+    sources: readyTicket.sources,
+    ...(readyTicket.outOfScope === undefined ? {} : { outOfScope: readyTicket.outOfScope }),
+    acceptanceCriteria: readyTicket.acceptanceCriteria,
+    scenarios: readyTicket.scenarios,
+  }
+  const normalized = normalize({
+    contractVersion: 1,
+    normalizationVersion: "RFC8785-NFC-1",
+    product,
+    scenarioCoverage,
+  })
+  const ticketRevisionSha256 = createHash("sha256").update(canonicalJson(normalized)).digest("hex")
+  const ticketRevision: TicketRevision = {
+    readyTicket,
+    scenarioCoverage,
+    ...(ticket.sourceRevision === undefined ? {} : { sourceRevision: ticket.sourceRevision }),
+    checkedAt,
+    ticketRevisionSha256,
+  }
+  return { _tag: "Ready", readyTicket, ticketRevision, checkedAt }
+}
+
+function isUnobservableCriterion(criterion: string): boolean {
+  const normalized = criterion.trim().toLowerCase()
+  return normalized === "" || isLowInformation(criterion) || normalized.startsWith("todo:")
+}
+
+function isLowInformation(value: string | undefined): boolean {
+  if (value === undefined) return true
+  const normalized = value.trim().toLowerCase()
+  return (
+    normalized === "x" ||
+    normalized === "todo" ||
+    normalized === "tbd" ||
+    normalized === "unknown" ||
+    normalized === "placeholder" ||
+    normalized === "n/a" ||
+    normalized === "na" ||
+    normalized === "none" ||
+    (normalized !== "" && !/[\p{L}\p{N}]/u.test(normalized))
+  )
+}
+
+function sourceCanResolveLocally(source: string, resolveSource: SourceResolver): boolean {
+  const value = source.trim()
+  const url = /https?:\/\/[^\s)>]+/.exec(value)?.[0]
+  if (url !== undefined) {
+    try {
+      const parsed = new URL(url)
+      return (
+        (parsed.protocol === "http:" || parsed.protocol === "https:") && resolveSource(parsed.href)
+      )
+    } catch {
+      return false
+    }
+  }
+  const fileReference = value.replace(/^\.\//, "")
+  const fileSegments = fileReference.split("/")
+  if (
+    fileSegments.every(
+      (segment) => segment !== "" && segment !== ".." && /^[A-Za-z0-9_.-]+$/.test(segment),
+    ) &&
+    (fileSegments.length > 1 || fileSegments[0]?.includes(".") === true)
+  ) {
+    return resolveSource(fileReference)
+  }
+  return (
+    /^(?:beads|provenance|ticket):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) &&
+    resolveSource(value)
+  )
+}
+
+export function canonicalSha256(value: unknown): string {
+  return createHash("sha256")
+    .update(canonicalJson(normalize(value)))
+    .digest("hex")
+}
+
+function normalize(value: unknown): unknown {
+  if (
+    value === undefined ||
+    typeof value === "bigint" ||
+    typeof value === "function" ||
+    typeof value === "symbol"
+  ) {
+    throw new Error("Value is not valid JSON")
+  }
+  if (typeof value === "string") {
+    assertNoLoneSurrogates(value)
+    return value.normalize("NFC")
+  }
+  if (typeof value === "number" && (!Number.isFinite(value) || Object.is(value, -0))) {
+    throw new Error("Canonical JSON rejects non-finite numbers and negative zero")
+  }
+  if (Array.isArray(value)) return value.map(normalize)
+  if (value !== null && typeof value === "object") {
+    const entries: Array<readonly [string, unknown]> = []
+    const keys = new Set<string>()
+    for (const [key, item] of Object.entries(value)) {
+      assertNoLoneSurrogates(key)
+      const normalizedKey = key.normalize("NFC")
+      if (keys.has(normalizedKey)) throw new Error(`NFC normalization collision: ${normalizedKey}`)
+      keys.add(normalizedKey)
+      entries.push([normalizedKey, normalize(item)])
+    }
+    return Object.fromEntries(entries)
+  }
+  return value
+}
+
+function assertNoLoneSurrogates(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1
+        continue
+      }
+      throw new Error("Canonical JSON rejects lone surrogate code points")
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      throw new Error("Canonical JSON rejects lone surrogate code points")
+    }
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
+  return `{${Object.entries(value)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+    .join(",")}}`
+}
