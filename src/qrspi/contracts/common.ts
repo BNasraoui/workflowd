@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { Data, Schema } from "effect"
+import { MAX_AGENT_OUTPUT_BYTES, MAX_STAGE_REQUEST_BYTES } from "../../agent-payload"
 import { JsonValueSchema, type JsonValue } from "../../json"
 import {
   BoundedText,
@@ -130,6 +131,37 @@ export const exactPolicyReference = (expected: typeof PolicyReference.Type) =>
     ),
   )
 
+export const documentStageCompatibility =
+  (stageKey: string, stageName: string) => (definition: typeof StageDefinition.Type) => {
+    if (definition.key !== stageKey)
+      throw new Error(`${stageName} requires the ${stageKey} stage key`)
+    if (
+      definition.designPolicy !== undefined ||
+      definition.promotionPolicy !== undefined ||
+      definition.structurePolicy !== undefined
+    )
+      throw new Error(`${stageName} forbids specialized policy fields`)
+    if (
+      definition.outputPolicy._tag !== "Artifact" ||
+      definition.outputPolicy.mediaType !== "text/markdown"
+    )
+      throw new Error(`${stageName} requires Markdown artifact output`)
+  }
+
+export const documentStageContractDefaults = <const StageKey extends string>(
+  stageKey: StageKey,
+  stageName: string,
+) => ({
+  ref: { name: `qrspi.${stageKey}` as const, contractVersion: 1 as const },
+  stageKey,
+  implementationRevision: `qrspi.${stageKey}.v1`,
+  kind: "document" as const,
+  maxRequestBytes: MAX_STAGE_REQUEST_BYTES,
+  maxResultBytes: MAX_AGENT_OUTPUT_BYTES,
+  compatibility: documentStageCompatibility(stageKey, stageName),
+  prepareOutput: prepareDocumentOutput,
+})
+
 export function isOrderedRoleSubsequence(
   actual: ReadonlyArray<string>,
   allowed: ReadonlyArray<string>,
@@ -166,7 +198,7 @@ export const RepositoryRelativePath = Schema.String.pipe(
   ),
 )
 export const BoundedMediaType = Schema.String.pipe(
-  Schema.pattern(new RegExp("^[A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]{0,127}$")),
+  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]{0,127}$/),
 )
 
 export const ArtifactReference = Schema.Struct({
@@ -341,6 +373,12 @@ export const StageTaskAuthority = Schema.Struct({
 })
 export type StageTaskAuthority = typeof StageTaskAuthority.Type
 
+export const taskAuthorityFromSources = (sources: ExactStageSources): StageTaskAuthority => ({
+  ticketRevision: sources.ticketRevision,
+  sources: sources.sources,
+  ...(sources.revisionIntent === undefined ? {} : { revisionIntent: sources.revisionIntent }),
+})
+
 export const StageExecutionContext = Schema.Struct({
   scope: ExactStageScope,
   target: RepositoryTarget,
@@ -356,6 +394,10 @@ export const PreparedStageOutput = Schema.Union(
   }),
 )
 export type PreparedStageOutput = typeof PreparedStageOutput.Type
+
+export function prepareDocumentOutput(result: { readonly document: string }) {
+  return { _tag: "Document" as const, text: result.document }
+}
 
 const StageProduceInputBase = Schema.Struct({
   contractVersion: Schema.Literal(1),

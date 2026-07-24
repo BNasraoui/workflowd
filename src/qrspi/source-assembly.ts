@@ -152,6 +152,23 @@ function decodeAuthority(input: {
       return role === undefined ? [] : [{ role, snapshot }]
     })
     .reverse()
+  validatePointers(pointers, currentPointers, expected, scope, target)
+  if (ticketRevision.workflowId !== scope.workflowId) {
+    throw identityError(undefined, undefined, scope.workflowId, ticketRevision.workflowId)
+  }
+  return { scope, ticketRevision, target, pointers, revisionIntent }
+}
+
+function validatePointers(
+  pointers: ReadonlyArray<AcceptedPredecessorPointer>,
+  currentPointers: ReadonlyArray<AcceptedPredecessorPointer>,
+  expected: ReadonlyArray<{
+    readonly role: StageSourceRole
+    readonly snapshot: typeof ExecutableStageSnapshot.Type
+  }>,
+  scope: ExactStageScope,
+  target: typeof RepositoryTarget.Type,
+): void {
   if (pointers.length < expected.length) {
     const role = expected[pointers.length]?.role
     throw new StageSourceAssemblyError({
@@ -182,10 +199,6 @@ function decodeAuthority(input: {
     const mismatch = pointerMismatch(pointer, expectedSource, scope, target)
     if (mismatch !== undefined) throw mismatch
   }
-  if (ticketRevision.workflowId !== scope.workflowId) {
-    throw identityError(undefined, undefined, scope.workflowId, ticketRevision.workflowId)
-  }
-  return { scope, ticketRevision, target, pointers, revisionIntent }
 }
 
 function pointerMismatch(

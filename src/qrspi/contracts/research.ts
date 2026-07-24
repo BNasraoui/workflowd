@@ -1,7 +1,12 @@
 import { Schema } from "effect"
-import { MAX_AGENT_OUTPUT_BYTES, MAX_STAGE_REQUEST_BYTES } from "../../agent-harness"
 import type { StageContract } from "../stage-catalog"
-import { BoundedMarkdown, ExactStageSources, MAX_DOCUMENT_RESULT_BYTES } from "./common"
+import {
+  BoundedMarkdown,
+  ExactStageSources,
+  MAX_DOCUMENT_RESULT_BYTES,
+  documentStageContractDefaults,
+  taskAuthorityFromSources,
+} from "./common"
 
 const ResearchSources = ExactStageSources.pipe(
   Schema.filter((sources) => {
@@ -23,43 +28,17 @@ export const ResearchResult = Schema.Struct({
 })
 
 export const researchStageContract = {
-  ref: { name: "qrspi.research", contractVersion: 1 },
-  stageKey: "research",
-  implementationRevision: "qrspi.research.v1",
-  kind: "document",
+  ...documentStageContractDefaults("research", "Research"),
   requestSchema: ResearchRequest,
   resultSchema: ResearchResult,
-  maxRequestBytes: MAX_STAGE_REQUEST_BYTES,
-  maxResultBytes: MAX_AGENT_OUTPUT_BYTES,
-  compatibility: (definition) => {
-    if (definition.key !== "research") throw new Error("Research requires the research stage key")
-    if (
-      definition.designPolicy !== undefined ||
-      definition.promotionPolicy !== undefined ||
-      definition.structurePolicy !== undefined
-    )
-      throw new Error("Research forbids specialized policy fields")
-    if (
-      definition.outputPolicy._tag !== "Artifact" ||
-      definition.outputPolicy.mediaType !== "text/markdown"
-    )
-      throw new Error("Research requires Markdown artifact output")
-  },
   assembleRequest: (sources) => ({ _tag: "ResearchRequest", sources }),
   buildTask: (request) => ({
     title: "Research workflow solution",
     prompt:
       "Research the workflow solution using the separately materialized ticket and accepted Questions authority. Return only the Research document contract.",
-    authority: {
-      ticketRevision: request.sources.ticketRevision,
-      sources: request.sources.sources,
-      ...(request.sources.revisionIntent === undefined
-        ? {}
-        : { revisionIntent: request.sources.revisionIntent }),
-    },
+    authority: taskAuthorityFromSources(request.sources),
     resultSchema: ResearchResult,
   }),
-  prepareOutput: (result) => ({ _tag: "Document", text: result.document }),
 } satisfies StageContract<
   typeof ResearchRequest.Type,
   typeof ResearchRequest.Encoded,
