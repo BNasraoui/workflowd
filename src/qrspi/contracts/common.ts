@@ -161,6 +161,7 @@ export const RepositoryRelativePath = Schema.String.pipe(
     (path) =>
       !path.startsWith("/") &&
       !path.includes("\\") &&
+      !path.includes("\0") &&
       path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
   ),
 )

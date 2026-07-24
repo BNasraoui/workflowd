@@ -1189,6 +1189,7 @@ describe("exact Implementation contract through erased catalog execution", () =>
       { ...final, scenarioEvidence: [] },
       { ...final, changedPaths: [] },
       { ...final, changedPaths: ["../outside"] },
+      { ...final, changedPaths: ["src/a\0b"] },
       { _tag: "Plan", document: "wrong output kind" },
     ]) {
       expect(
