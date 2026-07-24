@@ -156,6 +156,7 @@ export type StageSourceRole = typeof StageSourceRole.Type
 export const RepositoryRelativePath = Schema.String.pipe(
   Schema.minLength(1),
   Schema.maxLength(512),
+  Schema.filter((path) => path === path.normalize("NFC")),
   Schema.filter(
     (path) =>
       !path.startsWith("/") &&

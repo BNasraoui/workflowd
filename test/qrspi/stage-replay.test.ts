@@ -245,6 +245,39 @@ describe("Research request replay", () => {
         ),
       ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
     }
+
+    const decomposedPath = "artifacts/e\u0301.md"
+    const composedPath = decomposedPath.normalize("NFC")
+    const pointerArtifact = { ...artifact, path: decomposedPath }
+    const pointerIdentity = { ...acceptedIdentity, artifact: pointerArtifact }
+    const pathSubstitutedSource = {
+      ...source,
+      artifact: { ...artifact, path: composedPath },
+      acceptedPointer: {
+        ...pointerIdentity,
+        pointerSha256: canonicalSha256(pointerIdentity),
+      },
+    }
+    const pathSubstitutedSources = {
+      ...sources,
+      sources: [pathSubstitutedSource],
+      sourceSetSha256: canonicalSha256([
+        { role: "Questions", artifact: pathSubstitutedSource.artifact },
+      ]),
+    }
+    const pathSubstituted = encodeStageProduceInput(scope, researchStageContract.ref, {
+      _tag: "ResearchRequest",
+      sources: pathSubstitutedSources,
+    })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog([researchStageContract])
+          .port()
+          .buildTask({ input: pathSubstituted, ticketRevision: original })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
   })
 })
 
@@ -464,4 +497,63 @@ describe("complete built-in contract replay", () => {
         ),
       ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
     })
+
+  test("rejects unexpected durable request fields", async () => {
+    const contract = builtInStageContracts[0]
+    const scope = sourcesFor("questions")
+    const input = encodeStageProduceInput(scope, contract.ref, {
+      _tag: "QuestionsRequest",
+      sources: scope,
+      unexpected: "not in the contract",
+    })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({ input, ticketRevision: original })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+  })
+
+  test("rejects unexpected nested source fields", async () => {
+    const contract = builtInStageContracts[0]
+    const scope = sourcesFor("questions")
+    const input = encodeStageProduceInput(scope, contract.ref, {
+      _tag: "QuestionsRequest",
+      sources: { ...scope, unexpected: "not in exact sources" },
+    })
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .buildTask({ input, ticketRevision: original })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+  })
+
+  test("rejects unexpected agent result fields", async () => {
+    const contract = builtInStageContracts[0]
+    const scope = sourcesFor("questions")
+
+    expect(
+      await Effect.runPromise(
+        new TrustedStageCatalog(builtInStageContracts)
+          .port()
+          .prepareOutput({
+            contract: contract.ref,
+            result: {
+              _tag: "Questions",
+              document: "# Questions",
+              unexpected: "not in the result contract",
+            },
+            context: { scope, target },
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+  })
 })

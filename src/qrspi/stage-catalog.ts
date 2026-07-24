@@ -133,6 +133,8 @@ type RuntimeRegistration = {
   readonly prepareOutput: (result: unknown, context: StageExecutionContext) => unknown
 }
 
+const exactParseOptions = { onExcessProperty: "error" as const }
+
 const RegistrationMetadata = Schema.Struct({
   ref: StageContractRef,
   stageKey: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64)),
@@ -323,14 +325,18 @@ export class TrustedStageCatalog {
       Effect.try({
         try: () => {
           const registration = this.#registration(input.contract)
-          const sources = Schema.decodeUnknownSync(ExactStageSources)(input.sources)
+          const sources = Schema.decodeUnknownSync(
+            ExactStageSources,
+            exactParseOptions,
+          )(input.sources)
           if (sources.stageKey !== registration.descriptor.stageKey) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)
           }
           const request = Schema.decodeUnknownSync(JsonValueSchema)(
-            Schema.decodeUnknownSync(registration.requestSchema)(
-              registration.assembleRequest(sources, input.local),
-            ),
+            Schema.decodeUnknownSync(
+              registration.requestSchema,
+              exactParseOptions,
+            )(registration.assembleRequest(sources, input.local)),
           )
           const bytes = encodedBytes(request)
           if (
@@ -364,7 +370,10 @@ export class TrustedStageCatalog {
           if (durableSources.stageKey !== registration.descriptor.stageKey) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)
           }
-          const request = Schema.decodeUnknownSync(registration.requestSchema)(durableInput.request)
+          const request = Schema.decodeUnknownSync(
+            registration.requestSchema,
+            exactParseOptions,
+          )(durableInput.request)
           const sources = requestSourcesOf(request, registration.descriptor.ref)
           if (
             canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
@@ -416,7 +425,10 @@ export class TrustedStageCatalog {
           if (bytes > MAX_AGENT_OUTPUT_BYTES || bytes > registration.descriptor.maxResultBytes) {
             throw catalogError("result_too_large", registration.descriptor.ref)
           }
-          const result = Schema.decodeUnknownSync(registration.resultSchema)(input.result)
+          const result = Schema.decodeUnknownSync(
+            registration.resultSchema,
+            exactParseOptions,
+          )(input.result)
           const context = Schema.decodeUnknownSync(StageExecutionContext)(input.context)
           if (context.scope.stageKey !== registration.descriptor.stageKey) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)
@@ -494,7 +506,7 @@ function requestSourcesOf(request: unknown, ref: StageContractRef): ExactStageSo
   if (request === null || typeof request !== "object" || !("sources" in request)) {
     throw catalogError("malformed_request", ref)
   }
-  return Schema.decodeUnknownSync(ExactStageSources)(request.sources)
+  return Schema.decodeUnknownSync(ExactStageSources, exactParseOptions)(request.sources)
 }
 
 function structureTaskAuthority(request: unknown) {
