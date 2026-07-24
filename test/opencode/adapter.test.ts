@@ -29,16 +29,29 @@ const requested = {
 }
 
 describe("OpenCodeAdapter.subscribeSessionEvents", () => {
-  test("aborts the SDK subscription when the event iterable ends", async () => {
+  test("aborts and finalizes a live SDK subscription when consumption stops early", async () => {
     let subscriptionSignal: AbortSignal | undefined
+    let sourceFinalized = false
     const client = {
       createSession: async () => ({ id: "unused" }),
       promptSession: async () => undefined,
       subscribeEvents: async (_input, signal) => {
         subscriptionSignal = signal
-        return (async function* () {})()
+        return (async function* () {
+          try {
+            yield {
+              id: "evt_1",
+              type: "session.idle",
+              properties: { sessionID: "ses_1" },
+            }
+            await new Promise<never>(() => undefined)
+          } finally {
+            sourceFinalized = true
+          }
+        })()
       },
       getSessionStatuses: async () => ({}),
+      sessionExists: async () => true,
       listSessionMessages: async () => [],
       abortSession: async () => true,
       listAgents: async () => [],
@@ -51,11 +64,17 @@ describe("OpenCodeAdapter.subscribeSessionEvents", () => {
       { directory: "/tmp/worktree" },
       caller.signal,
     )
-    for await (const _event of events) {
-      // Drain the workflowd-level subscription.
+    for await (const event of events) {
+      expect(event).toEqual({
+        type: "session.status",
+        sessionID: "ses_1",
+        status: { type: "idle" },
+      })
+      break
     }
 
     expect(subscriptionSignal?.aborted).toBe(true)
+    expect(sourceFinalized).toBe(true)
     expect(caller.signal.aborted).toBe(false)
   })
 })

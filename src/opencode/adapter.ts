@@ -347,9 +347,7 @@ async function* normalizeEvents(
             ...(event.properties.sessionID === undefined
               ? {}
               : { sessionID: event.properties.sessionID }),
-            ...(event.properties.error === undefined
-              ? {}
-              : { error: event.properties.error }),
+            ...(event.properties.error === undefined ? {} : { error: event.properties.error }),
           }
           break
       }
