@@ -121,6 +121,25 @@ describe("gateReviewWithHeadEvidence", () => {
     ).toEqual({ _tag: "Pending", reason: "Sonar Automatic Analysis is pending" })
   })
 
+  test("publishes unavailable CI even when a returned check is pending", () => {
+    const result = gateReviewWithHeadEvidence(
+      passingReview,
+      evidence({
+        ci: {
+          state: "unavailable",
+          reason: "A required check context is missing.",
+          checks: [{ name: "Third-party check", state: "pending" }],
+        },
+      }),
+    )
+
+    expect(result._tag).toBe("Ready")
+    if (result._tag === "Pending") return
+    expect(result.review.verdict).toBe("changes_requested")
+    expect(result.review.findings[0]?.title).toBe("Required CI evidence is not current")
+    expect(result.review.findings[0]?.body).toBe("A required check context is missing.")
+  })
+
   test("terminal non-success CI and confirmed conflicts override reviewer prose", () => {
     const result = gateReviewWithHeadEvidence(
       passingReview,
@@ -230,6 +249,18 @@ describe("sanitizeUntrustedText", () => {
     expect(result).toContain("PRIVATE_KEY=[REDACTED]")
     expect(result).toEndWith("\nafter")
   })
+
+  test.each(["postgres", "mysql", "redis"])(
+    "redacts credentials in %s connection URLs",
+    (scheme) => {
+      const result = sanitizeUntrustedText(
+        `DATABASE_URL=${scheme}://database-user:database-password@example.test/database`,
+        1_000,
+      )
+
+      expect(result).toBe(`DATABASE_URL=${scheme}://database-user:[REDACTED]@example.test/database`)
+    },
+  )
 })
 
 test("fresh publication evidence replaces obsolete controller findings without removing agent findings", () => {

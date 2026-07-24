@@ -86,7 +86,10 @@ function pendingReason(
   checks: ReadonlyArray<CheckEvidence>,
   evidence: HeadEvidence,
 ): string | undefined {
-  const pendingCheck = checks.find((check) => check.state === "pending")
+  const pendingCheck =
+    evidence.ci.state === "available"
+      ? checks.find((check) => check.state === "pending")
+      : undefined
   if (pendingCheck !== undefined) return `Required check is pending: ${pendingCheck.name}`
   if (evidence.sonar.state === "pending") return "Sonar Automatic Analysis is pending"
   return evidence.mergeability.state === "pending"
@@ -205,7 +208,7 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
       /\b[-A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[-A-Z0-9_]*\s*[=:][^\r\n]*/gi,
       (assignment) => `${assignment.slice(0, assignment.search(/[=:]/) + 1)}[REDACTED]`,
     )
-    .replace(/(https?:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
   if (sanitized.length <= maxLength) return sanitized
   const marker = "\n[truncated by workflowd]"
   return `${sanitized.slice(0, Math.max(0, maxLength - marker.length))}${marker}`
