@@ -159,11 +159,29 @@ describe("Research request replay", () => {
       contentSha256: "f".repeat(64),
       mediaType: "text/markdown",
     }
-    const source = { role: "Questions" as const, artifact, content: "persisted questions" }
     const target = {
       repository: artifact.repository,
       headRef: "workflow/topic",
       expectedParentSha: "1".repeat(40),
+    }
+    const acceptedIdentity = {
+      role: "Questions" as const,
+      snapshotSha256: "2".repeat(64),
+      runOrdinal: 1,
+      acceptedStageRevision: artifact.stageRevision,
+      targetParentSha: target.expectedParentSha,
+      contract: { name: "qrspi.questions", contractVersion: 1 },
+      contractRegistrationSha256: "3".repeat(64),
+      artifact,
+    }
+    const source = {
+      role: "Questions" as const,
+      artifact,
+      acceptedPointer: {
+        ...acceptedIdentity,
+        pointerSha256: canonicalSha256(acceptedIdentity),
+      },
+      content: "persisted questions",
     }
     const sources = {
       ...scope,

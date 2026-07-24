@@ -33,6 +33,17 @@ export const researchStageContract = {
   maxResultBytes: MAX_AGENT_OUTPUT_BYTES,
   compatibility: (definition) => {
     if (definition.key !== "research") throw new Error("Research requires the research stage key")
+    if (
+      definition.designPolicy !== undefined ||
+      definition.promotionPolicy !== undefined ||
+      definition.structurePolicy !== undefined
+    )
+      throw new Error("Research forbids specialized policy fields")
+    if (
+      definition.outputPolicy._tag !== "Artifact" ||
+      definition.outputPolicy.mediaType !== "text/markdown"
+    )
+      throw new Error("Research requires Markdown artifact output")
   },
   assembleRequest: (sources) => ({ _tag: "ResearchRequest", sources }),
   buildTask: (request) => ({

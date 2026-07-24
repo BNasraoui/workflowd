@@ -55,9 +55,10 @@ describe("exact artifact authority", () => {
       Schema.decodeUnknownSync(ExactArtifactSource)({
         role: "Questions",
         artifact,
+        acceptedPointer: pointer,
         content: "# Questions",
       }),
-    ).toEqual({ role: "Questions", artifact, content: "# Questions" })
+    ).toEqual({ role: "Questions", artifact, acceptedPointer: pointer, content: "# Questions" })
     expect(Schema.decodeUnknownSync(AcceptedPredecessorPointer)(pointer)).toEqual(pointer)
   })
 
@@ -222,6 +223,7 @@ describe("trusted Research source assembly", () => {
     const expectedSource = {
       role: "Questions" as const,
       artifact: sourceArtifact,
+      acceptedPointer,
       content: sourceContent,
     }
     expect(result.sources).toEqual([expectedSource])

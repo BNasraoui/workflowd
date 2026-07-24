@@ -5,7 +5,11 @@ import { BoundedMarkdown, ExactStageSources, MAX_DOCUMENT_RESULT_BYTES } from ".
 
 export const QuestionsRequest = Schema.Struct({
   _tag: Schema.Literal("QuestionsRequest"),
-  sources: ExactStageSources,
+  sources: ExactStageSources.pipe(
+    Schema.filter((sources) =>
+      sources.sources.length === 0 ? true : "Questions accepts no predecessor sources",
+    ),
+  ),
 })
 
 export const QuestionsResult = Schema.Struct({
@@ -25,6 +29,17 @@ export const questionsStageContract = {
   compatibility: (definition) => {
     if (definition.key !== "questions")
       throw new Error("Questions requires the questions stage key")
+    if (
+      definition.designPolicy !== undefined ||
+      definition.promotionPolicy !== undefined ||
+      definition.structurePolicy !== undefined
+    )
+      throw new Error("Questions forbids specialized policy fields")
+    if (
+      definition.outputPolicy._tag !== "Artifact" ||
+      definition.outputPolicy.mediaType !== "text/markdown"
+    )
+      throw new Error("Questions requires Markdown artifact output")
   },
   assembleRequest: (sources) => ({ _tag: "QuestionsRequest", sources }),
   buildTask: (request) => ({

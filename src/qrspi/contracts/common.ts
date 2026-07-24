@@ -15,6 +15,7 @@ import {
 
 export const MAX_DOCUMENT_RESULT_BYTES = 256 * 1024
 export const MAX_STAGE_SOURCE_BYTES = 32 * 1024
+export const MAX_EXACT_STAGE_SOURCES_BYTES = 24 * 1024
 export const MAX_TASK_TITLE_BYTES = 256
 export const MAX_TASK_PROMPT_BYTES = 4 * 1024
 
@@ -179,13 +180,6 @@ export const ArtifactReference = Schema.Struct({
 })
 export type ArtifactReference = typeof ArtifactReference.Type
 
-export const ExactArtifactSource = Schema.Struct({
-  role: StageSourceRole,
-  artifact: ArtifactReference,
-  content: boundedUtf8(MAX_STAGE_SOURCE_BYTES, "Stage source"),
-})
-export type ExactArtifactSource = typeof ExactArtifactSource.Type
-
 const AcceptedPredecessorPointerBase = Schema.Struct({
   role: StageSourceRole,
   snapshotSha256: Sha256,
@@ -207,6 +201,21 @@ export const AcceptedPredecessorPointer = AcceptedPredecessorPointerBase.pipe(
   }),
 )
 export type AcceptedPredecessorPointer = typeof AcceptedPredecessorPointer.Type
+
+export const ExactArtifactSource = Schema.Struct({
+  role: StageSourceRole,
+  artifact: ArtifactReference,
+  acceptedPointer: AcceptedPredecessorPointer,
+  content: boundedUtf8(MAX_STAGE_SOURCE_BYTES, "Stage source"),
+}).pipe(
+  Schema.filter((source) =>
+    source.role === source.acceptedPointer.role &&
+    canonicalSha256(source.artifact) === canonicalSha256(source.acceptedPointer.artifact)
+      ? true
+      : "Source artifact does not match its accepted predecessor pointer",
+  ),
+)
+export type ExactArtifactSource = typeof ExactArtifactSource.Type
 
 export class StageSourceCurrentnessMismatch extends Data.TaggedError(
   "StageSourceCurrentnessMismatch",
@@ -290,6 +299,29 @@ export const ExactStageSources = ExactStageSourcesBase.pipe(
       ? true
       : "sourceSetSha256 does not match ordered source identities",
   ),
+  Schema.filter((value) => {
+    const repository = value.target.repository
+    const valid =
+      value.ticketRevision.workflowId === value.workflowId &&
+      value.sources.every(({ role, artifact, acceptedPointer }) => {
+        const expectedStageKey = stageKeyBySourceRole[role]
+        return (
+          artifact.workflowId === value.workflowId &&
+          artifact.generation === value.generation &&
+          artifact.stageKey === expectedStageKey &&
+          artifact.repository.providerInstanceId === repository.providerInstanceId &&
+          artifact.repository.repositoryId === repository.repositoryId &&
+          acceptedPointer.acceptedStageRevision === artifact.stageRevision &&
+          acceptedPointer.targetParentSha === value.target.expectedParentSha
+        )
+      })
+    return valid ? true : "Source authority does not match the request scope and target"
+  }),
+  Schema.filter((value) =>
+    encodedBytes(value) <= MAX_EXACT_STAGE_SOURCES_BYTES
+      ? true
+      : `Exact stage sources exceed ${MAX_EXACT_STAGE_SOURCES_BYTES} encoded bytes`,
+  ),
 )
 export type ExactStageSources = typeof ExactStageSources.Type
 
@@ -361,3 +393,16 @@ export const encodeStageProduceInput = (
 
 export const BoundedTaskTitle = boundedUtf8(MAX_TASK_TITLE_BYTES, "Task title")
 export const BoundedTaskPrompt = boundedUtf8(MAX_TASK_PROMPT_BYTES, "Task prompt")
+
+const stageKeyBySourceRole: Readonly<Record<StageSourceRole, string>> = {
+  Questions: "questions",
+  Research: "research",
+  Design: "design",
+  Structure: "structure",
+  Plan: "plan",
+  Implementation: "implementation",
+}
+
+function encodedBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8")
+}

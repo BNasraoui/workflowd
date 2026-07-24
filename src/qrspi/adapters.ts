@@ -29,9 +29,7 @@ const RawArtifactContent = Schema.Struct({
   path: Schema.String,
   sha: Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
   encoding: Schema.Literal("base64"),
-  content: Schema.String.pipe(
-    Schema.pattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
-  ),
+  content: Schema.String,
   size: Schema.Int.pipe(Schema.nonNegative()),
 })
 
@@ -225,10 +223,16 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       const content = Schema.decodeUnknownSync(RawArtifactContent)(response.data)
-      const bytes = Uint8Array.from(Buffer.from(content.content, "base64"))
+      const normalizedContent = content.content.replace(/[\r\n]/g, "")
+      if (
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalizedContent)
+      ) {
+        throw new Error("GitHub returned malformed base64 artifact content")
+      }
+      const bytes = Uint8Array.from(Buffer.from(normalizedContent, "base64"))
       if (
         bytes.byteLength !== content.size ||
-        Buffer.from(bytes).toString("base64") !== content.content
+        Buffer.from(bytes).toString("base64") !== normalizedContent
       ) {
         throw new Error("GitHub returned malformed base64 artifact content")
       }

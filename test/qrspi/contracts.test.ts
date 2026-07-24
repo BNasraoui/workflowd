@@ -13,6 +13,7 @@ import {
   StageProduceInput,
   StageTaskAuthority,
   MAX_DOCUMENT_RESULT_BYTES,
+  MAX_EXACT_STAGE_SOURCES_BYTES,
   PlanRequest,
   PlanResult,
   QuestionsRequest,
@@ -76,9 +77,27 @@ const researchArtifact = {
   contentSha256: sha("3"),
   mediaType: "text/markdown",
 }
+function acceptedPointerFor(
+  role: "Questions" | "Research" | "Design" | "Structure" | "Plan",
+  artifact: typeof researchArtifact,
+  marker: string,
+) {
+  const identity = {
+    role,
+    snapshotSha256: sha(marker),
+    runOrdinal: 1,
+    acceptedStageRevision: artifact.stageRevision,
+    targetParentSha: target.expectedParentSha,
+    contract: { name: `qrspi.${role.toLowerCase()}`, contractVersion: 1 },
+    contractRegistrationSha256: sha(marker),
+    artifact,
+  }
+  return { ...identity, pointerSha256: canonicalSha256(identity) }
+}
 const researchSource = {
   role: "Questions" as const,
   artifact: researchArtifact,
+  acceptedPointer: acceptedPointerFor("Questions", researchArtifact, "1"),
   content: "# Persisted Questions",
 }
 const researchSources = {
@@ -100,6 +119,7 @@ const designResearchArtifact = {
 const designResearchSource = {
   role: "Research" as const,
   artifact: designResearchArtifact,
+  acceptedPointer: acceptedPointerFor("Research", designResearchArtifact, "4"),
   content: "# Persisted Research",
 }
 const designSources = {
@@ -124,6 +144,7 @@ const structureDesignArtifact = {
 const structureDesignSource = {
   role: "Design" as const,
   artifact: structureDesignArtifact,
+  acceptedPointer: acceptedPointerFor("Design", structureDesignArtifact, "7"),
   content: "# Persisted Design",
 }
 const structureSources = {
@@ -180,6 +201,7 @@ const planStructureArtifact = {
 const planStructureSource = {
   role: "Structure" as const,
   artifact: planStructureArtifact,
+  acceptedPointer: acceptedPointerFor("Structure", planStructureArtifact, "b"),
   content: "# Persisted Structure",
 }
 const planSources = {
@@ -210,6 +232,7 @@ const implementationPlanArtifact = {
 const implementationPlanSource = {
   role: "Plan" as const,
   artifact: implementationPlanArtifact,
+  acceptedPointer: acceptedPointerFor("Plan", implementationPlanArtifact, "d"),
   content: "# Persisted Plan",
 }
 const implementationSources = {
@@ -307,6 +330,43 @@ describe("shared exact stage contracts", () => {
     expect(() => Schema.decodeUnknownSync(StageProduceInput)(encoded)).toThrow("sourceSetSha256")
   })
 
+  test("bounds a maximum-cardinality source envelope at the exact encoded boundary", () => {
+    const baseBytes = Buffer.byteLength(JSON.stringify(implementationSources), "utf8")
+    const originalBytes = Buffer.byteLength(implementationPlanSource.content, "utf8")
+    const exactContent = "x".repeat(MAX_EXACT_STAGE_SOURCES_BYTES - baseBytes + originalBytes)
+    const exactSources = {
+      ...implementationSources,
+      sources: [
+        { ...implementationPlanSource, content: exactContent },
+        ...implementationSources.sources.slice(1),
+      ],
+    }
+
+    expect(Buffer.byteLength(JSON.stringify(exactSources), "utf8")).toBe(
+      MAX_EXACT_STAGE_SOURCES_BYTES,
+    )
+    expect(Schema.decodeUnknownSync(ExactStageSources)(exactSources)).toEqual(exactSources)
+    const request = {
+      _tag: "ImplementationRequest" as const,
+      sources: exactSources,
+      checkpointPosition: 1,
+      expectedParentSha: target.expectedParentSha,
+    }
+    expect(Buffer.byteLength(JSON.stringify(request), "utf8")).toBeLessThanOrEqual(
+      MAX_STAGE_REQUEST_BYTES,
+    )
+    expect(Schema.decodeUnknownSync(ImplementationRequest)(request)).toEqual(request)
+    expect(() =>
+      Schema.decodeUnknownSync(ExactStageSources)({
+        ...exactSources,
+        sources: [
+          { ...exactSources.sources[0], content: `${exactContent}x` },
+          ...exactSources.sources.slice(1),
+        ],
+      }),
+    ).toThrow("encoded bytes")
+  })
+
   test("rejects the historical placeholder child input", () => {
     expect(() =>
       Schema.decodeUnknownSync(StageProduceInput)({
@@ -394,6 +454,39 @@ describe("exact Questions contract through erased catalog execution", () => {
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+  })
+
+  test("rejects predecessor authority for Questions during assembly and replay", async () => {
+    const catalog = new TrustedStageCatalog([questionsStageContract]).port()
+    const invalidSources = {
+      ...sources,
+      sources: [researchSource],
+      sourceSetSha256: canonicalSha256([{ role: "Questions", artifact: researchArtifact }]),
+    }
+
+    expect(
+      await Effect.runPromise(
+        catalog
+          .assembleRequest({
+            contract: questionsStageContract.ref,
+            sources: invalidSources,
+            maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+
+    const request = { _tag: "QuestionsRequest" as const, sources: invalidSources }
+    expect(
+      await Effect.runPromise(
+        catalog
+          .buildTask({
+            input: encodeStageProduceInput(scope, questionsStageContract.ref, request),
+            ticketRevision: verifiedTicket,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
   })
 
   test("enforces exact UTF-8 document and configured complete-request byte boundaries", async () => {
@@ -527,6 +620,43 @@ describe("exact Research contract through erased catalog execution", () => {
           .pipe(Effect.either),
       ),
     ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+  })
+
+  test("rejects rehashed cross-scope artifact authority during durable replay", async () => {
+    const catalog = new TrustedStageCatalog([researchStageContract]).port()
+    const artifact = { ...researchArtifact, workflowId: `wf_${sha("f")}` }
+    const source = { ...researchSource, artifact }
+    const changedSources = {
+      ...researchSources,
+      sources: [source],
+      sourceSetSha256: canonicalSha256([{ role: "Questions", artifact }]),
+    }
+    const request = { _tag: "ResearchRequest" as const, sources: changedSources }
+    const input = encodeStageProduceInput(researchScope, researchStageContract.ref, request)
+
+    expect(
+      await Effect.runPromise(
+        catalog.buildTask({ input, ticketRevision: verifiedTicket }).pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+  })
+
+  test("rechecks the complete encoded request bound during durable replay", async () => {
+    const catalog = new TrustedStageCatalog([researchStageContract]).port()
+    const oversizedSource = { ...researchSource, content: "x".repeat(MAX_STAGE_REQUEST_BYTES) }
+    const oversizedSources = { ...researchSources, sources: [oversizedSource] }
+    const request = { _tag: "ResearchRequest" as const, sources: oversizedSources }
+
+    expect(
+      await Effect.runPromise(
+        catalog
+          .buildTask({
+            input: encodeStageProduceInput(researchScope, researchStageContract.ref, request),
+            ticketRevision: verifiedTicket,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { reason: "request_too_large" } })
   })
 
   test("projects only bounded Research results", async () => {

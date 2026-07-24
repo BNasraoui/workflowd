@@ -87,6 +87,43 @@ describe("QRSPI external adapters", () => {
     })
   })
 
+  test("accepts GitHub line-wrapped base64 artifact content", async () => {
+    const bytes = new TextEncoder().encode("# A sufficiently long Markdown artifact\n".repeat(4))
+    const encoded = Buffer.from(bytes).toString("base64")
+    const wrapped = encoded.match(/.{1,60}/g)!.join("\n")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async () => ({
+            data: {
+              type: "file",
+              path: "artifacts/questions.md",
+              sha: "b".repeat(40),
+              encoding: "base64",
+              content: wrapped,
+              size: bytes.byteLength,
+            },
+          }),
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const result = await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: bytes.byteLength,
+      }),
+    )
+
+    expect(result.bytes).toEqual(bytes)
+  })
+
   test.each([
     ["one byte over", { size: 4, content: Buffer.from("éx").toString("base64") }, 3],
     ["malformed base64", { size: 1, content: "***" }, 10],

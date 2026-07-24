@@ -265,7 +265,12 @@ function readSource(
         }),
       )
     }
-    return { role: pointer.role, artifact: pointer.artifact, content } satisfies ExactArtifactSource
+    return {
+      role: pointer.role,
+      artifact: pointer.artifact,
+      acceptedPointer: pointer,
+      content,
+    } satisfies ExactArtifactSource
   })
 }
 

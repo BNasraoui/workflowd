@@ -347,8 +347,16 @@ export class TrustedStageCatalog {
     buildTask: (input) =>
       Effect.try({
         try: () => {
+          const registration = this.#registration(diagnosticContract(input.input))
+          if (
+            input.input !== null &&
+            typeof input.input === "object" &&
+            "request" in input.input &&
+            encodedBytes(input.input.request) > registration.descriptor.maxRequestBytes
+          ) {
+            throw catalogError("request_too_large", registration.descriptor.ref)
+          }
           const durableInput = Schema.decodeUnknownSync(StageProduceInput)(input.input)
-          const registration = this.#registration(durableInput.contract)
           const durableSources = requestSourcesOf(durableInput.request, registration.descriptor.ref)
           if (durableSources.stageKey !== registration.descriptor.stageKey) {
             throw catalogError("identity_mismatch", registration.descriptor.ref)

@@ -20,6 +20,7 @@ import {
   encodeStageProduceInput,
   planStageContract,
   questionsStageContract,
+  researchStageContract,
   structureStageContract,
 } from "../../src/qrspi/contracts"
 import {
@@ -1072,6 +1073,99 @@ describe("persisted stage snapshots", () => {
       },
     })
   })
+})
+
+describe("Questions and Research contract compatibility", () => {
+  const definitionFor = (stageKey: "questions" | "research") => ({
+    key: stageKey,
+    kind: "document" as const,
+    contract: { name: `qrspi.${stageKey}`, contractVersion: 1 },
+    activation: { mode: "enabled" as const },
+    definitionVersion: 1,
+    maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
+    producer: {
+      harness: { name: "opencode", version: 1 },
+      agent: `${stageKey}-agent`,
+      model: "openai/gpt-5.6-sol",
+      timeoutMs: 1_000,
+      retry: { maxAttempts: 1, backoffMs: 1 },
+    },
+    outputPolicy: {
+      _tag: "Artifact" as const,
+      pathTemplate: `artifacts/${stageKey}.md`,
+      mediaType: "text/markdown",
+    },
+    reviewPolicy: { mode: "none" as const },
+    humanGatePolicy: { mode: "none" as const },
+  })
+
+  test.each([
+    [questionsStageContract, "questions"],
+    [researchStageContract, "research"],
+  ] as const)("rejects non-Markdown and specialized %s definitions", async (contract, stageKey) => {
+    const catalog = new TrustedStageCatalog([contract]).port()
+    const definition = definitionFor(stageKey)
+    for (const change of [
+      { outputPolicy: { ...definition.outputPolicy, mediaType: "application/json" } },
+      { designPolicy: { name: "qrspi.design-policy", version: 1 } },
+    ]) {
+      expect(
+        await Effect.runPromise(
+          catalog.validateCompatibility({ ...definition, ...change }).pipe(Effect.either),
+        ),
+      ).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+    }
+  })
+
+  test.each([
+    [questionsStageContract, "questions"],
+    [researchStageContract, "research"],
+  ] as const)(
+    "reapplies %s media compatibility to persisted snapshots",
+    async (contract, stageKey) => {
+      const catalog = new TrustedStageCatalog([contract])
+      const definition = {
+        ...definitionFor(stageKey),
+        outputPolicy: {
+          ...definitionFor(stageKey).outputPolicy,
+          mediaType: "application/json",
+        },
+      }
+      const harness: AgentHarnessPort = {
+        describe: (ref) => Effect.succeed({ ref, registrationSha256: "b".repeat(64) }),
+        validateAvailability: () => Effect.void,
+        prepare: () => Effect.die("unused"),
+        createSession: () => Effect.die("unused"),
+        resumeSession: () => Effect.die("unused"),
+        abortSession: () => Effect.die("unused"),
+      }
+      const snapshot = {
+        sequencePosition: 1,
+        stageDefinitionSha256: canonicalSha256({
+          contractVersion: 1,
+          normalizationVersion: "RFC8785-NFC-1",
+          definition,
+        }),
+        definition,
+        contractRegistrationSha256: catalog.descriptor(contract.ref).registrationSha256,
+        harnessRegistrationSha256: "b".repeat(64),
+      }
+
+      expect(
+        await Effect.runPromise(
+          validatePersistedSnapshots({
+            workflowDefinitionSha256: "a".repeat(64),
+            snapshots: [snapshot],
+            stageCatalog: catalog.port(),
+            agentHarness: harness,
+          }).pipe(Effect.either),
+        ),
+      ).toMatchObject({
+        _tag: "Left",
+        left: { phase: "contract", reason: "incompatible_definition", stageKey },
+      })
+    },
+  )
 })
 
 describe("Design contract compatibility", () => {
