@@ -1,0 +1,1 @@
+{"id":"int-4855ded07041433efc6ee26c9f7d4884","kind":"field_change","created_at":"2026-07-24T07:23:35.786889055Z","actor":"Ben","issue_id":"workflowd-3sj","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented workflowd-owned SSE subscription cleanup with adapter-boundary regression coverage and passing verification."}}

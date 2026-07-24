@@ -147,7 +147,26 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     input: OpenCodeSessionDirectoryInput,
     signal: AbortSignal,
   ): Promise<AsyncIterable<OpenCodeSessionEvent>> {
-    return normalizeEvents(await this.client.subscribeEvents(input, signal))
+    const controller = new AbortController()
+    const interrupt = () => controller.abort(signal.reason)
+    if (signal.aborted) interrupt()
+    else signal.addEventListener("abort", interrupt, { once: true })
+
+    let cleanedUp = false
+    const cleanup = () => {
+      if (cleanedUp) return
+      cleanedUp = true
+      signal.removeEventListener("abort", interrupt)
+      controller.abort()
+    }
+
+    try {
+      const events = await this.client.subscribeEvents(input, controller.signal)
+      return normalizeEvents(events, cleanup)
+    } catch (cause) {
+      cleanup()
+      throw cause
+    }
   }
 
   async getSessionStatus(
@@ -281,43 +300,48 @@ function normalizeAssistantMessage(
 
 async function* normalizeEvents(
   stream: AsyncIterable<Event>,
+  cleanup: () => void,
 ): AsyncIterable<OpenCodeSessionEvent> {
-  for await (const event of stream) {
-    switch (event.type) {
-      case "message.updated":
-        if (event.properties.info.role === "assistant") {
-          yield {
-            type: "message.updated",
-            sessionID: event.properties.sessionID,
-            message: normalizeAssistantMessage(event.properties.info),
+  try {
+    for await (const event of stream) {
+      switch (event.type) {
+        case "message.updated":
+          if (event.properties.info.role === "assistant") {
+            yield {
+              type: "message.updated",
+              sessionID: event.properties.sessionID,
+              message: normalizeAssistantMessage(event.properties.info),
+            }
           }
-        }
-        break
-      case "session.status":
-        yield {
-          type: "session.status",
-          sessionID: event.properties.sessionID,
-          status: event.properties.status,
-        }
-        break
-      case "session.idle":
-        yield {
-          type: "session.status",
-          sessionID: event.properties.sessionID,
-          status: { type: "idle" },
-        }
-        break
-      case "session.error":
-        yield {
-          type: "session.error",
-          ...(event.properties.sessionID === undefined
-            ? {}
-            : { sessionID: event.properties.sessionID }),
-          ...(event.properties.error === undefined
-            ? {}
-            : { error: event.properties.error }),
-        }
-        break
+          break
+        case "session.status":
+          yield {
+            type: "session.status",
+            sessionID: event.properties.sessionID,
+            status: event.properties.status,
+          }
+          break
+        case "session.idle":
+          yield {
+            type: "session.status",
+            sessionID: event.properties.sessionID,
+            status: { type: "idle" },
+          }
+          break
+        case "session.error":
+          yield {
+            type: "session.error",
+            ...(event.properties.sessionID === undefined
+              ? {}
+              : { sessionID: event.properties.sessionID }),
+            ...(event.properties.error === undefined
+              ? {}
+              : { error: event.properties.error }),
+          }
+          break
+      }
     }
+  } finally {
+    cleanup()
   }
 }
