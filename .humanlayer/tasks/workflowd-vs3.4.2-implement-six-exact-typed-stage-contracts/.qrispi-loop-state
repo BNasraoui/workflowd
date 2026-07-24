@@ -16,3 +16,6 @@ design-synthesis-r4|accepted|03-design-acceptance-synthesis-r4.md|db113815359703
 design-package-r4|accepted|03-design-acceptance-package-r4.json|7b6422410f3dfcdd34bc2c1c20194f9798431285579011dd092390c1586b17f7
 design-gate-r4|accepted|03-design-gate-response-r4.json|566e85845f46b4386a65fd790ee8819d3d4c0d28e36cc77ffde1cab5331fcbba
 design-promotion-r4|accepted|03-provenance-promotion-result-r4.json|bb8941f3d4b90a8e523818ea68f77ee900c2edb18839bf433dc5ed9af13d2b92
+structure-producer-r1|accepted|04-structure-outline-exact-stage-contracts.md|00a4d00029e0c595ab76f1ff63f6e34fc1b6eec9762aab0faf75a25242c21a04
+structure-producer-b-r1|accepted|04-structure-candidate-b-r1.md|3eb08fa05e0f8951af383386bc1f23877cb1aea2ee2846696ac6632536fb25fa
+structure-comparison-r1|accepted|04-structure-comparison-r1.md|8878da434f223f88d47fc7e802292a2a62dd78716c587f042784f621bb2aabf5
