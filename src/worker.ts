@@ -443,11 +443,12 @@ export function runJobIteration(options: {
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
-      maxAttempts: evidenceIsPending(exit.cause)
-        ? Number.MAX_SAFE_INTEGER
-        : retryableFailure(exit.cause)
-          ? (agentFailureContext?.retryPolicy.maxAttempts ?? options.maxAttempts)
-          : work.attempt,
+      maxAttempts: jobMaxAttempts(
+        exit.cause,
+        work.attempt,
+        options.maxAttempts,
+        agentFailureContext,
+      ),
       ...(agentFailureContext === undefined
         ? {}
         : {
@@ -511,6 +512,17 @@ export function runPublicationIteration(options: {
 
 function evidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
   return Option.getOrUndefined(Cause.failureOption(cause)) instanceof EvidencePending
+}
+
+function jobMaxAttempts<E>(
+  cause: Cause.Cause<E>,
+  attempt: number,
+  configuredMaxAttempts: number,
+  agentFailureContext: AgentFailureContext | undefined,
+): number {
+  if (evidenceIsPending(cause)) return Number.MAX_SAFE_INTEGER
+  if (!retryableFailure(cause)) return attempt
+  return agentFailureContext?.retryPolicy.maxAttempts ?? configuredMaxAttempts
 }
 
 function publicationEvidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
