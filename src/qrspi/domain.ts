@@ -2,10 +2,10 @@ import { createHash } from "node:crypto"
 import { Data, Schema } from "effect"
 import { AgentHarnessRef, MAX_STAGE_REQUEST_BYTES } from "../agent-harness"
 
-const BoundedText = (maximum: number) =>
+export const BoundedText = (maximum: number) =>
   Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
-const Sha256 = Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/))
-const GitSha = Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/))
+export const Sha256 = Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/))
+export const GitSha = Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/))
 
 export const RepositoryReference = Schema.Struct({
   providerInstanceId: BoundedText(128),
@@ -579,23 +579,7 @@ export function checkTicket(
   }
 
   const readyTicket = Schema.decodeUnknownSync(ReadyTicket)(ticket)
-  const product = {
-    issueType: readyTicket.issueType,
-    title: readyTicket.title,
-    ...(readyTicket.userStory === undefined ? {} : { userStory: readyTicket.userStory }),
-    description: readyTicket.description,
-    sources: readyTicket.sources,
-    ...(readyTicket.outOfScope === undefined ? {} : { outOfScope: readyTicket.outOfScope }),
-    acceptanceCriteria: readyTicket.acceptanceCriteria,
-    scenarios: readyTicket.scenarios,
-  }
-  const normalized = normalize({
-    contractVersion: 1,
-    normalizationVersion: "RFC8785-NFC-1",
-    product,
-    scenarioCoverage,
-  })
-  const ticketRevisionSha256 = createHash("sha256").update(canonicalJson(normalized)).digest("hex")
+  const ticketRevisionSha256 = ticketRevisionSha256For(readyTicket, scenarioCoverage)
   const ticketRevision: TicketRevision = {
     readyTicket,
     scenarioCoverage,
@@ -604,6 +588,27 @@ export function checkTicket(
     ticketRevisionSha256,
   }
   return { _tag: "Ready", readyTicket, ticketRevision, checkedAt }
+}
+
+export function ticketRevisionSha256For(
+  readyTicket: ReadyTicket,
+  scenarioCoverage: ReadonlyArray<ReadonlyArray<number>>,
+): string {
+  return canonicalSha256({
+    contractVersion: 1,
+    normalizationVersion: "RFC8785-NFC-1",
+    product: {
+      issueType: readyTicket.issueType,
+      title: readyTicket.title,
+      ...(readyTicket.userStory === undefined ? {} : { userStory: readyTicket.userStory }),
+      description: readyTicket.description,
+      sources: readyTicket.sources,
+      ...(readyTicket.outOfScope === undefined ? {} : { outOfScope: readyTicket.outOfScope }),
+      acceptanceCriteria: readyTicket.acceptanceCriteria,
+      scenarios: readyTicket.scenarios,
+    },
+    scenarioCoverage,
+  })
 }
 
 function isUnobservableCriterion(criterion: string): boolean {

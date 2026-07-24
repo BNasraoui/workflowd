@@ -24,6 +24,15 @@ const RawBead = Schema.Struct({
 })
 const RawBeads = Schema.Array(RawBead).pipe(Schema.itemsCount(1))
 
+const RawArtifactContent = Schema.Struct({
+  type: Schema.Literal("file"),
+  path: Schema.String,
+  sha: Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+  encoding: Schema.Literal("base64"),
+  content: Schema.String,
+  size: Schema.Int.pipe(Schema.nonNegative()),
+})
+
 export class BeadsCliTicketSource implements TicketSourcePort {
   constructor(
     private readonly workspace: string,
@@ -167,6 +176,9 @@ type QrspiOctokit = {
           }
         }
       }>
+      readonly getContent?: (
+        input: Parameters<RepositoriesApi["getContent"]>[0],
+      ) => Promise<{ readonly data: unknown }>
     }
     readonly pulls: {
       readonly list: (
@@ -192,6 +204,81 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
     private readonly client: OctokitProvider,
     private readonly isTrustedPublication: TrustedPublicationVerifier = () => Promise.resolve(null),
   ) {}
+
+  readonly readArtifact: QrspiRepositoryPort["readArtifact"] = (input) =>
+    this.attempt("read exact repository artifact", async (signal) => {
+      if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
+        throw new Error("Artifact byte ceiling must be a non-negative safe integer")
+      }
+      const requestedName = repositoryName(input.repository)
+      const client = await this.client(this.config.installationId)
+      if (client.rest.repos.getContent === undefined) {
+        throw new Error("GitHub content API is unavailable")
+      }
+      const repository = await client.rest.repos.get({
+        ...requestedName,
+        request: { signal },
+      })
+      const observed = decodeRepository({
+        providerInstanceId: this.config.repository.providerInstanceId,
+        repositoryId: String(repository.data.id),
+        repositoryFullName: repository.data.full_name,
+      })
+      if (
+        observed.providerInstanceId !== input.repository.providerInstanceId ||
+        observed.repositoryId !== input.repository.repositoryId
+      ) {
+        throw new Error("Repository locator resolved to a different stable identity")
+      }
+      const { owner, repo } = repositoryName(observed)
+      if (client.rest.repos.getCommit === undefined) {
+        throw new Error("GitHub commit API is unavailable")
+      }
+      const commitResponse = await client.rest.repos.getCommit({
+        owner,
+        repo,
+        ref: input.commitSha,
+        request: { signal },
+      })
+      const observedCommitSha = Schema.decodeUnknownSync(
+        Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+      )(commitResponse.data.sha)
+      if (observedCommitSha !== input.commitSha) {
+        throw new Error("GitHub resolved the artifact reference to a different commit")
+      }
+      const response = await client.rest.repos.getContent({
+        owner,
+        repo,
+        path: input.path,
+        ref: observedCommitSha,
+        request: { signal },
+      })
+      const content = Schema.decodeUnknownSync(RawArtifactContent)(response.data)
+      const normalizedContent = content.content.replace(/[\r\n]/g, "")
+      if (
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalizedContent)
+      ) {
+        throw new Error("GitHub returned malformed base64 artifact content")
+      }
+      const bytes = Uint8Array.from(Buffer.from(normalizedContent, "base64"))
+      if (
+        bytes.byteLength !== content.size ||
+        Buffer.from(bytes).toString("base64") !== normalizedContent
+      ) {
+        throw new Error("GitHub returned malformed base64 artifact content")
+      }
+      if (bytes.byteLength > input.maxBytes) {
+        throw new Error(
+          `Artifact exceeded ${input.maxBytes} bytes: observed ${bytes.byteLength} bytes`,
+        )
+      }
+      return {
+        commitSha: observedCommitSha,
+        path: content.path,
+        blobSha: content.sha,
+        bytes,
+      }
+    })
 
   readonly inspect: QrspiRepositoryPort["inspect"] = (input) =>
     this.attempt("inspect repository target", async (signal) => {

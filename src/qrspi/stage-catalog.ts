@@ -6,20 +6,56 @@ import {
   type AgentHarnessSelection,
 } from "../agent-harness"
 import { stageHarnessRef } from "../opencode"
+import { JsonValueSchema, type JsonValue } from "../json"
 import {
   ExecutableStageSnapshot,
+  Sha256,
   StageContractRef,
+  TicketRevision,
   type StageDefinition,
   type WorkflowDefinition,
   WorkflowDefinitionValidationError,
   normalizeWorkflowDefinition,
   stageDefinitionSha256,
+  ticketRevisionSha256For,
+  workflowIdFor,
   workflowDefinitionSha256,
 } from "./domain"
 import { canonicalSha256 } from "./domain"
+import {
+  BoundedTaskPrompt,
+  BoundedTaskTitle,
+  AcceptedPredecessorPointer,
+  ExactStageScope,
+  ExactStageSources,
+  PreparedStageOutput,
+  RepositoryTarget,
+  StageExecutionContext,
+  StageProduceInput,
+  StageKey,
+  StageTaskAuthority,
+  StructureAuthority,
+} from "./contracts/common"
 
-export type ExactStageSources = Readonly<Record<string, unknown>>
-export type StageExecutionContext = Readonly<Record<string, unknown>>
+const ReplaySnapshotAuthority = Schema.Struct({
+  stageKey: StageKey,
+  stageDefinitionSha256: Sha256,
+  contract: StageContractRef,
+  contractRegistrationSha256: Sha256,
+})
+
+const StageReplayAuthority = Schema.Struct({
+  target: RepositoryTarget,
+  scope: ExactStageScope,
+  stageSnapshot: Schema.Struct({
+    ...ReplaySnapshotAuthority.fields,
+    maxEncodedInputBytes: Schema.Int.pipe(Schema.positive()),
+  }),
+  predecessorSnapshots: Schema.Array(ReplaySnapshotAuthority).pipe(Schema.maxItems(5)),
+  acceptedPointers: Schema.Array(AcceptedPredecessorPointer).pipe(Schema.maxItems(5)),
+})
+export type StageReplayAuthority = typeof StageReplayAuthority.Type
+
 export type PreparedDocumentOutput = { readonly _tag: "Document"; readonly text: string }
 export type PreparedImplementationStepOutput = {
   readonly _tag: "ImplementationStep"
@@ -28,28 +64,49 @@ export type PreparedImplementationStepOutput = {
 export type AgentTask<Result, ResultEncoded> = {
   readonly title: string
   readonly prompt: string
+  readonly authority: StageTaskAuthority
   readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
 }
 
-export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = {
+type StageContractBase<Request, RequestEncoded, Result, ResultEncoded> = {
   readonly ref: StageContractRef
+  readonly stageKey: string
   readonly implementationRevision: string
-  readonly kind: StageDefinition["kind"]
   readonly requestSchema: Schema.Schema<Request, RequestEncoded, never>
   readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
   readonly maxRequestBytes: number
   readonly maxResultBytes: number
   readonly compatibility: (definition: StageDefinition) => void
-  readonly assembleRequest: (sources: ExactStageSources) => RequestEncoded
+  readonly assembleRequest: (sources: ExactStageSources, local?: JsonValue) => RequestEncoded
   readonly buildTask: (request: Request) => AgentTask<Result, ResultEncoded>
-  readonly prepareOutput: (
-    result: Result,
-    context: StageExecutionContext,
-  ) => PreparedDocumentOutput | PreparedImplementationStepOutput
 }
 
-export type StageContractRegistration = {
+export type StageContract<Request, RequestEncoded, Result, ResultEncoded> = StageContractBase<
+  Request,
+  RequestEncoded,
+  Result,
+  ResultEncoded
+> &
+  (
+    | {
+        readonly kind: "document"
+        readonly prepareOutput: (
+          result: Result,
+          context: StageExecutionContext,
+        ) => PreparedDocumentOutput
+      }
+    | {
+        readonly kind: "implementation"
+        readonly prepareOutput: (
+          result: Result,
+          context: StageExecutionContext,
+        ) => PreparedImplementationStepOutput
+      }
+  )
+
+type StageContractRegistration = {
   readonly ref: StageContractRef
+  readonly stageKey?: unknown
   readonly implementationRevision?: unknown
   readonly kind?: unknown
   readonly requestSchema?: unknown
@@ -64,6 +121,7 @@ export type StageContractRegistration = {
 
 export type StageContractDescriptor = {
   readonly ref: StageContractRef
+  readonly stageKey: string
   readonly kind: StageDefinition["kind"]
   readonly maxRequestBytes: number
   readonly maxResultBytes: number
@@ -77,6 +135,14 @@ export class StageCatalogError extends Data.TaggedError("StageCatalogError")<{
     | "unknown_reference"
     | "untrusted_source"
     | "incompatible_definition"
+    | "malformed_request"
+    | "request_too_large"
+    | "malformed_input"
+    | "identity_mismatch"
+    | "malformed_task"
+    | "malformed_result"
+    | "result_too_large"
+    | "malformed_output"
   readonly reference: string
   readonly cause?: string
 }> {}
@@ -84,13 +150,19 @@ export class StageCatalogError extends Data.TaggedError("StageCatalogError")<{
 type RuntimeRegistration = {
   readonly source: StageContractRegistration
   readonly descriptor: StageContractDescriptor
-  readonly requestSchema: Schema.Schema.Any
-  readonly resultSchema: Schema.Schema.Any
+  readonly requestSchema: Schema.Schema<unknown, unknown, never>
+  readonly resultSchema: Schema.Schema<unknown, unknown, never>
   readonly compatibility: (definition: StageDefinition) => void
+  readonly assembleRequest: (sources: ExactStageSources, local?: JsonValue) => unknown
+  readonly buildTask: (request: unknown) => AgentTask<unknown, unknown>
+  readonly prepareOutput: (result: unknown, context: StageExecutionContext) => unknown
 }
+
+const exactParseOptions = { onExcessProperty: "error" as const }
 
 const RegistrationMetadata = Schema.Struct({
   ref: StageContractRef,
+  stageKey: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64)),
   implementationRevision: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
   kind: Schema.Literal("document", "implementation"),
   maxRequestBytes: Schema.Int.pipe(Schema.positive()),
@@ -108,37 +180,63 @@ function diagnosticReference(source: unknown): string {
   }
 }
 
+function isErasedSchema(value: unknown): value is Schema.Schema<unknown, unknown, never> {
+  return Schema.isSchema(value)
+}
+
+function isCompatibility(value: unknown): value is RuntimeRegistration["compatibility"] {
+  return typeof value === "function"
+}
+
+function isRequestAssembler(value: unknown): value is RuntimeRegistration["assembleRequest"] {
+  return typeof value === "function"
+}
+
+function isTaskBuilder(value: unknown): value is RuntimeRegistration["buildTask"] {
+  return typeof value === "function"
+}
+
+function isOutputPreparer(value: unknown): value is RuntimeRegistration["prepareOutput"] {
+  return typeof value === "function"
+}
+
 export class TrustedStageCatalog {
   readonly #byReference = new Map<string, RuntimeRegistration>()
 
   constructor(registrations: ReadonlyArray<StageContractRegistration>) {
     for (const source of registrations) {
       let metadata: typeof RegistrationMetadata.Type
-      let requestSchema: Schema.Schema.Any
-      let resultSchema: Schema.Schema.Any
+      let requestSchema: Schema.Schema<unknown, unknown, never>
+      let resultSchema: Schema.Schema<unknown, unknown, never>
       let compatibility: (definition: StageDefinition) => void
+      let assembleRequest: (sources: ExactStageSources, local?: JsonValue) => unknown
+      let buildTask: (request: unknown) => AgentTask<unknown, unknown>
+      let prepareOutput: (result: unknown, context: StageExecutionContext) => unknown
       let requestJsonSchema: object
       let resultJsonSchema: object
       try {
         metadata = Schema.decodeUnknownSync(RegistrationMetadata)(source)
-        if (!Schema.isSchema(source.requestSchema) || !Schema.isSchema(source.resultSchema)) {
+        if (!isErasedSchema(source.requestSchema) || !isErasedSchema(source.resultSchema)) {
           throw new Error("requestSchema and resultSchema must be Effect Schemas")
         }
-        if (typeof source.compatibility !== "function") {
+        if (!isCompatibility(source.compatibility)) {
           throw new Error("compatibility must be a function")
         }
-        if (typeof source.assembleRequest !== "function") {
+        if (!isRequestAssembler(source.assembleRequest)) {
           throw new Error("assembleRequest must be a function")
         }
-        if (typeof source.buildTask !== "function") {
+        if (!isTaskBuilder(source.buildTask)) {
           throw new Error("buildTask must be a function")
         }
-        if (typeof source.prepareOutput !== "function") {
+        if (!isOutputPreparer(source.prepareOutput)) {
           throw new Error("prepareOutput must be a function")
         }
         requestSchema = source.requestSchema
         resultSchema = source.resultSchema
         compatibility = source.compatibility
+        assembleRequest = source.assembleRequest
+        buildTask = source.buildTask
+        prepareOutput = source.prepareOutput
         requestJsonSchema = JSONSchema.make(requestSchema)
         resultJsonSchema = JSONSchema.make(resultSchema)
         if (
@@ -171,6 +269,9 @@ export class TrustedStageCatalog {
         requestSchema,
         resultSchema,
         compatibility,
+        assembleRequest,
+        buildTask,
+        prepareOutput,
       })
     }
   }
@@ -245,6 +346,280 @@ export class TrustedStageCatalog {
                 cause: String(cause),
               }),
       }),
+    assembleRequest: (input) =>
+      Effect.try({
+        try: () => {
+          const registration = this.#registration(input.contract)
+          const sources = Schema.decodeUnknownSync(
+            ExactStageSources,
+            exactParseOptions,
+          )(input.sources)
+          if (sources.stageKey !== registration.descriptor.stageKey) {
+            throw catalogError("identity_mismatch", registration.descriptor.ref)
+          }
+          const request = Schema.decodeUnknownSync(JsonValueSchema)(
+            Schema.decodeUnknownSync(
+              registration.requestSchema,
+              exactParseOptions,
+            )(registration.assembleRequest(sources, input.local)),
+          )
+          const bytes = encodedBytes(request)
+          if (
+            bytes > registration.descriptor.maxRequestBytes ||
+            bytes > input.maxEncodedInputBytes
+          ) {
+            throw catalogError("request_too_large", registration.descriptor.ref)
+          }
+          return request
+        },
+        catch: (cause) =>
+          cause instanceof StageCatalogError
+            ? cause
+            : catalogError("malformed_request", input.contract, cause),
+      }),
+    buildTask: (input) =>
+      Effect.try({
+        try: () => {
+          const registration = this.#registration(diagnosticContract(input.input))
+          const replayAuthority = Schema.decodeUnknownSync(StageReplayAuthority)(
+            input.replayAuthority,
+          )
+          if (
+            input.input !== null &&
+            typeof input.input === "object" &&
+            "request" in input.input &&
+            (encodedBytes(input.input.request) > registration.descriptor.maxRequestBytes ||
+              encodedBytes(input.input.request) >
+                replayAuthority.stageSnapshot.maxEncodedInputBytes)
+          ) {
+            throw catalogError("request_too_large", registration.descriptor.ref)
+          }
+          const durableInput = Schema.decodeUnknownSync(
+            StageProduceInput,
+            exactParseOptions,
+          )(input.input)
+          const ticketRevision = Schema.decodeUnknownSync(TicketRevision)(input.ticketRevision)
+          const durableSources = requestSourcesOf(durableInput.request, registration.descriptor.ref)
+          if (durableSources.stageKey !== registration.descriptor.stageKey) {
+            throw catalogError("identity_mismatch", registration.descriptor.ref)
+          }
+          const request = Schema.decodeUnknownSync(
+            registration.requestSchema,
+            exactParseOptions,
+          )(durableInput.request)
+          const sources = requestSourcesOf(request, registration.descriptor.ref)
+          if (
+            canonicalSha256(durableInput.scope) !== canonicalSha256(scopeOf(sources)) ||
+            canonicalSha256(replayAuthority.scope) !== canonicalSha256(durableInput.scope) ||
+            !matchesRepositoryTarget(replayAuthority.target, sources.target) ||
+            !matchesSelectedSnapshot(replayAuthority, sources, registration.descriptor) ||
+            !matchesPredecessorAuthority(replayAuthority, sources, this) ||
+            sources.ticketRevision.workflowId !== durableInput.scope.workflowId ||
+            ticketRevision.ticketRevisionSha256 !== sources.ticketRevision.ticketRevisionSha256 ||
+            workflowIdFor(sources.target.repository, ticketRevision.readyTicket.reference) !==
+              sources.workflowId ||
+            ticketRevisionSha256For(ticketRevision.readyTicket, ticketRevision.scenarioCoverage) !==
+              ticketRevision.ticketRevisionSha256
+          ) {
+            throw catalogError("identity_mismatch", registration.descriptor.ref)
+          }
+          try {
+            const task = registration.buildTask(request)
+            const title = Schema.decodeUnknownSync(BoundedTaskTitle)(task.title)
+            const prompt = Schema.decodeUnknownSync(BoundedTaskPrompt)(task.prompt)
+            const authority = Schema.decodeUnknownSync(StageTaskAuthority)(task.authority)
+            if (
+              canonicalSha256(authority) !==
+                canonicalSha256({
+                  ticketRevision: sources.ticketRevision,
+                  sources: sources.sources,
+                  ...(sources.revisionIntent === undefined
+                    ? {}
+                    : { revisionIntent: sources.revisionIntent }),
+                  ...structureTaskAuthority(request),
+                }) ||
+              task.resultSchema !== registration.resultSchema
+            ) {
+              throw new Error("task authority or result Schema does not match registration")
+            }
+            return { title, prompt, authority, resultSchema: registration.resultSchema }
+          } catch (cause) {
+            throw catalogError("malformed_task", registration.descriptor.ref, cause)
+          }
+        },
+        catch: (cause) => {
+          if (cause instanceof StageCatalogError) return cause
+          return catalogError(
+            isStageProduceInput(input.input) ? "malformed_request" : "malformed_input",
+            diagnosticContract(input.input),
+            cause,
+          )
+        },
+      }),
+    prepareOutput: (input) =>
+      Effect.try({
+        try: () => {
+          const registration = this.#registration(input.contract)
+          const bytes = encodedBytes(input.result)
+          if (bytes > MAX_AGENT_OUTPUT_BYTES || bytes > registration.descriptor.maxResultBytes) {
+            throw catalogError("result_too_large", registration.descriptor.ref)
+          }
+          const result = Schema.decodeUnknownSync(
+            registration.resultSchema,
+            exactParseOptions,
+          )(input.result)
+          const context = Schema.decodeUnknownSync(StageExecutionContext)(input.context)
+          if (context.scope.stageKey !== registration.descriptor.stageKey) {
+            throw catalogError("identity_mismatch", registration.descriptor.ref)
+          }
+          try {
+            const output = Schema.decodeUnknownSync(PreparedStageOutput)(
+              registration.prepareOutput(result, context),
+            )
+            if (
+              (registration.descriptor.kind === "document" && output._tag !== "Document") ||
+              (registration.descriptor.kind === "implementation" &&
+                output._tag !== "ImplementationStep")
+            ) {
+              throw new Error("prepared output tag does not match registered stage kind")
+            }
+            return output
+          } catch (cause) {
+            throw catalogError("malformed_output", registration.descriptor.ref, cause)
+          }
+        },
+        catch: (cause) =>
+          cause instanceof StageCatalogError
+            ? cause
+            : catalogError("malformed_result", input.contract, cause),
+      }),
+  })
+
+  #registration(ref: StageContractRef): RuntimeRegistration {
+    const decoded = Schema.decodeUnknownSync(StageContractRef)(ref)
+    const registration = this.#byReference.get(referenceKey(decoded))
+    if (registration === undefined) {
+      throw new StageCatalogError({
+        reason: "unknown_reference",
+        reference: referenceKey(decoded),
+      })
+    }
+    return registration
+  }
+}
+
+function encodedBytes(value: unknown): number {
+  const encoded = JSON.stringify(value)
+  if (encoded === undefined) throw new Error("value is not JSON encodable")
+  return Buffer.byteLength(encoded, "utf8")
+}
+
+function catalogError(
+  reason: StageCatalogError["reason"],
+  ref: StageContractRef,
+  cause?: unknown,
+): StageCatalogError {
+  return new StageCatalogError({
+    reason,
+    reference: referenceKey(ref),
+    ...(cause === undefined ? {} : { cause: boundedCause(cause) }),
+  })
+}
+
+function isStageProduceInput(input: unknown): boolean {
+  return input !== null && typeof input === "object" && "contractVersion" in input
+}
+
+function diagnosticContract(input: unknown): StageContractRef {
+  if (input !== null && typeof input === "object" && "contract" in input) {
+    try {
+      return Schema.decodeUnknownSync(StageContractRef)(input.contract)
+    } catch {
+      // Fall through to a bounded diagnostic reference.
+    }
+  }
+  return { name: "malformed", contractVersion: 1 }
+}
+
+function requestSourcesOf(request: unknown, ref: StageContractRef): ExactStageSources {
+  if (request === null || typeof request !== "object" || !("sources" in request)) {
+    throw catalogError("malformed_request", ref)
+  }
+  return Schema.decodeUnknownSync(ExactStageSources, exactParseOptions)(request.sources)
+}
+
+function structureTaskAuthority(request: unknown) {
+  if (request === null || typeof request !== "object" || !("authority" in request)) return {}
+  return {
+    structureAuthority: Schema.decodeUnknownSync(StructureAuthority)(request.authority),
+  }
+}
+
+function scopeOf(sources: ExactStageSources) {
+  return {
+    workflowId: sources.workflowId,
+    generation: sources.generation,
+    stageKey: sources.stageKey,
+    runOrdinal: sources.runOrdinal,
+    stageRevision: sources.stageRevision,
+    workflowDefinitionSha256: sources.workflowDefinitionSha256,
+    stageDefinitionSha256: sources.stageDefinitionSha256,
+  }
+}
+
+function matchesRepositoryTarget(left: RepositoryTarget, right: RepositoryTarget): boolean {
+  return (
+    left.repository.providerInstanceId === right.repository.providerInstanceId &&
+    left.repository.repositoryId === right.repository.repositoryId &&
+    left.headRef === right.headRef &&
+    left.expectedParentSha === right.expectedParentSha
+  )
+}
+
+function matchesSelectedSnapshot(
+  authority: StageReplayAuthority,
+  sources: ExactStageSources,
+  descriptor: StageContractDescriptor,
+): boolean {
+  const snapshot = authority.stageSnapshot
+  return (
+    snapshot.stageKey === sources.stageKey &&
+    snapshot.stageDefinitionSha256 === sources.stageDefinitionSha256 &&
+    canonicalSha256(snapshot.contract) === canonicalSha256(descriptor.ref) &&
+    snapshot.contractRegistrationSha256 === descriptor.registrationSha256
+  )
+}
+
+function matchesPredecessorAuthority(
+  authority: StageReplayAuthority,
+  sources: ExactStageSources,
+  catalog: TrustedStageCatalog,
+): boolean {
+  if (
+    authority.acceptedPointers.length !== sources.sources.length ||
+    authority.predecessorSnapshots.length !== sources.sources.length
+  ) {
+    return false
+  }
+  return sources.sources.every((source, index) => {
+    const acceptedPointer = authority.acceptedPointers[index]
+    const snapshot = authority.predecessorSnapshots[index]
+    if (acceptedPointer === undefined || snapshot === undefined) return false
+    let descriptor: StageContractDescriptor
+    try {
+      descriptor = catalog.descriptor(source.acceptedPointer.contract)
+    } catch {
+      return false
+    }
+    return (
+      canonicalSha256(source.acceptedPointer) === canonicalSha256(acceptedPointer) &&
+      snapshot.stageKey === source.artifact.stageKey &&
+      snapshot.stageDefinitionSha256 === source.acceptedPointer.snapshotSha256 &&
+      canonicalSha256(snapshot.contract) === canonicalSha256(source.acceptedPointer.contract) &&
+      snapshot.contractRegistrationSha256 === source.acceptedPointer.contractRegistrationSha256 &&
+      descriptor.stageKey === snapshot.stageKey &&
+      descriptor.registrationSha256 === source.acceptedPointer.contractRegistrationSha256
+    )
   })
 }
 
@@ -255,6 +630,22 @@ export type StageCatalogPort = {
   readonly validateCompatibility: (
     definition: StageDefinition,
   ) => Effect.Effect<void, StageCatalogError>
+  readonly assembleRequest: (input: {
+    readonly contract: StageContractRef
+    readonly sources: ExactStageSources
+    readonly local?: JsonValue
+    readonly maxEncodedInputBytes: number
+  }) => Effect.Effect<JsonValue, StageCatalogError>
+  readonly buildTask: (input: {
+    readonly input: unknown
+    readonly ticketRevision: TicketRevision
+    readonly replayAuthority: StageReplayAuthority
+  }) => Effect.Effect<AgentTask<unknown, unknown>, StageCatalogError>
+  readonly prepareOutput: (input: {
+    readonly contract: StageContractRef
+    readonly result: unknown
+    readonly context: StageExecutionContext
+  }) => Effect.Effect<PreparedStageOutput, StageCatalogError>
 }
 
 export const StageCatalog = Context.GenericTag<StageCatalogPort>("workflowd/qrspi/StageCatalog")
@@ -641,30 +1032,4 @@ function validationError(
 
 function boundedCause(cause: unknown): string {
   return String(cause).slice(0, 1_000)
-}
-
-export const QuestionsStageRequest = Schema.Struct({ ticket: Schema.Unknown })
-export const QuestionsStageResult = Schema.Struct({ text: Schema.String })
-
-export const questionsStageContract: StageContract<
-  typeof QuestionsStageRequest.Type,
-  typeof QuestionsStageRequest.Encoded,
-  typeof QuestionsStageResult.Type,
-  typeof QuestionsStageResult.Encoded
-> = {
-  ref: { name: "qrspi.questions", contractVersion: 1 },
-  implementationRevision: "qrspi.questions.v1",
-  kind: "document",
-  requestSchema: QuestionsStageRequest,
-  resultSchema: QuestionsStageResult,
-  maxRequestBytes: MAX_STAGE_REQUEST_BYTES,
-  maxResultBytes: MAX_AGENT_OUTPUT_BYTES,
-  compatibility: () => undefined,
-  assembleRequest: (sources) => ({ ticket: sources }),
-  buildTask: () => ({
-    title: "QRSPI questions",
-    prompt: "Produce the questions stage result.",
-    resultSchema: QuestionsStageResult,
-  }),
-  prepareOutput: (result) => ({ _tag: "Document", text: result.text }),
 }

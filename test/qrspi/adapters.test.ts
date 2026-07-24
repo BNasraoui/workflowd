@@ -34,6 +34,306 @@ const qrspiConfig = {
 } satisfies QrspiConfig
 
 describe("QRSPI external adapters", () => {
+  test("reads exact immutable artifact bytes at the requested cap", async () => {
+    const calls: Array<unknown> = []
+    const content = new TextEncoder().encode("éx")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
+          getContent: async (input: unknown) => {
+            calls.push(input)
+            return {
+              data: {
+                type: "file",
+                path: "artifacts/questions.md",
+                sha: "b".repeat(40),
+                encoding: "base64",
+                content: Buffer.from(content).toString("base64"),
+                size: content.byteLength,
+              },
+            }
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const result = await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: content.byteLength,
+      }),
+    )
+
+    expect(calls).toEqual([
+      {
+        owner: "example-owner",
+        repo: "example",
+        path: "artifacts/questions.md",
+        ref: "a".repeat(40),
+        request: { signal: expect.any(AbortSignal) },
+      },
+    ])
+    expect(result).toEqual({
+      commitSha: "a".repeat(40),
+      path: "artifacts/questions.md",
+      blobSha: "b".repeat(40),
+      bytes: content,
+    })
+  })
+
+  test("rejects a repository locator that resolves to another stable repository identity", async () => {
+    let contentCalls = 0
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 99, full_name: "other-owner/other" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async () => {
+            contentCalls += 1
+            throw new Error("must not read substituted repository content")
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 100,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    expect(contentCalls).toBe(0)
+  })
+
+  test("rejects artifact content when GitHub observes a different commit", async () => {
+    let contentCalls = 0
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "c".repeat(40),
+              parents: [{ sha: "d".repeat(40) }],
+              commit: { message: "substituted commit" },
+            },
+          }),
+          getContent: async () => {
+            contentCalls += 1
+            throw new Error("must not read content from a substituted commit")
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 100,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    expect(contentCalls).toBe(0)
+  })
+
+  test("uses the observed canonical repository name after a stable-identity rename", async () => {
+    const calls: Array<unknown> = []
+    const bytes = new TextEncoder().encode("renamed repository content")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "renamed-owner/renamed" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
+          getContent: async (input: unknown) => {
+            calls.push(input)
+            return {
+              data: {
+                type: "file",
+                path: "artifacts/questions.md",
+                sha: "b".repeat(40),
+                encoding: "base64",
+                content: Buffer.from(bytes).toString("base64"),
+                size: bytes.byteLength,
+              },
+            }
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: bytes.byteLength,
+      }),
+    )
+
+    expect(calls).toEqual([
+      {
+        owner: "renamed-owner",
+        repo: "renamed",
+        path: "artifacts/questions.md",
+        ref: "a".repeat(40),
+        request: { signal: expect.any(AbortSignal) },
+      },
+    ])
+  })
+
+  test("accepts GitHub line-wrapped base64 artifact content", async () => {
+    const bytes = new TextEncoder().encode("# A sufficiently long Markdown artifact\n".repeat(4))
+    const encoded = Buffer.from(bytes).toString("base64")
+    const wrapped = encoded.match(/.{1,60}/g)!.join("\n")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
+          getContent: async () => ({
+            data: {
+              type: "file",
+              path: "artifacts/questions.md",
+              sha: "b".repeat(40),
+              encoding: "base64",
+              content: wrapped,
+              size: bytes.byteLength,
+            },
+          }),
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    const result = await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: bytes.byteLength,
+      }),
+    )
+
+    expect(result.bytes).toEqual(bytes)
+  })
+
+  test.each([
+    ["one byte over", { size: 4, content: Buffer.from("éx").toString("base64") }, 3],
+    ["malformed base64", { size: 1, content: "***" }, 10],
+    ["directory response", [{ type: "file" }], 10],
+  ] as const)("rejects an exact artifact %s response", async (_name, data, maxBytes) => {
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "example-owner/example" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getCommit: async () => ({
+            data: {
+              sha: "a".repeat(40),
+              parents: [{ sha: "0".repeat(40) }],
+              commit: { message: "accepted artifact" },
+            },
+          }),
+          getContent: async () => ({
+            data: Array.isArray(data)
+              ? data
+              : {
+                  type: "file",
+                  path: "artifacts/questions.md",
+                  sha: "b".repeat(40),
+                  encoding: "base64",
+                  ...data,
+                },
+          }),
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+  })
+
+  test("maps an exact artifact timeout through the repository error channel", async () => {
+    const adapter = new GitHubQrspiRepository(
+      { ...qrspiConfig, repositoryOperationTimeoutMs: 10 },
+      async () => await new Promise(() => undefined),
+    )
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 10,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "QrspiRepositoryError", operation: "read exact repository artifact" },
+    })
+  })
+
   test("reads Beads through its readonly bounded command envelope", async () => {
     let command: ReadonlyArray<string> = []
     const source = new BeadsCliTicketSource("/srv/repository", "workspace-42", {

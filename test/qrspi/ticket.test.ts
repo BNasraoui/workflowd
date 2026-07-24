@@ -6,6 +6,7 @@ import {
   canonicalSha256,
   checkTicket as checkTicketDomain,
   normalizeWorkflowDefinition,
+  ticketRevisionSha256For,
   workflowIdFor,
 } from "../../src/qrspi/domain"
 import { makeWorkspaceSourceResolver } from "../../src/qrspi/source-resolver"
@@ -192,6 +193,35 @@ describe("QRSPI ticket boundary", () => {
         first.ticketRevision.ticketRevisionSha256,
       )
     }
+  })
+
+  test("recomputes ticket revision identity from semantic product fields", () => {
+    const decode = Schema.decodeUnknownSync(Ticket)
+    const checked = checkTicket(
+      decode({ ...readyTicket(), sourceRevision: "tracker-revision-1" }),
+      new Date("2026-07-21T05:00:00.000Z"),
+      optionalStory,
+    )
+    expect(checked._tag).toBe("Ready")
+    if (checked._tag !== "Ready") throw new Error("Expected ready ticket")
+
+    const original = ticketRevisionSha256For(
+      checked.readyTicket,
+      checked.ticketRevision.scenarioCoverage,
+    )
+    expect(original).toBe(checked.ticketRevision.ticketRevisionSha256)
+    expect(
+      ticketRevisionSha256For(
+        { ...checked.readyTicket, title: "A changed product title" },
+        checked.ticketRevision.scenarioCoverage,
+      ),
+    ).not.toBe(original)
+    expect(
+      ticketRevisionSha256For(
+        { ...checked.readyTicket, sourceRevision: "tracker-revision-2" },
+        checked.ticketRevision.scenarioCoverage,
+      ),
+    ).toBe(original)
   })
 
   test("uses RFC 8785 UTF-16 property ordering after NFC normalization", () => {

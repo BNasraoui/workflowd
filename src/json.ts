@@ -16,7 +16,7 @@ export type JsonSerializable =
   | ReadonlyArray<JsonSerializable>
   | { readonly [key: string]: JsonSerializable | undefined }
 
-const JsonValueSchema: Schema.Schema<JsonValue> = Schema.suspend(() =>
+export const JsonValueSchema: Schema.Schema<JsonValue> = Schema.suspend(() =>
   Schema.Union(
     Schema.Null,
     Schema.Boolean,
