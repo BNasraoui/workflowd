@@ -297,6 +297,40 @@ function normalizeAssistantMessage(message: AssistantMessage): OpenCodeAssistant
   }
 }
 
+function normalizeEvent(event: Event): OpenCodeSessionEvent | undefined {
+  switch (event.type) {
+    case "message.updated":
+      if (event.properties.info.role !== "assistant") return undefined
+      return {
+        type: "message.updated",
+        sessionID: event.properties.sessionID,
+        message: normalizeAssistantMessage(event.properties.info),
+      }
+    case "session.status":
+      return {
+        type: "session.status",
+        sessionID: event.properties.sessionID,
+        status: event.properties.status,
+      }
+    case "session.idle":
+      return {
+        type: "session.status",
+        sessionID: event.properties.sessionID,
+        status: { type: "idle" },
+      }
+    case "session.error":
+      return {
+        type: "session.error",
+        ...(event.properties.sessionID === undefined
+          ? {}
+          : { sessionID: event.properties.sessionID }),
+        ...(event.properties.error === undefined ? {} : { error: event.properties.error }),
+      }
+    default:
+      return undefined
+  }
+}
+
 async function* normalizeEvents(
   subscribe: (signal: AbortSignal) => Promise<AsyncIterable<Event>>,
   signal: AbortSignal,
@@ -325,41 +359,8 @@ async function* normalizeEvents(
         sourceDone = true
         break
       }
-      const event = next.value
-      switch (event.type) {
-        case "message.updated":
-          if (event.properties.info.role === "assistant") {
-            yield {
-              type: "message.updated",
-              sessionID: event.properties.sessionID,
-              message: normalizeAssistantMessage(event.properties.info),
-            }
-          }
-          break
-        case "session.status":
-          yield {
-            type: "session.status",
-            sessionID: event.properties.sessionID,
-            status: event.properties.status,
-          }
-          break
-        case "session.idle":
-          yield {
-            type: "session.status",
-            sessionID: event.properties.sessionID,
-            status: { type: "idle" },
-          }
-          break
-        case "session.error":
-          yield {
-            type: "session.error",
-            ...(event.properties.sessionID === undefined
-              ? {}
-              : { sessionID: event.properties.sessionID }),
-            ...(event.properties.error === undefined ? {} : { error: event.properties.error }),
-          }
-          break
-      }
+      const event = normalizeEvent(next.value)
+      if (event !== undefined) yield event
     }
   } finally {
     cleanup()
