@@ -1,4 +1,4 @@
-import { JSONSchema, Schema } from "effect"
+import { Schema } from "effect"
 
 const ReviewSummary = Schema.NonEmptyString.pipe(Schema.maxLength(4_000))
 const FindingTitle = Schema.NonEmptyString.pipe(Schema.maxLength(200))
@@ -31,5 +31,3 @@ export type ChangesRequestedReviewResult = typeof ChangesRequestedReviewResult.T
 
 export const ReviewResult = Schema.Union(PassedReviewResult, ChangesRequestedReviewResult)
 export type ReviewResult = typeof ReviewResult.Type
-
-export const ReviewResultJsonSchema = JSONSchema.make(ReviewResult)

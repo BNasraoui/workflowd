@@ -5,8 +5,13 @@ type IssueCommentResponse =
   RestEndpointMethodTypes["issues"]["listComments"]["response"]["data"][number]
 type CheckRunResponse =
   RestEndpointMethodTypes["checks"]["listForRef"]["response"]["data"]["check_runs"][number]
+type CommitStatusResponse =
+  RestEndpointMethodTypes["repos"]["listCommitStatusesForRef"]["response"]["data"][number]
 
-export type GitHubPullRequestData = typeof PullRequestData.Encoded
+export type GitHubPullRequestData = typeof PullRequestData.Encoded & {
+  readonly mergeable?: boolean | null
+  readonly mergeableState?: string
+}
 
 export type GitHubIssueComment = {
   readonly id: IssueCommentResponse["id"]
@@ -17,8 +22,42 @@ export type GitHubIssueComment = {
 
 export type GitHubCheckRun = {
   readonly id: CheckRunResponse["id"]
+  readonly name?: string
+  readonly status?: string
+  readonly conclusion?: string | null
+  readonly detailsUrl?: string | null
+  readonly summary?: string | null
   readonly externalId?: CheckRunResponse["external_id"]
   readonly appId?: NonNullable<CheckRunResponse["app"]>["id"]
+  readonly appSlug?: NonNullable<CheckRunResponse["app"]>["slug"]
+  readonly checkSuiteId?: number
+}
+
+export type GitHubWorkflowRun = {
+  readonly id: number
+  readonly name: string
+  readonly headSha: string
+  readonly status?: string | null
+  readonly conclusion?: string | null
+  readonly workflowId: number
+  readonly path: string
+  readonly checkSuiteId?: number
+}
+
+export type GitHubWorkflow = { readonly id: number; readonly path: string }
+
+export type GitHubWorkflowJob = {
+  readonly id: number
+  readonly name: string
+  readonly status: string
+  readonly conclusion?: string | null
+}
+
+export type GitHubCommitStatus = {
+  readonly context: string
+  readonly state: "error" | "failure" | "pending" | "success"
+  readonly description?: string | null
+  readonly targetUrl?: string | null
 }
 
 export type OctokitClientPort = {
@@ -45,6 +84,8 @@ export type OctokitClientPort = {
     }
     readonly state: "open" | "closed"
     readonly updated_at?: string
+    readonly mergeable?: boolean | null
+    readonly mergeable_state?: string
   }>
   readonly listIssueCommentPages: (
     input: RestEndpointMethodTypes["issues"]["listComments"]["parameters"],
@@ -58,6 +99,46 @@ export type OctokitClientPort = {
   readonly listCheckRunPages: (
     input: RestEndpointMethodTypes["checks"]["listForRef"]["parameters"],
   ) => AsyncIterable<ReadonlyArray<CheckRunResponse>>
+  readonly listCommitStatusPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly ref: string
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<CommitStatusResponse>>
+  readonly listWorkflowRunPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly head_sha: string
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<GitHubWorkflowRun>>
+  readonly getWorkflow?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly workflow_id: string
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => Promise<GitHubWorkflow>
+  readonly getRepositoryContentSha?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly path: string
+    readonly ref: string
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => Promise<string>
+  readonly listWorkflowJobPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly run_id: number
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<GitHubWorkflowJob>>
+  readonly downloadWorkflowJobLog?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly job_id: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => Promise<string>
   readonly createCheckRun: (
     input: RestEndpointMethodTypes["checks"]["create"]["parameters"],
   ) => Promise<number>
@@ -82,6 +163,18 @@ export type GitHubInstallationAdapter = {
   readonly listCheckRunPages: (
     input: RestEndpointMethodTypes["checks"]["listForRef"]["parameters"],
   ) => AsyncIterable<ReadonlyArray<GitHubCheckRun>>
+  readonly listCommitStatusPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly ref: string
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<GitHubCommitStatus>>
+  readonly listWorkflowRunPages?: NonNullable<OctokitClientPort["listWorkflowRunPages"]>
+  readonly getWorkflow?: NonNullable<OctokitClientPort["getWorkflow"]>
+  readonly getRepositoryContentSha?: NonNullable<OctokitClientPort["getRepositoryContentSha"]>
+  readonly listWorkflowJobPages?: NonNullable<OctokitClientPort["listWorkflowJobPages"]>
+  readonly downloadWorkflowJobLog?: NonNullable<OctokitClientPort["downloadWorkflowJobLog"]>
   readonly createCheckRun: (
     input: RestEndpointMethodTypes["checks"]["create"]["parameters"],
   ) => Promise<number>
@@ -111,6 +204,46 @@ export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
 
   listCheckRunPages(input: Parameters<GitHubInstallationAdapter["listCheckRunPages"]>[0]) {
     return normalizeCheckRunPages(this.client.listCheckRunPages(input))
+  }
+
+  listCommitStatusPages(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["listCommitStatusPages"]>>[0],
+  ) {
+    const pages = this.client.listCommitStatusPages?.(input)
+    return pages === undefined
+      ? emptyPages<GitHubCommitStatus>()
+      : normalizeCommitStatusPages(pages)
+  }
+
+  listWorkflowRunPages(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["listWorkflowRunPages"]>>[0],
+  ) {
+    return this.client.listWorkflowRunPages?.(input) ?? emptyPages<GitHubWorkflowRun>()
+  }
+
+  getWorkflow(input: Parameters<NonNullable<GitHubInstallationAdapter["getWorkflow"]>>[0]) {
+    return this.client.getWorkflow?.(input) ?? Promise.reject(new Error("Actions API unavailable"))
+  }
+
+  getRepositoryContentSha(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["getRepositoryContentSha"]>>[0],
+  ) {
+    return (
+      this.client.getRepositoryContentSha?.(input) ??
+      Promise.reject(new Error("Contents API unavailable"))
+    )
+  }
+
+  listWorkflowJobPages(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["listWorkflowJobPages"]>>[0],
+  ) {
+    return this.client.listWorkflowJobPages?.(input) ?? emptyPages<GitHubWorkflowJob>()
+  }
+
+  async downloadWorkflowJobLog(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["downloadWorkflowJobLog"]>>[0],
+  ) {
+    return (await this.client.downloadWorkflowJobLog?.(input)) ?? ""
   }
 
   async createCheckRun(input: Parameters<GitHubInstallationAdapter["createCheckRun"]>[0]) {
@@ -151,6 +284,10 @@ function normalizePullRequest(
       state: pullRequest.state,
       ...(pullRequest.updated_at === undefined ? {} : { updatedAt: pullRequest.updated_at }),
     },
+    ...(pullRequest.mergeable === undefined ? {} : { mergeable: pullRequest.mergeable }),
+    ...(pullRequest.mergeable_state === undefined
+      ? {}
+      : { mergeableState: pullRequest.mergeable_state }),
   }
 }
 
@@ -175,9 +312,41 @@ async function* normalizeCheckRunPages(
   for await (const page of pages) {
     yield page.map((checkRun) => ({
       id: checkRun.id,
+      name: checkRun.name,
+      status: checkRun.status,
+      conclusion: checkRun.conclusion,
+      detailsUrl: checkRun.details_url,
+      summary: checkRun.output?.summary,
       ...(checkRun.external_id === undefined ? {} : { externalId: checkRun.external_id }),
       ...(checkRun.app?.id === undefined ? {} : { appId: checkRun.app.id }),
+      ...(checkRun.app?.slug === undefined ? {} : { appSlug: checkRun.app.slug }),
+      ...(checkRun.check_suite?.id === undefined ? {} : { checkSuiteId: checkRun.check_suite.id }),
     }))
+  }
+}
+
+async function* normalizeCommitStatusPages(
+  pages: AsyncIterable<ReadonlyArray<CommitStatusResponse>>,
+): AsyncIterable<ReadonlyArray<GitHubCommitStatus>> {
+  for await (const page of pages) {
+    yield page.map((status) => ({
+      context: status.context,
+      state: normalizeCommitState(status.state),
+      description: status.description,
+      targetUrl: status.target_url,
+    }))
+  }
+}
+
+function normalizeCommitState(state: string): GitHubCommitStatus["state"] {
+  switch (state) {
+    case "error":
+    case "failure":
+    case "pending":
+    case "success":
+      return state
+    default:
+      return "error"
   }
 }
 
@@ -199,7 +368,67 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
         yield response.data
       }
     },
+    listCommitStatusPages: async function* (input) {
+      for await (const response of client.paginate.iterator(
+        client.rest.repos.listCommitStatusesForRef,
+        input,
+      )) {
+        yield response.data
+      }
+    },
+    listWorkflowRunPages: async function* (input) {
+      for await (const response of client.paginate.iterator(
+        client.rest.actions.listWorkflowRunsForRepo,
+        input,
+      )) {
+        yield response.data.map((run) => ({
+          id: run.id,
+          name: run.name ?? "GitHub Actions",
+          headSha: run.head_sha,
+          status: run.status,
+          conclusion: run.conclusion,
+          workflowId: run.workflow_id,
+          path: run.path,
+          ...(run.check_suite_id === undefined || run.check_suite_id === null
+            ? {}
+            : { checkSuiteId: run.check_suite_id }),
+        }))
+      }
+    },
+    getWorkflow: async (input) => {
+      const workflow = (await client.rest.actions.getWorkflow(input)).data
+      return { id: workflow.id, path: workflow.path }
+    },
+    getRepositoryContentSha: async (input) => {
+      const content = (await client.rest.repos.getContent(input)).data
+      if (Array.isArray(content) || content.type !== "file") {
+        throw new Error(`Repository path is not a file: ${input.path}`)
+      }
+      return content.sha
+    },
+    listWorkflowJobPages: async function* (input) {
+      for await (const response of client.paginate.iterator(
+        client.rest.actions.listJobsForWorkflowRun,
+        input,
+      )) {
+        yield response.data.map((job) => ({
+          id: job.id,
+          name: job.name,
+          status: job.status,
+          conclusion: job.conclusion,
+        }))
+      }
+    },
+    downloadWorkflowJobLog: async (input) => {
+      const response = await client.rest.actions.downloadJobLogsForWorkflowRun(input)
+      return typeof response.data === "string" ? response.data : JSON.stringify(response.data)
+    },
     createCheckRun: async (input) => (await client.rest.checks.create(input)).data.id,
     updateCheckRun: async (input) => (await client.rest.checks.update(input)).data.id,
   }
+}
+
+async function* emptyPages<A>(): AsyncIterable<ReadonlyArray<A>> {
+  await Promise.resolve()
+  yield []
 }

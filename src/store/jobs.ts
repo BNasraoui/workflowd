@@ -30,6 +30,7 @@ type JobOperations = Pick<
   | "recordFixResult"
   | "rescheduleJob"
   | "shouldCancelJob"
+  | "supersedeJob"
   | "supersedeAgentSession"
 >
 
@@ -290,7 +291,6 @@ export function makeJobOperations(
         SELECT 1 AS current
         FROM jobs AS candidate
         WHERE candidate.id = ${jobId}
-        AND candidate.kind = 'fix'
         AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
         AND candidate.lease_owner = ${workerId}
@@ -573,6 +573,33 @@ export function makeJobOperations(
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length === 0)),
+    supersedeJob: (input) =>
+      Effect.gen(function* () {
+        const timestamp = input.supersededAt.toISOString()
+        const rows = yield* sql<{ readonly id: number }>`
+          UPDATE jobs
+          SET
+            state = 'superseded',
+            cancel_requested = TRUE,
+            lease_owner = NULL,
+            lease_until = NULL,
+            last_error = ${input.reason.slice(0, 8_192)},
+            updated_at = ${timestamp}
+          WHERE id = ${input.jobId}
+          AND state = 'leased'
+          AND lease_owner = ${input.workerId}
+          AND lease_until > ${timestamp}
+          RETURNING id
+        `
+        if (rows.length === 0) return "stale" as const
+        yield* sql`
+          UPDATE agent_executions
+          SET state = 'superseded', updated_at = ${timestamp}
+          WHERE job_id = ${input.jobId}
+          AND state IN ('launch_intent', 'session_ready')
+        `
+        return "superseded" as const
+      }).pipe(sql.withTransaction),
     supersedeAgentSession: (sessionReferenceId, supersededAt) =>
       sql<{ readonly session_reference_id: string }>`
         UPDATE agent_executions

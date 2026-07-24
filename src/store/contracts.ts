@@ -29,6 +29,7 @@ import type {
   RescheduleJobInput,
   ReschedulePublicationInput,
   RescheduleReconciliationInput,
+  SupersedeJobInput,
 } from "./model"
 
 export type WorkflowStorePort = {
@@ -74,6 +75,9 @@ export type WorkflowStorePort = {
   readonly rescheduleJob: (
     input: RescheduleJobInput,
   ) => Effect.Effect<"retry" | "failed" | "stale", SqlError>
+  readonly supersedeJob: (
+    input: SupersedeJobInput,
+  ) => Effect.Effect<"superseded" | "stale", SqlError>
   readonly completeReviewJob: (
     input: CompleteReviewJobInput,
   ) => Effect.Effect<"completed" | "stale", SqlError>

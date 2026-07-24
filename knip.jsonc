@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  "entry": ["test/**/*.test.ts", "scripts/**/*.{mjs,ts}", "skills/**/scripts/**/*.{mjs,ts}"],
+  "project": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.{mjs,ts}",
+    "skills/**/scripts/**/*.{mjs,ts}",
+    "eslint-rules/**/*.{mjs,mts}",
+    "*.config.mjs",
+  ],
+  "include": ["files", "exports", "dependencies", "unlisted", "binaries", "unresolved"],
+  "ignoreFiles": ["eslint-rules/architecture/index.d.mts", "eslint-rules/effect/index.d.mts"],
+  "ignoreExportsUsedInFile": true,
+  // Existing library/test exports are a reviewed baseline; new dead exports remain reportable.
+  "ignoreIssues": {
+    "eslint-rules/**/*.mjs": ["exports"],
+    "src/agent-harness.ts": ["exports"],
+    "src/domain/{fix-result,review-result}.ts": ["exports"],
+    "src/qrspi/{domain,stage-catalog,store,workflow-start}.ts": ["exports"],
+    "src/session-access.ts": ["exports"],
+    "test/store/harness.ts": ["exports"],
+  },
+  "treatConfigHintsAsErrors": true,
+}

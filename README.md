@@ -77,9 +77,28 @@ Repository permissions:
 - Pull requests: Read and write
 - Issues: Read and write
 - Checks: Read and write
+- Actions: Read-only (required to collect failed-job log excerpts for the exact PR head)
+- Contents: Read-only (required to authenticate Actions workflows against the base branch)
 - Metadata: Read-only
 
-Install the App on every repository that should be automated. Generate a private key and store it outside the repository with mode `0600`.
+Install the App on every repository that should be automated. Existing installations must be re-approved after adding Actions and Contents read permission. Generate a private key and store it outside the repository with mode `0600`.
+
+## Pull-request quality gates
+
+This public repository uses **SonarQube Cloud Automatic Analysis**. Import `BNasraoui/workflowd` into SonarQube Cloud, keep Automatic Analysis enabled, and do not add `SONAR_TOKEN`: Workflowd reads the public PR analysis APIs and CI must not replace Automatic Analysis with a scanner workflow. For the exact PR head, automated approval requires zero unresolved new Sonar issues of any severity and no more than 1% duplicated new lines. Missing, stale, unavailable, or failed evidence blocks approval; genuinely pending analysis is retried without publishing a pass.
+
+The repository also runs blocking Knip and `bun audit --audit-level=high` checks, per-covered-file Bun line/function/statement thresholds, an 80% exact-base/head changed-executable-line gate from Bun LCOV, and CodeQL JavaScript/TypeScript analysis on PRs, main, and a weekly schedule. Approval for pull requests targeting `main` in `BNasraoui/workflowd` requires the exact-head `Required checks`, `SonarCloud Code Analysis`, and `CodeQL (JavaScript/TypeScript)` contexts; missing contexts fail closed. GitHub Actions contexts are accepted only when their check suite belongs to the expected workflow ID and path and that workflow file is unchanged from the exact base SHA. Other installed repositories and base branches do not inherit these repository-specific required contexts or Sonar project. Workflowd excludes a check run only when GitHub identifies both this App's app ID and its non-empty external identity, never from a caller-controlled check or legacy-status name.
+
+Failed Actions log **retention** is bounded to three sanitized 8,000-character excerpts and is explicitly treated as untrusted input for review and Fix Work. GitHub's REST job-log endpoint returns the downloaded payload before Workflowd can sanitize and truncate it, so the transport download itself is not claimed to be byte-bounded.
+
+A repository administrator must update the `main` ruleset after these workflows first run:
+
+- require `Required checks` (this includes TypeScript, Effect diagnostics, ESLint, Prettier, tests/coverage, Knip, dependency audit, repository integrity, and deployment validation);
+- require `CodeQL (JavaScript/TypeScript)`;
+- require SonarQube Cloud's Automatic Analysis check; and
+- require `OpenCode Review`, which is Workflowd's deterministic exact-head CI/Sonar/mergeability gate.
+
+Do not configure a bypass that permits `OpenCode Review` to be skipped for ordinary pull requests. If Sonar evidence remains missing, verify that the public project key is the standard `<owner>_<repository>` key (`BNasraoui_workflowd`) and that Automatic Analysis has processed the current PR head SHA.
 
 ## Installed Layout
 

@@ -107,6 +107,13 @@ export type RescheduleJobInput = {
   }
 }
 
+export type SupersedeJobInput = {
+  readonly jobId: number
+  readonly workerId: string
+  readonly supersededAt: Date
+  readonly reason: string
+}
+
 export type ReschedulePublicationInput = {
   readonly publicationId: number
   readonly workerId: string

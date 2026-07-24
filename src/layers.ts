@@ -5,7 +5,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { Effect, Layer } from "effect"
 import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
 import type { AppConfig } from "./config"
-import { GitHub, GitHubAppAdapter } from "./github"
+import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
@@ -181,6 +181,7 @@ export const makeLiveLayer = (
             {
               resolve: (reference) => sessionAccess.resolve(reference),
             },
+            publicSonarRequest,
           )
         }),
       ),

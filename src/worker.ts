@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto"
 import { Cause, Data, Effect, Exit, Option } from "effect"
 import { AgentHarness, AgentHarnessError } from "./agent-harness"
 import type { FixWork, ReviewWork } from "./domain/work"
+import { gateReviewWithHeadEvidence } from "./domain/head-evidence"
 import { decideFixEligibility } from "./domain/transaction-policy"
-import { GitHub } from "./github"
+import { GitHub, GitHubClientError } from "./github"
 import { Automation, OpenCodeAutomationError } from "./opencode"
 import { WorkflowStore } from "./store/contracts"
 import { Workspace } from "./workspace"
 import { WorkspaceError } from "./workspace/errors"
 
 class JobCancelled extends Data.TaggedError("JobCancelled")<Record<never, never>> {}
+class EvidencePending extends Data.TaggedError("EvidencePending")<{
+  readonly reason: string
+}> {}
 
 function interruptOnCancellation<A, E, R, CancellationError, CancellationRequirements>(
   operation: Effect.Effect<A, E, R>,
@@ -63,9 +67,43 @@ function processReviewWork(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const github = yield* GitHub
       const harness = yield* AgentHarness
       const workspaces = yield* Workspace
-      const workspace = yield* workspaces.prepareReview(work)
+      const currentAtCollectionStart = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAtCollectionStart))) {
+        return "stale" as const
+      }
+      const evidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (evidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: evidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
+      const preflight = gateReviewWithHeadEvidence(
+        { verdict: "pass", summary: "Evidence preflight.", findings: [] },
+        evidence,
+      )
+      if (preflight._tag === "Pending") {
+        return yield* Effect.fail(new EvidencePending({ reason: preflight.reason }))
+      }
+      const currentAfterCollection = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAfterCollection))) {
+        return "stale" as const
+      }
+      const workspace = yield* workspaces.prepareReview(work, evidence)
       const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       const prepared = yield* automation.prepareReview(
         {
@@ -129,7 +167,22 @@ function processReviewWork(
         yield* abortSession()
         return "stale" as const
       }
-      const review = sessionResult.review
+      const freshEvidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (freshEvidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: freshEvidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
+      const gated = gateReviewWithHeadEvidence(sessionResult.review, freshEvidence)
+      const review = gated._tag === "Pending" ? sessionResult.review : gated.review
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       return yield* store.completeAgentReviewJob({
         jobId: work.id,
@@ -163,9 +216,36 @@ function processFixWork(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const github = yield* GitHub
       const harness = yield* AgentHarness
       const workspaces = yield* Workspace
-      const workspace = yield* workspaces.prepareFix(work)
+      const collectionStartedAt = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, collectionStartedAt))) {
+        return "stale" as const
+      }
+      const evidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (evidence.ci.state === "stale") {
+        return yield* store.supersedeJob({
+          jobId: work.id,
+          workerId,
+          supersededAt: new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis)),
+          reason: evidence.ci.reason ?? "GitHub evidence is stale.",
+        })
+      }
+      const currentAfterCollection = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAfterCollection))) {
+        return "stale" as const
+      }
+      const workspace = yield* workspaces.prepareFix(work, evidence)
       let result = work.checkpoint
       if (workspace.recovery === "none" && result === undefined) {
         const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
@@ -289,7 +369,7 @@ type AgentFailureContext = {
   readonly retryPolicy: { readonly maxAttempts: number }
 }
 
-export function runJobIteration(options: {
+type JobIterationOptions = {
   readonly workerId: string
   readonly leaseDurationMs: number
   readonly maxAttempts: number
@@ -299,7 +379,9 @@ export function runJobIteration(options: {
   readonly trustedAgentUsers: ReadonlyArray<string>
   readonly fixWorkEnabled: boolean
   readonly now: () => Date
-}) {
+}
+
+function cleanupExpiredAgentSessions(options: JobIterationOptions) {
   return Effect.gen(function* () {
     const store = yield* WorkflowStore
     const harness = yield* AgentHarness
@@ -309,22 +391,50 @@ export function runJobIteration(options: {
         now: options.now(),
         leaseDurationMs: options.leaseDurationMs,
       })
-      if (expiredSession === null) break
+      if (expiredSession === null) return
       const cleanup = yield* Effect.exit(harness.abortSession(expiredSession))
-      if (Exit.isFailure(cleanup)) {
-        yield* store.recordAgentSessionCleanupFailure({
-          sessionReferenceId: expiredSession.sessionReferenceId,
-          workerId: options.workerId,
-          failedAt: options.now(),
-          error: Cause.pretty(cleanup.cause),
-        })
-        yield* Effect.logWarning(
-          `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
-        )
-        break
+      if (Exit.isSuccess(cleanup)) {
+        yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
+        continue
       }
-      yield* store.supersedeAgentSession(expiredSession.sessionReferenceId, options.now())
+      yield* store.recordAgentSessionCleanupFailure({
+        sessionReferenceId: expiredSession.sessionReferenceId,
+        workerId: options.workerId,
+        failedAt: options.now(),
+        error: Cause.pretty(cleanup.cause),
+      })
+      yield* Effect.logWarning(
+        `Could not abort expired agent session ${expiredSession.sessionReferenceId}: ${Cause.pretty(cleanup.cause)}`,
+      )
+      return
     }
+  })
+}
+
+function jobOperation(
+  work: ReviewWork | FixWork,
+  options: JobIterationOptions,
+  onPrepared: (intent: AgentFailureContext) => void,
+  onAbortFailure: () => void,
+) {
+  if (work._tag === "ReviewWork") {
+    return processReviewWork(
+      work,
+      options.workerId,
+      options.agentBranchPrefixes,
+      options.trustedAgentUsers,
+      options.fixWorkEnabled,
+      onPrepared,
+      onAbortFailure,
+    )
+  }
+  return processFixWork(work, options.workerId, onPrepared, onAbortFailure)
+}
+
+export function runJobIteration(options: JobIterationOptions) {
+  return Effect.gen(function* () {
+    const store = yield* WorkflowStore
+    yield* cleanupExpiredAgentSessions(options)
     const work = yield* store.claimNextJob({
       workerId: options.workerId,
       now: options.now(),
@@ -355,22 +465,9 @@ export function runJobIteration(options: {
     const captureAgentFailureContext = (intent: AgentFailureContext) => {
       agentFailureContext = intent
     }
-    const operation =
-      work._tag === "ReviewWork"
-        ? processReviewWork(
-            work,
-            options.workerId,
-            options.agentBranchPrefixes,
-            options.trustedAgentUsers,
-            options.fixWorkEnabled,
-            captureAgentFailureContext,
-            () => {
-              agentAbortFailed = true
-            },
-          )
-        : processFixWork(work, options.workerId, captureAgentFailureContext, () => {
-            agentAbortFailed = true
-          })
+    const operation = jobOperation(work, options, captureAgentFailureContext, () => {
+      agentAbortFailed = true
+    })
     const exit = yield* Effect.exit(
       interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
         store.shouldCancelJob(work.id, options.workerId, options.now()),
@@ -388,9 +485,12 @@ export function runJobIteration(options: {
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
-      maxAttempts: retryableFailure(exit.cause)
-        ? (agentFailureContext?.retryPolicy.maxAttempts ?? options.maxAttempts)
-        : work.attempt,
+      maxAttempts: jobMaxAttempts(
+        exit.cause,
+        work.attempt,
+        options.maxAttempts,
+        agentFailureContext,
+      ),
       ...(agentFailureContext === undefined
         ? {}
         : {
@@ -445,9 +545,34 @@ export function runPublicationIteration(options: {
       publicationId: publication.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, publication.attempt, options.now),
-      maxAttempts: options.maxAttempts,
+      maxAttempts: publicationEvidenceIsPending(exit.cause)
+        ? Number.MAX_SAFE_INTEGER
+        : options.maxAttempts,
     })
   })
+}
+
+function evidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
+  return Option.getOrUndefined(Cause.failureOption(cause)) instanceof EvidencePending
+}
+
+function jobMaxAttempts<E>(
+  cause: Cause.Cause<E>,
+  attempt: number,
+  configuredMaxAttempts: number,
+  agentFailureContext: AgentFailureContext | undefined,
+): number {
+  if (evidenceIsPending(cause)) return Number.MAX_SAFE_INTEGER
+  if (!retryableFailure(cause)) return attempt
+  return agentFailureContext?.retryPolicy.maxAttempts ?? configuredMaxAttempts
+}
+
+function publicationEvidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
+  const failure = Option.getOrUndefined(Cause.failureOption(cause))
+  return (
+    failure instanceof GitHubClientError &&
+    failure.operation === "wait for exact-head evidence before publication"
+  )
 }
 
 export function runCommandIteration(options: {
