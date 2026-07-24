@@ -133,22 +133,14 @@ export function evaluateChangedLineCoverage(
   let covered = 0
   let total = 0
   for (const [path, changedLines] of changed) {
-    if (!eligibleSource(path)) continue
-    const fileCoverage = coverage.get(path)
-    if (fileCoverage === undefined) {
-      if (!nonExecutableFiles.has(path)) missingFiles.push(path)
-      continue
-    }
-    for (const line of changedLines) {
-      const hits = fileCoverage.get(line)
-      if (hits === undefined) continue
-      total += 1
-      if (hits > 0) covered += 1
-      else uncovered.push(`${path}:${line}`)
-    }
+    const file = evaluateChangedFile(path, changedLines, coverage, nonExecutableFiles)
+    covered += file.covered
+    total += file.total
+    uncovered.push(...file.uncovered)
+    if (file.missing) missingFiles.push(path)
   }
-  missingFiles.sort()
-  uncovered.sort()
+  missingFiles.sort((left, right) => left.localeCompare(right))
+  uncovered.sort((left, right) => left.localeCompare(right))
   return {
     passed:
       missingFiles.length === 0 && (total === 0 || covered * 100 >= total * changedCoveragePercent),
@@ -156,6 +148,36 @@ export function evaluateChangedLineCoverage(
     total,
     uncovered,
     missingFiles,
+  }
+}
+
+function evaluateChangedFile(
+  path: string,
+  changedLines: ReadonlySet<number>,
+  coverage: LineCoverage,
+  nonExecutableFiles: ReadonlySet<string>,
+) {
+  const fileCoverage = coverage.get(path)
+  if (!eligibleSource(path)) {
+    return { covered: 0, total: 0, uncovered: [] as Array<string>, missing: false }
+  }
+  if (fileCoverage === undefined) {
+    return {
+      covered: 0,
+      total: 0,
+      uncovered: [] as Array<string>,
+      missing: !nonExecutableFiles.has(path),
+    }
+  }
+  const executable = [...changedLines].flatMap((line) => {
+    const hits = fileCoverage.get(line)
+    return hits === undefined ? [] : [{ line, hits }]
+  })
+  return {
+    covered: executable.filter(({ hits }) => hits > 0).length,
+    total: executable.length,
+    uncovered: executable.filter(({ hits }) => hits === 0).map(({ line }) => `${path}:${line}`),
+    missing: false,
   }
 }
 

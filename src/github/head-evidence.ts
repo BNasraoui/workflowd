@@ -8,7 +8,12 @@ import {
   type SonarEvidence,
 } from "../domain/head-evidence"
 import { normalizeError } from "../errors"
-import type { GitHubCheckRun, GitHubInstallationAdapter, GitHubWorkflowJob } from "./adapter"
+import type {
+  GitHubCheckRun,
+  GitHubCommitStatus,
+  GitHubInstallationAdapter,
+  GitHubWorkflowJob,
+} from "./adapter"
 
 export type SonarResponse = { readonly status: number; readonly body: unknown }
 export type SonarRequest = (path: string, signal?: AbortSignal) => Promise<SonarResponse>
@@ -188,17 +193,21 @@ async function appendCommitStatuses(
     for (const status of page) {
       if (seenContexts.has(status.context)) continue
       seenContexts.add(status.context)
-      retainCheck(collected, {
-        name: status.context,
-        state: commitStatusState(status.state),
-        conclusion: status.state,
-        ...(status.targetUrl == null ? {} : { detailsUrl: status.targetUrl }),
-        ...(status.description == null
-          ? {}
-          : { summary: sanitizeUntrustedText(status.description, 2_000) }),
-      })
+      retainCheck(collected, normalizeCommitStatus(status))
       if (collected.truncated) return
     }
+  }
+}
+
+function normalizeCommitStatus(status: GitHubCommitStatus): CheckEvidence {
+  return {
+    name: status.context,
+    state: commitStatusState(status.state),
+    conclusion: status.state,
+    ...(status.targetUrl == null ? {} : { detailsUrl: status.targetUrl }),
+    ...(status.description == null
+      ? {}
+      : { summary: sanitizeUntrustedText(status.description, 2_000) }),
   }
 }
 
