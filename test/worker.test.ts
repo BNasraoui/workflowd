@@ -750,6 +750,7 @@ describe("Review Work processing", () => {
     const job = makeReviewWork()
     let prepared = false
     let rescheduled = false
+    let maxAttempts = 0
 
     const result = await Effect.runPromise(
       runJobIteration(jobOptions).pipe(
@@ -757,9 +758,10 @@ describe("Review Work processing", () => {
           makeWorkerLayer({
             store: {
               claimNextJob: () => Effect.succeed(job),
-              rescheduleJob: () =>
+              rescheduleJob: (input) =>
                 Effect.sync(() => {
                   rescheduled = true
+                  maxAttempts = input.maxAttempts
                   return "retry" as const
                 }),
             },
@@ -789,6 +791,7 @@ describe("Review Work processing", () => {
     expect(result).toBe("retry")
     expect(rescheduled).toBe(true)
     expect(prepared).toBe(false)
+    expect(maxAttempts).toBe(Number.MAX_SAFE_INTEGER)
   })
 
   test("abandons review work when evidence collection detects a stale target", async () => {
