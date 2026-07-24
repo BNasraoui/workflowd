@@ -11,6 +11,9 @@ import { Workspace } from "./workspace"
 import { WorkspaceError } from "./workspace/errors"
 
 class JobCancelled extends Data.TaggedError("JobCancelled")<Record<never, never>> {}
+class EvidencePending extends Data.TaggedError("EvidencePending")<{
+  readonly reason: string
+}> {}
 
 function interruptOnCancellation<A, E, R, CancellationError, CancellationRequirements>(
   operation: Effect.Effect<A, E, R>,
@@ -85,7 +88,7 @@ function processReviewWork(
         evidence,
       )
       if (preflight._tag === "Pending") {
-        return yield* Effect.fail(new Error(preflight.reason))
+        return yield* Effect.fail(new EvidencePending({ reason: preflight.reason }))
       }
       const currentAfterCollection = new Date(
         yield* Effect.clockWith((clock) => clock.currentTimeMillis),
@@ -158,7 +161,9 @@ function processReviewWork(
         return "stale" as const
       }
       const gated = gateReviewWithHeadEvidence(sessionResult.review, evidence)
-      if (gated._tag === "Pending") return yield* Effect.fail(new Error(gated.reason))
+      if (gated._tag === "Pending") {
+        return yield* Effect.fail(new EvidencePending({ reason: gated.reason }))
+      }
       const review = gated.review
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       return yield* store.completeAgentReviewJob({
@@ -438,9 +443,11 @@ export function runJobIteration(options: {
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
-      maxAttempts: retryableFailure(exit.cause)
-        ? (agentFailureContext?.retryPolicy.maxAttempts ?? options.maxAttempts)
-        : work.attempt,
+      maxAttempts: evidenceIsPending(exit.cause)
+        ? Number.MAX_SAFE_INTEGER
+        : retryableFailure(exit.cause)
+          ? (agentFailureContext?.retryPolicy.maxAttempts ?? options.maxAttempts)
+          : work.attempt,
       ...(agentFailureContext === undefined
         ? {}
         : {
@@ -495,9 +502,23 @@ export function runPublicationIteration(options: {
       publicationId: publication.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, publication.attempt, options.now),
-      maxAttempts: options.maxAttempts,
+      maxAttempts: publicationEvidenceIsPending(exit.cause)
+        ? Number.MAX_SAFE_INTEGER
+        : options.maxAttempts,
     })
   })
+}
+
+function evidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
+  return Option.getOrUndefined(Cause.failureOption(cause)) instanceof EvidencePending
+}
+
+function publicationEvidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
+  const failure = Option.getOrUndefined(Cause.failureOption(cause))
+  return (
+    failure instanceof GitHubClientError &&
+    failure.operation === "wait for exact-head evidence before publication"
+  )
 }
 
 export function runCommandIteration(options: {

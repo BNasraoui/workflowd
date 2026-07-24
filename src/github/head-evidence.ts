@@ -94,6 +94,7 @@ function collectChecks(input: CollectHeadEvidenceInput) {
   return Effect.gen(function* () {
     const checks = yield* attempt("list exact-head check runs", async (signal) => {
       const collected: Array<CheckEvidence> = []
+      let sawSelfCheck = false
       for await (const page of input.client.listCheckRunPages({
         ...input.repository,
         ref: input.target.headSha,
@@ -101,7 +102,11 @@ function collectChecks(input: CollectHeadEvidenceInput) {
         request: { signal },
       })) {
         for (const check of page) {
-          if (check.name === undefined || isSelfCheck(check.name)) continue
+          if (check.name === undefined) continue
+          if (isSelfCheck(check.name)) {
+            sawSelfCheck = true
+            continue
+          }
           if (collected.length >= 50) return { checks: collected, truncated: true }
           collected.push({
             name: check.name,
@@ -119,16 +124,46 @@ function collectChecks(input: CollectHeadEvidenceInput) {
           })
         }
       }
-      return { checks: collected, truncated: false }
+      if (input.client.listCommitStatusPages !== undefined) {
+        for await (const page of input.client.listCommitStatusPages({
+          ...input.repository,
+          ref: input.target.headSha,
+          per_page: 100,
+          request: { signal },
+        })) {
+          for (const status of page) {
+            if (isSelfCheck(status.context)) {
+              sawSelfCheck = true
+              continue
+            }
+            if (collected.length >= 50) return { checks: collected, truncated: true }
+            collected.push({
+              name: status.context,
+              state:
+                status.state === "success"
+                  ? "success"
+                  : status.state === "pending"
+                    ? "pending"
+                    : "failure",
+              conclusion: status.state,
+              ...(status.targetUrl == null ? {} : { detailsUrl: status.targetUrl }),
+              ...(status.description == null
+                ? {}
+                : { summary: sanitizeUntrustedText(status.description, 2_000) }),
+            })
+          }
+        }
+      }
+      return { checks: collected, truncated: false, sawSelfCheck }
     }).pipe(
-      Effect.map(({ checks, truncated }) =>
+      Effect.map(({ checks, truncated, sawSelfCheck }) =>
         truncated
           ? {
               state: "unavailable" as const,
               reason: "More than 50 exact-head check runs were returned.",
               checks,
             }
-          : checks.length === 0
+          : checks.length === 0 && !sawSelfCheck
             ? {
                 state: "unavailable" as const,
                 reason: "No exact-head check runs were returned.",
@@ -174,6 +209,8 @@ function collectFailedJobLogs(
       return logs
     }
     let retained = 0
+    let runsSeen = 0
+    let jobsSeen = 0
     for await (const runs of input.client.listWorkflowRunPages({
       ...input.repository,
       head_sha: input.target.headSha,
@@ -181,6 +218,8 @@ function collectFailedJobLogs(
       request: { signal },
     })) {
       for (const run of runs) {
+        runsSeen += 1
+        if (runsSeen > 20 || retained >= 3) return logs
         if (run.headSha !== input.target.headSha || run.conclusion === "success") continue
         for await (const jobs of input.client.listWorkflowJobPages({
           ...input.repository,
@@ -189,7 +228,9 @@ function collectFailedJobLogs(
           request: { signal },
         })) {
           for (const job of jobs) {
-            if (!failedJob(job) || isSelfCheck(job.name) || retained >= 3) continue
+            jobsSeen += 1
+            if (jobsSeen > 100 || retained >= 3) return logs
+            if (!failedJob(job) || isSelfCheck(job.name)) continue
             const raw = await input.client.downloadWorkflowJobLog({
               ...input.repository,
               job_id: job.id,
@@ -232,6 +273,9 @@ function collectSonar(
       `/api/issues/search?componentKeys=${encodeURIComponent(project)}&pullRequest=${encodeURIComponent(pullRequest)}&resolved=false&ps=100`,
       SonarIssues,
     )
+    if (!Number.isInteger(issues.paging.total) || issues.paging.total < 0) {
+      return { state: "unavailable", reason: "Sonar issue count is invalid." }
+    }
     const measures = yield* sonarJson(
       input.sonarRequest,
       `/api/measures/component?component=${encodeURIComponent(project)}&pullRequest=${encodeURIComponent(pullRequest)}&metricKeys=new_duplicated_lines_density`,
@@ -240,7 +284,11 @@ function collectSonar(
     const duplication = measures.component.measures.find(
       (measure) => measure.metric === "new_duplicated_lines_density",
     )?.periods?.[0]?.value
-    if (duplication === undefined || !Number.isFinite(Number(duplication))) {
+    if (
+      duplication === undefined ||
+      !Number.isFinite(Number(duplication)) ||
+      Number(duplication) < 0
+    ) {
       return { state: "unavailable", reason: "Sonar new-code duplication measure is unavailable." }
     }
 

@@ -5,6 +5,8 @@ type IssueCommentResponse =
   RestEndpointMethodTypes["issues"]["listComments"]["response"]["data"][number]
 type CheckRunResponse =
   RestEndpointMethodTypes["checks"]["listForRef"]["response"]["data"]["check_runs"][number]
+type CommitStatusResponse =
+  RestEndpointMethodTypes["repos"]["listCommitStatusesForRef"]["response"]["data"][number]
 
 export type GitHubPullRequestData = typeof PullRequestData.Encoded & {
   readonly mergeable?: boolean | null
@@ -42,6 +44,13 @@ export type GitHubWorkflowJob = {
   readonly name: string
   readonly status: string
   readonly conclusion?: string | null
+}
+
+export type GitHubCommitStatus = {
+  readonly context: string
+  readonly state: "error" | "failure" | "pending" | "success"
+  readonly description?: string | null
+  readonly targetUrl?: string | null
 }
 
 export type OctokitClientPort = {
@@ -83,6 +92,13 @@ export type OctokitClientPort = {
   readonly listCheckRunPages: (
     input: RestEndpointMethodTypes["checks"]["listForRef"]["parameters"],
   ) => AsyncIterable<ReadonlyArray<CheckRunResponse>>
+  readonly listCommitStatusPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly ref: string
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<CommitStatusResponse>>
   readonly listWorkflowRunPages?: (input: {
     readonly owner: string
     readonly repo: string
@@ -127,6 +143,13 @@ export type GitHubInstallationAdapter = {
   readonly listCheckRunPages: (
     input: RestEndpointMethodTypes["checks"]["listForRef"]["parameters"],
   ) => AsyncIterable<ReadonlyArray<GitHubCheckRun>>
+  readonly listCommitStatusPages?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly ref: string
+    readonly per_page: number
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => AsyncIterable<ReadonlyArray<GitHubCommitStatus>>
   readonly listWorkflowRunPages?: NonNullable<OctokitClientPort["listWorkflowRunPages"]>
   readonly listWorkflowJobPages?: NonNullable<OctokitClientPort["listWorkflowJobPages"]>
   readonly downloadWorkflowJobLog?: NonNullable<OctokitClientPort["downloadWorkflowJobLog"]>
@@ -159,6 +182,12 @@ export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
 
   listCheckRunPages(input: Parameters<GitHubInstallationAdapter["listCheckRunPages"]>[0]) {
     return normalizeCheckRunPages(this.client.listCheckRunPages(input))
+  }
+
+  listCommitStatusPages(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["listCommitStatusPages"]>>[0],
+  ) {
+    return this.client.listCommitStatusPages?.(input) ?? emptyPages<GitHubCommitStatus>()
   }
 
   listWorkflowRunPages(
@@ -271,6 +300,14 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
     updateIssueComment: async (input) => (await client.rest.issues.updateComment(input)).data.id,
     listCheckRunPages: async function* (input) {
       for await (const response of client.paginate.iterator(client.rest.checks.listForRef, input)) {
+        yield response.data
+      }
+    },
+    listCommitStatusPages: async function* (input) {
+      for await (const response of client.paginate.iterator(
+        client.rest.repos.listCommitStatusesForRef,
+        input,
+      )) {
         yield response.data
       }
     },
