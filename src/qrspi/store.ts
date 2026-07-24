@@ -590,7 +590,11 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         }
         return input
       })
-      return read.pipe(Effect.catchTag("QrspiStoreDataError", quarantine))
+      return read.pipe(
+        Effect.catchTag("QrspiStoreDataError", (error) =>
+          error.reason === "identity_mismatch" ? Effect.fail(error) : quarantine(error),
+        ),
+      )
     },
     readTicketRevision: (input) =>
       Effect.gen(function* () {
