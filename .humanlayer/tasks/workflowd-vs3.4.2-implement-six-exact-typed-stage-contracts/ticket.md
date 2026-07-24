@@ -1,8 +1,8 @@
 # Implement six exact typed stage contracts
 
-**Bead:** `workflowd-vs3.4.2`  
-**Type:** task  
-**Priority:** P1  
+**Bead:** `workflowd-vs3.4.2`
+**Type:** task
+**Priority:** P1
 **Status at snapshot:** in_progress
 
 **Labels:** `cap-d2`, `qrspi`, `stage-runtime`
@@ -31,15 +31,14 @@ Use StageCatalog as the single heterogeneous resolution seam. Restore each concr
 - Requests bind WorkflowId, Generation, stage identity, exact ordered source bytes/hashes, repository target, and revision intent where applicable.
 - Changed, reordered, duplicate, malformed, missing, or oversized sources and results are rejected at Schema or persistence boundaries.
 - Ticket and accepted-artifact precedence is deterministic and covered by tests.
-- A test contract proves extension without stage-specific orchestrator changes.
+- All six contracts traverse one catalog execution seam without weakening their stage-specific types or accepting caller-supplied stage extensions.
 - Individual limits are tested without claiming aggregate storage capacity.
 
 ## Notes
 
-Authority: CAP-D2 / wvs34-d4-bac9e02e-res-d2. Depends on CAP-D1. Likely surfaces: src/qrspi/contracts/, src/qrspi/stage-catalog.ts, src/qrspi/source-assembly.ts, src/qrspi/source-resolver.ts, src/qrspi/store.ts, src/store/migrations.ts, test/qrspi/contracts.test.ts, test/qrspi/source-assembly.test.ts. Design discussion accepted through explicit human auto-approval: .humanlayer/tasks/workflowd-vs3.4.2-implement-six-exact-typed-stage-contracts/03-design-discussion-exact-stage-contracts.md (SHA-256 5bdedf4f16c47cd8dd9bc3c62410b58c2124c36b3e87c47df67244fa7fb64ae1). It resolves six stage-tagged local Schemas over one ordered exact-source envelope, immutable commit/path/blob/content reads, catalog-contained executable erasure, canonical StageProduce request replay identity, layered per-record bounds, explicit built-in registration order, and registration-only extension tests. Bead intentionally remains in progress; no implementation, commit, push, PR, close, or Dolt remote sync performed.
+Authority: CAP-D2 / wvs34-d4-bac9e02e-res-d2. Depends on CAP-D1. Likely surfaces: src/qrspi/contracts/, src/qrspi/stage-catalog.ts, src/qrspi/source-assembly.ts, src/qrspi/source-resolver.ts, src/qrspi/store.ts, src/store/migrations.ts, test/qrspi/contracts.test.ts, test/qrspi/source-assembly.test.ts. Design discussion accepted through explicit human auto-approval: .humanlayer/tasks/workflowd-vs3.4.2-implement-six-exact-typed-stage-contracts/03-design-discussion-exact-stage-contracts.md (SHA-256 5bdedf4f16c47cd8dd9bc3c62410b58c2124c36b3e87c47df67244fa7fb64ae1). During implementation review, the human owner superseded registration-only extension: QRSPI v1 is a closed six-stage typed flow, while future task-specific composition belongs to a separate flow-level Schema and compiler. The historical design and implementation Plan remain preserved as accepted inputs.
 
 ## Dependencies
 
 - `workflowd-vs3.4.1`: Build trusted stage definitions and catalog (blocks)
 - `workflowd-vs3.4`: Run configurable QRSPI stages and publish their artifacts (parent-child)
-
