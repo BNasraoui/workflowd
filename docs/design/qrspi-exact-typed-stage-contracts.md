@@ -4,7 +4,7 @@ type: design-discussion
 repo: BNasraoui/workflowd
 branch: opencode/workflowd-vs3.4.2
 sha: c5a18e27c709facd9bd21c991fccea720a410229
-status: accepted
+status: accepted-amended-during-implementation
 revision: 4
 ---
 
@@ -32,7 +32,7 @@ Replace the placeholder Questions contract and unknown source/output records wit
 - Duplicate, missing, unexpected, reordered, malformed, changed, cross-scope, stale, or oversized sources fail before CAP-D2 returns an encoded request to downstream lifecycle code. Each artifact reference must equal the current target repository, WorkflowId, Generation, expected predecessor stage and role, exact accepted revision pointer, and accepted final artifact identity before its bytes enter a request. Malformed, mistagged, or oversized results fail before CAP-D2 returns prepared output to its downstream owner.
 - The complete Schema-decoded request and its canonical SHA-256 are persisted in the existing workflow-operation input envelope. Retry and restart decode that same value, reload only the immutable ticket revision named by its hash, and never reread a tracker, latest artifact path, or mutable source or rebuild the technical source set.
 - Questions through Plan project bounded document output. Implementation projects a typed prepared-commit step and never passes through the document shape.
-- A test-only contract extends the runtime by registration alone, and tests make no aggregate database or workspace capacity claim.
+- The production flow is the closed six-contract family. Tests exercise all six through the common catalog seam and make no aggregate database or workspace capacity claim.
 - Every Schema-valid request can fit the existing 32 KiB stage envelope because it carries a bounded ticket reference rather than an independently much larger `TicketRevision`; the full revision remains exact, untruncated, and hash-verified before the task authority manifest is returned.
 - Request assembly may perform immutable reads outside a transaction. The encoded `StageProduceInput` with exact scope, contract ref, complete decoded nested request, and `requestSha256` provides a pure currentness expectation and comparison input for downstream lifecycle code. CAP-D2 supplies typed mismatch diagnostics but does not own ready-state persistence or stale/currentness state effects.
 
@@ -203,7 +203,7 @@ Expanding the workspace source resolver was rejected because that boundary only 
 
 Keep erasure inside `TrustedStageCatalog`. Private runtime registrations retain the selected Schemas and executable closures. Erased catalog methods decode the nested request/result around those closures and return only Schema-checked prepared output.
 
-A stage-key switch in the generic runner was rejected because adding a contract would then require central orchestration changes. Passing untyped closures or values out of the catalog was rejected because it would widen the trust boundary beyond the shipped registration seam.
+A stage-key switch in the generic runner remains unnecessary because the closed six-contract family carries its own Schemas and closures. Passing untyped closures or values out of the catalog was rejected because it would widen the trust boundary beyond the shipped catalog seam.
 
 #### What is the durable replay identity for this Bead?
 
@@ -223,11 +223,11 @@ Store the complete accepted `TicketRevision` once under its existing `(workflowI
 
 Embedding the complete `TicketRevision` was rejected because `ReadyTicket` permits far more than 32 KiB and `TicketRevision.scenarioCoverage` has no finite encoded maximum, so a readiness-valid ticket could make every stage unclaimable. Raising the request limit was rejected because it would also require larger prompt, launch-intent, harness, durable-agent, and SQLite limits without a defensible finite ceiling. Tightening ticket readiness to fit an arbitrary stage budget was rejected because ticket validity should not depend on repeated transport overhead when the exact immutable revision is already stored. Missing or corrupt referenced revisions fail closed; correction creates a new ticket revision and successor WorkflowStart/Generation identity.
 
-#### How should registration and tests prove extension?
+#### How should registration and tests prove the closed flow?
 
-Export an explicit ordered tuple `[questions, research, design, structure, plan, implementation]` as the live default. Preserve duplicate-reference rejection and registration hashing. Add a seventh test-only registration and exercise the erased assemble/build/prepare path without changing catalog, runner, store, queue, or stage-kind dispatch.
+Export the explicit ordered tuple `[questions, research, design, structure, plan, implementation]` as the only live QRSPI flow. Preserve duplicate-reference rejection and registration hashing. Exercise all six contracts through the catalog assemble/build/prepare path and statically bind each contract kind to its prepared-output shape. Do not expose caller-supplied production registration; task-specific composition belongs to a future flow-level Schema and compiler.
 
-Filesystem discovery and object-value enumeration were rejected because registration order would become implicit. A fixture that calls only concrete contract methods was rejected because it would not prove the production erased seam.
+Filesystem discovery and object-value enumeration were rejected because registration order would become implicit. Tests that call only concrete contract methods were rejected because they would not prove the production catalog seam.
 
 #### How does a hash-valid assembled request prove current authority at claim time?
 
@@ -394,4 +394,4 @@ test.each([
 })
 ```
 
-Contract and source tests should use pure Schema/catalog cases, injected repository-adapter observations, and one file-SQLite replay/corruption suite. They must cover UTF-8 exact limits; missing/extra/duplicate/reordered roles; repository/workflow/Generation/role-stage/accepted-revision/final-artifact mismatches before any repository read; repository rename with stable identity; commit/path/blob/content mismatch; changed request/hash; exact ticket-reference lookup; missing/malformed/hash-mismatched ticket rows; large readiness-valid tickets whose bounded stage references and prompts still fit; authority-manifest Ticket-first order; corrected-ticket successor identity; six distinct results; deterministic tuple order; and registration-only extension. Durable wrong-scope fixtures recompute all hashes after changing one authority field and must still fail the cross-field check, proving hashes alone are insufficient. Deterministic SQLite transition-race tests for Generation, run/revision, target-parent, or accepted-pointer changes between assembly, ready persistence, and claim are owned by downstream CAP-D3/D4/D7 tickets.
+Contract and source tests should use pure Schema/catalog cases, injected repository-adapter observations, and one file-SQLite replay/corruption suite. They must cover UTF-8 exact limits; missing/extra/duplicate/reordered roles; repository/workflow/Generation/role-stage/accepted-revision/final-artifact mismatches before any repository read; repository rename with stable identity; commit/path/blob/content mismatch; changed request/hash; exact ticket-reference lookup; missing/malformed/hash-mismatched ticket rows; large readiness-valid tickets whose bounded stage references and prompts still fit; authority-manifest Ticket-first order; corrected-ticket successor identity; six distinct results; deterministic tuple order; and kind/output separation across the complete closed family. Durable wrong-scope fixtures recompute all hashes after changing one authority field and must still fail the cross-field check, proving hashes alone are insufficient. Deterministic SQLite transition-race tests for Generation, run/revision, target-parent, or accepted-pointer changes between assembly, ready persistence, and claim are owned by downstream CAP-D3/D4/D7 tickets.
