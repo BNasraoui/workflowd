@@ -264,3 +264,20 @@ test("fresh publication evidence replaces obsolete controller findings without r
     findings: [],
   })
 })
+
+test("refreshing evidence preserves an agent finding about the evidence file", () => {
+  const review: ReviewResult = {
+    verdict: "changes_requested",
+    summary: "The supplied evidence is inconsistent.",
+    findings: [
+      {
+        severity: "high",
+        title: "Evidence does not match the review target",
+        body: "The evidence file records a different head SHA.",
+        path: ".workflowd/evidence.json",
+      },
+    ],
+  }
+
+  expect(stripHeadEvidenceFindings(review)).toEqual(review)
+})

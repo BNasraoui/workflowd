@@ -9,7 +9,10 @@ import {
 } from "./agent-harness"
 import { FixResult as FixResultSchema, type FixResult } from "./domain/fix-result"
 import { GitObjectId, JobId, PullRequestNumber } from "./domain/identifiers"
-import { ReviewResult as ReviewResultSchema, type ReviewResult } from "./domain/review-result"
+import {
+  AgentReviewResult as AgentReviewResultSchema,
+  type ReviewResult,
+} from "./domain/review-result"
 
 type AutomationKind = "review" | "fix"
 
@@ -45,7 +48,7 @@ export class OpenCodeAutomationError extends Data.TaggedError("OpenCodeAutomatio
 type ReviewAgentWork = PreparedAgentWork<
   RunPullRequestAutomationInput,
   ReviewResult,
-  typeof ReviewResultSchema.Encoded
+  typeof AgentReviewResultSchema.Encoded
 >
 type FixAgentWork = PreparedAgentWork<
   RunPullRequestAutomationInput,
@@ -81,14 +84,14 @@ export function makePullRequestHarnessDefinitions(config: OpenCodeAutomationConf
     RunPullRequestAutomationInput,
     typeof RunPullRequestAutomationInput.Encoded,
     ReviewResult,
-    typeof ReviewResultSchema.Encoded
+    typeof AgentReviewResultSchema.Encoded
   > = {
     ref: { name: "opencode.pr-review", version: 1 },
     implementationRevision: "opencode.pr-review.v1",
     agent: config.reviewerAgent,
     model: config.model,
     inputSchema: RunPullRequestAutomationInput,
-    outputSchema: ReviewResultSchema,
+    outputSchema: AgentReviewResultSchema,
     maxInputBytes: 26_363,
     maxOutputBytes: 3_395_207,
     promptContract: "pr-review-prompt",

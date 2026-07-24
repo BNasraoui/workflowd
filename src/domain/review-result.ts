@@ -5,16 +5,22 @@ const FindingTitle = Schema.NonEmptyString.pipe(Schema.maxLength(200))
 const FindingBody = Schema.NonEmptyString.pipe(Schema.maxLength(10_000))
 const FindingPath = Schema.NonEmptyString.pipe(Schema.maxLength(1_024))
 
-export const ReviewFinding = Schema.Struct({
+const AgentReviewFinding = Schema.Struct({
   severity: Schema.Literal("critical", "high", "medium", "low"),
   title: FindingTitle,
   body: FindingBody,
   path: Schema.optional(FindingPath),
   line: Schema.optional(Schema.Int.pipe(Schema.positive())),
 })
+
+export const ReviewFinding = Schema.extend(
+  AgentReviewFinding,
+  Schema.Struct({ provenance: Schema.optional(Schema.Literal("head_evidence")) }),
+)
 export type ReviewFinding = typeof ReviewFinding.Type
 
 const Findings = Schema.Array(ReviewFinding).pipe(Schema.maxItems(50))
+const AgentFindings = Schema.Array(AgentReviewFinding).pipe(Schema.maxItems(50))
 
 const PassedReviewResult = Schema.Struct({
   verdict: Schema.Literal("pass"),
@@ -31,3 +37,16 @@ export type ChangesRequestedReviewResult = typeof ChangesRequestedReviewResult.T
 
 export const ReviewResult = Schema.Union(PassedReviewResult, ChangesRequestedReviewResult)
 export type ReviewResult = typeof ReviewResult.Type
+
+export const AgentReviewResult = Schema.Union(
+  Schema.Struct({
+    verdict: Schema.Literal("pass"),
+    summary: ReviewSummary,
+    findings: AgentFindings.pipe(Schema.itemsCount(0)),
+  }),
+  Schema.Struct({
+    verdict: Schema.Literal("changes_requested"),
+    summary: ReviewSummary,
+    findings: AgentFindings.pipe(Schema.minItems(1)),
+  }),
+)

@@ -68,7 +68,7 @@ export function gateReviewWithHeadEvidence(
     ...ciFindings(evidence.ci),
     ...sonarFindings(evidence),
     ...mergeabilityFindings(evidence.mergeability),
-  ]
+  ].map((finding) => ({ ...finding, provenance: "head_evidence" as const }))
   if (findings.length === 0) return { _tag: "Ready", review }
   const agentFindings = review.verdict === "changes_requested" ? review.findings : []
   const retainedGateFindings = findings.slice(0, Math.max(0, 50 - agentFindings.length))
@@ -213,7 +213,7 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
 
 export function stripHeadEvidenceFindings(review: ReviewResult): ReviewResult {
   if (review.verdict === "pass") return review
-  const findings = review.findings.filter((finding) => finding.path !== evidencePath)
+  const findings = review.findings.filter((finding) => finding.provenance !== "head_evidence")
   const summary = review.summary.startsWith(gateSummaryPrefix)
     ? review.summary.slice(gateSummaryPrefix.length)
     : review.summary
