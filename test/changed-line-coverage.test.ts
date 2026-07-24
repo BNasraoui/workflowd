@@ -24,6 +24,16 @@ describe("changed-line coverage", () => {
     expect(changed.get("src/a.ts")).toEqual(new Set([1, 2, 9]))
   })
 
+  test("decodes Git-quoted destination paths", () => {
+    const changed = parseChangedLines(`diff --git "a/src/\\303\\251.ts" "b/src/\\303\\251.ts"
++++ "b/src/\\303\\251.ts"
+@@ -0,0 +1 @@
++export const covered = true
+`)
+
+    expect(changed.get("src/é.ts")).toEqual(new Set([1]))
+  })
+
   test("parses and combines Bun LCOV line hits", () => {
     const coverage = parseLcov(`TN:
 SF:src/a.ts

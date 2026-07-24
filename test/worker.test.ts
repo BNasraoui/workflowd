@@ -811,6 +811,81 @@ describe("Review Work processing", () => {
     expect(autoFix).toBe(false)
   })
 
+  test("completes a finished review when recollected evidence becomes pending", async () => {
+    const job = makeReviewWork()
+    let collections = 0
+    let launches = 0
+    let completedReview: typeof ReviewResult.Type | undefined
+    let rescheduled = false
+    const readyEvidence = {
+      headSha: job.target.headSha,
+      ci: { state: "available" as const, checks: [] },
+      sonar: {
+        state: "pass" as const,
+        headSha: job.target.headSha,
+        unresolvedIssueCount: 0,
+        duplicatedNewLinesPercent: 0,
+        findings: [],
+      },
+      mergeability: { state: "mergeable" as const },
+    }
+
+    const result = await Effect.runPromise(
+      runJobIteration(jobOptions).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextJob: () => Effect.succeed(job),
+              completeAgentReviewJob: (input) =>
+                Effect.sync(() => {
+                  completedReview = input.review
+                  return "completed" as const
+                }),
+              rescheduleJob: () =>
+                Effect.sync(() => {
+                  rescheduled = true
+                  return "retry" as const
+                }),
+            },
+            github: {
+              collectHeadEvidence: () =>
+                Effect.succeed(
+                  ++collections === 1
+                    ? readyEvidence
+                    : {
+                        ...readyEvidence,
+                        ci: {
+                          state: "available" as const,
+                          checks: [{ name: "Required checks", state: "pending" as const }],
+                        },
+                      },
+                ),
+            },
+            workspace: {
+              prepareReview: () => Effect.succeed({ directory: "/tmp/review" }),
+            },
+            automation: {
+              runReview: () => {
+                launches += 1
+                return Effect.succeed({
+                  verdict: "changes_requested",
+                  summary: "Agent found a defect.",
+                  findings: [{ severity: "high", title: "Defect", body: "Fix it." }],
+                })
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("completed")
+    expect(collections).toBe(2)
+    expect(launches).toBe(1)
+    expect(rescheduled).toBe(false)
+    expect(completedReview?.findings[0]?.title).toBe("Defect")
+  })
+
   test("retries pending exact-head evidence without launching the reviewer", async () => {
     const job = makeReviewWork()
     let prepared = false

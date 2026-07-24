@@ -182,10 +182,7 @@ function processReviewWork(
         })
       }
       const gated = gateReviewWithHeadEvidence(sessionResult.review, freshEvidence)
-      if (gated._tag === "Pending") {
-        return yield* Effect.fail(new EvidencePending({ reason: gated.reason }))
-      }
-      const review = gated.review
+      const review = gated._tag === "Pending" ? sessionResult.review : gated.review
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       return yield* store.completeAgentReviewJob({
         jobId: work.id,

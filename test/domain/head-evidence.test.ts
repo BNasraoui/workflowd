@@ -151,6 +151,30 @@ describe("gateReviewWithHeadEvidence", () => {
     ])
   })
 
+  test("preserves agent findings when gate findings reach the schema limit", () => {
+    const result = gateReviewWithHeadEvidence(
+      {
+        verdict: "changes_requested",
+        summary: "Agent found a defect.",
+        findings: [{ severity: "high", title: "Agent defect", body: "Fix the defect." }],
+      },
+      evidence({
+        ci: {
+          state: "available",
+          checks: Array.from({ length: 50 }, (_, index) => ({
+            name: `Failed check ${index + 1}`,
+            state: "failure" as const,
+          })),
+        },
+      }),
+    )
+
+    expect(result._tag).toBe("Ready")
+    if (result._tag === "Pending") return
+    expect(result.review.findings).toHaveLength(50)
+    expect(result.review.findings.at(-1)?.title).toBe("Agent defect")
+  })
+
   test("does not trust check names to identify Workflowd-owned checks", () => {
     const result = gateReviewWithHeadEvidence(
       passingReview,

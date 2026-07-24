@@ -71,12 +71,13 @@ export function gateReviewWithHeadEvidence(
   ]
   if (findings.length === 0) return { _tag: "Ready", review }
   const agentFindings = review.verdict === "changes_requested" ? review.findings : []
+  const retainedGateFindings = findings.slice(0, Math.max(0, 50 - agentFindings.length))
   return {
     _tag: "Ready",
     review: {
       verdict: "changes_requested",
       summary: bounded(`${gateSummaryPrefix}${review.summary}`, 4_000),
-      findings: [...findings, ...agentFindings].slice(0, 50),
+      findings: [...retainedGateFindings, ...agentFindings],
     },
   }
 }

@@ -30,7 +30,7 @@ export function parseChangedLines(diff: string): Map<string, Set<number>> {
   let path: string | undefined
   for (const line of diff.replaceAll("\r\n", "\n").split("\n")) {
     if (line.startsWith("+++ ")) {
-      const value = line.slice(4)
+      const value = decodeGitPath(line.slice(4))
       path = value === "/dev/null" ? undefined : value.replace(/^b\//, "")
       continue
     }
@@ -44,6 +44,41 @@ export function parseChangedLines(diff: string): Map<string, Set<number>> {
     changed.set(path, lines)
   }
   return changed
+}
+
+function decodeGitPath(value: string): string {
+  if (!value.startsWith('"') || !value.endsWith('"')) return value
+  const bytes: Array<number> = []
+  const encoded = value.slice(1, -1)
+  for (let index = 0; index < encoded.length; index += 1) {
+    const character = encoded[index]!
+    if (character !== "\\") {
+      bytes.push(...new TextEncoder().encode(character))
+      continue
+    }
+    const escape = encoded[++index]
+    if (escape === undefined) throw new Error(`Malformed Git-quoted path: ${value}`)
+    const octal = /^[0-7]{3}/.exec(encoded.slice(index))
+    if (octal !== null) {
+      bytes.push(Number.parseInt(octal[0], 8))
+      index += 2
+      continue
+    }
+    const escapedByte = new Map([
+      ["a", 7],
+      ["b", 8],
+      ["t", 9],
+      ["n", 10],
+      ["v", 11],
+      ["f", 12],
+      ["r", 13],
+      ['"', 34],
+      ["\\", 92],
+    ]).get(escape)
+    if (escapedByte === undefined) throw new Error(`Malformed Git-quoted path: ${value}`)
+    bytes.push(escapedByte)
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(bytes))
 }
 
 export function parseLcov(
