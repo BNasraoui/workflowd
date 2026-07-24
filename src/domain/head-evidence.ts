@@ -52,6 +52,7 @@ export type GatedReview =
 
 const selfCheckNames = new Set(["OpenCode Review", "Workflowd PR Gate"])
 const evidencePath = ".workflowd/evidence.json"
+const gateSummaryPrefix = "Automated gates did not pass. Reviewer summary: "
 
 export function gateReviewWithHeadEvidence(
   review: ReviewResult,
@@ -156,12 +157,7 @@ export function gateReviewWithHeadEvidence(
     _tag: "Ready",
     review: {
       verdict: "changes_requested",
-      summary: bounded(
-        findings.length === 1
-          ? findings[0]!.title
-          : `${findings.length} required CI, analyzer, or mergeability gates did not pass.`,
-        4_000,
-      ),
+      summary: bounded(`${gateSummaryPrefix}${review.summary}`, 4_000),
       findings: [...findings, ...agentFindings].slice(0, 50),
     },
   }
@@ -195,9 +191,12 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
 export function stripHeadEvidenceFindings(review: ReviewResult): ReviewResult {
   if (review.verdict === "pass") return review
   const findings = review.findings.filter((finding) => finding.path !== evidencePath)
+  const summary = review.summary.startsWith(gateSummaryPrefix)
+    ? review.summary.slice(gateSummaryPrefix.length)
+    : review.summary
   return findings.length === 0
-    ? { verdict: "pass", summary: review.summary, findings: [] }
-    : { ...review, findings }
+    ? { verdict: "pass", summary, findings: [] }
+    : { ...review, summary, findings }
 }
 
 function sonarUnavailableFinding(body: string): ReviewFinding {

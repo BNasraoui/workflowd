@@ -202,7 +202,7 @@ test("fresh publication evidence replaces obsolete controller findings without r
 
   expect(stripHeadEvidenceFindings(failed.review)).toEqual({
     verdict: "changes_requested",
-    summary: failed.review.summary,
+    summary: "Agent issue.",
     findings: [{ severity: "medium", title: "Agent issue", body: "Still relevant." }],
   })
 

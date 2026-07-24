@@ -11,7 +11,7 @@ import {
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
 import { ReviewResult } from "../src/domain/review-result"
-import { GitHub, type GitHubPort } from "../src/github"
+import { GitHub, GitHubClientError, type GitHubPort } from "../src/github"
 import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
 import type { OpenCodeAdapter } from "../src/opencode/adapter"
 import { SessionAccessResolver } from "../src/session-access"
@@ -1293,6 +1293,44 @@ describe("runJobIteration", () => {
 })
 
 describe("runPublicationIteration", () => {
+  test("keeps pending analyzer publication evidence retryable without exhausting attempts", async () => {
+    let maxAttempts = 0
+    const result = await Effect.runPromise(
+      runPublicationIteration({
+        workerId: "publisher-pending",
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        timeoutMs: 10_000,
+        now: () => new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(
+        Effect.provide(
+          makeWorkerLayer({
+            store: {
+              claimNextPublication: () => Effect.succeed(makePublication()),
+              reschedulePublication: (input) =>
+                Effect.sync(() => {
+                  maxAttempts = input.maxAttempts
+                  return "retry" as const
+                }),
+            },
+            github: {
+              publishReview: () =>
+                Effect.fail(
+                  new GitHubClientError({
+                    operation: "wait for exact-head evidence before publication",
+                    cause: new Error("Sonar pending"),
+                  }),
+                ),
+            },
+          }),
+        ),
+      ),
+    )
+
+    expect(result).toBe("retry")
+    expect(maxAttempts).toBe(Number.MAX_SAFE_INTEGER)
+  })
+
   test("passes GitHub a durable currentness guard for the claimed Publication", async () => {
     const calls: Array<string> = []
     const publication = makePublication()
