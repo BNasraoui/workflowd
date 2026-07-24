@@ -81,12 +81,12 @@ Expose one small typed store boundary that accepts a complete caller-selected do
 - **`src/qrspi/store.ts`**
   - Add row Schemas and extend bounded `QrspiStoreDataError` record/detail vocabulary for stage runs, revisions including the owner-crossing key, document payloads, artifact references, and operation ownership.
   - Add `createDocumentStageRuntimeAggregate` and `readDocumentStageRuntimeAggregate` to `QrspiStorePort`.
-  - Decode the complete input strictly before SQL. Insert the caller's StageRun, common revision, document payload, ordered artifact references, and exact producer/publication ownership in one existing `sql.withTransaction` boundary. Rely on caller-supplied exact identities; do not allocate, replace, claim, progress, bootstrap, or quarantine.
+  - Decode the complete aggregate input strictly before SQL. Within the existing `sql.withTransaction` boundary, select and strictly decode both referenced WorkflowOperation rows and validate each role's operation kind, canonical input hash, and nested stage/run/revision identity against the aggregate before inserting any ownership row. Then insert the caller's StageRun, common revision, document payload, ordered artifact references, and exact producer/publication ownership atomically. Rely on caller-supplied exact identities; do not allocate, replace, claim, progress, bootstrap, or quarantine.
   - Reload by the complete run/revision identity with explicit ordering, strict row and JSON Schema decoding, relational/nested identity comparison, tag and role checks, duplicate/reorder detection, and canonical hash recomputation before returning the aggregate.
 - **`test/qrspi/store.test.ts`**
   - Add a real SQLite harness and deterministic fixture builders for an existing workflow, definition/snapshot, Generation, producer and publication WorkflowOperations, and one document aggregate.
   - First add a failing test for the desired typed API, then prove atomic create/read equality for run identity, common revision and owner-crossing key, all three pointer values, exact ordered source/artifact references, prepared document result, and producer/publication operation ownership.
-  - Inject an insertion failure after parent rows and assert the transaction leaves no partial runtime rows.
+  - Inject an insertion failure after parent rows and assert the transaction leaves no partial runtime rows. Add producer and publication cases whose referenced operation has a mismatched kind, nested stage/run/revision identity, or input hash; assert creation returns the exact typed diagnostic and rolls back every runtime and ownership row.
 
 ### Validation
 
