@@ -147,16 +147,12 @@ function isTypeOnlyStatement(statement: ts.Statement): boolean {
   if (ts.isImportDeclaration(statement)) {
     const clause = statement.importClause
     if (clause === undefined || clause.name !== undefined) return false
-    if (clause.isTypeOnly) return true
-    return (
-      clause.namedBindings !== undefined &&
-      ts.isNamedImports(clause.namedBindings) &&
-      clause.namedBindings.elements.every((element) => element.isTypeOnly)
-    )
+    return clause.isTypeOnly
   }
   if (ts.isExportDeclaration(statement)) {
     if (statement.isTypeOnly) return true
     return (
+      statement.moduleSpecifier === undefined &&
       statement.exportClause !== undefined &&
       ts.isNamedExports(statement.exportClause) &&
       statement.exportClause.elements.every((element) => element.isTypeOnly)

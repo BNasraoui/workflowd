@@ -130,6 +130,15 @@ export type Name = string
     ).toMatchObject({ passed: true, missingFiles: [] })
   })
 
+  test("treats specifier-level type imports as runtime module dependencies", () => {
+    expect(hasRuntimeStatements(`import { type Effect } from "effect"`)).toBe(true)
+  })
+
+  test("treats specifier-level type re-exports with a source as runtime dependencies", () => {
+    expect(hasRuntimeStatements(`export { type Effect } from "effect"`)).toBe(true)
+    expect(hasRuntimeStatements(`type Effect = unknown\nexport { type Effect }`)).toBe(false)
+  })
+
   test("uses available coverage even when a file was marked non-executable", () => {
     expect(
       evaluateChangedLineCoverage(
