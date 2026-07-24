@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   gateReviewWithHeadEvidence,
   sanitizeUntrustedText,
+  stripHeadEvidenceFindings,
   type HeadEvidence,
 } from "../../src/domain/head-evidence"
 import type { ReviewResult } from "../../src/domain/review-result"
@@ -180,5 +181,38 @@ describe("sanitizeUntrustedText", () => {
     expect(result).not.toContain("private-material")
     expect(result).toContain("[REDACTED]")
     expect(result).toEndWith("[truncated by workflowd]")
+  })
+})
+
+test("fresh publication evidence replaces obsolete controller findings without removing agent findings", () => {
+  const failed = gateReviewWithHeadEvidence(
+    {
+      verdict: "changes_requested",
+      summary: "Agent issue.",
+      findings: [{ severity: "medium", title: "Agent issue", body: "Still relevant." }],
+    },
+    evidence({
+      ci: {
+        state: "available",
+        checks: [{ name: "Tests", state: "failure", conclusion: "failure" }],
+      },
+    }),
+  )
+  if (failed._tag === "Pending") throw new Error("expected terminal evidence")
+
+  expect(stripHeadEvidenceFindings(failed.review)).toEqual({
+    verdict: "changes_requested",
+    summary: failed.review.summary,
+    findings: [{ severity: "medium", title: "Agent issue", body: "Still relevant." }],
+  })
+
+  const controllerOnly = gateReviewWithHeadEvidence(
+    passingReview,
+    evidence({ sonar: { state: "missing" } }),
+  )
+  if (controllerOnly._tag === "Pending") throw new Error("expected terminal evidence")
+  expect(stripHeadEvidenceFindings(controllerOnly.review)).toMatchObject({
+    verdict: "pass",
+    findings: [],
   })
 })

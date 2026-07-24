@@ -257,4 +257,47 @@ describe("collectHeadEvidence", () => {
       expect(evidence.ci.reason).toBeTruthy()
     }
   })
+
+  test("collects legacy commit statuses and does not wait on self checks", async () => {
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          listCheckRunPages: () =>
+            onePage([{ id: 1, name: "OpenCode Review", status: "in_progress" }]),
+          listCommitStatusPages: () =>
+            onePage([
+              {
+                context: "legacy/security",
+                state: "failure",
+                description: "scan failed",
+                targetUrl: "https://github.test/status/1",
+              },
+            ]),
+        }),
+        repository: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 7,
+        target,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({
+      state: "available",
+      checks: [{ name: "legacy/security", state: "failure", conclusion: "failure" }],
+    })
+
+    const selfOnly = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          listCheckRunPages: () =>
+            onePage([{ id: 1, name: "OpenCode Review", status: "in_progress" }]),
+        }),
+        repository: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 7,
+        target,
+        sonarRequest: sonar(),
+      }),
+    )
+    expect(selfOnly.ci).toEqual({ state: "available", checks: [] })
+  })
 })

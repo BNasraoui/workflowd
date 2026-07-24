@@ -6,7 +6,6 @@ import {
   type MergeabilityEvidence,
   type SonarEvidence,
 } from "../domain/head-evidence"
-import type { ReviewTarget } from "../domain/review-target"
 import { normalizeError } from "../errors"
 import type { GitHubInstallationAdapter, GitHubWorkflowJob } from "./adapter"
 
@@ -22,7 +21,13 @@ export type CollectHeadEvidenceInput = {
   readonly client: GitHubInstallationAdapter
   readonly repository: { readonly owner: string; readonly repo: string }
   readonly pullRequestNumber: number
-  readonly target: ReviewTarget
+  readonly target: {
+    readonly baseRef: string
+    readonly baseSha: string
+    readonly headRef: string
+    readonly headRepositoryFullName: string
+    readonly headSha: string
+  }
   readonly sonarRequest: SonarRequest
 }
 
@@ -353,7 +358,7 @@ function matchesTarget(
     readonly headRepositoryFullName: string
     readonly headSha: string
   },
-  target: ReviewTarget,
+  target: CollectHeadEvidenceInput["target"],
 ): boolean {
   return (
     pullRequest.baseRef === target.baseRef &&

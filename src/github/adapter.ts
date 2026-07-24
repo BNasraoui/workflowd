@@ -187,7 +187,10 @@ export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
   listCommitStatusPages(
     input: Parameters<NonNullable<GitHubInstallationAdapter["listCommitStatusPages"]>>[0],
   ) {
-    return this.client.listCommitStatusPages?.(input) ?? emptyPages<GitHubCommitStatus>()
+    const pages = this.client.listCommitStatusPages?.(input)
+    return pages === undefined
+      ? emptyPages<GitHubCommitStatus>()
+      : normalizeCommitStatusPages(pages)
   }
 
   listWorkflowRunPages(
@@ -282,6 +285,31 @@ async function* normalizeCheckRunPages(
       ...(checkRun.external_id === undefined ? {} : { externalId: checkRun.external_id }),
       ...(checkRun.app?.id === undefined ? {} : { appId: checkRun.app.id }),
     }))
+  }
+}
+
+async function* normalizeCommitStatusPages(
+  pages: AsyncIterable<ReadonlyArray<CommitStatusResponse>>,
+): AsyncIterable<ReadonlyArray<GitHubCommitStatus>> {
+  for await (const page of pages) {
+    yield page.map((status) => ({
+      context: status.context,
+      state: normalizeCommitState(status.state),
+      description: status.description,
+      targetUrl: status.target_url,
+    }))
+  }
+}
+
+function normalizeCommitState(state: string): GitHubCommitStatus["state"] {
+  switch (state) {
+    case "error":
+    case "failure":
+    case "pending":
+    case "success":
+      return state
+    default:
+      return "error"
   }
 }
 

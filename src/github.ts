@@ -138,7 +138,10 @@ export class GitHubAppAdapter implements GitHubPort {
         target: publication.target,
       })
       if (evidence.ci.state === "stale") return "stale" as const
-      const gated = gateReviewWithHeadEvidence(stripHeadEvidenceFindings(publication.review), evidence)
+      const gated = gateReviewWithHeadEvidence(
+        stripHeadEvidenceFindings(publication.review),
+        evidence,
+      )
       if (gated._tag === "Pending") {
         return yield* Effect.fail(
           new GitHubClientError({
