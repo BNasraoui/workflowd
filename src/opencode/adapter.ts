@@ -156,11 +156,16 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
     await this.client.promptSession(input, signal)
   }
 
-  async subscribeSessionEvents(
+  subscribeSessionEvents(
     input: OpenCodeSessionDirectoryInput,
     signal: AbortSignal,
   ): Promise<AsyncIterable<OpenCodeSessionEvent>> {
-    return normalizeEvents(await this.client.subscribeEvents(input, signal))
+    return Promise.resolve(
+      normalizeEvents(
+        (subscriptionSignal) => this.client.subscribeEvents(input, subscriptionSignal),
+        signal,
+      ),
+    )
   }
 
   async getSessionStatus(
@@ -292,41 +297,72 @@ function normalizeAssistantMessage(message: AssistantMessage): OpenCodeAssistant
   }
 }
 
-async function* normalizeEvents(stream: AsyncIterable<Event>): AsyncIterable<OpenCodeSessionEvent> {
-  for await (const event of stream) {
-    switch (event.type) {
-      case "message.updated":
-        if (event.properties.info.role === "assistant") {
-          yield {
-            type: "message.updated",
-            sessionID: event.properties.sessionID,
-            message: normalizeAssistantMessage(event.properties.info),
+async function* normalizeEvents(
+  subscribe: (signal: AbortSignal) => Promise<AsyncIterable<Event>>,
+  signal: AbortSignal,
+): AsyncIterable<OpenCodeSessionEvent> {
+  const controller = new AbortController()
+  const interrupt = () => controller.abort(signal.reason)
+  if (signal.aborted) interrupt()
+  else signal.addEventListener("abort", interrupt, { once: true })
+
+  let cleanedUp = false
+  const cleanup = () => {
+    if (cleanedUp) return
+    cleanedUp = true
+    signal.removeEventListener("abort", interrupt)
+    controller.abort()
+  }
+
+  let iterator: AsyncIterator<Event> | undefined
+  let sourceDone = false
+  try {
+    const stream = await subscribe(controller.signal)
+    iterator = stream[Symbol.asyncIterator]()
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) {
+        sourceDone = true
+        break
+      }
+      const event = next.value
+      switch (event.type) {
+        case "message.updated":
+          if (event.properties.info.role === "assistant") {
+            yield {
+              type: "message.updated",
+              sessionID: event.properties.sessionID,
+              message: normalizeAssistantMessage(event.properties.info),
+            }
           }
-        }
-        break
-      case "session.status":
-        yield {
-          type: "session.status",
-          sessionID: event.properties.sessionID,
-          status: event.properties.status,
-        }
-        break
-      case "session.idle":
-        yield {
-          type: "session.status",
-          sessionID: event.properties.sessionID,
-          status: { type: "idle" },
-        }
-        break
-      case "session.error":
-        yield {
-          type: "session.error",
-          ...(event.properties.sessionID === undefined
-            ? {}
-            : { sessionID: event.properties.sessionID }),
-          ...(event.properties.error === undefined ? {} : { error: event.properties.error }),
-        }
-        break
+          break
+        case "session.status":
+          yield {
+            type: "session.status",
+            sessionID: event.properties.sessionID,
+            status: event.properties.status,
+          }
+          break
+        case "session.idle":
+          yield {
+            type: "session.status",
+            sessionID: event.properties.sessionID,
+            status: { type: "idle" },
+          }
+          break
+        case "session.error":
+          yield {
+            type: "session.error",
+            ...(event.properties.sessionID === undefined
+              ? {}
+              : { sessionID: event.properties.sessionID }),
+            ...(event.properties.error === undefined ? {} : { error: event.properties.error }),
+          }
+          break
+      }
     }
+  } finally {
+    cleanup()
+    if (!sourceDone && iterator?.return !== undefined) await iterator.return()
   }
 }
