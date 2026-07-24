@@ -118,7 +118,8 @@ function collectChecks(
         trustedRequiredContexts: new Set(),
         truncated: false,
       }
-      await appendCheckRuns(input, signal, collected)
+      const trustedActionsCheckSuites = await collectTrustedActionsCheckSuites(input, signal)
+      await appendCheckRuns(input, signal, collected, trustedActionsCheckSuites)
       await appendCommitStatuses(input, signal, collected)
       return collected
     }).pipe(
@@ -162,10 +163,16 @@ const requiredContextAppSlugs: Readonly<Record<string, string>> = {
   "CodeQL (JavaScript/TypeScript)": "github-actions",
 }
 
+const requiredContextWorkflowPaths: Readonly<Record<string, string>> = {
+  "Required checks": ".github/workflows/ci.yml",
+  "CodeQL (JavaScript/TypeScript)": ".github/workflows/codeql.yml",
+}
+
 async function appendCheckRuns(
   input: CollectHeadEvidenceInput,
   signal: AbortSignal,
   collected: CollectedChecks,
+  trustedActionsCheckSuites: ReadonlyMap<number, string>,
 ): Promise<void> {
   for await (const page of input.client.listCheckRunPages({
     ...input.repository,
@@ -177,13 +184,73 @@ async function appendCheckRuns(
       const normalized = normalizeCheckRun(check)
       if (normalized === undefined) continue
       if (isOwnedWorkflowdCheck(check, input.workflowdAppId)) continue
-      if (requiredContextAppSlugs[normalized.name] === check.appSlug) {
+      if (isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites)) {
         collected.trustedRequiredContexts.add(normalized.name)
       }
       retainCheck(collected, normalized)
       if (collected.truncated) return
     }
   }
+}
+
+async function collectTrustedActionsCheckSuites(
+  input: CollectHeadEvidenceInput,
+  signal: AbortSignal,
+): Promise<ReadonlyMap<number, string>> {
+  const getWorkflow = input.client.getWorkflow
+  const getContentSha = input.client.getRepositoryContentSha
+  const listRuns = input.client.listWorkflowRunPages
+  const trusted = new Map<number, string>()
+  if (getWorkflow === undefined || getContentSha === undefined || listRuns === undefined) {
+    return trusted
+  }
+
+  const workflows = new Map<number, string>()
+  for (const path of new Set(Object.values(requiredContextWorkflowPaths))) {
+    const [workflow, baseContentSha, headContentSha] = await Promise.all([
+      getWorkflow({ ...input.repository, workflow_id: path, request: { signal } }),
+      getContentSha({ ...input.repository, path, ref: input.target.baseSha, request: { signal } }),
+      getContentSha({ ...input.repository, path, ref: input.target.headSha, request: { signal } }),
+    ])
+    if (workflow.path === path && baseContentSha === headContentSha) {
+      workflows.set(workflow.id, path)
+    }
+  }
+
+  for await (const page of listRuns({
+    ...input.repository,
+    head_sha: input.target.headSha,
+    per_page: 100,
+    request: { signal },
+  })) {
+    for (const run of page) {
+      const path = workflows.get(run.workflowId)
+      if (
+        path !== undefined &&
+        run.path === path &&
+        run.headSha === input.target.headSha &&
+        run.checkSuiteId !== undefined
+      ) {
+        trusted.set(run.checkSuiteId, path)
+      }
+    }
+  }
+  return trusted
+}
+
+function isTrustedRequiredContext(
+  check: GitHubCheckRun,
+  name: string,
+  trustedActionsCheckSuites: ReadonlyMap<number, string>,
+): boolean {
+  const appSlug = requiredContextAppSlugs[name]
+  if (appSlug !== check.appSlug) return false
+  const workflowPath = requiredContextWorkflowPaths[name]
+  if (workflowPath === undefined) return true
+  return (
+    check.checkSuiteId !== undefined &&
+    trustedActionsCheckSuites.get(check.checkSuiteId) === workflowPath
+  )
 }
 
 function normalizeCheckRun(check: GitHubCheckRun): CheckEvidence | undefined {

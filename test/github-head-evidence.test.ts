@@ -46,6 +46,7 @@ const requiredCheckRuns = [
     conclusion: "success",
     appId: 20,
     appSlug: "github-actions",
+    checkSuiteId: 201,
   },
   {
     id: 102,
@@ -62,6 +63,30 @@ const requiredCheckRuns = [
     conclusion: "success",
     appId: 22,
     appSlug: "github-actions",
+    checkSuiteId: 203,
+  },
+]
+
+const requiredWorkflowRuns = [
+  {
+    id: 301,
+    name: "CI",
+    headSha,
+    status: "completed",
+    conclusion: "success",
+    workflowId: 401,
+    path: ".github/workflows/ci.yml",
+    checkSuiteId: 201,
+  },
+  {
+    id: 303,
+    name: "CodeQL",
+    headSha,
+    status: "completed",
+    conclusion: "success",
+    workflowId: 403,
+    path: ".github/workflows/codeql.yml",
+    checkSuiteId: 203,
   },
 ]
 
@@ -72,7 +97,12 @@ function github(overrides: Partial<GitHubInstallationAdapter> = {}): GitHubInsta
     createIssueComment: async () => 1,
     updateIssueComment: async () => 1,
     listCheckRunPages: () => onePage(requiredCheckRuns),
-    listWorkflowRunPages: () => onePage([]),
+    listWorkflowRunPages: () => onePage(requiredWorkflowRuns),
+    getWorkflow: async ({ workflow_id }) => ({
+      id: workflow_id.endsWith("ci.yml") ? 401 : 403,
+      path: workflow_id,
+    }),
+    getRepositoryContentSha: async () => "trusted-workflow-blob",
     listWorkflowJobPages: () => onePage([]),
     downloadWorkflowJobLog: async () => "",
     createCheckRun: async () => 1,
@@ -287,7 +317,18 @@ describe("collectHeadEvidence", () => {
               { id: 3, name: "Tests", status: "completed", conclusion: "failure" },
             ]),
           listWorkflowRunPages: () =>
-            onePage([{ id: 91, name: "CI", headSha, status: "completed", conclusion: "failure" }]),
+            onePage([
+              ...requiredWorkflowRuns,
+              {
+                id: 91,
+                name: "Other CI",
+                headSha,
+                status: "completed",
+                conclusion: "failure",
+                workflowId: 999,
+                path: ".github/workflows/other.yml",
+              },
+            ]),
           listWorkflowJobPages: () =>
             onePage([{ id: 92, name: "Tests", status: "completed", conclusion: "failure" }]),
           downloadWorkflowJobLog: async () =>
@@ -365,6 +406,55 @@ describe("collectHeadEvidence", () => {
       state: "unavailable",
       reason:
         "Missing required exact-head contexts: Required checks, SonarCloud Code Analysis, CodeQL (JavaScript/TypeScript).",
+    })
+  })
+
+  test("does not accept forged same-app Actions contexts from another workflow run", async () => {
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          listCheckRunPages: () =>
+            onePage(
+              requiredCheckRuns.map((check) =>
+                check.appSlug === "github-actions" ? { ...check, checkSuiteId: 999 } : check,
+              ),
+            ),
+        }),
+        repository: workflowdRepository,
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason:
+        "Missing required exact-head contexts: Required checks, CodeQL (JavaScript/TypeScript).",
+    })
+  })
+
+  test("does not trust an Actions context when the pull request changes its workflow", async () => {
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          getRepositoryContentSha: async ({ path, ref }) =>
+            path.endsWith("ci.yml") && ref === headSha
+              ? "pull-request-controlled-workflow"
+              : "trusted-workflow-blob",
+        }),
+        repository: workflowdRepository,
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason: "Missing required exact-head contexts: Required checks.",
     })
   })
 

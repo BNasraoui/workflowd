@@ -103,7 +103,16 @@ test("OctokitInstallationAdapter preserves pages and forwards writes", async () 
       })(),
     listWorkflowRunPages: () =>
       (async function* () {
-        yield [{ id: 301, name: "CI", headSha: "head", conclusion: "failure" }]
+        yield [
+          {
+            id: 301,
+            name: "CI",
+            headSha: "head",
+            conclusion: "failure",
+            workflowId: 401,
+            path: ".github/workflows/ci.yml",
+          },
+        ]
       })(),
     listWorkflowJobPages: () =>
       (async function* () {
@@ -136,7 +145,18 @@ test("OctokitInstallationAdapter preserves pages and forwards writes", async () 
         per_page: 20,
       }),
     ),
-  ).toEqual([[{ id: 301, name: "CI", headSha: "head", conclusion: "failure" }]])
+  ).toEqual([
+    [
+      {
+        id: 301,
+        name: "CI",
+        headSha: "head",
+        conclusion: "failure",
+        workflowId: 401,
+        path: ".github/workflows/ci.yml",
+      },
+    ],
+  ])
   expect(
     await collect(
       adapter.listWorkflowJobPages({ owner: "owner", repo: "repo", run_id: 301, per_page: 100 }),
@@ -200,6 +220,9 @@ test("makeOctokitClientPort collects Actions runs, jobs, and failed-job logs", a
                   {
                     id: 11,
                     name: "CI",
+                    workflow_id: 41,
+                    path: ".github/workflows/ci.yml",
+                    check_suite_id: 51,
                     head_sha: "a".repeat(40),
                     status: "completed",
                     conclusion: "failure",
@@ -273,7 +296,14 @@ test("makeOctokitClientPort collects Actions runs, jobs, and failed-job logs", a
     job_id: 12,
   })
 
-  expect(runs[0]?.[0]).toMatchObject({ id: 11, name: "CI", conclusion: "failure" })
+  expect(runs[0]?.[0]).toMatchObject({
+    id: 11,
+    name: "CI",
+    conclusion: "failure",
+    workflowId: 41,
+    path: ".github/workflows/ci.yml",
+    checkSuiteId: 51,
+  })
   expect(jobs[0]?.[0]).toMatchObject({ id: 12, name: "Tests", conclusion: "failure" })
   expect(log).toBe("failed assertion")
 })

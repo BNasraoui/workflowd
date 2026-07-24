@@ -30,6 +30,7 @@ export type GitHubCheckRun = {
   readonly externalId?: CheckRunResponse["external_id"]
   readonly appId?: NonNullable<CheckRunResponse["app"]>["id"]
   readonly appSlug?: NonNullable<CheckRunResponse["app"]>["slug"]
+  readonly checkSuiteId?: number
 }
 
 export type GitHubWorkflowRun = {
@@ -38,7 +39,12 @@ export type GitHubWorkflowRun = {
   readonly headSha: string
   readonly status?: string | null
   readonly conclusion?: string | null
+  readonly workflowId: number
+  readonly path: string
+  readonly checkSuiteId?: number
 }
+
+export type GitHubWorkflow = { readonly id: number; readonly path: string }
 
 export type GitHubWorkflowJob = {
   readonly id: number
@@ -107,6 +113,19 @@ export type OctokitClientPort = {
     readonly per_page: number
     readonly request?: { readonly signal?: AbortSignal }
   }) => AsyncIterable<ReadonlyArray<GitHubWorkflowRun>>
+  readonly getWorkflow?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly workflow_id: string
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => Promise<GitHubWorkflow>
+  readonly getRepositoryContentSha?: (input: {
+    readonly owner: string
+    readonly repo: string
+    readonly path: string
+    readonly ref: string
+    readonly request?: { readonly signal?: AbortSignal }
+  }) => Promise<string>
   readonly listWorkflowJobPages?: (input: {
     readonly owner: string
     readonly repo: string
@@ -152,6 +171,8 @@ export type GitHubInstallationAdapter = {
     readonly request?: { readonly signal?: AbortSignal }
   }) => AsyncIterable<ReadonlyArray<GitHubCommitStatus>>
   readonly listWorkflowRunPages?: NonNullable<OctokitClientPort["listWorkflowRunPages"]>
+  readonly getWorkflow?: NonNullable<OctokitClientPort["getWorkflow"]>
+  readonly getRepositoryContentSha?: NonNullable<OctokitClientPort["getRepositoryContentSha"]>
   readonly listWorkflowJobPages?: NonNullable<OctokitClientPort["listWorkflowJobPages"]>
   readonly downloadWorkflowJobLog?: NonNullable<OctokitClientPort["downloadWorkflowJobLog"]>
   readonly createCheckRun: (
@@ -198,6 +219,19 @@ export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
     input: Parameters<NonNullable<GitHubInstallationAdapter["listWorkflowRunPages"]>>[0],
   ) {
     return this.client.listWorkflowRunPages?.(input) ?? emptyPages<GitHubWorkflowRun>()
+  }
+
+  getWorkflow(input: Parameters<NonNullable<GitHubInstallationAdapter["getWorkflow"]>>[0]) {
+    return this.client.getWorkflow?.(input) ?? Promise.reject(new Error("Actions API unavailable"))
+  }
+
+  getRepositoryContentSha(
+    input: Parameters<NonNullable<GitHubInstallationAdapter["getRepositoryContentSha"]>>[0],
+  ) {
+    return (
+      this.client.getRepositoryContentSha?.(input) ??
+      Promise.reject(new Error("Contents API unavailable"))
+    )
   }
 
   listWorkflowJobPages(
@@ -286,6 +320,7 @@ async function* normalizeCheckRunPages(
       ...(checkRun.external_id === undefined ? {} : { externalId: checkRun.external_id }),
       ...(checkRun.app?.id === undefined ? {} : { appId: checkRun.app.id }),
       ...(checkRun.app?.slug === undefined ? {} : { appSlug: checkRun.app.slug }),
+      ...(checkRun.check_suite?.id === undefined ? {} : { checkSuiteId: checkRun.check_suite.id }),
     }))
   }
 }
@@ -352,8 +387,24 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
           headSha: run.head_sha,
           status: run.status,
           conclusion: run.conclusion,
+          workflowId: run.workflow_id,
+          path: run.path,
+          ...(run.check_suite_id === undefined || run.check_suite_id === null
+            ? {}
+            : { checkSuiteId: run.check_suite_id }),
         }))
       }
+    },
+    getWorkflow: async (input) => {
+      const workflow = (await client.rest.actions.getWorkflow(input)).data
+      return { id: workflow.id, path: workflow.path }
+    },
+    getRepositoryContentSha: async (input) => {
+      const content = (await client.rest.repos.getContent(input)).data
+      if (Array.isArray(content) || content.type !== "file") {
+        throw new Error(`Repository path is not a file: ${input.path}`)
+      }
+      return content.sha
     },
     listWorkflowJobPages: async function* (input) {
       for await (const response of client.paginate.iterator(
