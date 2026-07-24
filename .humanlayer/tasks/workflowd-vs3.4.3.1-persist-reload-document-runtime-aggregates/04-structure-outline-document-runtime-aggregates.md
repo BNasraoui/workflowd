@@ -10,7 +10,7 @@ Establish the inactive document half of the accepted durable stage-runtime model
 
 ## Desired End State
 
-- Strict Schemas represent StageRun identity and pointers, common StageRevision identity and lifecycle, the document payload, immutable artifact references, and exact producer/publication WorkflowOperation ownership without a nullable document/implementation union.
+- Strict Schemas represent StageRun identity and pointers, common StageRevision identity and lifecycle, a stable owner-crossing key, the document payload, immutable artifact references, and exact producer/publication WorkflowOperation ownership without a nullable document/implementation union. The publication ownership row is the publication-operation identity hook.
 - A numbered migration after the current `0010` frontier creates the complete shared runtime table family for both variants, guarded Generation cursor columns, and storage support for the accepted `stage_runtime_v1` literal while preserving all existing row values and creating no inferred runtime rows.
 - `QrspiStore` can atomically persist one caller-supplied valid document aggregate and strictly reload it by exact identity.
 - Reads reject missing or contradictory payloads, malformed or excess JSON, invalid tags and ordinals, duplicate or reordered records, relational/nested identity disagreement, and canonical hash disagreement as exact typed diagnostics. Reads never mutate or expose rejected rows as trusted state.
@@ -26,7 +26,7 @@ Establish the inactive document half of the accepted durable stage-runtime model
 
 | Child obligation | Structure outcome |
 | --- | --- |
-| Complete append-only shared layout | Phase 1 creates StageRun, common/tagged revisions, implementation-step, immutable-reference, operation-ownership, and diagnostic tables needed by later siblings. |
+| Complete append-only shared layout | Phase 1 creates StageRun, common/tagged revisions with a stable owner-crossing key, implementation-step, immutable-reference, operation-ownership, and diagnostic tables needed by later siblings. Publication ownership supplies the publication-operation identity hook. |
 | Document aggregate round trip | Phase 2 adds only document-facing Schemas and typed store methods. |
 | Guarded pointers and ownership | Phase 1 supplies local SQL keys/FKs/current indexes; Phase 2 checks exact run-pointer, revision, artifact, and physical-operation identity. |
 | Exact rejection before transition | Phase 3 exercises SQL and strict read diagnostics without adding quarantine or a transition. |
@@ -46,12 +46,12 @@ Add the complete relational foundation behind an append-only migration and prove
   - Retain a `runStoreMigrationsThrough0010` runner for previous-frontier fixtures and append the next numbered migration without editing migrations `0001`-`0010`.
   - Add nullable `current_stage_key` and `current_stage_run_ordinal` Generation cursor columns with an all-or-none shape and positive ordinal checks.
   - Extend the persisted Generation format boundary to admit `stage_runtime_v1` while retaining exact `legacy` and `stage_snapshots_v1` values. If SQLite requires table reconstruction to replace the existing format `CHECK`, copy every existing column value exactly, preserve primary/foreign keys and the partial current index, and prove no runtime fact is inferred.
-  - Create strict tables for `qrspi_stage_runs`, `qrspi_stage_revisions`, document and implementation one-to-one payloads, implementation steps, artifact/implementation-commit/checkpoint references, revision diagnostics, and document/step WorkflowOperation ownership.
-  - Enforce bounded identities, positive ordinals, exact state/kind/reason literals, object/array JSON shape, lowercase SHA-256 and Git SHA shape, composite parent keys, same-run revision pointers, one current run per Generation/stage, one payload kind per common revision, contiguous-position-compatible keys, immutable-reference uniqueness, and unique physical-operation ownership. Do not add triggers or executable claim indexes.
+  - Create strict tables for `qrspi_stage_runs`, `qrspi_stage_revisions`, document and implementation one-to-one payloads, implementation steps, artifact/implementation-commit/checkpoint references, revision diagnostics, and document/step WorkflowOperation ownership. Store a bounded, non-null `owner_crossing_key` on `qrspi_stage_revisions`; its unique constraint is the stable identity seam for later handoff receipts. The publication-role ownership row's unique WorkflowOperation foreign key supplies the publication-operation identity hook for later reconciliation.
+  - Enforce bounded identities, globally unique owner-crossing keys, positive ordinals, exact state/kind/reason literals, object/array JSON shape, lowercase SHA-256 and Git SHA shape, composite parent keys, same-run revision pointers, one current run per Generation/stage, one payload kind per common revision, contiguous-position-compatible keys, immutable-reference uniqueness, and unique physical-operation ownership. Do not add triggers or executable claim indexes.
 - **`test/store/migrations.test.ts`**
   - Extend migration-order and strict-table assertions for the new frontier.
-  - Inspect Generation columns, accepted format literals, composite keys/FKs, partial current indexes, one-to-one variant ownership, operation-owner uniqueness, and reference/diagnostic checks.
-  - Seed the required existing workflow/definition/Generation/operation graph and prove direct SQL rejects invalid tags, cross-variant ownership, duplicate current runs, cross-run pointers, malformed JSON, malformed hashes, invalid ordinals, and duplicate physical-operation ownership.
+  - Inspect Generation columns, accepted format literals, composite keys/FKs, partial current indexes, one-to-one variant ownership, the bounded non-null and globally unique owner-crossing key, publication-role operation identity, operation-owner uniqueness, and reference/diagnostic checks.
+  - Seed the required existing workflow/definition/Generation/operation graph and prove direct SQL rejects invalid tags, cross-variant ownership, duplicate current runs, duplicate owner-crossing keys, cross-run pointers, malformed JSON, malformed hashes, invalid ordinals, and duplicate physical-operation ownership.
   - Build a file database through `0010`, snapshot existing Generation/operation values, apply the current migration through a fresh layer, and assert exact value preservation plus zero inferred runtime rows.
 
 ### Validation
@@ -75,17 +75,17 @@ Expose one small typed store boundary that accepts a complete caller-selected do
 ### File Changes
 
 - **`src/qrspi/stage-runtime.ts`**
-  - Define bounded `StageRunIdentity`, `StageRevisionIdentity`, StageRun and StageRevision state literals, nullable pending/published/accepted revision pointer values, exact source-set identity, document prepared-result payload, immutable artifact record, operation ownership roles, and the tagged `DocumentStageRevisionAggregate`.
+  - Define bounded `StageRunIdentity`, `StageRevisionIdentity`, the stable owner-crossing key, StageRun and StageRevision state literals, nullable pending/published/accepted revision pointer values, exact source-set identity, document prepared-result payload, immutable artifact record, operation ownership roles, and the tagged `DocumentStageRevisionAggregate`.
   - Reuse `ExactStageScope`, `ExactStageSources`, `PreparedStageOutput`'s `Document` shape, and `ArtifactReference` from `src/qrspi/contracts/common.ts`; do not create competing source or artifact representations and do not define implementation behavior.
   - Apply semantic filters for one aggregate identity, document tag/payload, same-run pointers, ordered source/artifact ordinals, source-set hash, prepared-result hash, and artifact/reference identity.
 - **`src/qrspi/store.ts`**
-  - Add row Schemas and extend bounded `QrspiStoreDataError` record/detail vocabulary for stage runs, revisions, document payloads, artifact references, and operation ownership.
+  - Add row Schemas and extend bounded `QrspiStoreDataError` record/detail vocabulary for stage runs, revisions including the owner-crossing key, document payloads, artifact references, and operation ownership.
   - Add `createDocumentStageRuntimeAggregate` and `readDocumentStageRuntimeAggregate` to `QrspiStorePort`.
   - Decode the complete input strictly before SQL. Insert the caller's StageRun, common revision, document payload, ordered artifact references, and exact producer/publication ownership in one existing `sql.withTransaction` boundary. Rely on caller-supplied exact identities; do not allocate, replace, claim, progress, bootstrap, or quarantine.
   - Reload by the complete run/revision identity with explicit ordering, strict row and JSON Schema decoding, relational/nested identity comparison, tag and role checks, duplicate/reorder detection, and canonical hash recomputation before returning the aggregate.
 - **`test/qrspi/store.test.ts`**
   - Add a real SQLite harness and deterministic fixture builders for an existing workflow, definition/snapshot, Generation, producer and publication WorkflowOperations, and one document aggregate.
-  - First add a failing test for the desired typed API, then prove atomic create/read equality for run identity, common revision, all three pointer values, exact ordered source/artifact references, prepared document result, and producer/publication operation ownership.
+  - First add a failing test for the desired typed API, then prove atomic create/read equality for run identity, common revision and owner-crossing key, all three pointer values, exact ordered source/artifact references, prepared document result, and producer/publication operation ownership.
   - Inject an insertion failure after parent rows and assert the transaction leaves no partial runtime rows.
 
 ### Validation
