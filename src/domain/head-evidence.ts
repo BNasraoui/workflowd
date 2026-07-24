@@ -196,18 +196,18 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .replace(
-      /\b(authorization\s*:\s*(?:bearer|basic|token)|(?:github|sonar|api)[_-]?token\s*[=:])\s*[^\s]+/gi,
-      "$1 [REDACTED]",
-    )
-    .replace(
-      /\b([A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[=:])\s*[^\s]+/gi,
-      "$1 [REDACTED]",
-    )
-    .replace(/(https?:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
-    .replace(
-      /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/g,
+      /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi,
       "[REDACTED PRIVATE KEY]",
     )
+    .replace(
+      /\b(authorization\s*:\s*(?:bearer|basic|token)|(?:github|sonar|api)[_-]?token\s*[=:])\s*(?:"[\s\S]*?"|'[\s\S]*?'|[^\s]+)/gi,
+      "$1 [REDACTED]",
+    )
+    .replace(
+      /\b([A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[=:])\s*(?:"[\s\S]*?"|'[\s\S]*?'|[^\s]+)/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/(https?:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
   if (sanitized.length <= maxLength) return sanitized
   const marker = "\n[truncated by workflowd]"
   return `${sanitized.slice(0, Math.max(0, maxLength - marker.length))}${marker}`

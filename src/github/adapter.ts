@@ -29,6 +29,7 @@ export type GitHubCheckRun = {
   readonly summary?: string | null
   readonly externalId?: CheckRunResponse["external_id"]
   readonly appId?: NonNullable<CheckRunResponse["app"]>["id"]
+  readonly appSlug?: NonNullable<CheckRunResponse["app"]>["slug"]
 }
 
 export type GitHubWorkflowRun = {
@@ -284,6 +285,7 @@ async function* normalizeCheckRunPages(
       summary: checkRun.output?.summary,
       ...(checkRun.external_id === undefined ? {} : { externalId: checkRun.external_id }),
       ...(checkRun.app?.id === undefined ? {} : { appId: checkRun.app.id }),
+      ...(checkRun.app?.slug === undefined ? {} : { appSlug: checkRun.app.slug }),
     }))
   }
 }

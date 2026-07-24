@@ -194,6 +194,18 @@ describe("sanitizeUntrustedText", () => {
     expect(result).toContain("[REDACTED]")
     expect(result).toEndWith("[truncated by workflowd]")
   })
+
+  test("redacts an environment-prefixed quoted multiline private key", () => {
+    const result = sanitizeUntrustedText(
+      'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----"\nafter',
+      1_000,
+    )
+
+    expect(result).not.toContain("private-material")
+    expect(result).not.toContain("-----END PRIVATE KEY-----")
+    expect(result).toContain("PRIVATE_KEY=[REDACTED]")
+    expect(result).toEndWith("\nafter")
+  })
 })
 
 test("fresh publication evidence replaces obsolete controller findings without removing agent findings", () => {

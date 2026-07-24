@@ -106,7 +106,11 @@ export function collectHeadEvidence(
 function collectChecks(input: CollectHeadEvidenceInput) {
   return Effect.gen(function* () {
     const checks = yield* attempt("list exact-head check runs", async (signal) => {
-      const collected: CollectedChecks = { checks: [], truncated: false }
+      const collected: CollectedChecks = {
+        checks: [],
+        trustedRequiredContexts: new Set(),
+        truncated: false,
+      }
       await appendCheckRuns(input, signal, collected)
       await appendCommitStatuses(input, signal, collected)
       return collected
@@ -141,7 +145,14 @@ function collectChecks(input: CollectHeadEvidenceInput) {
 
 type CollectedChecks = {
   readonly checks: Array<CheckEvidence>
+  readonly trustedRequiredContexts: Set<string>
   truncated: boolean
+}
+
+const requiredContextAppSlugs: Readonly<Record<string, string>> = {
+  "Required checks": "github-actions",
+  "SonarCloud Code Analysis": "sonarcloud",
+  "CodeQL (JavaScript/TypeScript)": "github-actions",
 }
 
 async function appendCheckRuns(
@@ -159,6 +170,9 @@ async function appendCheckRuns(
       const normalized = normalizeCheckRun(check)
       if (normalized === undefined) continue
       if (isOwnedWorkflowdCheck(check, input.workflowdAppId)) continue
+      if (requiredContextAppSlugs[normalized.name] === check.appSlug) {
+        collected.trustedRequiredContexts.add(normalized.name)
+      }
       retainCheck(collected, normalized)
       if (collected.truncated) return
     }
@@ -238,7 +252,7 @@ function classifyChecks(collected: CollectedChecks, requiredContexts: ReadonlyAr
     }
   }
   const missingContexts = requiredContexts.filter(
-    (context) => !collected.checks.some((check) => check.name === context),
+    (context) => !collected.trustedRequiredContexts.has(context),
   )
   if (missingContexts.length > 0) {
     return {

@@ -37,13 +37,21 @@ async function* onePage<A>(items: ReadonlyArray<A>) {
 }
 
 const requiredCheckRuns = [
-  { id: 101, name: "Required checks", status: "completed", conclusion: "success", appId: 20 },
+  {
+    id: 101,
+    name: "Required checks",
+    status: "completed",
+    conclusion: "success",
+    appId: 20,
+    appSlug: "github-actions",
+  },
   {
     id: 102,
     name: "SonarCloud Code Analysis",
     status: "completed",
     conclusion: "success",
     appId: 21,
+    appSlug: "sonarcloud",
   },
   {
     id: 103,
@@ -51,6 +59,7 @@ const requiredCheckRuns = [
     status: "completed",
     conclusion: "success",
     appId: 22,
+    appSlug: "github-actions",
   },
 ]
 
@@ -289,6 +298,39 @@ describe("collectHeadEvidence", () => {
       expect(evidence.ci.state).toBe("unavailable")
       expect(evidence.ci.reason).toBeTruthy()
     }
+  })
+
+  test("does not accept required contexts from arbitrary apps or legacy statuses", async () => {
+    const spoofedCheckRuns = requiredCheckRuns.map((check) => ({
+      ...check,
+      appId: 999,
+      appSlug: "untrusted-ci",
+    }))
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          listCheckRunPages: () => onePage(spoofedCheckRuns),
+          listCommitStatusPages: () =>
+            onePage(
+              requiredCheckRuns.map((check) => ({
+                context: check.name,
+                state: "success" as const,
+              })),
+            ),
+        }),
+        repository: { owner: "owner", repo: "repo" },
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason:
+        "Missing required exact-head contexts: Required checks, SonarCloud Code Analysis, CodeQL (JavaScript/TypeScript).",
+    })
   })
 
   test("deduplicates legacy statuses so the newest context state controls gating", async () => {
