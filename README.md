@@ -77,9 +77,25 @@ Repository permissions:
 - Pull requests: Read and write
 - Issues: Read and write
 - Checks: Read and write
+- Actions: Read-only (required to collect bounded failed-job logs for the exact PR head)
 - Metadata: Read-only
 
-Install the App on every repository that should be automated. Generate a private key and store it outside the repository with mode `0600`.
+Install the App on every repository that should be automated. Existing installations must be re-approved after adding Actions read permission. Generate a private key and store it outside the repository with mode `0600`.
+
+## Pull-request quality gates
+
+This public repository uses **SonarQube Cloud Automatic Analysis**. Import `BNasraoui/workflowd` into SonarQube Cloud, keep Automatic Analysis enabled, and do not add `SONAR_TOKEN`: Workflowd reads the public PR analysis APIs and CI must not replace Automatic Analysis with a scanner workflow. For the exact PR head, automated approval requires zero unresolved new Sonar issues of any severity and no more than 1% duplicated new lines. Missing, stale, unavailable, or failed evidence blocks approval; genuinely pending analysis is retried without publishing a pass.
+
+The repository also runs blocking Knip and `bun audit --audit-level=high` checks, per-covered-file Bun line/function/statement thresholds, and CodeQL JavaScript/TypeScript analysis on PRs, main, and a weekly schedule. Failed Actions logs and analyzer findings are bounded, sanitized, explicitly treated as untrusted, and supplied to both review and Fix Work. Workflowd's own `OpenCode Review` and `Workflowd PR Gate` contexts are excluded from evidence waiting to prevent cycles.
+
+A repository administrator must update the `main` ruleset after these workflows first run:
+
+- require `Required checks` (this includes TypeScript, Effect diagnostics, ESLint, Prettier, tests/coverage, Knip, dependency audit, repository integrity, and deployment validation);
+- require `CodeQL (JavaScript/TypeScript)`;
+- require SonarQube Cloud's Automatic Analysis check; and
+- require `OpenCode Review`, which is Workflowd's deterministic exact-head CI/Sonar/mergeability gate.
+
+Do not configure a bypass that permits `OpenCode Review` to be skipped for ordinary pull requests. If Sonar evidence remains missing, verify that the public project key is the standard `<owner>_<repository>` key (`BNasraoui_workflowd`) and that Automatic Analysis has processed the current PR head SHA.
 
 ## Installed Layout
 

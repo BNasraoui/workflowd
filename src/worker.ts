@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { Cause, Data, Effect, Exit, Option } from "effect"
 import { AgentHarness, AgentHarnessError } from "./agent-harness"
 import type { FixWork, ReviewWork } from "./domain/work"
+import { gateReviewWithHeadEvidence } from "./domain/head-evidence"
 import { decideFixEligibility } from "./domain/transaction-policy"
 import { GitHub } from "./github"
 import { Automation, OpenCodeAutomationError } from "./opencode"
@@ -63,9 +64,36 @@ function processReviewWork(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const github = yield* GitHub
       const harness = yield* AgentHarness
       const workspaces = yield* Workspace
-      const workspace = yield* workspaces.prepareReview(work)
+      const currentAtCollectionStart = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAtCollectionStart))) {
+        return "stale" as const
+      }
+      const evidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (evidence.ci.state === "stale") return "stale" as const
+      const preflight = gateReviewWithHeadEvidence(
+        { verdict: "pass", summary: "Evidence preflight.", findings: [] },
+        evidence,
+      )
+      if (preflight._tag === "Pending") {
+        return yield* Effect.fail(new Error(preflight.reason))
+      }
+      const currentAfterCollection = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAfterCollection))) {
+        return "stale" as const
+      }
+      const workspace = yield* workspaces.prepareReview(work, evidence)
       const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       const prepared = yield* automation.prepareReview(
         {
@@ -129,7 +157,9 @@ function processReviewWork(
         yield* abortSession()
         return "stale" as const
       }
-      const review = sessionResult.review
+      const gated = gateReviewWithHeadEvidence(sessionResult.review, evidence)
+      if (gated._tag === "Pending") return yield* Effect.fail(new Error(gated.reason))
+      const review = gated.review
       const completedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))
       return yield* store.completeAgentReviewJob({
         jobId: work.id,
@@ -163,9 +193,29 @@ function processFixWork(
     Effect.gen(function* () {
       const store = yield* WorkflowStore
       const automation = yield* Automation
+      const github = yield* GitHub
       const harness = yield* AgentHarness
       const workspaces = yield* Workspace
-      const workspace = yield* workspaces.prepareFix(work)
+      const collectionStartedAt = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, collectionStartedAt))) {
+        return "stale" as const
+      }
+      const evidence = yield* github.collectHeadEvidence({
+        installationId: work.installationId,
+        repositoryFullName: work.repositoryFullName,
+        pullRequestNumber: work.pullRequestNumber,
+        target: work.target,
+      })
+      if (evidence.ci.state === "stale") return "stale" as const
+      const currentAfterCollection = new Date(
+        yield* Effect.clockWith((clock) => clock.currentTimeMillis),
+      )
+      if (!(yield* store.isJobCurrent(work.id, workerId, currentAfterCollection))) {
+        return "stale" as const
+      }
+      const workspace = yield* workspaces.prepareFix(work, evidence)
       let result = work.checkpoint
       if (workspace.recovery === "none" && result === undefined) {
         const requestedAt = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))

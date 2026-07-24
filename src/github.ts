@@ -1,8 +1,14 @@
 import { Context, Data, Effect } from "effect"
 import { AuthoritativePullRequestSnapshot } from "./domain/pull-request-transition"
+import {
+  gateReviewWithHeadEvidence,
+  stripHeadEvidenceFindings,
+  type HeadEvidence,
+} from "./domain/head-evidence"
 import type { Publication } from "./domain/publication"
 import { normalizeError } from "./errors"
 import type { GitHubInstallationAdapter } from "./github/adapter"
+import { collectHeadEvidence, type SonarRequest, type SonarResponse } from "./github/head-evidence"
 import { presentReviewCheck, renderReviewComment, reviewMarker } from "./github/review-presentation"
 import type { SessionAccess } from "./session-access"
 
@@ -41,6 +47,9 @@ export type GitHubPort = {
   readonly fetchPullRequestSnapshot: (
     input: FetchPullRequestSnapshotInput,
   ) => Effect.Effect<PullRequestSnapshot, GitHubClientError>
+  readonly collectHeadEvidence: (
+    input: FetchPullRequestSnapshotInput & { readonly target: Publication["target"] },
+  ) => Effect.Effect<HeadEvidence, GitHubClientError>
 }
 
 export const GitHub = Context.GenericTag<GitHubPort>("workflowd/GitHub")
@@ -50,7 +59,31 @@ export class GitHubAppAdapter implements GitHubPort {
     private readonly appId: number,
     private readonly getInstallationClient: InstallationClientProvider,
     private readonly sessionAccess?: SessionAccessProvider,
+    private readonly sonarRequest: SonarRequest = publicSonarRequest,
   ) {}
+
+  readonly collectHeadEvidence = (
+    input: FetchPullRequestSnapshotInput & { readonly target: Publication["target"] },
+  ): Effect.Effect<HeadEvidence, GitHubClientError> =>
+    Effect.gen(this, function* () {
+      const repository = yield* parseRepositoryName(input.repositoryFullName)
+      const client = yield* this.client(input.installationId)
+      return yield* collectHeadEvidence({
+        client,
+        repository,
+        pullRequestNumber: input.pullRequestNumber,
+        target: input.target,
+        sonarRequest: this.sonarRequest,
+      }).pipe(
+        Effect.mapError(
+          (error) =>
+            new GitHubClientError({
+              operation: error.operation,
+              cause: error.cause,
+            }),
+        ),
+      )
+    })
 
   readonly fetchPullRequestSnapshot = (
     input: FetchPullRequestSnapshotInput,
@@ -98,12 +131,30 @@ export class GitHubAppAdapter implements GitHubPort {
         return "stale" as const
       }
 
-      const session = yield* this.resolveSessionAccess(publication)
-      const comment = renderReviewComment(publication, session)
+      const evidence = yield* this.collectHeadEvidence({
+        installationId: publication.installationId,
+        repositoryFullName: publication.repositoryFullName,
+        pullRequestNumber: publication.pullRequestNumber,
+        target: publication.target,
+      })
+      if (evidence.ci.state === "stale") return "stale" as const
+      const gated = gateReviewWithHeadEvidence(stripHeadEvidenceFindings(publication.review), evidence)
+      if (gated._tag === "Pending") {
+        return yield* Effect.fail(
+          new GitHubClientError({
+            operation: "wait for exact-head evidence before publication",
+            cause: new Error(gated.reason),
+          }),
+        )
+      }
+      const effectivePublication = { ...publication, review: gated.review }
+
+      const session = yield* this.resolveSessionAccess(effectivePublication)
+      const comment = renderReviewComment(effectivePublication, session)
       const commentOutcome = yield* this.publishComment(
         client,
         repository,
-        publication,
+        effectivePublication,
         comment,
         isCurrent,
       )
@@ -111,7 +162,7 @@ export class GitHubAppAdapter implements GitHubPort {
       const checkOutcome = yield* this.publishCheck(
         client,
         repository,
-        publication,
+        effectivePublication,
         comment,
         isCurrent,
       )
@@ -276,6 +327,17 @@ export class GitHubAppAdapter implements GitHubPort {
       catch: (cause) => new GitHubClientError({ operation, cause: normalizeError(cause) }),
     })
   }
+}
+
+export async function publicSonarRequest(
+  path: string,
+  signal?: AbortSignal,
+): Promise<SonarResponse> {
+  const response = await fetch(`https://sonarcloud.io${path}`, {
+    headers: { accept: "application/json" },
+    ...(signal === undefined ? {} : { signal }),
+  })
+  return { status: response.status, body: await response.json() }
 }
 
 function parseRepositoryName(

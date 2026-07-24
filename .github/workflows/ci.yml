@@ -26,6 +26,10 @@ jobs:
             command: bun run lint
           - name: Prettier
             command: bun run format:check
+          - name: Knip
+            command: bun run knip
+          - name: Dependency audit
+            command: bun run audit
           - name: Tests
             command: bun run test:coverage
     steps:

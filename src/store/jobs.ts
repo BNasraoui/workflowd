@@ -290,7 +290,6 @@ export function makeJobOperations(
         SELECT 1 AS current
         FROM jobs AS candidate
         WHERE candidate.id = ${jobId}
-        AND candidate.kind = 'fix'
         AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
         AND candidate.lease_owner = ${workerId}

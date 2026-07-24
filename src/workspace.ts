@@ -1,5 +1,6 @@
 import { Context, Effect, Ref, type Scope } from "effect"
 import type { FixResult } from "./domain/fix-result"
+import type { HeadEvidence } from "./domain/head-evidence"
 import type { FixWork, ReviewWork, Work } from "./domain/work"
 import { ReviewContextFiles } from "./workspace/context"
 import { ExistingWorktreeDiscovery, LocalRepositoryCatalog } from "./workspace/discovery"
@@ -46,15 +47,15 @@ export class GitWorkspaceAdapter implements WorkspacePort {
     this.#context = new ReviewContextFiles(config.maxDiffBytes, this.#fixes, config.gitSigningKey)
   }
 
-  prepareReview(work: ReviewWork) {
+  prepareReview(work: ReviewWork, evidence?: HeadEvidence) {
     return Effect.gen(this, function* () {
       const resolved = yield* this.#resolve(work, (workspace) => this.#removeManaged(workspace))
       yield* this.#acquireContext(resolved)
-      return yield* this.#context.prepareReview(work, resolved)
+      return yield* this.#context.prepareReview(work, resolved, evidence)
     })
   }
 
-  prepareFix(work: FixWork) {
+  prepareFix(work: FixWork, evidence?: HeadEvidence) {
     return Effect.gen(this, function* () {
       const completed = yield* Ref.make(false)
       const resolved = yield* this.#resolve(work, (workspace) =>
@@ -63,7 +64,7 @@ export class GitWorkspaceAdapter implements WorkspacePort {
         ),
       )
       yield* this.#acquireContext(resolved)
-      const workspace = yield* this.#context.prepareFix(work, resolved)
+      const workspace = yield* this.#context.prepareFix(work, resolved, evidence)
       return {
         ...workspace,
         markCompleted: () => Effect.runSync(Ref.set(completed, true)),

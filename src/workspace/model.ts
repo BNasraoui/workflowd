@@ -1,5 +1,6 @@
 import type { Effect, Scope } from "effect"
 import type { FixResult } from "../domain/fix-result"
+import type { HeadEvidence } from "../domain/head-evidence"
 import type { FixWork, ReviewWork } from "../domain/work"
 import type { WorkspaceError } from "./errors"
 
@@ -28,8 +29,12 @@ export type GitWorkspaceConfig = {
 export type WorkspacePort = {
   readonly prepareReview: (
     work: ReviewWork,
+    evidence?: HeadEvidence,
   ) => Effect.Effect<ReviewWorkspace, WorkspaceError, Scope.Scope>
-  readonly prepareFix: (work: FixWork) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
+  readonly prepareFix: (
+    work: FixWork,
+    evidence?: HeadEvidence,
+  ) => Effect.Effect<FixWorkspace, WorkspaceError, Scope.Scope>
   readonly publishFix: (
     work: FixWork,
     workspace: FixWorkspace,

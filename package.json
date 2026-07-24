@@ -12,10 +12,12 @@
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
     "skill:check": "bun scripts/sync-qrspi-skill-reference.mjs --check",
+    "audit": "bun audit --audit-level=high",
+    "knip": "knip",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run lint && bun run format:check && bun run test:coverage"
+    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage"
   },
   "dependencies": {
     "@effect/platform": "0.97.0",
@@ -24,7 +26,6 @@
     "@effect/sql-sqlite-bun": "0.53.0",
     "@octokit/app": "16.1.2",
     "@octokit/rest": "22.0.1",
-    "@octokit/webhooks": "14.2.0",
     "@opencode-ai/sdk": "1.18.3",
     "effect": "3.22.0"
   },
@@ -34,6 +35,7 @@
     "@types/bun": "1.3.5",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
+    "knip": "6.29.0",
     "prettier": "^3.9.5",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.64.0"
