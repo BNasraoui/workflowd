@@ -5,6 +5,7 @@ import {
   ExactStageScope,
   ExactStageSources,
   RepositoryTarget,
+  RevisionIntent,
   TicketRevisionReference,
   type ExactArtifactSource,
   type StageSourceRole,
@@ -42,6 +43,7 @@ export const assembleExactStageSources = (input: {
   readonly target: typeof RepositoryTarget.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
+  readonly revisionIntent?: unknown
   readonly maxSourceBytes: number
   readonly repository: QrspiRepositoryPort
 }): Effect.Effect<ExactStageSources, StageSourceAssemblyError | QrspiRepositoryError> =>
@@ -70,6 +72,9 @@ export const assembleExactStageSources = (input: {
       sources,
       sourceSetSha256,
       target: authority.target,
+      ...(authority.revisionIntent === undefined
+        ? {}
+        : { revisionIntent: authority.revisionIntent }),
     }).pipe(
       Effect.mapError(
         (cause) =>
@@ -84,6 +89,7 @@ function decodeAuthority(input: {
   readonly target: typeof RepositoryTarget.Type
   readonly snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>
   readonly acceptedPointers: ReadonlyArray<unknown>
+  readonly revisionIntent?: unknown
 }) {
   const scope = Schema.decodeUnknownSync(ExactStageScope)(input.scope)
   const ticketRevision = Schema.decodeUnknownSync(TicketRevisionReference)(input.ticketRevision)
@@ -92,6 +98,10 @@ function decodeAuthority(input: {
   const pointers = Schema.decodeUnknownSync(Schema.Array(AcceptedPredecessorPointer))(
     input.acceptedPointers,
   )
+  const revisionIntent =
+    input.revisionIntent === undefined
+      ? undefined
+      : Schema.decodeUnknownSync(RevisionIntent)(input.revisionIntent)
   const selectedIndex = snapshots.findIndex(
     (snapshot) =>
       snapshot.definition.key === scope.stageKey &&
@@ -141,7 +151,7 @@ function decodeAuthority(input: {
   if (ticketRevision.workflowId !== scope.workflowId) {
     throw identityError(undefined, undefined, scope.workflowId, ticketRevision.workflowId)
   }
-  return { scope, ticketRevision, target, pointers }
+  return { scope, ticketRevision, target, pointers, revisionIntent }
 }
 
 function pointerMismatch(
@@ -246,7 +256,7 @@ function readSource(
         )
     }
     const content = yield* Effect.try({
-      try: () => new TextDecoder("utf-8", { fatal: true }).decode(observed.bytes),
+      try: () => new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(observed.bytes),
       catch: (cause) =>
         new StageSourceAssemblyError({
           reason: "malformed_utf8",

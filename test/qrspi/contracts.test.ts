@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
+import { createHash } from "node:crypto"
 import { MAX_STAGE_REQUEST_BYTES } from "../../src/agent-harness"
 import { TicketRevision, canonicalSha256, ticketRevisionSha256For } from "../../src/qrspi/domain"
 import {
@@ -34,6 +35,7 @@ import {
 import { TrustedStageCatalog } from "../../src/qrspi/stage-catalog"
 
 const sha = (character: string) => character.repeat(64)
+const contentSha256 = (content: string) => createHash("sha256").update(content).digest("hex")
 const scope = {
   workflowId: `wf_${sha("a")}`,
   generation: 1,
@@ -74,7 +76,7 @@ const researchArtifact = {
   commitSha: "1".repeat(40),
   path: "artifacts/questions.md",
   blobSha: "2".repeat(40),
-  contentSha256: sha("3"),
+  contentSha256: contentSha256("# Persisted Questions"),
   mediaType: "text/markdown",
 }
 function acceptedPointerFor(
@@ -114,7 +116,7 @@ const designResearchArtifact = {
   path: "artifacts/research.md",
   commitSha: "4".repeat(40),
   blobSha: "5".repeat(40),
-  contentSha256: sha("6"),
+  contentSha256: contentSha256("# Persisted Research"),
 }
 const designResearchSource = {
   role: "Research" as const,
@@ -139,7 +141,7 @@ const structureDesignArtifact = {
   path: "artifacts/design.md",
   commitSha: "7".repeat(40),
   blobSha: "8".repeat(40),
-  contentSha256: sha("9"),
+  contentSha256: contentSha256("# Persisted Design"),
 }
 const structureDesignSource = {
   role: "Design" as const,
@@ -196,7 +198,7 @@ const planStructureArtifact = {
   path: "artifacts/structure.md",
   commitSha: "b".repeat(40),
   blobSha: "c".repeat(40),
-  contentSha256: sha("d"),
+  contentSha256: contentSha256("# Persisted Structure"),
 }
 const planStructureSource = {
   role: "Structure" as const,
@@ -227,7 +229,7 @@ const implementationPlanArtifact = {
   path: "artifacts/plan.md",
   commitSha: "d".repeat(40),
   blobSha: "e".repeat(40),
-  contentSha256: sha("f"),
+  contentSha256: contentSha256("# Persisted Plan"),
 }
 const implementationPlanSource = {
   role: "Plan" as const,
@@ -334,12 +336,26 @@ describe("shared exact stage contracts", () => {
     const baseBytes = Buffer.byteLength(JSON.stringify(implementationSources), "utf8")
     const originalBytes = Buffer.byteLength(implementationPlanSource.content, "utf8")
     const exactContent = "x".repeat(MAX_EXACT_STAGE_SOURCES_BYTES - baseBytes + originalBytes)
+    const exactArtifact = {
+      ...implementationPlanArtifact,
+      contentSha256: contentSha256(exactContent),
+    }
+    const exactSource = {
+      ...implementationPlanSource,
+      artifact: exactArtifact,
+      acceptedPointer: acceptedPointerFor("Plan", exactArtifact, "d"),
+      content: exactContent,
+    }
     const exactSources = {
       ...implementationSources,
-      sources: [
-        { ...implementationPlanSource, content: exactContent },
-        ...implementationSources.sources.slice(1),
-      ],
+      sources: [exactSource, ...implementationSources.sources.slice(1)],
+      sourceSetSha256: canonicalSha256([
+        { role: "Plan", artifact: exactArtifact },
+        { role: "Structure", artifact: planStructureArtifact },
+        { role: "Design", artifact: structureDesignArtifact },
+        { role: "Research", artifact: designResearchArtifact },
+        { role: "Questions", artifact: researchArtifact },
+      ]),
     }
 
     expect(Buffer.byteLength(JSON.stringify(exactSources), "utf8")).toBe(
@@ -356,13 +372,28 @@ describe("shared exact stage contracts", () => {
       MAX_STAGE_REQUEST_BYTES,
     )
     expect(Schema.decodeUnknownSync(ImplementationRequest)(request)).toEqual(request)
+    const oversizedContent = `${exactContent}x`
+    const oversizedArtifact = {
+      ...exactArtifact,
+      contentSha256: contentSha256(oversizedContent),
+    }
+    const oversizedSource = {
+      ...exactSource,
+      artifact: oversizedArtifact,
+      acceptedPointer: acceptedPointerFor("Plan", oversizedArtifact, "d"),
+      content: oversizedContent,
+    }
     expect(() =>
       Schema.decodeUnknownSync(ExactStageSources)({
         ...exactSources,
-        sources: [
-          { ...exactSources.sources[0], content: `${exactContent}x` },
-          ...exactSources.sources.slice(1),
-        ],
+        sources: [oversizedSource, ...exactSources.sources.slice(1)],
+        sourceSetSha256: canonicalSha256([
+          { role: "Plan", artifact: oversizedArtifact },
+          { role: "Structure", artifact: planStructureArtifact },
+          { role: "Design", artifact: structureDesignArtifact },
+          { role: "Research", artifact: designResearchArtifact },
+          { role: "Questions", artifact: researchArtifact },
+        ]),
       }),
     ).toThrow("encoded bytes")
   })

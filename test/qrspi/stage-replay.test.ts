@@ -5,6 +5,7 @@ import { Effect, Layer, Schema } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import {
   TicketRevision,
   ticketRevisionSha256For,
@@ -143,6 +144,7 @@ describe("Research request replay", () => {
       workflowDefinitionSha256: "b".repeat(64),
       stageDefinitionSha256: "c".repeat(64),
     }
+    const content = "persisted questio\u0301ns"
     const artifact = {
       repository: {
         providerInstanceId: "github-app-1",
@@ -156,7 +158,7 @@ describe("Research request replay", () => {
       commitSha: "d".repeat(40),
       path: "artifacts/questions.md",
       blobSha: "e".repeat(40),
-      contentSha256: "f".repeat(64),
+      contentSha256: createHash("sha256").update(content).digest("hex"),
       mediaType: "text/markdown",
     }
     const target = {
@@ -181,7 +183,7 @@ describe("Research request replay", () => {
         ...acceptedIdentity,
         pointerSha256: canonicalSha256(acceptedIdentity),
       },
-      content: "persisted questions",
+      content,
     }
     const sources = {
       ...scope,
@@ -189,6 +191,7 @@ describe("Research request replay", () => {
       sources: [source],
       sourceSetSha256: canonicalSha256([{ role: "Questions", artifact }]),
       target,
+      revisionIntent: { reason: "Revise the accepted Research output" },
     }
     const persisted = JSON.parse(
       JSON.stringify(
@@ -211,7 +214,34 @@ describe("Research request replay", () => {
     )
 
     expect(task.authority.sources).toEqual([source])
+    expect(persisted.request.sources.revisionIntent).toEqual({
+      reason: "Revise the accepted Research output",
+    })
     expect(repositoryCalls).toBe(0)
+
+    for (const substitutedContent of ["substituted questions", content.normalize("NFC")]) {
+      const substitutedRequest = {
+        _tag: "ResearchRequest" as const,
+        sources: {
+          ...sources,
+          sources: [{ ...source, content: substitutedContent }],
+        },
+      }
+      const substituted = encodeStageProduceInput(
+        scope,
+        researchStageContract.ref,
+        substitutedRequest,
+      )
+
+      expect(
+        await Effect.runPromise(
+          new TrustedStageCatalog([researchStageContract])
+            .port()
+            .buildTask({ input: substituted, ticketRevision: original })
+            .pipe(Effect.either),
+        ),
+      ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    }
   })
 })
 

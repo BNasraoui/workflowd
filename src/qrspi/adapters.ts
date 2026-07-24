@@ -210,11 +210,27 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
         throw new Error("Artifact byte ceiling must be a non-negative safe integer")
       }
-      const { owner, repo } = repositoryName(input.repository)
+      const requestedName = repositoryName(input.repository)
       const client = await this.client(this.config.installationId)
       if (client.rest.repos.getContent === undefined) {
         throw new Error("GitHub content API is unavailable")
       }
+      const repository = await client.rest.repos.get({
+        ...requestedName,
+        request: { signal },
+      })
+      const observed = decodeRepository({
+        providerInstanceId: this.config.repository.providerInstanceId,
+        repositoryId: String(repository.data.id),
+        repositoryFullName: repository.data.full_name,
+      })
+      if (
+        observed.providerInstanceId !== input.repository.providerInstanceId ||
+        observed.repositoryId !== input.repository.repositoryId
+      ) {
+        throw new Error("Repository locator resolved to a different stable identity")
+      }
+      const { owner, repo } = repositoryName(observed)
       const response = await client.rest.repos.getContent({
         owner,
         repo,

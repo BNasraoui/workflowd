@@ -87,6 +87,85 @@ describe("QRSPI external adapters", () => {
     })
   })
 
+  test("rejects a repository locator that resolves to another stable repository identity", async () => {
+    let contentCalls = 0
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 99, full_name: "other-owner/other" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async () => {
+            contentCalls += 1
+            throw new Error("must not read substituted repository content")
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    expect(
+      await Effect.runPromise(
+        adapter
+          .readArtifact({
+            repository,
+            commitSha: "a".repeat(40),
+            path: "artifacts/questions.md",
+            maxBytes: 100,
+          })
+          .pipe(Effect.either),
+      ),
+    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    expect(contentCalls).toBe(0)
+  })
+
+  test("uses the observed canonical repository name after a stable-identity rename", async () => {
+    const calls: Array<unknown> = []
+    const bytes = new TextEncoder().encode("renamed repository content")
+    const adapter = new GitHubQrspiRepository(qrspiConfig, async () => ({
+      rest: {
+        repos: {
+          get: async () => ({ data: { id: 42, full_name: "renamed-owner/renamed" } }),
+          getBranch: async () => ({ data: { commit: { sha: "a".repeat(40) } } }),
+          getContent: async (input: unknown) => {
+            calls.push(input)
+            return {
+              data: {
+                type: "file",
+                path: "artifacts/questions.md",
+                sha: "b".repeat(40),
+                encoding: "base64",
+                content: Buffer.from(bytes).toString("base64"),
+                size: bytes.byteLength,
+              },
+            }
+          },
+        },
+        pulls: { list: async () => ({ data: [] }) },
+        git: { createRef: async () => undefined },
+      },
+    }))
+
+    await Effect.runPromise(
+      adapter.readArtifact({
+        repository,
+        commitSha: "a".repeat(40),
+        path: "artifacts/questions.md",
+        maxBytes: bytes.byteLength,
+      }),
+    )
+
+    expect(calls).toEqual([
+      {
+        owner: "renamed-owner",
+        repo: "renamed",
+        path: "artifacts/questions.md",
+        ref: "a".repeat(40),
+        request: { signal: expect.any(AbortSignal) },
+      },
+    ])
+  })
+
   test("accepts GitHub line-wrapped base64 artifact content", async () => {
     const bytes = new TextEncoder().encode("# A sufficiently long Markdown artifact\n".repeat(4))
     const encoded = Buffer.from(bytes).toString("base64")

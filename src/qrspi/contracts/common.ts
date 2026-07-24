@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { Data, Schema } from "effect"
 import { JsonValueSchema, type JsonValue } from "../../json"
 import {
@@ -213,6 +214,12 @@ export const ExactArtifactSource = Schema.Struct({
     canonicalSha256(source.artifact) === canonicalSha256(source.acceptedPointer.artifact)
       ? true
       : "Source artifact does not match its accepted predecessor pointer",
+  ),
+  Schema.filter((source) =>
+    createHash("sha256").update(source.content, "utf8").digest("hex") ===
+    source.artifact.contentSha256
+      ? true
+      : "Source content does not match contentSha256",
   ),
 )
 export type ExactArtifactSource = typeof ExactArtifactSource.Type

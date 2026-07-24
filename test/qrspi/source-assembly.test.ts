@@ -32,7 +32,7 @@ const artifact = {
   commitSha: gitSha("b"),
   path: "artifacts/questions.md",
   blobSha: gitSha("c"),
-  contentSha256: sha("d"),
+  contentSha256: createHash("sha256").update("# Questions").digest("hex"),
   mediaType: "text/markdown",
 }
 
@@ -231,6 +231,37 @@ describe("trusted Research source assembly", () => {
       canonicalSha256([{ role: "Questions", artifact: sourceArtifact }]),
     )
     expect(reader.calls()).toBe(1)
+  })
+
+  test("preserves revision intent in assembled exact sources", async () => {
+    const reader = repositoryReader()
+    const revisionIntent = { reason: "Address requested review changes" }
+
+    const result = await Effect.runPromise(
+      assembleExactStageSources({ ...assemblyInput(reader.port), revisionIntent }),
+    )
+
+    expect(result.revisionIntent).toEqual(revisionIntent)
+  })
+
+  test("preserves a leading UTF-8 BOM in exact source content", async () => {
+    const bytes = Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode(sourceContent)])
+    const bomArtifact = {
+      ...sourceArtifact,
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+    }
+    const bomIdentity = { ...acceptedIdentity, artifact: bomArtifact }
+    const bomPointer = {
+      ...bomIdentity,
+      pointerSha256: canonicalSha256(bomIdentity),
+    }
+    const reader = repositoryReader({ bytes })
+
+    const result = await Effect.runPromise(
+      assembleExactStageSources(assemblyInput(reader.port, [bomPointer])),
+    )
+
+    expect(result.sources[0]?.content).toBe(`\ufeff${sourceContent}`)
   })
 
   test("uses stable repository IDs while allowing a locator rename", async () => {
