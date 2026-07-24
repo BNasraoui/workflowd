@@ -58,24 +58,36 @@ describe("OpenCodeAdapter.subscribeSessionEvents", () => {
 
   test("aborts and finalizes a live SDK subscription when consumption stops early", async () => {
     let subscriptionSignal: AbortSignal | undefined
-    let sourceFinalized = false
+    const lifecycle: Array<"abort" | "return"> = []
     const client = {
       createSession: async () => ({ id: "unused" }),
       promptSession: async () => undefined,
       subscribeEvents: async (_input, signal) => {
         subscriptionSignal = signal
-        return (async function* () {
-          try {
-            yield {
-              id: "evt_1",
-              type: "session.idle",
-              properties: { sessionID: "ses_1" },
-            }
-            await new Promise<never>(() => undefined)
-          } finally {
-            sourceFinalized = true
-          }
-        })()
+        const recordAbort = () => lifecycle.push("abort")
+        signal.addEventListener("abort", recordAbort)
+        let yielded = false
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async () => {
+              if (yielded) return new Promise<never>(() => undefined)
+              yielded = true
+              return {
+                done: false as const,
+                value: {
+                  id: "evt_1",
+                  type: "session.idle",
+                  properties: { sessionID: "ses_1" },
+                } satisfies Event,
+              }
+            },
+            return: async () => {
+              signal.removeEventListener("abort", recordAbort)
+              lifecycle.push("return")
+              return { done: true as const, value: undefined }
+            },
+          }),
+        }
       },
       getSessionStatuses: async () => ({}),
       sessionExists: async () => true,
@@ -102,7 +114,7 @@ describe("OpenCodeAdapter.subscribeSessionEvents", () => {
 
     expect(subscriptionSignal).not.toBe(caller.signal)
     expect(subscriptionSignal?.aborted).toBe(true)
-    expect(sourceFinalized).toBe(true)
+    expect(lifecycle).toEqual(["abort", "return"])
     expect(caller.signal.aborted).toBe(false)
   })
 

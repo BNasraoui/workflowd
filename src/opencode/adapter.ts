@@ -314,9 +314,18 @@ async function* normalizeEvents(
     controller.abort()
   }
 
+  let iterator: AsyncIterator<Event> | undefined
+  let sourceDone = false
   try {
     const stream = await subscribe(controller.signal)
-    for await (const event of stream) {
+    iterator = stream[Symbol.asyncIterator]()
+    while (true) {
+      const next = await iterator.next()
+      if (next.done) {
+        sourceDone = true
+        break
+      }
+      const event = next.value
       switch (event.type) {
         case "message.updated":
           if (event.properties.info.role === "assistant") {
@@ -354,5 +363,6 @@ async function* normalizeEvents(
     }
   } finally {
     cleanup()
+    if (!sourceDone && iterator?.return !== undefined) await iterator.return()
   }
 }
