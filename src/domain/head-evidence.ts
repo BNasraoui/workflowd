@@ -200,13 +200,10 @@ export function sanitizeUntrustedText(value: string, maxLength: number): string 
       /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi,
       "[REDACTED PRIVATE KEY]",
     )
+    .replace(/\bauthorization\s*:[^\r\n]*/gi, "Authorization: [REDACTED]")
     .replace(
-      /\b(authorization\s*:\s*(?:bearer|basic|token)|(?:github|sonar|api)[_-]?token\s*[=:])\s*(?:"[\s\S]*?"|'[\s\S]*?'|[^\s]+)/gi,
-      "$1 [REDACTED]",
-    )
-    .replace(
-      /\b([A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[A-Z0-9_]*\s*[=:])\s*(?:"[\s\S]*?"|'[\s\S]*?'|[^\s]+)/gi,
-      "$1[REDACTED]",
+      /\b[-A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN|PRIVATE_KEY|ACCESS_KEY)[-A-Z0-9_]*\s*[=:][^\r\n]*/gi,
+      (assignment) => `${assignment.slice(0, assignment.search(/[=:]/) + 1)}[REDACTED]`,
     )
     .replace(/(https?:\/\/[^\s:/]+:)[^\s@]+@/gi, "$1[REDACTED]@")
   if (sanitized.length <= maxLength) return sanitized

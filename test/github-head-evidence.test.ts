@@ -54,7 +54,7 @@ const requiredCheckRuns = [
     status: "completed",
     conclusion: "success",
     appId: 21,
-    appSlug: "sonarcloud",
+    appSlug: "sonarqubecloud",
   },
   {
     id: 103,
@@ -204,6 +204,7 @@ describe("collectHeadEvidence", () => {
     "does not require Workflowd-specific checks or Sonar outside the Workflowd main gate",
     async (repository, reviewTarget) => {
       let sonarRequested = false
+      let workflowEvidenceRequested = false
       const evidence = await Effect.runPromise(
         collectHeadEvidence({
           client: github({
@@ -212,6 +213,14 @@ describe("collectHeadEvidence", () => {
               pullRequest: { ...pull().pullRequest, baseRef: reviewTarget.baseRef },
             }),
             listCheckRunPages: () => onePage([]),
+            getWorkflow: async () => {
+              workflowEvidenceRequested = true
+              throw new Error("must not request repository-specific workflows")
+            },
+            getRepositoryContentSha: async () => {
+              workflowEvidenceRequested = true
+              throw new Error("must not request repository-specific workflow content")
+            },
           }),
           repository,
           pullRequestNumber: 7,
@@ -227,8 +236,56 @@ describe("collectHeadEvidence", () => {
       expect(evidence.ci).toEqual({ state: "available", checks: [] })
       expect(evidence.sonar).toMatchObject({ state: "pass", headSha })
       expect(sonarRequested).toBe(false)
+      expect(workflowEvidenceRequested).toBe(false)
     },
   )
+
+  test("does not require an Actions workflow until it exists on the trusted base", async () => {
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          getRepositoryContentSha: async ({ path, ref }) => {
+            if (path.endsWith("codeql.yml") && ref === target.baseSha) {
+              throw Object.assign(new Error("Not Found"), { status: 404 })
+            }
+            return "trusted-workflow-blob"
+          },
+        }),
+        repository: workflowdRepository,
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({ state: "available" })
+  })
+
+  test("still requires an Actions workflow that exists on the trusted base", async () => {
+    const evidence = await Effect.runPromise(
+      collectHeadEvidence({
+        client: github({
+          getRepositoryContentSha: async ({ path, ref }) => {
+            if (path.endsWith("codeql.yml") && ref === target.headSha) {
+              throw Object.assign(new Error("Not Found"), { status: 404 })
+            }
+            return "trusted-workflow-blob"
+          },
+        }),
+        repository: workflowdRepository,
+        pullRequestNumber: 7,
+        target,
+        workflowdAppId,
+        sonarRequest: sonar(),
+      }),
+    )
+
+    expect(evidence.ci).toMatchObject({
+      state: "unavailable",
+      reason: "Missing required exact-head contexts: CodeQL (JavaScript/TypeScript).",
+    })
+  })
 
   test.each([
     ["missing", sonar({ prPresent: false })],

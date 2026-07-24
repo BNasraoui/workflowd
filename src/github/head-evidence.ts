@@ -116,10 +116,18 @@ function collectChecks(
       const collected: CollectedChecks = {
         checks: [],
         trustedRequiredContexts: new Set(),
+        contextsAbsentFromBase: new Set(),
         truncated: false,
       }
-      const trustedActionsCheckSuites = await collectTrustedActionsCheckSuites(input, signal)
-      await appendCheckRuns(input, signal, collected, trustedActionsCheckSuites)
+      const trustedActions = await collectTrustedActionsCheckSuites(
+        input,
+        signal,
+        input.requiredCheckContexts ?? policyRequiredContexts,
+      )
+      for (const context of trustedActions.contextsAbsentFromBase) {
+        collected.contextsAbsentFromBase.add(context)
+      }
+      await appendCheckRuns(input, signal, collected, trustedActions.checkSuites)
       await appendCommitStatuses(input, signal, collected)
       return collected
     }).pipe(
@@ -154,12 +162,13 @@ function collectChecks(
 type CollectedChecks = {
   readonly checks: Array<CheckEvidence>
   readonly trustedRequiredContexts: Set<string>
+  readonly contextsAbsentFromBase: Set<string>
   truncated: boolean
 }
 
 const requiredContextAppSlugs: Readonly<Record<string, string>> = {
   "Required checks": "github-actions",
-  "SonarCloud Code Analysis": "sonarcloud",
+  "SonarCloud Code Analysis": "sonarqubecloud",
   "CodeQL (JavaScript/TypeScript)": "github-actions",
 }
 
@@ -196,21 +205,43 @@ async function appendCheckRuns(
 async function collectTrustedActionsCheckSuites(
   input: CollectHeadEvidenceInput,
   signal: AbortSignal,
-): Promise<ReadonlyMap<number, string>> {
+  requiredContexts: ReadonlyArray<string>,
+): Promise<{
+  readonly checkSuites: ReadonlyMap<number, string>
+  readonly contextsAbsentFromBase: ReadonlySet<string>
+}> {
   const getWorkflow = input.client.getWorkflow
   const getContentSha = input.client.getRepositoryContentSha
   const listRuns = input.client.listWorkflowRunPages
   const trusted = new Map<number, string>()
+  const contextsAbsentFromBase = new Set<string>()
+  const requiredWorkflows = requiredContexts.flatMap((context) => {
+    const path = requiredContextWorkflowPaths[context]
+    return path === undefined ? [] : [{ context, path }]
+  })
+  if (requiredWorkflows.length === 0) {
+    return { checkSuites: trusted, contextsAbsentFromBase }
+  }
   if (getWorkflow === undefined || getContentSha === undefined || listRuns === undefined) {
-    return trusted
+    return { checkSuites: trusted, contextsAbsentFromBase }
   }
 
   const workflows = new Map<number, string>()
-  for (const path of new Set(Object.values(requiredContextWorkflowPaths))) {
-    const [workflow, baseContentSha, headContentSha] = await Promise.all([
+  for (const { context, path } of requiredWorkflows) {
+    const baseContentSha = await repositoryContentSha(
+      getContentSha,
+      input,
+      path,
+      input.target.baseSha,
+      signal,
+    )
+    if (baseContentSha === undefined) {
+      contextsAbsentFromBase.add(context)
+      continue
+    }
+    const [workflow, headContentSha] = await Promise.all([
       getWorkflow({ ...input.repository, workflow_id: path, request: { signal } }),
-      getContentSha({ ...input.repository, path, ref: input.target.baseSha, request: { signal } }),
-      getContentSha({ ...input.repository, path, ref: input.target.headSha, request: { signal } }),
+      repositoryContentSha(getContentSha, input, path, input.target.headSha, signal),
     ])
     if (workflow.path === path && baseContentSha === headContentSha) {
       workflows.set(workflow.id, path)
@@ -235,7 +266,26 @@ async function collectTrustedActionsCheckSuites(
       }
     }
   }
-  return trusted
+  return { checkSuites: trusted, contextsAbsentFromBase }
+}
+
+async function repositoryContentSha(
+  getContentSha: NonNullable<GitHubInstallationAdapter["getRepositoryContentSha"]>,
+  input: CollectHeadEvidenceInput,
+  path: string,
+  ref: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    return await getContentSha({ ...input.repository, path, ref, request: { signal } })
+  } catch (cause) {
+    if (isNotFound(cause)) return undefined
+    throw cause
+  }
+}
+
+function isNotFound(cause: unknown): boolean {
+  return typeof cause === "object" && cause !== null && "status" in cause && cause.status === 404
 }
 
 function isTrustedRequiredContext(
@@ -326,7 +376,9 @@ function classifyChecks(collected: CollectedChecks, requiredContexts: ReadonlyAr
     }
   }
   const missingContexts = requiredContexts.filter(
-    (context) => !collected.trustedRequiredContexts.has(context),
+    (context) =>
+      !collected.contextsAbsentFromBase.has(context) &&
+      !collected.trustedRequiredContexts.has(context),
   )
   if (missingContexts.length > 0) {
     return {
