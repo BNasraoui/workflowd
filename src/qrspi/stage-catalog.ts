@@ -392,7 +392,10 @@ export class TrustedStageCatalog {
           ) {
             throw catalogError("request_too_large", registration.descriptor.ref)
           }
-          const durableInput = Schema.decodeUnknownSync(StageProduceInput)(input.input)
+          const durableInput = Schema.decodeUnknownSync(
+            StageProduceInput,
+            exactParseOptions,
+          )(input.input)
           const ticketRevision = Schema.decodeUnknownSync(TicketRevision)(input.ticketRevision)
           const durableSources = requestSourcesOf(durableInput.request, registration.descriptor.ref)
           if (durableSources.stageKey !== registration.descriptor.stageKey) {

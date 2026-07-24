@@ -571,9 +571,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             }),
           )
         }
-        const input = yield* Schema.decodeUnknown(Schema.parseJson(StageProduceInput))(
-          row.input_json,
-        ).pipe(
+        const input = yield* Schema.decodeUnknown(Schema.parseJson(StageProduceInput), {
+          onExcessProperty: "error",
+        })(row.input_json).pipe(
           Effect.mapError((cause) =>
             dataError("workflow_operation", operationId, cause, { reason: "malformed" }),
           ),
