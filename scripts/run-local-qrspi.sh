@@ -20,6 +20,9 @@ recursive=true
 auto_approve=false
 use_worktree=false
 worktree_root=""
+worktree_prepared=false
+worktree_bead_id=""
+delivery_root_id=""
 current_package_sha=""
 current_binding_sha=""
 current_gate_sha=""
@@ -46,8 +49,8 @@ usage() {
   printf '%s\n' "  --refresh-ticket       Replace an existing ticket snapshot"
   printf '%s\n' "  --dry-run              Show stages without writing or launching agents"
   printf '%s\n' "  --auto-approve         Run stages non-interactively and accept successful outputs"
-  printf '%s\n' "  --worktree             Create/adopt one worktree per Bead from origin/main"
-  printf '%s\n' "  --worktree-root <path> Parent directory for generated worktrees"
+  printf '%s\n' "  --worktree             Create/adopt one worktree for the delivery run"
+  printf '%s\n' "  --worktree-root <path> Parent directory for the generated worktree"
   printf '%s\n' "  --no-claim             Do not claim open Beads before running"
   printf '%s\n' "  --no-recursive         Do not descend into child Beads after Structure"
   printf '%s\n' "  -h, --help             Show this help"
@@ -576,6 +579,7 @@ stage_prompt() {
   fi
   if [[ "$stage" == implementation ]]; then
     printf '%s\n' "Follow test-driven development and implement only accepted Plan work. In auto-approve mode, run all automated checks and continue through phase gates without waiting for human verification."
+    printf '%s\n' "Treat the auto-approved gate response as permission to run the implementation autonomously in this invocation. Do not launch another QRSPI runner or dispatch separate mint jobs. Commit production changes only when the implementation skill requires them; the runner owns final validation, Bead closure, and delivery."
   fi
 }
 
@@ -635,6 +639,9 @@ run_stage() {
 
     if [[ "$auto_approve" == true ]]; then
       [[ "$accept_stage" == true ]] && record_acceptance "$task_directory" "$stage" "$artifact"
+      if [[ "$stage" == plan ]]; then
+        commit_delivery_changes "$bead_id" "Plan $bead_id"
+      fi
       return 0
     fi
 
@@ -732,6 +739,75 @@ run_repo_skill_step() {
     "${command[@]:2}"
   [[ -f "$output" ]] || fail "$step session exited without creating $output"
   [[ "$record" == false ]] || record_loop_checkpoint "$task_directory" "$step" "$output"
+}
+
+create_scope_children() {
+  local bead_id=$1
+  local task_directory=$2
+  local structure=$3
+  local review=$4
+  local step=$5
+  local output=$6
+  local skill_file="$active_repo/skills/ticket-writing/SKILL.md"
+  local -a command
+
+  [[ -f "$skill_file" ]] || fail "missing repository skill: $skill_file"
+
+  if [[ "$auto_approve" == true ]]; then
+    command=("$OPENCODE_BIN" run --auto --dir "$active_repo" --agent "$agent" --title "QRSPI $step: $bead_id" --file "$skill_file")
+  else
+    [[ -t 0 && -t 1 ]] || fail "scope child creation requires an interactive terminal"
+    command=("$OPENCODE_BIN" run -i --dir "$active_repo" --agent "$agent" --title "QRSPI $step: $bead_id" --file "$skill_file")
+  fi
+  [[ -z "$model" ]] || command+=(--model "$model")
+
+  "${command[@]:0:2}" \
+    "$(printf '%s\n' \
+      "Use the attached ticket-writing skill to materialize the recursive scope decomposition for Bead $bead_id." \
+      "Read the current ticket at $task_directory/ticket.json, the accepted Structure at $structure, and the scope review at $review." \
+      "Create one Beads task under parent $bead_id for every proposed child outcome in the review. Preserve each outcome, dependencies, primary files, provisional estimate, and exact acceptance/control/risk coverage in ticket-template fields. Do not treat proposed children as implementation-ready leaves; every child requires its own Structure scope review before Plan." \
+      "Use the bd CLI to create children and add dependencies. Follow the existing ticket style, labels, and ticket-template format. Do not implement, Plan, modify Git, close Beads, run Dolt remote sync, or create pull requests." \
+      "Write a brief creation manifest to $output listing each created child ID, title, and dependencies. The human authorized this automated recursive QRSPI gate decision.")" \
+    "${command[@]:2}"
+  [[ -f "$output" ]] || fail "scope child creation did not create $output"
+  record_loop_checkpoint "$task_directory" "$step" "$output"
+}
+
+commit_delivery_changes() {
+  local bead_id=$1
+  local message=$2
+
+  [[ "$dry_run" == false ]] || return 0
+  [[ -n "$(git -C "$active_repo" status --porcelain --untracked-files=all)" ]] || return 0
+  git -C "$active_repo" add -- .humanlayer/tasks
+  git -C "$active_repo" commit -m "$message"
+}
+
+push_delivery_branch() {
+  local current_branch
+
+  [[ "$auto_approve" == true && "$dry_run" == false ]] || return 0
+  current_branch=$(git -C "$active_repo" branch --show-current)
+  [[ "$current_branch" == opencode/* ]] || return 0
+  git -C "$active_repo" push
+}
+
+close_split_parent() {
+  local bead_id=$1
+  local children_json
+  local total
+  local closed_count
+
+  [[ "$auto_approve" == true && "$dry_run" == false ]] || return 0
+  children_json=$("$BD_BIN" list --parent "$bead_id" --all --json)
+  total=$(printf '%s\n' "$children_json" | jq 'length')
+  closed_count=$(printf '%s\n' "$children_json" | jq '[.[] | select(.status == "closed")] | length')
+  if ((total > 0 && total == closed_count)); then
+    "$BD_BIN" update "$bead_id" --notes "All split children completed through recursive local QRSPI delivery." >/dev/null
+    "$BD_BIN" close "$bead_id" --reason "All split children completed through recursive local QRSPI delivery." >/dev/null
+    printf 'closed split parent %s\n' "$bead_id"
+    push_delivery_branch
+  fi
 }
 
 write_design_binding() {
@@ -1065,6 +1141,18 @@ run_structure_loop() {
         esac
         ;;
       SplitFeature|PromoteToEpic)
+        if [[ "$auto_approve" == true && "$recursive" == true ]]; then
+          mapfile -t scope_children < <(child_ids_for "$bead_id")
+          if ((${#scope_children[@]} == 0)); then
+            create_scope_children "$bead_id" "$task_directory" "$structure" "$review" "structure-children-r$revision" "$task_directory/04-structure-children-r$revision.md"
+            mapfile -t scope_children < <(child_ids_for "$bead_id")
+          fi
+          ((${#scope_children[@]} > 0)) || fail "scope review returned $verdict but no child Beads could be created from $review"
+          record_acceptance "$task_directory" structure "$structure"
+          commit_delivery_changes "$bead_id" "Structure scope split for $bead_id"
+          printf 'Structure scope review returned %s and produced %d child Bead(s); accepting the parent Structure for recursive child delivery\n' "$verdict" "${#scope_children[@]}"
+          return 0
+        fi
         mapfile -t scope_children < <(child_ids_for "$bead_id")
         if ((${#scope_children[@]} > 0)); then
           record_acceptance "$task_directory" structure "$structure"
@@ -1132,31 +1220,52 @@ prepare_worktree() {
   local repository_name
   local branch="opencode/$bead_id"
   local worktree
+  local current_branch
 
   repository_name=$(basename "$source_repo")
   worktree="$worktree_root/$repository_name-$bead_id"
+  if [[ "$worktree_prepared" == true ]]; then
+    [[ "$worktree_bead_id" == "$bead_id" ]] || fail "a recursive delivery run can use only one top-level worktree"
+    return 0
+  fi
+
   if [[ "$dry_run" == true ]]; then
     printf 'git fetch origin main\n'
     printf 'git worktree add %s from origin/main on %s\n' "$worktree" "$branch"
     active_repo=$worktree
+    worktree_prepared=true
+    worktree_bead_id=$bead_id
     return 0
   fi
 
   if [[ -d "$worktree" ]]; then
     git -C "$worktree" rev-parse --show-toplevel >/dev/null 2>&1 || fail "worktree path is not a Git worktree: $worktree"
     active_repo=$(realpath "$worktree")
+    current_branch=$(git -C "$active_repo" branch --show-current)
+    if [[ "$current_branch" != "$branch" ]]; then
+      git -C "$active_repo" rev-parse --verify --quiet "$branch" >/dev/null || \
+        git -C "$active_repo" branch "$branch"
+      git -C "$active_repo" switch "$branch"
+    fi
     printf 'adopt worktree: %s\n' "$active_repo"
+    worktree_prepared=true
+    worktree_bead_id=$bead_id
     return 0
   fi
 
-  git -C "$source_repo" fetch origin main
-  if git -C "$source_repo" show-ref --verify --quiet "refs/heads/$branch"; then
-    fail "branch $branch already exists without its expected worktree $worktree"
-  fi
+  git -C "$source_repo" fetch origin
   mkdir -p "$worktree_root"
-  git -C "$source_repo" worktree add -b "$branch" "$worktree" origin/main
+  if git -C "$source_repo" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$source_repo" worktree add "$worktree" "$branch"
+  elif git -C "$source_repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    git -C "$source_repo" worktree add -b "$branch" "$worktree" "origin/$branch"
+  else
+    git -C "$source_repo" worktree add -b "$branch" "$worktree" origin/main
+  fi
   active_repo=$(realpath "$worktree")
   printf 'created worktree: %s\n' "$active_repo"
+  worktree_prepared=true
+  worktree_bead_id=$bead_id
 }
 
 run_bead() {
@@ -1169,6 +1278,12 @@ run_bead() {
   local index
   local response
   local -a child_ids=()
+  local delivery_bead_id
+
+  if [[ -z "$delivery_root_id" ]]; then
+    delivery_root_id=$bead_id
+  fi
+  delivery_bead_id=$delivery_root_id
 
   raw_ticket=$("$BD_BIN" show "$bead_id" --json) || fail "could not read Bead $bead_id"
   ticket_json=$(printf '%s\n' "$raw_ticket" | normalize_ticket) || fail "could not decode Bead $bead_id"
@@ -1192,9 +1307,10 @@ run_bead() {
     esac
   fi
 
-  active_repo=$source_repo
   if [[ "$use_worktree" == true ]]; then
-    prepare_worktree "$bead_id"
+    prepare_worktree "$delivery_bead_id"
+  else
+    active_repo=$source_repo
   fi
   task_directory=$(task_directory_for "$bead_id" "$title")
 
@@ -1224,20 +1340,29 @@ run_bead() {
       mapfile -t child_ids < <(child_ids_for "$bead_id")
       if ((${#child_ids[@]} > 0)); then
         run_children "$bead_id" "${child_ids[@]}"
+        close_split_parent "$bead_id"
         printf 'parent %s stops after Structure while child Beads carry implementation\n' "$bead_id"
         return 0
       fi
     fi
   done
 
-  if [[ "$dry_run" == false && "$to_stage" == implementation && "$auto_approve" == false ]]; then
-    printf '\nImplementation flow finished for %s. Close the Bead now? [y/N]: ' "$bead_id"
-    IFS= read -r response
-    if [[ "$response" == y || "$response" == Y || "$response" == yes || "$response" == YES ]]; then
-      "$BD_BIN" close "$bead_id" --reason "Completed through the local human-gated QRISPI flow." >/dev/null
+  if [[ "$dry_run" == false && "$to_stage" == implementation ]]; then
+    if [[ "$auto_approve" == true ]]; then
+      commit_delivery_changes "$bead_id" "Complete $bead_id"
+      "$BD_BIN" update "$bead_id" --notes "Completed through recursive local QRSPI delivery. Validation artifacts live under $task_directory." >/dev/null
+      "$BD_BIN" close "$bead_id" --reason "Completed through recursive local QRSPI delivery." >/dev/null
       printf 'closed %s\n' "$bead_id"
+      push_delivery_branch
     else
-      printf 'left %s in progress for review\n' "$bead_id"
+      printf '\nImplementation flow finished for %s. Close the Bead now? [y/N]: ' "$bead_id"
+      IFS= read -r response
+      if [[ "$response" == y || "$response" == Y || "$response" == yes || "$response" == YES ]]; then
+        "$BD_BIN" close "$bead_id" --reason "Completed through the local human-gated QRISPI flow." >/dev/null
+        printf 'closed %s\n' "$bead_id"
+      else
+        printf 'left %s in progress for review\n' "$bead_id"
+      fi
     fi
   fi
 }
