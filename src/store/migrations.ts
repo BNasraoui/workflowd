@@ -1087,6 +1087,8 @@ const qrspiStageRuntimeLayout = Effect.gen(function* () {
       ),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
+      CHECK ((expected_json IS NULL) = (expected_sha256 IS NULL)),
+      CHECK ((actual_json IS NULL) = (actual_sha256 IS NULL)),
       PRIMARY KEY (workflow_id, generation, stage_key, stage_revision),
       FOREIGN KEY (workflow_id, generation, stage_key, stage_revision)
         REFERENCES qrspi_stage_revisions (
