@@ -1117,6 +1117,90 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     })
   }
 
+  const relationalIdentityCases = [
+    {
+      name: "rejects a Generation cursor with only a run ordinal",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_generations
+        SET current_stage_key = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+      `,
+    },
+    {
+      name: "rejects a Generation cursor with only a stage key",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_generations
+        SET current_stage_run_ordinal = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+      `,
+    },
+    {
+      name: "rejects a Generation cursor that resolves only in another Generation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_generations
+        SET current_stage_key = ${runtimeFixture.documentStageKey},
+            current_stage_run_ordinal = ${runtimeFixture.otherGenerationRunOrdinal}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+      `,
+    },
+    {
+      name: "rejects a second current run for one Generation stage",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_runs (
+          workflow_id, generation, stage_key, run_ordinal,
+          workflow_definition_sha256, stage_definition_sha256, state, is_current,
+          activation_policy_json, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 5,
+          ${runtimeFixture.workflowDefinitionSha256},
+          ${runtimeFixture.documentStageDefinitionSha256}, 'blocked', 1, '{}',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a duplicate owner-crossing key across runtime identities",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions
+        SET owner_crossing_key = 'owner-research-historical'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    ...(["pending_revision", "published_revision", "accepted_revision"] as const).map(
+      (pointer) => ({
+        name: `rejects a ${pointer} pointer to another run`,
+        statement: (sql: SqlClient.SqlClient) =>
+          sql.unsafe(
+            `UPDATE qrspi_stage_runs
+             SET ${pointer} = ?
+             WHERE workflow_id = ? AND generation = ?
+               AND stage_key = ? AND run_ordinal = ?`,
+            [
+              runtimeFixture.historicalRevision,
+              runtimeFixture.workflowId,
+              1,
+              runtimeFixture.documentStageKey,
+              runtimeFixture.currentRunOrdinal,
+            ],
+          ),
+      }),
+    ),
+  ] as const
+
+  for (const testCase of relationalIdentityCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
   const originalGenerationColumns: ReadonlyArray<ColumnMetadata> = [
     { name: "workflow_id", type: "TEXT", notnull: 1, dflt_value: null, pk: 1 },
     { name: "generation", type: "INTEGER", notnull: 1, dflt_value: null, pk: 2 },
