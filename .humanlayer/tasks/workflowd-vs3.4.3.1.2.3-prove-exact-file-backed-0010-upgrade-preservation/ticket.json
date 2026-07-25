@@ -1,0 +1,74 @@
+{
+  "id": "workflowd-vs3.4.3.1.2.3",
+  "title": "Prove exact file-backed 0010 upgrade preservation",
+  "description": "## Description\n\nPopulate a real file database through `0010`, close it, reopen the same file through a fresh current layer, and prove complete Generation and WorkflowOperation equality after migration. The upgrade must preserve null runtime cursors, advance the migration ledger exactly once, leave all twelve runtime tables empty, retain foreign-key integrity, infer no runtime authority, and clean up temporary files even on failure.\n\nThis child depends only on the completed strict inactive shared runtime layout and is implementation-independent of the two SQL rejection children. It owns the file-lifecycle and exact-row-preservation portion of the mandatory atomic migration release gate for workflowd-vs3.4.3.1.2.\n\n## Sources\n\n- Accepted Structure: `.humanlayer/tasks/workflowd-vs3.4.3.1.2-prove-shared-runtime-sql-invariants-and-upgrade-preservation/01-structure-outline-sql-invariants-upgrade-preservation.md`\n- Accepted scope review: `.humanlayer/tasks/workflowd-vs3.4.3.1.2-prove-shared-runtime-sql-invariants-and-upgrade-preservation/04-structure-scope-review-r1.md`\n\n## Out of Scope\n\n- Identity-spine and tagged payload SQL rejection matrices owned by the other children.\n- Typed aggregate Schemas, store create/read behavior, runtime APIs, or semantic hash recomputation.\n- Runtime allocation, transition, claim, progression, bootstrap, quarantine, inferred legacy conversion, or neighboring lifecycle behavior.\n- Editing migrations `0001` through `0010`, weakening append-only `0011`, or introducing runtime rows during upgrade.\n- Plan or Implementation before this child completes its own Structure scope review.",
+  "acceptance_criteria": "## Acceptance Criteria\n\n- A real file database built through `runStoreMigrationsThrough0010` contains diverse Generation and WorkflowOperation rows covering identities, states, currentness, retry lineage, nullable lease/effect/output fields, terminal metadata, JSON values, hashes, and timestamps.\n- After the historical layer closes and a fresh current layer migrates the same file, complete deterministically ordered `SELECT *` snapshots prove every shipped Generation and WorkflowOperation identity and pre-existing column value is exactly unchanged.\n- The migration ledger advances exactly once to `0011`, every Generation runtime cursor remains null, every original `generation_format` is preserved, all twelve runtime tables remain empty, and `PRAGMA foreign_key_check` reports no violations.\n- Temporary files are removed after success or failure, and this child covers acceptance criteria 2 and 3 plus the preservation portion of criterion 4/A1: append-only `0011`, retry/currentness/nullable fields, zero legacy conversion, zero runtime authority, FK/index fidelity, and demonstrated corrections.\n\n## Scenarios\n\n### Scenario: Preserve every shipped value across a fresh layer\n\n**Given** a populated file database migrated only through `0010` and then closed\n**When** a fresh layer opens the same file and applies current migrations\n**Then** every Generation and WorkflowOperation identity and pre-existing column value is exactly unchanged\n\n### Scenario: Infer no runtime authority\n\n**Given** the populated database has crossed the `0010` to `0011` boundary\n**When** the runtime cursors, migration ledger, foreign keys, and all twelve runtime tables are inspected\n**Then** the cursors are null, the ledger advanced once, the runtime tables are empty, foreign keys are valid, and no legacy fact was converted\n\n### Scenario: Keep the migration release gate atomic\n\n**Given** this exact upgrade-preservation suite passes\n**When** the SQL rejection children under workflowd-vs3.4.3.1.2 have not both passed\n**Then** the parent migration outcome is not considered releasable",
+  "notes": "Recursive scope outcome T3. Dependency: completed layout child `workflowd-vs3.4.3.1.1`; independent of T1 and T2 implementation. Primary files: `test/store/migrations.test.ts`; conditional `src/store/migrations.ts`. Provisional changed lines: low 160, likely 245, high 380. Exact acceptance/control/risk coverage: Acceptance criteria 2 and 3 and the preservation portion of criterion 4/A1; append-only `0011`, every shipped value and identity, retry/currentness/nullable fields, format preservation, zero legacy conversion, zero runtime authority, FK/index fidelity, and any correction exposed by the upgrade proof. Production contingency included: 0/5/40. Risks retained: file lifecycle and cleanup, accidental shipped-value rewrite, migration-ledger drift, inferred runtime authority, SQLite reconstruction, FK/index fidelity, and the smallest demonstrated `0011` correction. This is not an implementation-ready leaf; an independent Structure scope review is mandatory before Plan. The parent release gate remains atomic and cannot be completed or released until all three child outcomes pass together.",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "owner": "nasraouiprojects@gmail.com",
+  "created_at": "2026-07-25T12:09:08Z",
+  "created_by": "Ben",
+  "updated_at": "2026-07-25T12:09:08Z",
+  "labels": [
+    "cap-d3",
+    "qrspi",
+    "sqlite",
+    "stage-runtime"
+  ],
+  "dependencies": [
+    {
+      "id": "workflowd-vs3.4.3.1.2",
+      "title": "Prove shared runtime SQL invariants and upgrade preservation",
+      "description": "## Description\n\nProve that the inactive shared runtime layout rejects every allocated SQL-local contradiction and that upgrading a real file database from the `0010` frontier preserves all shipped Generation and WorkflowOperation values exactly while inferring no runtime rows. This verification is mandatory for the migration release gate and is not deferred test cleanup.\n\nThis child consumes the complete schema from the preceding layout child and completes the migration-side acceptance and risk proof for workflowd-vs3.4.3.1.\n\n## Sources\n\n- Accepted Structure: `.humanlayer/tasks/workflowd-vs3.4.3.1-persist-reload-document-runtime-aggregates/04-structure-outline-document-runtime-aggregates.md`\n- Accepted scope review: `.humanlayer/tasks/workflowd-vs3.4.3.1-persist-reload-document-runtime-aggregates/04-structure-scope-review-r1.md`\n\n## Out of Scope\n\n- New production schema beyond corrections required for an allocated invariant to hold.\n- Typed document aggregate Schemas or store create/read behavior.\n- Runtime allocation, transition, claim, progression, bootstrap, quarantine, or legacy conversion.\n- Plan or Implementation before this child completes its own Structure scope review.",
+      "acceptance_criteria": "## Acceptance Criteria\n\n- Direct SQL tests reject invalid tags, cross-variant ownership, duplicate current runs, duplicate owner-crossing keys, duplicate physical-operation ownership, cross-run pointers, malformed JSON, malformed hashes, and invalid ordinals using the strict shared layout.\n- A file database built through `0010` retains every existing Generation and WorkflowOperation identity and column value exactly after migration through a fresh layer.\n- The upgrade creates zero StageRun, StageRevision, pointer, reference, diagnostic, or ownership rows and performs no inferred legacy conversion.\n- Together with the preceding layout child, this child completes A1 preservation and the SQL-local rejection portion of A3 while retaining append-only history, format/cursor guards, FK/index fidelity, and sibling-schema completeness controls.\n\n## Scenarios\n\n### Scenario: Reject one invalid SQL shape\n\n**Given** the complete strict runtime schema and its required parent graph\n**When** direct SQL attempts one allocated invalid tag, ownership, pointer, JSON, hash, or ordinal shape\n**Then** SQLite rejects the row and leaves the valid graph unchanged\n\n### Scenario: Upgrade the previous frontier exactly\n\n**Given** a file database built through migration `0010` with existing Generation and operation values\n**When** a fresh layer applies the current migration\n**Then** every old value is unchanged and all runtime tables remain empty\n\n### Scenario: Keep migration verification in the release gate\n\n**Given** the layout child is otherwise complete\n**When** this preservation and rejection suite has not passed\n**Then** the shared migration outcome is not considered releasable",
+      "notes": "Recursive frontier T1b. Primary file: `test/store/migrations.test.ts`. Provisional changed lines: low 120, likely 210, high 300. Depends on T1a. Exact allocation and coverage: Remainder of T1: A1 preservation and SQL rejection evidence; cannot be deferred or released separately from T1a. Risks retained: SQLite reconstruction, FK/index fidelity, sibling schema completeness. This is not an implementation-ready leaf; an independent Structure scope review is mandatory before Plan.",
+      "status": "in_progress",
+      "priority": 1,
+      "issue_type": "task",
+      "assignee": "Ben",
+      "owner": "nasraouiprojects@gmail.com",
+      "created_at": "2026-07-25T10:42:11Z",
+      "created_by": "Ben",
+      "updated_at": "2026-07-25T11:57:56Z",
+      "started_at": "2026-07-25T11:57:56Z",
+      "labels": [
+        "cap-d3",
+        "qrspi",
+        "sqlite",
+        "stage-runtime"
+      ],
+      "dependency_type": "parent-child"
+    },
+    {
+      "id": "workflowd-vs3.4.3.1.1",
+      "title": "Install the strict inactive shared runtime layout",
+      "description": "## Description\n\nCreate the full append-only post-`0010` migration for the inactive shared stage-runtime relational foundation. Retain a historical runner through `0010`, add the guarded Generation cursor and `stage_runtime_v1` format boundary, and install the strict run, common/tagged revision, implementation-step, immutable-reference, diagnostic, and document/step operation-ownership tables and indexes. Add structural smoke assertions for every table, column, key, foreign key, index, and literal. The schema remains inert and creates no runtime facts.\n\nThis child is the first recursive frontier outcome of workflowd-vs3.4.3.1 and supplies the shared layout required by all later frontier children and later stage-runtime siblings.\n\n## Sources\n\n- Accepted Structure: `.humanlayer/tasks/workflowd-vs3.4.3.1-persist-reload-document-runtime-aggregates/04-structure-outline-document-runtime-aggregates.md`\n- Accepted scope review: `.humanlayer/tasks/workflowd-vs3.4.3.1-persist-reload-document-runtime-aggregates/04-structure-scope-review-r1.md`\n\n## Out of Scope\n\n- The direct-SQL rejection matrix and exact file-backed upgrade-preservation proof owned by the next child.\n- Typed document aggregate Schemas, create/read store methods, and trusted-read diagnostics.\n- Runtime allocation, transition, claim, progression, replacement, bootstrap, quarantine, or inferred legacy conversion.\n- External-owner lifecycle, status/readiness, or capacity behavior.\n- Plan or Implementation before this child completes its own Structure scope review.",
+      "acceptance_criteria": "## Acceptance Criteria\n\n- One append-only migration after `0010` creates the complete strict shared runtime table family, guarded Generation cursor columns, and exact accepted format literals without editing migrations `0001` through `0010`.\n- `runStoreMigrationsThrough0010` remains available beside the existing historical runner, and structural tests prove every required table, column, composite key, foreign key, partial index, one-to-one variant boundary, owner-crossing key, publication-operation hook, ownership uniqueness rule, and strict literal/shape check.\n- The layout includes all schema-only seams required by implementation and later siblings while adding no trigger, executable claim index, inferred runtime row, or runtime API.\n- This child completes the production migration and structural-smoke portion of A1 and preserves the strict tagged-table, same-run-key, unique owner/operation seam, format/cursor guard, append-only history, and inactivity controls.\n\n## Scenarios\n\n### Scenario: Install the complete inactive layout\n\n**Given** a database is at migration frontier `0010`\n**When** Workflowd applies the next numbered migration\n**Then** every shared stage-runtime table, key, index, cursor, and format rule exists and no runtime row is inferred\n\n### Scenario: Inspect relational authority seams\n\n**Given** the migrated database\n**When** tests inspect its SQLite schema\n**Then** same-run pointers, tagged payload ownership, owner-crossing identity, publication operation identity, and physical-operation uniqueness are structurally enforced\n\n### Scenario: Keep the schema inert\n\n**Given** the complete shared layout is installed\n**When** existing runtime entry points are inspected\n**Then** no claim, transition, bootstrap, quarantine, or inferred conversion path has been added",
+      "notes": "Completed through recursive local QRSPI delivery. Validation artifacts live under /home/ben/.local/share/opencode/worktrees/workflowd/20260725T101208Z-abaa7ab0/.humanlayer/tasks/workflowd-vs3.4.3.1.1-install-the-strict-inactive-shared-runtime-layout.",
+      "status": "closed",
+      "priority": 1,
+      "issue_type": "task",
+      "assignee": "Ben",
+      "owner": "nasraouiprojects@gmail.com",
+      "created_at": "2026-07-25T10:41:55Z",
+      "created_by": "Ben",
+      "updated_at": "2026-07-25T11:57:51Z",
+      "started_at": "2026-07-25T10:45:25Z",
+      "closed_at": "2026-07-25T11:57:51Z",
+      "close_reason": "Completed through recursive local QRSPI delivery.",
+      "labels": [
+        "cap-d3",
+        "qrspi",
+        "sqlite",
+        "stage-runtime"
+      ],
+      "dependency_type": "blocks"
+    }
+  ],
+  "parent": "workflowd-vs3.4.3.1.2",
+  "dependent_count": 0,
+  "dependency_count": 2,
+  "comment_count": 0
+}
