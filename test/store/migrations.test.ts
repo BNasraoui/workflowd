@@ -743,6 +743,60 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     implementationPublishOperationId: "runtime-implementation-publish-r1",
   } as const
 
+  const insertRuntimeOperation = (
+    operationId: string,
+    kind: "StageProduce" | "ArtifactPublish" | "ReviewContribute",
+  ) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`
+        INSERT INTO workflow_operations (
+          operation_id, logical_operation_id, operation_revision, retry_of, kind,
+          scope_json, input_json, input_sha256, output_json, state, is_current,
+          attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+          external_intent_json, external_observation_json, observation_attempts,
+          max_observation_attempts, parent_effect_json, last_error,
+          terminal_failure_reason, terminal_retry_policy, created_at, updated_at
+        ) VALUES (
+          ${operationId}, ${operationId}, 1, NULL, ${kind}, '{}', '{}',
+          ${"6".repeat(64)}, NULL, 'ready', 1, 0, 3, NULL, NULL, NULL,
+          ${timestamp}, NULL, NULL, 0, 3, '{}', NULL, NULL, NULL,
+          ${timestamp}, ${timestamp}
+        )
+      `
+    })
+
+  const insertRuntimeOperationOwner = (
+    operationId: string,
+    operationKind: "StageProduce" | "ArtifactPublish",
+    ownerKind: "document_revision" | "implementation_step",
+    operationRole: "produce" | "publish",
+  ) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* insertRuntimeOperation(operationId, operationKind)
+      yield* sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          ${operationId}, ${operationKind}, ${ownerKind}, ${operationRole}, ${timestamp}
+        )
+      `
+    })
+
+  const insertSecondImplementationStep = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      INSERT INTO qrspi_implementation_steps (
+        workflow_id, generation, stage_key, stage_revision, position,
+        prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1, 2,
+        NULL, NULL, NULL, ${timestamp}, ${timestamp}
+      )
+    `
+  })
+
   const seedValidRuntimeIdentitySpine = Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     yield* sql`PRAGMA foreign_keys = ON`
@@ -1715,6 +1769,671 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
       )
     })
   }
+
+  const commonOperationOwnerCases = [
+    {
+      name: "rejects a common owner with an unsupported operation kind",
+      operationId: "runtime-owner-unsupported-kind",
+      physicalKind: "ReviewContribute",
+      setup: insertRuntimeOperation("runtime-owner-unsupported-kind", "ReviewContribute"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-unsupported-kind', 'ReviewContribute',
+          'document_revision', 'produce', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner with an unsupported owner kind",
+      operationId: "runtime-owner-unsupported-owner",
+      physicalKind: "StageProduce",
+      setup: insertRuntimeOperation("runtime-owner-unsupported-owner", "StageProduce"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-unsupported-owner', 'StageProduce',
+          'stage_run', 'produce', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner with an unsupported operation role",
+      operationId: "runtime-owner-unsupported-role",
+      physicalKind: "StageProduce",
+      setup: insertRuntimeOperation("runtime-owner-unsupported-role", "StageProduce"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-unsupported-role', 'StageProduce',
+          'document_revision', 'review', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner with produce paired to the publish kind",
+      operationId: "runtime-owner-produce-publish-kind",
+      physicalKind: "ArtifactPublish",
+      setup: insertRuntimeOperation("runtime-owner-produce-publish-kind", "ArtifactPublish"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-produce-publish-kind', 'ArtifactPublish',
+          'document_revision', 'produce', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner with publish paired to the produce kind",
+      operationId: "runtime-owner-publish-produce-kind",
+      physicalKind: "StageProduce",
+      setup: insertRuntimeOperation("runtime-owner-publish-produce-kind", "StageProduce"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-publish-produce-kind', 'StageProduce',
+          'document_revision', 'publish', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner whose declared kind differs from its physical operation",
+      operationId: "runtime-owner-physical-kind",
+      physicalKind: "ArtifactPublish",
+      setup: insertRuntimeOperation("runtime-owner-physical-kind", "ArtifactPublish"),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-physical-kind', 'StageProduce',
+          'document_revision', 'produce', ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a common owner for a missing physical operation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_stage_operation_owners (
+          operation_id, operation_kind, owner_kind, operation_role, created_at
+        ) VALUES (
+          'runtime-owner-missing-operation', 'StageProduce',
+          'document_revision', 'produce', ${timestamp}
+        )
+      `,
+    },
+  ] as const
+
+  for (const testCase of commonOperationOwnerCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          if ("setup" in testCase) {
+            yield* testCase.setup
+            expect(
+              yield* sql`
+                SELECT kind FROM workflow_operations
+                WHERE operation_id = ${testCase.operationId}
+              `,
+            ).toEqual([{ kind: testCase.physicalKind }])
+          }
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
+  const documentOperationOwnerCases = [
+    {
+      name: "rejects a document operation with the implementation owner tag",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revision_operations
+        SET owner_kind = 'implementation_step'
+        WHERE operation_id = ${runtimeFixture.documentProduceOperationId}
+      `,
+    },
+    {
+      name: "rejects a document operation with the wrong workflow parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-wrong-workflow",
+        "StageProduce",
+        "document_revision",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          'workflow-runtime-identity-absent', 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'produce',
+          'runtime-document-owner-wrong-workflow', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document operation with the wrong Generation parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-wrong-generation",
+        "StageProduce",
+        "document_revision",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 2, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'produce',
+          'runtime-document-owner-wrong-generation', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document operation with the wrong stage parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-wrong-stage",
+        "StageProduce",
+        "document_revision",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'produce',
+          'runtime-document-owner-wrong-stage', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document operation with the wrong revision parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-wrong-revision",
+        "StageProduce",
+        "document_revision",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 5,
+          'document_revision', 'produce', 'runtime-document-owner-wrong-revision',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    ...([0, 1_000_001] as const).map((stageRevision) => {
+      const operationId = `runtime-document-owner-revision-${stageRevision}`
+      return {
+        name: `rejects a document operation with revision ${stageRevision}`,
+        setup: insertRuntimeOperationOwner(
+          operationId,
+          "StageProduce",
+          "document_revision",
+          "produce",
+        ),
+        statement: (sql: SqlClient.SqlClient) => sql`
+          INSERT INTO qrspi_document_stage_revision_operations (
+            workflow_id, generation, stage_key, stage_revision,
+            owner_kind, operation_role, operation_id, created_at, updated_at
+          ) VALUES (
+            ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+            ${stageRevision}, 'document_revision', 'produce', ${operationId},
+            ${timestamp}, ${timestamp}
+          )
+        `,
+      }
+    }),
+    {
+      name: "rejects a document operation whose common owner is an implementation step",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-common-implementation",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.pendingRevision}, 'document_revision', 'produce',
+          'runtime-document-owner-common-implementation', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document produce operation whose common role is publish",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-owner-common-publish",
+        "ArtifactPublish",
+        "document_revision",
+        "publish",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.pendingRevision}, 'document_revision', 'produce',
+          'runtime-document-owner-common-publish', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+  ]
+
+  const implementationStepOperationOwnerCases = [
+    {
+      name: "rejects an implementation operation with the document owner tag",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_step_operations
+        SET owner_kind = 'document_revision'
+        WHERE operation_id = ${runtimeFixture.implementationProduceOperationId}
+      `,
+    },
+    {
+      name: "rejects an implementation operation with the wrong workflow parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-owner-wrong-workflow",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          'workflow-runtime-identity-absent', 1,
+          ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', 'runtime-implementation-owner-wrong-workflow',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation operation with the wrong Generation parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-owner-wrong-generation",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 2, ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', 'runtime-implementation-owner-wrong-generation',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation operation with the wrong stage parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-owner-wrong-stage",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', 'runtime-implementation-owner-wrong-stage',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation operation with the wrong revision parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-owner-wrong-revision",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 5,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', 'runtime-implementation-owner-wrong-revision',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation operation with the wrong step parent",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-owner-wrong-step",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1, 2,
+          'implementation_step', 'produce',
+          'runtime-implementation-owner-wrong-step', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    ...([0, 1_000_001] as const).map((stageRevision) => {
+      const operationId = `runtime-implementation-owner-revision-${stageRevision}`
+      return {
+        name: `rejects an implementation operation with revision ${stageRevision}`,
+        setup: insertRuntimeOperationOwner(
+          operationId,
+          "StageProduce",
+          "implementation_step",
+          "produce",
+        ),
+        statement: (sql: SqlClient.SqlClient) => sql`
+          INSERT INTO qrspi_implementation_step_operations (
+            workflow_id, generation, stage_key, stage_revision, position,
+            owner_kind, operation_role, operation_id, created_at, updated_at
+          ) VALUES (
+            ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey},
+            ${stageRevision}, ${runtimeFixture.implementationStepPosition},
+            'implementation_step', 'produce', ${operationId}, ${timestamp}, ${timestamp}
+          )
+        `,
+      }
+    }),
+    ...([0, 1_000_001] as const).map((position) => {
+      const operationId = `runtime-implementation-owner-position-${position}`
+      return {
+        name: `rejects an implementation operation with position ${position}`,
+        setup: insertRuntimeOperationOwner(
+          operationId,
+          "StageProduce",
+          "implementation_step",
+          "produce",
+        ),
+        statement: (sql: SqlClient.SqlClient) => sql`
+          INSERT INTO qrspi_implementation_step_operations (
+            workflow_id, generation, stage_key, stage_revision, position,
+            owner_kind, operation_role, operation_id, created_at, updated_at
+          ) VALUES (
+            ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+            ${position}, 'implementation_step', 'produce', ${operationId},
+            ${timestamp}, ${timestamp}
+          )
+        `,
+      }
+    }),
+    {
+      name: "rejects an implementation operation whose common owner is a document revision",
+      setup: Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* insertRuntimeOperationOwner(
+          "runtime-implementation-owner-common-document",
+          "StageProduce",
+          "document_revision",
+          "produce",
+        )
+        yield* sql`
+          INSERT INTO qrspi_implementation_steps (
+            workflow_id, generation, stage_key, stage_revision, position,
+            prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+          ) VALUES (
+            ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+            2, NULL, NULL, NULL, ${timestamp}, ${timestamp}
+          )
+        `
+      }),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          2, 'implementation_step',
+          'produce', 'runtime-implementation-owner-common-document',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation produce operation whose common role is publish",
+      setup: Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* insertRuntimeOperationOwner(
+          "runtime-implementation-owner-common-publish",
+          "ArtifactPublish",
+          "implementation_step",
+          "publish",
+        )
+        yield* sql`
+          INSERT INTO qrspi_implementation_steps (
+            workflow_id, generation, stage_key, stage_revision, position,
+            prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+          ) VALUES (
+            ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+            2, NULL, NULL, NULL, ${timestamp}, ${timestamp}
+          )
+        `
+      }),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          2, 'implementation_step',
+          'produce', 'runtime-implementation-owner-common-publish',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+  ]
+
+  const taggedOperationOwnerCases = [
+    ...documentOperationOwnerCases,
+    ...implementationStepOperationOwnerCases,
+  ]
+
+  for (const testCase of taggedOperationOwnerCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          if ("setup" in testCase) yield* testCase.setup
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
+  const operationOwnershipReuseCases = [
+    {
+      name: "rejects a second produce operation for one document revision",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-duplicate-produce",
+        "StageProduce",
+        "document_revision",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'produce',
+          'runtime-document-duplicate-produce', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a second publish operation for one document revision",
+      setup: insertRuntimeOperationOwner(
+        "runtime-document-duplicate-publish",
+        "ArtifactPublish",
+        "document_revision",
+        "publish",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'publish',
+          'runtime-document-duplicate-publish', ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a second produce operation for one implementation step",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-duplicate-produce",
+        "StageProduce",
+        "implementation_step",
+        "produce",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', 'runtime-implementation-duplicate-produce',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a second publish operation for one implementation step",
+      setup: insertRuntimeOperationOwner(
+        "runtime-implementation-duplicate-publish",
+        "ArtifactPublish",
+        "implementation_step",
+        "publish",
+      ),
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'publish', 'runtime-implementation-duplicate-publish',
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects reusing one physical operation for two document revisions",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.pendingRevision}, 'document_revision', 'produce',
+          ${runtimeFixture.documentProduceOperationId}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects reusing one physical operation for two implementation steps",
+      setup: insertSecondImplementationStep,
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          2, 'implementation_step', 'produce',
+          ${runtimeFixture.implementationProduceOperationId}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects reusing a document operation for an implementation step",
+      setup: insertSecondImplementationStep,
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_step_operations (
+          workflow_id, generation, stage_key, stage_revision, position,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          2, 'implementation_step', 'produce',
+          ${runtimeFixture.documentProduceOperationId}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects reusing an implementation operation for a document revision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revision_operations (
+          workflow_id, generation, stage_key, stage_revision,
+          owner_kind, operation_role, operation_id, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.pendingRevision}, 'document_revision', 'produce',
+          ${runtimeFixture.implementationProduceOperationId}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+  ]
+
+  for (const testCase of operationOwnershipReuseCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          if ("setup" in testCase) yield* testCase.setup
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
+  test("reconciles the complete operation-ownership rejection matrix", () => {
+    expect({
+      common: commonOperationOwnerCases.length,
+      document: documentOperationOwnerCases.length,
+      implementation: implementationStepOperationOwnerCases.length,
+      reuse: operationOwnershipReuseCases.length,
+      total:
+        commonOperationOwnerCases.length +
+        documentOperationOwnerCases.length +
+        implementationStepOperationOwnerCases.length +
+        operationOwnershipReuseCases.length,
+    }).toEqual({ common: 7, document: 9, implementation: 12, reuse: 8, total: 36 })
+  })
 
   const localIdentityCases = [
     {
