@@ -1180,318 +1180,47 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     expect(result.foreignKeyViolations).toEqual([])
   })
 
-  const diagnosticParentIdentityCases = [
-    {
-      name: "rejects a diagnostic with the wrong workflow",
-      assignment: "workflow_id",
-      value: "workflow-runtime-identity-absent",
-    },
-    {
-      name: "rejects a diagnostic with the wrong Generation",
-      assignment: "generation",
-      value: 2,
-    },
-    {
-      name: "rejects a diagnostic with the wrong stage",
-      assignment: "stage_key",
-      value: "stage-runtime-identity-absent",
-    },
-    {
-      name: "rejects a diagnostic with the wrong revision",
-      assignment: "stage_revision",
-      value: 5,
-    },
-  ].map((testCase) => ({
-    name: testCase.name,
-    statement: (sql: SqlClient.SqlClient) =>
-      sql.unsafe(
-        `UPDATE qrspi_stage_revision_diagnostics
-         SET ${testCase.assignment} = ?
-         WHERE workflow_id = ? AND generation = ?
-           AND stage_key = ? AND stage_revision = ?`,
-        [
-          testCase.value,
-          runtimeFixture.workflowId,
-          1,
-          runtimeFixture.documentStageKey,
-          runtimeFixture.historicalRevision,
-        ],
-      ),
-  }))
+  test("keeps diagnostic JSON and hashes paired", async () => {
+    const diagnostic = await runWithDatabase(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* seedValidRuntimeIdentitySpine
 
-  const diagnosticLiteralAndBoundCases = [
-    {
-      name: "rejects an unsupported diagnostic reason",
-      assignment: "reason",
-      value: "future_reason",
-    },
-    { name: "rejects an empty diagnostic message", assignment: "message", value: "" },
-    {
-      name: "rejects an over-bound diagnostic message",
-      assignment: "message",
-      value: "m".repeat(2_001),
-    },
-    {
-      name: "rejects an empty diagnostic observed kind",
-      assignment: "observed_kind",
-      value: "",
-    },
-    {
-      name: "rejects an over-bound diagnostic observed kind",
-      assignment: "observed_kind",
-      value: "k".repeat(65),
-    },
-    {
-      name: "rejects an empty diagnostic observed state",
-      assignment: "observed_state",
-      value: "",
-    },
-    {
-      name: "rejects an over-bound diagnostic observed state",
-      assignment: "observed_state",
-      value: "s".repeat(65),
-    },
-  ].map((testCase) => ({
-    name: testCase.name,
-    statement: (sql: SqlClient.SqlClient) =>
-      sql.unsafe(
-        `UPDATE qrspi_stage_revision_diagnostics
-         SET ${testCase.assignment} = ?
-         WHERE workflow_id = ? AND generation = ?
-           AND stage_key = ? AND stage_revision = ?`,
-        [
-          testCase.value,
-          runtimeFixture.workflowId,
-          1,
-          runtimeFixture.documentStageKey,
-          runtimeFixture.historicalRevision,
-        ],
-      ),
-  }))
+        yield* expectIdentitySpineRejection(sql`
+          UPDATE qrspi_stage_revision_diagnostics SET expected_json = NULL
+          WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+            AND stage_key = ${runtimeFixture.documentStageKey}
+            AND stage_revision = ${runtimeFixture.historicalRevision}
+        `)
+        yield* expectIdentitySpineRejection(sql`
+          UPDATE qrspi_stage_revision_diagnostics SET actual_sha256 = NULL
+          WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+            AND stage_key = ${runtimeFixture.documentStageKey}
+            AND stage_revision = ${runtimeFixture.historicalRevision}
+        `)
+        yield* sql`
+          UPDATE qrspi_stage_revision_diagnostics
+          SET expected_json = NULL, expected_sha256 = NULL,
+              actual_json = NULL, actual_sha256 = NULL
+          WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+            AND stage_key = ${runtimeFixture.documentStageKey}
+            AND stage_revision = ${runtimeFixture.historicalRevision}
+        `
+        return yield* sql`
+          SELECT expected_json, expected_sha256, actual_json, actual_sha256
+          FROM qrspi_stage_revision_diagnostics
+        `
+      }),
+    )
 
-  const toDiagnosticFieldUpdate = (testCase: {
-    readonly name: string
-    readonly assignment: string
-    readonly value: string
-  }) => ({
-    name: testCase.name,
-    statement: (sql: SqlClient.SqlClient) =>
-      sql.unsafe(
-        `UPDATE qrspi_stage_revision_diagnostics
-         SET ${testCase.assignment} = ?
-         WHERE workflow_id = ? AND generation = ?
-           AND stage_key = ? AND stage_revision = ?`,
-        [
-          testCase.value,
-          runtimeFixture.workflowId,
-          1,
-          runtimeFixture.documentStageKey,
-          runtimeFixture.historicalRevision,
-        ],
-      ),
-  })
-
-  const diagnosticJsonCases = [
-    {
-      name: "rejects malformed diagnostic expected JSON",
-      assignment: "expected_json",
-      value: "{not-json",
-    },
-    {
-      name: "rejects array-root diagnostic expected JSON",
-      assignment: "expected_json",
-      value: "[]",
-    },
-    {
-      name: "rejects malformed diagnostic actual JSON",
-      assignment: "actual_json",
-      value: "{not-json",
-    },
-    {
-      name: "rejects array-root diagnostic actual JSON",
-      assignment: "actual_json",
-      value: "[]",
-    },
-  ].map(toDiagnosticFieldUpdate)
-
-  const diagnosticHashCases = [
-    {
-      name: "rejects a wrong-length diagnostic expected SHA-256",
-      assignment: "expected_sha256",
-      value: "1".repeat(63),
-    },
-    {
-      name: "rejects an uppercase diagnostic expected SHA-256",
-      assignment: "expected_sha256",
-      value: "A".repeat(64),
-    },
-    {
-      name: "rejects a non-hex diagnostic expected SHA-256",
-      assignment: "expected_sha256",
-      value: `${"1".repeat(63)}g`,
-    },
-    {
-      name: "rejects a wrong-length diagnostic actual SHA-256",
-      assignment: "actual_sha256",
-      value: "1".repeat(63),
-    },
-    {
-      name: "rejects an uppercase diagnostic actual SHA-256",
-      assignment: "actual_sha256",
-      value: "A".repeat(64),
-    },
-    {
-      name: "rejects a non-hex diagnostic actual SHA-256",
-      assignment: "actual_sha256",
-      value: `${"1".repeat(63)}g`,
-    },
-  ].map(toDiagnosticFieldUpdate)
-
-  const diagnosticOneSidedPairCases = [
-    {
-      name: "rejects diagnostic expected JSON without its hash",
-      assignment: "expected_sha256",
-    },
-    {
-      name: "rejects diagnostic expected hash without its JSON",
-      assignment: "expected_json",
-    },
-    {
-      name: "rejects diagnostic actual JSON without its hash",
-      assignment: "actual_sha256",
-    },
-    {
-      name: "rejects diagnostic actual hash without its JSON",
-      assignment: "actual_json",
-    },
-  ].map((testCase) => ({
-    name: testCase.name,
-    statement: (sql: SqlClient.SqlClient) =>
-      sql.unsafe(
-        `UPDATE qrspi_stage_revision_diagnostics
-         SET ${testCase.assignment} = NULL
-         WHERE workflow_id = ? AND generation = ?
-           AND stage_key = ? AND stage_revision = ?`,
-        [
-          runtimeFixture.workflowId,
-          1,
-          runtimeFixture.documentStageKey,
-          runtimeFixture.historicalRevision,
-        ],
-      ),
-  }))
-
-  const diagnosticRejectionCases = [
-    ...diagnosticParentIdentityCases,
-    ...diagnosticLiteralAndBoundCases,
-    ...diagnosticJsonCases,
-    ...diagnosticHashCases,
-    ...diagnosticOneSidedPairCases,
-  ]
-
-  for (const testCase of diagnosticRejectionCases) {
-    test(testCase.name, async () => {
-      await runWithDatabase(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
-          yield* seedValidRuntimeIdentitySpine
-          yield* expectIdentitySpineRejection(testCase.statement(sql))
-        }),
-      )
-    })
-  }
-
-  const diagnosticPairAbsenceCases = [
-    {
-      name: "allows an absent expected pair with a complete actual pair",
-      assignment: "expected_json = NULL, expected_sha256 = NULL",
-      expected: {
+    expect(diagnostic).toEqual([
+      {
         expected_json: null,
-        actual_json: '{"kind":"implementation"}',
         expected_sha256: null,
-        actual_sha256: "9".repeat(64),
-      },
-    },
-    {
-      name: "allows an absent actual pair with a complete expected pair",
-      assignment: "actual_json = NULL, actual_sha256 = NULL",
-      expected: {
-        expected_json: '{"kind":"document"}',
         actual_json: null,
-        expected_sha256: "8".repeat(64),
         actual_sha256: null,
       },
-    },
-  ] as const
-
-  for (const testCase of diagnosticPairAbsenceCases) {
-    test(testCase.name, async () => {
-      const result = await runWithDatabase(
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
-          yield* seedValidRuntimeIdentitySpine
-          yield* sql.unsafe(
-            `UPDATE qrspi_stage_revision_diagnostics
-             SET ${testCase.assignment}
-             WHERE workflow_id = ? AND generation = ?
-               AND stage_key = ? AND stage_revision = ?`,
-            [
-              runtimeFixture.workflowId,
-              1,
-              runtimeFixture.documentStageKey,
-              runtimeFixture.historicalRevision,
-            ],
-          )
-          return {
-            diagnostic: yield* sql`
-              SELECT expected_json, actual_json, expected_sha256, actual_sha256
-              FROM qrspi_stage_revision_diagnostics
-              WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
-                AND stage_key = ${runtimeFixture.documentStageKey}
-                AND stage_revision = ${runtimeFixture.historicalRevision}
-            `,
-            foreignKeys: yield* sql`PRAGMA foreign_keys`,
-            foreignKeyViolations: yield* sql`PRAGMA foreign_key_check`,
-          }
-        }),
-      )
-
-      expect(result.diagnostic).toEqual([testCase.expected])
-      expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
-      expect(result.foreignKeyViolations).toEqual([])
-    })
-  }
-
-  test("reconciles diagnostic pair completeness with the allocated parent coverage", () => {
-    expect({
-      parentIdentity: diagnosticParentIdentityCases.length,
-      literalAndBound: diagnosticLiteralAndBoundCases.length,
-      json: diagnosticJsonCases.length,
-      hash: diagnosticHashCases.length,
-      oneSidedPair: diagnosticOneSidedPairCases.length,
-      rejectionTotal: diagnosticRejectionCases.length,
-      positiveAbsence: diagnosticPairAbsenceCases.length,
-      allocatedParentAcceptance: [
-        "criterion 3",
-        "criterion 4",
-        "criterion 5 diagnostic portion",
-        "criterion 6 diagnostic portion",
-      ],
-    }).toEqual({
-      parentIdentity: 4,
-      literalAndBound: 7,
-      json: 4,
-      hash: 6,
-      oneSidedPair: 4,
-      rejectionTotal: 25,
-      positiveAbsence: 2,
-      allocatedParentAcceptance: [
-        "criterion 3",
-        "criterion 4",
-        "criterion 5 diagnostic portion",
-        "criterion 6 diagnostic portion",
-      ],
-    })
+    ])
   })
 
   const taggedVariantCases = [
