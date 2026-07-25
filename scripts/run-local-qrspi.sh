@@ -367,6 +367,32 @@ stage_accepted() {
   return 1
 }
 
+inherited_design_directory_for() {
+  local bead_id=$1
+  local current_id=$bead_id
+  local depth=0
+  local parent_id
+  local parent_json
+  local parent_title
+  local parent_directory
+
+  while ((depth < 32)); do
+    depth=$((depth + 1))
+    parent_id=$("$BD_BIN" show "$current_id" --json | normalize_ticket | jq -r \
+      'if .parent == null then "" elif (.parent | type) == "object" then .parent.id // "" else .parent end') || return 1
+    [[ -n "$parent_id" ]] || return 1
+    parent_json=$("$BD_BIN" show "$parent_id" --json | normalize_ticket) || return 1
+    parent_title=$(printf '%s\n' "$parent_json" | jq -r '.title')
+    parent_directory=$(task_directory_for "$parent_id" "$parent_title") || return 1
+    if stage_accepted "$parent_directory" design; then
+      printf '%s\n' "$parent_directory"
+      return 0
+    fi
+    current_id=$parent_id
+  done
+  return 1
+}
+
 artifact_for_stage() {
   local task_directory=$1
   local stage=$2
@@ -572,6 +598,15 @@ stage_prompt() {
   else
     printf '%s\n' "Do not commit, push, create or update a pull request, close the Bead, or run Dolt remote sync. The local runner and human own those effects."
     printf '%s\n' "Keep every human review gate in the skill. Do not infer approval from this launch prompt."
+  fi
+  if [[ "$stage" == structure || "$stage" == plan || "$stage" == implementation ]]; then
+    local inherited_design=""
+    if ! stage_accepted "$task_directory" design; then
+      inherited_design=$(inherited_design_directory_for "$bead_id" || true)
+    fi
+    if [[ -n "$inherited_design" && "$inherited_design" != "$task_directory" ]]; then
+      printf '%s\n' "This split child inherits its accepted promoted Design authority from ancestor task directory $inherited_design. Read the accepted 03-design-discussion and 03-design-acceptance artifacts there and treat them as this Bead's Design authority; do not expect a Design artifact inside $task_directory."
+    fi
   fi
   if [[ "$stage" == structure ]]; then
     printf '%s\n' "Produce only the Structure outline. Do not estimate its size, compare it with another Structure, create child Beads, Plan, or implement. The runner launches the independent post-Structure scope review separately."
@@ -1086,6 +1121,7 @@ run_structure_loop() {
   local review
   local verdict
   local response
+  local design_directory
   local -a scope_children=()
 
   if stage_accepted "$task_directory" structure; then
@@ -1097,7 +1133,11 @@ run_structure_loop() {
     run_repo_skill_step "$bead_id" "$task_directory" structure-scope-review-r1 structure-scope-reviewer "$task_directory/04-structure-scope-review-r1.md" "Independently estimate the accepted Structure and return the exact post-Structure scope-review contract."
     return 0
   fi
-  stage_accepted "$task_directory" design || fail "Structure requires an accepted and promoted Design package"
+  if ! stage_accepted "$task_directory" design; then
+    design_directory=$(inherited_design_directory_for "$bead_id") || \
+      fail "Structure requires an accepted and promoted Design package"
+    printf 'inherited accepted Design from %s\n' "$design_directory"
+  fi
 
   while true; do
     revision=$(revision_for "$task_directory" structure)
@@ -1118,8 +1158,10 @@ run_structure_loop() {
     case "$verdict" in
       FeatureFit|KeepLarge)
         if [[ "$auto_approve" == true ]]; then
-          printf 'Structure scope review returned %s; stopping for required human acceptance before Plan\n' "$verdict"
-          return 2
+          record_acceptance "$task_directory" structure "$structure"
+          commit_delivery_changes "$bead_id" "Structure $bead_id"
+          printf 'Structure scope review returned %s; auto-approved delivery records acceptance and continues to Plan\n' "$verdict"
+          return 0
         fi
         printf '\nAccept Structure revision %s with %s? [a]ccept, [r]evise Structure, [d]esign revision, [s]top: ' "$revision" "$verdict"
         IFS= read -r response
