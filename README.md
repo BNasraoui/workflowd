@@ -276,7 +276,11 @@ bun install --frozen-lockfile
 bun run check
 ```
 
-The hook checks each local branch pushed against
+The pre-commit hook blocks commits containing a staged file over 600 lines and requires
+the file to be restructured into smaller modules. It checks the staged content, including
+partially staged files, rather than the working-tree copy.
+
+The pre-push hook checks each local branch pushed against
 `<ticket-type>/<ticket-id>-<slug>`, for example
 `feature/workflowd-0zr-add-pre-push-guard`. Supported ticket types are
 `feature`, `bug`, `task`, `chore`, and `epic`; the ticket must exist in Beads
