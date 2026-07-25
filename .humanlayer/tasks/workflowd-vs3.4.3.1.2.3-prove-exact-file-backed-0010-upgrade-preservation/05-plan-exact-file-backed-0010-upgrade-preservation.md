@@ -381,20 +381,20 @@ Do not edit any migration through `0010`, add inferred rows, weaken checks or fo
 
 #### Automated Verification
 
-- [ ] The focused migration suite passes: `bun test test/store/migrations.test.ts`
-- [ ] The full repository quality gate passes, including TypeScript, Effect diagnostics, lint, formatting, and tests: `bun run check`
-- [ ] The final patch has no whitespace errors: `git diff --check`
-- [ ] `git diff -- src/store/migrations.ts` is empty unless the new test first demonstrated a concrete `0011` defect and the diff contains only its smallest correction.
+- [x] The focused migration suite passes: `bun test test/store/migrations.test.ts`
+- [x] The full repository quality gate passes, including TypeScript, Effect diagnostics, lint, formatting, and tests: `bun run check`
+- [x] The final patch has no whitespace errors: `git diff --check`
+- [x] `git diff -- src/store/migrations.ts` is empty unless the new test first demonstrated a concrete `0011` defect and the diff contains only its smallest correction.
 
 #### Manual Verification
 
-- [ ] Inspect the test and confirm the historical and current database work occurs in two sequential `Effect.runPromise` calls with separately constructed `SqliteClient.layer({ filename })` values over the same filename.
-- [ ] Confirm the first layer runs only through `0010`, captures complete ordered `SELECT *` snapshots, and has returned before the current layer is constructed.
-- [ ] Confirm the Generation fixture covers both historical formats and current/noncurrent plus terminal/nonterminal values, while the WorkflowOperation fixture covers retry lineage, lease tuples, nullable and populated effect/output fields, terminal metadata, JSON text, hashes, counters, and timestamps.
-- [ ] Confirm comparison removes only `current_stage_key` and `current_stage_run_ordinal`, checks both are null, and compares WorkflowOperations without projecting away any column.
-- [ ] Confirm the ledger is exact before and after migration, `0011` appears once after rerun, all twelve runtime tables are empty, foreign-key checks are clean, and the four retained indexes are asserted.
-- [ ] Confirm `rm(directory, { recursive: true, force: true })` is in `finally` around setup, both layer lifetimes, and every assertion.
-- [ ] Confirm no sibling SQL rejection matrix, inferred legacy conversion, runtime allocation, claim, transition, bootstrap, quarantine, trigger, executable claim index, or neighboring lifecycle behavior was added.
+- [x] Inspect the test and confirm the historical and current database work occurs in two sequential `Effect.runPromise` calls with separately constructed `SqliteClient.layer({ filename })` values over the same filename.
+- [x] Confirm the first layer runs only through `0010`, captures complete ordered `SELECT *` snapshots, and has returned before the current layer is constructed.
+- [x] Confirm the Generation fixture covers both historical formats and current/noncurrent plus terminal/nonterminal values, while the WorkflowOperation fixture covers retry lineage, lease tuples, nullable and populated effect/output fields, terminal metadata, JSON text, hashes, counters, and timestamps.
+- [x] Confirm comparison removes only `current_stage_key` and `current_stage_run_ordinal`, checks both are null, and compares WorkflowOperations without projecting away any column.
+- [x] Confirm the ledger is exact before and after migration, `0011` appears once after rerun, all twelve runtime tables are empty, foreign-key checks are clean, and the four retained indexes are asserted.
+- [x] Confirm `rm(directory, { recursive: true, force: true })` is in `finally` around setup, both layer lifetimes, and every assertion.
+- [x] Confirm no sibling SQL rejection matrix, inferred legacy conversion, runtime allocation, claim, transition, bootstrap, quarantine, trigger, executable claim index, or neighboring lifecycle behavior was added.
 
 **Implementation Note**: After completing this phase and all automated verification passes, pause for human confirmation of the manual diff inspection before treating this child implementation as accepted. Do not close the parent migration release gate until both sibling SQL-rejection outcomes also pass.
 
