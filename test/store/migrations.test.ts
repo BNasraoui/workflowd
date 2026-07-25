@@ -1383,6 +1383,339 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     })
   }
 
+  const sourceSetCases = [
+    {
+      name: "rejects malformed StageRevision source_set_json",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions SET source_set_json = '{not-json'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects object-root StageRevision source_set_json",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions SET source_set_json = '{}'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects a wrong-length StageRevision source_set_sha256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions SET source_set_sha256 = ${"1".repeat(63)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects an uppercase StageRevision source_set_sha256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions SET source_set_sha256 = ${"A".repeat(64)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects a non-hex StageRevision source_set_sha256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_stage_revisions SET source_set_sha256 = ${`${"1".repeat(63)}g`}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+  ] as const
+
+  const documentPayloadCases = [
+    {
+      name: "rejects malformed document prepared-result JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions SET prepared_result_json = '{not-json'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects array-root document prepared-result JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions SET prepared_result_json = '[]'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects a wrong-length document prepared-result SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions
+        SET prepared_result_sha256 = ${"1".repeat(63)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects an uppercase document prepared-result SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions
+        SET prepared_result_sha256 = ${"A".repeat(64)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects a non-hex document prepared-result SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions
+        SET prepared_result_sha256 = ${`${"1".repeat(63)}g`}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects document prepared-result JSON without its hash",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions SET prepared_result_sha256 = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects document prepared-result hash without its JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions SET prepared_result_json = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+  ] as const
+
+  const implementationPayloadCases = [
+    {
+      name: "rejects malformed implementation delivery-evidence JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_json = '{not-json'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects array-root implementation delivery-evidence JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_json = '[]'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects a wrong-length implementation delivery-evidence SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_sha256 = ${"1".repeat(63)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects an uppercase implementation delivery-evidence SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_sha256 = ${"A".repeat(64)}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects a non-hex implementation delivery-evidence SHA-256",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_sha256 = ${`${"1".repeat(63)}g`}
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects implementation delivery-evidence JSON without its hash",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_sha256 = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects implementation delivery-evidence hash without its JSON",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions
+        SET prepared_delivery_evidence_json = NULL
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+  ] as const
+
+  const incompleteStepTriads = [
+    {
+      name: "rejects a step with only prepared-result JSON",
+      preparedResultJson: runtimeFixture.stepPreparedResultJson,
+      preparedResultSha256: null,
+      final: null,
+    },
+    {
+      name: "rejects a step with only prepared-result hash",
+      preparedResultJson: null,
+      preparedResultSha256: runtimeFixture.stepPreparedResultSha256,
+      final: null,
+    },
+    {
+      name: "rejects a step with only final",
+      preparedResultJson: null,
+      preparedResultSha256: null,
+      final: 1,
+    },
+    {
+      name: "rejects a step with prepared-result JSON and hash but no final",
+      preparedResultJson: runtimeFixture.stepPreparedResultJson,
+      preparedResultSha256: runtimeFixture.stepPreparedResultSha256,
+      final: null,
+    },
+    {
+      name: "rejects a step with prepared-result JSON and final but no hash",
+      preparedResultJson: runtimeFixture.stepPreparedResultJson,
+      preparedResultSha256: null,
+      final: 1,
+    },
+    {
+      name: "rejects a step with prepared-result hash and final but no JSON",
+      preparedResultJson: null,
+      preparedResultSha256: runtimeFixture.stepPreparedResultSha256,
+      final: 1,
+    },
+  ] as const
+
+  const stepTriadCases = incompleteStepTriads.map((testCase) => ({
+    name: testCase.name,
+    statement: (sql: SqlClient.SqlClient) => sql`
+      UPDATE qrspi_implementation_steps
+      SET prepared_result_json = ${testCase.preparedResultJson},
+          prepared_result_sha256 = ${testCase.preparedResultSha256},
+          final = ${testCase.final}
+      WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+        AND stage_key = ${runtimeFixture.implementationStageKey}
+        AND stage_revision = 1
+        AND position = ${runtimeFixture.implementationStepPosition}
+    `,
+  }))
+
+  const stepValueCases = [
+    {
+      name: "rejects malformed implementation-step prepared-result JSON",
+      assignment: "prepared_result_json",
+      value: "{not-json",
+    },
+    {
+      name: "rejects array-root implementation-step prepared-result JSON",
+      assignment: "prepared_result_json",
+      value: "[]",
+    },
+    {
+      name: "rejects a wrong-length implementation-step prepared-result SHA-256",
+      assignment: "prepared_result_sha256",
+      value: "1".repeat(63),
+    },
+    {
+      name: "rejects an uppercase implementation-step prepared-result SHA-256",
+      assignment: "prepared_result_sha256",
+      value: "A".repeat(64),
+    },
+    {
+      name: "rejects a non-hex implementation-step prepared-result SHA-256",
+      assignment: "prepared_result_sha256",
+      value: `${"1".repeat(63)}g`,
+    },
+    {
+      name: "rejects implementation-step final -1",
+      assignment: "final",
+      value: -1,
+    },
+    {
+      name: "rejects implementation-step final 2",
+      assignment: "final",
+      value: 2,
+    },
+  ].map((testCase) => ({
+    name: testCase.name,
+    statement: (sql: SqlClient.SqlClient) =>
+      sql.unsafe(
+        `UPDATE qrspi_implementation_steps
+         SET ${testCase.assignment} = ?
+         WHERE workflow_id = ? AND generation = ? AND stage_key = ?
+           AND stage_revision = ? AND position = ?`,
+        [
+          testCase.value,
+          runtimeFixture.workflowId,
+          1,
+          runtimeFixture.implementationStageKey,
+          1,
+          runtimeFixture.implementationStepPosition,
+        ],
+      ),
+  }))
+
+  const stepPositionCases = ([0, 1_000_001] as const).map((position) => ({
+    name: `rejects implementation-step position ${position}`,
+    statement: (sql: SqlClient.SqlClient) => sql`
+      INSERT INTO qrspi_implementation_steps (
+        workflow_id, generation, stage_key, stage_revision, position,
+        prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+        ${position}, ${runtimeFixture.stepPreparedResultJson},
+        ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+      )
+    `,
+  }))
+
+  const taggedPayloadCases = [
+    ...sourceSetCases,
+    ...documentPayloadCases,
+    ...implementationPayloadCases,
+    ...stepTriadCases,
+    ...stepValueCases,
+    ...stepPositionCases,
+  ]
+
+  for (const testCase of taggedPayloadCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
   const localIdentityCases = [
     {
       name: "rejects an unsupported Generation format",
