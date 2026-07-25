@@ -118,12 +118,7 @@ const groupForeignKeys = (foreignKeys: ReadonlyArray<ForeignKeyMetadata>) =>
     onDelete: rows![0]!.on_delete,
   }))
 
-const noActionForeignKey = (
-  id: number,
-  table: string,
-  from: Array<string>,
-  to: Array<string>,
-) => ({
+const noActionForeignKey = (id: number, table: string, from: Array<string>, to: Array<string>) => ({
   id,
   seq: from.map((_, seq) => seq),
   table,
@@ -231,7 +226,13 @@ describe("strict initial store schema", () => {
             'commands', 'reconciliations', 'agent_executions', 'qrspi_workflows',
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
             'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
-             'qrspi_stage_definitions', 'qrspi_stage_runs', 'qrspi_stage_revisions'
+            'qrspi_stage_definitions', 'qrspi_stage_runs', 'qrspi_stage_revisions',
+            'qrspi_document_stage_revisions', 'qrspi_implementation_stage_revisions',
+            'qrspi_implementation_steps', 'qrspi_artifact_references',
+            'qrspi_implementation_commit_references', 'qrspi_implementation_checkpoints',
+            'qrspi_stage_revision_diagnostics', 'qrspi_stage_operation_owners',
+            'qrspi_document_stage_revision_operations',
+            'qrspi_implementation_step_operations'
           )
           ORDER BY name
         `
@@ -254,7 +255,7 @@ describe("strict initial store schema", () => {
       { migration_id: 10, name: "qrspi_generation_format" },
       { migration_id: 11, name: "qrspi_stage_runtime_layout" },
     ])
-    expect(result.tables).toHaveLength(16)
+    expect(result.tables).toHaveLength(26)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -659,6 +660,21 @@ describe("strict initial store schema", () => {
 })
 
 describe("migration 11: QRSPI stage runtime identity spine", () => {
+  const runtimeTables = [
+    "qrspi_stage_runs",
+    "qrspi_stage_revisions",
+    "qrspi_document_stage_revisions",
+    "qrspi_implementation_stage_revisions",
+    "qrspi_implementation_steps",
+    "qrspi_artifact_references",
+    "qrspi_implementation_commit_references",
+    "qrspi_implementation_checkpoints",
+    "qrspi_stage_revision_diagnostics",
+    "qrspi_stage_operation_owners",
+    "qrspi_document_stage_revision_operations",
+    "qrspi_implementation_step_operations",
+  ] as const
+
   const originalGenerationColumns: ReadonlyArray<ColumnMetadata> = [
     { name: "workflow_id", type: "TEXT", notnull: 1, dflt_value: null, pk: 1 },
     { name: "generation", type: "INTEGER", notnull: 1, dflt_value: null, pk: 2 },
@@ -860,10 +876,10 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     expect(result.generation.ddl).toContain(
       "(current_stage_key IS NULL) = (current_stage_run_ordinal IS NULL)",
     )
+    expect(result.generation.ddl).toContain("current_stage_run_ordinal BETWEEN 1 AND 1000000")
     expect(result.generation.ddl).toContain(
-      "current_stage_run_ordinal BETWEEN 1 AND 1000000",
+      "current_stage_key IS NULL OR length(current_stage_key) BETWEEN 1 AND 64",
     )
-    expect(result.generation.ddl).toContain("current_stage_key IS NULL OR length(current_stage_key) BETWEEN 1 AND 64")
     expect(result.generation.ddl).not.toContain("current_stage_key TEXT DEFAULT")
     expect(result.generation.ddl).not.toContain("current_stage_run_ordinal INTEGER DEFAULT")
   })
@@ -927,10 +943,12 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
         const stageRevision = yield* readTableMetadata("qrspi_stage_revisions")
         const stageDefinition = yield* readTableMetadata("qrspi_stage_definitions")
         const strictTables = yield* SqlClient.SqlClient.pipe(
-          Effect.flatMap((sql) => sql`
+          Effect.flatMap(
+            (sql) => sql`
             SELECT name, strict FROM pragma_table_list
             WHERE name IN ('qrspi_stage_runs', 'qrspi_stage_revisions') ORDER BY name
-          `),
+          `,
+          ),
         )
         const currentDdl = yield* readIndexDdl("qrspi_stage_runs_current")
         const runIndexes = yield* readIndexInventory(stageRun.indexes)
@@ -1146,9 +1164,7 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     expect(result.stageRun.ddl).toContain(
       "terminal_reason IS NULL OR length(terminal_reason) BETWEEN 1 AND 2000",
     )
-    expect(result.stageRevision.ddl).toContain(
-      "generation INTEGER NOT NULL CHECK (generation > 0)",
-    )
+    expect(result.stageRevision.ddl).toContain("generation INTEGER NOT NULL CHECK (generation > 0)")
     expect(result.stageRevision.ddl).toContain(
       "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
     )
@@ -1174,33 +1190,570 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     expect(result.stageRevision.ddl).toContain("source_set_sha256 NOT GLOB '*[^0-9a-f]*'")
   })
 
+  test("creates the exact tagged payload, reference, diagnostic, and operation layout", async () => {
+    const identity = ["workflow_id", "generation", "stage_key", "stage_revision"]
+    const repository = ["provider_instance_id", "repository_id", "repository_full_name"]
+    const column = (
+      name: string,
+      type: string,
+      notnull: number,
+      pk = 0,
+      dflt_value: string | null = null,
+    ): ColumnMetadata => ({ name, type, notnull, dflt_value, pk })
+    const requiredIdentity = identity.map((name, index) =>
+      column(
+        name,
+        name === "generation" || name === "stage_revision" ? "INTEGER" : "TEXT",
+        1,
+        index + 1,
+      ),
+    )
+    const requiredRepository = repository.map((name) => column(name, "TEXT", 1))
+    const timestamps = [column("created_at", "TEXT", 1), column("updated_at", "TEXT", 1)]
+    const expected = {
+      qrspi_document_stage_revisions: {
+        columns: [
+          ...requiredIdentity,
+          column("kind", "TEXT", 1, 0, "'document'"),
+          column("prepared_result_json", "TEXT", 0),
+          column("prepared_result_sha256", "TEXT", 0),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "qrspi_stage_revisions",
+            [...identity, "kind"],
+            [...identity, "kind"],
+          ),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "kind = 'document'",
+          "prepared_result_json IS NULL OR ( json_valid(prepared_result_json) = 1 AND json_type(prepared_result_json, '$') = 'object' )",
+          "json_valid(prepared_result_json) = 1",
+          "json_type(prepared_result_json, '$') = 'object'",
+          "length(prepared_result_sha256) = 64",
+          "prepared_result_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "(prepared_result_json IS NULL) = (prepared_result_sha256 IS NULL)",
+        ],
+      },
+      qrspi_implementation_stage_revisions: {
+        columns: [
+          ...requiredIdentity,
+          column("kind", "TEXT", 1, 0, "'implementation'"),
+          column("prepared_delivery_evidence_json", "TEXT", 0),
+          column("prepared_delivery_evidence_sha256", "TEXT", 0),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "qrspi_stage_revisions",
+            [...identity, "kind"],
+            [...identity, "kind"],
+          ),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "kind = 'implementation'",
+          "prepared_delivery_evidence_json IS NULL OR ( json_valid(prepared_delivery_evidence_json) = 1 AND json_type(prepared_delivery_evidence_json, '$') = 'object' )",
+          "json_valid(prepared_delivery_evidence_json) = 1",
+          "json_type(prepared_delivery_evidence_json, '$') = 'object'",
+          "length(prepared_delivery_evidence_sha256) = 64",
+          "prepared_delivery_evidence_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "(prepared_delivery_evidence_json IS NULL) = (prepared_delivery_evidence_sha256 IS NULL)",
+        ],
+      },
+      qrspi_implementation_steps: {
+        columns: [
+          ...requiredIdentity,
+          column("position", "INTEGER", 1, 5),
+          column("prepared_result_json", "TEXT", 0),
+          column("prepared_result_sha256", "TEXT", 0),
+          column("final", "INTEGER", 0),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(0, "qrspi_implementation_stage_revisions", identity, identity),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 1000000)",
+          "prepared_result_json IS NULL OR ( json_valid(prepared_result_json) = 1 AND json_type(prepared_result_json, '$') = 'object' )",
+          "json_valid(prepared_result_json) = 1",
+          "json_type(prepared_result_json, '$') = 'object'",
+          "length(prepared_result_sha256) = 64",
+          "prepared_result_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "final INTEGER CHECK (final IN (0, 1))",
+          "prepared_result_json IS NULL AND prepared_result_sha256 IS NULL AND final IS NULL",
+          "prepared_result_json IS NOT NULL",
+          "prepared_result_sha256 IS NOT NULL AND final IS NOT NULL",
+        ],
+      },
+      qrspi_artifact_references: {
+        columns: [
+          ...requiredIdentity,
+          ...requiredRepository,
+          ...["commit_sha", "path", "blob_sha", "content_sha256", "media_type"].map((name) =>
+            column(name, "TEXT", 1),
+          ),
+          ...timestamps,
+        ],
+        foreignKeys: [noActionForeignKey(0, "qrspi_document_stage_revisions", identity, identity)],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "length(provider_instance_id) BETWEEN 1 AND 128",
+          "length(repository_id) BETWEEN 1 AND 128",
+          "length(repository_full_name) BETWEEN 3 AND 256",
+          "instr(repository_full_name, '/') > 0",
+          "length(commit_sha) IN (40, 64)",
+          "commit_sha NOT GLOB '*[^0-9a-f]*'",
+          "length(path) BETWEEN 1 AND 512",
+          "length(blob_sha) IN (40, 64)",
+          "blob_sha NOT GLOB '*[^0-9a-f]*'",
+          "length(content_sha256) = 64",
+          "content_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "length(media_type) BETWEEN 1 AND 128",
+        ],
+      },
+      qrspi_implementation_commit_references: {
+        columns: [
+          ...requiredIdentity,
+          column("position", "INTEGER", 1, 5),
+          ...requiredRepository,
+          ...[
+            "commit_sha",
+            "expected_parent_sha",
+            "changed_paths_json",
+            "changed_paths_sha256",
+          ].map((name) => column(name, "TEXT", 1)),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "qrspi_implementation_steps",
+            [...identity, "position"],
+            [...identity, "position"],
+          ),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 1000000)",
+          "length(provider_instance_id) BETWEEN 1 AND 128",
+          "length(repository_id) BETWEEN 1 AND 128",
+          "length(repository_full_name) BETWEEN 3 AND 256",
+          "instr(repository_full_name, '/') > 0",
+          "length(commit_sha) IN (40, 64)",
+          "commit_sha NOT GLOB '*[^0-9a-f]*'",
+          "length(expected_parent_sha) IN (40, 64)",
+          "expected_parent_sha NOT GLOB '*[^0-9a-f]*'",
+          "json_valid(changed_paths_json) = 1",
+          "json_type(changed_paths_json, '$') = 'array'",
+          "json_array_length(changed_paths_json) > 0",
+          "length(changed_paths_sha256) = 64",
+          "changed_paths_sha256 NOT GLOB '*[^0-9a-f]*'",
+        ],
+      },
+      qrspi_implementation_checkpoints: {
+        columns: [
+          ...requiredIdentity,
+          column("checkpoint_id", "TEXT", 1),
+          ...requiredRepository,
+          ...[
+            "base_sha",
+            "final_sha",
+            "commit_references_json",
+            "commit_references_sha256",
+            "changed_paths_json",
+            "changed_paths_sha256",
+            "prepared_delivery_evidence_sha256",
+          ].map((name) => column(name, "TEXT", 1)),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(0, "qrspi_implementation_stage_revisions", identity, identity),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "checkpoint_id TEXT NOT NULL UNIQUE",
+          "length(checkpoint_id) BETWEEN 1 AND 512",
+          "length(provider_instance_id) BETWEEN 1 AND 128",
+          "length(repository_id) BETWEEN 1 AND 128",
+          "length(repository_full_name) BETWEEN 3 AND 256",
+          "instr(repository_full_name, '/') > 0",
+          "length(base_sha) IN (40, 64)",
+          "base_sha NOT GLOB '*[^0-9a-f]*'",
+          "length(final_sha) IN (40, 64)",
+          "final_sha NOT GLOB '*[^0-9a-f]*'",
+          "json_valid(commit_references_json) = 1",
+          "json_type(commit_references_json, '$') = 'array'",
+          "json_array_length(commit_references_json) > 0",
+          "length(commit_references_sha256) = 64",
+          "commit_references_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "json_valid(changed_paths_json) = 1",
+          "json_type(changed_paths_json, '$') = 'array'",
+          "json_array_length(changed_paths_json) > 0",
+          "length(changed_paths_sha256) = 64",
+          "changed_paths_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "length(prepared_delivery_evidence_sha256) = 64",
+          "prepared_delivery_evidence_sha256 NOT GLOB '*[^0-9a-f]*'",
+        ],
+      },
+      qrspi_stage_revision_diagnostics: {
+        columns: [
+          ...requiredIdentity,
+          column("observed_kind", "TEXT", 0),
+          column("observed_state", "TEXT", 0),
+          column("reason", "TEXT", 1),
+          column("message", "TEXT", 1),
+          column("expected_json", "TEXT", 0),
+          column("actual_json", "TEXT", 0),
+          column("expected_sha256", "TEXT", 0),
+          column("actual_sha256", "TEXT", 0),
+          ...timestamps,
+        ],
+        foreignKeys: [noActionForeignKey(0, "qrspi_stage_revisions", identity, identity)],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "length(observed_kind) BETWEEN 1 AND 64",
+          "length(observed_state) BETWEEN 1 AND 64",
+          "length(message) BETWEEN 1 AND 2000",
+          "expected_json IS NULL OR ( json_valid(expected_json) = 1 AND json_type(expected_json, '$') = 'object' )",
+          "json_valid(expected_json) = 1",
+          "json_type(expected_json, '$') = 'object'",
+          "actual_json IS NULL OR ( json_valid(actual_json) = 1 AND json_type(actual_json, '$') = 'object' )",
+          "json_valid(actual_json) = 1",
+          "json_type(actual_json, '$') = 'object'",
+          "length(expected_sha256) = 64",
+          "expected_sha256 NOT GLOB '*[^0-9a-f]*'",
+          "length(actual_sha256) = 64",
+          "actual_sha256 NOT GLOB '*[^0-9a-f]*'",
+        ],
+      },
+      qrspi_stage_operation_owners: {
+        columns: [
+          column("operation_id", "TEXT", 1, 1),
+          column("operation_kind", "TEXT", 1),
+          column("owner_kind", "TEXT", 1),
+          column("operation_role", "TEXT", 1),
+          column("created_at", "TEXT", 1),
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "workflow_operations",
+            ["operation_id", "operation_kind"],
+            ["operation_id", "kind"],
+          ),
+        ],
+        ddl: [
+          "operation_kind IN ('StageProduce', 'ArtifactPublish')",
+          "owner_kind IN ('document_revision', 'implementation_step')",
+          "operation_role TEXT NOT NULL CHECK (operation_role IN ('produce', 'publish'))",
+          "operation_role = 'produce' AND operation_kind = 'StageProduce'",
+          "operation_role = 'publish' AND operation_kind = 'ArtifactPublish'",
+          "UNIQUE (operation_id, owner_kind, operation_role)",
+        ],
+      },
+      qrspi_document_stage_revision_operations: {
+        columns: [
+          ...requiredIdentity,
+          column("owner_kind", "TEXT", 1, 0, "'document_revision'"),
+          column("operation_role", "TEXT", 1, 5),
+          column("operation_id", "TEXT", 1),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "qrspi_stage_operation_owners",
+            ["operation_id", "owner_kind", "operation_role"],
+            ["operation_id", "owner_kind", "operation_role"],
+          ),
+          noActionForeignKey(1, "qrspi_document_stage_revisions", identity, identity),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "owner_kind = 'document_revision'",
+          "operation_role IN ('produce', 'publish')",
+          "UNIQUE (operation_id)",
+        ],
+      },
+      qrspi_implementation_step_operations: {
+        columns: [
+          ...requiredIdentity,
+          column("position", "INTEGER", 1, 5),
+          column("owner_kind", "TEXT", 1, 0, "'implementation_step'"),
+          column("operation_role", "TEXT", 1, 6),
+          column("operation_id", "TEXT", 1),
+          ...timestamps,
+        ],
+        foreignKeys: [
+          noActionForeignKey(
+            0,
+            "qrspi_stage_operation_owners",
+            ["operation_id", "owner_kind", "operation_role"],
+            ["operation_id", "owner_kind", "operation_role"],
+          ),
+          noActionForeignKey(
+            1,
+            "qrspi_implementation_steps",
+            [...identity, "position"],
+            [...identity, "position"],
+          ),
+        ],
+        ddl: [
+          "generation INTEGER NOT NULL CHECK (generation > 0)",
+          "stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64)",
+          "stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000)",
+          "position INTEGER NOT NULL CHECK (position BETWEEN 1 AND 1000000)",
+          "owner_kind = 'implementation_step'",
+          "operation_role IN ('produce', 'publish')",
+          "UNIQUE (operation_id)",
+        ],
+      },
+    } as const
+
+    expect(expected.qrspi_document_stage_revisions.ddl).toContain(
+      "json_valid(prepared_result_json) = 1",
+    )
+    expect(expected.qrspi_implementation_stage_revisions.ddl).toContain(
+      "json_valid(prepared_delivery_evidence_json) = 1",
+    )
+    expect(expected.qrspi_implementation_steps.ddl).toContain(
+      "json_valid(prepared_result_json) = 1",
+    )
+    expect(expected.qrspi_implementation_commit_references.ddl).toContain(
+      "json_valid(changed_paths_json) = 1",
+    )
+    expect(expected.qrspi_implementation_checkpoints.ddl).toContain(
+      "json_valid(commit_references_json) = 1",
+    )
+    expect(expected.qrspi_implementation_checkpoints.ddl).toContain(
+      "json_valid(changed_paths_json) = 1",
+    )
+    expect(expected.qrspi_stage_revision_diagnostics.ddl).toContain("json_valid(expected_json) = 1")
+    expect(expected.qrspi_stage_revision_diagnostics.ddl).toContain("json_valid(actual_json) = 1")
+    expect(expected.qrspi_document_stage_revisions.ddl).toContain(
+      "prepared_result_json IS NULL OR ( json_valid(prepared_result_json) = 1 AND json_type(prepared_result_json, '$') = 'object' )",
+    )
+    expect(expected.qrspi_implementation_stage_revisions.ddl).toContain(
+      "prepared_delivery_evidence_json IS NULL OR ( json_valid(prepared_delivery_evidence_json) = 1 AND json_type(prepared_delivery_evidence_json, '$') = 'object' )",
+    )
+    expect(expected.qrspi_implementation_steps.ddl).toContain(
+      "prepared_result_json IS NULL OR ( json_valid(prepared_result_json) = 1 AND json_type(prepared_result_json, '$') = 'object' )",
+    )
+    expect(expected.qrspi_stage_revision_diagnostics.ddl).toContain(
+      "expected_json IS NULL OR ( json_valid(expected_json) = 1 AND json_type(expected_json, '$') = 'object' )",
+    )
+    expect(expected.qrspi_stage_revision_diagnostics.ddl).toContain(
+      "actual_json IS NULL OR ( json_valid(actual_json) = 1 AND json_type(actual_json, '$') = 'object' )",
+    )
+
+    const result = await runWithDatabase(
+      Effect.gen(function* () {
+        const tables = yield* Effect.all(
+          Object.keys(expected).map((table) =>
+            readTableMetadata(table).pipe(Effect.map((metadata) => [table, metadata] as const)),
+          ),
+        )
+        const strictTables = yield* SqlClient.SqlClient.pipe(
+          Effect.flatMap((sql) =>
+            sql.unsafe<{ readonly name: string; readonly strict: number }>(
+              `SELECT name, strict FROM pragma_table_list
+               WHERE name IN (${Object.keys(expected)
+                 .map(() => "?")
+                 .join(", ")}) ORDER BY name`,
+              Object.keys(expected),
+            ),
+          ),
+        )
+        return { strictTables, tables: Object.fromEntries(tables) }
+      }),
+    )
+
+    expect(result.strictTables).toEqual(
+      Object.keys(expected)
+        .sort()
+        .map((name) => ({ name, strict: 1 })),
+    )
+    for (const [table, inventory] of Object.entries(expected)) {
+      const metadata = result.tables[table]!
+      expect(metadata.columns, table).toEqual(inventory.columns)
+      expect(groupForeignKeys(metadata.foreignKeys), table).toEqual([...inventory.foreignKeys])
+      for (const snippet of inventory.ddl) {
+        expect(compactDdl(metadata.ddl), `${table}: ${snippet}`).toContain(compactDdl(snippet))
+      }
+    }
+    const diagnosticDdl = result.tables.qrspi_stage_revision_diagnostics!.ddl!
+    const reasonClause = diagnosticDdl.match(/reason TEXT NOT NULL CHECK \(reason IN \((.*?)\)\)/s)
+    expect(reasonClause?.[1]).toBeDefined()
+    expect(
+      Array.from(reasonClause?.[1]?.matchAll(/'([^']+)'/g) ?? [], (match) => match[1]),
+    ).toEqual([
+      "malformed",
+      "missing",
+      "duplicate",
+      "reordered",
+      "hash_mismatch",
+      "identity_mismatch",
+    ])
+  })
+
+  test("installs the exact runtime indexes", async () => {
+    const identityColumns = (length: number) =>
+      ["workflow_id", "generation", "stage_key", "stage_revision", "position"].slice(0, length)
+    const expectedAuthorityIndexes = {
+      qrspi_document_stage_revisions: [
+        ["sqlite_autoindex_qrspi_document_stage_revisions_1", 1, "pk", ...identityColumns(4)],
+      ],
+      qrspi_implementation_stage_revisions: [
+        ["sqlite_autoindex_qrspi_implementation_stage_revisions_1", 1, "pk", ...identityColumns(4)],
+      ],
+      qrspi_implementation_steps: [
+        ["sqlite_autoindex_qrspi_implementation_steps_1", 1, "pk", ...identityColumns(5)],
+      ],
+      qrspi_artifact_references: [
+        ["sqlite_autoindex_qrspi_artifact_references_1", 1, "pk", ...identityColumns(4)],
+      ],
+      qrspi_implementation_commit_references: [
+        [
+          "sqlite_autoindex_qrspi_implementation_commit_references_1",
+          1,
+          "pk",
+          ...identityColumns(5),
+        ],
+      ],
+      qrspi_implementation_checkpoints: [
+        ["sqlite_autoindex_qrspi_implementation_checkpoints_1", 1, "u", "checkpoint_id"],
+        ["sqlite_autoindex_qrspi_implementation_checkpoints_2", 1, "pk", ...identityColumns(4)],
+      ],
+      qrspi_stage_revision_diagnostics: [
+        ["sqlite_autoindex_qrspi_stage_revision_diagnostics_1", 1, "pk", ...identityColumns(4)],
+      ],
+      qrspi_stage_operation_owners: [
+        ["qrspi_stage_operation_owners_role", 0, "c", "operation_role", "operation_id"],
+        ["sqlite_autoindex_qrspi_stage_operation_owners_1", 1, "pk", "operation_id"],
+        [
+          "sqlite_autoindex_qrspi_stage_operation_owners_2",
+          1,
+          "u",
+          "operation_id",
+          "owner_kind",
+          "operation_role",
+        ],
+      ],
+      qrspi_document_stage_revision_operations: [
+        [
+          "sqlite_autoindex_qrspi_document_stage_revision_operations_1",
+          1,
+          "pk",
+          ...identityColumns(4),
+          "operation_role",
+        ],
+        ["sqlite_autoindex_qrspi_document_stage_revision_operations_2", 1, "u", "operation_id"],
+      ],
+      qrspi_implementation_step_operations: [
+        [
+          "sqlite_autoindex_qrspi_implementation_step_operations_1",
+          1,
+          "pk",
+          ...identityColumns(5),
+          "operation_role",
+        ],
+        ["sqlite_autoindex_qrspi_implementation_step_operations_2", 1, "u", "operation_id"],
+      ],
+    } as const
+    const result = await runWithDatabase(
+      Effect.gen(function* () {
+        const authorityIndexes = yield* Effect.all(
+          Object.keys(expectedAuthorityIndexes).map((table) =>
+            readTableMetadata(table).pipe(
+              Effect.flatMap(({ indexes }) => readIndexInventory(indexes)),
+              Effect.map((indexes) => [table, indexes] as const),
+            ),
+          ),
+        )
+        const workflowOperation = yield* readTableMetadata("workflow_operations")
+        return {
+          authorityIndexes: Object.fromEntries(authorityIndexes),
+          workflowOperationIndexes: yield* readIndexInventory(workflowOperation.indexes),
+        }
+      }),
+    )
+
+    for (const [table, indexes] of Object.entries(expectedAuthorityIndexes)) {
+      expect(result.authorityIndexes[table], table).toEqual(
+        indexes.map(([name, unique, origin, ...columns]) => ({
+          name,
+          unique,
+          partial: 0,
+          origin,
+          columns: columns.map((name, seqno) => ({ name, seqno })),
+        })),
+      )
+    }
+    expect(result.workflowOperationIndexes).toContainEqual({
+      name: "workflow_operations_identity_kind",
+      unique: 1,
+      partial: 0,
+      origin: "c",
+      columns: [
+        { name: "operation_id", seqno: 0 },
+        { name: "kind", seqno: 1 },
+      ],
+    })
+  })
+
   test("installs no runtime facts, triggers, or executable claim indexes", async () => {
     const result = await runWithDatabase(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
-        const counts = yield* Effect.all([
-          sql`SELECT count(*) AS count FROM qrspi_stage_runs`,
-          sql`SELECT count(*) AS count FROM qrspi_stage_revisions`,
-        ])
-        const triggers = yield* sql`
-          SELECT name FROM sqlite_master
-          WHERE type = 'trigger' AND (
-            lower(sql) LIKE '%qrspi_stage_runs%'
-            OR lower(sql) LIKE '%qrspi_stage_revisions%'
-            OR lower(sql) LIKE '%current_stage_run_ordinal%'
-          )
-        `
-        const claimIndexes = yield* sql`
-          SELECT name FROM sqlite_master
-          WHERE type = 'index'
-            AND tbl_name IN ('qrspi_stage_runs', 'qrspi_stage_revisions')
-            AND (lower(name) LIKE '%claim%' OR lower(coalesce(sql, '')) LIKE '%claim%')
-        `
+        const counts = yield* Effect.all(
+          runtimeTables.map((table) =>
+            sql.unsafe<{ readonly count: number }>(`SELECT count(*) AS count FROM "${table}"`),
+          ),
+        )
+        const triggers = yield* sql.unsafe(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'trigger' AND (
+             ${runtimeTables.map((table) => `lower(sql) LIKE '%${table}%'`).join(" OR ")}
+             OR lower(sql) LIKE '%current_stage_run_ordinal%'
+           )`,
+        )
+        const claimIndexes = yield* sql.unsafe(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'index'
+             AND tbl_name IN (${runtimeTables.map((table) => `'${table}'`).join(", ")})
+             AND (
+               lower(name) LIKE '%claim%' OR lower(coalesce(sql, '')) LIKE '%claim%'
+               OR lower(name) LIKE '%lease%' OR lower(coalesce(sql, '')) LIKE '%lease%'
+               OR lower(name) LIKE '%run_at%' OR lower(coalesce(sql, '')) LIKE '%run_at%'
+             )`,
+        )
         return { claimIndexes, counts, triggers }
       }),
     )
 
-    expect(result.counts).toEqual([[{ count: 0 }], [{ count: 0 }]])
+    expect(result.counts.flat()).toEqual(runtimeTables.map(() => ({ count: 0 })))
     expect(result.triggers).toEqual([])
     expect(result.claimIndexes).toEqual([])
   })
