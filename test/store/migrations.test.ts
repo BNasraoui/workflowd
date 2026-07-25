@@ -730,6 +730,17 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     pendingRevision: 2,
     publishedRevision: 3,
     acceptedRevision: 4,
+    implementationStepPosition: 1,
+    documentPreparedResultJson: '{"result":"document-ready"}',
+    documentPreparedResultSha256: "1".repeat(64),
+    implementationEvidenceJson: '{"result":"implementation-ready"}',
+    implementationEvidenceSha256: "2".repeat(64),
+    stepPreparedResultJson: '{"result":"step-ready"}',
+    stepPreparedResultSha256: "3".repeat(64),
+    documentProduceOperationId: "runtime-document-produce-r1",
+    documentPublishOperationId: "runtime-document-publish-r1",
+    implementationProduceOperationId: "runtime-implementation-produce-r1",
+    implementationPublishOperationId: "runtime-implementation-publish-r1",
   } as const
 
   const seedValidRuntimeIdentitySpine = Effect.gen(function* () {
@@ -809,16 +820,34 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
         terminal_failure_reason, terminal_retry_policy, created_at, updated_at
       ) VALUES
         (
-          'runtime-produce-r1', 'runtime-produce', 1, NULL, 'StageProduce',
+          ${runtimeFixture.documentProduceOperationId}, 'runtime-document-produce', 1,
+          NULL, 'StageProduce',
           '{"stage":"research"}', '{"request":"produce"}', ${"9".repeat(64)},
           NULL, 'ready', 1, 0, 3, NULL, NULL, NULL, ${timestamp}, NULL, NULL,
           0, 3, '{}', NULL, NULL, NULL, ${timestamp}, ${timestamp}
         ),
         (
-          'runtime-publish-r1', 'runtime-publish', 1, NULL, 'ArtifactPublish',
+          ${runtimeFixture.documentPublishOperationId}, 'runtime-document-publish', 1,
+          NULL, 'ArtifactPublish',
           '{"stage":"research"}', '{"request":"publish"}', ${"a".repeat(64)},
           NULL, 'ready', 1, 0, 3, NULL, NULL, NULL, ${timestamp}, NULL, NULL,
           0, 3, '{}', NULL, NULL, NULL, ${timestamp}, ${timestamp}
+        ),
+        (
+          ${runtimeFixture.implementationProduceOperationId},
+          'runtime-implementation-produce', 1, NULL, 'StageProduce',
+          '{"stage":"implementation"}', '{"request":"produce"}',
+          ${"4".repeat(64)}, NULL, 'ready', 1, 0, 3, NULL, NULL, NULL,
+          ${timestamp}, NULL, NULL, 0, 3, '{}', NULL, NULL, NULL,
+          ${timestamp}, ${timestamp}
+        ),
+        (
+          ${runtimeFixture.implementationPublishOperationId},
+          'runtime-implementation-publish', 1, NULL, 'ArtifactPublish',
+          '{"stage":"implementation"}', '{"request":"publish"}',
+          ${"5".repeat(64)}, NULL, 'ready', 1, 0, 3, NULL, NULL, NULL,
+          ${timestamp}, NULL, NULL, 0, 3, '{}', NULL, NULL, NULL,
+          ${timestamp}, ${timestamp}
         )
     `
     yield* sql`
@@ -904,7 +933,8 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
         (${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 3,
           'document', NULL, NULL, ${timestamp}, ${timestamp}),
         (${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 4,
-          'document', NULL, NULL, ${timestamp}, ${timestamp})
+          'document', ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256}, ${timestamp}, ${timestamp})
     `
     yield* sql`
       INSERT INTO qrspi_implementation_stage_revisions (
@@ -913,8 +943,116 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
         created_at, updated_at
       ) VALUES (
         ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
-        'implementation', NULL, NULL, ${timestamp}, ${timestamp}
+        'implementation', ${runtimeFixture.implementationEvidenceJson},
+        ${runtimeFixture.implementationEvidenceSha256}, ${timestamp}, ${timestamp}
       )
+    `
+    yield* sql`
+      INSERT INTO qrspi_implementation_steps (
+        workflow_id, generation, stage_key, stage_revision, position,
+        prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+        ${runtimeFixture.implementationStepPosition},
+        ${runtimeFixture.stepPreparedResultJson},
+        ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+      )
+    `
+    yield* sql`
+      INSERT INTO qrspi_artifact_references (
+        workflow_id, generation, stage_key, stage_revision,
+        provider_instance_id, repository_id, repository_full_name,
+        commit_sha, path, blob_sha, content_sha256, media_type,
+        created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+        ${runtimeFixture.acceptedRevision}, 'github.com', 'repository-42',
+        'example/workflowd', ${"4".repeat(40)}, 'artifacts/research.md',
+        ${"5".repeat(40)}, ${"6".repeat(64)}, 'text/markdown',
+        ${timestamp}, ${timestamp}
+      )
+    `
+    yield* sql`
+      INSERT INTO qrspi_implementation_commit_references (
+        workflow_id, generation, stage_key, stage_revision, position,
+        provider_instance_id, repository_id, repository_full_name,
+        commit_sha, expected_parent_sha, changed_paths_json,
+        changed_paths_sha256, created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+        ${runtimeFixture.implementationStepPosition}, 'github.com', 'repository-42',
+        'example/workflowd', ${"4".repeat(40)}, ${"5".repeat(40)},
+        '["src/main.ts"]', ${"6".repeat(64)}, ${timestamp}, ${timestamp}
+      )
+    `
+    yield* sql`
+      INSERT INTO qrspi_implementation_checkpoints (
+        workflow_id, generation, stage_key, stage_revision, checkpoint_id,
+        provider_instance_id, repository_id, repository_full_name,
+        base_sha, final_sha, commit_references_json, commit_references_sha256,
+        changed_paths_json, changed_paths_sha256,
+        prepared_delivery_evidence_sha256, created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+        'runtime-implementation-checkpoint', 'github.com', 'repository-42',
+        'example/workflowd', ${"5".repeat(40)}, ${"4".repeat(40)},
+        '[{"position":1}]', ${"7".repeat(64)}, '["src/main.ts"]',
+        ${"6".repeat(64)}, ${runtimeFixture.implementationEvidenceSha256},
+        ${timestamp}, ${timestamp}
+      )
+    `
+    yield* sql`
+      INSERT INTO qrspi_stage_revision_diagnostics (
+        workflow_id, generation, stage_key, stage_revision,
+        observed_kind, observed_state, reason, message,
+        expected_json, actual_json, expected_sha256, actual_sha256,
+        created_at, updated_at
+      ) VALUES (
+        ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+        ${runtimeFixture.historicalRevision}, 'document', 'accepted',
+        'identity_mismatch', 'Fixture diagnostic for the historical revision.',
+        '{"kind":"document"}', '{"kind":"implementation"}',
+        ${"8".repeat(64)}, ${"9".repeat(64)}, ${timestamp}, ${timestamp}
+      )
+    `
+    yield* sql`
+      INSERT INTO qrspi_stage_operation_owners (
+        operation_id, operation_kind, owner_kind, operation_role, created_at
+      ) VALUES
+        (${runtimeFixture.documentProduceOperationId}, 'StageProduce',
+          'document_revision', 'produce', ${timestamp}),
+        (${runtimeFixture.documentPublishOperationId}, 'ArtifactPublish',
+          'document_revision', 'publish', ${timestamp}),
+        (${runtimeFixture.implementationProduceOperationId}, 'StageProduce',
+          'implementation_step', 'produce', ${timestamp}),
+        (${runtimeFixture.implementationPublishOperationId}, 'ArtifactPublish',
+          'implementation_step', 'publish', ${timestamp})
+    `
+    yield* sql`
+      INSERT INTO qrspi_document_stage_revision_operations (
+        workflow_id, generation, stage_key, stage_revision,
+        owner_kind, operation_role, operation_id, created_at, updated_at
+      ) VALUES
+        (${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'produce',
+          ${runtimeFixture.documentProduceOperationId}, ${timestamp}, ${timestamp}),
+        (${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document_revision', 'publish',
+          ${runtimeFixture.documentPublishOperationId}, ${timestamp}, ${timestamp})
+    `
+    yield* sql`
+      INSERT INTO qrspi_implementation_step_operations (
+        workflow_id, generation, stage_key, stage_revision, position,
+        owner_kind, operation_role, operation_id, created_at, updated_at
+      ) VALUES
+        (${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'produce', ${runtimeFixture.implementationProduceOperationId},
+          ${timestamp}, ${timestamp}),
+        (${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          ${runtimeFixture.implementationStepPosition}, 'implementation_step',
+          'publish', ${runtimeFixture.implementationPublishOperationId},
+          ${timestamp}, ${timestamp})
     `
     yield* sql`
       UPDATE qrspi_stage_runs
@@ -948,38 +1086,122 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
       expect(foreignKeyViolations).toEqual([])
     })
 
-  test("seeds the complete valid runtime identity spine", async () => {
-    const counts = await runWithDatabase(
+  test("seeds the complete valid tagged runtime graph", async () => {
+    const result = await runWithDatabase(
       Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
         yield* seedValidRuntimeIdentitySpine
         const graph = yield* readRuntimeGraph
-        return Object.fromEntries(
-          Object.entries(graph).map(([table, rows]) => [table, rows.length]),
-        )
+        return {
+          counts: Object.fromEntries(
+            Object.entries(graph).map(([table, rows]) => [table, rows.length]),
+          ),
+          foreignKeys: yield* sql`PRAGMA foreign_keys`,
+          foreignKeyViolations: yield* sql`PRAGMA foreign_key_check`,
+        }
       }),
     )
 
-    expect(counts).toEqual({
+    expect(result.counts).toEqual({
       qrspi_workflows: 1,
       qrspi_ticket_revisions: 1,
       qrspi_workflow_definitions: 1,
       qrspi_stage_definitions: 2,
       qrspi_generations: 2,
-      workflow_operations: 2,
+      workflow_operations: 4,
       qrspi_stage_runs: 4,
       qrspi_stage_revisions: 5,
       qrspi_document_stage_revisions: 4,
       qrspi_implementation_stage_revisions: 1,
-      qrspi_implementation_steps: 0,
-      qrspi_artifact_references: 0,
-      qrspi_implementation_commit_references: 0,
-      qrspi_implementation_checkpoints: 0,
-      qrspi_stage_revision_diagnostics: 0,
-      qrspi_stage_operation_owners: 0,
-      qrspi_document_stage_revision_operations: 0,
-      qrspi_implementation_step_operations: 0,
+      qrspi_implementation_steps: 1,
+      qrspi_artifact_references: 1,
+      qrspi_implementation_commit_references: 1,
+      qrspi_implementation_checkpoints: 1,
+      qrspi_stage_revision_diagnostics: 1,
+      qrspi_stage_operation_owners: 4,
+      qrspi_document_stage_revision_operations: 2,
+      qrspi_implementation_step_operations: 2,
     })
+    expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
+    expect(result.foreignKeyViolations).toEqual([])
   })
+
+  const taggedVariantCases = [
+    {
+      name: "rejects document payload kind implementation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_document_stage_revisions SET kind = 'implementation'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.documentStageKey}
+          AND stage_revision = ${runtimeFixture.acceptedRevision}
+      `,
+    },
+    {
+      name: "rejects implementation payload kind document",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        UPDATE qrspi_implementation_stage_revisions SET kind = 'document'
+        WHERE workflow_id = ${runtimeFixture.workflowId} AND generation = 1
+          AND stage_key = ${runtimeFixture.implementationStageKey}
+          AND stage_revision = 1
+      `,
+    },
+    {
+      name: "rejects a document payload attached to an implementation StageRevision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_result_json, prepared_result_sha256, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 1,
+          'document', ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256},
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation payload attached to a document StageRevision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_delivery_evidence_json, prepared_delivery_evidence_sha256,
+          created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'implementation',
+          ${runtimeFixture.implementationEvidenceJson},
+          ${runtimeFixture.implementationEvidenceSha256},
+          ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation step attached to a document payload identity",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_steps (
+          workflow_id, generation, stage_key, stage_revision, position,
+          prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 2,
+          ${runtimeFixture.stepPreparedResultJson},
+          ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+  ] as const
+
+  for (const testCase of taggedVariantCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
 
   const localIdentityCases = [
     {
