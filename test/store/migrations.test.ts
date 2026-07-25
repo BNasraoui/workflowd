@@ -1203,6 +1203,186 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     })
   }
 
+  const taggedParentIdentityCases = [
+    {
+      name: "rejects a document payload with the wrong workflow",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_result_json, prepared_result_sha256, created_at, updated_at
+        ) VALUES (
+          'workflow-runtime-identity-absent', 1, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document',
+          ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document payload with the wrong Generation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_result_json, prepared_result_sha256, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 2, ${runtimeFixture.documentStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document',
+          ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document payload with the wrong stage",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_result_json, prepared_result_sha256, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey},
+          ${runtimeFixture.acceptedRevision}, 'document',
+          ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects a document payload with the wrong revision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_document_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_result_json, prepared_result_sha256, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 5,
+          'document', ${runtimeFixture.documentPreparedResultJson},
+          ${runtimeFixture.documentPreparedResultSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation payload with the wrong workflow",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_delivery_evidence_json, prepared_delivery_evidence_sha256,
+          created_at, updated_at
+        ) VALUES (
+          'workflow-runtime-identity-absent', 1,
+          ${runtimeFixture.implementationStageKey}, 1, 'implementation',
+          ${runtimeFixture.implementationEvidenceJson},
+          ${runtimeFixture.implementationEvidenceSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation payload with the wrong Generation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_delivery_evidence_json, prepared_delivery_evidence_sha256,
+          created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 2, ${runtimeFixture.implementationStageKey}, 1,
+          'implementation', ${runtimeFixture.implementationEvidenceJson},
+          ${runtimeFixture.implementationEvidenceSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation payload with the wrong stage",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_delivery_evidence_json, prepared_delivery_evidence_sha256,
+          created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 1,
+          'implementation', ${runtimeFixture.implementationEvidenceJson},
+          ${runtimeFixture.implementationEvidenceSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation payload with the wrong revision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_stage_revisions (
+          workflow_id, generation, stage_key, stage_revision, kind,
+          prepared_delivery_evidence_json, prepared_delivery_evidence_sha256,
+          created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 5,
+          'implementation', ${runtimeFixture.implementationEvidenceJson},
+          ${runtimeFixture.implementationEvidenceSha256}, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation step with the wrong workflow",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_steps (
+          workflow_id, generation, stage_key, stage_revision, position,
+          prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+        ) VALUES (
+          'workflow-runtime-identity-absent', 1,
+          ${runtimeFixture.implementationStageKey}, 1, 2,
+          ${runtimeFixture.stepPreparedResultJson},
+          ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation step with the wrong Generation",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_steps (
+          workflow_id, generation, stage_key, stage_revision, position,
+          prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 2, ${runtimeFixture.implementationStageKey}, 1, 2,
+          ${runtimeFixture.stepPreparedResultJson},
+          ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation step with the wrong stage",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_steps (
+          workflow_id, generation, stage_key, stage_revision, position,
+          prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.documentStageKey}, 1, 2,
+          ${runtimeFixture.stepPreparedResultJson},
+          ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+    {
+      name: "rejects an implementation step with the wrong revision",
+      statement: (sql: SqlClient.SqlClient) => sql`
+        INSERT INTO qrspi_implementation_steps (
+          workflow_id, generation, stage_key, stage_revision, position,
+          prepared_result_json, prepared_result_sha256, final, created_at, updated_at
+        ) VALUES (
+          ${runtimeFixture.workflowId}, 1, ${runtimeFixture.implementationStageKey}, 5, 2,
+          ${runtimeFixture.stepPreparedResultJson},
+          ${runtimeFixture.stepPreparedResultSha256}, 1, ${timestamp}, ${timestamp}
+        )
+      `,
+    },
+  ] as const
+
+  for (const testCase of taggedParentIdentityCases) {
+    test(testCase.name, async () => {
+      await runWithDatabase(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* seedValidRuntimeIdentitySpine
+          yield* expectIdentitySpineRejection(testCase.statement(sql))
+        }),
+      )
+    })
+  }
+
   const localIdentityCases = [
     {
       name: "rejects an unsupported Generation format",
