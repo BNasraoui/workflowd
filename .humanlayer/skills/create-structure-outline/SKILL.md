@@ -44,6 +44,8 @@ Each phase should ideally be a thin vertical slice that touches all / as many la
 
 Try to find ways to structure the outline so that each phase cuts across multiple layers, services, or module boundaries at least > 1 if at all possible. Each phase should be independently verifiable based on typechecks, tests, build steps, and any other in-repo verification. Ensure you understand codebase patterns for testing and verification, and don't suggest manual testing for a step that could be automated w/ a script, an existing skill, etc.
 
+Structure the delta proportionately. Reuse existing evidence for unchanged behavior. Add verification for changed behavior, its nearest regression boundary, or an evidenced gap, grouping equivalent inputs by failure mechanism. The outline is complete when the delta has non-duplicative evidence and every phase delivers an independently useful outcome.
+
 A horizontal breakdown looks like this:
 
 1. Build the schema
