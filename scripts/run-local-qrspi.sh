@@ -789,7 +789,7 @@ push_delivery_branch() {
   [[ "$auto_approve" == true && "$dry_run" == false ]] || return 0
   current_branch=$(git -C "$active_repo" branch --show-current)
   [[ "$current_branch" == opencode/* ]] || return 0
-  git -C "$active_repo" push
+  git -C "$active_repo" push --set-upstream origin "$current_branch"
 }
 
 close_split_parent() {
