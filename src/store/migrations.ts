@@ -631,10 +631,213 @@ export const runStoreMigrationsThrough0008 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0008),
 })
 
+const migrationsThrough0010 = {
+  ...migrationsThrough0008,
+  "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+  "0010_qrspi_generation_format": qrspiGenerationFormat,
+}
+
+export const runStoreMigrationsThrough0010 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0010),
+})
+
+const qrspiStageRuntimeLayout = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_generations_definition
+    ON qrspi_generations (workflow_id, generation, workflow_definition_sha256)
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_stage_definitions_identity
+    ON qrspi_stage_definitions (
+      workflow_definition_sha256, stage_definition_sha256, stage_key
+    )
+  `
+  yield* sql`
+    CREATE TABLE qrspi_stage_runs (
+      workflow_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      run_ordinal INTEGER NOT NULL CHECK (run_ordinal BETWEEN 1 AND 1000000),
+      workflow_definition_sha256 TEXT NOT NULL CHECK (
+        length(workflow_definition_sha256) = 64
+          AND workflow_definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      stage_definition_sha256 TEXT NOT NULL CHECK (
+        length(stage_definition_sha256) = 64
+          AND stage_definition_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'blocked', 'active', 'waiting_review', 'waiting_human', 'waiting_ticket',
+        'succeeded', 'skipped', 'rejected', 'failed', 'cancelled', 'superseded',
+        'data_error'
+      )),
+      is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+      activation_policy_json TEXT NOT NULL CHECK (
+        json_valid(activation_policy_json) = 1
+          AND json_type(activation_policy_json, '$') = 'object'
+      ),
+      skip_reason TEXT CHECK (
+        skip_reason IS NULL OR length(skip_reason) BETWEEN 1 AND 2000
+      ),
+      pending_revision INTEGER CHECK (
+        pending_revision IS NULL OR pending_revision BETWEEN 1 AND 1000000
+      ),
+      published_revision INTEGER CHECK (
+        published_revision IS NULL OR published_revision BETWEEN 1 AND 1000000
+      ),
+      accepted_revision INTEGER CHECK (
+        accepted_revision IS NULL OR accepted_revision BETWEEN 1 AND 1000000
+      ),
+      terminal_reason TEXT CHECK (
+        terminal_reason IS NULL OR length(terminal_reason) BETWEEN 1 AND 2000
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation, stage_key, run_ordinal),
+      FOREIGN KEY (workflow_id, generation, workflow_definition_sha256)
+        REFERENCES qrspi_generations (
+          workflow_id, generation, workflow_definition_sha256
+        ),
+      FOREIGN KEY (
+        workflow_definition_sha256, stage_definition_sha256, stage_key
+      ) REFERENCES qrspi_stage_definitions (
+        workflow_definition_sha256, stage_definition_sha256, stage_key
+      ),
+      FOREIGN KEY (
+        workflow_id, generation, stage_key, run_ordinal, pending_revision
+      ) REFERENCES qrspi_stage_revisions (
+        workflow_id, generation, stage_key, run_ordinal, stage_revision
+      ),
+      FOREIGN KEY (
+        workflow_id, generation, stage_key, run_ordinal, published_revision
+      ) REFERENCES qrspi_stage_revisions (
+        workflow_id, generation, stage_key, run_ordinal, stage_revision
+      ),
+      FOREIGN KEY (
+        workflow_id, generation, stage_key, run_ordinal, accepted_revision
+      ) REFERENCES qrspi_stage_revisions (
+        workflow_id, generation, stage_key, run_ordinal, stage_revision
+      )
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_stage_revisions (
+      workflow_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      stage_key TEXT NOT NULL CHECK (length(stage_key) BETWEEN 1 AND 64),
+      stage_revision INTEGER NOT NULL CHECK (stage_revision BETWEEN 1 AND 1000000),
+      run_ordinal INTEGER NOT NULL CHECK (run_ordinal BETWEEN 1 AND 1000000),
+      kind TEXT NOT NULL CHECK (kind IN ('document', 'implementation')),
+      state TEXT NOT NULL CHECK (state IN (
+        'producing', 'publishing', 'reviewing', 'waiting_human', 'accepted',
+        'abandoned', 'failed', 'superseded'
+      )),
+      owner_crossing_key TEXT NOT NULL UNIQUE CHECK (
+        length(owner_crossing_key) BETWEEN 1 AND 512
+      ),
+      -- hash-bound ordered { role, artifact } identity projection
+      source_set_json TEXT NOT NULL CHECK (
+        json_valid(source_set_json) = 1
+          AND json_type(source_set_json, '$') = 'array'
+      ),
+      source_set_sha256 TEXT NOT NULL CHECK (
+        length(source_set_sha256) = 64
+          AND source_set_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (workflow_id, generation, stage_key, stage_revision),
+      UNIQUE (workflow_id, generation, stage_key, run_ordinal, stage_revision),
+      UNIQUE (workflow_id, generation, stage_key, stage_revision, kind),
+      FOREIGN KEY (workflow_id, generation, stage_key, run_ordinal)
+        REFERENCES qrspi_stage_runs (
+          workflow_id, generation, stage_key, run_ordinal
+        )
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE qrspi_generations_with_stage_runtime (
+      workflow_id TEXT NOT NULL REFERENCES qrspi_workflows (workflow_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      repository_json TEXT NOT NULL CHECK (
+        json_valid(repository_json) = 1 AND json_type(repository_json, '$') = 'object'
+      ),
+      base_ref TEXT NOT NULL CHECK (length(base_ref) > 0),
+      base_sha TEXT NOT NULL CHECK (length(base_sha) IN (40, 64)),
+      head_ref TEXT NOT NULL CHECK (length(head_ref) > 0),
+      root_sha TEXT NOT NULL CHECK (length(root_sha) IN (40, 64)),
+      current_head_sha TEXT NOT NULL CHECK (length(current_head_sha) IN (40, 64)),
+      ticket_revision_sha256 TEXT NOT NULL,
+      workflow_definition_sha256 TEXT NOT NULL
+        REFERENCES qrspi_workflow_definitions (definition_sha256),
+      state TEXT NOT NULL CHECK (state IN (
+        'running', 'waiting_ticket', 'waiting_human', 'reconciling', 'finalizing',
+        'completed', 'rejected', 'cancelled', 'failed', 'superseded'
+      )),
+      is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      generation_format TEXT NOT NULL DEFAULT 'legacy' CHECK (
+        generation_format IN ('legacy', 'stage_snapshots_v1', 'stage_runtime_v1')
+      ),
+      current_stage_key TEXT CHECK (
+        current_stage_key IS NULL OR length(current_stage_key) BETWEEN 1 AND 64
+      ),
+      current_stage_run_ordinal INTEGER CHECK (
+        current_stage_run_ordinal IS NULL
+          OR current_stage_run_ordinal BETWEEN 1 AND 1000000
+      ),
+      PRIMARY KEY (workflow_id, generation),
+      CHECK (
+        (current_stage_key IS NULL) = (current_stage_run_ordinal IS NULL)
+      ),
+      FOREIGN KEY (workflow_id, ticket_revision_sha256)
+        REFERENCES qrspi_ticket_revisions (workflow_id, ticket_revision_sha256),
+      FOREIGN KEY (
+        workflow_id, generation, current_stage_key, current_stage_run_ordinal
+      ) REFERENCES qrspi_stage_runs (
+        workflow_id, generation, stage_key, run_ordinal
+      )
+    ) STRICT
+  `
+  yield* sql`
+    INSERT INTO qrspi_generations_with_stage_runtime (
+      workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+      root_sha, current_head_sha, ticket_revision_sha256,
+      workflow_definition_sha256, state, is_current, created_at, updated_at,
+      generation_format, current_stage_key, current_stage_run_ordinal
+    )
+    SELECT
+      workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+      root_sha, current_head_sha, ticket_revision_sha256,
+      workflow_definition_sha256, state, is_current, created_at, updated_at,
+      generation_format, NULL, NULL
+    FROM qrspi_generations
+  `
+  yield* sql`DROP TABLE qrspi_generations`
+  yield* sql`
+    ALTER TABLE qrspi_generations_with_stage_runtime RENAME TO qrspi_generations
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_generations_current
+    ON qrspi_generations (workflow_id) WHERE is_current = 1
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_generations_definition
+    ON qrspi_generations (workflow_id, generation, workflow_definition_sha256)
+  `
+  yield* sql`
+    CREATE UNIQUE INDEX qrspi_stage_runs_current
+    ON qrspi_stage_runs (workflow_id, generation, stage_key)
+    WHERE is_current = 1
+  `
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0008,
-    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
-    "0010_qrspi_generation_format": qrspiGenerationFormat,
+    ...migrationsThrough0010,
+    "0011_qrspi_stage_runtime_layout": qrspiStageRuntimeLayout,
   }),
 })
