@@ -2,9 +2,9 @@
 
 **Bead:** `workflowd-vs3.4.3.1`
 
-**Parent Design:** `.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-discussion-stage-runtime-state.md` (accepted revision 3)
+**Parent Design:** `.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-design-discussion-stage-runtime-state.md` (accepted revision 3, SHA-256 `17c3922e7b3143717cd7eda2ab6cece974b255f97a4e7b8ae80ba1fbe6a3ef2c`, locally verified byte-for-byte; local synthesis `Accept`, local gate `approve`, and confirmed local promotion result recorded alongside it in the ancestor task directory)
 
-**Baseline:** `40e65fa98829efbc50f94679b427fbfb04f1674f`
+**Baseline:** `f8ad7ad9551d0e3513c6800ca2a83b4c49644951`
 
 Establish the inactive document half of the accepted durable stage-runtime model. This child owns the complete append-only shared table layout required by later siblings, but exposes typed create/read behavior only for document aggregates. Nothing in this child initializes, claims, progresses, replaces, bootstraps, or quarantines runtime work.
 
@@ -43,7 +43,7 @@ Add the complete relational foundation behind an append-only migration and prove
 ### File Changes
 
 - **`src/store/migrations.ts`**
-  - Retain a `runStoreMigrationsThrough0010` runner for previous-frontier fixtures and append the next numbered migration without editing migrations `0001`-`0010`.
+  - Export and retain a `runStoreMigrationsThrough0010` runner alongside the existing `runStoreMigrationsThrough0008` for previous-frontier fixtures, and append the next numbered migration without editing migrations `0001`-`0010`.
   - Add nullable `current_stage_key` and `current_stage_run_ordinal` Generation cursor columns with an all-or-none shape and positive ordinal checks.
   - Extend the persisted Generation format boundary to admit `stage_runtime_v1` while retaining exact `legacy` and `stage_snapshots_v1` values. If SQLite requires table reconstruction to replace the existing format `CHECK`, copy every existing column value exactly, preserve primary/foreign keys and the partial current index, and prove no runtime fact is inferred.
   - Create strict tables for `qrspi_stage_runs`, `qrspi_stage_revisions`, document and implementation one-to-one payloads, implementation steps, artifact/implementation-commit/checkpoint references, revision diagnostics, and document/step WorkflowOperation ownership. Store a bounded, non-null `owner_crossing_key` on `qrspi_stage_revisions`; its unique constraint is the stable identity seam for later handoff receipts. The publication-role ownership row's unique WorkflowOperation foreign key supplies the publication-operation identity hook for later reconciliation.
@@ -133,3 +133,7 @@ Complete the trusted read boundary with one-fault-at-a-time corruption evidence 
 ## Open Questions
 
 - None. The accepted parent Design fixes record ownership and this child deliberately stops at inactive document persistence. The SQLite format-check migration must preserve every existing row value and is accepted only with the file-backed previous-frontier proof in Phase 1.
+
+## Local Authority Limitation
+
+This outline inherits the accepted ancestor Design authority through the confirmed content-addressed local graph export at `.humanlayer/tasks/workflowd-vs3.4.3-add-durable-tagged-stage-runtime-state/03-provenance-promotion-result-r3-graph-export.json` (SHA-256 `6550358d90c7f32355ad3943a14ba84fe41f422665da3ba1c65002fdc1073df2`; promotion result status `confirmed`, authoritative observation mode `local_content_addressed_compatibility`). In local-QRSPI compatibility mode that confirmed export is the explicitly authorized snapshot substitute. This outline does not claim production Provenance publication, authenticated production gate authority, a production graph root, or production Structure authority.
