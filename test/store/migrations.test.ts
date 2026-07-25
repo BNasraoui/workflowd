@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Either, Layer } from "effect"
@@ -884,56 +887,283 @@ describe("migration 11: QRSPI stage runtime identity spine", () => {
     expect(result.generation.ddl).not.toContain("current_stage_run_ordinal INTEGER DEFAULT")
   })
 
-  test("preserves through-0010 Generation values without inferring runtime facts", async () => {
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient
-        const workflowDefinitionSha256 = "b".repeat(64)
-        const ticketRevisionSha256 = "a".repeat(64)
-        const baseSha = "c".repeat(40)
-        yield* sql`PRAGMA foreign_keys = ON`
-        yield* runStoreMigrationsThrough0010
-        yield* sql`
-          INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
-          VALUES ('workflow-1', 'workflow-branch', ${timestamp}, ${timestamp})
-        `
-        yield* sql`
-          INSERT INTO qrspi_ticket_revisions (
-            workflow_id, ticket_revision_sha256, revision_json, checked_at
-          ) VALUES ('workflow-1', ${ticketRevisionSha256}, '{"ticket":1}', ${timestamp})
-        `
-        yield* sql`
-          INSERT INTO qrspi_workflow_definitions (definition_sha256, definition_json, created_at)
-          VALUES (${workflowDefinitionSha256}, '{"workflow":1}', ${timestamp})
-        `
-        yield* sql`
-          INSERT INTO qrspi_generations (
-            workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
-            root_sha, current_head_sha, ticket_revision_sha256,
-            workflow_definition_sha256, state, is_current, created_at, updated_at,
-            generation_format
-          ) VALUES (
-            'workflow-1', 3, '{"repository":1}', 'main', ${baseSha}, 'workflow-branch',
-            ${baseSha}, ${baseSha}, ${ticketRevisionSha256}, ${workflowDefinitionSha256},
-            'waiting_human', 1, ${timestamp}, ${timestamp}, 'stage_snapshots_v1'
-          )
-        `
-        const before = yield* sql`SELECT * FROM qrspi_generations`
-        yield* runStoreMigrations
-        const after = yield* sql`SELECT * FROM qrspi_generations`
-        const runCount = yield* sql`SELECT count(*) AS count FROM qrspi_stage_runs`
-        const revisionCount = yield* sql`SELECT count(*) AS count FROM qrspi_stage_revisions`
-        const foreignKeyViolations = yield* sql`PRAGMA foreign_key_check`
-        return { after, before, foreignKeyViolations, revisionCount, runCount }
-      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
-    )
+  type HistoricalGenerationRow = {
+    readonly workflow_id: string
+    readonly generation: number
+    readonly repository_json: string
+    readonly base_ref: string
+    readonly base_sha: string
+    readonly head_ref: string
+    readonly root_sha: string
+    readonly current_head_sha: string
+    readonly ticket_revision_sha256: string
+    readonly workflow_definition_sha256: string
+    readonly state: string
+    readonly is_current: number
+    readonly created_at: string
+    readonly updated_at: string
+    readonly generation_format: "legacy" | "stage_snapshots_v1"
+  }
 
-    expect(result.after).toEqual([
-      { ...result.before[0], current_stage_key: null, current_stage_run_ordinal: null },
-    ])
-    expect(result.runCount).toEqual([{ count: 0 }])
-    expect(result.revisionCount).toEqual([{ count: 0 }])
-    expect(result.foreignKeyViolations).toEqual([])
+  type UpgradedGenerationRow = HistoricalGenerationRow & {
+    readonly current_stage_key: string | null
+    readonly current_stage_run_ordinal: number | null
+  }
+
+  type MigrationRow = {
+    readonly migration_id: number
+    readonly name: string
+  }
+
+  test("preserves complete through-0010 history across a fresh file-backed layer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-migration-"))
+    const filename = join(directory, "workflowd.db")
+
+    try {
+      const historical = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          const ticketRevision1 = "a".repeat(64)
+          const ticketRevision2 = "b".repeat(64)
+          const workflowDefinition1 = "c".repeat(64)
+          const workflowDefinition2 = "d".repeat(64)
+          yield* sql`PRAGMA foreign_keys = ON`
+          yield* runStoreMigrationsThrough0010
+          yield* sql`
+            INSERT INTO qrspi_workflows (workflow_id, branch_name, created_at, updated_at)
+            VALUES (
+              'workflow-1', 'workflow-branch',
+              '2026-07-19T09:00:00.000Z', '2026-07-19T12:00:00.000Z'
+            )
+          `
+          yield* sql`
+            INSERT INTO qrspi_ticket_revisions (
+              workflow_id, ticket_revision_sha256, revision_json, checked_at
+            ) VALUES
+              (
+                'workflow-1', ${ticketRevision1}, '{"ticket":"historical"}',
+                '2026-07-19T09:30:00.000Z'
+              ),
+              (
+                'workflow-1', ${ticketRevision2}, '{"ticket":"current","revision":2}',
+                '2026-07-19T10:30:00.000Z'
+              )
+          `
+          yield* sql`
+            INSERT INTO qrspi_workflow_definitions (
+              definition_sha256, definition_json, created_at
+            ) VALUES
+              (
+                ${workflowDefinition1}, '{"workflow":"historical"}',
+                '2026-07-19T09:40:00.000Z'
+              ),
+              (
+                ${workflowDefinition2}, '{"workflow":"current","stages":[]}',
+                '2026-07-19T10:40:00.000Z'
+              )
+          `
+          yield* sql`
+            INSERT INTO qrspi_generations (
+              workflow_id, generation, repository_json, base_ref, base_sha, head_ref,
+              root_sha, current_head_sha, ticket_revision_sha256,
+              workflow_definition_sha256, state, is_current, created_at, updated_at,
+              generation_format
+            ) VALUES
+              (
+                'workflow-1', 1, '{"repository":"historical"}', 'release/1',
+                ${"1".repeat(40)}, 'workflow/release-1', ${"2".repeat(64)},
+                ${"3".repeat(40)}, ${ticketRevision1}, ${workflowDefinition1},
+                'completed', 0, '2026-07-19T10:00:00.000Z',
+                '2026-07-19T10:30:00.000Z', 'legacy'
+              ),
+              (
+                'workflow-1', 2, '{"repository":"current","renamed":true}', 'main',
+                ${"4".repeat(64)}, 'workflow/current', ${"5".repeat(40)},
+                ${"6".repeat(64)}, ${ticketRevision2}, ${workflowDefinition2},
+                'waiting_human', 1, '2026-07-19T11:00:00.000Z',
+                '2026-07-19T12:00:00.000Z', 'stage_snapshots_v1'
+              )
+          `
+          yield* sql`
+            INSERT INTO workflow_operations (
+              operation_id, logical_operation_id, operation_revision, retry_of, kind,
+              scope_json, input_json, input_sha256, output_json, state, is_current,
+              attempt, max_attempts, lease_owner, lease_token, lease_until, run_at,
+              external_intent_json, external_observation_json, observation_attempts,
+              max_observation_attempts, parent_effect_json, last_error,
+              terminal_failure_reason, terminal_retry_policy, created_at, updated_at
+            ) VALUES
+              (
+                'produce-1-r1', 'produce-1', 1, NULL, 'StageProduce',
+                '{"scope":"first"}', '{"request":"first"}', ${"1".repeat(64)}, NULL,
+                'failed', 0, 2, 3, NULL, NULL, NULL, '2026-07-19T10:01:00.000Z',
+                NULL, NULL, 1, 5, '{"failure":"retain parent"}',
+                'temporary producer error', 'producer failed', 'retryable',
+                '2026-07-19T10:00:00.000Z', '2026-07-19T10:02:00.000Z'
+              ),
+              (
+                'produce-1-r2', 'produce-1', 2, 'produce-1-r1', 'StageProduce',
+                '{"scope":"retry"}', '{"request":"retry"}', ${"2".repeat(64)}, NULL,
+                'leased', 1, 2, 3, 'worker-2', 'lease-token-2',
+                '2026-07-19T12:30:00.000Z', '2026-07-19T12:00:00.000Z',
+                '{"workspace":"prepared"}', NULL, 0, 7, '{"success":"advance"}',
+                NULL, NULL, NULL, '2026-07-19T11:00:00.000Z',
+                '2026-07-19T12:00:00.000Z'
+              ),
+              (
+                'publish-1-r1', 'publish-1', 1, NULL, 'ArtifactPublish',
+                '{"artifact":"release"}', '{"publish":"request"}', ${"3".repeat(64)},
+                '{"published":true,"url":"https://example.test/artifact"}', 'succeeded', 1,
+                1, 4, NULL, NULL, NULL, '2026-07-19T12:10:00.000Z',
+                '{"request_id":"external-1"}', '{"status":"published","attempt":1}',
+                2, 6, '{"parent":"publication"}', NULL, NULL, NULL,
+                '2026-07-19T11:30:00.000Z', '2026-07-19T12:20:00.000Z'
+              ),
+              (
+                'start-1-r1', 'start-1', 1, NULL, 'WorkflowStart',
+                '{"workflow":"one"}', '{"start":"manual"}', ${"4".repeat(64)}, NULL,
+                'waiting_human', 1, 0, 1, NULL, NULL, NULL,
+                '2026-07-19T12:40:00.000Z', NULL, NULL, 0, 3,
+                '{"parent":"operator gate"}', NULL, 'operator approval required',
+                'operator_required', '2026-07-19T12:30:00.000Z',
+                '2026-07-19T12:40:00.000Z'
+              )
+          `
+
+          const generations = yield* sql<HistoricalGenerationRow>`
+            SELECT * FROM qrspi_generations ORDER BY workflow_id, generation
+          `
+          const operations = yield* sql<Record<string, unknown>>`
+            SELECT * FROM workflow_operations
+            ORDER BY logical_operation_id, operation_revision, operation_id
+          `
+          const migrations = yield* sql<MigrationRow>`
+            SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+          `
+          return { generations, migrations, operations }
+        }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+      )
+
+      const upgraded = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          yield* sql`PRAGMA foreign_keys = ON`
+          yield* runStoreMigrations
+
+          const readCurrentState = Effect.gen(function* () {
+            const generations = yield* sql<UpgradedGenerationRow>`
+              SELECT * FROM qrspi_generations ORDER BY workflow_id, generation
+            `
+            const operations = yield* sql<Record<string, unknown>>`
+              SELECT * FROM workflow_operations
+              ORDER BY logical_operation_id, operation_revision, operation_id
+            `
+            const migrations = yield* sql<MigrationRow>`
+              SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
+            `
+            const runtimeCounts = yield* Effect.all(
+              runtimeTables.map((table) =>
+                sql.unsafe<{ readonly count: number }>(`SELECT count(*) AS count FROM "${table}"`),
+              ),
+            )
+            const foreignKeyViolations = yield* sql`PRAGMA foreign_key_check`
+            const generation = yield* readTableMetadata("qrspi_generations")
+            const workflowOperation = yield* readTableMetadata("workflow_operations")
+            return {
+              foreignKeyViolations,
+              generations,
+              generationIndexes: yield* readIndexInventory(generation.indexes),
+              migrations,
+              operations,
+              runtimeCounts,
+              workflowOperationIndexes: yield* readIndexInventory(workflowOperation.indexes),
+            }
+          })
+
+          const afterFirstRun = yield* readCurrentState
+          yield* runStoreMigrations
+          const afterSecondRun = yield* readCurrentState
+          return { afterFirstRun, afterSecondRun }
+        }).pipe(Effect.provide(SqliteClient.layer({ filename }))),
+      )
+
+      const shippedGenerations: ReadonlyArray<HistoricalGenerationRow> =
+        upgraded.afterFirstRun.generations.map(
+          ({ current_stage_key, current_stage_run_ordinal, ...historicalRow }) => historicalRow,
+        )
+      expect(shippedGenerations).toEqual(historical.generations)
+      expect(upgraded.afterFirstRun.generations).toEqual(
+        historical.generations.map((row) => ({
+          ...row,
+          current_stage_key: null,
+          current_stage_run_ordinal: null,
+        })),
+      )
+      expect(upgraded.afterFirstRun.operations).toEqual(historical.operations)
+      expect(upgraded.afterSecondRun.generations).toEqual(upgraded.afterFirstRun.generations)
+      expect(upgraded.afterSecondRun.operations).toEqual(upgraded.afterFirstRun.operations)
+
+      expect(historical.migrations).toEqual([
+        { migration_id: 1, name: "initial_schema" },
+        { migration_id: 2, name: "agent_harness" },
+        { migration_id: 3, name: "agent_session_cleanup_leases" },
+        { migration_id: 4, name: "agent_session_recovery_and_payload_envelopes" },
+        { migration_id: 5, name: "qrspi_workflow_start" },
+        { migration_id: 6, name: "fix_publication_signing_evidence" },
+        { migration_id: 7, name: "reconciliation_observation_watermark" },
+        { migration_id: 8, name: "reconciliation_observation_sequence" },
+        { migration_id: 9, name: "qrspi_stage_definitions" },
+        { migration_id: 10, name: "qrspi_generation_format" },
+      ])
+      expect(upgraded.afterFirstRun.migrations).toEqual([
+        ...historical.migrations,
+        { migration_id: 11, name: "qrspi_stage_runtime_layout" },
+      ])
+      expect(upgraded.afterSecondRun.migrations).toEqual(upgraded.afterFirstRun.migrations)
+      expect(upgraded.afterFirstRun.runtimeCounts.flat()).toEqual(
+        runtimeTables.map(() => ({ count: 0 })),
+      )
+      expect(upgraded.afterSecondRun.runtimeCounts).toEqual(upgraded.afterFirstRun.runtimeCounts)
+      expect(upgraded.afterFirstRun.foreignKeyViolations).toEqual([])
+      expect(upgraded.afterSecondRun.foreignKeyViolations).toEqual([])
+      expect(upgraded.afterFirstRun.generationIndexes).toContainEqual({
+        name: "qrspi_generations_current",
+        unique: 1,
+        partial: 1,
+        origin: "c",
+        columns: [{ name: "workflow_id", seqno: 0 }],
+      })
+      expect(upgraded.afterFirstRun.generationIndexes).toContainEqual({
+        name: "qrspi_generations_definition",
+        unique: 1,
+        partial: 0,
+        origin: "c",
+        columns: [
+          { name: "workflow_id", seqno: 0 },
+          { name: "generation", seqno: 1 },
+          { name: "workflow_definition_sha256", seqno: 2 },
+        ],
+      })
+      expect(upgraded.afterFirstRun.workflowOperationIndexes).toContainEqual({
+        name: "workflow_operations_current",
+        unique: 1,
+        partial: 1,
+        origin: "c",
+        columns: [{ name: "logical_operation_id", seqno: 0 }],
+      })
+      expect(upgraded.afterFirstRun.workflowOperationIndexes).toContainEqual({
+        name: "workflow_operations_identity_kind",
+        unique: 1,
+        partial: 0,
+        origin: "c",
+        columns: [
+          { name: "operation_id", seqno: 0 },
+          { name: "kind", seqno: 1 },
+        ],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
   })
 
   test("creates the exact strict StageRun and common StageRevision identities", async () => {
