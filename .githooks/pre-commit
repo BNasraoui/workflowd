@@ -1,0 +1,20 @@
+#!/bin/sh
+
+set -u
+
+limit=600
+violations=$(
+  git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r path; do
+    line_count=$(git show ":$path" | awk 'END { print NR }')
+    if [ "$line_count" -gt "$limit" ]; then
+      printf 'pre-commit:   %s (%s lines)\n' "$path" "$line_count"
+    fi
+  done
+)
+
+if [ -n "$violations" ]; then
+  printf 'pre-commit: staged files exceed the %s-line limit:\n' "$limit" >&2
+  printf '%s\n' "$violations" >&2
+  printf '%s\n' "pre-commit: restructure each file into smaller, focused modules before committing." >&2
+  exit 1
+fi
