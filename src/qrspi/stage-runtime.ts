@@ -72,32 +72,13 @@ const DocumentStageRevisionAggregateStructure = Schema.Struct({
 })
 type AggregateStructure = typeof DocumentStageRevisionAggregateStructure.Type
 
-export const stageScopeFrom = (
-  sources: typeof ExactStageSources.Type,
-): typeof ExactStageScope.Type => ({
-  workflowId: sources.workflowId,
-  generation: sources.generation,
-  stageKey: sources.stageKey,
-  runOrdinal: sources.runOrdinal,
-  stageRevision: sources.stageRevision,
-  workflowDefinitionSha256: sources.workflowDefinitionSha256,
-  stageDefinitionSha256: sources.stageDefinitionSha256,
-})
-
-export const stageRunIdentityFrom = (
+const stageRunIdentityFrom = (
   source: typeof ExactStageSources.Type | StageRevisionIdentity,
 ): StageRunIdentity => ({
   workflowId: source.workflowId,
   generation: source.generation,
   stageKey: source.stageKey,
   runOrdinal: source.runOrdinal,
-})
-
-export const stageRevisionIdentityFrom = (
-  sources: typeof ExactStageSources.Type,
-): StageRevisionIdentity => ({
-  ...stageRunIdentityFrom(sources),
-  stageRevision: sources.stageRevision,
 })
 
 export type DocumentAggregateIdentity = {
