@@ -160,7 +160,7 @@ const AggregateOperationRow = Schema.Struct({
 })
 type AggregateOperationRow = typeof AggregateOperationRow.Type
 const ArtifactPublishObject = Schema.Record({ key: Schema.String, value: JsonValueSchema })
-const DocumentAggregateRow = Schema.Struct({
+const DocumentAggregateRunRow = Schema.Struct({
   workflow_id: StageRevisionIdentity.fields.workflowId,
   generation: StageRevisionIdentity.fields.generation,
   stage_key: StageRevisionIdentity.fields.stageKey,
@@ -175,17 +175,30 @@ const DocumentAggregateRow = Schema.Struct({
   published_revision: Schema.NullOr(StageRevisionIdentity.fields.stageRevision),
   accepted_revision: Schema.NullOr(StageRevisionIdentity.fields.stageRevision),
   terminal_reason: Schema.Null,
+})
+
+const DocumentAggregateRevisionRow = Schema.Struct({
+  workflow_id: StageRevisionIdentity.fields.workflowId,
+  generation: StageRevisionIdentity.fields.generation,
+  stage_key: StageRevisionIdentity.fields.stageKey,
+  run_ordinal: StageRevisionIdentity.fields.runOrdinal,
   stage_revision: StageRevisionIdentity.fields.stageRevision,
-  revision_kind: Schema.Literal("document"),
+  revision_kind: Schema.String,
   revision_state: StageRevisionState,
   owner_crossing_key: Schema.NonEmptyString,
   source_set_json: Schema.String,
   source_set_sha256: ExactStageScope.fields.stageDefinitionSha256,
-  document_kind: Schema.Literal("document"),
+})
+
+const DocumentAggregatePayloadRow = Schema.Struct({
+  workflow_id: StageRevisionIdentity.fields.workflowId,
+  generation: StageRevisionIdentity.fields.generation,
+  stage_key: StageRevisionIdentity.fields.stageKey,
+  stage_revision: StageRevisionIdentity.fields.stageRevision,
+  document_kind: Schema.String,
   prepared_result_json: Schema.NullOr(Schema.String),
   prepared_result_sha256: Schema.NullOr(ExactStageScope.fields.stageDefinitionSha256),
 })
-type DocumentAggregateRow = typeof DocumentAggregateRow.Type
 
 const DocumentAggregateArtifactRow = Schema.Struct({
   provider_instance_id: RepositoryReference.fields.providerInstanceId,
@@ -204,14 +217,15 @@ const DocumentAggregateArtifactRow = Schema.Struct({
 
 const DocumentAggregateOwnerRow = Schema.Struct({
   operation_id: Schema.NonEmptyString,
-  operation_kind: Schema.Literal("StageProduce", "ArtifactPublish"),
-  common_owner_kind: Schema.Literal("document_revision"),
-  operation_role: Schema.Literal("produce", "publish"),
+  operation_role: Schema.String,
   workflow_id: StageRevisionIdentity.fields.workflowId,
   generation: StageRevisionIdentity.fields.generation,
   stage_key: StageRevisionIdentity.fields.stageKey,
   stage_revision: StageRevisionIdentity.fields.stageRevision,
-  document_owner_kind: Schema.Literal("document_revision"),
+  document_owner_kind: Schema.String,
+  operation_kind: Schema.NullOr(Schema.String),
+  common_owner_kind: Schema.NullOr(Schema.String),
+  common_operation_role: Schema.NullOr(Schema.String),
 })
 
 const StoredSourceProjection = Schema.Array(
@@ -471,10 +485,36 @@ const aggregateDataError = (
   details: StoreDataErrorDetails,
 ) => dataError("document_stage_revision_aggregate", aggregateRecordId(identity), cause, details)
 
+const aggregateIdentityMismatch = (
+  identity: StageRevisionIdentityType,
+  message: string,
+  details: Omit<StoreDataErrorDetails, "reason"> = {},
+) => Effect.fail(aggregateDataError(identity, message, { ...details, reason: "identity_mismatch" }))
+
 const canonicalAggregateHash = (identity: StageRevisionIdentityType, value: unknown) =>
   Effect.try({
     try: () => canonicalSha256(value),
     catch: (cause) => aggregateDataError(identity, cause, { reason: "malformed" }),
+  })
+
+const decodeSingleAggregateRow = <A, I>(
+  identity: StageRevisionIdentityType,
+  rows: ReadonlyArray<unknown>,
+  schema: Schema.Schema<A, I, never>,
+  missingMessage: string,
+  duplicateMessage: string,
+) =>
+  Effect.gen(function* () {
+    if (rows.length !== 1) {
+      return yield* Effect.fail(
+        aggregateDataError(identity, rows.length === 0 ? missingMessage : duplicateMessage, {
+          reason: rows.length === 0 ? "missing" : "duplicate",
+        }),
+      )
+    }
+    return yield* Schema.decodeUnknown(schema, { onExcessProperty: "error" })(rows[0]).pipe(
+      Effect.mapError((cause) => aggregateDataError(identity, cause, { reason: "malformed" })),
+    )
   })
 
 const operationDataError = (operationId: string, cause: unknown, details: StoreDataErrorDetails) =>
@@ -1035,51 +1075,84 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         Effect.flatMap((identity) =>
           transaction(
             Effect.gen(function* () {
-              const rows = yield* sql<Record<string, unknown>>`
+              const runRows = yield* sql<Record<string, unknown>>`
                 SELECT
                   run.workflow_id, run.generation, run.stage_key, run.run_ordinal,
                   run.workflow_definition_sha256, run.stage_definition_sha256,
                   run.state AS run_state, run.is_current, run.activation_policy_json,
                   run.skip_reason, run.pending_revision, run.published_revision,
-                  run.accepted_revision, run.terminal_reason,
-                  revision.stage_revision, revision.kind AS revision_kind,
-                  revision.state AS revision_state, revision.owner_crossing_key,
-                  revision.source_set_json, revision.source_set_sha256,
-                  document.kind AS document_kind, document.prepared_result_json,
-                  document.prepared_result_sha256
+                  run.accepted_revision, run.terminal_reason
                 FROM qrspi_stage_runs AS run
-                JOIN qrspi_stage_revisions AS revision
-                  ON revision.workflow_id = run.workflow_id
-                  AND revision.generation = run.generation
-                  AND revision.stage_key = run.stage_key
-                  AND revision.run_ordinal = run.run_ordinal
-                JOIN qrspi_document_stage_revisions AS document
-                  ON document.workflow_id = revision.workflow_id
-                  AND document.generation = revision.generation
-                  AND document.stage_key = revision.stage_key
-                  AND document.stage_revision = revision.stage_revision
                 WHERE run.workflow_id = ${identity.workflowId}
                   AND run.generation = ${identity.generation}
                   AND run.stage_key = ${identity.stageKey}
                   AND run.run_ordinal = ${identity.runOrdinal}
-                  AND revision.stage_revision = ${identity.stageRevision}
               `
-              if (rows.length !== 1) {
-                return yield* Effect.fail(
-                  aggregateDataError(
-                    identity,
-                    rows.length === 0 ? "document aggregate not found" : "duplicate aggregate rows",
-                    { reason: rows.length === 0 ? "missing" : "duplicate" },
-                  ),
+              const run = yield* decodeSingleAggregateRow(
+                identity,
+                runRows,
+                DocumentAggregateRunRow,
+                "document stage run not found",
+                "duplicate stage run rows",
+              )
+
+              const revisionRows = yield* sql<Record<string, unknown>>`
+                SELECT workflow_id, generation, stage_key, run_ordinal, stage_revision,
+                  kind AS revision_kind, state AS revision_state, owner_crossing_key,
+                  source_set_json, source_set_sha256
+                FROM qrspi_stage_revisions
+                WHERE workflow_id = ${identity.workflowId}
+                  AND generation = ${identity.generation}
+                  AND stage_key = ${identity.stageKey}
+                  AND stage_revision = ${identity.stageRevision}
+              `
+              const revision = yield* decodeSingleAggregateRow(
+                identity,
+                revisionRows,
+                DocumentAggregateRevisionRow,
+                "common document revision not found",
+                "duplicate common revision rows",
+              )
+              if (revision.run_ordinal !== identity.runOrdinal) {
+                return yield* aggregateIdentityMismatch(
+                  identity,
+                  "common revision run identity does not match",
+                  {
+                    expectedIdentity: identity,
+                    actualIdentity: { ...identity, runOrdinal: revision.run_ordinal },
+                  },
                 )
               }
-              const row = yield* Schema.decodeUnknown(DocumentAggregateRow, {
-                onExcessProperty: "error",
-              })(rows[0]).pipe(
-                Effect.mapError((cause) =>
-                  aggregateDataError(identity, cause, { reason: "malformed" }),
-                ),
+              if (revision.revision_kind !== "document") {
+                return yield* aggregateIdentityMismatch(
+                  identity,
+                  `common revision kind is not document: ${revision.revision_kind}`,
+                )
+              }
+
+              const documentRows = yield* sql<Record<string, unknown>>`
+                SELECT workflow_id, generation, stage_key, stage_revision,
+                  kind AS document_kind, prepared_result_json, prepared_result_sha256
+                FROM qrspi_document_stage_revisions
+                WHERE workflow_id = ${identity.workflowId}
+                  AND generation = ${identity.generation}
+                  AND stage_key = ${identity.stageKey}
+                  AND stage_revision = ${identity.stageRevision}
+              `
+              const document = yield* decodeSingleAggregateRow(
+                identity,
+                documentRows,
+                DocumentAggregatePayloadRow,
+                "document revision payload not found",
+                "duplicate document payload rows",
               )
+              if (document.document_kind !== "document") {
+                return yield* aggregateIdentityMismatch(
+                  identity,
+                  `document payload kind is not document: ${document.document_kind}`,
+                )
+              }
+              const row = { ...run, ...revision, ...document }
               const expectedScope: ExactStageScopeType = {
                 ...identity,
                 workflowDefinitionSha256: row.workflow_definition_sha256,
@@ -1087,15 +1160,14 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               }
 
               const ownerRows = yield* sql<Record<string, unknown>>`
-                SELECT common.operation_id, common.operation_kind,
-                  common.owner_kind AS common_owner_kind, document.operation_role,
+                SELECT document.operation_id, document.operation_role,
                   document.workflow_id, document.generation, document.stage_key,
-                  document.stage_revision, document.owner_kind AS document_owner_kind
+                  document.stage_revision, document.owner_kind AS document_owner_kind,
+                  common.operation_kind, common.owner_kind AS common_owner_kind,
+                  common.operation_role AS common_operation_role
                 FROM qrspi_document_stage_revision_operations AS document
-                JOIN qrspi_stage_operation_owners AS common
+                LEFT JOIN qrspi_stage_operation_owners AS common
                   ON common.operation_id = document.operation_id
-                  AND common.owner_kind = document.owner_kind
-                  AND common.operation_role = document.operation_role
                 WHERE document.workflow_id = ${identity.workflowId}
                   AND document.generation = ${identity.generation}
                   AND document.stage_key = ${identity.stageKey}
@@ -1109,26 +1181,63 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                   aggregateDataError(identity, cause, { reason: "malformed" }),
                 ),
               )
-              if (owners.length !== 2) {
-                return yield* Effect.fail(
-                  aggregateDataError(identity, "document aggregate ownership is incomplete", {
-                    reason: "missing",
-                  }),
+              const invalidDocumentRole = owners.find(
+                (owner) => owner.operation_role !== "produce" && owner.operation_role !== "publish",
+              )
+              if (invalidDocumentRole !== undefined) {
+                return yield* aggregateIdentityMismatch(
+                  identity,
+                  `document owner role does not match: ${invalidDocumentRole.operation_role}`,
                 )
               }
-              const producerOwner = owners[0]!
-              const publicationOwner = owners[1]!
-              if (
-                producerOwner.operation_role !== "produce" ||
-                producerOwner.operation_kind !== "StageProduce" ||
-                publicationOwner.operation_role !== "publish" ||
-                publicationOwner.operation_kind !== "ArtifactPublish"
-              ) {
-                return yield* Effect.fail(
-                  aggregateDataError(identity, "document aggregate ownership roles do not match", {
-                    reason: "identity_mismatch",
-                  }),
-                )
+              const ownerFor = (role: "produce" | "publish") => {
+                const owner = owners.find((candidate) => candidate.operation_role === role)
+                return owner === undefined
+                  ? Effect.fail(
+                      aggregateDataError(identity, `${role} owner not found`, {
+                        reason: "missing",
+                      }),
+                    )
+                  : Effect.succeed(owner)
+              }
+              const producerOwner = yield* ownerFor("produce")
+              const publicationOwner = yield* ownerFor("publish")
+              const commonOwners = [
+                {
+                  owner: producerOwner,
+                  role: "produce",
+                  kind: "StageProduce",
+                },
+                {
+                  owner: publicationOwner,
+                  role: "publish",
+                  kind: "ArtifactPublish",
+                },
+              ] as const
+              for (const { owner, role, kind } of commonOwners) {
+                if (owner.document_owner_kind !== "document_revision") {
+                  return yield* aggregateIdentityMismatch(
+                    identity,
+                    `document owner kind does not match: ${owner.document_owner_kind}`,
+                  )
+                }
+                if (owner.operation_kind === null) {
+                  return yield* Effect.fail(
+                    aggregateDataError(identity, "common operation owner not found", {
+                      reason: "missing",
+                    }),
+                  )
+                }
+                const mismatch =
+                  owner.common_owner_kind !== "document_revision"
+                    ? `common owner kind does not match: ${owner.common_owner_kind}`
+                    : owner.common_operation_role !== role
+                      ? `common owner role does not match: ${owner.common_operation_role}`
+                      : owner.operation_kind !== kind
+                        ? `common owner operation kind does not match: ${owner.operation_kind}`
+                        : undefined
+                if (mismatch !== undefined)
+                  return yield* aggregateIdentityMismatch(identity, mismatch)
               }
 
               const producerRow = yield* loadAggregateOperation(producerOwner.operation_id)
@@ -1243,7 +1352,18 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 )
               }
               const finalArtifact = yield* Effect.gen(function* () {
-                if (artifactRows[0] === undefined) return undefined
+                if (artifactRows[0] === undefined) {
+                  if (row.published_revision === identity.stageRevision) {
+                    return yield* Effect.fail(
+                      aggregateDataError(
+                        identity,
+                        "published document artifact reference not found",
+                        { reason: "missing" },
+                      ),
+                    )
+                  }
+                  return undefined
+                }
                 const artifactRow = yield* Schema.decodeUnknown(DocumentAggregateArtifactRow, {
                   onExcessProperty: "error",
                 })(artifactRows[0]).pipe(
