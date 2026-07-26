@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import { canonicalSha256 } from "../../src/qrspi/domain"
 import {
   QrspiStore,
@@ -149,6 +149,12 @@ const exactScope = (aggregate: DocumentStageRevisionAggregate) => ({
   stageDefinitionSha256: aggregate.sources.stageDefinitionSha256,
 })
 
+const generationScope = (aggregate: DocumentStageRevisionAggregate) => ({
+  _tag: "GenerationScope" as const,
+  workflowId: aggregate.sources.workflowId,
+  generation: aggregate.sources.generation,
+})
+
 const producerInput = (
   aggregate: DocumentStageRevisionAggregate,
   sources: DocumentStageRevisionAggregate["sources"] = aggregate.sources,
@@ -181,21 +187,13 @@ const validOperations = (aggregate: DocumentStageRevisionAggregate) => [
   operation(
     aggregate.producerOperationId,
     "StageProduce",
-    {
-      _tag: "GenerationScope",
-      workflowId: aggregate.sources.workflowId,
-      generation: aggregate.sources.generation,
-    },
+    generationScope(aggregate),
     producerInput(aggregate),
   ),
   operation(
     aggregate.publicationOperationId,
     "ArtifactPublish",
-    {
-      _tag: "GenerationScope",
-      workflowId: aggregate.sources.workflowId,
-      generation: aggregate.sources.generation,
-    },
+    generationScope(aggregate),
     publicationInput(aggregate),
   ),
 ]
@@ -565,7 +563,7 @@ describe("document aggregate operation authority", () => {
     authorityCase("malformed scope_json", "producer", "malformed", (aggregate) =>
       alterOperation(aggregate, 0, (row) => ({
         ...row,
-        scope: { ...(row.scope as Record<string, unknown>), unexpected: true },
+        scope: { ...generationScope(aggregate), unexpected: true },
       })),
     ),
     authorityCase("oversized publication input", "publication", "malformed", (aggregate) =>
@@ -622,10 +620,7 @@ describe("document aggregate operation authority", () => {
     authorityCase("mismatched Generation scope", "publication", "identity_mismatch", (aggregate) =>
       alterOperation(aggregate, 1, (row) => ({
         ...row,
-        scope: {
-          ...(row.scope as Record<string, unknown>),
-          generation: aggregate.sources.generation + 1,
-        },
+        scope: { ...generationScope(aggregate), generation: aggregate.sources.generation + 1 },
       })),
     ),
   ])("rejects aggregate operation authority: $name", async ({ arrange, details, reason, role }) => {
@@ -660,14 +655,17 @@ describe("document aggregate atomic persistence", () => {
             SELECT run.workflow_id, run.generation, run.stage_key, run.run_ordinal,
               run.workflow_definition_sha256, run.stage_definition_sha256, run.state AS run_state,
               run.is_current, run.activation_policy_json, run.pending_revision,
-              run.published_revision, run.accepted_revision, run.created_at AS run_created_at,
+              run.published_revision, run.accepted_revision,
               revision.stage_revision, revision.state AS revision_state, revision.owner_crossing_key,
-              revision.source_set_json, revision.source_set_sha256,
-              revision.created_at AS revision_created_at, document.prepared_result_json,
-              document.prepared_result_sha256, document.created_at AS document_created_at,
+              revision.source_set_json, revision.source_set_sha256, document.prepared_result_json,
+              document.prepared_result_sha256,
               artifact.provider_instance_id, artifact.repository_id, artifact.repository_full_name,
               artifact.commit_sha, artifact.path, artifact.blob_sha, artifact.content_sha256,
-              artifact.media_type, artifact.created_at AS artifact_created_at
+              artifact.media_type, (
+                run.created_at = ${now.toISOString()} AND run.updated_at = ${now.toISOString()}
+                AND revision.created_at = ${now.toISOString()} AND revision.updated_at = ${now.toISOString()}
+                AND document.created_at = ${now.toISOString()} AND document.updated_at = ${now.toISOString()}
+                AND artifact.created_at = ${now.toISOString()} AND artifact.updated_at = ${now.toISOString()}) AS timestamps_match
             FROM qrspi_stage_runs AS run
             JOIN qrspi_stage_revisions AS revision
               USING (workflow_id, generation, stage_key, run_ordinal)
@@ -694,7 +692,6 @@ describe("document aggregate atomic persistence", () => {
               pending_revision: aggregate.sources.stageRevision,
               published_revision: null,
               accepted_revision: aggregate.sources.stageRevision,
-              run_created_at: now.toISOString(),
               stage_revision: aggregate.sources.stageRevision,
               revision_state: aggregate.revisionState,
               owner_crossing_key: aggregate.ownerCrossingKey,
@@ -702,10 +699,8 @@ describe("document aggregate atomic persistence", () => {
                 aggregate.sources.sources.map(({ role, artifact }) => ({ role, artifact })),
               ),
               source_set_sha256: aggregate.sources.sourceSetSha256,
-              revision_created_at: now.toISOString(),
               prepared_result_json: JSON.stringify(aggregate.preparedResult!.value),
               prepared_result_sha256: aggregate.preparedResult!.sha256,
-              document_created_at: now.toISOString(),
               provider_instance_id: repository.providerInstanceId,
               repository_id: repository.repositoryId,
               repository_full_name: repository.repositoryFullName,
@@ -714,13 +709,17 @@ describe("document aggregate atomic persistence", () => {
               blob_sha: aggregate.finalArtifact!.blobSha,
               content_sha256: aggregate.finalArtifact!.contentSha256,
               media_type: aggregate.finalArtifact!.mediaType,
-              artifact_created_at: now.toISOString(),
+              timestamps_match: 1,
             },
           ])
 
           const owners = yield* sql<Record<string, unknown>>`
             SELECT common.operation_id, common.operation_role, document.workflow_id,
-              document.generation, document.stage_key, document.stage_revision
+              document.generation, document.stage_key, document.stage_revision,
+              (
+                common.created_at = ${now.toISOString()} AND document.created_at = ${now.toISOString()}
+                AND document.updated_at = ${now.toISOString()}
+              ) AS timestamps_match
             FROM qrspi_stage_operation_owners AS common
             JOIN qrspi_document_stage_revision_operations AS document
               USING (operation_id, operation_role)
@@ -735,6 +734,7 @@ describe("document aggregate atomic persistence", () => {
               generation: aggregate.sources.generation,
               stage_key: aggregate.sources.stageKey,
               stage_revision: aggregate.sources.stageRevision,
+              timestamps_match: 1,
             },
             {
               operation_id: aggregate.publicationOperationId,
@@ -743,6 +743,7 @@ describe("document aggregate atomic persistence", () => {
               generation: aggregate.sources.generation,
               stage_key: aggregate.sources.stageKey,
               stage_revision: aggregate.sources.stageRevision,
+              timestamps_match: 1,
             },
           ])
 
@@ -768,6 +769,7 @@ describe("document aggregate atomic persistence", () => {
           .pipe(Effect.exit)
 
         expect(exit._tag).toBe("Failure")
+        if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("SqlError")
         yield* expectNoDocumentAggregateRows(sql, aggregate)
       }),
     )
