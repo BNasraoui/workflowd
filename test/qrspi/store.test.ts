@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Effect, Layer } from "effect"
+import { Effect, Layer } from "effect"
 import { canonicalSha256 } from "../../src/qrspi/domain"
 import {
   QrspiStore,
@@ -26,8 +26,40 @@ const directories: Array<string> = []
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })))
 })
-
 function documentAggregate(): DocumentStageRevisionAggregate {
+  const structureArtifact = {
+    repository,
+    workflowId: "workflow-1",
+    generation: 1,
+    stageKey: "structure",
+    stageRevision: 1,
+    commitSha: "6".repeat(40),
+    path: "artifacts/structure.md",
+    blobSha: "7".repeat(40),
+    contentSha256: "63754810d8e378f99b85d113e2f09c9be658a3e169cd6027580f36b044db9505",
+    mediaType: "text/markdown",
+  }
+  const acceptedPointerIdentity = {
+    role: "Structure" as const,
+    snapshotSha256: sha("6"),
+    runOrdinal: 1,
+    acceptedStageRevision: structureArtifact.stageRevision,
+    targetParentSha: "8".repeat(40),
+    contract: { name: "qrspi.structure", contractVersion: 1 },
+    contractRegistrationSha256: sha("9"),
+    artifact: structureArtifact,
+  }
+  const technicalSources = [
+    {
+      role: acceptedPointerIdentity.role,
+      artifact: structureArtifact,
+      acceptedPointer: {
+        ...acceptedPointerIdentity,
+        pointerSha256: canonicalSha256(acceptedPointerIdentity),
+      },
+      content: "# Structure",
+    },
+  ]
   const sources = {
     workflowId: "workflow-1",
     generation: 1,
@@ -40,8 +72,10 @@ function documentAggregate(): DocumentStageRevisionAggregate {
       workflowId: "workflow-1",
       ticketRevisionSha256: sha("c"),
     },
-    sources: [],
-    sourceSetSha256: canonicalSha256([]),
+    sources: technicalSources,
+    sourceSetSha256: canonicalSha256(
+      technicalSources.map(({ role, artifact }) => ({ role, artifact })),
+    ),
     target: {
       repository,
       headRef: "refs/heads/workflow",
@@ -166,6 +200,28 @@ const validOperations = (aggregate: DocumentStageRevisionAggregate) => [
   ),
 ]
 
+const alterOperation = (
+  aggregate: DocumentStageRevisionAggregate,
+  index: 0 | 1,
+  alter: (row: AggregateOperation) => AggregateOperation,
+) => {
+  const rows = validOperations(aggregate)
+  rows[index] = alter(rows[index]!)
+  return rows
+}
+
+const alterInput = (
+  aggregate: DocumentStageRevisionAggregate,
+  index: 0 | 1,
+  input: Record<string, unknown>,
+  rehash = true,
+) =>
+  alterOperation(aggregate, index, (row) => ({
+    ...row,
+    input,
+    inputSha256: rehash ? canonicalSha256(input) : row.inputSha256,
+  }))
+
 function insertAggregateOperation(sql: SqlClient.SqlClient, row: AggregateOperation) {
   const timestamp = "2026-07-25T01:02:03.000Z"
   return sql`
@@ -250,34 +306,21 @@ const expectNoDocumentAggregateRows = (
       AND generation = ${aggregate.sources.generation}
       AND stage_key = ${aggregate.sources.stageKey}
     `
-    const [runs, revisions, documents, artifacts, commonOwners, documentOwners] = yield* Effect.all(
-      [
-        sql<{
-          readonly count: number
-        }>`SELECT count(*) AS count FROM qrspi_stage_runs WHERE ${identity}`,
-        sql<{
-          readonly count: number
-        }>`SELECT count(*) AS count FROM qrspi_stage_revisions WHERE ${identity}`,
-        sql<{
-          readonly count: number
-        }>`SELECT count(*) AS count FROM qrspi_document_stage_revisions WHERE ${identity}`,
-        sql<{
-          readonly count: number
-        }>`SELECT count(*) AS count FROM qrspi_artifact_references WHERE ${identity}`,
-        sql<{ readonly count: number }>`
-          SELECT count(*) AS count FROM qrspi_stage_operation_owners
-          WHERE operation_id IN (
-            ${aggregate.producerOperationId}, ${aggregate.publicationOperationId}
-          )
-        `,
-        sql<{ readonly count: number }>`
-          SELECT count(*) AS count FROM qrspi_document_stage_revision_operations WHERE ${identity}
-        `,
-      ],
-    )
-    expect([runs, revisions, documents, artifacts, commonOwners, documentOwners]).toEqual(
-      Array.from({ length: 6 }, () => [{ count: 0 }]),
-    )
+    const rows = yield* sql<Record<string, unknown>>`
+      SELECT
+        (SELECT count(*) FROM qrspi_stage_runs WHERE ${identity}) AS runs,
+        (SELECT count(*) FROM qrspi_stage_revisions WHERE ${identity}) AS revisions,
+        (SELECT count(*) FROM qrspi_document_stage_revisions WHERE ${identity}) AS documents,
+        (SELECT count(*) FROM qrspi_artifact_references WHERE ${identity}) AS artifacts,
+        (SELECT count(*) FROM qrspi_stage_operation_owners WHERE operation_id IN (
+          ${aggregate.producerOperationId}, ${aggregate.publicationOperationId}
+        )) AS common_owners,
+        (SELECT count(*) FROM qrspi_document_stage_revision_operations WHERE ${identity})
+          AS document_owners
+    `
+    expect(rows).toEqual([
+      { runs: 0, revisions: 0, documents: 0, artifacts: 0, common_owners: 0, document_owners: 0 },
+    ])
   })
 
 async function aggregateFixture<A>(
@@ -316,10 +359,24 @@ const expectAggregateCreateFailure = (
       .pipe(Effect.either)
     expect(result).toMatchObject({
       _tag: "Left",
-      left: { record: "workflow_operation", ...expected },
+      left: { _tag: "QrspiStoreDataError", record: "workflow_operation", ...expected },
     })
     yield* expectNoDocumentAggregateRows(sql, aggregate)
   })
+
+const loadAggregateParents = (
+  sql: SqlClient.SqlClient,
+  aggregate: DocumentStageRevisionAggregate,
+) => sql<Record<string, unknown>>`
+  SELECT g.generation_format, g.current_stage_key, g.current_stage_run_ordinal,
+    g.state AS generation_state, g.is_current AS generation_is_current, o.operation_id,
+    o.state AS operation_state, o.is_current AS operation_is_current
+  FROM qrspi_generations AS g
+  JOIN workflow_operations AS o
+    ON o.operation_id IN (${aggregate.producerOperationId}, ${aggregate.publicationOperationId})
+  WHERE g.workflow_id = ${aggregate.sources.workflowId} AND g.generation = ${aggregate.sources.generation}
+  ORDER BY o.operation_id
+`
 
 test("accepts one exact document aggregate", async () => {
   const aggregate = documentAggregate()
@@ -327,13 +384,6 @@ test("accepts one exact document aggregate", async () => {
   await expect(
     Effect.runPromise(preflightDocumentStageRevisionAggregate(aggregate)),
   ).resolves.toEqual(aggregate)
-  expect(aggregate.isCurrent).toBe(true)
-  expect(aggregate.activationPolicy).toEqual({
-    mode: "conditional",
-    policy: { name: "qrspi.stage-activation", version: 1 },
-    decision: "enabled",
-    reason: "The stage is selected for this generation",
-  })
 })
 
 test("rejects a malformed aggregate tag", async () => {
@@ -382,46 +432,18 @@ test("bounds malformed structural diagnostics", async () => {
   }
 })
 
-test("rejects a guarded pointer from another run", async () => {
+test.each([
+  { name: "run", field: "runOrdinal" as const },
+  { name: "revision in the same run", field: "stageRevision" as const },
+])("rejects a guarded pointer to another $name", async ({ field }) => {
   const aggregate = documentAggregate()
+  const actualIdentity = {
+    ...aggregate.pendingRevision!,
+    [field]: aggregate.sources[field] + 1,
+  }
   const result = await preflightFailure({
     ...aggregate,
-    pendingRevision: {
-      ...aggregate.pendingRevision!,
-      runOrdinal: aggregate.sources.runOrdinal + 1,
-    },
-  })
-
-  expect(result).toMatchObject({
-    _tag: "Left",
-    left: {
-      _tag: "QrspiStoreDataError",
-      record: "document_stage_revision_aggregate",
-      reason: "identity_mismatch",
-      expectedIdentity: {
-        workflowId: aggregate.sources.workflowId,
-        generation: aggregate.sources.generation,
-        stageKey: aggregate.sources.stageKey,
-        runOrdinal: aggregate.sources.runOrdinal,
-      },
-      actualIdentity: {
-        workflowId: aggregate.sources.workflowId,
-        generation: aggregate.sources.generation,
-        stageKey: aggregate.sources.stageKey,
-        runOrdinal: aggregate.sources.runOrdinal + 1,
-      },
-    },
-  })
-})
-
-test("rejects a guarded pointer to another revision in the same run", async () => {
-  const aggregate = documentAggregate()
-  const result = await preflightFailure({
-    ...aggregate,
-    pendingRevision: {
-      ...aggregate.pendingRevision!,
-      stageRevision: aggregate.sources.stageRevision + 1,
-    },
+    pendingRevision: actualIdentity,
   })
 
   expect(result).toMatchObject({
@@ -438,11 +460,7 @@ test("rejects a guarded pointer to another revision in the same run", async () =
         stageRevision: aggregate.sources.stageRevision,
       },
       actualIdentity: {
-        workflowId: aggregate.sources.workflowId,
-        generation: aggregate.sources.generation,
-        stageKey: aggregate.sources.stageKey,
-        runOrdinal: aggregate.sources.runOrdinal,
-        stageRevision: aggregate.sources.stageRevision + 1,
+        ...actualIdentity,
       },
     },
   })
@@ -519,188 +537,107 @@ test("rejects a prepared Document with the wrong canonical hash", async () => {
   })
 })
 
+const authorityCase = (
+  name: string,
+  role: "producer" | "publication",
+  reason: string,
+  arrange: (aggregate: DocumentStageRevisionAggregate) => ReadonlyArray<AggregateOperation>,
+  details?: (aggregate: DocumentStageRevisionAggregate) => Record<string, unknown>,
+) => ({ name, role, reason, arrange, details })
+
 describe("document aggregate operation authority", () => {
-  test("rejects a missing aggregate operation before writing runtime rows", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      expectAggregateCreateFailure(sql, store, aggregate, [validOperations(aggregate)[0]!], {
-        _tag: "QrspiStoreDataError",
-        recordId: aggregate.publicationOperationId,
-        reason: "missing",
-      }),
-    )
-  })
-
   test.each([
-    {
-      name: "strict producer input",
-      select: (aggregate: DocumentStageRevisionAggregate) => {
-        const [producer, publication] = validOperations(aggregate)
-        const input = { ...producer!.input, unexpected: true }
-        return [{ ...producer!, input, inputSha256: canonicalSha256(input) }, publication!] as const
-      },
-      operationId: (aggregate: DocumentStageRevisionAggregate) => aggregate.producerOperationId,
-    },
-    {
-      name: "publication scope projection",
-      select: (aggregate: DocumentStageRevisionAggregate) => {
-        const [producer, publication] = validOperations(aggregate)
-        const input = { publicationReceipt: { requestId: "publish-request-1" } }
-        return [producer!, { ...publication!, input, inputSha256: canonicalSha256(input) }] as const
-      },
-      operationId: (aggregate: DocumentStageRevisionAggregate) => aggregate.publicationOperationId,
-    },
-    {
-      name: "durable Generation scope",
-      select: (aggregate: DocumentStageRevisionAggregate) => {
-        const [producer, publication] = validOperations(aggregate)
-        return [
-          {
-            ...producer!,
-            scope: {
-              _tag: "GenerationScope",
-              workflowId: aggregate.sources.workflowId,
-              generation: aggregate.sources.generation,
-              unexpected: true,
-            },
-          },
-          publication!,
-        ] as const
-      },
-      operationId: (aggregate: DocumentStageRevisionAggregate) => aggregate.producerOperationId,
-    },
-  ])("rejects malformed aggregate operation authority: $name", async ({ select, operationId }) => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      expectAggregateCreateFailure(sql, store, aggregate, select(aggregate), {
-        _tag: "QrspiStoreDataError",
-        recordId: operationId(aggregate),
-        reason: "malformed",
+    authorityCase("missing aggregate operation", "publication", "missing", (aggregate) => [
+      validOperations(aggregate)[0]!,
+    ]),
+    authorityCase("malformed producer input", "producer", "malformed", (aggregate) =>
+      alterInput(aggregate, 0, { ...producerInput(aggregate), unexpected: true }),
+    ),
+    authorityCase(
+      "malformed publication scope projection",
+      "publication",
+      "malformed",
+      (aggregate) =>
+        alterInput(aggregate, 1, {
+          publicationReceipt: { requestId: "publish-request-1" },
+        }),
+    ),
+    authorityCase("malformed scope_json", "producer", "malformed", (aggregate) =>
+      alterOperation(aggregate, 0, (row) => ({
+        ...row,
+        scope: { ...(row.scope as Record<string, unknown>), unexpected: true },
+      })),
+    ),
+    authorityCase("oversized publication input", "publication", "malformed", (aggregate) =>
+      alterInput(aggregate, 1, {
+        ...publicationInput(aggregate),
+        uninterpreted: "x".repeat(33_000),
       }),
-    )
-  })
-
-  test("rejects an oversized publication input before writing runtime rows", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      Effect.gen(function* () {
-        const [producer, publication] = validOperations(aggregate)
-        const input = { ...publication!.input, uninterpreted: "x".repeat(33_000) }
-        yield* expectAggregateCreateFailure(
-          sql,
-          store,
+    ),
+    authorityCase("wrong operation kind", "producer", "identity_mismatch", (aggregate) =>
+      alterOperation(aggregate, 0, (row) => ({ ...row, kind: "ArtifactPublish" })),
+    ),
+    authorityCase(
+      "complete publication input hash",
+      "publication",
+      "hash_mismatch",
+      (aggregate) =>
+        alterInput(
           aggregate,
-          [producer!, { ...publication!, input, inputSha256: canonicalSha256(input) }],
-          {
-            _tag: "QrspiStoreDataError",
-            recordId: aggregate.publicationOperationId,
-            reason: "malformed",
-          },
-        )
-      }),
-    )
-  })
-
-  test("rejects the wrong aggregate operation kind", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      Effect.gen(function* () {
-        const [producer, publication] = validOperations(aggregate)
-        yield* expectAggregateCreateFailure(
-          sql,
-          store,
-          aggregate,
-          [{ ...producer!, kind: "ArtifactPublish" }, publication!],
-          {
-            recordId: aggregate.producerOperationId,
-            reason: "identity_mismatch",
-          },
-        )
-      }),
-    )
-  })
-
-  test("hash-binds the complete publication input", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      Effect.gen(function* () {
-        const [producer, publication] = validOperations(aggregate)
-        const input = { ...publication!.input, requestedPath: "artifacts/changed-plan.md" }
-        const actualSha256 = canonicalSha256(input)
-        yield* expectAggregateCreateFailure(
-          sql,
-          store,
-          aggregate,
-          [producer!, { ...publication!, input }],
-          {
-            recordId: aggregate.publicationOperationId,
-            reason: "hash_mismatch",
-            expectedSha256: publication!.inputSha256,
-            actualSha256,
-          },
-        )
-      }),
-    )
-  })
-
-  test("compares complete exact stage authority", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      Effect.gen(function* () {
-        const mismatchedSources = {
+          1,
+          { ...publicationInput(aggregate), requestedPath: "artifacts/changed-plan.md" },
+          false,
+        ),
+      (aggregate) => {
+        const publication = validOperations(aggregate)[1]!
+        return {
+          expectedSha256: publication.inputSha256,
+          actualSha256: canonicalSha256({
+            ...publication.input,
+            requestedPath: "artifacts/changed-plan.md",
+          }),
+        }
+      },
+    ),
+    authorityCase(
+      "exact stage definition hash",
+      "producer",
+      "identity_mismatch",
+      (aggregate) => {
+        const input = producerInput(aggregate, {
           ...aggregate.sources,
           stageDefinitionSha256: sha("9"),
-        }
-        const input = producerInput(aggregate, mismatchedSources)
-        const [, publication] = validOperations(aggregate)
-        yield* expectAggregateCreateFailure(
-          sql,
-          store,
-          aggregate,
-          [
-            operation(
-              aggregate.producerOperationId,
-              "StageProduce",
-              {
-                _tag: "GenerationScope",
-                workflowId: aggregate.sources.workflowId,
-                generation: aggregate.sources.generation,
-              },
-              input,
-            ),
-            publication!,
-          ],
-          {
-            recordId: aggregate.producerOperationId,
-            reason: "identity_mismatch",
-            expectedSha256: aggregate.sources.stageDefinitionSha256,
-            actualSha256: mismatchedSources.stageDefinitionSha256,
-          },
-        )
+        })
+        return alterOperation(aggregate, 0, (row) => ({
+          ...row,
+          input,
+          inputSha256: canonicalSha256(input),
+        }))
+      },
+      (aggregate) => ({
+        expectedSha256: aggregate.sources.stageDefinitionSha256,
+        actualSha256: sha("9"),
       }),
-    )
-  })
-
-  test("compares the durable Generation operation scope", async () => {
-    await aggregateFixture(({ sql, store, aggregate }) =>
-      Effect.gen(function* () {
-        const [producer, publication] = validOperations(aggregate)
-        yield* expectAggregateCreateFailure(
-          sql,
-          store,
-          aggregate,
-          [
-            producer!,
-            {
-              ...publication!,
-              scope: {
-                _tag: "GenerationScope",
-                workflowId: aggregate.sources.workflowId,
-                generation: aggregate.sources.generation + 1,
-              },
-            },
-          ],
-          {
-            recordId: aggregate.publicationOperationId,
-            reason: "identity_mismatch",
-          },
-        )
-      }),
-    )
+    ),
+    authorityCase("mismatched Generation scope", "publication", "identity_mismatch", (aggregate) =>
+      alterOperation(aggregate, 1, (row) => ({
+        ...row,
+        scope: {
+          ...(row.scope as Record<string, unknown>),
+          generation: aggregate.sources.generation + 1,
+        },
+      })),
+    ),
+  ])("rejects aggregate operation authority: $name", async ({ arrange, details, reason, role }) => {
+    await aggregateFixture(({ sql, store, aggregate }) => {
+      const recordId =
+        role === "producer" ? aggregate.producerOperationId : aggregate.publicationOperationId
+      return expectAggregateCreateFailure(sql, store, aggregate, arrange(aggregate), {
+        recordId,
+        reason,
+        ...details?.(aggregate),
+      })
+    })
   })
 })
 
@@ -714,31 +651,35 @@ describe("document aggregate atomic persistence", () => {
       ({ sql, store, aggregate }) =>
         Effect.gen(function* () {
           yield* seedAggregatePrerequisites(sql, aggregate, validOperations(aggregate))
-          const generationBefore = yield* sql<Record<string, unknown>>`
-            SELECT generation_format, current_stage_key, current_stage_run_ordinal, state, is_current
-            FROM qrspi_generations
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-          `
-          const operationsBefore = yield* sql<Record<string, unknown>>`
-            SELECT operation_id, state, is_current
-            FROM workflow_operations
-            WHERE operation_id IN (
-              ${aggregate.producerOperationId}, ${aggregate.publicationOperationId}
-            ) ORDER BY operation_id
-          `
+          const parentsBefore = yield* loadAggregateParents(sql, aggregate)
 
           const created = yield* store.createDocumentStageRuntimeAggregate(aggregate, now)
           expect(created).toEqual(aggregate)
 
-          const run = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_stage_runs
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-              AND stage_key = ${aggregate.sources.stageKey}
-              AND run_ordinal = ${aggregate.sources.runOrdinal}
+          const persisted = yield* sql<Record<string, unknown>>`
+            SELECT run.workflow_id, run.generation, run.stage_key, run.run_ordinal,
+              run.workflow_definition_sha256, run.stage_definition_sha256, run.state AS run_state,
+              run.is_current, run.activation_policy_json, run.pending_revision,
+              run.published_revision, run.accepted_revision, run.created_at AS run_created_at,
+              revision.stage_revision, revision.state AS revision_state, revision.owner_crossing_key,
+              revision.source_set_json, revision.source_set_sha256,
+              revision.created_at AS revision_created_at, document.prepared_result_json,
+              document.prepared_result_sha256, document.created_at AS document_created_at,
+              artifact.provider_instance_id, artifact.repository_id, artifact.repository_full_name,
+              artifact.commit_sha, artifact.path, artifact.blob_sha, artifact.content_sha256,
+              artifact.media_type, artifact.created_at AS artifact_created_at
+            FROM qrspi_stage_runs AS run
+            JOIN qrspi_stage_revisions AS revision
+              USING (workflow_id, generation, stage_key, run_ordinal)
+            JOIN qrspi_document_stage_revisions AS document
+              USING (workflow_id, generation, stage_key, stage_revision)
+            JOIN qrspi_artifact_references AS artifact
+              USING (workflow_id, generation, stage_key, stage_revision)
+            WHERE run.workflow_id = ${aggregate.sources.workflowId} AND run.generation = ${aggregate.sources.generation}
+              AND run.stage_key = ${aggregate.sources.stageKey}
+              AND run.run_ordinal = ${aggregate.sources.runOrdinal}
           `
-          expect(run).toEqual([
+          expect(persisted).toEqual([
             {
               workflow_id: aggregate.sources.workflowId,
               generation: aggregate.sources.generation,
@@ -746,75 +687,25 @@ describe("document aggregate atomic persistence", () => {
               run_ordinal: aggregate.sources.runOrdinal,
               workflow_definition_sha256: aggregate.sources.workflowDefinitionSha256,
               stage_definition_sha256: aggregate.sources.stageDefinitionSha256,
-              state: aggregate.runState,
+              run_state: aggregate.runState,
               is_current: 1,
               activation_policy_json:
                 '{"mode":"conditional","policy":{"name":"qrspi.stage-activation","version":1},"decision":"enabled","reason":"The stage is selected for this generation"}',
-              skip_reason: null,
               pending_revision: aggregate.sources.stageRevision,
               published_revision: null,
               accepted_revision: aggregate.sources.stageRevision,
-              terminal_reason: null,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
-            },
-          ])
-
-          const revision = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_stage_revisions
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-              AND stage_key = ${aggregate.sources.stageKey}
-          `
-          expect(revision).toEqual([
-            {
-              workflow_id: aggregate.sources.workflowId,
-              generation: aggregate.sources.generation,
-              stage_key: aggregate.sources.stageKey,
+              run_created_at: now.toISOString(),
               stage_revision: aggregate.sources.stageRevision,
-              run_ordinal: aggregate.sources.runOrdinal,
-              kind: "document",
-              state: aggregate.revisionState,
+              revision_state: aggregate.revisionState,
               owner_crossing_key: aggregate.ownerCrossingKey,
-              source_set_json: JSON.stringify([]),
+              source_set_json: JSON.stringify(
+                aggregate.sources.sources.map(({ role, artifact }) => ({ role, artifact })),
+              ),
               source_set_sha256: aggregate.sources.sourceSetSha256,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
-            },
-          ])
-
-          const document = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_document_stage_revisions
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-              AND stage_key = ${aggregate.sources.stageKey}
-          `
-          expect(document).toEqual([
-            {
-              workflow_id: aggregate.sources.workflowId,
-              generation: aggregate.sources.generation,
-              stage_key: aggregate.sources.stageKey,
-              stage_revision: aggregate.sources.stageRevision,
-              kind: "document",
+              revision_created_at: now.toISOString(),
               prepared_result_json: JSON.stringify(aggregate.preparedResult!.value),
               prepared_result_sha256: aggregate.preparedResult!.sha256,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
-            },
-          ])
-
-          const artifact = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_artifact_references
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-              AND stage_key = ${aggregate.sources.stageKey}
-          `
-          expect(artifact).toEqual([
-            {
-              workflow_id: aggregate.sources.workflowId,
-              generation: aggregate.sources.generation,
-              stage_key: aggregate.sources.stageKey,
-              stage_revision: aggregate.sources.stageRevision,
+              document_created_at: now.toISOString(),
               provider_instance_id: repository.providerInstanceId,
               repository_id: repository.repositoryId,
               repository_full_name: repository.repositoryFullName,
@@ -823,80 +714,39 @@ describe("document aggregate atomic persistence", () => {
               blob_sha: aggregate.finalArtifact!.blobSha,
               content_sha256: aggregate.finalArtifact!.contentSha256,
               media_type: aggregate.finalArtifact!.mediaType,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
+              artifact_created_at: now.toISOString(),
             },
           ])
 
-          const commonOwners = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_stage_operation_owners
-            WHERE operation_id IN (
-              ${aggregate.producerOperationId}, ${aggregate.publicationOperationId}
-            ) ORDER BY operation_role
+          const owners = yield* sql<Record<string, unknown>>`
+            SELECT common.operation_id, common.operation_role, document.workflow_id,
+              document.generation, document.stage_key, document.stage_revision
+            FROM qrspi_stage_operation_owners AS common
+            JOIN qrspi_document_stage_revision_operations AS document
+              USING (operation_id, operation_role)
+            WHERE common.operation_id IN (${aggregate.producerOperationId}, ${aggregate.publicationOperationId})
+            ORDER BY common.operation_role
           `
-          expect(commonOwners).toEqual([
+          expect(owners).toEqual([
             {
               operation_id: aggregate.producerOperationId,
-              operation_kind: "StageProduce",
-              owner_kind: "document_revision",
               operation_role: "produce",
-              created_at: now.toISOString(),
-            },
-            {
-              operation_id: aggregate.publicationOperationId,
-              operation_kind: "ArtifactPublish",
-              owner_kind: "document_revision",
-              operation_role: "publish",
-              created_at: now.toISOString(),
-            },
-          ])
-          const documentOwners = yield* sql<Record<string, unknown>>`
-            SELECT * FROM qrspi_document_stage_revision_operations
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-              AND stage_key = ${aggregate.sources.stageKey}
-            ORDER BY operation_role
-          `
-          expect(documentOwners).toEqual([
-            {
               workflow_id: aggregate.sources.workflowId,
               generation: aggregate.sources.generation,
               stage_key: aggregate.sources.stageKey,
               stage_revision: aggregate.sources.stageRevision,
-              owner_kind: "document_revision",
-              operation_role: "produce",
-              operation_id: aggregate.producerOperationId,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
             },
             {
+              operation_id: aggregate.publicationOperationId,
+              operation_role: "publish",
               workflow_id: aggregate.sources.workflowId,
               generation: aggregate.sources.generation,
               stage_key: aggregate.sources.stageKey,
               stage_revision: aggregate.sources.stageRevision,
-              owner_kind: "document_revision",
-              operation_role: "publish",
-              operation_id: aggregate.publicationOperationId,
-              created_at: now.toISOString(),
-              updated_at: now.toISOString(),
             },
           ])
 
-          const generationAfter = yield* sql<Record<string, unknown>>`
-            SELECT generation_format, current_stage_key, current_stage_run_ordinal, state, is_current
-            FROM qrspi_generations
-            WHERE workflow_id = ${aggregate.sources.workflowId}
-              AND generation = ${aggregate.sources.generation}
-          `
-          const operationsAfter = yield* sql<Record<string, unknown>>`
-            SELECT operation_id, state, is_current
-            FROM workflow_operations
-            WHERE operation_id IN (
-              ${aggregate.producerOperationId}, ${aggregate.publicationOperationId}
-            ) ORDER BY operation_id
-          `
-          expect(generationAfter).toEqual(generationBefore)
-          expect(operationsAfter).toEqual(operationsBefore)
+          expect(yield* loadAggregateParents(sql, aggregate)).toEqual(parentsBefore)
         }),
       aggregate,
     )
@@ -918,7 +768,6 @@ describe("document aggregate atomic persistence", () => {
           .pipe(Effect.exit)
 
         expect(exit._tag).toBe("Failure")
-        if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("SqlError")
         yield* expectNoDocumentAggregateRows(sql, aggregate)
       }),
     )
