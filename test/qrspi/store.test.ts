@@ -393,6 +393,57 @@ async function aggregateFixture<A>(
   )
 }
 
+const expectAggregateReadFailure = (
+  store: QrspiStorePort,
+  aggregate: DocumentStageRevisionAggregate,
+  expected: Record<string, unknown>,
+) =>
+  Effect.gen(function* () {
+    const result = yield* store
+      .readDocumentStageRuntimeAggregate(revisionIdentity(aggregate))
+      .pipe(Effect.either)
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: {
+        _tag: "QrspiStoreDataError",
+        record: "document_stage_revision_aggregate",
+        recordId: `${aggregate.sources.workflowId}/${aggregate.sources.generation}/${aggregate.sources.stageKey}/${aggregate.sources.runOrdinal}/${aggregate.sources.stageRevision}`,
+        ...expected,
+      },
+    })
+  })
+
+const corruptIgnoringConstraints = (
+  sql: SqlClient.SqlClient,
+  mutation: Effect.Effect<unknown, unknown>,
+) =>
+  Effect.gen(function* () {
+    yield* sql`PRAGMA foreign_keys = OFF`
+    yield* sql`PRAGMA ignore_check_constraints = ON`
+    yield* mutation
+    yield* sql`PRAGMA ignore_check_constraints = OFF`
+    yield* sql`PRAGMA foreign_keys = ON`
+  })
+
+const expectCorruptedAggregateRead = (
+  corrupt: (
+    sql: SqlClient.SqlClient,
+    aggregate: DocumentStageRevisionAggregate,
+  ) => Effect.Effect<unknown, unknown>,
+  expected: Record<string, unknown>,
+  aggregate: DocumentStageRevisionAggregate = documentAggregate(),
+) =>
+  aggregateFixture(
+    ({ sql, store, aggregate }) =>
+      Effect.gen(function* () {
+        yield* seedAggregatePrerequisites(sql, aggregate, validOperations(aggregate))
+        yield* store.createDocumentStageRuntimeAggregate(aggregate, now)
+        yield* corrupt(sql, aggregate)
+        yield* expectAggregateReadFailure(store, aggregate, expected)
+      }),
+    aggregate,
+  )
+
 const expectAggregateCreateFailure = (
   sql: SqlClient.SqlClient,
   store: QrspiStorePort,
@@ -853,34 +904,273 @@ describe("document aggregate reload", () => {
     )
   })
 
-  test("returns typed missing instead of a partial aggregate", async () => {
-    const aggregate = { ...documentAggregate(), publishedRevision: null }
+  test("allows an unpublished document revision to omit its artifact", async () => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null, finalArtifact: undefined }
     await aggregateFixture(
       ({ sql, store, aggregate }) =>
         Effect.gen(function* () {
           yield* seedAggregatePrerequisites(sql, aggregate, validOperations(aggregate))
           yield* store.createDocumentStageRuntimeAggregate(aggregate, now)
-          yield* sql`
-            DELETE FROM qrspi_document_stage_revision_operations
+          expect(
+            yield* store.readDocumentStageRuntimeAggregate(revisionIdentity(aggregate)),
+          ).toEqual(aggregate)
+        }),
+      aggregate,
+    )
+  })
+
+  test.each(["produce", "publish"] as const)(
+    "diagnoses a missing %s owner without returning a partial aggregate",
+    async (role) => {
+      const aggregate = { ...documentAggregate(), publishedRevision: null }
+      await expectCorruptedAggregateRead(
+        (sql, aggregate) => sql`
+          DELETE FROM qrspi_document_stage_revision_operations
+          WHERE workflow_id = ${aggregate.sources.workflowId}
+            AND generation = ${aggregate.sources.generation}
+            AND stage_key = ${aggregate.sources.stageKey}
+            AND stage_revision = ${aggregate.sources.stageRevision}
+            AND operation_role = ${role}
+        `,
+        { reason: "missing", message: `${role} owner not found` },
+        aggregate,
+      )
+    },
+  )
+
+  test("diagnoses a missing common operation owner exactly", async () => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) =>
+        corruptIgnoringConstraints(
+          sql,
+          sql`
+            DELETE FROM qrspi_stage_operation_owners
+            WHERE operation_id = ${aggregate.producerOperationId}
+          `,
+        ),
+      { reason: "missing", message: "common operation owner not found" },
+      aggregate,
+    )
+  })
+
+  test.each([
+    {
+      name: "common revision",
+      message: "common document revision not found",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        DELETE FROM qrspi_stage_revisions
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+      disablesForeignKeys: true,
+    },
+    {
+      name: "document payload",
+      message: "document revision payload not found",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        DELETE FROM qrspi_document_stage_revisions
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+      disablesForeignKeys: true,
+    },
+    {
+      name: "published artifact",
+      message: "published document artifact reference not found",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        DELETE FROM qrspi_artifact_references
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+      disablesForeignKeys: false,
+    },
+  ])("diagnoses a missing $name exactly", async ({ corrupt, disablesForeignKeys, message }) => {
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => {
+        const mutation = corrupt(sql, aggregate)
+        return disablesForeignKeys ? corruptIgnoringConstraints(sql, mutation) : mutation
+      },
+      { reason: "missing", message },
+    )
+  })
+
+  test.each([
+    {
+      name: "common revision tag",
+      message: "common revision kind is not document: implementation",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_stage_revisions SET kind = 'implementation'
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+    },
+    {
+      name: "document payload tag",
+      message: "document payload kind is not document: implementation",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_document_stage_revisions SET kind = 'implementation'
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+    },
+  ])("diagnoses a wrong $name as identity mismatch", async ({ corrupt, message }) => {
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => corruptIgnoringConstraints(sql, corrupt(sql, aggregate)),
+      { reason: "identity_mismatch", message },
+    )
+  })
+
+  test.each([
+    {
+      name: "malformed activation policy JSON",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_stage_runs SET activation_policy_json = 'not-json'
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND run_ordinal = ${aggregate.sources.runOrdinal}
+      `,
+    },
+    {
+      name: "excess source projection data",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_stage_revisions
+        SET source_set_json = ${JSON.stringify(
+          aggregate.sources.sources.map(({ role, artifact }) => ({ role, artifact, excess: true })),
+        )}
+        WHERE workflow_id = ${aggregate.sources.workflowId}
+          AND generation = ${aggregate.sources.generation}
+          AND stage_key = ${aggregate.sources.stageKey}
+          AND stage_revision = ${aggregate.sources.stageRevision}
+      `,
+    },
+  ])("diagnoses $name exactly", async ({ corrupt }) => {
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => corruptIgnoringConstraints(sql, corrupt(sql, aggregate)),
+      { reason: "malformed" },
+    )
+  })
+
+  test("diagnoses a common revision moved to another run through its exact revision key", async () => {
+    const aggregate = documentAggregate()
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) =>
+        corruptIgnoringConstraints(
+          sql,
+          sql`
+            UPDATE qrspi_stage_revisions
+            SET run_ordinal = ${aggregate.sources.runOrdinal + 1}
             WHERE workflow_id = ${aggregate.sources.workflowId}
               AND generation = ${aggregate.sources.generation}
               AND stage_key = ${aggregate.sources.stageKey}
               AND stage_revision = ${aggregate.sources.stageRevision}
-              AND operation_role = 'publish'
-          `
+          `,
+        ),
+      {
+        reason: "identity_mismatch",
+        message: "common revision run identity does not match",
+        expectedIdentity: revisionIdentity(aggregate),
+        actualIdentity: {
+          ...revisionIdentity(aggregate),
+          runOrdinal: aggregate.sources.runOrdinal + 1,
+        },
+      },
+      aggregate,
+    )
+  })
 
-          const result = yield* store
-            .readDocumentStageRuntimeAggregate(revisionIdentity(aggregate))
-            .pipe(Effect.either)
-          expect(result).toMatchObject({
-            _tag: "Left",
-            left: {
-              _tag: "QrspiStoreDataError",
-              record: "document_stage_revision_aggregate",
-              reason: "missing",
-            },
-          })
-        }),
+  test.each([
+    {
+      name: "document owner role",
+      message: "document owner role does not match: unexpected",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_document_stage_revision_operations SET operation_role = 'unexpected'
+        WHERE operation_id = ${aggregate.producerOperationId}
+      `,
+    },
+    {
+      name: "common owner kind",
+      message: "common owner kind does not match: implementation_step",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE qrspi_stage_operation_owners SET owner_kind = 'implementation_step'
+        WHERE operation_id = ${aggregate.producerOperationId}
+      `,
+    },
+  ])("diagnoses a wrong $name as identity mismatch", async ({ corrupt, message }) => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => corruptIgnoringConstraints(sql, corrupt(sql, aggregate)),
+      { reason: "identity_mismatch", message },
+      aggregate,
+    )
+  })
+
+  test.each([
+    {
+      name: "missing",
+      reason: "missing",
+      message: "aggregate operation not found",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        DELETE FROM workflow_operations WHERE operation_id = ${aggregate.producerOperationId}
+      `,
+    },
+    {
+      name: "wrong-kind",
+      reason: "identity_mismatch",
+      message: "operation kind is not StageProduce",
+      corrupt: (sql: SqlClient.SqlClient, aggregate: DocumentStageRevisionAggregate) => sql`
+        UPDATE workflow_operations SET kind = 'ArtifactPublish'
+        WHERE operation_id = ${aggregate.producerOperationId}
+      `,
+    },
+  ])("diagnoses a $name referenced physical operation", async ({ corrupt, message, reason }) => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => corruptIgnoringConstraints(sql, corrupt(sql, aggregate)),
+      {
+        record: "workflow_operation",
+        recordId: aggregate.producerOperationId,
+        reason,
+        message,
+      },
+      aggregate,
+    )
+  })
+
+  test("diagnoses nested producer revision identity disagreement", async () => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    const input = producerInput(aggregate, {
+      ...aggregate.sources,
+      runOrdinal: aggregate.sources.runOrdinal + 1,
+    })
+    await expectCorruptedAggregateRead(
+      (sql, aggregate) => sql`
+        UPDATE workflow_operations
+        SET input_json = ${JSON.stringify(input)}, input_sha256 = ${canonicalSha256(input)}
+        WHERE operation_id = ${aggregate.producerOperationId}
+      `,
+      {
+        record: "workflow_operation",
+        recordId: aggregate.producerOperationId,
+        reason: "identity_mismatch",
+        message: "operation scope does not identify the aggregate revision",
+        expectedIdentity: revisionIdentity(aggregate),
+        actualIdentity: {
+          ...revisionIdentity(aggregate),
+          runOrdinal: aggregate.sources.runOrdinal + 1,
+        },
+      },
       aggregate,
     )
   })
