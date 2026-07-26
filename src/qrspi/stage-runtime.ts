@@ -5,7 +5,7 @@ import {
   ExactStageSources,
   PreparedStageOutput,
 } from "./contracts"
-import { BoundedText, Sha256, canonicalSha256 } from "./domain"
+import { BoundedText, Sha256, StageActivationPolicy, canonicalSha256 } from "./domain"
 
 export const StageRunIdentity = Schema.Struct({
   workflowId: ExactStageScope.fields.workflowId,
@@ -60,6 +60,8 @@ const DocumentStageRevisionAggregateStructure = Schema.Struct({
   kind: Schema.Literal("document"),
   sources: ExactStageSources,
   runState: StageRunState,
+  isCurrent: Schema.Boolean,
+  activationPolicy: StageActivationPolicy,
   revisionState: StageRevisionState,
   ownerCrossingKey: BoundedText(512),
   pendingRevision: Schema.NullOr(StageRevisionIdentity),
@@ -72,13 +74,14 @@ const DocumentStageRevisionAggregateStructure = Schema.Struct({
 })
 type AggregateStructure = typeof DocumentStageRevisionAggregateStructure.Type
 
-const stageRunIdentityFrom = (
+const stageRevisionIdentityFrom = (
   source: typeof ExactStageSources.Type | StageRevisionIdentity,
-): StageRunIdentity => ({
+): StageRevisionIdentity => ({
   workflowId: source.workflowId,
   generation: source.generation,
   stageKey: source.stageKey,
   runOrdinal: source.runOrdinal,
+  stageRevision: source.stageRevision,
 })
 
 export type DocumentAggregateIdentity = {
@@ -99,25 +102,26 @@ type AggregateMismatch = {
   readonly actualSha256?: string
 }
 
-const sameRun = (expected: StageRunIdentity, actual: StageRunIdentity) =>
+const sameRevision = (expected: StageRevisionIdentity, actual: StageRevisionIdentity) =>
   expected.workflowId === actual.workflowId &&
   expected.generation === actual.generation &&
   expected.stageKey === actual.stageKey &&
-  expected.runOrdinal === actual.runOrdinal
+  expected.runOrdinal === actual.runOrdinal &&
+  expected.stageRevision === actual.stageRevision
 
 function aggregateMismatch(value: AggregateStructure): AggregateMismatch | undefined {
-  const expectedRun = stageRunIdentityFrom(value.sources)
-  const crossRunPointer = [
+  const expectedRevision = stageRevisionIdentityFrom(value.sources)
+  const mismatchedPointer = [
     value.pendingRevision,
     value.publishedRevision,
     value.acceptedRevision,
-  ].find((pointer) => pointer !== null && !sameRun(expectedRun, pointer))
-  if (crossRunPointer !== undefined && crossRunPointer !== null) {
+  ].find((pointer) => pointer !== null && !sameRevision(expectedRevision, pointer))
+  if (mismatchedPointer !== undefined && mismatchedPointer !== null) {
     return {
       reason: "identity_mismatch",
-      message: "guarded revision pointer does not identify the aggregate run",
-      expectedIdentity: expectedRun,
-      actualIdentity: stageRunIdentityFrom(crossRunPointer),
+      message: "guarded revision pointer does not identify the aggregate revision",
+      expectedIdentity: expectedRevision,
+      actualIdentity: stageRevisionIdentityFrom(mismatchedPointer),
     }
   }
 
