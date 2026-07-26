@@ -18,6 +18,11 @@ import {
   type ExecutableStageSnapshot as ExecutableStageSnapshotType,
 } from "./domain"
 import { StageProduceInput, type StageProduceInput as StageProduceInputType } from "./contracts"
+import {
+  decodeDocumentStageRevisionAggregate,
+  type DocumentAggregateIdentity,
+  type DocumentStageRevisionAggregate,
+} from "./stage-runtime"
 
 const OperationState = Schema.Literal(
   "blocked",
@@ -191,6 +196,9 @@ type StoreError =
   SqlError | QrspiStoreDataError | WorkflowStartCurrentnessError | WorkflowStartRetryExhaustedError
 
 export type QrspiStorePort = {
+  readonly preflightDocumentStageRevisionAggregate: (
+    input: unknown,
+  ) => Effect.Effect<DocumentStageRevisionAggregate, QrspiStoreDataError>
   readonly loadCurrentGenerationSnapshotSets: () => Effect.Effect<
     ReadonlyArray<CurrentGenerationSnapshotSet>,
     SqlError | QrspiStoreDataError
@@ -289,7 +297,11 @@ export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/Qr
 
 export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")<{
   readonly record:
-    "workflow_operation" | "workflow_definition" | "stage_definition" | "ticket_revision"
+    | "workflow_operation"
+    | "workflow_definition"
+    | "stage_definition"
+    | "ticket_revision"
+    | "document_stage_revision_aggregate"
   readonly recordId: string
   readonly message: string
   readonly reason?:
@@ -299,6 +311,8 @@ export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")
   readonly sequencePosition?: number
   readonly expectedSha256?: string
   readonly actualSha256?: string
+  readonly expectedIdentity?: DocumentAggregateIdentity
+  readonly actualIdentity?: DocumentAggregateIdentity
 }> {}
 
 export class WorkflowStartCurrentnessError extends Data.TaggedError(
@@ -316,6 +330,8 @@ type StoreDataErrorDetails = {
   readonly sequencePosition?: number
   readonly expectedSha256?: string
   readonly actualSha256?: string
+  readonly expectedIdentity?: DocumentAggregateIdentity
+  readonly actualIdentity?: DocumentAggregateIdentity
 }
 
 const dataError = (
@@ -327,7 +343,7 @@ const dataError = (
   new QrspiStoreDataError({
     record,
     recordId,
-    message: String(cause),
+    message: String(cause).slice(0, 2_000),
     ...(details.reason === undefined ? {} : { reason: details.reason }),
     ...(details.workflowId === undefined ? {} : { workflowId: details.workflowId }),
     ...(details.generation === undefined ? {} : { generation: details.generation }),
@@ -336,7 +352,18 @@ const dataError = (
       : { sequencePosition: details.sequencePosition }),
     ...(details.expectedSha256 === undefined ? {} : { expectedSha256: details.expectedSha256 }),
     ...(details.actualSha256 === undefined ? {} : { actualSha256: details.actualSha256 }),
+    ...(details.expectedIdentity === undefined
+      ? {}
+      : { expectedIdentity: details.expectedIdentity }),
+    ...(details.actualIdentity === undefined ? {} : { actualIdentity: details.actualIdentity }),
   })
+
+export const preflightDocumentStageRevisionAggregate = (input: unknown) =>
+  decodeDocumentStageRevisionAggregate(input).pipe(
+    Effect.mapError((issue) =>
+      dataError("document_stage_revision_aggregate", issue.recordId, issue.message, issue.details),
+    ),
+  )
 
 function decodeCurrentGenerationSnapshotSet(
   rows: ReadonlyArray<typeof CurrentGenerationSnapshotRow.Type>,
@@ -544,6 +571,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         `.pipe(Effect.andThen(Effect.fail(error)))
 
   return {
+    preflightDocumentStageRevisionAggregate,
     readStageProduceInput: (operationId) => {
       const read = Effect.gen(function* () {
         const rows = yield* sql<Record<string, unknown>>`
