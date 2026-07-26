@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -26,39 +27,51 @@ const directories: Array<string> = []
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })))
 })
-function documentAggregate(): DocumentStageRevisionAggregate {
-  const structureArtifact = {
+
+function technicalSource(
+  role: "Structure" | "Design",
+  stageKey: "structure" | "design",
+  stageRevision: number,
+  character: string,
+) {
+  const content = `# ${role}`
+  const artifact = {
     repository,
     workflowId: "workflow-1",
     generation: 1,
-    stageKey: "structure",
-    stageRevision: 1,
-    commitSha: "6".repeat(40),
-    path: "artifacts/structure.md",
-    blobSha: "7".repeat(40),
-    contentSha256: "63754810d8e378f99b85d113e2f09c9be658a3e169cd6027580f36b044db9505",
+    stageKey,
+    stageRevision,
+    commitSha: character.repeat(40),
+    path: `artifacts/${stageKey}.md`,
+    blobSha: character.repeat(40),
+    contentSha256: createHash("sha256").update(content).digest("hex"),
     mediaType: "text/markdown",
   }
-  const acceptedPointerIdentity = {
-    role: "Structure" as const,
-    snapshotSha256: sha("6"),
+  const acceptedPointer = {
+    role,
+    snapshotSha256: sha(character),
     runOrdinal: 1,
-    acceptedStageRevision: structureArtifact.stageRevision,
-    targetParentSha: "8".repeat(40),
-    contract: { name: "qrspi.structure", contractVersion: 1 },
-    contractRegistrationSha256: sha("9"),
-    artifact: structureArtifact,
+    acceptedStageRevision: stageRevision,
+    targetParentSha: character.repeat(40),
+    contract: { name: `qrspi.${stageKey}`, contractVersion: 1 },
+    contractRegistrationSha256: sha(character),
+    artifact,
   }
-  const technicalSources = [
-    {
-      role: acceptedPointerIdentity.role,
-      artifact: structureArtifact,
-      acceptedPointer: {
-        ...acceptedPointerIdentity,
-        pointerSha256: canonicalSha256(acceptedPointerIdentity),
-      },
-      content: "# Structure",
+  return {
+    role,
+    artifact,
+    acceptedPointer: {
+      ...acceptedPointer,
+      pointerSha256: canonicalSha256(acceptedPointer),
     },
+    content,
+  }
+}
+
+function documentAggregate(): DocumentStageRevisionAggregate {
+  const technicalSources = [
+    technicalSource("Structure", "structure", 2, "6"),
+    technicalSource("Design", "design", 1, "7"),
   ]
   const sources = {
     workflowId: "workflow-1",
@@ -154,6 +167,43 @@ const generationScope = (aggregate: DocumentStageRevisionAggregate) => ({
   workflowId: aggregate.sources.workflowId,
   generation: aggregate.sources.generation,
 })
+
+const revisionIdentity = (aggregate: DocumentStageRevisionAggregate) => ({
+  workflowId: aggregate.sources.workflowId,
+  generation: aggregate.sources.generation,
+  stageKey: aggregate.sources.stageKey,
+  runOrdinal: aggregate.sources.runOrdinal,
+  stageRevision: aggregate.sources.stageRevision,
+})
+
+function historicalAggregate(
+  aggregate: DocumentStageRevisionAggregate,
+): DocumentStageRevisionAggregate {
+  const sources = {
+    ...aggregate.sources,
+    runOrdinal: aggregate.sources.runOrdinal + 1,
+    stageRevision: aggregate.sources.stageRevision + 1,
+  }
+  const revision = revisionIdentity({ ...aggregate, sources })
+  return {
+    ...aggregate,
+    sources,
+    isCurrent: false,
+    ownerCrossingKey: `${aggregate.ownerCrossingKey}-historical`,
+    pendingRevision: revision,
+    publishedRevision: null,
+    acceptedRevision: revision,
+    finalArtifact: {
+      ...aggregate.finalArtifact!,
+      stageRevision: sources.stageRevision,
+      commitSha: "a".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: sha("d"),
+    },
+    producerOperationId: `${aggregate.producerOperationId}-historical`,
+    publicationOperationId: `${aggregate.publicationOperationId}-historical`,
+  }
+}
 
 const producerInput = (
   aggregate: DocumentStageRevisionAggregate,
@@ -772,6 +822,66 @@ describe("document aggregate atomic persistence", () => {
         if (exit._tag === "Failure") expect(Cause.pretty(exit.cause)).toContain("SqlError")
         yield* expectNoDocumentAggregateRows(sql, aggregate)
       }),
+    )
+  })
+})
+
+describe("document aggregate reload", () => {
+  test("reloads the exact requested aggregate deterministically beside newer history", async () => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    await aggregateFixture(
+      ({ sql, store, aggregate }) =>
+        Effect.gen(function* () {
+          yield* seedAggregatePrerequisites(sql, aggregate, validOperations(aggregate))
+          yield* store.createDocumentStageRuntimeAggregate(aggregate, now)
+
+          const historical = historicalAggregate(aggregate)
+          yield* Effect.forEach(
+            validOperations(historical),
+            (row) => insertAggregateOperation(sql, row),
+            { concurrency: 1 },
+          )
+          yield* store.createDocumentStageRuntimeAggregate(historical, now)
+
+          const first = yield* store.readDocumentStageRuntimeAggregate(revisionIdentity(aggregate))
+          const second = yield* store.readDocumentStageRuntimeAggregate(revisionIdentity(aggregate))
+          expect(first).toEqual(aggregate)
+          expect(second).toEqual(first)
+          expect(first.sources.sources.map(({ role }) => role)).toEqual(["Structure", "Design"])
+        }),
+      aggregate,
+    )
+  })
+
+  test("returns typed missing instead of a partial aggregate", async () => {
+    const aggregate = { ...documentAggregate(), publishedRevision: null }
+    await aggregateFixture(
+      ({ sql, store, aggregate }) =>
+        Effect.gen(function* () {
+          yield* seedAggregatePrerequisites(sql, aggregate, validOperations(aggregate))
+          yield* store.createDocumentStageRuntimeAggregate(aggregate, now)
+          yield* sql`
+            DELETE FROM qrspi_document_stage_revision_operations
+            WHERE workflow_id = ${aggregate.sources.workflowId}
+              AND generation = ${aggregate.sources.generation}
+              AND stage_key = ${aggregate.sources.stageKey}
+              AND stage_revision = ${aggregate.sources.stageRevision}
+              AND operation_role = 'publish'
+          `
+
+          const result = yield* store
+            .readDocumentStageRuntimeAggregate(revisionIdentity(aggregate))
+            .pipe(Effect.either)
+          expect(result).toMatchObject({
+            _tag: "Left",
+            left: {
+              _tag: "QrspiStoreDataError",
+              record: "document_stage_revision_aggregate",
+              reason: "missing",
+            },
+          })
+        }),
+      aggregate,
     )
   })
 })
