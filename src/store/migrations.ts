@@ -717,6 +717,11 @@ const kernelEventWaitStore = Effect.gen(function* () {
     )
   `
   yield* sql`
+    CREATE INDEX kernel_deliveries_ready
+    ON kernel_wait_event_deliveries (instance_id, event_sequence, wait_id)
+    WHERE state = 'ready'
+  `
+  yield* sql`
     CREATE TRIGGER kernel_events_immutable_insert
     BEFORE INSERT ON kernel_events
     WHEN EXISTS (
@@ -730,6 +735,7 @@ const kernelEventWaitStore = Effect.gen(function* () {
           AND existing.event_key = NEW.event_key
           AND existing.correlation = NEW.correlation
           AND existing.payload_json = NEW.payload_json
+          AND existing.recorded_at = NEW.recorded_at
         )
     ) OR (
       EXISTS (
@@ -743,6 +749,7 @@ const kernelEventWaitStore = Effect.gen(function* () {
           AND existing.event_key = NEW.event_key
           AND existing.correlation = NEW.correlation
           AND existing.payload_json = NEW.payload_json
+          AND existing.recorded_at = NEW.recorded_at
         )
       )
     )

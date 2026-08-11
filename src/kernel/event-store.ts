@@ -110,6 +110,7 @@ const DeliveryRow = Schema.Struct({
 })
 const ReadyDeliveryRow = Schema.Struct({
   ...DeliveryRow.fields,
+  wait_state: Schema.Literal("matched"),
   source: RecordEventInputSchema.fields.source,
   source_event_id: RecordEventInputSchema.fields.sourceEventId,
   event_type: RecordEventInputSchema.fields.event.fields.type,
@@ -240,10 +241,11 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const { decoded, payloadJson } = yield* decodeEventInput(input)
       const inserted = yield* sql<{ readonly sequence: number }>`
-          INSERT INTO kernel_events (
-            sequence, source, source_event_id, event_type, event_version, event_key,
-            correlation, payload_json, recorded_at
-          ) VALUES (
+        INSERT INTO kernel_events (
+          sequence, source, source_event_id, event_type, event_version, event_key,
+          correlation, payload_json, recorded_at
+        )
+        SELECT
             COALESCE(
               (SELECT sequence FROM kernel_events
                 WHERE source = ${decoded.source} AND source_event_id = ${decoded.sourceEventId}),
@@ -252,19 +254,12 @@ const make = Effect.gen(function* () {
             ${decoded.source}, ${decoded.sourceEventId}, ${decoded.event.type},
             ${decoded.event.version}, ${decoded.event.key}, ${decoded.event.correlation},
             ${payloadJson}, ${decoded.recordedAt.toISOString()}
-          )
-          ON CONFLICT (source, source_event_id) DO NOTHING
-          RETURNING sequence
-        `.pipe(
-        Effect.mapError((error) =>
-          String(error.cause).includes("kernel event immutable conflict")
-            ? new KernelStoreConflictError({
-                record: "event",
-                key: `${decoded.source}:${decoded.sourceEventId}`,
-              })
-            : error,
-        ),
-      )
+        WHERE NOT EXISTS (
+          SELECT 1 FROM kernel_events
+          WHERE source = ${decoded.source} AND source_event_id = ${decoded.sourceEventId}
+        )
+        RETURNING sequence
+      `
       let status: "recorded" | "duplicate"
       let sequence: number
       if (inserted.length > 0) {
@@ -527,9 +522,12 @@ const make = Effect.gen(function* () {
       Effect.flatMap((decodedInstanceId) =>
         sql`SELECT
           delivery.instance_id, delivery.wait_id, delivery.event_sequence, delivery.state,
+          wait.state AS wait_state,
           event.source, event.source_event_id, event.event_type, event.event_version,
           event.event_key, event.correlation, event.payload_json, event.recorded_at
         FROM kernel_wait_event_deliveries AS delivery
+        LEFT JOIN kernel_waits AS wait
+          ON wait.instance_id = delivery.instance_id AND wait.wait_id = delivery.wait_id
         JOIN kernel_events AS event ON event.sequence = delivery.event_sequence
         WHERE delivery.instance_id = ${decodedInstanceId} AND delivery.state = 'ready'
         ORDER BY delivery.event_sequence, delivery.wait_id`.pipe(

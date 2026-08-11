@@ -203,6 +203,18 @@ test("owns four strict SQLite tables in migration 11", async () => {
   expect(result.tables.every(({ strict }) => strict === 1)).toBe(true)
 })
 
+test("migration 11 indexes ready delivery recovery", async () => {
+  const indexes = await runWithStore(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      return yield* sql`SELECT name FROM pragma_index_list('kernel_wait_event_deliveries')
+        WHERE name = 'kernel_deliveries_ready'`
+    }),
+  )
+
+  expect(indexes).toEqual([{ name: "kernel_deliveries_ready" }])
+})
+
 test("legacy work can still be claimed and completed after migration 11", async () => {
   const filename = `${process.cwd()}/kernel-legacy-${crypto.randomUUID()}.sqlite`
   try {

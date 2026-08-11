@@ -222,6 +222,25 @@ describe("one-shot global event ledger corrections", () => {
     expect(result._tag).toBe("Left")
   })
 
+  test("event immutability rejects timestamp-only raw replacement", async () => {
+    const result = await runKernel(
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        const sql = yield* SqlClient.SqlClient
+        const recorded = yield* store.recordEvent(event("replace-timestamp"))
+        return yield* sql`INSERT OR REPLACE INTO kernel_events (
+          sequence, source, source_event_id, event_type, event_version, event_key, correlation,
+          payload_json, recorded_at
+        ) VALUES (
+          ${recorded.event.sequence}, 'github', 'replace-timestamp', 'approval', 1,
+          'gate-7', 'gate-7', '{"approved":true}', '2026-08-11T12:00:00.000Z'
+        )`.pipe(Effect.either)
+      }),
+    )
+
+    expect(result._tag).toBe("Left")
+  })
+
   test("durable text bounds count UTF-8 bytes rather than characters", async () => {
     const result = await runKernel(
       Effect.gen(function* () {

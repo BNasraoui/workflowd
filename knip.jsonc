@@ -1,6 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
-  "entry": ["test/**/*.test.ts", "scripts/**/*.{mjs,ts}", "skills/**/scripts/**/*.{mjs,ts}"],
+  "entry": [
+    "test/**/*.test.ts",
+    "test/kernel/register-wait-process.ts",
+    "scripts/**/*.{mjs,ts}",
+    "skills/**/scripts/**/*.{mjs,ts}",
+  ],
   "project": [
     "src/**/*.ts",
     "test/**/*.ts",

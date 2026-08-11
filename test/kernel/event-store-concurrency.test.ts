@@ -310,7 +310,11 @@ test("concurrent event and wait arrival produces one delivery", async () => {
 test("wait registration begins with a write and survives a committed writer interleaving", async () => {
   const filename = `${process.cwd()}/kernel-write-first-${crypto.randomUUID()}.sqlite`
   const marker = `${filename}.locked`
+  const release = `${filename}.release`
+  const registrationStarted = `${filename}.registration-started`
+  const registrationResult = `${filename}.registration-result`
   let writer: ReturnType<typeof Bun.spawn> | undefined
+  let registrar: ReturnType<typeof Bun.spawn> | undefined
   try {
     await bootstrapFile(filename)
     await runOnFile(
@@ -333,8 +337,10 @@ test("wait registration begins with a write and survives a committed writer inte
            payload_json, recorded_at
          ) VALUES (1, 'github', 'interleaved', 'approval', 1, 'gate-7', 'gate-7', '{}', ?)\`)
            .run(process.env.TEST_TIMESTAMP!);
-         await Bun.write(process.env.TEST_MARKER!, "locked");
-         await Bun.sleep(200);
+          await Bun.write(process.env.TEST_MARKER!, "locked");
+         while (!(await Bun.file(process.env.TEST_RELEASE!).exists())) {
+           await Bun.sleep(5);
+         }
          db.exec("COMMIT");
          db.close();`,
       ],
@@ -343,6 +349,7 @@ test("wait registration begins with a write and survives a committed writer inte
           ...process.env,
           TEST_DB: filename,
           TEST_MARKER: marker,
+          TEST_RELEASE: release,
           TEST_TIMESTAMP: timestamp.toISOString(),
         },
         stderr: "pipe",
@@ -353,32 +360,101 @@ test("wait registration begins with a write and survives a committed writer inte
       await Bun.sleep(5)
     }
     expect(await Bun.file(marker).exists()).toBe(true)
+    registrar = Bun.spawn(
+      [
+        "bun",
+        "test/kernel/register-wait-process.ts",
+        filename,
+        registrationStarted,
+        registrationResult,
+      ],
+      { stderr: "pipe", stdout: "pipe" },
+    )
+    for (
+      let attempt = 0;
+      attempt < 100 && !(await Bun.file(registrationStarted).exists());
+      attempt += 1
+    ) {
+      await Bun.sleep(5)
+    }
+    expect(await Bun.file(registrationStarted).exists()).toBe(true)
+    expect(await Bun.file(registrationResult).exists()).toBe(false)
+    expect(writer.exitCode).toBeNull()
 
-    const result = await runOnFile(
+    await Bun.write(release, "release")
+    expect(await writer.exited).toBe(0)
+    expect(await registrar.exited).toBe(0)
+    const result: unknown = await Bun.file(registrationResult).json()
+
+    expect(result).toMatchObject({
+      _tag: "Right",
+      right: {
+        deliveries: [{ instanceId: "instance-a", waitId: "interleaved-wait", eventSequence: 1 }],
+      },
+    })
+  } finally {
+    writer?.kill()
+    registrar?.kill()
+    for (const path of [marker, release, registrationStarted, registrationResult]) {
+      await Bun.file(path)
+        .delete()
+        .catch(() => undefined)
+    }
+    await removeDatabase(filename)
+  }
+})
+
+test("independent clients fence delivery consumption to one cursor advance", async () => {
+  const filename = `${process.cwd()}/kernel-consume-${crypto.randomUUID()}.sqlite`
+  try {
+    await bootstrapFile(filename)
+    await runOnFile(
       filename,
       Effect.gen(function* () {
         const store = yield* KernelEventStore
-        return yield* store.registerWait({
+        yield* store.createInstance(instance("instance-a"))
+        yield* store.registerWait({
           instanceId: "instance-a",
-          waitId: "interleaved-wait",
+          waitId: "consume-wait",
           condition: { type: "approval", version: 1, key: "gate-7", correlation: "gate-7" },
           registeredAt: timestamp,
         })
-      }).pipe(Effect.either),
+        yield* store.recordEvent(event("consume-event"))
+      }),
     )
-    expect(await writer.exited).toBe(0)
+    const consume = () =>
+      runOnFile(
+        filename,
+        Effect.gen(function* () {
+          const store = yield* KernelEventStore
+          return yield* store.consumeDelivery({
+            instanceId: "instance-a",
+            waitId: "consume-wait",
+            eventSequence: 1,
+            expectedCursor: 0,
+          })
+        }),
+      )
+    const results = await Promise.all([consume(), consume()])
+    const durable = await runOnFile(
+      filename,
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        const sql = yield* SqlClient.SqlClient
+        const cursor = yield* sql`SELECT event_cursor FROM kernel_workflow_instances
+          WHERE instance_id = 'instance-a'`
+        const delivery = yield* sql`SELECT state FROM kernel_wait_event_deliveries
+          WHERE instance_id = 'instance-a' AND wait_id = 'consume-wait'`
+        const ready = yield* store.readReadyDeliveries("instance-a")
+        return { cursor, delivery, ready }
+      }),
+    )
 
-    expect(result._tag).toBe("Right")
-    if (result._tag === "Right") {
-      expect(result.right.deliveries).toEqual([
-        { instanceId: "instance-a", waitId: "interleaved-wait", eventSequence: 1 },
-      ])
-    }
+    expect(results.map(({ status }) => status).sort()).toEqual(["consumed", "duplicate"])
+    expect(durable.cursor).toEqual([{ event_cursor: 1 }])
+    expect(durable.delivery).toEqual([{ state: "consumed" }])
+    expect(durable.ready).toEqual([])
   } finally {
-    writer?.kill()
-    await Bun.file(marker)
-      .delete()
-      .catch(() => undefined)
     await removeDatabase(filename)
   }
 })

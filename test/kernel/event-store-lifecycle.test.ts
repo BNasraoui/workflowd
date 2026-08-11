@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { SqlClient } from "@effect/sql"
 import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
@@ -252,4 +253,24 @@ test("replaying a consumed wait does not return its consumed delivery", async ()
   expect(result.replay.status).toBe("duplicate")
   expect(result.replay.deliveries).toEqual([])
   expect(result.ready).toEqual([])
+})
+
+test("ready recovery fails closed when the wait is not matched", async () => {
+  const result = await runKernel(
+    Effect.gen(function* () {
+      const store = yield* KernelEventStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.createInstance(instance)
+      yield* store.registerWait(wait("wait-a"))
+      yield* store.recordEvent(event("event-1"))
+      yield* sql`UPDATE kernel_waits SET state = 'consumed'
+        WHERE instance_id = 'instance-1' AND wait_id = 'wait-a'`
+      return yield* store.readReadyDeliveries("instance-1").pipe(Effect.either)
+    }),
+  )
+
+  expect(result._tag).toBe("Left")
+  if (result._tag === "Left") {
+    expect(result.left).toMatchObject({ _tag: "KernelStoreDataError", record: "delivery" })
+  }
 })
