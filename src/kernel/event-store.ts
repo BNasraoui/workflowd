@@ -1,13 +1,8 @@
 import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import { runStoreMigrations } from "../store/migrations"
-import {
-  KernelStoreConflictError,
-  KernelStoreDataError,
-  KernelStoreInputError,
-} from "./event-store-errors"
 import {
   type CreateInstanceResult,
   MAX_KERNEL_PAYLOAD_BYTES,
@@ -20,8 +15,24 @@ import {
   WorkflowInstanceInput,
 } from "./event-store-model"
 
-export * from "./event-store-errors"
 export * from "./event-store-model"
+
+export class KernelStoreInputError extends Data.TaggedError("KernelStoreInputError")<{
+  readonly message: string
+}> {}
+
+export class KernelStoreConflictError extends Data.TaggedError("KernelStoreConflictError")<{
+  readonly record: "event" | "instance" | "wait"
+  readonly instanceId: string
+  readonly key: string
+}> {}
+
+export class KernelStoreDataError extends Data.TaggedError("KernelStoreDataError")<{
+  readonly record: "delivery" | "event" | "instance" | "wait"
+  readonly instanceId: string
+  readonly key: string
+  readonly message: string
+}> {}
 
 type KernelStoreError =
   SqlError | KernelStoreConflictError | KernelStoreDataError | KernelStoreInputError

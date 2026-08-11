@@ -555,6 +555,13 @@ describe("kernel event store", () => {
         }
         const results = yield* Effect.all([
           store
+            .createInstance({
+              ...instanceInput,
+              instanceId: "oversized",
+              payload: "p".repeat(65_536),
+            })
+            .pipe(Effect.either),
+          store
             .recordEvent({ ...event, event: { ...event.event, type: "t".repeat(129) } })
             .pipe(Effect.either),
           store
@@ -575,6 +582,6 @@ describe("kernel event store", () => {
       }),
     )
 
-    expect(tags).toEqual(Array.from({ length: 5 }, () => "KernelStoreInputError"))
+    expect(tags).toEqual(Array.from({ length: 6 }, () => "KernelStoreInputError"))
   })
 })
