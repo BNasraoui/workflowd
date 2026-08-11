@@ -1,16 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer, Logger } from "effect"
+import { Effect, Layer, Logger, Queue } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
-import { WorkflowStore } from "../src/store/contracts"
+import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
+import { WorkSignal, WorkSignalLive, type WorkSignalPort } from "../src/work-signal"
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
 import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
-const TestLayer = WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))
+const TestLayer = Layer.merge(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)), WorkSignalLive)
 
 const payload = JSON.stringify({
   action: "opened",
@@ -204,7 +205,164 @@ describe("handleGitHubWebhook", () => {
 
     expect(response.status).toBe(400)
   })
+
+  test.each([
+    ["enqueued", ["job", "reconciliation"]],
+    ["reconciliation_enqueued", "reconciliation"],
+    ["duplicate", undefined],
+    ["ignored", "reconciliation"],
+  ] as const)("wakes only for committed pull request disposition %s", async (status, lanes) => {
+    const secret = "webhook-secret"
+    const actions: Array<string> = []
+    const request = signedRequest("pull_request", payload, `delivery-${status}`, secret)
+    const layer = dispositionLayer(
+      {
+        ingestPullRequest: () =>
+          Effect.sync(() => {
+            actions.push(`commit:${status}`)
+            return status === "duplicate" ? { status } : { status, generation: 1 }
+          }),
+      },
+      actions,
+    )
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: secret,
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(response.status).toBe(202)
+    expect(actions).toEqual([
+      `commit:${status}`,
+      ...(lanes === undefined ? [] : typeof lanes === "string" ? [lanes] : lanes),
+    ])
+  })
+
+  test("an accepted transition wakes and re-arms an existing reconciliation", async () => {
+    const secret = "webhook-secret"
+    const initialPayload = JSON.stringify({
+      ...JSON.parse(payload),
+      pull_request: { ...JSON.parse(payload).pull_request, updated_at: "2026-07-19T12:00:00.000Z" },
+    })
+    const ambiguousPayload = JSON.stringify({
+      ...JSON.parse(initialPayload),
+      action: "synchronize",
+      pull_request: {
+        ...JSON.parse(initialPayload).pull_request,
+        head: { ...JSON.parse(initialPayload).pull_request.head, sha: "e".repeat(40) },
+      },
+    })
+    const acceptedPayload = JSON.stringify({
+      ...JSON.parse(ambiguousPayload),
+      pull_request: {
+        ...JSON.parse(ambiguousPayload).pull_request,
+        updated_at: "2026-07-19T12:00:02.000Z",
+        head: { ...JSON.parse(ambiguousPayload).pull_request.head, sha: "f".repeat(40) },
+      },
+    })
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* handleGitHubWebhook(
+            signedRequest("pull_request", initialPayload, "rearm-initial", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:00:00.000Z") },
+          )
+          yield* handleGitHubWebhook(
+            signedRequest("pull_request", ambiguousPayload, "rearm-ambiguous", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:00:01.000Z") },
+          )
+          const store = yield* WorkflowStore
+          const first = yield* store.claimNextReconciliation({
+            workerId: "first-reconciler",
+            now: new Date("2026-07-19T12:01:00.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          if (first === null) return yield* Effect.dieMessage("expected reconciliation")
+          const signals = yield* WorkSignal
+          const wake = yield* signals.subscribe("reconciliation")
+          const response = yield* handleGitHubWebhook(
+            signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:01:01.000Z") },
+          )
+          yield* Queue.take(wake)
+          const rearmed = yield* store.claimNextReconciliation({
+            workerId: "second-reconciler",
+            now: new Date("2026-07-19T12:01:02.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          return { body: yield* Effect.promise(() => response.json()), first, rearmed }
+        }).pipe(Effect.provide(TestLayer)),
+      ),
+    )
+
+    expect(result.body).toEqual({ status: "enqueued", generation: 2 })
+    expect(result.rearmed?.id).toBe(result.first.id)
+  })
+
+  test.each([
+    ["enqueued", "command"],
+    ["duplicate", undefined],
+  ] as const)("wakes only for committed command disposition %s", async (status, lane) => {
+    const secret = "webhook-secret"
+    const actions: Array<string> = []
+    const commandPayload = JSON.stringify({
+      action: "created",
+      installation: { id: 91 },
+      repository: JSON.parse(payload).repository,
+      issue: { number: 7, pull_request: { url: "https://api.github.test/pr/7" } },
+      comment: { id: 10, body: "/agent review", user: { login: "example-owner" } },
+    })
+    const request = signedRequest("issue_comment", commandPayload, `command-${status}`, secret)
+    const layer = dispositionLayer(
+      {
+        ingestCommand: () =>
+          Effect.sync(() => {
+            actions.push(`commit:${status}`)
+            return { status }
+          }),
+      },
+      actions,
+    )
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: secret,
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(response.status).toBe(202)
+    expect(actions).toEqual(lane === undefined ? [`commit:${status}`] : [`commit:${status}`, lane])
+  })
 })
+
+function signedRequest(event: string, body: string, deliveryId: string, secret: string) {
+  const signature = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`
+  return new Request("http://localhost/hooks/github", {
+    method: "POST",
+    body,
+    headers: {
+      "x-github-delivery": deliveryId,
+      "x-github-event": event,
+      "x-hub-signature-256": signature,
+    },
+  })
+}
+
+function dispositionLayer(store: Partial<WorkflowStorePort>, actions: Array<string>) {
+  const signals: WorkSignalPort = {
+    subscribe: () => Effect.die("unused"),
+    wake: (lane) => Effect.sync(() => actions.push(lane)),
+  }
+  const StoreWithDisposition = Layer.effect(
+    WorkflowStore,
+    Effect.map(WorkflowStore, (live) => ({ ...live, ...store })),
+  ).pipe(Layer.provide(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))))
+  return Layer.merge(StoreWithDisposition, Layer.succeed(WorkSignal, signals))
+}
 
 describe("routeRequest", () => {
   test("serves local health without touching the webhook store", async () => {

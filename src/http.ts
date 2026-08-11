@@ -3,8 +3,10 @@ import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
 import { JsonText } from "./json"
 import { WorkflowStore, type WorkflowStorePort } from "./store/contracts"
+import type { IngestPullRequestResult } from "./store/model"
 import { verifyWebhookSignature } from "./webhook"
 import type { WorkflowStartError } from "./qrspi/workflow-start"
+import { WorkSignal, type WorkSignalPort } from "./work-signal"
 
 type QrspiIngress = {
   readonly token: string
@@ -21,7 +23,7 @@ export type WebhookHandlerOptions = {
 export function routeRequest(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort> {
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   const { pathname } = new URL(request.url)
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
@@ -96,10 +98,25 @@ function authorized(header: string | null, token: string) {
   return supplied.length === expected.length && timingSafeEqual(supplied, expected)
 }
 
+function wakePullRequestWork(signals: WorkSignalPort, result: IngestPullRequestResult) {
+  if (result.status === "duplicate") return Effect.void
+  const reconciliation = signals.wake("reconciliation")
+  return result.status === "enqueued"
+    ? signals.wake("job").pipe(Effect.andThen(reconciliation))
+    : reconciliation
+}
+
+function wakeCommandWork(
+  signals: WorkSignalPort,
+  result: { readonly status: "duplicate" | "enqueued" },
+) {
+  return result.status === "enqueued" ? signals.wake("command") : Effect.void
+}
+
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort> {
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   return Effect.gen(function* () {
     const deliveryId = request.headers.get("x-github-delivery")
     const eventName = request.headers.get("x-github-event")
@@ -152,13 +169,16 @@ export function handleGitHubWebhook(
       receivedAt: options.now,
     }
     const store = yield* WorkflowStore
+    const signals = yield* WorkSignal
 
     if (decoded._tag === "PullRequest") {
       const result = yield* store.ingestPullRequest(delivery, decoded)
+      yield* wakePullRequestWork(signals, result)
       return Response.json(result, { status: 202 })
     }
     if (decoded._tag === "Command") {
       const result = yield* store.ingestCommand(delivery, decoded)
+      yield* wakeCommandWork(signals, result)
       return Response.json(result, { status: 202 })
     }
 

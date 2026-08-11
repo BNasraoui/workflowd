@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Scope } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
@@ -11,14 +11,19 @@ import {
   serveHookHttp,
   startHookService,
   superviseWorker,
+  workDownstreamLanes,
 } from "../src/runtime"
 import { WorkflowStoreLive } from "../src/store"
+import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
+import { WorkSignal, WorkSignalLive } from "../src/work-signal"
+import { runPublicationIteration } from "../src/worker"
 import {
   WorkflowStart,
   WorkflowStartValidationError,
   closedWorkflowStart,
 } from "../src/qrspi/workflow-start"
+import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./store/harness"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -195,6 +200,7 @@ test("superviseWorker resumes the same worker after an iteration failure", async
         yield* superviseWorker(
           "Test worker",
           0,
+          "job",
           Effect.suspend(() => {
             attempts += 1
             return attempts === 1
@@ -205,10 +211,188 @@ test("superviseWorker resumes the same worker after an iteration failure", async
         yield* Deferred.await(resumed)
         return attempts
       }),
-    ),
+    ).pipe(Effect.provide(WorkSignalLive)),
   )
 
   expect(recovered).toBe(2)
+})
+
+test("superviseWorker subscribes before its first claim and consumes a wake after idle", async () => {
+  let attempts = 0
+  const observed = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const signals = yield* WorkSignal
+        const claimedAgain = yield* Deferred.make<void>()
+        yield* superviseWorker(
+          "Test worker",
+          60_000,
+          "job",
+          Effect.suspend(() => {
+            attempts += 1
+            return attempts === 1
+              ? signals.wake("job").pipe(Effect.as("idle" as const))
+              : Deferred.succeed(claimedAgain, undefined).pipe(Effect.as("idle" as const))
+          }),
+        )
+        yield* Deferred.await(claimedAgain)
+        return attempts
+      }).pipe(Effect.provide(WorkSignalLive)),
+    ),
+  )
+
+  expect(observed).toBe(2)
+})
+
+test("superviseWorker retains fallback polling after an idle iteration", async () => {
+  let attempts = 0
+  const observed = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const claimedAgain = yield* Deferred.make<void>()
+        yield* superviseWorker(
+          "Test worker",
+          5,
+          "job",
+          Effect.sync(() => {
+            attempts += 1
+            if (attempts === 2) Effect.runSync(Deferred.succeed(claimedAgain, undefined))
+            return "idle" as const
+          }),
+        )
+        yield* Deferred.await(claimedAgain)
+        return attempts
+      }).pipe(Effect.provide(WorkSignalLive)),
+    ),
+  )
+
+  expect(observed).toBe(2)
+})
+
+test("superviseWorker preserves error backoff and scoped shutdown", async () => {
+  let attempts = 0
+  const result = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const signals = yield* WorkSignal
+        const failed = yield* Deferred.make<void>()
+        const resumed = yield* Deferred.make<void>()
+        const interrupted = yield* Deferred.make<void>()
+        const workerScope = yield* Scope.make()
+        yield* Scope.extend(
+          superviseWorker(
+            "Test worker",
+            40,
+            "job",
+            Effect.suspend(() => {
+              attempts += 1
+              if (attempts === 1) {
+                return Deferred.succeed(failed, undefined).pipe(
+                  Effect.andThen(Effect.fail("transient")),
+                )
+              }
+              return Deferred.succeed(resumed, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(Deferred.succeed(interrupted, undefined)),
+              )
+            }),
+          ),
+          workerScope,
+        )
+        yield* Deferred.await(failed)
+        yield* signals.wake("job")
+        yield* Effect.sleep(10)
+        const attemptsDuringBackoff = attempts
+        yield* Deferred.await(resumed)
+        yield* Scope.close(workerScope, Exit.void)
+        yield* Deferred.await(interrupted)
+        return { attemptsDuringBackoff, attempts }
+      }).pipe(Effect.provide(WorkSignalLive)),
+    ),
+  )
+
+  expect(result).toEqual({ attemptsDuringBackoff: 1, attempts: 2 })
+})
+
+test("publication completion wakes the job lane that now exposes queued Fix Work", async () => {
+  const result = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const signals = yield* WorkSignal
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "publication-unlocks-fix",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+          },
+          samplePullRequestEvent,
+        )
+        const review = yield* store.claimNextJob({
+          workerId: "review-worker",
+          now: new Date("2026-07-20T12:01:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (review === null) return yield* Effect.dieMessage("expected review")
+        yield* store.completeReviewJob({
+          jobId: review.id,
+          workerId: "review-worker",
+          completedAt: new Date("2026-07-20T12:01:01.000Z"),
+          review: changesRequestedReview,
+          autoFix: true,
+        })
+        const blockedFix = yield* store.claimNextJob({
+          workerId: "early-fix-worker",
+          now: new Date("2026-07-20T12:01:02.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        const jobWake = yield* signals.subscribe("job")
+        yield* superviseWorker(
+          "Publisher",
+          60_000,
+          "publication",
+          runPublicationIteration({
+            workerId: "publication-worker",
+            leaseDurationMs: 60_000,
+            maxAttempts: 3,
+            timeoutMs: 10_000,
+            now: () => new Date("2026-07-20T12:02:00.000Z"),
+          }),
+        )
+        yield* Queue.take(jobWake)
+        const fix = yield* store.claimNextJob({
+          workerId: "fix-worker",
+          now: new Date("2026-07-20T12:02:01.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        return { blockedFix, fix }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            makeStoreLayer(),
+            WorkSignalLive,
+            Layer.succeed(GitHub, {
+              fetchPullRequestSnapshot: () => Effect.die("unused"),
+              collectHeadEvidence: () => Effect.die("unused"),
+              publishReview: () => Effect.succeed("published"),
+            }),
+          ),
+        ),
+      ),
+    ),
+  )
+
+  expect(result.blockedFix).toBeNull()
+  expect(result.fix?._tag).toBe("FixWork")
+})
+
+test("job, command, and reconciliation workers declare conservative downstream wakes", () => {
+  expect(workDownstreamLanes("job")).toEqual(["publication"])
+  expect(workDownstreamLanes("publication")).toEqual(["job"])
+  expect(workDownstreamLanes("command")).toEqual(["job"])
+  expect(workDownstreamLanes("reconciliation")).toEqual(["job"])
 })
 
 describe("runHookService startup", () => {
@@ -233,6 +417,7 @@ describe("runHookService startup", () => {
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
     const TestAdapters = Layer.mergeAll(
+      WorkSignalLive,
       Layer.succeed(GitHub, {
         fetchPullRequestSnapshot: () => {
           githubCalls += 1
@@ -317,6 +502,7 @@ describe("runHookService startup", () => {
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
     const TestAdapters = Layer.mergeAll(
+      WorkSignalLive,
       Layer.succeed(GitHub, {
         fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
         publishReview: () => Effect.die("unexpected publish"),
