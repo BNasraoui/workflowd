@@ -360,7 +360,6 @@ test("publication completion wakes the job lane that now exposes queued Fix Work
             timeoutMs: 10_000,
             now: () => new Date("2026-07-20T12:02:00.000Z"),
           }),
-          workDownstreamLanes("publication"),
         )
         yield* Queue.take(jobWake)
         const fix = yield* store.claimNextJob({

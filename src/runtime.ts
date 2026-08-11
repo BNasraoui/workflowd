@@ -33,11 +33,11 @@ export function superviseWorker<A extends string, E, R>(
   pollIntervalMs: number,
   lane: WorkLane,
   iteration: Effect.Effect<A, E, R>,
-  downstream: ReadonlyArray<WorkLane> = [],
 ) {
   return Effect.gen(function* () {
     const signals = yield* WorkSignal
     const subscription = yield* signals.subscribe(lane)
+    const downstream = workDownstreamLanes(lane)
     return yield* Effect.forever(
       iteration.pipe(
         Effect.flatMap((result) =>
@@ -169,7 +169,6 @@ export function startHookService(
             now: () => new Date(),
           }),
         ),
-        workDownstreamLanes("job"),
       )
     }
 
@@ -202,7 +201,6 @@ export function startHookService(
           now: () => new Date(),
         }),
       ),
-      workDownstreamLanes("reconciliation"),
     )
 
     yield* superviseWorker(
@@ -220,7 +218,6 @@ export function startHookService(
           now: () => new Date(),
         }),
       ),
-      workDownstreamLanes("command"),
     )
 
     // Acquire the listener last so its finalizer stops acceptance and drains
