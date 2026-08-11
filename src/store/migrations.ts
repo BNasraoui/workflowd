@@ -616,6 +616,89 @@ const qrspiGenerationFormat = Effect.gen(function* () {
   `
 })
 
+const kernelEventWaitStore = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE kernel_workflow_instances (
+      instance_id TEXT PRIMARY KEY CHECK (length(instance_id) BETWEEN 1 AND 256),
+      workflow_type TEXT NOT NULL CHECK (length(workflow_type) BETWEEN 1 AND 128),
+      workflow_version INTEGER NOT NULL CHECK (workflow_version > 0),
+      workflow_key TEXT NOT NULL CHECK (length(workflow_key) BETWEEN 1 AND 256),
+      payload_json TEXT NOT NULL CHECK (
+        json_valid(payload_json) = 1
+          AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      created_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_events (
+      instance_id TEXT NOT NULL REFERENCES kernel_workflow_instances (instance_id),
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      dedupe_key TEXT NOT NULL CHECK (length(dedupe_key) BETWEEN 1 AND 256),
+      event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
+      event_version INTEGER NOT NULL CHECK (event_version > 0),
+      event_key TEXT NOT NULL CHECK (length(event_key) BETWEEN 1 AND 256),
+      payload_json TEXT NOT NULL CHECK (
+        json_valid(payload_json) = 1
+          AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      recorded_at TEXT NOT NULL,
+      PRIMARY KEY (instance_id, sequence),
+      UNIQUE (instance_id, dedupe_key)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_waits (
+      instance_id TEXT NOT NULL REFERENCES kernel_workflow_instances (instance_id),
+      wait_id TEXT NOT NULL CHECK (length(wait_id) BETWEEN 1 AND 256),
+      event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
+      event_version INTEGER NOT NULL CHECK (event_version > 0),
+      event_key TEXT NOT NULL CHECK (length(event_key) BETWEEN 1 AND 256),
+      after_sequence INTEGER NOT NULL CHECK (after_sequence >= 0),
+      registered_at TEXT NOT NULL,
+      PRIMARY KEY (instance_id, wait_id)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_wait_event_deliveries (
+      instance_id TEXT NOT NULL,
+      wait_id TEXT NOT NULL,
+      event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+      delivered_at TEXT NOT NULL,
+      PRIMARY KEY (instance_id, wait_id, event_sequence),
+      FOREIGN KEY (instance_id, wait_id)
+        REFERENCES kernel_waits (instance_id, wait_id),
+      FOREIGN KEY (instance_id, event_sequence)
+        REFERENCES kernel_events (instance_id, sequence)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE INDEX kernel_events_match
+    ON kernel_events (instance_id, event_type, event_version, event_key, sequence)
+  `
+  yield* sql`
+    CREATE INDEX kernel_waits_match
+    ON kernel_waits (instance_id, event_type, event_version, event_key, after_sequence)
+  `
+  yield* sql`
+    CREATE TRIGGER kernel_events_immutable_update
+    BEFORE UPDATE ON kernel_events
+    WHEN (SELECT ignore_check_constraints FROM pragma_ignore_check_constraints) = 0
+    BEGIN
+      SELECT RAISE(ABORT, 'kernel events are immutable');
+    END
+  `
+  yield* sql`
+    CREATE TRIGGER kernel_events_immutable_delete
+    BEFORE DELETE ON kernel_events
+    WHEN (SELECT ignore_check_constraints FROM pragma_ignore_check_constraints) = 0
+    BEGIN
+      SELECT RAISE(ABORT, 'kernel events are immutable');
+    END
+  `
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -636,5 +719,6 @@ export const runStoreMigrations = Migrator.make({})({
     ...migrationsThrough0008,
     "0009_qrspi_stage_definitions": qrspiStageDefinitions,
     "0010_qrspi_generation_format": qrspiGenerationFormat,
+    "0011_kernel_event_wait_store": kernelEventWaitStore,
   }),
 })

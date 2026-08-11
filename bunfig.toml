@@ -4,6 +4,7 @@ coverageThreshold = { lines = 0.6, functions = 0.6, statements = 0.6 }
 coverageReporter = ["text", "lcov"]
 coveragePathIgnorePatterns = [
   "src/store/errors.ts",
+  "src/kernel/event-store-errors.ts",
   "src/workspace/errors.ts",
   "src/qrspi/ports.ts",
 ]
