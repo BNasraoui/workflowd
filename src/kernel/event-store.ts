@@ -128,11 +128,17 @@ const ConsumeStateRow = Schema.Struct({
   wait_state: Schema.Literal("pending", "matched", "consumed", "cancelled"),
 })
 
+const compareJsonEntries = ([left]: [string, unknown], [right]: [string, unknown]): number => {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
 const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .sort(compareJsonEntries)
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(",")}}`
   }
@@ -173,6 +179,26 @@ const toDelivery = (row: typeof DeliveryRow.Type) => ({
   waitId: row.wait_id,
   eventSequence: row.event_sequence,
 })
+
+const toReadyDelivery = (decoded: typeof ReadyDeliveryRow.Type) => ({
+  ...toDelivery(decoded),
+  event: {
+    source: decoded.source,
+    sourceEventId: decoded.source_event_id,
+    type: decoded.event_type,
+    version: decoded.event_version,
+    key: decoded.event_key,
+    correlation: decoded.correlation,
+    payload: decoded.payload_json,
+    recordedAt: new Date(decoded.recorded_at),
+  },
+})
+
+const decodeReadyDelivery = (row: unknown, instanceId: string) =>
+  Schema.decodeUnknown(ReadyDeliveryRow)(row).pipe(
+    Effect.mapError(dataError("delivery", instanceId, instanceId)),
+    Effect.map(toReadyDelivery),
+  )
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -422,19 +448,17 @@ const make = Effect.gen(function* () {
               AND state = 'pending'`
           storedWait = { ...storedWait, state: "matched" }
         }
-      } else {
-        if (
-          storedWait.event_type !== decoded.condition.type ||
-          storedWait.event_version !== decoded.condition.version ||
-          storedWait.event_key !== decoded.condition.key ||
-          storedWait.correlation !== decoded.condition.correlation
-        ) {
-          return yield* new KernelStoreConflictError({
-            record: "wait",
-            key: decoded.waitId,
-            instanceId: decoded.instanceId,
-          })
-        }
+      } else if (
+        storedWait.event_type !== decoded.condition.type ||
+        storedWait.event_version !== decoded.condition.version ||
+        storedWait.event_key !== decoded.condition.key ||
+        storedWait.correlation !== decoded.condition.correlation
+      ) {
+        return yield* new KernelStoreConflictError({
+          record: "wait",
+          key: decoded.waitId,
+          instanceId: decoded.instanceId,
+        })
       }
       const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence, state
         FROM kernel_wait_event_deliveries
@@ -517,10 +541,11 @@ const make = Effect.gen(function* () {
     }).pipe(sql.withTransaction)
 
   const readReadyDeliveries: KernelEventStorePort["readReadyDeliveries"] = (instanceId) =>
-    Schema.decodeUnknown(Identifier)(instanceId).pipe(
-      Effect.mapError(inputError),
-      Effect.flatMap((decodedInstanceId) =>
-        sql`SELECT
+    Effect.gen(function* () {
+      const decodedInstanceId = yield* Schema.decodeUnknown(Identifier)(instanceId).pipe(
+        Effect.mapError(inputError),
+      )
+      const rows = yield* sql`SELECT
           delivery.instance_id, delivery.wait_id, delivery.event_sequence, delivery.state,
           wait.state AS wait_state,
           event.source, event.source_event_id, event.event_type, event.event_version,
@@ -530,30 +555,9 @@ const make = Effect.gen(function* () {
           ON wait.instance_id = delivery.instance_id AND wait.wait_id = delivery.wait_id
         JOIN kernel_events AS event ON event.sequence = delivery.event_sequence
         WHERE delivery.instance_id = ${decodedInstanceId} AND delivery.state = 'ready'
-        ORDER BY delivery.event_sequence, delivery.wait_id`.pipe(
-          Effect.flatMap((rows) =>
-            Effect.forEach(rows, (row) =>
-              Schema.decodeUnknown(ReadyDeliveryRow)(row).pipe(
-                Effect.mapError(dataError("delivery", decodedInstanceId, decodedInstanceId)),
-                Effect.map((decoded) => ({
-                  ...toDelivery(decoded),
-                  event: {
-                    source: decoded.source,
-                    sourceEventId: decoded.source_event_id,
-                    type: decoded.event_type,
-                    version: decoded.event_version,
-                    key: decoded.event_key,
-                    correlation: decoded.correlation,
-                    payload: decoded.payload_json,
-                    recordedAt: new Date(decoded.recorded_at),
-                  },
-                })),
-              ),
-            ),
-          ),
-        ),
-      ),
-    )
+        ORDER BY delivery.event_sequence, delivery.wait_id`
+      return yield* Effect.forEach(rows, (row) => decodeReadyDelivery(row, decodedInstanceId))
+    })
 
   return KernelEventStore.of({
     consumeDelivery,
