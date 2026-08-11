@@ -14,13 +14,16 @@ import {
   workDownstreamLanes,
 } from "../src/runtime"
 import { WorkflowStoreLive } from "../src/store"
+import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkSignal, WorkSignalLive } from "../src/work-signal"
+import { runPublicationIteration } from "../src/worker"
 import {
   WorkflowStart,
   WorkflowStartValidationError,
   closedWorkflowStart,
 } from "../src/qrspi/workflow-start"
+import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./store/harness"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -311,42 +314,86 @@ test("superviseWorker preserves error backoff and scoped shutdown", async () => 
   expect(result).toEqual({ attemptsDuringBackoff: 1, attempts: 2 })
 })
 
-test("non-idle workers wake their conservative downstream lanes", async () => {
-  const pending = await Effect.runPromise(
+test("publication completion wakes the job lane that now exposes queued Fix Work", async () => {
+  const result = await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
+        const store = yield* WorkflowStore
         const signals = yield* WorkSignal
-        const job = yield* signals.subscribe("job")
-        const publication = yield* signals.subscribe("publication")
-        const completed = yield* Deferred.make<void>()
-        let attempts = 0
-        yield* superviseWorker(
-          "Job worker",
-          60_000,
-          "job",
-          Effect.suspend(() => {
-            attempts += 1
-            return attempts === 1
-              ? Deferred.succeed(completed, undefined).pipe(Effect.as("completed" as const))
-              : Effect.never
-          }),
-          ["job", "publication"],
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "publication-unlocks-fix",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: new Date("2026-07-20T12:00:00.000Z"),
+          },
+          samplePullRequestEvent,
         )
-        yield* Deferred.await(completed)
-        yield* Effect.yieldNow()
-        return [yield* Queue.size(job), yield* Queue.size(publication)]
-      }).pipe(Effect.provide(WorkSignalLive)),
+        const review = yield* store.claimNextJob({
+          workerId: "review-worker",
+          now: new Date("2026-07-20T12:01:00.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        if (review === null) return yield* Effect.dieMessage("expected review")
+        yield* store.completeReviewJob({
+          jobId: review.id,
+          workerId: "review-worker",
+          completedAt: new Date("2026-07-20T12:01:01.000Z"),
+          review: changesRequestedReview,
+          autoFix: true,
+        })
+        const blockedFix = yield* store.claimNextJob({
+          workerId: "early-fix-worker",
+          now: new Date("2026-07-20T12:01:02.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        const jobWake = yield* signals.subscribe("job")
+        yield* superviseWorker(
+          "Publisher",
+          60_000,
+          "publication",
+          runPublicationIteration({
+            workerId: "publication-worker",
+            leaseDurationMs: 60_000,
+            maxAttempts: 3,
+            timeoutMs: 10_000,
+            now: () => new Date("2026-07-20T12:02:00.000Z"),
+          }),
+          workDownstreamLanes("publication"),
+        )
+        yield* Queue.take(jobWake)
+        const fix = yield* store.claimNextJob({
+          workerId: "fix-worker",
+          now: new Date("2026-07-20T12:02:01.000Z"),
+          leaseDurationMs: 60_000,
+        })
+        return { blockedFix, fix }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            makeStoreLayer(),
+            WorkSignalLive,
+            Layer.succeed(GitHub, {
+              fetchPullRequestSnapshot: () => Effect.die("unused"),
+              collectHeadEvidence: () => Effect.die("unused"),
+              publishReview: () => Effect.succeed("published"),
+            }),
+          ),
+        ),
+      ),
     ),
   )
 
-  expect(pending).toEqual([1, 1])
+  expect(result.blockedFix).toBeNull()
+  expect(result.fix?._tag).toBe("FixWork")
 })
 
 test("job, command, and reconciliation workers declare conservative downstream wakes", () => {
-  expect(workDownstreamLanes("job")).toEqual(["job", "publication"])
+  expect(workDownstreamLanes("job")).toEqual(["publication"])
+  expect(workDownstreamLanes("publication")).toEqual(["job"])
   expect(workDownstreamLanes("command")).toEqual(["job"])
   expect(workDownstreamLanes("reconciliation")).toEqual(["job"])
-  expect(workDownstreamLanes("publication")).toEqual([])
 })
 
 describe("runHookService startup", () => {

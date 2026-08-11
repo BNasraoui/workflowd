@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer, Logger } from "effect"
+import { Effect, Layer, Logger, Queue } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
@@ -207,11 +207,11 @@ describe("handleGitHubWebhook", () => {
   })
 
   test.each([
-    ["enqueued", "job"],
+    ["enqueued", ["job", "reconciliation"]],
     ["reconciliation_enqueued", "reconciliation"],
     ["duplicate", undefined],
-    ["ignored", undefined],
-  ] as const)("wakes only for committed pull request disposition %s", async (status, lane) => {
+    ["ignored", "reconciliation"],
+  ] as const)("wakes only for committed pull request disposition %s", async (status, lanes) => {
     const secret = "webhook-secret"
     const actions: Array<string> = []
     const request = signedRequest("pull_request", payload, `delivery-${status}`, secret)
@@ -234,7 +234,72 @@ describe("handleGitHubWebhook", () => {
     )
 
     expect(response.status).toBe(202)
-    expect(actions).toEqual(lane === undefined ? [`commit:${status}`] : [`commit:${status}`, lane])
+    expect(actions).toEqual([
+      `commit:${status}`,
+      ...(lanes === undefined ? [] : typeof lanes === "string" ? [lanes] : lanes),
+    ])
+  })
+
+  test("an accepted transition wakes and re-arms an existing reconciliation", async () => {
+    const secret = "webhook-secret"
+    const initialPayload = JSON.stringify({
+      ...JSON.parse(payload),
+      pull_request: { ...JSON.parse(payload).pull_request, updated_at: "2026-07-19T12:00:00.000Z" },
+    })
+    const ambiguousPayload = JSON.stringify({
+      ...JSON.parse(initialPayload),
+      action: "synchronize",
+      pull_request: {
+        ...JSON.parse(initialPayload).pull_request,
+        head: { ...JSON.parse(initialPayload).pull_request.head, sha: "e".repeat(40) },
+      },
+    })
+    const acceptedPayload = JSON.stringify({
+      ...JSON.parse(ambiguousPayload),
+      pull_request: {
+        ...JSON.parse(ambiguousPayload).pull_request,
+        updated_at: "2026-07-19T12:00:02.000Z",
+        head: { ...JSON.parse(ambiguousPayload).pull_request.head, sha: "f".repeat(40) },
+      },
+    })
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* handleGitHubWebhook(
+            signedRequest("pull_request", initialPayload, "rearm-initial", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:00:00.000Z") },
+          )
+          yield* handleGitHubWebhook(
+            signedRequest("pull_request", ambiguousPayload, "rearm-ambiguous", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:00:01.000Z") },
+          )
+          const store = yield* WorkflowStore
+          const first = yield* store.claimNextReconciliation({
+            workerId: "first-reconciler",
+            now: new Date("2026-07-19T12:01:00.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          if (first === null) return yield* Effect.dieMessage("expected reconciliation")
+          const signals = yield* WorkSignal
+          const wake = yield* signals.subscribe("reconciliation")
+          const response = yield* handleGitHubWebhook(
+            signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
+            { webhookSecret: secret, now: new Date("2026-07-19T12:01:01.000Z") },
+          )
+          yield* Queue.take(wake)
+          const rearmed = yield* store.claimNextReconciliation({
+            workerId: "second-reconciler",
+            now: new Date("2026-07-19T12:01:02.000Z"),
+            leaseDurationMs: 60_000,
+          })
+          return { body: yield* Effect.promise(() => response.json()), first, rearmed }
+        }).pipe(Effect.provide(TestLayer)),
+      ),
+    )
+
+    expect(result.body).toEqual({ status: "enqueued", generation: 2 })
+    expect(result.rearmed?.id).toBe(result.first.id)
   })
 
   test.each([

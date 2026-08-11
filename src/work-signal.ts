@@ -19,7 +19,7 @@ export const WorkSignalLive = Layer.scoped(
       command: yield* PubSub.sliding<void>(1),
     }
     yield* Effect.addFinalizer(() =>
-      Effect.all(Object.values(lanes).map(PubSub.shutdown)).pipe(Effect.asVoid),
+      Effect.all(Object.values(lanes).map((lane) => PubSub.shutdown(lane))).pipe(Effect.asVoid),
     )
     return {
       subscribe: (lane) => PubSub.subscribe(lanes[lane]),

@@ -111,12 +111,11 @@ export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "comm
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
     case "job":
-      return ["job", "publication"]
+      return ["publication"]
+    case "publication":
     case "command":
     case "reconciliation":
       return ["job"]
-    case "publication":
-      return []
   }
 }
 
