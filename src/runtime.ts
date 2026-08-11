@@ -1,4 +1,4 @@
-import { Data, Effect, FiberSet, Option } from "effect"
+import { Data, Effect, FiberSet, Option, Queue } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
@@ -10,6 +10,7 @@ import {
   runReconciliationIteration,
 } from "./worker"
 import { WorkflowStart } from "./qrspi/workflow-start"
+import { WorkSignal, type WorkLane } from "./work-signal"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -30,18 +31,28 @@ type ScopedHookRouteHandler<R> = (
 export function superviseWorker<A extends string, E, R>(
   name: string,
   pollIntervalMs: number,
+  lane: WorkLane,
   iteration: Effect.Effect<A, E, R>,
+  downstream: ReadonlyArray<WorkLane> = [],
 ) {
-  return Effect.forever(
-    iteration.pipe(
-      Effect.tap((result) => (result === "idle" ? Effect.sleep(pollIntervalMs) : Effect.void)),
-      Effect.catchAllCause((cause) =>
-        Effect.logError(`${name} iteration failed`, cause).pipe(
-          Effect.andThen(Effect.sleep(pollIntervalMs)),
+  return Effect.gen(function* () {
+    const signals = yield* WorkSignal
+    const subscription = yield* signals.subscribe(lane)
+    return yield* Effect.forever(
+      iteration.pipe(
+        Effect.flatMap((result) =>
+          result === "idle"
+            ? Effect.race(Queue.take(subscription), Effect.sleep(pollIntervalMs))
+            : Effect.forEach(downstream, signals.wake, { discard: true }),
+        ),
+        Effect.catchAllCause((cause) =>
+          Effect.logError(`${name} iteration failed`, cause).pipe(
+            Effect.andThen(Effect.sleep(pollIntervalMs)),
+          ),
         ),
       ),
-    ),
-  ).pipe(Effect.forkScoped)
+    ).pipe(Effect.forkScoped)
+  })
 }
 
 function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHookRouteHandler<R>) {
@@ -97,6 +108,18 @@ export function serveHookHttp<R>(
 
 export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
 
+export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
+  switch (lane) {
+    case "job":
+      return ["job", "publication"]
+    case "command":
+    case "reconciliation":
+      return ["job"]
+    case "publication":
+      return []
+  }
+}
+
 export function startHookService(
   config: AppConfig,
   observeWorkerIteration: (name: RuntimeWorkerName) => Effect.Effect<void> = () => Effect.void,
@@ -132,6 +155,7 @@ export function startHookService(
       yield* superviseWorker(
         "Job worker",
         config.worker.pollIntervalMs,
+        "job",
         observed(
           "job",
           runJobIteration({
@@ -146,12 +170,14 @@ export function startHookService(
             now: () => new Date(),
           }),
         ),
+        workDownstreamLanes("job"),
       )
     }
 
     yield* superviseWorker(
       "Publisher",
       config.worker.pollIntervalMs,
+      "publication",
       observed(
         "publication",
         runPublicationIteration({
@@ -167,6 +193,7 @@ export function startHookService(
     yield* superviseWorker(
       "Reconciliation",
       config.worker.pollIntervalMs,
+      "reconciliation",
       observed(
         "reconciliation",
         runReconciliationIteration({
@@ -176,11 +203,13 @@ export function startHookService(
           now: () => new Date(),
         }),
       ),
+      workDownstreamLanes("reconciliation"),
     )
 
     yield* superviseWorker(
       "Command worker",
       config.worker.pollIntervalMs,
+      "command",
       observed(
         "command",
         runCommandIteration({
@@ -192,6 +221,7 @@ export function startHookService(
           now: () => new Date(),
         }),
       ),
+      workDownstreamLanes("command"),
     )
 
     // Acquire the listener last so its finalizer stops acceptance and drains

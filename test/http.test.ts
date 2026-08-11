@@ -4,13 +4,14 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Logger } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
-import { WorkflowStore } from "../src/store/contracts"
+import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
+import { WorkSignal, WorkSignalLive, type WorkSignalPort } from "../src/work-signal"
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
 import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
-const TestLayer = WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))
+const TestLayer = Layer.merge(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)), WorkSignalLive)
 
 const payload = JSON.stringify({
   action: "opened",
@@ -204,7 +205,99 @@ describe("handleGitHubWebhook", () => {
 
     expect(response.status).toBe(400)
   })
+
+  test.each([
+    ["enqueued", "job"],
+    ["reconciliation_enqueued", "reconciliation"],
+    ["duplicate", undefined],
+    ["ignored", undefined],
+  ] as const)("wakes only for committed pull request disposition %s", async (status, lane) => {
+    const secret = "webhook-secret"
+    const actions: Array<string> = []
+    const request = signedRequest("pull_request", payload, `delivery-${status}`, secret)
+    const layer = dispositionLayer(
+      {
+        ingestPullRequest: () =>
+          Effect.sync(() => {
+            actions.push(`commit:${status}`)
+            return status === "duplicate" ? { status } : { status, generation: 1 }
+          }),
+      },
+      actions,
+    )
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: secret,
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(response.status).toBe(202)
+    expect(actions).toEqual(lane === undefined ? [`commit:${status}`] : [`commit:${status}`, lane])
+  })
+
+  test.each([
+    ["enqueued", "command"],
+    ["duplicate", undefined],
+  ] as const)("wakes only for committed command disposition %s", async (status, lane) => {
+    const secret = "webhook-secret"
+    const actions: Array<string> = []
+    const commandPayload = JSON.stringify({
+      action: "created",
+      installation: { id: 91 },
+      repository: JSON.parse(payload).repository,
+      issue: { number: 7, pull_request: { url: "https://api.github.test/pr/7" } },
+      comment: { id: 10, body: "/agent review", user: { login: "example-owner" } },
+    })
+    const request = signedRequest("issue_comment", commandPayload, `command-${status}`, secret)
+    const layer = dispositionLayer(
+      {
+        ingestCommand: () =>
+          Effect.sync(() => {
+            actions.push(`commit:${status}`)
+            return { status }
+          }),
+      },
+      actions,
+    )
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(request, {
+        webhookSecret: secret,
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(response.status).toBe(202)
+    expect(actions).toEqual(lane === undefined ? [`commit:${status}`] : [`commit:${status}`, lane])
+  })
 })
+
+function signedRequest(event: string, body: string, deliveryId: string, secret: string) {
+  const signature = `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`
+  return new Request("http://localhost/hooks/github", {
+    method: "POST",
+    body,
+    headers: {
+      "x-github-delivery": deliveryId,
+      "x-github-event": event,
+      "x-hub-signature-256": signature,
+    },
+  })
+}
+
+function dispositionLayer(store: Partial<WorkflowStorePort>, actions: Array<string>) {
+  const signals: WorkSignalPort = {
+    subscribe: () => Effect.die("unused"),
+    wake: (lane) => Effect.sync(() => actions.push(lane)),
+  }
+  const StoreWithDisposition = Layer.effect(
+    WorkflowStore,
+    Effect.map(WorkflowStore, (live) => ({ ...live, ...store })),
+  ).pipe(Layer.provide(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))))
+  return Layer.merge(StoreWithDisposition, Layer.succeed(WorkSignal, signals))
+}
 
 describe("routeRequest", () => {
   test("serves local health without touching the webhook store", async () => {

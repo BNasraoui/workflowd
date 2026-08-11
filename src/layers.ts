@@ -27,6 +27,7 @@ import {
 import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
 import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
+import { WorkSignalLive } from "./work-signal"
 
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
@@ -152,6 +153,7 @@ export const makeLiveLayer = (config: AppConfig) => {
         )
   return Layer.mergeAll(
     WorkflowStoreLive,
+    WorkSignalLive,
     Layer.effect(
       GitHub,
       Effect.tryPromise({
