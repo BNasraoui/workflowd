@@ -443,7 +443,8 @@ const make = Effect.gen(function* () {
       }
       const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence, state
         FROM kernel_wait_event_deliveries
-        WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}`
+        WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}
+          AND state = 'ready'`
       const deliveries = yield* decodeDeliveries(deliveryRows, decoded.waitId, decoded.instanceId)
       return {
         status: inserted.length > 0 ? ("registered" as const) : ("duplicate" as const),

@@ -212,3 +212,44 @@ test("a matched wait also blocks another active wait", async () => {
 
   expect(result._tag).toBe("Left")
 })
+
+test("replaying a matched wait returns its ready delivery", async () => {
+  const result = await runKernel(
+    Effect.gen(function* () {
+      const store = yield* KernelEventStore
+      yield* store.createInstance(instance)
+      yield* store.registerWait(wait("wait-a"))
+      yield* store.recordEvent(event("event-1"))
+      return yield* store.registerWait(wait("wait-a"))
+    }),
+  )
+
+  expect(result.status).toBe("duplicate")
+  expect(result.deliveries).toEqual([
+    { instanceId: "instance-1", waitId: "wait-a", eventSequence: 1 },
+  ])
+})
+
+test("replaying a consumed wait does not return its consumed delivery", async () => {
+  const result = await runKernel(
+    Effect.gen(function* () {
+      const store = yield* KernelEventStore
+      yield* store.createInstance(instance)
+      yield* store.registerWait(wait("wait-a"))
+      const recorded = yield* store.recordEvent(event("event-1"))
+      yield* store.consumeDelivery({
+        instanceId: "instance-1",
+        waitId: "wait-a",
+        eventSequence: recorded.event.sequence,
+        expectedCursor: 0,
+      })
+      const replay = yield* store.registerWait(wait("wait-a"))
+      const ready = yield* store.readReadyDeliveries("instance-1")
+      return { replay, ready }
+    }),
+  )
+
+  expect(result.replay.status).toBe("duplicate")
+  expect(result.replay.deliveries).toEqual([])
+  expect(result.ready).toEqual([])
+})
