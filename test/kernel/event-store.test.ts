@@ -22,13 +22,19 @@ const instance = (instanceId = "instance-1") => ({
 const event = (sourceEventId: string) => ({
   source: "github",
   sourceEventId,
-  event: { type: "approval", version: 1, correlation: "gate-7", payload: { ok: true } },
+  event: {
+    type: "approval",
+    version: 1,
+    key: "approval-key",
+    correlation: "gate-7",
+    payload: { ok: true },
+  },
   recordedAt: timestamp,
 })
 const wait = (waitId: string) => ({
   instanceId: "instance-1",
   waitId,
-  condition: { type: "approval", version: 1, correlation: "gate-7" },
+  condition: { type: "approval", version: 1, key: "approval-key", correlation: "gate-7" },
   registeredAt: timestamp,
 })
 
@@ -54,7 +60,7 @@ describe("kernel event store replay", () => {
 
     expect(result.first.status).toBe("created")
     expect(result.replay.status).toBe("duplicate")
-    expect(result.replay.instance.startSequence).toBe(result.first.instance.startSequence)
+    expect(result.replay.instance.eventCursor).toBe(result.first.instance.eventCursor)
   })
 
   test("rejects conflicting instance identity reuse", async () => {
@@ -67,6 +73,22 @@ describe("kernel event store replay", () => {
     )
 
     expect(error).toMatchObject({ _tag: "KernelStoreConflictError", record: "instance" })
+  })
+
+  test("instance replay ignores a later receipt timestamp and returns the first", async () => {
+    const result = await runKernel(
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        yield* store.createInstance(instance())
+        return yield* store.createInstance({
+          ...instance(),
+          createdAt: new Date("2026-08-11T10:00:00.000Z"),
+        })
+      }),
+    )
+
+    expect(result.status).toBe("duplicate")
+    expect(result.instance.createdAt).toEqual(timestamp)
   })
 
   test("idempotently replays canonical event payloads", async () => {
@@ -105,6 +127,45 @@ describe("kernel event store replay", () => {
     expect(error).toMatchObject({ _tag: "KernelStoreConflictError", record: "event" })
   })
 
+  test("rejects a changed semantic event key", async () => {
+    const result = await runKernel(
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        const original = {
+          ...event("key-conflict"),
+          event: { ...event("key-conflict").event, key: "key-a" },
+        }
+        yield* store.recordEvent(original)
+        return yield* store
+          .recordEvent({ ...original, event: { ...original.event, key: "key-b" } })
+          .pipe(Effect.either)
+      }),
+    )
+
+    expect(result._tag).toBe("Left")
+  })
+
+  test("event replay ignores a later receipt timestamp and returns no deliveries", async () => {
+    const result = await runKernel(
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        yield* store.createInstance(instance())
+        yield* store.registerWait(wait("event-time"))
+        const first = yield* store.recordEvent(event("event-time"))
+        const replay = yield* store.recordEvent({
+          ...event("event-time"),
+          recordedAt: new Date("2026-08-11T10:00:00.000Z"),
+        })
+        return { first, replay }
+      }),
+    )
+
+    expect(result.first.deliveries).toHaveLength(1)
+    expect(result.replay.status).toBe("duplicate")
+    expect(result.replay.event.recordedAt).toEqual(timestamp)
+    expect(result.replay.deliveries).toEqual([])
+  })
+
   test("idempotently replays a wait and rejects changed conditions", async () => {
     const result = await runKernel(
       Effect.gen(function* () {
@@ -124,6 +185,23 @@ describe("kernel event store replay", () => {
 
     expect([result.first.status, result.replay.status]).toEqual(["registered", "duplicate"])
     expect(result.conflict).toMatchObject({ _tag: "KernelStoreConflictError", record: "wait" })
+  })
+
+  test("wait replay ignores a later receipt timestamp and returns the first", async () => {
+    const result = await runKernel(
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        yield* store.createInstance(instance())
+        yield* store.registerWait(wait("wait-time"))
+        return yield* store.registerWait({
+          ...wait("wait-time"),
+          registeredAt: new Date("2026-08-11T10:00:00.000Z"),
+        })
+      }),
+    )
+
+    expect(result.status).toBe("duplicate")
+    expect(result.wait.registeredAt).toEqual(timestamp)
   })
 
   test("unrelated malformed wait data fails closed", async () => {
@@ -157,7 +235,7 @@ describe("kernel malformed rows and rollback", () => {
         yield* sql`PRAGMA ignore_check_constraints = ON`
         yield* sql`INSERT INTO kernel_workflow_instances (
           instance_id, workflow_type, workflow_version, workflow_key, payload_json,
-          start_sequence, created_at
+          event_cursor, created_at
         ) VALUES ('instance-1', 'review', 1, 'repo', '{}', -1, ${timestamp.toISOString()})`
         return yield* store.createInstance(instance()).pipe(Effect.flip)
       }),
@@ -174,9 +252,9 @@ describe("kernel malformed rows and rollback", () => {
         yield* store.createInstance(instance())
         yield* sql`PRAGMA ignore_check_constraints = ON`
         yield* sql`INSERT INTO kernel_events (
-          sequence, source, source_event_id, event_type, event_version, correlation,
+          sequence, source, source_event_id, event_type, event_version, event_key, correlation,
           payload_json, recorded_at
-        ) VALUES (1, 'github', 'malformed', 'approval', 1, 'gate-7', '{bad',
+        ) VALUES (1, 'github', 'malformed', 'approval', 1, 'approval-key', 'gate-7', '{bad',
           ${timestamp.toISOString()})`
         const error = yield* store.registerWait(wait("rollback-wait")).pipe(Effect.flip)
         const rows = yield* sql`SELECT wait_id FROM kernel_waits WHERE wait_id = 'rollback-wait'`
@@ -195,9 +273,12 @@ describe("kernel malformed rows and rollback", () => {
         const sql = yield* SqlClient.SqlClient
         yield* store.createInstance(instance())
         yield* sql`INSERT INTO kernel_waits (
-          instance_id, wait_id, event_type, event_version, correlation,
-          after_sequence, registered_at
-        ) VALUES ('instance-1', 'malformed-wait', 'approval', 1, 'gate-7', 0, 'bad-date')`
+          instance_id, wait_id, event_type, event_version, event_key, correlation,
+          after_sequence, state, registered_at
+        ) VALUES (
+          'instance-1', 'malformed-wait', 'approval', 1, 'approval-key', 'gate-7',
+          0, 'pending', 'bad-date'
+        )`
         const error = yield* store.recordEvent(event("rollback-event")).pipe(Effect.flip)
         const rows = yield* sql`SELECT sequence FROM kernel_events
           WHERE source_event_id = 'rollback-event'`
@@ -219,8 +300,10 @@ describe("kernel malformed rows and rollback", () => {
         yield* sql`PRAGMA foreign_keys = OFF`
         yield* sql`PRAGMA ignore_check_constraints = ON`
         yield* sql`INSERT INTO kernel_wait_event_deliveries (
-          instance_id, wait_id, event_sequence, delivered_at
-        ) VALUES ('instance-1', '', ${recorded.event.sequence}, ${timestamp.toISOString()})`
+          instance_id, wait_id, event_sequence, state, delivered_at
+        ) VALUES (
+          'instance-1', '', ${recorded.event.sequence}, 'ready', ${timestamp.toISOString()}
+        )`
         return yield* store.readReadyDeliveries("instance-1").pipe(Effect.flip)
       }),
     )
@@ -257,6 +340,7 @@ describe("kernel byte envelopes", () => {
           event: {
             type: "t".repeat(128),
             version: 1,
+            key: "k".repeat(256),
             correlation: "c".repeat(256),
             payload: "p".repeat(65_534),
           },
@@ -268,6 +352,7 @@ describe("kernel byte envelopes", () => {
           event: {
             type: "é".repeat(64),
             version: 1,
+            key: "é".repeat(128),
             correlation: "é".repeat(128),
             payload: "é".repeat(32_767),
           },
@@ -297,6 +382,12 @@ describe("kernel byte envelopes", () => {
           store
             .recordEvent({
               ...base,
+              event: { ...base.event, key: `${"é".repeat(128)}a` },
+            })
+            .pipe(Effect.either),
+          store
+            .recordEvent({
+              ...base,
               event: { ...base.event, correlation: `${"é".repeat(128)}a` },
             })
             .pipe(Effect.either),
@@ -311,6 +402,6 @@ describe("kernel byte envelopes", () => {
       }),
     )
 
-    expect(tags).toEqual(Array.from({ length: 5 }, () => "KernelStoreInputError"))
+    expect(tags).toEqual(Array.from({ length: 6 }, () => "KernelStoreInputError"))
   })
 })

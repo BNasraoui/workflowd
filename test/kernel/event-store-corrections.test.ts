@@ -134,7 +134,7 @@ describe("one-shot global event ledger corrections", () => {
 
     expect(result._tag).toBe("Right")
     if (result._tag === "Right") {
-      expect(result.right.created.instance.startSequence).toBe(1)
+      expect(result.right.created.instance.eventCursor).toBe(1)
       expect(result.right.registered.deliveries).toEqual([])
     }
   })
@@ -191,10 +191,10 @@ describe("one-shot global event ledger corrections", () => {
         const sql = yield* SqlClient.SqlClient
         const recorded = yield* store.recordEvent(event("replace-target"))
         return yield* sql`INSERT OR REPLACE INTO kernel_events (
-          sequence, source, source_event_id, event_type, event_version, correlation,
+          sequence, source, source_event_id, event_type, event_version, event_key, correlation,
           payload_json, recorded_at
         ) VALUES (
-          ${recorded.event.sequence}, 'github', 'replace-target', 'approval', 1,
+          ${recorded.event.sequence}, 'github', 'replace-target', 'approval', 1, 'gate-7',
           'gate-7', '{"approved":false}', ${timestamp.toISOString()}
         )`.pipe(Effect.either)
       }),
@@ -210,10 +210,10 @@ describe("one-shot global event ledger corrections", () => {
         const sql = yield* SqlClient.SqlClient
         yield* store.recordEvent(event("replace-identical"))
         return yield* sql`INSERT OR REPLACE INTO kernel_events (
-          source, source_event_id, event_type, event_version, correlation,
+          source, source_event_id, event_type, event_version, event_key, correlation,
           payload_json, recorded_at
         ) VALUES (
-          'github', 'replace-identical', 'approval', 1, 'gate-7',
+          'github', 'replace-identical', 'approval', 1, 'gate-7', 'gate-7',
           '{"approved":true}', ${timestamp.toISOString()}
         )`.pipe(Effect.either)
       }),
@@ -253,17 +253,18 @@ describe("one-shot global event ledger corrections", () => {
           readonly source?: string
           readonly sourceEventId?: string
           readonly type?: string
+          readonly key?: string
           readonly correlation?: string
           readonly payload?: string
         }) => sql`
           INSERT INTO kernel_events (
-            sequence, source, source_event_id, event_type, event_version, correlation,
+            sequence, source, source_event_id, event_type, event_version, event_key, correlation,
             payload_json, recorded_at
           ) VALUES (
             ${overrides.sequence},
             ${overrides.source ?? "source"},
             ${overrides.sourceEventId ?? crypto.randomUUID()},
-            ${overrides.type ?? "type"}, 1,
+            ${overrides.type ?? "type"}, 1, ${overrides.key ?? "key"},
             ${overrides.correlation ?? "correlation"},
             ${overrides.payload ?? "null"}, ${timestamp.toISOString()}
           )
@@ -272,29 +273,30 @@ describe("one-shot global event ledger corrections", () => {
           insertEvent({ sequence: 100, source: `${"é".repeat(64)}a` }).pipe(Effect.either),
           insertEvent({ sequence: 101, sourceEventId: `${"é".repeat(128)}a` }).pipe(Effect.either),
           insertEvent({ sequence: 102, type: `${"é".repeat(64)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 103, correlation: `${"é".repeat(128)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 104, payload: JSON.stringify("p".repeat(65_535)) }).pipe(
+          insertEvent({ sequence: 103, key: `${"é".repeat(128)}a` }).pipe(Effect.either),
+          insertEvent({ sequence: 104, correlation: `${"é".repeat(128)}a` }).pipe(Effect.either),
+          insertEvent({ sequence: 105, payload: JSON.stringify("p".repeat(65_535)) }).pipe(
             Effect.either,
           ),
           sql`INSERT INTO kernel_workflow_instances (
             instance_id, workflow_type, workflow_version, workflow_key, payload_json,
-            start_sequence, created_at
+            event_cursor, created_at
           ) VALUES (
             ${`${"é".repeat(128)}a`}, 'review', 1, 'key', 'null', 0,
             ${timestamp.toISOString()}
           )`.pipe(Effect.either),
           sql`INSERT INTO kernel_waits (
-            instance_id, wait_id, event_type, event_version, correlation,
-            after_sequence, registered_at
+            instance_id, wait_id, event_type, event_version, event_key, correlation,
+            after_sequence, state, registered_at
           ) VALUES (
-            'instance-1', ${`${"é".repeat(128)}a`}, 'type', 1, 'correlation', 0,
-            ${timestamp.toISOString()}
+            'instance-1', ${`${"é".repeat(128)}a`}, 'type', 1, 'key', 'correlation',
+            0, 'pending', ${timestamp.toISOString()}
           )`.pipe(Effect.either),
         ])
         return results.map(({ _tag }) => _tag)
       }),
     )
 
-    expect(tags).toEqual(Array.from({ length: 7 }, () => "Left"))
+    expect(tags).toEqual(Array.from({ length: 8 }, () => "Left"))
   })
 })

@@ -3,6 +3,9 @@ import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import {
+  type ConsumeDeliveryInput,
+  type ConsumeDeliveryResult,
+  ConsumeDeliveryInput as ConsumeDeliveryInputSchema,
   type CreateInstanceResult,
   MAX_KERNEL_PAYLOAD_BYTES,
   type ReadyWaitEventDelivery,
@@ -38,6 +41,9 @@ type KernelStoreError =
   SqlError | KernelStoreConflictError | KernelStoreDataError | KernelStoreInputError
 
 export type KernelEventStorePort = {
+  readonly consumeDelivery: (
+    input: ConsumeDeliveryInput,
+  ) => Effect.Effect<ConsumeDeliveryResult, KernelStoreError>
   readonly createInstance: (
     input: WorkflowInstanceInput,
   ) => Effect.Effect<CreateInstanceResult, KernelStoreError>
@@ -71,7 +77,7 @@ const InstanceRow = Schema.Struct({
   workflow_version: Schema.Int.pipe(Schema.positive()),
   workflow_key: Identifier,
   payload_json: JsonText,
-  start_sequence: NonNegativeSequence,
+  event_cursor: NonNegativeSequence,
   created_at: Timestamp,
 })
 const EventRow = Schema.Struct({
@@ -80,6 +86,7 @@ const EventRow = Schema.Struct({
   source_event_id: RecordEventInputSchema.fields.sourceEventId,
   event_type: RecordEventInputSchema.fields.event.fields.type,
   event_version: Schema.Int.pipe(Schema.positive()),
+  event_key: Identifier,
   correlation: Identifier,
   payload_json: JsonText,
   recorded_at: Timestamp,
@@ -89,14 +96,17 @@ const WaitRow = Schema.Struct({
   wait_id: Identifier,
   event_type: RegisterWaitInputSchema.fields.condition.fields.type,
   event_version: Schema.Int.pipe(Schema.positive()),
+  event_key: Identifier,
   correlation: Identifier,
   after_sequence: NonNegativeSequence,
+  state: Schema.Literal("pending", "matched", "consumed", "cancelled"),
   registered_at: Timestamp,
 })
 const DeliveryRow = Schema.Struct({
   instance_id: Identifier,
   wait_id: Identifier,
   event_sequence: PositiveSequence,
+  state: Schema.Literal("ready", "consumed", "cancelled"),
 })
 const ReadyDeliveryRow = Schema.Struct({
   ...DeliveryRow.fields,
@@ -104,9 +114,17 @@ const ReadyDeliveryRow = Schema.Struct({
   source_event_id: RecordEventInputSchema.fields.sourceEventId,
   event_type: RecordEventInputSchema.fields.event.fields.type,
   event_version: Schema.Int.pipe(Schema.positive()),
+  event_key: Identifier,
   correlation: Identifier,
   payload_json: JsonText,
   recorded_at: Timestamp,
+})
+const ConsumeStateRow = Schema.Struct({
+  event_cursor: NonNegativeSequence,
+  event_sequence: PositiveSequence,
+  after_sequence: NonNegativeSequence,
+  delivery_state: Schema.Literal("ready", "consumed", "cancelled"),
+  wait_state: Schema.Literal("pending", "matched", "consumed", "cancelled"),
 })
 
 const canonicalJson = (value: unknown): string => {
@@ -171,10 +189,10 @@ const make = Effect.gen(function* () {
   const createInstance: KernelEventStorePort["createInstance"] = (input) =>
     Effect.gen(function* () {
       const { decoded, payloadJson } = yield* decodeInstanceInput(input)
-      const inserted = yield* sql<{ readonly start_sequence: number }>`
+      const inserted = yield* sql<{ readonly event_cursor: number }>`
         INSERT INTO kernel_workflow_instances (
           instance_id, workflow_type, workflow_version, workflow_key, payload_json,
-          start_sequence, created_at
+          event_cursor, created_at
         ) VALUES (
           ${decoded.instanceId}, ${decoded.workflowType}, ${decoded.workflowVersion},
           ${decoded.workflowKey}, ${payloadJson},
@@ -182,12 +200,12 @@ const make = Effect.gen(function* () {
           ${decoded.createdAt.toISOString()}
         )
         ON CONFLICT (instance_id) DO NOTHING
-        RETURNING start_sequence
+        RETURNING event_cursor
       `
       if (inserted.length > 0) {
         return {
           status: "created" as const,
-          instance: { ...decoded, startSequence: inserted[0]!.start_sequence },
+          instance: { ...decoded, eventCursor: inserted[0]!.event_cursor },
         }
       }
       const rows = yield* sql`SELECT * FROM kernel_workflow_instances
@@ -199,8 +217,7 @@ const make = Effect.gen(function* () {
         row.workflow_type !== decoded.workflowType ||
         row.workflow_version !== decoded.workflowVersion ||
         row.workflow_key !== decoded.workflowKey ||
-        canonicalJson(row.payload_json) !== payloadJson ||
-        row.created_at !== decoded.createdAt.toISOString()
+        canonicalJson(row.payload_json) !== payloadJson
       ) {
         return yield* new KernelStoreConflictError({
           record: "instance",
@@ -210,7 +227,12 @@ const make = Effect.gen(function* () {
       }
       return {
         status: "duplicate" as const,
-        instance: { ...decoded, startSequence: row.start_sequence },
+        instance: {
+          ...decoded,
+          payload: row.payload_json,
+          createdAt: new Date(row.created_at),
+          eventCursor: row.event_cursor,
+        },
       }
     }).pipe(sql.withTransaction)
 
@@ -219,8 +241,8 @@ const make = Effect.gen(function* () {
       const { decoded, payloadJson } = yield* decodeEventInput(input)
       const inserted = yield* sql<{ readonly sequence: number }>`
           INSERT INTO kernel_events (
-            sequence, source, source_event_id, event_type, event_version, correlation,
-            payload_json, recorded_at
+            sequence, source, source_event_id, event_type, event_version, event_key,
+            correlation, payload_json, recorded_at
           ) VALUES (
             COALESCE(
               (SELECT sequence FROM kernel_events
@@ -228,8 +250,8 @@ const make = Effect.gen(function* () {
               (SELECT COALESCE(MAX(sequence), 0) + 1 FROM kernel_events)
             ),
             ${decoded.source}, ${decoded.sourceEventId}, ${decoded.event.type},
-            ${decoded.event.version}, ${decoded.event.correlation}, ${payloadJson},
-            ${decoded.recordedAt.toISOString()}
+            ${decoded.event.version}, ${decoded.event.key}, ${decoded.event.correlation},
+            ${payloadJson}, ${decoded.recordedAt.toISOString()}
           )
           ON CONFLICT (source, source_event_id) DO NOTHING
           RETURNING sequence
@@ -252,8 +274,10 @@ const make = Effect.gen(function* () {
           LEFT JOIN kernel_wait_event_deliveries AS delivery
             ON delivery.instance_id = wait.instance_id AND delivery.wait_id = wait.wait_id
           WHERE delivery.wait_id IS NULL
+            AND wait.state = 'pending'
             AND wait.event_type = ${decoded.event.type}
             AND wait.event_version = ${decoded.event.version}
+            AND wait.event_key = ${decoded.event.key}
             AND wait.correlation = ${decoded.event.correlation}
             AND wait.after_sequence < ${sequence}`
         yield* Effect.forEach(pendingWaits, (row) =>
@@ -263,18 +287,33 @@ const make = Effect.gen(function* () {
         )
         yield* sql`
           INSERT INTO kernel_wait_event_deliveries (
-            instance_id, wait_id, event_sequence, delivered_at
+            instance_id, wait_id, event_sequence, state, delivered_at
           )
-          SELECT wait.instance_id, wait.wait_id, ${sequence}, ${decoded.recordedAt.toISOString()}
+          SELECT wait.instance_id, wait.wait_id, ${sequence}, 'ready',
+            ${decoded.recordedAt.toISOString()}
           FROM kernel_waits AS wait
           LEFT JOIN kernel_wait_event_deliveries AS delivery
             ON delivery.instance_id = wait.instance_id AND delivery.wait_id = wait.wait_id
           WHERE delivery.wait_id IS NULL
+            AND wait.state = 'pending'
             AND wait.event_type = ${decoded.event.type}
             AND wait.event_version = ${decoded.event.version}
+            AND wait.event_key = ${decoded.event.key}
             AND wait.correlation = ${decoded.event.correlation}
             AND wait.after_sequence < ${sequence}
           ON CONFLICT (instance_id, wait_id) DO NOTHING
+        `
+        yield* sql`
+          UPDATE kernel_waits AS wait
+          SET state = 'matched'
+          WHERE state = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM kernel_wait_event_deliveries AS delivery
+              WHERE delivery.instance_id = wait.instance_id
+                AND delivery.wait_id = wait.wait_id
+                AND delivery.event_sequence = ${sequence}
+                AND delivery.state = 'ready'
+            )
         `
       } else {
         status = "duplicate"
@@ -286,9 +325,9 @@ const make = Effect.gen(function* () {
         if (
           row.event_type !== decoded.event.type ||
           row.event_version !== decoded.event.version ||
+          row.event_key !== decoded.event.key ||
           row.correlation !== decoded.event.correlation ||
-          canonicalJson(row.payload_json) !== payloadJson ||
-          row.recorded_at !== decoded.recordedAt.toISOString()
+          canonicalJson(row.payload_json) !== payloadJson
         ) {
           return yield* new KernelStoreConflictError({
             record: "event",
@@ -296,8 +335,25 @@ const make = Effect.gen(function* () {
           })
         }
         sequence = row.sequence
+        return {
+          status,
+          event: {
+            source: row.source,
+            sourceEventId: row.source_event_id,
+            event: {
+              type: row.event_type,
+              version: row.event_version,
+              key: row.event_key,
+              correlation: row.correlation,
+              payload: row.payload_json,
+            },
+            recordedAt: new Date(row.recorded_at),
+            sequence,
+          },
+          deliveries: [],
+        }
       }
-      const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence
+      const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence, state
         FROM kernel_wait_event_deliveries WHERE event_sequence = ${sequence}
         ORDER BY instance_id, wait_id`
       const deliveries = yield* decodeDeliveries(
@@ -312,39 +368,46 @@ const make = Effect.gen(function* () {
       const decoded = yield* Schema.decodeUnknown(RegisterWaitInputSchema)(input).pipe(
         Effect.mapError(inputError),
       )
-      const instanceRows = yield* sql`SELECT * FROM kernel_workflow_instances
-        WHERE instance_id = ${decoded.instanceId}`
-      const instance = yield* Schema.decodeUnknown(InstanceRow)(instanceRows[0]).pipe(
-        Effect.mapError(dataError("instance", decoded.instanceId, decoded.instanceId)),
-      )
       const inserted = yield* sql`
         INSERT INTO kernel_waits (
-          instance_id, wait_id, event_type, event_version, correlation,
-          after_sequence, registered_at
-        ) VALUES (
-          ${decoded.instanceId}, ${decoded.waitId}, ${decoded.condition.type},
-          ${decoded.condition.version}, ${decoded.condition.correlation},
-          ${instance.start_sequence}, ${decoded.registeredAt.toISOString()}
+          instance_id, wait_id, event_type, event_version, event_key, correlation,
+          after_sequence, state, registered_at
         )
+        SELECT
+          ${decoded.instanceId}, ${decoded.waitId}, ${decoded.condition.type},
+          ${decoded.condition.version}, ${decoded.condition.key},
+          ${decoded.condition.correlation},
+          event_cursor, 'pending', ${decoded.registeredAt.toISOString()}
+        FROM kernel_workflow_instances
+        WHERE instance_id = ${decoded.instanceId}
         ON CONFLICT (instance_id, wait_id) DO NOTHING
+        ON CONFLICT (instance_id) WHERE state IN ('pending', 'matched') DO NOTHING
         RETURNING wait_id
       `
-      let wait: typeof WaitRow.Type
+      const rows = yield* sql`SELECT * FROM kernel_waits
+        WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}`
+      if (rows.length === 0) {
+        const instanceRows = yield* sql`SELECT * FROM kernel_workflow_instances
+          WHERE instance_id = ${decoded.instanceId}`
+        yield* Schema.decodeUnknown(InstanceRow)(instanceRows[0]).pipe(
+          Effect.mapError(dataError("instance", decoded.instanceId, decoded.instanceId)),
+        )
+        return yield* new KernelStoreConflictError({
+          record: "wait",
+          key: decoded.waitId,
+          instanceId: decoded.instanceId,
+        })
+      }
+      let storedWait = yield* Schema.decodeUnknown(WaitRow)(rows[0]).pipe(
+        Effect.mapError(dataError("wait", decoded.waitId, decoded.instanceId)),
+      )
       if (inserted.length > 0) {
-        wait = {
-          instance_id: decoded.instanceId,
-          wait_id: decoded.waitId,
-          event_type: decoded.condition.type,
-          event_version: decoded.condition.version,
-          correlation: decoded.condition.correlation,
-          after_sequence: instance.start_sequence,
-          registered_at: decoded.registeredAt.toISOString(),
-        }
         const eventRows = yield* sql`SELECT * FROM kernel_events
           WHERE event_type = ${decoded.condition.type}
             AND event_version = ${decoded.condition.version}
+            AND event_key = ${decoded.condition.key}
             AND correlation = ${decoded.condition.correlation}
-            AND sequence > ${instance.start_sequence}
+            AND sequence > ${storedWait.after_sequence}
           ORDER BY sequence LIMIT 1`
         if (eventRows.length > 0) {
           const event = yield* Schema.decodeUnknown(EventRow)(eventRows[0]).pipe(
@@ -352,24 +415,24 @@ const make = Effect.gen(function* () {
           )
           yield* sql`
             INSERT INTO kernel_wait_event_deliveries (
-              instance_id, wait_id, event_sequence, delivered_at
+              instance_id, wait_id, event_sequence, state, delivered_at
             ) VALUES (
-              ${decoded.instanceId}, ${decoded.waitId}, ${event.sequence}, ${event.recorded_at}
+              ${decoded.instanceId}, ${decoded.waitId}, ${event.sequence}, 'ready',
+              ${event.recorded_at}
             )
             ON CONFLICT (instance_id, wait_id) DO NOTHING
           `
+          yield* sql`UPDATE kernel_waits SET state = 'matched'
+            WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}
+              AND state = 'pending'`
+          storedWait = { ...storedWait, state: "matched" }
         }
       } else {
-        const rows = yield* sql`SELECT * FROM kernel_waits
-          WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}`
-        wait = yield* Schema.decodeUnknown(WaitRow)(rows[0]).pipe(
-          Effect.mapError(dataError("wait", decoded.waitId, decoded.instanceId)),
-        )
         if (
-          wait.event_type !== decoded.condition.type ||
-          wait.event_version !== decoded.condition.version ||
-          wait.correlation !== decoded.condition.correlation ||
-          wait.registered_at !== decoded.registeredAt.toISOString()
+          storedWait.event_type !== decoded.condition.type ||
+          storedWait.event_version !== decoded.condition.version ||
+          storedWait.event_key !== decoded.condition.key ||
+          storedWait.correlation !== decoded.condition.correlation
         ) {
           return yield* new KernelStoreConflictError({
             record: "wait",
@@ -378,7 +441,7 @@ const make = Effect.gen(function* () {
           })
         }
       }
-      const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence
+      const deliveryRows = yield* sql`SELECT instance_id, wait_id, event_sequence, state
         FROM kernel_wait_event_deliveries
         WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}`
       const deliveries = yield* decodeDeliveries(deliveryRows, decoded.waitId, decoded.instanceId)
@@ -386,10 +449,75 @@ const make = Effect.gen(function* () {
         status: inserted.length > 0 ? ("registered" as const) : ("duplicate" as const),
         wait: {
           ...decoded,
-          afterSequence: wait.after_sequence,
+          registeredAt: new Date(storedWait.registered_at),
+          afterSequence: storedWait.after_sequence,
         },
         deliveries,
       }
+    }).pipe(sql.withTransaction)
+
+  const consumeDelivery: KernelEventStorePort["consumeDelivery"] = (input) =>
+    Effect.gen(function* () {
+      const decoded = yield* Schema.decodeUnknown(ConsumeDeliveryInputSchema)(input).pipe(
+        Effect.mapError(inputError),
+      )
+      const advanced = yield* sql<{ readonly event_cursor: number }>`
+        UPDATE kernel_workflow_instances AS instance
+        SET event_cursor = ${decoded.eventSequence}
+        WHERE instance_id = ${decoded.instanceId}
+          AND event_cursor = ${decoded.expectedCursor}
+          AND ${decoded.eventSequence} > event_cursor
+          AND EXISTS (
+            SELECT 1
+            FROM kernel_wait_event_deliveries AS delivery
+            JOIN kernel_waits AS wait
+              ON wait.instance_id = delivery.instance_id
+              AND wait.wait_id = delivery.wait_id
+            WHERE delivery.instance_id = instance.instance_id
+              AND delivery.wait_id = ${decoded.waitId}
+              AND delivery.event_sequence = ${decoded.eventSequence}
+              AND delivery.state = 'ready'
+              AND wait.state = 'matched'
+          )
+        RETURNING event_cursor
+      `
+      if (advanced.length > 0) {
+        yield* sql`UPDATE kernel_wait_event_deliveries SET state = 'consumed'
+          WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}
+            AND event_sequence = ${decoded.eventSequence} AND state = 'ready'`
+        yield* sql`UPDATE kernel_waits SET state = 'consumed'
+          WHERE instance_id = ${decoded.instanceId} AND wait_id = ${decoded.waitId}
+            AND state = 'matched'`
+        return { status: "consumed" as const, eventCursor: advanced[0]!.event_cursor }
+      }
+      const rows = yield* sql`SELECT
+          instance.event_cursor,
+          delivery.event_sequence,
+          wait.after_sequence,
+          delivery.state AS delivery_state,
+          wait.state AS wait_state
+        FROM kernel_workflow_instances AS instance
+        JOIN kernel_waits AS wait ON wait.instance_id = instance.instance_id
+        JOIN kernel_wait_event_deliveries AS delivery
+          ON delivery.instance_id = wait.instance_id AND delivery.wait_id = wait.wait_id
+        WHERE instance.instance_id = ${decoded.instanceId} AND wait.wait_id = ${decoded.waitId}`
+      const state = yield* Schema.decodeUnknown(ConsumeStateRow)(rows[0]).pipe(
+        Effect.mapError(dataError("delivery", decoded.waitId, decoded.instanceId)),
+      )
+      if (
+        state.event_sequence === decoded.eventSequence &&
+        state.after_sequence === decoded.expectedCursor &&
+        state.event_cursor >= decoded.eventSequence &&
+        state.delivery_state === "consumed" &&
+        state.wait_state === "consumed"
+      ) {
+        return { status: "duplicate" as const, eventCursor: state.event_cursor }
+      }
+      return yield* new KernelStoreConflictError({
+        record: "wait",
+        key: decoded.waitId,
+        instanceId: decoded.instanceId,
+      })
     }).pipe(sql.withTransaction)
 
   const readReadyDeliveries: KernelEventStorePort["readReadyDeliveries"] = (instanceId) =>
@@ -397,12 +525,12 @@ const make = Effect.gen(function* () {
       Effect.mapError(inputError),
       Effect.flatMap((decodedInstanceId) =>
         sql`SELECT
-          delivery.instance_id, delivery.wait_id, delivery.event_sequence,
+          delivery.instance_id, delivery.wait_id, delivery.event_sequence, delivery.state,
           event.source, event.source_event_id, event.event_type, event.event_version,
-          event.correlation, event.payload_json, event.recorded_at
+          event.event_key, event.correlation, event.payload_json, event.recorded_at
         FROM kernel_wait_event_deliveries AS delivery
         JOIN kernel_events AS event ON event.sequence = delivery.event_sequence
-        WHERE delivery.instance_id = ${decodedInstanceId}
+        WHERE delivery.instance_id = ${decodedInstanceId} AND delivery.state = 'ready'
         ORDER BY delivery.event_sequence, delivery.wait_id`.pipe(
           Effect.flatMap((rows) =>
             Effect.forEach(rows, (row) =>
@@ -415,6 +543,7 @@ const make = Effect.gen(function* () {
                     sourceEventId: decoded.source_event_id,
                     type: decoded.event_type,
                     version: decoded.event_version,
+                    key: decoded.event_key,
                     correlation: decoded.correlation,
                     payload: decoded.payload_json,
                     recordedAt: new Date(decoded.recorded_at),
@@ -428,6 +557,7 @@ const make = Effect.gen(function* () {
     )
 
   return KernelEventStore.of({
+    consumeDelivery,
     createInstance,
     recordEvent,
     registerWait,

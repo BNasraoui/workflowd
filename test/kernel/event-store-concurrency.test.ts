@@ -75,7 +75,7 @@ test("independent connections replay one exact event without duplicate rows", as
         yield* store.registerWait({
           instanceId: "instance-a",
           waitId: "wait-a",
-          condition: { type: "approval", version: 1, correlation: "gate-7" },
+          condition: { type: "approval", version: 1, key: "gate-7", correlation: "gate-7" },
           registeredAt: timestamp,
         })
       }),
@@ -110,6 +110,9 @@ test("independent connections replay one exact event without duplicate rows", as
     expect(
       results.flatMap((result) => (result._tag === "Right" ? [result.right.status] : [])).sort(),
     ).toEqual(["duplicate", "recorded"])
+    const successful = results.flatMap((result) => (result._tag === "Right" ? [result.right] : []))
+    expect(successful.find(({ status }) => status === "recorded")?.deliveries).toHaveLength(1)
+    expect(successful.find(({ status }) => status === "duplicate")?.deliveries).toEqual([])
     expect(rows.events).toHaveLength(1)
     expect(rows.deliveries).toHaveLength(1)
   } finally {
@@ -220,7 +223,7 @@ test("instance and wait replay are deterministic across independent connections"
           return yield* store.registerWait({
             instanceId: "shared-instance",
             waitId: "shared-wait",
-            condition: { type: "approval", version: 1, correlation: "gate-7" },
+            condition: { type: "approval", version: 1, key: "gate-7", correlation: "gate-7" },
             registeredAt: timestamp,
           })
         }),
@@ -283,7 +286,7 @@ test("concurrent event and wait arrival produces one delivery", async () => {
           return yield* store.registerWait({
             instanceId: "instance-a",
             waitId: "arrival-wait",
-            condition: { type: "approval", version: 1, correlation: "gate-7" },
+            condition: { type: "approval", version: 1, key: "gate-7", correlation: "gate-7" },
             registeredAt: timestamp,
           })
         }),
@@ -300,6 +303,82 @@ test("concurrent event and wait arrival produces one delivery", async () => {
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0]?.event.sourceEventId).toBe("arrival")
   } finally {
+    await removeDatabase(filename)
+  }
+})
+
+test("wait registration begins with a write and survives a committed writer interleaving", async () => {
+  const filename = `${process.cwd()}/kernel-write-first-${crypto.randomUUID()}.sqlite`
+  const marker = `${filename}.locked`
+  let writer: ReturnType<typeof Bun.spawn> | undefined
+  try {
+    await bootstrapFile(filename)
+    await runOnFile(
+      filename,
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        yield* store.createInstance(instance("instance-a"))
+      }),
+    )
+    writer = Bun.spawn(
+      [
+        "bun",
+        "-e",
+        `import { Database } from "bun:sqlite";
+         const db = new Database(process.env.TEST_DB!);
+         db.exec("PRAGMA foreign_keys = ON");
+         db.exec("BEGIN IMMEDIATE");
+         db.query(\`INSERT INTO kernel_events (
+           sequence, source, source_event_id, event_type, event_version, event_key, correlation,
+           payload_json, recorded_at
+         ) VALUES (1, 'github', 'interleaved', 'approval', 1, 'gate-7', 'gate-7', '{}', ?)\`)
+           .run(process.env.TEST_TIMESTAMP!);
+         await Bun.write(process.env.TEST_MARKER!, "locked");
+         await Bun.sleep(200);
+         db.exec("COMMIT");
+         db.close();`,
+      ],
+      {
+        env: {
+          ...process.env,
+          TEST_DB: filename,
+          TEST_MARKER: marker,
+          TEST_TIMESTAMP: timestamp.toISOString(),
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      },
+    )
+    for (let attempt = 0; attempt < 100 && !(await Bun.file(marker).exists()); attempt += 1) {
+      await Bun.sleep(5)
+    }
+    expect(await Bun.file(marker).exists()).toBe(true)
+
+    const result = await runOnFile(
+      filename,
+      Effect.gen(function* () {
+        const store = yield* KernelEventStore
+        return yield* store.registerWait({
+          instanceId: "instance-a",
+          waitId: "interleaved-wait",
+          condition: { type: "approval", version: 1, key: "gate-7", correlation: "gate-7" },
+          registeredAt: timestamp,
+        })
+      }).pipe(Effect.either),
+    )
+    expect(await writer.exited).toBe(0)
+
+    expect(result._tag).toBe("Right")
+    if (result._tag === "Right") {
+      expect(result.right.deliveries).toEqual([
+        { instanceId: "instance-a", waitId: "interleaved-wait", eventSequence: 1 },
+      ])
+    }
+  } finally {
+    writer?.kill()
+    await Bun.file(marker)
+      .delete()
+      .catch(() => undefined)
     await removeDatabase(filename)
   }
 })

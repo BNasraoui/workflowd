@@ -28,7 +28,7 @@ export const WorkflowInstanceInput = Schema.Struct({
   createdAt: Schema.DateFromSelf,
 })
 export type WorkflowInstanceInput = typeof WorkflowInstanceInput.Type
-export type WorkflowInstanceRecord = WorkflowInstanceInput & { readonly startSequence: number }
+export type WorkflowInstanceRecord = WorkflowInstanceInput & { readonly eventCursor: number }
 export type CreateInstanceResult = {
   readonly status: "created" | "duplicate"
   readonly instance: WorkflowInstanceRecord
@@ -37,6 +37,7 @@ export type CreateInstanceResult = {
 export const EventCondition = Schema.Struct({
   type: TypeName,
   version: Version,
+  key: Identifier,
   correlation: Identifier,
 })
 export type EventCondition = typeof EventCondition.Type
@@ -76,6 +77,7 @@ export type ReadyWaitEventDelivery = WaitEventDelivery & {
     readonly sourceEventId: string
     readonly type: string
     readonly version: number
+    readonly key: string
     readonly correlation: string
     readonly payload: JsonValue
     readonly recordedAt: Date
@@ -90,4 +92,16 @@ export type RegisterWaitResult = {
   readonly status: "registered" | "duplicate"
   readonly wait: WaitRecord
   readonly deliveries: ReadonlyArray<WaitEventDelivery>
+}
+
+export const ConsumeDeliveryInput = Schema.Struct({
+  instanceId: Identifier,
+  waitId: Identifier,
+  eventSequence: Schema.Int.pipe(Schema.positive()),
+  expectedCursor: Schema.Int.pipe(Schema.nonNegative()),
+})
+export type ConsumeDeliveryInput = typeof ConsumeDeliveryInput.Type
+export type ConsumeDeliveryResult = {
+  readonly status: "consumed" | "duplicate"
+  readonly eventCursor: number
 }

@@ -634,7 +634,7 @@ const kernelEventWaitStore = Effect.gen(function* () {
         json_valid(payload_json) = 1
           AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 65536
       ),
-      start_sequence INTEGER NOT NULL CHECK (start_sequence >= 0),
+      event_cursor INTEGER NOT NULL CHECK (event_cursor >= 0),
       created_at TEXT NOT NULL
     ) STRICT
   `
@@ -651,6 +651,9 @@ const kernelEventWaitStore = Effect.gen(function* () {
         length(CAST(event_type AS BLOB)) BETWEEN 1 AND 128
       ),
       event_version INTEGER NOT NULL CHECK (event_version > 0),
+      event_key TEXT NOT NULL CHECK (
+        length(CAST(event_key AS BLOB)) BETWEEN 1 AND 256
+      ),
       correlation TEXT NOT NULL CHECK (
         length(CAST(correlation AS BLOB)) BETWEEN 1 AND 256
       ),
@@ -672,10 +675,16 @@ const kernelEventWaitStore = Effect.gen(function* () {
         length(CAST(event_type AS BLOB)) BETWEEN 1 AND 128
       ),
       event_version INTEGER NOT NULL CHECK (event_version > 0),
+      event_key TEXT NOT NULL CHECK (
+        length(CAST(event_key AS BLOB)) BETWEEN 1 AND 256
+      ),
       correlation TEXT NOT NULL CHECK (
         length(CAST(correlation AS BLOB)) BETWEEN 1 AND 256
       ),
       after_sequence INTEGER NOT NULL CHECK (after_sequence >= 0),
+      state TEXT NOT NULL CHECK (state IN (
+        'pending', 'matched', 'consumed', 'cancelled'
+      )),
       registered_at TEXT NOT NULL,
       PRIMARY KEY (instance_id, wait_id)
     ) STRICT
@@ -685,6 +694,7 @@ const kernelEventWaitStore = Effect.gen(function* () {
       instance_id TEXT NOT NULL,
       wait_id TEXT NOT NULL,
       event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+      state TEXT NOT NULL CHECK (state IN ('ready', 'consumed', 'cancelled')),
       delivered_at TEXT NOT NULL,
       PRIMARY KEY (instance_id, wait_id),
       FOREIGN KEY (instance_id, wait_id)
@@ -693,12 +703,18 @@ const kernelEventWaitStore = Effect.gen(function* () {
     ) STRICT
   `
   yield* sql`
+    CREATE UNIQUE INDEX kernel_waits_active
+    ON kernel_waits (instance_id) WHERE state IN ('pending', 'matched')
+  `
+  yield* sql`
     CREATE INDEX kernel_events_match
-    ON kernel_events (event_type, event_version, correlation, sequence)
+    ON kernel_events (event_type, event_version, event_key, correlation, sequence)
   `
   yield* sql`
     CREATE INDEX kernel_waits_match
-    ON kernel_waits (event_type, event_version, correlation, after_sequence)
+    ON kernel_waits (
+      state, event_type, event_version, event_key, correlation, after_sequence
+    )
   `
   yield* sql`
     CREATE TRIGGER kernel_events_immutable_insert
@@ -711,9 +727,9 @@ const kernelEventWaitStore = Effect.gen(function* () {
           existing.sequence = NEW.sequence
           AND existing.event_type = NEW.event_type
           AND existing.event_version = NEW.event_version
+          AND existing.event_key = NEW.event_key
           AND existing.correlation = NEW.correlation
           AND existing.payload_json = NEW.payload_json
-          AND existing.recorded_at = NEW.recorded_at
         )
     ) OR (
       EXISTS (
@@ -724,9 +740,9 @@ const kernelEventWaitStore = Effect.gen(function* () {
           AND existing.source_event_id = NEW.source_event_id
           AND existing.event_type = NEW.event_type
           AND existing.event_version = NEW.event_version
+          AND existing.event_key = NEW.event_key
           AND existing.correlation = NEW.correlation
           AND existing.payload_json = NEW.payload_json
-          AND existing.recorded_at = NEW.recorded_at
         )
       )
     )

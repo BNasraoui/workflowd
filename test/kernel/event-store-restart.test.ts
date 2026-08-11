@@ -21,13 +21,19 @@ const instance = (instanceId: string) => ({
 const wait = (instanceId: string, waitId: string, correlation: string) => ({
   instanceId,
   waitId,
-  condition: { type: "signal", version: 1, correlation },
+  condition: { type: "signal", version: 1, key: "signal-key", correlation },
   registeredAt: timestamp,
 })
 const event = (sourceEventId: string, correlation: string) => ({
   source: "test",
   sourceEventId,
-  event: { type: "signal", version: 1, correlation, payload: { sourceEventId } },
+  event: {
+    type: "signal",
+    version: 1,
+    key: "signal-key",
+    correlation,
+    payload: { sourceEventId },
+  },
   recordedAt: timestamp,
 })
 
