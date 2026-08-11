@@ -620,41 +620,61 @@ const kernelEventWaitStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   yield* sql`
     CREATE TABLE kernel_workflow_instances (
-      instance_id TEXT PRIMARY KEY CHECK (length(instance_id) BETWEEN 1 AND 256),
-      workflow_type TEXT NOT NULL CHECK (length(workflow_type) BETWEEN 1 AND 128),
+      instance_id TEXT PRIMARY KEY CHECK (
+        length(CAST(instance_id AS BLOB)) BETWEEN 1 AND 256
+      ),
+      workflow_type TEXT NOT NULL CHECK (
+        length(CAST(workflow_type AS BLOB)) BETWEEN 1 AND 128
+      ),
       workflow_version INTEGER NOT NULL CHECK (workflow_version > 0),
-      workflow_key TEXT NOT NULL CHECK (length(workflow_key) BETWEEN 1 AND 256),
+      workflow_key TEXT NOT NULL CHECK (
+        length(CAST(workflow_key AS BLOB)) BETWEEN 1 AND 256
+      ),
       payload_json TEXT NOT NULL CHECK (
         json_valid(payload_json) = 1
           AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 65536
       ),
+      start_sequence INTEGER NOT NULL CHECK (start_sequence >= 0),
       created_at TEXT NOT NULL
     ) STRICT
   `
   yield* sql`
     CREATE TABLE kernel_events (
-      instance_id TEXT NOT NULL REFERENCES kernel_workflow_instances (instance_id),
-      sequence INTEGER NOT NULL CHECK (sequence > 0),
-      dedupe_key TEXT NOT NULL CHECK (length(dedupe_key) BETWEEN 1 AND 256),
-      event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
+      sequence INTEGER NOT NULL UNIQUE CHECK (sequence > 0),
+      source TEXT NOT NULL CHECK (
+        length(CAST(source AS BLOB)) BETWEEN 1 AND 128
+      ),
+      source_event_id TEXT NOT NULL CHECK (
+        length(CAST(source_event_id AS BLOB)) BETWEEN 1 AND 256
+      ),
+      event_type TEXT NOT NULL CHECK (
+        length(CAST(event_type AS BLOB)) BETWEEN 1 AND 128
+      ),
       event_version INTEGER NOT NULL CHECK (event_version > 0),
-      event_key TEXT NOT NULL CHECK (length(event_key) BETWEEN 1 AND 256),
+      correlation TEXT NOT NULL CHECK (
+        length(CAST(correlation AS BLOB)) BETWEEN 1 AND 256
+      ),
       payload_json TEXT NOT NULL CHECK (
         json_valid(payload_json) = 1
           AND length(CAST(payload_json AS BLOB)) BETWEEN 1 AND 65536
       ),
       recorded_at TEXT NOT NULL,
-      PRIMARY KEY (instance_id, sequence),
-      UNIQUE (instance_id, dedupe_key)
+      PRIMARY KEY (source, source_event_id)
     ) STRICT
   `
   yield* sql`
     CREATE TABLE kernel_waits (
       instance_id TEXT NOT NULL REFERENCES kernel_workflow_instances (instance_id),
-      wait_id TEXT NOT NULL CHECK (length(wait_id) BETWEEN 1 AND 256),
-      event_type TEXT NOT NULL CHECK (length(event_type) BETWEEN 1 AND 128),
+      wait_id TEXT NOT NULL CHECK (
+        length(CAST(wait_id AS BLOB)) BETWEEN 1 AND 256
+      ),
+      event_type TEXT NOT NULL CHECK (
+        length(CAST(event_type AS BLOB)) BETWEEN 1 AND 128
+      ),
       event_version INTEGER NOT NULL CHECK (event_version > 0),
-      event_key TEXT NOT NULL CHECK (length(event_key) BETWEEN 1 AND 256),
+      correlation TEXT NOT NULL CHECK (
+        length(CAST(correlation AS BLOB)) BETWEEN 1 AND 256
+      ),
       after_sequence INTEGER NOT NULL CHECK (after_sequence >= 0),
       registered_at TEXT NOT NULL,
       PRIMARY KEY (instance_id, wait_id)
@@ -666,25 +686,57 @@ const kernelEventWaitStore = Effect.gen(function* () {
       wait_id TEXT NOT NULL,
       event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
       delivered_at TEXT NOT NULL,
-      PRIMARY KEY (instance_id, wait_id, event_sequence),
+      PRIMARY KEY (instance_id, wait_id),
       FOREIGN KEY (instance_id, wait_id)
         REFERENCES kernel_waits (instance_id, wait_id),
-      FOREIGN KEY (instance_id, event_sequence)
-        REFERENCES kernel_events (instance_id, sequence)
+      FOREIGN KEY (event_sequence) REFERENCES kernel_events (sequence)
     ) STRICT
   `
   yield* sql`
     CREATE INDEX kernel_events_match
-    ON kernel_events (instance_id, event_type, event_version, event_key, sequence)
+    ON kernel_events (event_type, event_version, correlation, sequence)
   `
   yield* sql`
     CREATE INDEX kernel_waits_match
-    ON kernel_waits (instance_id, event_type, event_version, event_key, after_sequence)
+    ON kernel_waits (event_type, event_version, correlation, after_sequence)
+  `
+  yield* sql`
+    CREATE TRIGGER kernel_events_immutable_insert
+    BEFORE INSERT ON kernel_events
+    WHEN EXISTS (
+      SELECT 1 FROM kernel_events AS existing
+      WHERE existing.source = NEW.source
+        AND existing.source_event_id = NEW.source_event_id
+        AND NOT (
+          existing.sequence = NEW.sequence
+          AND existing.event_type = NEW.event_type
+          AND existing.event_version = NEW.event_version
+          AND existing.correlation = NEW.correlation
+          AND existing.payload_json = NEW.payload_json
+          AND existing.recorded_at = NEW.recorded_at
+        )
+    ) OR (
+      EXISTS (
+        SELECT 1 FROM kernel_events AS existing
+        WHERE existing.sequence = NEW.sequence
+        AND NOT (
+          existing.source = NEW.source
+          AND existing.source_event_id = NEW.source_event_id
+          AND existing.event_type = NEW.event_type
+          AND existing.event_version = NEW.event_version
+          AND existing.correlation = NEW.correlation
+          AND existing.payload_json = NEW.payload_json
+          AND existing.recorded_at = NEW.recorded_at
+        )
+      )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'kernel event immutable conflict');
+    END
   `
   yield* sql`
     CREATE TRIGGER kernel_events_immutable_update
     BEFORE UPDATE ON kernel_events
-    WHEN (SELECT ignore_check_constraints FROM pragma_ignore_check_constraints) = 0
     BEGIN
       SELECT RAISE(ABORT, 'kernel events are immutable');
     END
@@ -692,7 +744,6 @@ const kernelEventWaitStore = Effect.gen(function* () {
   yield* sql`
     CREATE TRIGGER kernel_events_immutable_delete
     BEFORE DELETE ON kernel_events
-    WHEN (SELECT ignore_check_constraints FROM pragma_ignore_check_constraints) = 0
     BEGIN
       SELECT RAISE(ABORT, 'kernel events are immutable');
     END
@@ -714,11 +765,19 @@ export const runStoreMigrationsThrough0008 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0008),
 })
 
+const migrationsThrough0010 = {
+  ...migrationsThrough0008,
+  "0009_qrspi_stage_definitions": qrspiStageDefinitions,
+  "0010_qrspi_generation_format": qrspiGenerationFormat,
+}
+
+export const runStoreMigrationsThrough0010 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0010),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0008,
-    "0009_qrspi_stage_definitions": qrspiStageDefinitions,
-    "0010_qrspi_generation_format": qrspiGenerationFormat,
+    ...migrationsThrough0010,
     "0011_kernel_event_wait_store": kernelEventWaitStore,
   }),
 })
