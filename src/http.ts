@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
 import { JsonText } from "./json"
+import { Scheduler, type SchedulerPort } from "./scheduler"
 import { WorkflowStore, type WorkflowStorePort } from "./store/contracts"
 import { verifyWebhookSignature } from "./webhook"
 import type { WorkflowStartError } from "./qrspi/workflow-start"
@@ -21,7 +22,7 @@ export type WebhookHandlerOptions = {
 export function routeRequest(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort> {
+): Effect.Effect<Response, never, WorkflowStorePort | SchedulerPort> {
   const { pathname } = new URL(request.url)
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
@@ -99,7 +100,7 @@ function authorized(header: string | null, token: string) {
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort> {
+): Effect.Effect<Response, never, WorkflowStorePort | SchedulerPort> {
   return Effect.gen(function* () {
     const deliveryId = request.headers.get("x-github-delivery")
     const eventName = request.headers.get("x-github-event")
@@ -152,13 +153,19 @@ export function handleGitHubWebhook(
       receivedAt: options.now,
     }
     const store = yield* WorkflowStore
+    const scheduler = yield* Scheduler
 
     if (decoded._tag === "PullRequest") {
       const result = yield* store.ingestPullRequest(delivery, decoded)
+      if (result.status === "enqueued") yield* scheduler.signal("job")
+      if (result.status === "reconciliation_enqueued") {
+        yield* scheduler.signal("reconciliation")
+      }
       return Response.json(result, { status: 202 })
     }
     if (decoded._tag === "Command") {
       const result = yield* store.ingestCommand(delivery, decoded)
+      if (result.status === "enqueued") yield* scheduler.signal("command")
       return Response.json(result, { status: 202 })
     }
 

@@ -3,6 +3,7 @@ import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { Automation } from "./opencode"
+import { Scheduler, type WorkLane } from "./scheduler"
 import {
   runCommandIteration,
   runJobIteration,
@@ -29,19 +30,36 @@ type ScopedHookRouteHandler<R> = (
 
 export function superviseWorker<A extends string, E, R>(
   name: string,
+  lane: WorkLane,
   pollIntervalMs: number,
   iteration: Effect.Effect<A, E, R>,
 ) {
-  return Effect.forever(
-    iteration.pipe(
-      Effect.tap((result) => (result === "idle" ? Effect.sleep(pollIntervalMs) : Effect.void)),
-      Effect.catchAllCause((cause) =>
-        Effect.logError(`${name} iteration failed`, cause).pipe(
-          Effect.andThen(Effect.sleep(pollIntervalMs)),
+  return Effect.gen(function* () {
+    const scheduler = yield* Scheduler
+    const subscription = yield* scheduler.subscribe(lane)
+    const downstreamLane =
+      lane === "job"
+        ? ("publication" as const)
+        : lane === "command" || lane === "reconciliation"
+          ? ("job" as const)
+          : undefined
+    return yield* Effect.forever(
+      iteration.pipe(
+        Effect.tap((result) =>
+          result === "idle"
+            ? Effect.race(subscription.wait, Effect.sleep(pollIntervalMs))
+            : downstreamLane === undefined
+              ? Effect.void
+              : scheduler.signal(downstreamLane),
+        ),
+        Effect.catchAllCause((cause) =>
+          Effect.logError(`${name} iteration failed`, cause).pipe(
+            Effect.andThen(Effect.sleep(pollIntervalMs)),
+          ),
         ),
       ),
-    ),
-  ).pipe(Effect.forkScoped)
+    ).pipe(Effect.forkScoped)
+  })
 }
 
 function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHookRouteHandler<R>) {
@@ -131,6 +149,7 @@ export function startHookService(
       const workerId = `${process.pid}:worker:${index}`
       yield* superviseWorker(
         "Job worker",
+        "job",
         config.worker.pollIntervalMs,
         observed(
           "job",
@@ -151,6 +170,7 @@ export function startHookService(
 
     yield* superviseWorker(
       "Publisher",
+      "publication",
       config.worker.pollIntervalMs,
       observed(
         "publication",
@@ -166,6 +186,7 @@ export function startHookService(
 
     yield* superviseWorker(
       "Reconciliation",
+      "reconciliation",
       config.worker.pollIntervalMs,
       observed(
         "reconciliation",
@@ -180,6 +201,7 @@ export function startHookService(
 
     yield* superviseWorker(
       "Command worker",
+      "command",
       config.worker.pollIntervalMs,
       observed(
         "command",

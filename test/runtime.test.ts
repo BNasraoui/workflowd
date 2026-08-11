@@ -12,6 +12,7 @@ import {
   startHookService,
   superviseWorker,
 } from "../src/runtime"
+import { Scheduler, SchedulerLive } from "../src/scheduler"
 import { WorkflowStoreLive } from "../src/store"
 import { Workspace } from "../src/workspace"
 import {
@@ -48,6 +49,238 @@ const qrspiDefinition = {
     },
   ],
 }
+
+describe("superviseWorker", () => {
+  test("wakes an idle worker promptly before a long fallback interval", async () => {
+    const claims = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scheduler = yield* Scheduler
+          const firstClaim = yield* Deferred.make<void>()
+          const secondClaim = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "job",
+            60_000,
+            Effect.suspend(() => {
+              count += 1
+              const claimed =
+                count === 1
+                  ? Deferred.succeed(firstClaim, undefined)
+                  : count === 2
+                    ? Deferred.succeed(secondClaim, undefined)
+                    : Effect.void
+              return claimed.pipe(Effect.as("idle" as const))
+            }),
+          )
+
+          yield* Deferred.await(firstClaim)
+          yield* scheduler.signal("job")
+          yield* Deferred.await(secondClaim).pipe(Effect.timeout("100 millis"))
+          return count
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(claims).toBe(2)
+  })
+
+  test("does not lose a wake emitted as an idle result is returned", async () => {
+    const claims = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scheduler = yield* Scheduler
+          const secondClaim = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "job",
+            60_000,
+            Effect.suspend(() => {
+              count += 1
+              if (count === 1) return scheduler.signal("job").pipe(Effect.as("idle" as const))
+              return Deferred.succeed(secondClaim, undefined).pipe(Effect.as("idle" as const))
+            }),
+          )
+
+          yield* Deferred.await(secondClaim).pipe(Effect.timeout("100 millis"))
+          return count
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(claims).toBe(2)
+  })
+
+  test("keeps a wake emitted during an active iteration pending", async () => {
+    const claims = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scheduler = yield* Scheduler
+          const active = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const secondClaim = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "job",
+            60_000,
+            Effect.suspend(() => {
+              count += 1
+              if (count === 1) {
+                return Deferred.succeed(active, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.as("idle" as const),
+                )
+              }
+              return Deferred.succeed(secondClaim, undefined).pipe(Effect.as("idle" as const))
+            }),
+          )
+
+          yield* Deferred.await(active)
+          yield* scheduler.signal("job")
+          yield* Deferred.succeed(release, undefined)
+          yield* Deferred.await(secondClaim).pipe(Effect.timeout("100 millis"))
+          return count
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(claims).toBe(2)
+  })
+
+  test("coalesces active-iteration bursts without spinning", async () => {
+    const claims = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scheduler = yield* Scheduler
+          const active = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "job",
+            60_000,
+            Effect.suspend(() => {
+              count += 1
+              if (count === 1) {
+                return Deferred.succeed(active, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.as("idle" as const),
+                )
+              }
+              return Effect.succeed("idle" as const)
+            }),
+          )
+
+          yield* Deferred.await(active)
+          yield* Effect.all([
+            scheduler.signal("job"),
+            scheduler.signal("job"),
+            scheduler.signal("job"),
+          ])
+          yield* Deferred.succeed(release, undefined)
+          yield* Effect.sleep(30)
+          return count
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(claims).toBe(2)
+  })
+
+  test("claims again on the fallback interval without a signal", async () => {
+    const claims = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const secondClaim = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "reconciliation",
+            10,
+            Effect.suspend(() => {
+              count += 1
+              return (count === 2 ? Deferred.succeed(secondClaim, undefined) : Effect.void).pipe(
+                Effect.as("idle" as const),
+              )
+            }),
+          )
+
+          yield* Deferred.await(secondClaim).pipe(Effect.timeout("100 millis"))
+          return count
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(claims).toBe(2)
+  })
+
+  test("falls back to polling and recovers after an iteration failure", async () => {
+    const logs: Array<unknown> = []
+    const logger = Logger.make<unknown, void>(({ message }) => logs.push(message))
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const recovered = yield* Deferred.make<void>()
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            "command",
+            20,
+            Effect.suspend(() => {
+              count += 1
+              return count === 1
+                ? Effect.fail("claim failed")
+                : Deferred.succeed(recovered, undefined).pipe(Effect.as("idle" as const))
+            }),
+          )
+
+          yield* Effect.sleep(5)
+          const beforeFallback = count
+          yield* Deferred.await(recovered).pipe(Effect.timeout("100 millis"))
+          return { beforeFallback, count }
+        }),
+      ).pipe(
+        Effect.provide(SchedulerLive),
+        Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
+      ),
+    )
+
+    expect(result).toEqual({ beforeFallback: 1, count: 2 })
+    expect(logs).toEqual([["test worker iteration failed"]])
+  })
+
+  test.each([
+    ["job", "publication"],
+    ["command", "job"],
+    ["reconciliation", "job"],
+  ] as const)("wakes downstream from a successful %s iteration", async (source, downstream) => {
+    const woke = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scheduler = yield* Scheduler
+          const subscription = yield* scheduler.subscribe(downstream)
+          let count = 0
+          yield* superviseWorker(
+            "test worker",
+            source,
+            60_000,
+            Effect.suspend(() => {
+              count += 1
+              return count === 1 ? Effect.succeed("completed" as const) : Effect.never
+            }),
+          )
+
+          return yield* subscription.wait.pipe(Effect.as(true), Effect.timeout("100 millis"))
+        }),
+      ).pipe(Effect.provide(SchedulerLive)),
+    )
+
+    expect(woke).toBe(true)
+  })
+})
 
 describe("serveHookHttp", () => {
   test("stops the listener and joins interrupted in-flight request effects", async () => {
@@ -194,6 +427,7 @@ test("superviseWorker resumes the same worker after an iteration failure", async
         const resumed = yield* Deferred.make<void>()
         yield* superviseWorker(
           "Test worker",
+          "job",
           0,
           Effect.suspend(() => {
             attempts += 1
@@ -205,7 +439,7 @@ test("superviseWorker resumes the same worker after an iteration failure", async
         yield* Deferred.await(resumed)
         return attempts
       }),
-    ),
+    ).pipe(Effect.provide(SchedulerLive)),
   )
 
   expect(recovered).toBe(2)
@@ -279,7 +513,9 @@ describe("runHookService startup", () => {
 
     const exit = await Effect.runPromise(
       Effect.exit(
-        runHookService(config).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
+        runHookService(config).pipe(
+          Effect.provide(Layer.mergeAll(StoreLive, TestAdapters, SchedulerLive)),
+        ),
       ),
     )
 
@@ -388,7 +624,7 @@ describe("runHookService startup", () => {
             },
           }
         }),
-      ).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
+      ).pipe(Effect.provide(Layer.mergeAll(StoreLive, TestAdapters, SchedulerLive))),
     )
 
     expect(validations).toBe(1)

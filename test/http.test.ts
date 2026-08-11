@@ -3,14 +3,15 @@ import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Logger } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
+import { Scheduler, SchedulerLive, type WorkLane } from "../src/scheduler"
 import { WorkflowStoreLive } from "../src/store"
-import { WorkflowStore } from "../src/store/contracts"
+import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
 import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
-const TestLayer = WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))
+const TestLayer = Layer.merge(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)), SchedulerLive)
 
 const payload = JSON.stringify({
   action: "opened",
@@ -35,7 +36,114 @@ const payload = JSON.stringify({
   },
 })
 
+const commandPayload = JSON.stringify({
+  action: "created",
+  installation: { id: 91 },
+  repository: JSON.parse(payload).repository,
+  issue: {
+    number: 7,
+    pull_request: { url: "https://api.github.test/pr/7" },
+  },
+  comment: {
+    id: 10,
+    body: "/agent review",
+    user: { login: "example-owner" },
+  },
+})
+
+const signedRequest = (body: string, event: string, deliveryId: string) => {
+  const secret = "webhook-secret"
+  return new Request("http://localhost/hooks/github", {
+    method: "POST",
+    body,
+    headers: {
+      "content-type": "application/json",
+      "x-github-delivery": deliveryId,
+      "x-github-event": event,
+      "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`,
+    },
+  })
+}
+
+const makeIngressStore = (
+  overrides: Pick<WorkflowStorePort, "ingestPullRequest" | "ingestCommand">,
+): WorkflowStorePort => ({
+  recordDelivery: () => Effect.die("unused"),
+  ingestPullRequest: overrides.ingestPullRequest,
+  ingestCommand: overrides.ingestCommand,
+  applyReconciliationSnapshot: () => Effect.die("unused"),
+  claimNextReconciliation: () => Effect.die("unused"),
+  rescheduleReconciliation: () => Effect.die("unused"),
+  claimNextJob: () => Effect.die("unused"),
+  claimExpiredAgentSession: () => Effect.die("unused"),
+  supersedeAgentSession: () => Effect.die("unused"),
+  recordAgentSessionCleanupFailure: () => Effect.die("unused"),
+  shouldCancelJob: () => Effect.die("unused"),
+  isJobCurrent: () => Effect.die("unused"),
+  supersedeJob: () => Effect.die("unused"),
+  isTrustedBranchPublication: () => Effect.die("unused"),
+  rescheduleJob: () => Effect.die("unused"),
+  completeReviewJob: () => Effect.die("unused"),
+  completeAgentReviewJob: () => Effect.die("unused"),
+  completeFixJob: () => Effect.die("unused"),
+  disableFixJob: () => Effect.die("unused"),
+  recordFixResult: () => Effect.die("unused"),
+  recordAgentFixResult: () => Effect.die("unused"),
+  recordAgentLaunchIntent: () => Effect.die("unused"),
+  recordAgentSessionReference: () => Effect.die("unused"),
+  claimNextPublication: () => Effect.die("unused"),
+  isPublicationCurrent: () => Effect.die("unused"),
+  completePublication: () => Effect.die("unused"),
+  reschedulePublication: () => Effect.die("unused"),
+  claimNextCommand: () => Effect.die("unused"),
+  executeCommand: () => Effect.die("unused"),
+  rescheduleCommand: () => Effect.die("unused"),
+})
+
 describe("handleGitHubWebhook", () => {
+  test.each([
+    ["pull request enqueued", "pull_request", payload, "enqueued", "job"],
+    [
+      "pull request reconciliation enqueued",
+      "pull_request",
+      payload,
+      "reconciliation_enqueued",
+      "reconciliation",
+    ],
+    ["pull request duplicate", "pull_request", payload, "duplicate", null],
+    ["pull request ignored", "pull_request", payload, "ignored", null],
+    ["command enqueued", "issue_comment", commandPayload, "enqueued", "command"],
+    ["command duplicate", "issue_comment", commandPayload, "duplicate", null],
+  ] as const)("signals the exact lane for %s", async (_name, event, body, status, lane) => {
+    const signals: Array<WorkLane> = []
+    const StoreLayer = Layer.succeed(
+      WorkflowStore,
+      makeIngressStore({
+        ingestPullRequest: () =>
+          Effect.succeed(status === "duplicate" ? { status } : { status, generation: 1 }),
+        ingestCommand: () =>
+          Effect.succeed({ status: status === "enqueued" ? "enqueued" : "duplicate" }),
+      }),
+    )
+    const SchedulerLayer = Layer.succeed(Scheduler, {
+      subscribe: () => Effect.die("unused"),
+      signal: (signaledLane) =>
+        Effect.sync(() => {
+          signals.push(signaledLane)
+        }),
+    })
+
+    const response = await Effect.runPromise(
+      handleGitHubWebhook(signedRequest(body, event, `delivery-${_name}`), {
+        webhookSecret: "webhook-secret",
+        now: new Date("2026-07-19T12:00:00.000Z"),
+      }).pipe(Effect.provide(Layer.merge(StoreLayer, SchedulerLayer))),
+    )
+
+    expect(response.status).toBe(202)
+    expect(signals).toEqual(lane === null ? [] : [lane])
+  })
+
   test("verifies and durably enqueues a pull request delivery", async () => {
     const secret = "webhook-secret"
     const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`

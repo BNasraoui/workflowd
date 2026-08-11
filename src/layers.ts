@@ -9,6 +9,7 @@ import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
+import { SchedulerLive } from "./scheduler"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
@@ -152,6 +153,7 @@ export const makeLiveLayer = (config: AppConfig) => {
         )
   return Layer.mergeAll(
     WorkflowStoreLive,
+    SchedulerLive,
     Layer.effect(
       GitHub,
       Effect.tryPromise({

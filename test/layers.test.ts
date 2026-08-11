@@ -10,6 +10,7 @@ import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
 import { makeLiveLayer } from "../src/layers"
 import { Automation } from "../src/opencode"
+import { Scheduler } from "../src/scheduler"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkflowStart } from "../src/qrspi/workflow-start"
@@ -110,6 +111,7 @@ test("composes the reusable agent harness with the live ports", async () => {
         const agentHarness = yield* AgentHarness
         const workspace = yield* Workspace
         const workflowStart = yield* WorkflowStart
+        const scheduler = yield* Scheduler
         return [
           store.claimNextJob,
           github.publishReview,
@@ -117,6 +119,7 @@ test("composes the reusable agent harness with the live ports", async () => {
           agentHarness.createSession,
           workspace.prepareReview,
           workflowStart.start,
+          scheduler.signal,
         ]
       }).pipe(Effect.provide(Live)),
     )
