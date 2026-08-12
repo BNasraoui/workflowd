@@ -126,7 +126,8 @@ describe("strict initial store schema", () => {
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
             'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
             'qrspi_stage_definitions', 'kernel_workflow_instances', 'kernel_events',
-            'kernel_waits', 'kernel_wait_event_deliveries'
+            'kernel_waits', 'kernel_wait_event_deliveries', 'kernel_workflow_jobs',
+            'kernel_workflow_job_results'
           )
           ORDER BY name
         `
@@ -148,8 +149,9 @@ describe("strict initial store schema", () => {
       { migration_id: 9, name: "qrspi_stage_definitions" },
       { migration_id: 10, name: "qrspi_generation_format" },
       { migration_id: 11, name: "kernel_event_wait_store" },
+      { migration_id: 12, name: "kernel_workflow_jobs" },
     ])
-    expect(result.tables).toHaveLength(18)
+    expect(result.tables).toHaveLength(20)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

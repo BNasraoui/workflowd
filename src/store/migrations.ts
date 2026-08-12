@@ -773,6 +773,84 @@ const kernelEventWaitStore = Effect.gen(function* () {
   `
 })
 
+const kernelWorkflowJobs = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE kernel_workflow_jobs (
+      job_id TEXT PRIMARY KEY CHECK (length(CAST(job_id AS BLOB)) BETWEEN 1 AND 256),
+      instance_id TEXT NOT NULL REFERENCES kernel_workflow_instances (instance_id),
+      wait_id TEXT NOT NULL,
+      event_sequence INTEGER NOT NULL CHECK (event_sequence > 0),
+      expected_cursor INTEGER NOT NULL CHECK (expected_cursor >= 0),
+      input_version INTEGER NOT NULL CHECK (input_version > 0),
+      input_json TEXT NOT NULL CHECK (
+        json_valid(input_json) = 1
+          AND length(CAST(input_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      state TEXT NOT NULL CHECK (state IN (
+        'ready', 'leased', 'retry_scheduled', 'succeeded', 'failed', 'operator_required',
+        'data_error'
+      )),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0 AND attempt <= max_attempts),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+      run_at TEXT NOT NULL,
+      lease_worker_id TEXT,
+      claim_token TEXT,
+      lease_until TEXT,
+      failure_category TEXT CHECK (failure_category IN (
+        'transient', 'permanent', 'operator_required', 'data_error'
+      )),
+      failure_version INTEGER CHECK (failure_version IS NULL OR failure_version > 0),
+      failure_json TEXT CHECK (
+        failure_json IS NULL OR (
+          json_valid(failure_json) = 1
+            AND length(CAST(failure_json AS BLOB)) BETWEEN 1 AND 65536
+        )
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (instance_id, wait_id)
+        REFERENCES kernel_waits (instance_id, wait_id),
+      FOREIGN KEY (event_sequence) REFERENCES kernel_events (sequence),
+      CHECK (
+        (state = 'leased' AND lease_worker_id IS NOT NULL
+          AND claim_token IS NOT NULL AND lease_until IS NOT NULL)
+        OR
+        (state <> 'leased' AND lease_worker_id IS NULL
+          AND claim_token IS NULL AND lease_until IS NULL)
+      ),
+      CHECK (
+        (failure_json IS NULL AND failure_category IS NULL AND failure_version IS NULL)
+        OR
+        (failure_json IS NOT NULL AND failure_category IS NOT NULL AND failure_version IS NOT NULL)
+      )
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_workflow_job_results (
+      result_id TEXT PRIMARY KEY CHECK (
+        length(CAST(result_id AS BLOB)) BETWEEN 1 AND 256
+      ),
+      job_id TEXT NOT NULL UNIQUE REFERENCES kernel_workflow_jobs (job_id),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      worker_id TEXT NOT NULL CHECK (length(CAST(worker_id AS BLOB)) BETWEEN 1 AND 256),
+      claim_token TEXT NOT NULL CHECK (length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256),
+      lease_until TEXT NOT NULL,
+      result_version INTEGER NOT NULL CHECK (result_version > 0),
+      result_json TEXT NOT NULL CHECK (
+        json_valid(result_json) = 1
+          AND length(CAST(result_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      completed_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`
+    CREATE INDEX kernel_workflow_jobs_claimable
+    ON kernel_workflow_jobs (state, run_at, lease_until, job_id)
+    WHERE state IN ('ready', 'retry_scheduled', 'leased')
+  `
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -798,9 +876,18 @@ export const runStoreMigrationsThrough0010 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0010),
 })
 
+const migrationsThrough0011 = {
+  ...migrationsThrough0010,
+  "0011_kernel_event_wait_store": kernelEventWaitStore,
+}
+
+export const runStoreMigrationsThrough0011 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0011),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0010,
-    "0011_kernel_event_wait_store": kernelEventWaitStore,
+    ...migrationsThrough0011,
+    "0012_kernel_workflow_jobs": kernelWorkflowJobs,
   }),
 })

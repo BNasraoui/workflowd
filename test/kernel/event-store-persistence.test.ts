@@ -13,6 +13,10 @@ test("exports a true through-0010 migrator", () => {
   expect("runStoreMigrationsThrough0010" in StoreMigrations).toBe(true)
 })
 
+test("exports the current migration as the true predecessor", () => {
+  expect("runStoreMigrationsThrough0011" in StoreMigrations).toBe(true)
+})
+
 const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClientService>) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   return Effect.runPromise(effect.pipe(Effect.provide(database)))
@@ -265,4 +269,76 @@ test("legacy work can still be claimed and completed after migration 11", async 
       .delete()
       .catch(() => undefined)
   }
+})
+
+test("migration 12 preserves realistic predecessor state and owns strict job tables", async () => {
+  const result = await runWithDatabase(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* StoreMigrations.runStoreMigrationsThrough0011
+      yield* seedRepresentativeLegacyRows
+      const before = yield* legacySnapshot
+      yield* StoreMigrations.runStoreMigrations
+      const after = yield* legacySnapshot
+      const tables = yield* sql<{ readonly name: string; readonly strict: number }>`
+        SELECT name, strict FROM pragma_table_list
+        WHERE name IN ('kernel_workflow_jobs', 'kernel_workflow_job_results')
+        ORDER BY name
+      `
+      const ledger = yield* sql`SELECT migration_id, name FROM effect_sql_migrations
+        WHERE migration_id = 12`
+      const foreignKeys = yield* sql`PRAGMA foreign_key_check`
+      const integrity = yield* sql`PRAGMA integrity_check`
+      return { before, after, tables, ledger, foreignKeys, integrity }
+    }),
+  )
+
+  expect(result.after).toEqual(result.before)
+  expect(result.tables).toEqual([
+    { name: "kernel_workflow_job_results", strict: 1 },
+    { name: "kernel_workflow_jobs", strict: 1 },
+  ])
+  expect(result.ledger).toEqual([{ migration_id: 12, name: "kernel_workflow_jobs" }])
+  expect(result.foreignKeys).toEqual([])
+  expect(result.integrity).toEqual([{ integrity_check: "ok" }])
+})
+
+test("migration 12 rolls back all new objects and its ledger row before a successful retry", async () => {
+  const result = await runWithDatabase(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* StoreMigrations.runStoreMigrationsThrough0011
+      yield* sql`CREATE TABLE kernel_workflow_job_results (conflict TEXT) STRICT`
+      const failed = yield* StoreMigrations.runStoreMigrations.pipe(Effect.exit)
+      const afterFailure = yield* sql`SELECT name FROM sqlite_master
+        WHERE name LIKE 'kernel_workflow_job%' ORDER BY name`
+      const failedLedger = yield* sql`SELECT migration_id FROM effect_sql_migrations
+        WHERE migration_id = 12`
+      yield* sql`DROP TABLE kernel_workflow_job_results`
+      yield* StoreMigrations.runStoreMigrations
+      const afterRetry = yield* sql`SELECT name FROM pragma_table_list
+        WHERE name IN ('kernel_workflow_jobs', 'kernel_workflow_job_results') ORDER BY name`
+      const retryLedger = yield* sql`SELECT migration_id FROM effect_sql_migrations
+        WHERE migration_id = 12`
+      const foreignKeys = yield* sql`PRAGMA foreign_key_check`
+      const integrity = yield* sql`PRAGMA integrity_check`
+      return {
+        failed,
+        afterFailure,
+        failedLedger,
+        afterRetry,
+        retryLedger,
+        foreignKeys,
+        integrity,
+      }
+    }),
+  )
+
+  expect(result.failed._tag).toBe("Failure")
+  expect(result.afterFailure).toEqual([{ name: "kernel_workflow_job_results" }])
+  expect(result.failedLedger).toEqual([])
+  expect(result.afterRetry).toHaveLength(2)
+  expect(result.retryLedger).toEqual([{ migration_id: 12 }])
+  expect(result.foreignKeys).toEqual([])
+  expect(result.integrity).toEqual([{ integrity_check: "ok" }])
 })
