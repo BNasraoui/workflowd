@@ -7,6 +7,9 @@ import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
+import { KernelEventStoreLive } from "./kernel/event-store"
+import { KernelJobStoreLive } from "./kernel/job-store"
+import { TestJobCanaryLive } from "./kernel/test-job-canary"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
@@ -71,6 +74,10 @@ export const makeLiveLayer = (config: AppConfig) => {
             }),
     }),
   )
+  const storeLayer = Layer.merge(KernelEventStoreLive, KernelJobStoreLive).pipe(
+    Layer.provideMerge(WorkflowStoreLive),
+  )
+  const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
@@ -136,7 +143,7 @@ export const makeLiveLayer = (config: AppConfig) => {
                       )
                     },
                   )
-                }).pipe(Effect.provide(WorkflowStoreLive)),
+                }),
               ),
             ),
           ),
@@ -151,8 +158,8 @@ export const makeLiveLayer = (config: AppConfig) => {
               : Layer.fail(error),
           ),
         )
+  const qrspiWithStores = qrspiLayer.pipe(Layer.provideMerge(storeLayer))
   return Layer.mergeAll(
-    WorkflowStoreLive,
     WorkSignalLive,
     Layer.effect(
       GitHub,
@@ -183,6 +190,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
-    qrspiLayer,
+    qrspiWithStores,
+    testJobCanaryLayer,
   )
 }

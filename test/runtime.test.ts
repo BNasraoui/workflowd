@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Scope } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
+import { KernelJobStore } from "../src/kernel/job-store"
+import { runKernelJobIteration } from "../src/kernel/job-runner"
+import { TestJobCanary } from "../src/kernel/test-job-canary"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
 import {
   HookHttpServerStartError,
@@ -13,7 +15,6 @@ import {
   superviseWorker,
   workDownstreamLanes,
 } from "../src/runtime"
-import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkSignal, WorkSignalLive } from "../src/work-signal"
@@ -24,6 +25,7 @@ import {
   closedWorkflowStart,
 } from "../src/qrspi/workflow-start"
 import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./store/harness"
+import { arrangeDelivery, kernelLayer } from "./kernel/job-store-harness"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -396,6 +398,159 @@ test("job, command, and reconciliation workers declare conservative downstream w
 })
 
 describe("runHookService startup", () => {
+  test("starts one kernel job supervisor and immediately processes ready work", async () => {
+    let kernelIterations = 0
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, concurrency: 3, pollIntervalMs: 60_000 },
+    }
+    const TestAdapters = Layer.mergeAll(
+      WorkSignalLive,
+      Layer.succeed(GitHub, {
+        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+        publishReview: () => Effect.die("unexpected publish"),
+        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+      }),
+      Layer.succeed(Automation, {
+        validateAvailability: () => Effect.void,
+        prepareReview: () => Effect.die("unexpected review"),
+        prepareFix: () => Effect.die("unexpected fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("unexpected harness description"),
+        validateAvailability: () => Effect.die("unexpected harness validation"),
+        prepare: () => Effect.die("unexpected harness preparation"),
+        createSession: () => Effect.die("unexpected session creation"),
+        resumeSession: () => Effect.die("unexpected session resume"),
+        abortSession: () => Effect.die("unexpected session abort"),
+      }),
+      Layer.succeed(Workspace, {
+        prepareReview: () => Effect.die("unexpected review workspace"),
+        prepareFix: () => Effect.die("unexpected fix workspace"),
+        publishFix: () => Effect.die("unexpected fix publication"),
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const jobs = yield* KernelJobStore
+          const delivery = yield* arrangeDelivery("startup-kernel-job", {
+            kind: "echo",
+            value: "ready",
+          })
+          yield* jobs.enqueueFromDelivery({ ...delivery, runAt: new Date(0) })
+          const waiting = yield* Deferred.make<void>()
+          yield* startHookService(config, (worker) => {
+            if (worker !== "kernel-job") return Effect.void
+            kernelIterations += 1
+            return kernelIterations === 2 ? Deferred.succeed(waiting, undefined) : Effect.void
+          })
+          yield* Deferred.await(waiting)
+          yield* Effect.sleep(10)
+          return yield* jobs.readJob("startup-kernel-job")
+        }),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters))),
+    )
+
+    expect(result?.state).toBe("succeeded")
+    expect(kernelIterations).toBe(2)
+  })
+
+  test("kernel supervisor polls a scheduled transient retry on the worker interval", async () => {
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, concurrency: 1, pollIntervalMs: 10 },
+    }
+    const TestAdapters = Layer.mergeAll(
+      WorkSignalLive,
+      Layer.succeed(GitHub, {
+        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+        publishReview: () => Effect.die("unexpected publish"),
+        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+      }),
+      Layer.succeed(Automation, {
+        validateAvailability: () => Effect.void,
+        prepareReview: () => Effect.die("unexpected review"),
+        prepareFix: () => Effect.die("unexpected fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("unexpected harness description"),
+        validateAvailability: () => Effect.die("unexpected harness validation"),
+        prepare: () => Effect.die("unexpected harness preparation"),
+        createSession: () => Effect.die("unexpected session creation"),
+        resumeSession: () => Effect.die("unexpected session resume"),
+        abortSession: () => Effect.die("unexpected session abort"),
+      }),
+      Layer.succeed(Workspace, {
+        prepareReview: () => Effect.die("unexpected review workspace"),
+        prepareFix: () => Effect.die("unexpected fix workspace"),
+        publishFix: () => Effect.die("unexpected fix publication"),
+      }),
+    )
+
+    const outcome = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const jobs = yield* KernelJobStore
+          const delivery = yield* arrangeDelivery("supervised-kernel-retry", {
+            kind: "echo",
+            value: "eventual",
+          })
+          yield* jobs.enqueueFromDelivery({ ...delivery, runAt: new Date(0) })
+          const failedAt = new Date()
+          yield* runKernelJobIteration({
+            workerId: "failing-worker",
+            now: () => failedAt,
+            leaseDurationMs: 60_000,
+            retryDelayMs: 50,
+            execute: () => Effect.fail(new Error("injected transient failure")),
+          })
+          const succeeded = yield* Deferred.make<void>()
+          yield* startHookService(config)
+          const waiter = yield* jobs.readJob("supervised-kernel-retry").pipe(
+            Effect.flatMap((job) =>
+              job?.state === "succeeded" ? Deferred.succeed(succeeded, undefined) : Effect.void,
+            ),
+            Effect.andThen(Effect.sleep(1)),
+            Effect.forever,
+            Effect.forkScoped,
+          )
+          yield* Effect.race(
+            Deferred.await(succeeded),
+            Effect.sleep(500).pipe(Effect.as("timeout")),
+          )
+          yield* Fiber.interrupt(waiter)
+          return yield* jobs.readJob("supervised-kernel-retry")
+        }),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters))),
+    )
+
+    expect(outcome?.state).toBe("succeeded")
+  })
+
   test("validates OpenCode exactly once before listener or workers activate", async () => {
     let validations = 0
     let githubCalls = 0
@@ -413,9 +568,6 @@ describe("runHookService startup", () => {
       ...loaded,
       http: { ...loaded.http, port: 0 },
     }
-    const StoreLive = WorkflowStoreLive.pipe(
-      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
-    )
     const TestAdapters = Layer.mergeAll(
       WorkSignalLive,
       Layer.succeed(GitHub, {
@@ -464,7 +616,9 @@ describe("runHookService startup", () => {
 
     const exit = await Effect.runPromise(
       Effect.exit(
-        runHookService(config).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
+        runHookService(config).pipe(
+          Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters)),
+        ),
       ),
     )
 
@@ -483,6 +637,7 @@ describe("runHookService startup", () => {
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
         WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_TEST_JOB_TOKEN: "test-job-secret",
         WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
         WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
         WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
@@ -498,9 +653,6 @@ describe("runHookService startup", () => {
       http: { ...loaded.http, port: 0 },
       worker: { ...loaded.worker, pollIntervalMs: 60_000 },
     }
-    const StoreLive = WorkflowStoreLive.pipe(
-      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
-    )
     const TestAdapters = Layer.mergeAll(
       WorkSignalLive,
       Layer.succeed(GitHub, {
@@ -538,6 +690,11 @@ describe("runHookService startup", () => {
           }),
         ),
       ),
+      Layer.succeed(TestJobCanary, {
+        submit: (input) =>
+          Effect.succeed({ jobId: input.jobId, status: "pending", newlyEnqueued: true }),
+        status: (jobId) => Effect.succeed({ jobId, status: "pending" }),
+      }),
     )
 
     const result = await Effect.runPromise(
@@ -547,7 +704,7 @@ describe("runHookService startup", () => {
           const server = yield* startHookService(config, (worker) =>
             Effect.gen(function* () {
               observedWorkers.add(worker)
-              if (observedWorkers.size === 4) {
+              if (observedWorkers.size === 5) {
                 yield* Deferred.succeed(allWorkersObserved, undefined)
               }
             }),
@@ -563,6 +720,13 @@ describe("runHookService startup", () => {
               headers: { authorization: "Bearer kickoff-secret" },
             }),
           )
+          const testJobResponse = yield* Effect.tryPromise(() =>
+            fetch(`http://${server.hostname}:${server.port}/workflows/test-jobs`, {
+              method: "POST",
+              body: '{"jobId":"runtime-canary","value":true}',
+              headers: { authorization: "Bearer test-job-secret" },
+            }),
+          )
           return {
             health: {
               status: response.status,
@@ -572,16 +736,23 @@ describe("runHookService startup", () => {
               status: qrspiResponse.status,
               body: yield* Effect.promise(() => qrspiResponse.json()),
             },
+            testJob: {
+              status: testJobResponse.status,
+              body: yield* Effect.promise(() => testJobResponse.json()),
+            },
           }
         }),
-      ).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters))),
     )
 
     expect(validations).toBe(1)
-    expect(observedWorkers).toEqual(new Set(["job", "publication", "reconciliation", "command"]))
+    expect(observedWorkers).toEqual(
+      new Set(["job", "kernel-job", "publication", "reconciliation", "command"]),
+    )
     expect(result).toEqual({
       health: { status: 200, body: { status: "ok" } },
       qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
+      testJob: { status: 202, body: { jobId: "runtime-canary", status: "pending" } },
     })
   })
 })

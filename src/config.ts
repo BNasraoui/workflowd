@@ -83,6 +83,7 @@ export interface AppConfig {
   readonly openCode: OpenCodeConfig
   readonly worker: WorkerConfig
   readonly qrspi?: QrspiConfig
+  readonly testJobCanary?: { readonly token: string }
 }
 
 export interface ConfigLoadOptions {
@@ -229,6 +230,16 @@ async function secret(
   return value
 }
 
+async function optionalSecret(
+  env: Record<string, string | undefined>,
+  directName: string,
+  fileName: string,
+  read: (path: string) => Promise<string>,
+): Promise<string | undefined> {
+  if (env[directName] === undefined && env[fileName] === undefined) return undefined
+  return secret(env, directName, fileName, read)
+}
+
 export async function loadConfig(
   env: Record<string, string | undefined>,
   options: ConfigLoadOptions = {},
@@ -249,6 +260,15 @@ export async function loadConfig(
     "OPENCODE_SERVER_PASSWORD_FILE",
     read,
   )
+  const testJobToken = await optionalSecret(
+    env,
+    "WORKFLOWD_TEST_JOB_TOKEN",
+    "WORKFLOWD_TEST_JOB_TOKEN_FILE",
+    read,
+  )
+  if (testJobToken !== undefined && testJobToken.length < 8) {
+    throw new Error("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
+  }
   const jobTimeoutMs = positiveInteger(
     env.WORKFLOWD_JOB_TIMEOUT_MS,
     30 * 60_000,
@@ -387,6 +407,7 @@ export async function loadConfig(
       commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
     },
     ...(qrspi === undefined ? {} : { qrspi }),
+    ...(testJobToken === undefined ? {} : { testJobCanary: { token: testJobToken } }),
   }
 }
 

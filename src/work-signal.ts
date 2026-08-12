@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, PubSub, type Queue, type Scope } from "effect"
 
-export type WorkLane = "job" | "publication" | "reconciliation" | "command"
+export type WorkLane = "job" | "kernel-job" | "publication" | "reconciliation" | "command"
 
 export type WorkSignalPort = {
   readonly subscribe: (lane: WorkLane) => Effect.Effect<Queue.Dequeue<void>, never, Scope.Scope>
@@ -14,6 +14,7 @@ export const WorkSignalLive = Layer.scoped(
   Effect.gen(function* () {
     const lanes = {
       job: yield* PubSub.sliding<void>(1),
+      "kernel-job": yield* PubSub.sliding<void>(1),
       publication: yield* PubSub.sliding<void>(1),
       reconciliation: yield* PubSub.sliding<void>(1),
       command: yield* PubSub.sliding<void>(1),

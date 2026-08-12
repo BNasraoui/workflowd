@@ -213,6 +213,43 @@ describe("loadConfig", () => {
     })
   })
 
+  test("optionally loads the test-job token from exactly one direct or file source", async () => {
+    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    const direct = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_TEST_JOB_TOKEN: "test-job-secret" },
+      { home: "/home/test" },
+    )
+    const fromFile = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_TEST_JOB_TOKEN_FILE: "/run/test-job-token" },
+      { home: "/home/test", readFile: async () => "file-test-job-secret\n" },
+    )
+
+    expect(disabled.testJobCanary).toBeUndefined()
+    expect(direct.testJobCanary).toEqual({ token: "test-job-secret" })
+    expect(fromFile.testJobCanary).toEqual({ token: "file-test-job-secret" })
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_TEST_JOB_TOKEN: "test-job-secret",
+          WORKFLOWD_TEST_JOB_TOKEN_FILE: "/run/test-job-token",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow(
+      "WORKFLOWD_TEST_JOB_TOKEN and WORKFLOWD_TEST_JOB_TOKEN_FILE cannot both be set",
+    )
+  })
+
+  test("requires a sensible test-job token length", async () => {
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_TEST_JOB_TOKEN: "short" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
+  })
+
   test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
     "requires the QRSPI token when %s is present",
     async (name) => {

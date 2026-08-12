@@ -2,6 +2,8 @@ import { Data, Effect, FiberSet, Option, Queue } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
+import { runKernelJobIteration } from "./kernel/job-runner"
+import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { Automation } from "./opencode"
 import {
   runCommandIteration,
@@ -106,12 +108,14 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
+export type RuntimeWorkerName = "job" | "kernel-job" | "publication" | "reconciliation" | "command"
 
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
     case "job":
       return ["publication"]
+    case "kernel-job":
+      return []
     case "publication":
     case "command":
     case "reconciliation":
@@ -130,9 +134,14 @@ export function startHookService(
 
   return Effect.gen(function* () {
     const automation = yield* Automation
+    const signals = yield* WorkSignal
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
+    const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
+    }
+    if (config.testJobCanary !== undefined && Option.isNone(testJobCanary)) {
+      return yield* Effect.die(new Error("Test-job canary is configured without its service"))
     }
 
     yield* automation
@@ -171,6 +180,23 @@ export function startHookService(
         ),
       )
     }
+
+    yield* superviseWorker(
+      "Kernel job worker",
+      config.worker.pollIntervalMs,
+      "kernel-job",
+      observed(
+        "kernel-job",
+        Effect.suspend(() =>
+          runKernelJobIteration({
+            workerId: `${process.pid}:kernel-job`,
+            now: () => new Date(),
+            leaseDurationMs: config.worker.jobLeaseDurationMs,
+            retryDelayMs: config.worker.pollIntervalMs,
+          }),
+        ).pipe(Effect.map((result) => result.status)),
+      ),
+    )
 
     yield* superviseWorker(
       "Publisher",
@@ -236,6 +262,22 @@ export function startHookService(
                 qrspi: {
                   token: config.qrspi.token,
                   start: Option.getOrThrow(workflowStart).start,
+                },
+              }),
+          ...(config.testJobCanary === undefined
+            ? {}
+            : {
+                testJobs: {
+                  token: config.testJobCanary.token,
+                  submit: (input: TestJobSubmission, now: Date) =>
+                    Option.getOrThrow(testJobCanary)
+                      .submit(input, now)
+                      .pipe(
+                        Effect.tap((result) =>
+                          result.newlyEnqueued ? signals.wake("kernel-job") : Effect.void,
+                        ),
+                      ),
+                  status: Option.getOrThrow(testJobCanary).status,
                 },
               }),
         }),
