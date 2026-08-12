@@ -219,6 +219,33 @@ const boundedJson = (value: unknown) =>
 const conflict = (record: string, key: string) =>
   new KernelSessionStoreConflictError({ record, key })
 const denied = (key: string) => new KernelSessionStoreAuthorityError({ key })
+type CleanupDisposition = "completed" | "missing" | "retry" | "operator_required"
+type CleanupTerminalState = "cleaned" | "missing" | "operator_required" | "cleanup_required"
+const observationState = (
+  disposition: "completed" | "missing" | "failed" | "operator_required",
+) => {
+  if (disposition === "completed") return "completed" as const
+  if (disposition === "operator_required") return "operator_required" as const
+  return "failed" as const
+}
+const effectiveCleanupDisposition = (
+  input: CleanupDisposition,
+  attempt: number,
+  maxAttempts: number,
+) => {
+  if (input === "retry" && attempt >= maxAttempts) return "operator_required" as const
+  return input
+}
+const cleanupTerminalState = (disposition: CleanupDisposition): CleanupTerminalState => {
+  if (disposition === "completed") return "cleaned"
+  if (disposition === "missing") return "missing"
+  if (disposition === "operator_required") return "operator_required"
+  return "cleanup_required"
+}
+const cleanupRequestState = (disposition: CleanupDisposition) =>
+  disposition === "retry" ? ("retry_scheduled" as const) : disposition
+const cleanupError = (disposition: CleanupDisposition, payload: string) =>
+  disposition === "operator_required" ? payload : null
 const validateResumeAuthority = (input: ResumeAuthority) =>
   Effect.all([validDate(input.expectedLeaseUntil), validDate(input.now)])
 const validateCleanupAuthority = (input: CleanupAuthority) =>
@@ -698,12 +725,7 @@ const make = Effect.gen(function* () {
       evidence_json, observed_at) VALUES (${input.observationId}, ${input.requestId}, ${input.attempt},
       ${input.observerHostId}, ${input.observerWorkerId}, ${input.observerToken}, ${input.disposition},
       ${version}, ${evidence.json}, ${input.observedAt.toISOString()})`
-      const state =
-        input.disposition === "completed"
-          ? "completed"
-          : input.disposition === "operator_required"
-            ? "operator_required"
-            : "failed"
+      const state = observationState(input.disposition)
       yield* sql`UPDATE kernel_resume_attempts SET state = ${state},
         updated_at = ${input.observedAt.toISOString()} WHERE request_id = ${input.requestId}
         AND attempt = ${input.attempt} AND state = 'observation_required'`
@@ -853,10 +875,11 @@ const make = Effect.gen(function* () {
       const payload = yield* boundedJson(input.outcome)
       const budget = yield* sql<{ readonly max_attempts: number }>`SELECT max_attempts
         FROM kernel_cleanup_requests WHERE cleanup_id = ${input.cleanupId}`
-      const disposition =
-        input.disposition === "retry" && input.attempt >= (budget[0]?.max_attempts ?? 0)
-          ? ("operator_required" as const)
-          : input.disposition
+      const disposition = effectiveCleanupDisposition(
+        input.disposition,
+        input.attempt,
+        budget[0]?.max_attempts ?? 0,
+      )
       const existing = yield* sql`SELECT * FROM kernel_cleanup_outcomes
         WHERE cleanup_id = ${input.cleanupId} AND attempt = ${input.attempt}`
       if (existing.length > 0) {
@@ -889,30 +912,16 @@ const make = Effect.gen(function* () {
       VALUES (${input.outcomeId}, ${input.cleanupId}, ${input.attempt}, ${input.owningHostId},
       ${input.workerId}, ${input.claimToken}, ${input.expectedLeaseUntil.toISOString()}, ${disposition},
       ${version}, ${payload.json}, ${input.now.toISOString()})`
-      const requestState = disposition === "retry" ? "retry_scheduled" : disposition
+      const requestState = cleanupRequestState(disposition)
       yield* sql`UPDATE kernel_cleanup_requests SET state = ${requestState},
       run_at = ${input.runAt?.toISOString() ?? input.now.toISOString()}, updated_at = ${input.now.toISOString()}
       WHERE cleanup_id = ${input.cleanupId}`
-      const resourceState =
-        disposition === "completed"
-          ? "cleaned"
-          : disposition === "missing"
-            ? "missing"
-            : disposition === "operator_required"
-              ? "operator_required"
-              : "cleanup_required"
+      const resourceState = cleanupTerminalState(disposition)
       yield* sql`UPDATE kernel_working_resources SET state = ${resourceState},
-      cleanup_error = ${disposition === "operator_required" ? payload.json : null},
+      cleanup_error = ${cleanupError(disposition, payload.json)},
       updated_at = ${input.now.toISOString()} WHERE resource_id = (
         SELECT resource_id FROM kernel_cleanup_requests WHERE cleanup_id = ${input.cleanupId})`
-      const sessionState =
-        disposition === "completed"
-          ? "cleaned"
-          : disposition === "missing"
-            ? "missing"
-            : disposition === "operator_required"
-              ? "operator_required"
-              : "cleanup_required"
+      const sessionState = cleanupTerminalState(disposition)
       yield* sql`UPDATE kernel_sessions SET state = ${sessionState}, revision = revision + 1,
         updated_at = ${input.now.toISOString()} WHERE resource_id = (
           SELECT resource_id FROM kernel_cleanup_requests WHERE cleanup_id = ${input.cleanupId})

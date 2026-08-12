@@ -3,15 +3,21 @@ import { JsonValueSchema, type JsonValue } from "../json"
 import { MAX_CUSTODY_ID_BYTES } from "./session-store-model"
 
 export const bytes = (value: string) => new TextEncoder().encode(value).byteLength
-export const canonicalJson = (value: JsonValue): string =>
-  Array.isArray(value)
-    ? `[${value.map(canonicalJson).join(",")}]`
-    : value !== null && typeof value === "object"
-      ? `{${Object.entries(value)
-          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
-          .join(",")}}`
-      : JSON.stringify(value)
+const compareKeys = ([left]: [string, JsonValue], [right]: [string, JsonValue]) => {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+export const canonicalJson = (value: JsonValue): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(compareKeys)
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`
+  }
+  return JSON.stringify(value)
+}
 
 export const Timestamp = Schema.String.pipe(
   Schema.pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
