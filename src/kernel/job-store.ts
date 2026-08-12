@@ -133,13 +133,16 @@ const ResultRow = Schema.Struct({
   completed_at: Timestamp,
 })
 
-const compareEntries = ([left]: [string, unknown], [right]: [string, unknown]) =>
-  left < right ? -1 : left > right ? 1 : 0
+const compareJsonEntries = ([left]: [string, unknown], [right]: [string, unknown]): number => {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
 const canonicalJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value)
-      .sort(compareEntries)
+      .sort(compareJsonEntries)
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(",")}}`
   }

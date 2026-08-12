@@ -18,6 +18,7 @@ import { WorkflowStoreLive } from "../../src/store"
 
 export const now = new Date("2026-08-12T10:00:00.000Z")
 export const expiry = new Date("2026-08-12T10:01:00.000Z")
+const defaultJobInput = () => ({ task: "review" }) as const
 
 export const removeDatabase = async (filename: string) => {
   for (const path of [filename, `${filename}-shm`, `${filename}-wal`]) {
@@ -38,20 +39,23 @@ export const runKernel = <A, E>(
   effect: Effect.Effect<A, E, KernelEventStorePort | KernelJobStorePort | SqlClientService>,
 ) => Effect.runPromise(effect.pipe(Effect.provide(kernelLayer(filename))))
 
-export const deliveryInput = (jobId: string, input: JsonValue = { task: "review" }) => ({
-  jobId,
-  instanceId: `instance-${jobId.slice(0, 100)}`,
-  waitId: `wait-${jobId.slice(0, 100)}`,
-  eventSequence: 1,
-  expectedCursor: 0,
-  inputVersion: 1,
-  input,
-  maxAttempts: 3,
-  runAt: now,
-  createdAt: now,
-})
+export const deliveryInput = (jobId: string, input?: JsonValue) => {
+  const resolvedInput = input === undefined ? defaultJobInput() : input
+  return {
+    jobId,
+    instanceId: `instance-${jobId.slice(0, 100)}`,
+    waitId: `wait-${jobId.slice(0, 100)}`,
+    eventSequence: 1,
+    expectedCursor: 0,
+    inputVersion: 1,
+    input: resolvedInput,
+    maxAttempts: 3,
+    runAt: now,
+    createdAt: now,
+  }
+}
 
-export const arrangeDelivery = (jobId: string, input: JsonValue = { task: "review" }) =>
+export const arrangeDelivery = (jobId: string, input?: JsonValue) =>
   Effect.gen(function* () {
     const events = yield* KernelEventStore
     const sql = yield* SqlClient.SqlClient
@@ -96,7 +100,7 @@ export const arrangeDelivery = (jobId: string, input: JsonValue = { task: "revie
     }
   })
 
-export const arrangeJob = (jobId: string, input: JsonValue = { task: "review" }) =>
+export const arrangeJob = (jobId: string, input?: JsonValue) =>
   Effect.gen(function* () {
     const jobs = yield* KernelJobStore
     const delivery = yield* arrangeDelivery(jobId, input)
