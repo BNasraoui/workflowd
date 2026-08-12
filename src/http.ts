@@ -12,6 +12,7 @@ import {
   TestJobCanaryNotFound,
   TestJobSubmission,
   TestJobId,
+  type TestJobCanaryError,
   type TestJobCanaryPort,
 } from "./kernel/test-job-canary"
 
@@ -46,25 +47,32 @@ export function routeRequest(
   if (pathname === "/workflows/qrspi" && request.method === "POST" && options.qrspi !== undefined) {
     return handleQrspiStart(request, options.qrspi, options.maxBodyBytes ?? 1_048_576)
   }
-  if (options.testJobs !== undefined) {
-    if (pathname === "/workflows/test-jobs" && request.method === "POST") {
-      return handleTestJobSubmit(
-        request,
-        options.testJobs,
-        options.now,
-        options.maxBodyBytes ?? 1_048_576,
-      )
-    }
-    const match = /^\/workflows\/test-jobs\/([^/]+)$/.exec(pathname)
-    if (match !== null && request.method === "GET") {
-      try {
-        return handleTestJobStatus(request, options.testJobs, decodeURIComponent(match[1]!))
-      } catch {
-        return Effect.succeed(Response.json({ error: "invalid test job ID" }, { status: 400 }))
-      }
-    }
-  }
+  const testJobResponse = routeTestJobRequest(request, pathname, options)
+  if (testJobResponse !== undefined) return testJobResponse
   return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+}
+
+function routeTestJobRequest(
+  request: Request,
+  pathname: string,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never> | undefined {
+  if (options.testJobs === undefined) return undefined
+  if (pathname === "/workflows/test-jobs" && request.method === "POST") {
+    return handleTestJobSubmit(
+      request,
+      options.testJobs,
+      options.now,
+      options.maxBodyBytes ?? 1_048_576,
+    )
+  }
+  const match = /^\/workflows\/test-jobs\/([^/]+)$/.exec(pathname)
+  if (match === null || request.method !== "GET") return undefined
+  try {
+    return handleTestJobStatus(request, options.testJobs, decodeURIComponent(match[1]!))
+  } catch {
+    return Effect.succeed(Response.json({ error: "invalid test job ID" }, { status: 400 }))
+  }
 }
 
 function handleTestJobSubmit(
@@ -114,15 +122,20 @@ function handleTestJobStatus(request: Request, ingress: TestJobIngress, jobId: s
   return Schema.decodeUnknown(TestJobId)(jobId).pipe(
     Effect.flatMap(ingress.status),
     Effect.match({
-      onFailure: (error) =>
-        error instanceof TestJobCanaryNotFound
-          ? Response.json({ error: "not found" }, { status: 404 })
-          : "_tag" in error && error._tag === "ParseError"
-            ? Response.json({ error: "invalid test job ID" }, { status: 400 })
-            : Response.json({ error: "internal server error" }, { status: 500 }),
+      onFailure: testJobStatusFailure,
       onSuccess: (result) => Response.json(result),
     }),
   )
+}
+
+function testJobStatusFailure(error: TestJobCanaryError): Response {
+  if (error instanceof TestJobCanaryNotFound) {
+    return Response.json({ error: "not found" }, { status: 404 })
+  }
+  if ("_tag" in error && error._tag === "ParseError") {
+    return Response.json({ error: "invalid test job ID" }, { status: 400 })
+  }
+  return Response.json({ error: "internal server error" }, { status: 500 })
 }
 
 function handleQrspiStart(request: Request, ingress: QrspiIngress, maxBodyBytes: number) {
