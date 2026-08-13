@@ -9,6 +9,7 @@ import { WorkSignal, WorkSignalLive, type WorkSignalPort } from "../src/work-sig
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
 import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
+import { TestJobCanaryConflict, TestJobCanaryNotFound } from "../src/kernel/test-job-canary"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
 const TestLayer = Layer.merge(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)), WorkSignalLive)
@@ -375,6 +376,142 @@ describe("routeRequest", () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ status: "ok" })
+  })
+
+  test("keeps test-job routes absent when the canary is disabled", async () => {
+    const responses = await Promise.all(
+      [
+        new Request("http://localhost/workflows/test-jobs", { method: "POST", body: "{}" }),
+        new Request("http://localhost/workflows/test-jobs/job-1"),
+      ].map((request) =>
+        Effect.runPromise(
+          routeRequest(request, {
+            webhookSecret: "secret",
+            now: new Date("2026-07-19T12:00:00.000Z"),
+          }).pipe(Effect.provide(TestLayer)),
+        ),
+      ),
+    )
+
+    expect(responses.map((response) => response.status)).toEqual([404, 404])
+  })
+
+  test("authenticates and strictly decodes bounded test-job submissions", async () => {
+    const calls: Array<unknown> = []
+    const canary = {
+      token: "test-job-secret",
+      submit: (input: unknown) =>
+        Effect.sync(() => {
+          calls.push(input)
+          return { jobId: "job-1", status: "pending" as const, newlyEnqueued: true }
+        }),
+      status: () => Effect.die("unused"),
+    }
+    const request = (body: string, authorization = "Bearer test-job-secret") =>
+      routeRequest(
+        new Request("http://localhost/workflows/test-jobs", {
+          method: "POST",
+          body,
+          headers: { authorization },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          maxBodyBytes: 50,
+          testJobs: canary,
+        },
+      ).pipe(Effect.provide(TestLayer), Effect.runPromise)
+
+    const unauthorized = await request('{"jobId":"job-1","value":null}', "Bearer wrong")
+    const malformed = await request("{")
+    const extra = await request('{"jobId":"job-1","value":null,"extra":true}')
+    const invalidId = await request('{"jobId":"","value":null}')
+    const dotId = await request('{"jobId":".","value":null}')
+    const dotDotId = await request('{"jobId":"..","value":null}')
+    const oversized = await request(JSON.stringify({ jobId: "job-1", value: "x".repeat(100) }))
+    const accepted = await request('{"jobId":"job-1","value":{"probe":true}}')
+
+    expect([
+      unauthorized.status,
+      malformed.status,
+      extra.status,
+      invalidId.status,
+      dotId.status,
+      dotDotId.status,
+      oversized.status,
+    ]).toEqual([401, 400, 400, 400, 400, 400, 413])
+    expect(accepted.status).toBe(202)
+    expect(await accepted.json()).toEqual({ jobId: "job-1", status: "pending" })
+    expect(calls).toEqual([{ jobId: "job-1", value: { probe: true } }])
+  })
+
+  test("returns canary conflicts and lifecycle status without premature results", async () => {
+    const testJobs = {
+      token: "test-job-secret",
+      submit: () => Effect.fail(new TestJobCanaryConflict({ jobId: "job-1" })),
+      status: (jobId: string) =>
+        jobId === "missing"
+          ? Effect.fail(new TestJobCanaryNotFound({ jobId }))
+          : Effect.succeed({ jobId, status: "running" as const }),
+    }
+    const options = {
+      webhookSecret: "secret",
+      now: new Date("2026-07-19T12:00:00.000Z"),
+      testJobs,
+    }
+    const auth = { authorization: "Bearer test-job-secret" }
+    const conflict = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/test-jobs", {
+          method: "POST",
+          body: '{"jobId":"job-1","value":false}',
+          headers: auth,
+        }),
+        options,
+      ).pipe(Effect.provide(TestLayer)),
+    )
+    const known = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/test-jobs/job-1", { headers: auth }),
+        options,
+      ).pipe(Effect.provide(TestLayer)),
+    )
+    const unknown = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/test-jobs/missing", { headers: auth }),
+        options,
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(conflict.status).toBe(409)
+    expect(await known.json()).toEqual({ jobId: "job-1", status: "running" })
+    expect(unknown.status).toBe(404)
+  })
+
+  test("rejects malformed encoded test-job IDs without invoking status", async () => {
+    let calls = 0
+    const response = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/test-jobs/%E0%A4%A", {
+          headers: { authorization: "Bearer test-job-secret" },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          testJobs: {
+            token: "test-job-secret",
+            submit: () => Effect.die("unused"),
+            status: () => {
+              calls += 1
+              return Effect.die("must not run")
+            },
+          },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(400)
+    expect(calls).toBe(0)
   })
 
   test("authenticates and decodes QRSPI kickoff before invoking the trusted handler", async () => {

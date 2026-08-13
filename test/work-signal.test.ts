@@ -52,4 +52,24 @@ describe("WorkSignal", () => {
 
     expect(sizes).toEqual([1, 1])
   })
+
+  test("keeps kernel job wakes on a separate lane", async () => {
+    const pending = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const signals = yield* WorkSignal
+          const kernelJobs = yield* signals.subscribe("kernel-job")
+          const legacyJobs = yield* signals.subscribe("job")
+          yield* signals.wake("kernel-job")
+          return {
+            kernelJob: yield* Queue.poll(kernelJobs),
+            legacyJob: yield* Queue.poll(legacyJobs),
+          }
+        }).pipe(Effect.provide(WorkSignalLive)),
+      ),
+    )
+
+    expect(Option.isSome(pending.kernelJob)).toBe(true)
+    expect(Option.isNone(pending.legacyJob)).toBe(true)
+  })
 })

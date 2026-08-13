@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
 import { JsonText } from "./json"
@@ -7,10 +7,22 @@ import type { IngestPullRequestResult } from "./store/model"
 import { verifyWebhookSignature } from "./webhook"
 import type { WorkflowStartError } from "./qrspi/workflow-start"
 import { WorkSignal, type WorkSignalPort } from "./work-signal"
+import {
+  TestJobCanaryConflict,
+  TestJobCanaryNotFound,
+  TestJobSubmission,
+  TestJobId,
+  type TestJobCanaryError,
+  type TestJobCanaryPort,
+} from "./kernel/test-job-canary"
 
 type QrspiIngress = {
   readonly token: string
   readonly start: (input: unknown) => Effect.Effect<object, WorkflowStartError, never>
+}
+
+type TestJobIngress = Pick<TestJobCanaryPort, "submit" | "status"> & {
+  readonly token: string
 }
 
 export type WebhookHandlerOptions = {
@@ -18,6 +30,7 @@ export type WebhookHandlerOptions = {
   readonly now: Date
   readonly maxBodyBytes?: number
   readonly qrspi?: QrspiIngress
+  readonly testJobs?: TestJobIngress
 }
 
 export function routeRequest(
@@ -34,7 +47,95 @@ export function routeRequest(
   if (pathname === "/workflows/qrspi" && request.method === "POST" && options.qrspi !== undefined) {
     return handleQrspiStart(request, options.qrspi, options.maxBodyBytes ?? 1_048_576)
   }
+  const testJobResponse = routeTestJobRequest(request, pathname, options)
+  if (testJobResponse !== undefined) return testJobResponse
   return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+}
+
+function routeTestJobRequest(
+  request: Request,
+  pathname: string,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never> | undefined {
+  if (options.testJobs === undefined) return undefined
+  if (pathname === "/workflows/test-jobs" && request.method === "POST") {
+    return handleTestJobSubmit(
+      request,
+      options.testJobs,
+      options.now,
+      options.maxBodyBytes ?? 1_048_576,
+    )
+  }
+  const match = /^\/workflows\/test-jobs\/([^/]+)$/.exec(pathname)
+  if (match === null || request.method !== "GET") return undefined
+  try {
+    return handleTestJobStatus(request, options.testJobs, decodeURIComponent(match[1]!))
+  } catch {
+    return Effect.succeed(Response.json({ error: "invalid test job ID" }, { status: 400 }))
+  }
+}
+
+function handleTestJobSubmit(
+  request: Request,
+  ingress: TestJobIngress,
+  now: Date,
+  maxBodyBytes: number,
+) {
+  return Effect.gen(function* () {
+    if (!authorized(request.headers.get("authorization"), ingress.token)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 })
+    }
+    const bytes = new Uint8Array(yield* Effect.tryPromise(() => request.arrayBuffer()))
+    if (bytes.byteLength > maxBodyBytes) {
+      return Response.json({ error: "payload too large" }, { status: 413 })
+    }
+    const json = yield* Schema.decodeUnknown(JsonText)(new TextDecoder().decode(bytes)).pipe(
+      Effect.catchAll(() => Effect.succeed(undefined)),
+    )
+    if (json === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
+    const input = yield* Schema.decodeUnknown(TestJobSubmission)(json, {
+      onExcessProperty: "error",
+    }).pipe(Effect.either)
+    if (input._tag === "Left") return Response.json({ error: "invalid test job" }, { status: 400 })
+    return yield* ingress.submit(input.right, now).pipe(
+      Effect.match({
+        onFailure: (error) =>
+          error instanceof TestJobCanaryConflict
+            ? Response.json({ error: "conflict" }, { status: 409 })
+            : Response.json({ error: "internal server error" }, { status: 500 }),
+        onSuccess: ({ newlyEnqueued: _, ...result }) => Response.json(result, { status: 202 }),
+      }),
+    )
+  }).pipe(
+    Effect.catchAllCause((cause) =>
+      Effect.logError("Test-job ingress failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
+}
+
+function handleTestJobStatus(request: Request, ingress: TestJobIngress, jobId: string) {
+  if (!authorized(request.headers.get("authorization"), ingress.token)) {
+    return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+  }
+  return Schema.decodeUnknown(TestJobId)(jobId).pipe(
+    Effect.flatMap(ingress.status),
+    Effect.match({
+      onFailure: testJobStatusFailure,
+      onSuccess: (result) => Response.json(result),
+    }),
+  )
+}
+
+function testJobStatusFailure(error: TestJobCanaryError): Response {
+  if (error instanceof TestJobCanaryNotFound) {
+    return Response.json({ error: "not found" }, { status: 404 })
+  }
+  if ("_tag" in error && error._tag === "ParseError") {
+    return Response.json({ error: "invalid test job ID" }, { status: 400 })
+  }
+  return Response.json({ error: "internal server error" }, { status: 500 })
 }
 
 function handleQrspiStart(request: Request, ingress: QrspiIngress, maxBodyBytes: number) {
@@ -93,9 +194,9 @@ function workflowStartStatus(error: WorkflowStartError): number {
 
 function authorized(header: string | null, token: string) {
   if (header === null || !header.startsWith("Bearer ")) return false
-  const supplied = Buffer.from(header.slice("Bearer ".length))
-  const expected = Buffer.from(token)
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected)
+  const supplied = createHash("sha256").update(header.slice("Bearer ".length)).digest()
+  const expected = createHash("sha256").update(token).digest()
+  return timingSafeEqual(supplied, expected)
 }
 
 function wakePullRequestWork(signals: WorkSignalPort, result: IngestPullRequestResult) {

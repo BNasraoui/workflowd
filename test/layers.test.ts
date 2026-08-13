@@ -8,6 +8,9 @@ import { Cause, Effect, Layer } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
+import { KernelEventStore } from "../src/kernel/event-store"
+import { KernelJobStore } from "../src/kernel/job-store"
+import { TestJobCanary } from "../src/kernel/test-job-canary"
 import { makeLiveLayer } from "../src/layers"
 import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
@@ -74,6 +77,57 @@ const sixStageDefinition = {
       : {}),
   })),
 }
+
+test("starts and restarts the full live layer with both kernel stores", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
+  try {
+    const privateKeyPath = join(directory, "github.pem")
+    const databasePath = join(directory, "workflowd.db")
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
+    const config = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_DATABASE_PATH: databasePath,
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+      },
+      { home: directory },
+    )
+
+    const start = () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const events = yield* KernelEventStore
+          const jobs = yield* KernelJobStore
+          yield* WorkflowStore
+          yield* WorkflowStart
+          const testJobs = yield* TestJobCanary
+          return [events.readReadyDeliveries, jobs.readRecoverable, testJobs.submit]
+        }).pipe(
+          Effect.provide(
+            makeLiveLayer(config).pipe(
+              Layer.provide(SqliteClient.layer({ filename: databasePath })),
+            ),
+          ),
+        ),
+      )
+
+    expect((await start()).every((method) => typeof method === "function")).toBe(true)
+    expect((await start()).every((method) => typeof method === "function")).toBe(true)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))
