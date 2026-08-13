@@ -851,6 +851,221 @@ const kernelWorkflowJobs = Effect.gen(function* () {
   `
 })
 
+const kernelSessionStore = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+
+  yield* sql`
+    CREATE TABLE kernel_working_resources (
+      resource_id TEXT PRIMARY KEY CHECK (length(CAST(resource_id AS BLOB)) BETWEEN 1 AND 256),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      absolute_path TEXT NOT NULL CHECK (
+        length(CAST(absolute_path AS BLOB)) BETWEEN 1 AND 4096
+          AND substr(absolute_path, 1, 1) = '/'
+          AND absolute_path NOT GLOB '*/../*' AND absolute_path NOT GLOB '*/./*'
+          AND absolute_path NOT GLOB '*/..' AND absolute_path NOT GLOB '*/.'
+          AND (absolute_path = '/' OR substr(absolute_path, -1) <> '/')
+      ),
+      kind TEXT NOT NULL CHECK (kind IN ('workspace', 'worktree', 'checkout')),
+      state TEXT NOT NULL CHECK (state IN (
+        'reserved', 'cleanup_required', 'cleanup_leased', 'cleaned', 'missing', 'operator_required', 'data_error'
+      )),
+      cleanup_reason TEXT,
+      cleanup_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (resource_id, owning_host_id),
+      UNIQUE (owning_host_id, absolute_path),
+      CHECK (state NOT IN ('cleanup_required', 'cleanup_leased', 'operator_required', 'data_error')
+        OR cleanup_reason IS NOT NULL),
+      CHECK (cleanup_error IS NULL OR state IN ('operator_required', 'data_error'))
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_sessions (
+      session_id TEXT PRIMARY KEY CHECK (length(CAST(session_id AS BLOB)) BETWEEN 1 AND 256),
+      provider_kind TEXT NOT NULL CHECK (provider_kind IN ('opencode', 'codex', 'claude')),
+      provider_version INTEGER NOT NULL CHECK (provider_version > 0),
+      provider_id TEXT NOT NULL CHECK (length(CAST(provider_id AS BLOB)) BETWEEN 1 AND 256),
+      server_id TEXT NOT NULL CHECK (length(CAST(server_id AS BLOB)) BETWEEN 1 AND 256),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      endpoint_alias TEXT NOT NULL CHECK (length(CAST(endpoint_alias AS BLOB)) BETWEEN 1 AND 256),
+      endpoint_identity TEXT NOT NULL CHECK (length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 512),
+      native_session_id TEXT NOT NULL CHECK (length(CAST(native_session_id AS BLOB)) BETWEEN 1 AND 256),
+      resource_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN (
+        'ready', 'active', 'completed', 'missing', 'cleanup_required', 'cleaned',
+        'operator_required', 'data_error'
+      )),
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (session_id, owning_host_id),
+      FOREIGN KEY (resource_id, owning_host_id)
+        REFERENCES kernel_working_resources (resource_id, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`CREATE UNIQUE INDEX kernel_sessions_active_native ON kernel_sessions (
+    provider_kind, provider_id, server_id, endpoint_identity, native_session_id
+  ) WHERE state IN ('ready', 'active')`
+  yield* sql`
+    CREATE TABLE kernel_resume_requests (
+      request_id TEXT PRIMARY KEY CHECK (length(CAST(request_id AS BLOB)) BETWEEN 1 AND 256),
+      session_id TEXT NOT NULL,
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      prompt_json TEXT NOT NULL CHECK (
+        json_valid(prompt_json) = 1 AND length(CAST(prompt_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      prompt_text TEXT NOT NULL CHECK (length(CAST(prompt_text AS BLOB)) BETWEEN 1 AND 65536),
+      prompt_sha256 TEXT NOT NULL CHECK (length(prompt_sha256) = 64 AND prompt_sha256 NOT GLOB '*[^0-9a-f]*'),
+      output_contract TEXT CHECK (output_contract IS NULL OR length(CAST(output_contract AS BLOB)) BETWEEN 1 AND 256),
+      output_contract_version INTEGER CHECK (output_contract_version IS NULL OR output_contract_version > 0),
+      state TEXT NOT NULL CHECK (state IN (
+        'ready', 'leased', 'sent', 'observation_required', 'completed', 'failed', 'cancelled',
+        'operator_required', 'data_error'
+      )),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0 AND attempt <= max_attempts),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+      run_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (request_id, owning_host_id),
+      CHECK ((output_contract IS NULL) = (output_contract_version IS NULL)),
+      FOREIGN KEY (session_id, owning_host_id) REFERENCES kernel_sessions (session_id, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_resume_attempts (
+      request_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      worker_id TEXT NOT NULL CHECK (length(CAST(worker_id AS BLOB)) BETWEEN 1 AND 256),
+      claim_token TEXT NOT NULL CHECK (length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256),
+      lease_until TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN (
+        'leased', 'sent', 'observation_required', 'completed', 'failed', 'cancelled', 'released',
+        'operator_required', 'data_error'
+      )),
+      sent_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (request_id, attempt),
+      UNIQUE (request_id, attempt, owning_host_id),
+      CHECK ((state = 'leased' AND sent_at IS NULL) OR (state <> 'leased' AND sent_at IS NOT NULL)
+        OR state IN ('failed', 'cancelled', 'released')),
+      FOREIGN KEY (request_id, owning_host_id)
+        REFERENCES kernel_resume_requests (request_id, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_resume_checkpoints (
+      checkpoint_id TEXT PRIMARY KEY CHECK (length(CAST(checkpoint_id AS BLOB)) BETWEEN 1 AND 256),
+      request_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version > 0),
+      checkpoint_json TEXT NOT NULL CHECK (
+        json_valid(checkpoint_json) = 1 AND length(CAST(checkpoint_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (request_id, attempt) REFERENCES kernel_resume_attempts (request_id, attempt)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_resume_results (
+      result_id TEXT PRIMARY KEY CHECK (length(CAST(result_id AS BLOB)) BETWEEN 1 AND 256),
+      request_id TEXT NOT NULL UNIQUE,
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      result_version INTEGER NOT NULL CHECK (result_version > 0),
+      result_json TEXT NOT NULL CHECK (
+        json_valid(result_json) = 1 AND length(CAST(result_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      completed_at TEXT NOT NULL,
+      FOREIGN KEY (request_id, attempt) REFERENCES kernel_resume_attempts (request_id, attempt)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_resume_observations (
+      observation_id TEXT PRIMARY KEY CHECK (length(CAST(observation_id AS BLOB)) BETWEEN 1 AND 256),
+      request_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      observer_host_id TEXT NOT NULL CHECK (length(CAST(observer_host_id AS BLOB)) BETWEEN 1 AND 256),
+      observer_worker_id TEXT NOT NULL CHECK (length(CAST(observer_worker_id AS BLOB)) BETWEEN 1 AND 256),
+      observer_token TEXT NOT NULL CHECK (length(CAST(observer_token AS BLOB)) BETWEEN 1 AND 256),
+      disposition TEXT NOT NULL CHECK (disposition IN ('completed', 'missing', 'failed', 'operator_required')),
+      evidence_version INTEGER NOT NULL CHECK (evidence_version > 0),
+      evidence_json TEXT NOT NULL CHECK (
+        json_valid(evidence_json) = 1 AND length(CAST(evidence_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      observed_at TEXT NOT NULL,
+      FOREIGN KEY (request_id, attempt) REFERENCES kernel_resume_attempts (request_id, attempt)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_cleanup_requests (
+      cleanup_id TEXT PRIMARY KEY CHECK (length(CAST(cleanup_id AS BLOB)) BETWEEN 1 AND 256),
+      resource_id TEXT NOT NULL UNIQUE,
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      reason TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) BETWEEN 1 AND 4096),
+      state TEXT NOT NULL CHECK (state IN (
+        'pending', 'leased', 'completed', 'missing', 'retry_scheduled', 'operator_required', 'data_error'
+      )),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0 AND attempt <= max_attempts),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+      run_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (cleanup_id, owning_host_id),
+      FOREIGN KEY (resource_id, owning_host_id)
+        REFERENCES kernel_working_resources (resource_id, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_cleanup_outcomes (
+      outcome_id TEXT PRIMARY KEY CHECK (length(CAST(outcome_id AS BLOB)) BETWEEN 1 AND 256),
+      cleanup_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      worker_id TEXT NOT NULL CHECK (length(CAST(worker_id AS BLOB)) BETWEEN 1 AND 256),
+      claim_token TEXT NOT NULL CHECK (length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256),
+      lease_until TEXT NOT NULL,
+      disposition TEXT NOT NULL CHECK (disposition IN ('completed', 'missing', 'retry', 'operator_required')),
+      outcome_version INTEGER NOT NULL CHECK (outcome_version > 0),
+      outcome_json TEXT NOT NULL CHECK (
+        json_valid(outcome_json) = 1 AND length(CAST(outcome_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      completed_at TEXT NOT NULL,
+      FOREIGN KEY (cleanup_id, attempt, owning_host_id)
+        REFERENCES kernel_cleanup_attempts (cleanup_id, attempt, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`
+    CREATE TABLE kernel_cleanup_attempts (
+      cleanup_id TEXT NOT NULL REFERENCES kernel_cleanup_requests (cleanup_id),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      worker_id TEXT NOT NULL CHECK (length(CAST(worker_id AS BLOB)) BETWEEN 1 AND 256),
+      claim_token TEXT NOT NULL CHECK (length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256),
+      lease_until TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('leased', 'completed', 'missing', 'retry', 'operator_required')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (cleanup_id, attempt),
+      UNIQUE (cleanup_id, attempt, owning_host_id),
+      FOREIGN KEY (cleanup_id, owning_host_id)
+        REFERENCES kernel_cleanup_requests (cleanup_id, owning_host_id)
+    ) STRICT
+  `
+  yield* sql`CREATE INDEX kernel_resume_requests_claimable
+    ON kernel_resume_requests (state, run_at, request_id)
+    WHERE state IN ('ready', 'leased', 'sent', 'observation_required')`
+  yield* sql`CREATE INDEX kernel_cleanup_requests_claimable
+    ON kernel_cleanup_requests (state, run_at, cleanup_id)
+    WHERE state IN ('pending', 'leased', 'retry_scheduled')`
+  yield* sql`CREATE UNIQUE INDEX kernel_cleanup_outcomes_attempt
+    ON kernel_cleanup_outcomes (cleanup_id, attempt)`
+  yield* sql`CREATE UNIQUE INDEX kernel_resume_observations_attempt
+    ON kernel_resume_observations (request_id, attempt)`
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -885,9 +1100,18 @@ export const runStoreMigrationsThrough0011 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0011),
 })
 
+const migrationsThrough0012 = {
+  ...migrationsThrough0011,
+  "0012_kernel_workflow_jobs": kernelWorkflowJobs,
+}
+
+export const runStoreMigrationsThrough0012 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0012),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0011,
-    "0012_kernel_workflow_jobs": kernelWorkflowJobs,
+    ...migrationsThrough0012,
+    "0013_kernel_session_store": kernelSessionStore,
   }),
 })

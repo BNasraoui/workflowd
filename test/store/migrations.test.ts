@@ -126,8 +126,11 @@ describe("strict initial store schema", () => {
             'qrspi_ticket_revisions', 'qrspi_workflow_definitions',
             'workflow_operations', 'workflow_operation_gates', 'qrspi_generations',
             'qrspi_stage_definitions', 'kernel_workflow_instances', 'kernel_events',
-            'kernel_waits', 'kernel_wait_event_deliveries', 'kernel_workflow_jobs',
-            'kernel_workflow_job_results'
+             'kernel_waits', 'kernel_wait_event_deliveries', 'kernel_workflow_jobs',
+             'kernel_workflow_job_results', 'kernel_working_resources', 'kernel_sessions',
+             'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
+             'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
+             'kernel_cleanup_attempts', 'kernel_cleanup_outcomes'
           )
           ORDER BY name
         `
@@ -150,8 +153,9 @@ describe("strict initial store schema", () => {
       { migration_id: 10, name: "qrspi_generation_format" },
       { migration_id: 11, name: "kernel_event_wait_store" },
       { migration_id: 12, name: "kernel_workflow_jobs" },
+      { migration_id: 13, name: "kernel_session_store" },
     ])
-    expect(result.tables).toHaveLength(20)
+    expect(result.tables).toHaveLength(30)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
