@@ -1066,6 +1066,40 @@ const kernelSessionStore = Effect.gen(function* () {
     ON kernel_resume_observations (request_id, attempt)`
 })
 
+const kernelAgentHandoff = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE kernel_agent_completion_watches (
+      instance_id TEXT PRIMARY KEY REFERENCES kernel_workflow_instances (instance_id),
+      wait_id TEXT NOT NULL CHECK (length(CAST(wait_id AS BLOB)) BETWEEN 1 AND 256),
+      child_session_id TEXT NOT NULL REFERENCES kernel_sessions (session_id),
+      child_session_generation INTEGER NOT NULL CHECK (child_session_generation > 0),
+      provider_kind TEXT NOT NULL CHECK (provider_kind IN ('opencode', 'codex', 'claude')),
+      provider_version INTEGER NOT NULL CHECK (provider_version > 0),
+      provider_id TEXT NOT NULL CHECK (length(CAST(provider_id AS BLOB)) BETWEEN 1 AND 256),
+      server_id TEXT NOT NULL CHECK (length(CAST(server_id AS BLOB)) BETWEEN 1 AND 256),
+      owning_host_id TEXT NOT NULL CHECK (length(CAST(owning_host_id AS BLOB)) BETWEEN 1 AND 256),
+      endpoint_alias TEXT NOT NULL CHECK (length(CAST(endpoint_alias AS BLOB)) BETWEEN 1 AND 256),
+      endpoint_identity TEXT NOT NULL CHECK (length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 512),
+      native_session_id TEXT NOT NULL CHECK (length(CAST(native_session_id AS BLOB)) BETWEEN 1 AND 256),
+      resource_id TEXT NOT NULL REFERENCES kernel_working_resources (resource_id),
+      baseline_version INTEGER NOT NULL CHECK (baseline_version > 0),
+      baseline_json TEXT NOT NULL CHECK (
+        json_valid(baseline_json) = 1 AND length(CAST(baseline_json AS BLOB)) BETWEEN 1 AND 65536
+      ),
+      state TEXT NOT NULL CHECK (state IN ('watching', 'completed', 'operator_required', 'data_error')),
+      completion_event_sequence INTEGER REFERENCES kernel_events (sequence),
+      registered_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (instance_id, wait_id),
+      CHECK ((state = 'completed') = (completion_event_sequence IS NOT NULL))
+    ) STRICT
+  `
+  yield* sql`CREATE INDEX kernel_agent_completion_watches_active
+    ON kernel_agent_completion_watches (provider_kind, owning_host_id, state, registered_at)
+    WHERE state = 'watching'`
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -1113,5 +1147,6 @@ export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0012,
     "0013_kernel_session_store": kernelSessionStore,
+    "0014_kernel_agent_handoff": kernelAgentHandoff,
   }),
 })

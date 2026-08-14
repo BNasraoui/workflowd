@@ -130,7 +130,8 @@ describe("strict initial store schema", () => {
              'kernel_workflow_job_results', 'kernel_working_resources', 'kernel_sessions',
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
-             'kernel_cleanup_attempts', 'kernel_cleanup_outcomes'
+              'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
+              'kernel_agent_completion_watches'
           )
           ORDER BY name
         `
@@ -154,8 +155,9 @@ describe("strict initial store schema", () => {
       { migration_id: 11, name: "kernel_event_wait_store" },
       { migration_id: 12, name: "kernel_workflow_jobs" },
       { migration_id: 13, name: "kernel_session_store" },
+      { migration_id: 14, name: "kernel_agent_handoff" },
     ])
-    expect(result.tables).toHaveLength(30)
+    expect(result.tables).toHaveLength(31)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

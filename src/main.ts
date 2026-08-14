@@ -20,7 +20,7 @@ const program = Effect.gen(function* () {
     filename: config.storage.databasePath,
   })
   return yield* runHookService(config).pipe(
-    Effect.provide(makeLiveLayer(config).pipe(Layer.provide(DatabaseLive))),
+    Effect.provide(makeLiveLayer(config).pipe(Layer.provideMerge(DatabaseLive))),
   )
 })
 

@@ -8,7 +8,8 @@ import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
-import { KernelEventStoreLive } from "./kernel/event-store"
+import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
+import { AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
 import { KernelJobStoreLive } from "./kernel/job-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import {
@@ -17,6 +18,11 @@ import {
   OpenCodeResumeWorker,
   runOpenCodeResumeIteration,
 } from "./kernel/opencode-resume-worker"
+import {
+  OpenCodeCompletionProvider,
+  OpenCodeCompletionSource,
+  runOpenCodeCompletionSourceIteration,
+} from "./kernel/opencode-completion-source"
 import { TestJobCanaryLive } from "./kernel/test-job-canary"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
@@ -38,7 +44,7 @@ import {
 import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
 import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
-import { WorkSignalLive } from "./work-signal"
+import { WorkSignal, WorkSignalLive } from "./work-signal"
 
 const resumeContract = <A, I>(definition: {
   readonly ref: { readonly name: string; readonly version: number }
@@ -131,12 +137,18 @@ export const makeLiveLayer = (config: AppConfig) => {
             }),
     }),
   )
-  const storeLayer = Layer.mergeAll(
+  const kernelStoreLayer = Layer.mergeAll(
     KernelEventStoreLive,
     KernelJobStoreLive,
     KernelSessionStoreLive,
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
-  const resumeProviderLayer = Layer.succeed(OpenCodeResumeProvider, resumeProvider)
+  const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
+  const storeLayer = Layer.merge(kernelStoreLayer, agentHandoffStoreLayer)
+  const providerLayer = Layer.merge(
+    Layer.succeed(OpenCodeResumeProvider, resumeProvider),
+    Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
+  )
+  const workSignalLayer = WorkSignalLive
   const resumeWorkerLayer = Layer.effect(
     OpenCodeResumeWorker,
     Effect.gen(function* () {
@@ -164,7 +176,37 @@ export const makeLiveLayer = (config: AppConfig) => {
         ),
       }
     }),
-  ).pipe(Layer.provideMerge(storeLayer), Layer.provideMerge(resumeProviderLayer))
+  ).pipe(Layer.provideMerge(storeLayer), Layer.provideMerge(providerLayer))
+  const completionSourceLayer = Layer.effect(
+    OpenCodeCompletionSource,
+    Effect.gen(function* () {
+      const provider = yield* OpenCodeCompletionProvider
+      const events = yield* KernelEventStore
+      const sql = yield* SqlClient.SqlClient
+      const signals = yield* WorkSignal
+      return {
+        iteration: runOpenCodeCompletionSourceIteration({
+          owningHostId: config.worker.hostId,
+          providerId: config.openCode.serverId,
+          serverId: config.openCode.serverId,
+          endpointAlias: config.openCode.endpointAlias,
+          endpointIdentity: config.openCode.baseUrl,
+          providerVersion: 1,
+          now: () => new Date(),
+        }).pipe(
+          Effect.provideService(OpenCodeCompletionProvider, provider),
+          Effect.provideService(KernelEventStore, events),
+          Effect.provideService(SqlClient.SqlClient, sql),
+          Effect.provideService(WorkSignal, signals),
+          Effect.map((result) => result.status),
+        ),
+      }
+    }),
+  ).pipe(
+    Layer.provideMerge(storeLayer),
+    Layer.provideMerge(providerLayer),
+    Layer.provideMerge(workSignalLayer),
+  )
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const qrspiLayer =
     config.qrspi === undefined
@@ -248,9 +290,10 @@ export const makeLiveLayer = (config: AppConfig) => {
         )
   const qrspiWithStores = qrspiLayer.pipe(Layer.provideMerge(storeLayer))
   return Layer.mergeAll(
-    WorkSignalLive,
-    resumeProviderLayer,
+    workSignalLayer,
+    providerLayer,
     resumeWorkerLayer,
+    completionSourceLayer,
     Layer.effect(
       GitHub,
       Effect.tryPromise({

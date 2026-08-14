@@ -3,6 +3,8 @@ import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
+import { enqueueNextAgentHandoff } from "./kernel/agent-handoff-reducer"
+import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { Automation } from "./opencode"
@@ -121,12 +123,20 @@ export function serveHookHttp<R>(
 }
 
 export type RuntimeWorkerName =
-  "job" | "kernel-job" | "session-resume" | "publication" | "reconciliation" | "command"
+  | "job"
+  | "agent-completion"
+  | "kernel-job"
+  | "session-resume"
+  | "publication"
+  | "reconciliation"
+  | "command"
 
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
     case "job":
       return ["publication"]
+    case "agent-completion":
+      return ["kernel-job"]
     case "kernel-job":
     case "session-resume":
       return []
@@ -152,6 +162,7 @@ export function startHookService(
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
+    const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
     }
@@ -202,16 +213,31 @@ export function startHookService(
       "kernel-job",
       observed(
         "kernel-job",
-        Effect.suspend(() =>
-          runKernelJobIteration({
-            workerId: `${process.pid}:kernel-job`,
-            now: () => new Date(),
-            leaseDurationMs: config.worker.jobLeaseDurationMs,
-            retryDelayMs: config.worker.pollIntervalMs,
-          }),
-        ).pipe(Effect.map((result) => result.status)),
+        Effect.suspend(() => {
+          const iterationAt = new Date()
+          return enqueueNextAgentHandoff(iterationAt).pipe(
+            Effect.zipRight(
+              runKernelJobIteration({
+                workerId: `${process.pid}:kernel-job`,
+                now: () => new Date(),
+                leaseDurationMs: config.worker.jobLeaseDurationMs,
+                retryDelayMs: config.worker.pollIntervalMs,
+              }),
+            ),
+            Effect.map((result) => result.status),
+          )
+        }),
       ),
     )
+
+    if (Option.isSome(completionSource)) {
+      yield* superviseWorker(
+        "OpenCode completion source",
+        60_000,
+        "agent-completion",
+        observed("agent-completion", completionSource.value.iteration),
+      )
+    }
 
     if (Option.isSome(resumeWorker)) {
       yield* superviseWorker(

@@ -42,6 +42,7 @@ type OpenCodeSessionDirectoryInput = { readonly directory: string }
 type OpenCodeSdkDirectoryInput = { readonly directory?: string }
 
 type OpenCodeAssistantMessage = {
+  readonly id?: AssistantMessage["id"]
   readonly role: AssistantMessage["role"]
   readonly time: AssistantMessage["time"]
   readonly structured?: AssistantMessage["structured"]
@@ -290,6 +291,7 @@ export function makeOpenCodeSdkClient(client: OpencodeClient): OpenCodeSdkClient
 
 function normalizeAssistantMessage(message: AssistantMessage): OpenCodeAssistantMessage {
   return {
+    id: message.id,
     role: message.role,
     time: message.time,
     ...(message.structured === undefined ? {} : { structured: message.structured }),
