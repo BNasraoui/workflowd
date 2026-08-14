@@ -2,13 +2,21 @@ import { readFile } from "node:fs/promises"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
-import { Effect, Layer } from "effect"
+import { SqlClient } from "@effect/sql"
+import { Effect, JSONSchema, Layer, Schema } from "effect"
 import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { KernelEventStoreLive } from "./kernel/event-store"
 import { KernelJobStoreLive } from "./kernel/job-store"
+import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
+import {
+  OpenCodeResumeAdapter,
+  OpenCodeResumeProvider,
+  OpenCodeResumeWorker,
+  runOpenCodeResumeIteration,
+} from "./kernel/opencode-resume-worker"
 import { TestJobCanaryLive } from "./kernel/test-job-canary"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
@@ -32,6 +40,44 @@ import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
 import { WorkSignalLive } from "./work-signal"
 
+const resumeContract = <A, I>(definition: {
+  readonly ref: { readonly name: string; readonly version: number }
+  readonly outputSchema: Schema.Schema<A, I, never>
+  readonly model: string
+  readonly agent: string
+  readonly maxOutputBytes: number
+}) => {
+  const separator = definition.model.indexOf("/")
+  return {
+    name: definition.ref.name,
+    version: definition.ref.version,
+    schema: definition.outputSchema,
+    jsonSchema: JSONSchema.make(definition.outputSchema),
+    agent: definition.agent,
+    model: {
+      providerID: definition.model.slice(0, separator),
+      modelID: definition.model.slice(separator + 1),
+    },
+    maxOutputBytes: definition.maxOutputBytes,
+  }
+}
+
+const stageResumeContract = <A, I>(
+  contract: {
+    readonly ref: { readonly name: string; readonly contractVersion: number }
+    readonly resultSchema: Schema.Schema<A, I, never>
+    readonly maxResultBytes: number
+  },
+  harness: ReturnType<typeof makeOpenCodeHarnessDefinitions>["stage"],
+) =>
+  resumeContract({
+    ref: { name: contract.ref.name, version: contract.ref.contractVersion },
+    outputSchema: contract.resultSchema,
+    model: harness.model,
+    agent: harness.agent,
+    maxOutputBytes: contract.maxResultBytes,
+  })
+
 export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
@@ -46,6 +92,17 @@ export const makeLiveLayer = (config: AppConfig) => {
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
   })
+  const resumeProvider = new OpenCodeResumeAdapter(openCodeAdapter)
+  const resumeContracts = [
+    resumeContract(definitions.review),
+    resumeContract(definitions.fix),
+    stageResumeContract(builtInStageContracts[0], definitions.stage),
+    stageResumeContract(builtInStageContracts[1], definitions.stage),
+    stageResumeContract(builtInStageContracts[2], definitions.stage),
+    stageResumeContract(builtInStageContracts[3], definitions.stage),
+    stageResumeContract(builtInStageContracts[4], definitions.stage),
+    stageResumeContract(builtInStageContracts[5], definitions.stage),
+  ]
   const agentHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
     new TrustedAgentHarnessCatalog(Object.values(definitions)),
@@ -74,9 +131,40 @@ export const makeLiveLayer = (config: AppConfig) => {
             }),
     }),
   )
-  const storeLayer = Layer.merge(KernelEventStoreLive, KernelJobStoreLive).pipe(
-    Layer.provideMerge(WorkflowStoreLive),
-  )
+  const storeLayer = Layer.mergeAll(
+    KernelEventStoreLive,
+    KernelJobStoreLive,
+    KernelSessionStoreLive,
+  ).pipe(Layer.provideMerge(WorkflowStoreLive))
+  const resumeProviderLayer = Layer.succeed(OpenCodeResumeProvider, resumeProvider)
+  const resumeWorkerLayer = Layer.effect(
+    OpenCodeResumeWorker,
+    Effect.gen(function* () {
+      const sessions = yield* KernelSessionStore
+      const provider = yield* OpenCodeResumeProvider
+      const sql = yield* SqlClient.SqlClient
+      return {
+        iteration: runOpenCodeResumeIteration({
+          owningHostId: config.worker.hostId,
+          workerId: `${process.pid}:opencode-resume`,
+          providerId: config.openCode.serverId,
+          serverId: config.openCode.serverId,
+          endpointAlias: config.openCode.endpointAlias,
+          endpointIdentity: config.openCode.baseUrl,
+          providerVersion: 1,
+          leaseDurationMs: config.worker.jobLeaseDurationMs,
+          heartbeatIntervalMs: Math.max(1_000, Math.floor(config.worker.jobLeaseDurationMs / 3)),
+          now: () => new Date(),
+          contracts: resumeContracts,
+        }).pipe(
+          Effect.provideService(KernelSessionStore, sessions),
+          Effect.provideService(OpenCodeResumeProvider, provider),
+          Effect.provideService(SqlClient.SqlClient, sql),
+          Effect.map((result) => result.status),
+        ),
+      }
+    }),
+  ).pipe(Layer.provideMerge(storeLayer), Layer.provideMerge(resumeProviderLayer))
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const qrspiLayer =
     config.qrspi === undefined
@@ -161,6 +249,8 @@ export const makeLiveLayer = (config: AppConfig) => {
   const qrspiWithStores = qrspiLayer.pipe(Layer.provideMerge(storeLayer))
   return Layer.mergeAll(
     WorkSignalLive,
+    resumeProviderLayer,
+    resumeWorkerLayer,
     Layer.effect(
       GitHub,
       Effect.tryPromise({

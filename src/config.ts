@@ -46,6 +46,7 @@ interface OpenCodeConfig {
 }
 
 interface WorkerConfig {
+  readonly hostId: string
   readonly concurrency: number
   readonly pollIntervalMs: number
   readonly jobTimeoutMs: number
@@ -388,6 +389,7 @@ export async function loadConfig(
       ),
     },
     worker: {
+      hostId: agentId(env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost", "WORKFLOWD_HOST_ID"),
       concurrency: positiveInteger(
         env.WORKFLOWD_WORKER_CONCURRENCY,
         2,

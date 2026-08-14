@@ -3,6 +3,7 @@ import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
+import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { Automation } from "./opencode"
 import {
@@ -57,6 +58,17 @@ export function superviseWorker<A extends string, E, R>(
   })
 }
 
+export const superviseOpenCodeResumeWorker = (pollIntervalMs: number) =>
+  Effect.gen(function* () {
+    const worker = yield* OpenCodeResumeWorker
+    return yield* superviseWorker(
+      "OpenCode resume worker",
+      pollIntervalMs,
+      "session-resume",
+      worker.iteration,
+    )
+  })
+
 function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHookRouteHandler<R>) {
   return Effect.gen(function* () {
     const requests = yield* FiberSet.make<Response, never>()
@@ -108,13 +120,15 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-export type RuntimeWorkerName = "job" | "kernel-job" | "publication" | "reconciliation" | "command"
+export type RuntimeWorkerName =
+  "job" | "kernel-job" | "session-resume" | "publication" | "reconciliation" | "command"
 
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
     case "job":
       return ["publication"]
     case "kernel-job":
+    case "session-resume":
       return []
     case "publication":
     case "command":
@@ -137,6 +151,7 @@ export function startHookService(
     const signals = yield* WorkSignal
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
+    const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
     }
@@ -197,6 +212,15 @@ export function startHookService(
         ).pipe(Effect.map((result) => result.status)),
       ),
     )
+
+    if (Option.isSome(resumeWorker)) {
+      yield* superviseWorker(
+        "OpenCode resume worker",
+        60_000,
+        "session-resume",
+        observed("session-resume", resumeWorker.value.iteration),
+      )
+    }
 
     yield* superviseWorker(
       "Publisher",

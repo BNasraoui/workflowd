@@ -7,6 +7,7 @@ const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
   WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+  WORKFLOWD_HOST_ID: "mint",
 }
 
 const qrspiDefinition = {
@@ -85,6 +86,7 @@ describe("loadConfig", () => {
         pollIntervalMs: 1_000,
       },
       worker: {
+        hostId: "mint",
         concurrency: 2,
         pollIntervalMs: 1_000,
         jobTimeoutMs: 30 * 60_000,

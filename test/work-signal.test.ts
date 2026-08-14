@@ -72,4 +72,25 @@ describe("WorkSignal", () => {
     expect(Option.isSome(pending.kernelJob)).toBe(true)
     expect(Option.isNone(pending.legacyJob)).toBe(true)
   })
+
+  test("keeps local resume wakes on a separate coalescing lane", async () => {
+    const pending = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const signals = yield* WorkSignal
+          const resumes = yield* signals.subscribe("session-resume")
+          const jobs = yield* signals.subscribe("kernel-job")
+          yield* signals.wake("session-resume")
+          yield* signals.wake("session-resume")
+          return {
+            resume: yield* Queue.size(resumes),
+            job: yield* Queue.poll(jobs),
+          }
+        }).pipe(Effect.provide(WorkSignalLive)),
+      ),
+    )
+
+    expect(pending.resume).toBe(1)
+    expect(Option.isNone(pending.job)).toBe(true)
+  })
 })
