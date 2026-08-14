@@ -128,6 +128,7 @@ The required installed values are:
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
+- `WORKFLOWD_HOST_ID`: stable identifier for the machine allowed to claim its local session resumes
 - `WORKFLOWD_COMMAND_USERS`: comma-separated authorized GitHub usernames; an empty value disables commands
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
 - `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled

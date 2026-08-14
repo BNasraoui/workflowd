@@ -5,6 +5,7 @@ import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
+import { OpenCodeResumeWorker } from "../src/kernel/opencode-resume-worker"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
 import {
@@ -12,6 +13,7 @@ import {
   runHookService,
   serveHookHttp,
   startHookService,
+  superviseOpenCodeResumeWorker,
   superviseWorker,
   workDownstreamLanes,
 } from "../src/runtime"
@@ -271,6 +273,40 @@ test("superviseWorker retains fallback polling after an idle iteration", async (
   expect(observed).toBe(2)
 })
 
+test("local resume supervision performs a startup scan and uses its signal lane", async () => {
+  let attempts = 0
+  const scanned = await Effect.runPromise(Deferred.make<void>())
+  const woke = await Effect.runPromise(Deferred.make<void>())
+  const observed = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const signals = yield* WorkSignal
+        yield* superviseOpenCodeResumeWorker(60_000)
+        yield* Deferred.await(scanned)
+        yield* signals.wake("session-resume")
+        yield* Deferred.await(woke)
+        return attempts
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            WorkSignalLive,
+            Layer.succeed(OpenCodeResumeWorker, {
+              iteration: Effect.sync(() => {
+                attempts += 1
+                if (attempts === 1) Effect.runSync(Deferred.succeed(scanned, undefined))
+                if (attempts === 2) Effect.runSync(Deferred.succeed(woke, undefined))
+                return "idle" as const
+              }),
+            }),
+          ),
+        ),
+      ),
+    ),
+  )
+
+  expect(observed).toBe(2)
+})
+
 test("superviseWorker preserves error backoff and scoped shutdown", async () => {
   let attempts = 0
   const result = await Effect.runPromise(
@@ -395,6 +431,7 @@ test("job, command, and reconciliation workers declare conservative downstream w
   expect(workDownstreamLanes("publication")).toEqual(["job"])
   expect(workDownstreamLanes("command")).toEqual(["job"])
   expect(workDownstreamLanes("reconciliation")).toEqual(["job"])
+  expect(workDownstreamLanes("session-resume")).toEqual([])
 })
 
 describe("runHookService startup", () => {
