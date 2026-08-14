@@ -168,14 +168,22 @@ describe("OpenCode agent completion source", () => {
   })
 
   test("observes without prompting, commits one neutral fact, then wakes durable delivery work", async () => {
-    const prompts = 0
+    const providerOperations: Array<string> = []
     const provider: OpenCodeCompletionProviderPort = {
-      sessionExists: async () => true,
-      listMessages: async () => [],
-      subscribeEvents: async () =>
-        (async function* () {
+      sessionExists: async () => {
+        providerOperations.push("sessionExists")
+        return true
+      },
+      listMessages: async () => {
+        providerOperations.push("listMessages")
+        return []
+      },
+      subscribeEvents: async () => {
+        providerOperations.push("subscribeEvents")
+        return (async function* () {
           yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
-        })(),
+        })()
+      },
     }
     const wakes: Array<string> = []
     const signals: WorkSignalPort = {
@@ -202,7 +210,7 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(prompts).toBe(0)
+    expect(providerOperations).toEqual(["sessionExists", "subscribeEvents", "listMessages"])
     expect(result.iteration).toMatchObject({ status: "completed", childSessionId: "child-stable" })
     expect(result.rows).toHaveLength(1)
     expect(result.rows[0]).toMatchObject({ event_type: "agent.session.completed" })
