@@ -286,7 +286,12 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
   expect(await adapter.getSessionStatus(sessionInput, signal)).toEqual({ type: "busy" })
   expect(await adapter.sessionExists(sessionInput, signal)).toBe(true)
   expect(await adapter.listSessionMessages(sessionInput, signal)).toEqual([
-    { role: "assistant", time: { created: 1, completed: 2 }, structured: { verdict: "pass" } },
+    {
+      id: "msg_1",
+      role: "assistant",
+      time: { created: 1, completed: 2 },
+      structured: { verdict: "pass" },
+    },
   ])
   expect(
     await collect(await adapter.subscribeSessionEvents({ directory: "/repo" }, signal)),
@@ -295,6 +300,7 @@ test("SdkOpenCodeAdapter normalizes assistant messages and session events", asyn
       type: "message.updated",
       sessionID: "ses_1",
       message: {
+        id: "msg_1",
         role: "assistant",
         time: { created: 1, completed: 2 },
         structured: { verdict: "pass" },
