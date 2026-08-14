@@ -130,6 +130,28 @@ describe("agent handoff registration", () => {
     })
   })
 
+  test("rejects a resume prompt whose exact text does not match its payload", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const handoffs = yield* AgentHandoffStore
+        return yield* handoffs
+          .register({
+            instanceId: "bad-prompt-handoff",
+            waitId: "bad-prompt-wait",
+            workflow: { ...workflow, resumePromptText: '{"task":"different"}' },
+            baseline: { version: 1, messageFingerprints: [] },
+            registeredAt: at,
+          })
+          .pipe(Effect.either)
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { _tag: "AgentHandoffStoreError", operation: "validate exact resume prompt" },
+    })
+  })
+
   test("matches the same completion both before and after wait registration", async () => {
     for (const order of ["event-first", "wait-first"] as const) {
       const delivered = await Effect.runPromise(

@@ -92,6 +92,37 @@ describe("kernel job runner", () => {
     }
   })
 
+  test("fails a parent-resume action closed when custody services are unavailable", async () => {
+    const result = await runKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const jobs = yield* KernelJobStore
+        yield* arrangeJob("resume-without-custody", {
+          kind: "resume_parent_agent",
+          parentSessionId: "parent-stable",
+          resumePrompt: { task: "Continue." },
+          resumePromptText: '{"task":"Continue."}',
+          outputContract: "test.parent-result",
+          outputContractVersion: 1,
+          registeredAt: now.toISOString(),
+        })
+        const iteration = yield* runKernelJobIteration({
+          workerId: "runner-a",
+          now: () => now,
+          leaseDurationMs: 60_000,
+          retryDelayMs: 1_000,
+        })
+        return { iteration, job: yield* jobs.readJob("resume-without-custody") }
+      }),
+    )
+
+    expect(result.iteration).toEqual({
+      status: "operator_required",
+      jobId: "resume-without-custody",
+    })
+    expect(result.job?.state).toBe("operator_required")
+  })
+
   test("schedules an injected transient execution failure before a fresh claim succeeds", async () => {
     const failedAt = new Date(now.getTime() + 500)
     const runAt = new Date(failedAt.getTime() + 1_000)
