@@ -1,0 +1,38 @@
+[Unit]
+Description=Workflowd host-specific remote probe runner
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Documents/repos/workflowd
+Environment=HOME=%h
+Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/workflowd/runner.env
+LoadCredential=nats-token:%h/.config/workflowd/nats-token
+Environment=WORKFLOWD_NATS_TOKEN_FILE=%d/nats-token
+ExecStart=%h/.bun/bin/bun run runner
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=workflowd-runner
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/workflowd-runner
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=default.target

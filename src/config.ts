@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/domain"
+import { parseNatsServers } from "./remote/nats-url"
 
 interface HttpConfig {
   readonly host: string
@@ -85,6 +86,15 @@ export interface AppConfig {
   readonly worker: WorkerConfig
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
+  readonly remoteCoordinator?: RemoteCoordinatorConfig
+}
+
+export interface RemoteCoordinatorConfig {
+  readonly servers: ReadonlyArray<string>
+  readonly token: string
+  readonly workerId: string
+  readonly leaseDurationMs: number
+  readonly commandTtlMs: number
 }
 
 export interface ConfigLoadOptions {
@@ -318,6 +328,11 @@ export async function loadConfig(
     env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
     "OPENCODE_SERVER_URL",
   )
+  const workerHostId = agentId(
+    env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost",
+    "WORKFLOWD_HOST_ID",
+  )
+  const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, workerHostId)
 
   return {
     http: {
@@ -389,7 +404,7 @@ export async function loadConfig(
       ),
     },
     worker: {
-      hostId: agentId(env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost", "WORKFLOWD_HOST_ID"),
+      hostId: workerHostId,
       concurrency: positiveInteger(
         env.WORKFLOWD_WORKER_CONCURRENCY,
         2,
@@ -410,6 +425,37 @@ export async function loadConfig(
     },
     ...(qrspi === undefined ? {} : { qrspi }),
     ...(testJobToken === undefined ? {} : { testJobCanary: { token: testJobToken } }),
+    ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
+  }
+}
+
+async function loadRemoteCoordinatorConfig(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string>,
+  hostId: string,
+): Promise<RemoteCoordinatorConfig | undefined> {
+  const enabled = booleanSetting(
+    env.WORKFLOWD_REMOTE_COORDINATOR_ENABLED,
+    "WORKFLOWD_REMOTE_COORDINATOR_ENABLED",
+  )
+  if (!enabled) return undefined
+  const rawServers = required(env, "WORKFLOWD_NATS_SERVERS")
+  const servers = parseNatsServers(rawServers)
+  const token = await secret(env, "WORKFLOWD_NATS_TOKEN", "WORKFLOWD_NATS_TOKEN_FILE", read)
+  return {
+    servers,
+    token,
+    workerId: `${hostId}:remote-coordinator`,
+    leaseDurationMs: positiveInteger(
+      env.WORKFLOWD_REMOTE_LEASE_MS,
+      60_000,
+      "WORKFLOWD_REMOTE_LEASE_MS",
+    ),
+    commandTtlMs: positiveInteger(
+      env.WORKFLOWD_REMOTE_COMMAND_TTL_MS,
+      5 * 60_000,
+      "WORKFLOWD_REMOTE_COMMAND_TTL_MS",
+    ),
   }
 }
 

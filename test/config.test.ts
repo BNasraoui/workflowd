@@ -40,6 +40,30 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("loads an optional central remote coordinator with token-file credentials", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_REMOTE_COORDINATOR_ENABLED: "true",
+        WORKFLOWD_NATS_SERVERS: "tls://nats.example.ts.net:4222,nats://127.0.0.1:4222",
+        WORKFLOWD_NATS_TOKEN_FILE: "/run/credentials/nats-token",
+      },
+      {
+        home: "/home/test",
+        readFile: async (path) =>
+          path === "/run/credentials/nats-token" ? "remote-token\n" : "unexpected",
+      },
+    )
+
+    expect(config.remoteCoordinator).toEqual({
+      servers: ["tls://nats.example.ts.net:4222", "nats://127.0.0.1:4222"],
+      token: "remote-token",
+      workerId: "mint:remote-coordinator",
+      leaseDurationMs: 60_000,
+      commandTtlMs: 300_000,
+    })
+  })
+
   test("groups validated settings by their runtime domain", async () => {
     const config = await loadConfig(
       {

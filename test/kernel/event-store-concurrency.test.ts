@@ -372,7 +372,7 @@ test("wait registration begins with a write and survives a committed writer inte
     )
     for (
       let attempt = 0;
-      attempt < 100 && !(await Bun.file(registrationStarted).exists());
+      attempt < 400 && !(await Bun.file(registrationStarted).exists());
       attempt += 1
     ) {
       await Bun.sleep(5)

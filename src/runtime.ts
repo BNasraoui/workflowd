@@ -7,6 +7,9 @@ import { enqueueNextAgentHandoff } from "./kernel/agent-handoff-reducer"
 import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
+import { RemoteCoordinator } from "./remote/coordinator"
+import type { RemoteCoordinatorError } from "./remote/coordinator-store"
+import type { RemoteTransportError } from "./remote/transport"
 import { Automation } from "./opencode"
 import {
   runCommandIteration,
@@ -130,6 +133,38 @@ export type RuntimeWorkerName =
   | "publication"
   | "reconciliation"
   | "command"
+  | "remote-dispatch"
+  | "remote-result"
+
+export const startRemoteCoordinatorWorkers = (
+  pollIntervalMs: number,
+  observe: (name: "remote-dispatch" | "remote-result") => Effect.Effect<void> = () => Effect.void,
+) =>
+  Effect.gen(function* () {
+    const coordinator = yield* RemoteCoordinator
+    if (coordinator === null) {
+      return yield* Effect.die(new Error("Remote coordinator service is unavailable"))
+    }
+    yield* coordinator.ensure
+    const supervise = (
+      name: "remote-dispatch" | "remote-result",
+      iteration: Effect.Effect<string, RemoteCoordinatorError | RemoteTransportError>,
+    ) =>
+      Effect.forever(
+        iteration.pipe(
+          Effect.tap(() => observe(name)),
+          Effect.andThen(name === "remote-dispatch" ? Effect.sleep(pollIntervalMs) : Effect.void),
+          Effect.catchAllCause((cause) =>
+            Effect.logError(`${name} iteration failed`, cause).pipe(
+              Effect.andThen(Effect.sleep(pollIntervalMs)),
+            ),
+          ),
+        ),
+      ).pipe(Effect.forkScoped)
+    const dispatch = yield* supervise("remote-dispatch", coordinator.dispatchIteration)
+    const result = yield* supervise("remote-result", coordinator.resultIteration)
+    return [dispatch, result] as const
+  })
 
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
@@ -163,11 +198,15 @@ export function startHookService(
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
+    const remoteCoordinator = yield* RemoteCoordinator
     if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
       return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
     }
     if (config.testJobCanary !== undefined && Option.isNone(testJobCanary)) {
       return yield* Effect.die(new Error("Test-job canary is configured without its service"))
+    }
+    if (config.remoteCoordinator !== undefined && remoteCoordinator === null) {
+      return yield* Effect.die(new Error("Remote coordinator is configured without its service"))
     }
 
     yield* automation
@@ -183,6 +222,12 @@ export function startHookService(
             ),
         ),
       )
+
+    if (config.remoteCoordinator !== undefined) {
+      yield* startRemoteCoordinatorWorkers(config.worker.pollIntervalMs, (name) =>
+        observeWorkerIteration(name),
+      ).pipe(Effect.provideService(RemoteCoordinator, remoteCoordinator))
+    }
 
     for (let index = 0; index < config.worker.concurrency; index += 1) {
       const workerId = `${process.pid}:worker:${index}`

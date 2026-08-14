@@ -1100,6 +1100,60 @@ const kernelAgentHandoff = Effect.gen(function* () {
     WHERE state = 'watching'`
 })
 
+const kernelRemoteDispatch = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE kernel_remote_dispatches (
+      command_id TEXT PRIMARY KEY CHECK (length(CAST(command_id AS BLOB)) BETWEEN 1 AND 256),
+      job_id TEXT NOT NULL REFERENCES kernel_workflow_jobs (job_id),
+      attempt INTEGER NOT NULL CHECK (attempt > 0),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      host_id TEXT NOT NULL CHECK (
+        length(host_id) BETWEEN 1 AND 64 AND host_id NOT GLOB '*[^A-Za-z0-9_-]*'
+      ),
+      worker_id TEXT NOT NULL CHECK (length(CAST(worker_id AS BLOB)) BETWEEN 1 AND 256),
+      claim_token TEXT NOT NULL CHECK (length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256),
+      lease_until TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN (
+        'prepared', 'publishing', 'published', 'completed', 'superseded', 'cancelled'
+      )),
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      publish_started_at TEXT,
+      published_at TEXT,
+      completed_at TEXT,
+      UNIQUE (job_id, attempt),
+      UNIQUE (job_id, generation),
+      CHECK (state != 'prepared' OR publish_started_at IS NULL),
+      CHECK (state NOT IN ('publishing', 'published', 'completed')
+        OR publish_started_at IS NOT NULL),
+      CHECK (state != 'published' OR published_at IS NOT NULL),
+      CHECK ((state = 'completed') = (completed_at IS NOT NULL))
+    ) STRICT
+  `
+  yield* sql`CREATE INDEX kernel_remote_dispatch_pending
+    ON kernel_remote_dispatches (state, issued_at, command_id)
+    WHERE state IN ('prepared', 'publishing', 'published')`
+  yield* sql`
+    CREATE TABLE kernel_remote_result_inbox (
+      delivery_id TEXT PRIMARY KEY CHECK (length(CAST(delivery_id AS BLOB)) BETWEEN 1 AND 256),
+      result_id TEXT,
+      command_id TEXT,
+      disposition TEXT NOT NULL CHECK (disposition IN (
+        'accepted', 'duplicate', 'malformed', 'oversized', 'wrong_host', 'stale',
+        'expired', 'conflict'
+      )),
+      payload_sha256 TEXT NOT NULL CHECK (
+        length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      payload_bytes INTEGER NOT NULL CHECK (payload_bytes >= 0),
+      received_at TEXT NOT NULL
+    ) STRICT
+  `
+  yield* sql`CREATE INDEX kernel_remote_result_inbox_result
+    ON kernel_remote_result_inbox (result_id, received_at)`
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -1148,5 +1202,6 @@ export const runStoreMigrations = Migrator.make({})({
     ...migrationsThrough0012,
     "0013_kernel_session_store": kernelSessionStore,
     "0014_kernel_agent_handoff": kernelAgentHandoff,
+    "0015_kernel_remote_dispatch": kernelRemoteDispatch,
   }),
 })

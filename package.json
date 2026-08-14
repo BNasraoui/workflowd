@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
+    "runner": "bun src/remote-runner.ts",
+    "remote:enqueue": "bun src/remote-enqueue.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
@@ -25,6 +27,9 @@
     "@effect/platform-bun": "0.91.0",
     "@effect/sql": "0.52.0",
     "@effect/sql-sqlite-bun": "0.53.0",
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/nats-core": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
     "@octokit/app": "16.1.2",
     "@octokit/rest": "22.0.1",
     "@opencode-ai/sdk": "1.18.3",
