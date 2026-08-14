@@ -291,6 +291,80 @@ describe("OpenCode agent completion source", () => {
     expect(result.count).toBe(0)
   })
 
+  test("quarantines custody mismatch without calling the provider", async () => {
+    let providerCalls = 0
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => {
+        providerCalls += 1
+        return true
+      },
+      listMessages: async () => [],
+      subscribeEvents: async () => (async function* () {})(),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* arrange
+        return yield* runOpenCodeCompletionSourceIteration({
+          ...options,
+          providerId: "wrong-provider",
+        })
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result).toMatchObject({ status: "operator_required", reason: "custody_mismatch" })
+    expect(providerCalls).toBe(0)
+  })
+
+  test("quarantines ambiguous catch-up history without recording a completion", async () => {
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      listMessages: async () => [
+        childAnswer,
+        {
+          ...childAnswer,
+          id: "msg_terminal_2",
+          time: { ...childAnswer.time, completed: childAnswer.time.completed + 1 },
+        },
+      ],
+      subscribeEvents: async () => (async function* () {})(),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* arrange
+        const iteration = yield* runOpenCodeCompletionSourceIteration(options)
+        const events = yield* sql<{
+          readonly count: number
+        }>`SELECT COUNT(*) AS count FROM kernel_events`
+        return { iteration, count: events[0]!.count }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.iteration).toMatchObject({
+      status: "operator_required",
+      reason: "ambiguous_new_answers",
+    })
+    expect(result.count).toBe(0)
+  })
+
   test("continues the parent end to end through the existing resume worker", async () => {
     let parentPrompts = 0
     const completionProvider: OpenCodeCompletionProviderPort = {

@@ -141,6 +141,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     KernelEventStoreLive,
     KernelJobStoreLive,
     KernelSessionStoreLive,
+    Layer.service(SqlClient.SqlClient),
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
   const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
   const storeLayer = Layer.merge(kernelStoreLayer, agentHandoffStoreLayer)
