@@ -19,11 +19,22 @@ The short fixed corpus runs in the normal test suite and CI:
 bun run simulate:remote
 ```
 
-For a longer local run (still bounded to 500 steps per seed):
+Longer runs should use the soak entrypoint, which drives the same seeds outside `bun test` and so
+is not bounded by a test timeout (still bounded to 500 steps per seed):
 
 ```sh
-WORKFLOWD_SIM_SEEDS=1,49,24301,11776009 WORKFLOWD_SIM_STEPS=50 bun run simulate:remote
+WORKFLOWD_SIM_SEEDS=49,24301,11776009 WORKFLOWD_SIM_STEPS=500 bun run soak:remote
 ```
+
+It prints one result line per seed and exits non-zero if any seed fails to settle.
+
+Seed `1` is deliberately omitted above: it does not quiesce within 32 rounds at 487 or more
+steps. That is an open simulation finding, not a harness limit.
+
+`bun run simulate:remote` sizes its timeout from the seed and step counts. Override it directly with
+`WORKFLOWD_SIM_TIMEOUT_MS` on a slow machine. Note that a *failing* seed then pays for shrinking,
+which re-runs the whole schedule once per candidate action and is effectively unbounded on long
+schedules, so prefer `soak:remote` when a long run is expected to find something.
 
 The intentionally broken `singleMessageBatches` mutation seam is test-only. Its test demonstrates
 that command-before-fence ordering is found and deletion/value shrinking reduces the replay to the

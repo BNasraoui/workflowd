@@ -10,6 +10,7 @@
     "remote:enqueue": "bun src/remote-enqueue.ts",
     "test": "bun test",
     "simulate:remote": "bun test test/remote/simulation/corpus.test.ts",
+    "soak:remote": "bun scripts/soak-remote.ts",
     "test:coverage": "bun test --coverage",
     "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
     "typecheck": "tsc --noEmit",
