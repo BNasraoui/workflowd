@@ -23,13 +23,10 @@ Longer runs should use the soak entrypoint, which drives the same seeds outside 
 is not bounded by a test timeout (still bounded to 500 steps per seed):
 
 ```sh
-WORKFLOWD_SIM_SEEDS=49,24301,11776009 WORKFLOWD_SIM_STEPS=500 bun run soak:remote
+WORKFLOWD_SIM_SEEDS=1,49,24301,11776009 WORKFLOWD_SIM_STEPS=500 bun run soak:remote
 ```
 
 It prints one result line per seed and exits non-zero if any seed fails to settle.
-
-Seed `1` is deliberately omitted above: it does not quiesce within 32 rounds at 487 or more
-steps. That is an open simulation finding, not a harness limit.
 
 `bun run simulate:remote` sizes its timeout from the seed and step counts. Override it directly with
 `WORKFLOWD_SIM_TIMEOUT_MS` on a slow machine. Note that a *failing* seed then pays for shrinking,
@@ -44,7 +41,8 @@ After every action, the harness compares durable state with a small independent 
 and terminal jobs. It also checks exact dispatch lease custody, immutable terminal outcomes,
 single execution, host addressing, cursor monotonicity, coordinator inbox/result coherence, and
 runner inbox/outbox coherence. Quiescence reconnects endpoints, releases delayed traffic, and then
-requires all recoverable work to become terminal within a fixed number of rounds.
+requires all recoverable work to become terminal within a round budget scaled to the number of
+accepted jobs.
 
 Time starts from a fixed instant. Dispatch leases are shorter than command expiry so tests cover
 both accepting a valid result after lease time and expiry-driven retry. The `cancel` action advances

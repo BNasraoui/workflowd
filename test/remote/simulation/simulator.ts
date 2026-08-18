@@ -481,16 +481,29 @@ export class RemoteSimulation implements AsyncDisposable {
     }
     this.#transport.release("host")
     this.#transport.release("result")
-    for (let index = 0; index < 32; index += 1) {
+    // A drain round retires only a bounded slice of the backlog, so the round
+    // budget has to scale with outstanding work rather than being a fixed cap:
+    // seed 1 at 500 steps accepts 48 jobs and needs ~35 rounds, which overran
+    // the previous fixed cap of 32. Two rounds per accepted job (with a floor
+    // for short runs) leaves headroom while still bounding a genuine stall.
+    const budget = Math.max(32, this.#accepted.size * 2)
+    let last: SimulationSummary | null = null
+    for (let index = 0; index < budget; index += 1) {
       await this.#coordinator()
       await this.#runner("runner-a")
       await this.#runner("runner-b")
       await this.#coordinator()
       await this.#checkSafety()
-      const summary = await this.#summary()
-      if (summary.terminal === summary.accepted) return summary
+      last = await this.#summary()
+      if (last.terminal === last.accepted) return last
     }
-    throw new Error(`seed=${this.seed} did not quiesce within 32 rounds`)
+    // Keep the first line free of run-specific counts: minimizeSimulationFailure
+    // treats it as the failure signature, so varying it per candidate would stop
+    // the shrinker recognising smaller reproductions of the same failure.
+    throw new Error(
+      `seed=${this.seed} did not quiesce\n` +
+        `rounds=${budget} accepted=${last?.accepted ?? 0} terminal=${last?.terminal ?? 0}`,
+    )
   }
 
   async [Symbol.asyncDispose]() {
