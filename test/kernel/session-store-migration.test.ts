@@ -33,6 +33,8 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 12, name: "kernel_workflow_jobs" },
       { migration_id: 13, name: "kernel_session_store" },
       { migration_id: 14, name: "kernel_agent_handoff" },
+      { migration_id: 15, name: "kernel_remote_dispatch" },
+      { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(10)

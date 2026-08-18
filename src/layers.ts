@@ -45,6 +45,9 @@ import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/st
 import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
 import { WorkSignal, WorkSignalLive } from "./work-signal"
+import { RemoteCoordinatorLive } from "./remote/coordinator"
+import { RemoteCoordinatorStoreLive } from "./remote/coordinator-store"
+import { RemoteTransportLive } from "./remote/transport"
 
 const resumeContract = <A, I>(definition: {
   readonly ref: { readonly name: string; readonly version: number }
@@ -290,6 +293,18 @@ export const makeLiveLayer = (config: AppConfig) => {
           ),
         )
   const qrspiWithStores = qrspiLayer.pipe(Layer.provideMerge(storeLayer))
+  const remoteCoordinatorLayer =
+    config.remoteCoordinator === undefined
+      ? Layer.empty
+      : RemoteCoordinatorLive(config.remoteCoordinator).pipe(
+          Layer.provideMerge(RemoteCoordinatorStoreLive.pipe(Layer.provideMerge(storeLayer))),
+          Layer.provideMerge(
+            RemoteTransportLive({
+              servers: config.remoteCoordinator.servers,
+              token: config.remoteCoordinator.token,
+            }),
+          ),
+        )
   return Layer.mergeAll(
     workSignalLayer,
     providerLayer,
@@ -326,5 +341,6 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
     qrspiWithStores,
     testJobCanaryLayer,
+    remoteCoordinatorLayer,
   )
 }

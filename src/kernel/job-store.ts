@@ -65,6 +65,9 @@ export type KernelJobStorePort = {
     KernelJobStoreError
   >
   readonly claimNext: (input: ClaimInput) => Effect.Effect<JobClaim | null, KernelJobStoreError>
+  readonly claimRemoteProbe: (
+    input: ClaimInput,
+  ) => Effect.Effect<JobClaim | null, KernelJobStoreError>
   readonly heartbeat: (
     input: ClaimAuthority & { readonly leaseDurationMs: number },
   ) => Effect.Effect<{ readonly leaseUntil: Date }, KernelJobStoreError>
@@ -254,7 +257,7 @@ const make = Effect.gen(function* () {
       failure_version = 1, failure_json = ${canonicalJson({ message })}, updated_at = ${now}
       WHERE job_id = ${jobId}`
 
-  const claimNext: KernelJobStorePort["claimNext"] = (input) =>
+  const claimMatching = (remoteProbe: boolean, input: ClaimInput) =>
     Effect.gen(function* () {
       const workerId = yield* Schema.decodeUnknown(JobIdentifier)(input.workerId).pipe(
         Effect.mapError(inputError),
@@ -263,8 +266,21 @@ const make = Effect.gen(function* () {
       const nowText = input.now.toISOString()
       const candidates = yield* sql<{ readonly job_id: string }>`SELECT job_id
         FROM kernel_workflow_jobs
-        WHERE (state IN ('ready', 'retry_scheduled') AND run_at <= ${nowText})
-          OR (state = 'leased' AND lease_until <= ${nowText})
+        WHERE ((state IN ('ready', 'retry_scheduled') AND run_at <= ${nowText})
+          OR (state = 'leased' AND lease_until <= ${nowText}))
+        AND (
+          (${remoteProbe ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
+            THEN json_extract(input_json, '$.kind') ELSE NULL END = 'remote_probe')
+          OR (${remoteProbe ? 1 : 0} = 0
+            AND CASE WHEN json_valid(input_json)
+              THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END <> 'remote_probe')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM kernel_remote_dispatches AS dispatch
+          WHERE dispatch.job_id = kernel_workflow_jobs.job_id
+            AND dispatch.attempt = kernel_workflow_jobs.attempt
+            AND dispatch.state IN ('prepared', 'publishing', 'published')
+        )
         ORDER BY run_at, job_id`
       for (const candidate of candidates) {
         const exhausted = yield* sql`UPDATE kernel_workflow_jobs SET state = 'failed',
@@ -282,6 +298,19 @@ const make = Effect.gen(function* () {
             claim_token = ${token}, lease_until = ${leaseUntil}, updated_at = ${nowText}
           WHERE job_id = ${candidate.job_id}
             AND attempt < max_attempts
+            AND (
+              (${remoteProbe ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
+                THEN json_extract(input_json, '$.kind') ELSE NULL END = 'remote_probe')
+              OR (${remoteProbe ? 1 : 0} = 0
+                AND CASE WHEN json_valid(input_json)
+                  THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END <> 'remote_probe')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM kernel_remote_dispatches AS dispatch
+              WHERE dispatch.job_id = kernel_workflow_jobs.job_id
+                AND dispatch.attempt = kernel_workflow_jobs.attempt
+                AND dispatch.state IN ('prepared', 'publishing', 'published')
+            )
             AND ((state IN ('ready', 'retry_scheduled') AND run_at <= ${nowText})
               OR (state = 'leased' AND lease_until <= ${nowText}))
           RETURNING job_id, instance_id, wait_id, event_sequence, expected_cursor,
@@ -307,6 +336,10 @@ const make = Effect.gen(function* () {
       }
       return null
     }).pipe(sql.withTransaction)
+
+  const claimNext: KernelJobStorePort["claimNext"] = (input) => claimMatching(false, input)
+  const claimRemoteProbe: KernelJobStorePort["claimRemoteProbe"] = (input) =>
+    claimMatching(true, input)
 
   const authorityWhere = (input: ClaimAuthority) => sql`
     job_id = ${input.jobId} AND state = 'leased' AND attempt = ${input.attempt}
@@ -466,6 +499,7 @@ const make = Effect.gen(function* () {
   return KernelJobStore.of({
     enqueueFromDelivery,
     claimNext,
+    claimRemoteProbe,
     heartbeat,
     complete,
     fail,

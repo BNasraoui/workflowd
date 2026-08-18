@@ -7,6 +7,7 @@ import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
 import { OpenCodeResumeWorker } from "../src/kernel/opencode-resume-worker"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
+import { RemoteCoordinator } from "../src/remote/coordinator"
 import { Automation, OpenCodeAutomationError } from "../src/opencode"
 import {
   HookHttpServerStartError,
@@ -435,6 +436,92 @@ test("job, command, and reconciliation workers declare conservative downstream w
 })
 
 describe("runHookService startup", () => {
+  test("starts local HTTP while remote coordination is unavailable and recovers later", async () => {
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_REMOTE_COORDINATOR_ENABLED: "true",
+        WORKFLOWD_NATS_SERVERS: "nats://127.0.0.1:1",
+        WORKFLOWD_NATS_TOKEN: "test-token",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+    }
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const brokerAvailable = yield* Deferred.make<void>()
+          const recovered = yield* Deferred.make<void>()
+          const coordinator = RemoteCoordinator.of({
+            ensure: Deferred.await(brokerAvailable),
+            dispatchIteration: Deferred.succeed(recovered, undefined).pipe(
+              Effect.as("idle" as const),
+            ),
+            resultIteration: Effect.succeed("idle" as const),
+          })
+          const adapters = Layer.mergeAll(
+            Logger.replace(
+              Logger.defaultLogger,
+              Logger.make(() => undefined),
+            ),
+            WorkSignalLive,
+            Layer.succeed(GitHub, {
+              fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+              publishReview: () => Effect.die("unexpected publish"),
+              collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+            }),
+            Layer.succeed(Automation, {
+              validateAvailability: () => Effect.void,
+              prepareReview: () => Effect.die("unexpected review"),
+              prepareFix: () => Effect.die("unexpected fix"),
+            }),
+            Layer.succeed(AgentHarness, {
+              describe: () => Effect.die("unexpected harness description"),
+              validateAvailability: () => Effect.die("unexpected harness validation"),
+              prepare: () => Effect.die("unexpected harness preparation"),
+              createSession: () => Effect.die("unexpected session creation"),
+              resumeSession: () => Effect.die("unexpected session resume"),
+              abortSession: () => Effect.die("unexpected session abort"),
+            }),
+            Layer.succeed(Workspace, {
+              prepareReview: () => Effect.die("unexpected review workspace"),
+              prepareFix: () => Effect.die("unexpected fix workspace"),
+              publishFix: () => Effect.die("unexpected fix publication"),
+            }),
+            Layer.succeed(RemoteCoordinator, coordinator),
+          )
+          const started = yield* Effect.race(
+            startHookService(config).pipe(
+              Effect.map((server) => server as Bun.Server<undefined> | null),
+            ),
+            Effect.sleep(250).pipe(Effect.as(null)),
+          ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)))
+          if (started === null) return { started: false, health: 0, recovered: false }
+          const health = yield* Effect.tryPromise(() =>
+            fetch(`http://${started.hostname}:${started.port}/health`),
+          )
+          yield* Deferred.succeed(brokerAvailable, undefined)
+          const didRecover = yield* Effect.race(
+            Deferred.await(recovered).pipe(Effect.as(true)),
+            Effect.sleep(250).pipe(Effect.as(false)),
+          )
+          return { started: true, health: health.status, recovered: didRecover }
+        }),
+      ),
+    )
+
+    expect(result).toEqual({ started: true, health: 200, recovered: true })
+  })
+
   test("starts one kernel job supervisor and immediately processes ready work", async () => {
     let kernelIterations = 0
     const loaded = await loadConfig(
