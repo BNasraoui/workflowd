@@ -1154,6 +1154,25 @@ const kernelRemoteDispatch = Effect.gen(function* () {
     ON kernel_remote_result_inbox (result_id, received_at)`
 })
 
+const kernelRemoteCancellationOutbox = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`
+    CREATE TABLE kernel_remote_cancellation_outbox (
+      command_id TEXT PRIMARY KEY REFERENCES kernel_remote_dispatches (command_id),
+      job_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      host_id TEXT NOT NULL CHECK (
+        length(host_id) BETWEEN 1 AND 64 AND host_id NOT GLOB '*[^A-Za-z0-9_-]*'
+      ),
+      issued_at TEXT NOT NULL,
+      published_at TEXT
+    ) STRICT
+  `
+  yield* sql`CREATE INDEX kernel_remote_cancellation_outbox_pending
+    ON kernel_remote_cancellation_outbox (issued_at, command_id)
+    WHERE published_at IS NULL`
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -1203,5 +1222,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0013_kernel_session_store": kernelSessionStore,
     "0014_kernel_agent_handoff": kernelAgentHandoff,
     "0015_kernel_remote_dispatch": kernelRemoteDispatch,
+    "0016_kernel_remote_cancellation_outbox": kernelRemoteCancellationOutbox,
   }),
 })

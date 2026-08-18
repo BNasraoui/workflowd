@@ -157,6 +157,7 @@ describe("strict initial store schema", () => {
       { migration_id: 13, name: "kernel_session_store" },
       { migration_id: 14, name: "kernel_agent_handoff" },
       { migration_id: 15, name: "kernel_remote_dispatch" },
+      { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
     ])
     expect(result.tables).toHaveLength(31)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

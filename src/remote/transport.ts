@@ -23,6 +23,10 @@ const COMMAND_STREAM = "WORKFLOWD_COMMANDS_V1"
 const RESULT_STREAM = "WORKFLOWD_RESULTS_V1"
 const RESULT_SUBJECT = "workflowd.v1.results"
 const STREAM_MAX_AGE_NANOS = 24 * 60 * 60 * 1_000_000_000
+const STREAM_MAX_BYTES = 64 * 1024 * 1024
+const CONSUMER_ACK_WAIT_NANOS = 2_000_000_000
+const CONSUMER_MAX_DELIVER = 20
+const CONSUMER_MAX_ACK_PENDING = 1_000
 const commandSubject = (hostId: string) => `workflowd.v1.commands.${hostId}`
 
 export class RemoteTransportError extends Data.TaggedError("RemoteTransportError")<{
@@ -132,15 +136,20 @@ const ensureConsumer = (
         ack_policy: AckPolicy.Explicit,
         deliver_policy: DeliverPolicy.All,
         filter_subject: filterSubject,
-        max_deliver: 20,
-        ack_wait: 2_000_000_000,
+        max_deliver: CONSUMER_MAX_DELIVER,
+        ack_wait: CONSUMER_ACK_WAIT_NANOS,
+        max_ack_pending: CONSUMER_MAX_ACK_PENDING,
       })
       info = await manager.consumers.info(stream, durable)
     }
     if (
       info.config.ack_policy !== AckPolicy.Explicit ||
+      info.config.deliver_policy !== DeliverPolicy.All ||
       info.config.filter_subject !== filterSubject ||
-      info.config.durable_name !== durable
+      info.config.durable_name !== durable ||
+      info.config.max_deliver !== CONSUMER_MAX_DELIVER ||
+      info.config.ack_wait !== CONSUMER_ACK_WAIT_NANOS ||
+      info.config.max_ack_pending !== CONSUMER_MAX_ACK_PENDING
     ) {
       throw new Error(`incompatible JetStream consumer ${durable}`)
     }
@@ -149,56 +158,98 @@ const ensureConsumer = (
 
 const make = (config: RemoteTransportConfig) =>
   Effect.gen(function* () {
-    const connection = yield* Effect.acquireRelease(
-      tryPromise("connect", () =>
-        connect({
+    const state = yield* Effect.acquireRelease(
+      Effect.sync(() => ({
+        connection: undefined as NatsConnection | undefined,
+        connecting: undefined as Promise<NatsConnection> | undefined,
+        closed: false,
+      })),
+      (state) =>
+        Effect.sync(() => {
+          state.closed = true
+        }).pipe(
+          Effect.andThen(
+            state.connection === undefined
+              ? Effect.void
+              : tryPromise("close", () => state.connection!.drain()).pipe(Effect.ignore),
+          ),
+        ),
+    )
+
+    const getConnection = () =>
+      tryPromise("connect", async () => {
+        if (state.connection !== undefined && !state.connection.isClosed()) {
+          return state.connection
+        }
+        if (state.connecting !== undefined) return state.connecting
+        const connecting = connect({
           servers: [...config.servers],
           ...(config.token === undefined ? {} : { token: config.token }),
           maxReconnectAttempts: -1,
           reconnectTimeWait: 100,
           ignoreClusterUpdates: true,
-          waitOnFirstConnect: true,
-        }),
-      ),
-      (connection) => tryPromise("close", () => connection.drain()).pipe(Effect.ignore),
-    )
-
-    const ensureInfrastructure = () =>
-      tryPromise("ensure", async () => {
-        const manager = await jetstreamManager(connection)
-        for (const stream of [
-          { name: COMMAND_STREAM, subjects: ["workflowd.v1.commands.*"] },
-          { name: RESULT_STREAM, subjects: [RESULT_SUBJECT] },
-        ]) {
-          let info
-          try {
-            info = await manager.streams.info(stream.name)
-          } catch {
-            await manager.streams.add({
-              ...stream,
-              retention: RetentionPolicy.Limits,
-              storage: StorageType.File,
-              discard: DiscardPolicy.Old,
-              max_age: STREAM_MAX_AGE_NANOS,
-              max_bytes: 64 * 1024 * 1024,
-              max_msg_size: MAX_REMOTE_MESSAGE_BYTES,
-            })
-            info = await manager.streams.info(stream.name)
+          waitOnFirstConnect: false,
+        })
+        state.connecting = connecting
+        try {
+          const connection = await connecting
+          if (state.closed) {
+            await connection.drain()
+            throw new Error("remote transport scope is closed")
           }
-          if (
-            info.config.storage !== StorageType.File ||
-            info.config.max_msg_size !== MAX_REMOTE_MESSAGE_BYTES ||
-            info.config.max_age !== STREAM_MAX_AGE_NANOS ||
-            info.config.subjects.length !== stream.subjects.length ||
-            !stream.subjects.every((subject) => info.config.subjects.includes(subject))
-          ) {
-            throw new Error(`incompatible JetStream stream ${stream.name}`)
-          }
+          state.connection = connection
+          return connection
+        } finally {
+          if (state.connecting === connecting) state.connecting = undefined
         }
       })
 
+    const ensureInfrastructure = () =>
+      getConnection().pipe(
+        Effect.flatMap((connection) =>
+          tryPromise("ensure", async () => {
+            const manager = await jetstreamManager(connection)
+            for (const stream of [
+              { name: COMMAND_STREAM, subjects: ["workflowd.v1.commands.*"] },
+              { name: RESULT_STREAM, subjects: [RESULT_SUBJECT] },
+            ]) {
+              let info
+              try {
+                info = await manager.streams.info(stream.name)
+              } catch {
+                await manager.streams.add({
+                  ...stream,
+                  retention: RetentionPolicy.Limits,
+                  storage: StorageType.File,
+                  discard: DiscardPolicy.Old,
+                  max_age: STREAM_MAX_AGE_NANOS,
+                  max_bytes: STREAM_MAX_BYTES,
+                  max_msg_size: MAX_REMOTE_MESSAGE_BYTES,
+                })
+                info = await manager.streams.info(stream.name)
+              }
+              if (
+                info.config.storage !== StorageType.File ||
+                info.config.retention !== RetentionPolicy.Limits ||
+                info.config.discard !== DiscardPolicy.Old ||
+                info.config.max_msg_size !== MAX_REMOTE_MESSAGE_BYTES ||
+                info.config.max_age !== STREAM_MAX_AGE_NANOS ||
+                info.config.max_bytes !== STREAM_MAX_BYTES ||
+                info.config.subjects.length !== stream.subjects.length ||
+                !stream.subjects.every((subject) => info.config.subjects.includes(subject))
+              ) {
+                throw new Error(`incompatible JetStream stream ${stream.name}`)
+              }
+            }
+          }),
+        ),
+      )
+
     const publishRaw: RemoteTransportPort["publishRaw"] = (subject, data) =>
-      tryPromise("publish", () => jetstream(connection).publish(subject, data)).pipe(
+      getConnection().pipe(
+        Effect.flatMap((connection) =>
+          tryPromise("publish", () => jetstream(connection).publish(subject, data)),
+        ),
         Effect.retry({ times: 5, while: transientPublishFailure }),
         Effect.asVoid,
       )
@@ -211,6 +262,7 @@ const make = (config: RemoteTransportConfig) =>
       maxMessages: number,
     ) =>
       Effect.gen(function* () {
+        const connection = yield* getConnection()
         const consumer = yield* ensureConsumer(connection, stream, durable, subject)
         const messages = yield* tryPromise("consume", () =>
           consumer.fetch({ max_messages: maxMessages, expires: expiresMs }),
@@ -232,6 +284,7 @@ const make = (config: RemoteTransportConfig) =>
       handle: (delivery: RemoteDelivery) => Effect.Effect<void, E>,
     ): Effect.Effect<void, E | RemoteTransportError> =>
       Effect.gen(function* () {
+        const connection = yield* getConnection()
         const consumer = yield* ensureConsumer(
           connection,
           COMMAND_STREAM,

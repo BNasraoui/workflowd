@@ -145,13 +145,13 @@ export const startRemoteCoordinatorWorkers = (
     if (coordinator === null) {
       return yield* Effect.die(new Error("Remote coordinator service is unavailable"))
     }
-    yield* coordinator.ensure
     const supervise = (
       name: "remote-dispatch" | "remote-result",
       iteration: Effect.Effect<string, RemoteCoordinatorError | RemoteTransportError>,
     ) =>
       Effect.forever(
-        iteration.pipe(
+        coordinator.ensure.pipe(
+          Effect.andThen(iteration),
           Effect.tap(() => observe(name)),
           Effect.andThen(name === "remote-dispatch" ? Effect.sleep(pollIntervalMs) : Effect.void),
           Effect.catchAllCause((cause) =>

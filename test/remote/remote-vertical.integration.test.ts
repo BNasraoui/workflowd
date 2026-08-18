@@ -49,14 +49,14 @@ beforeAll(async () => {
     container,
     "-p",
     `127.0.0.1:${port}:4222`,
-    "nats:2-alpine",
+    "nats:2.11.8-alpine",
     "-js",
   )
-})
+}, 60_000)
 
 afterAll(async () => {
   await docker("rm", "-f", container).catch(() => undefined)
-})
+}, 30_000)
 
 type CentralServices =
   | KernelJobStorePort

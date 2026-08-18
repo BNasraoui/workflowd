@@ -1,4 +1,4 @@
-import { Effect, Queue } from "effect"
+import { Effect, Option, Queue } from "effect"
 import { decodeRemoteHostMessage } from "./codec"
 import { RemoteRunnerStore, type RemoteRunnerStorePort } from "./runner-store"
 import { RemoteTransport } from "./transport"
@@ -8,16 +8,29 @@ export type RemoteRunnerIterationOptions = {
   readonly afterDurableReceipt?: () => Effect.Effect<void, Error, RemoteRunnerStorePort>
 }
 
-export const processRemoteRunnerDeliveries = (
-  hostId: string,
-  at: Date,
-  deliveries: ReadonlyArray<RemoteDelivery>,
-  options: RemoteRunnerIterationOptions = {},
-) =>
+export type RemoteRunnerLoopOptions = {
+  readonly outboxRetryIntervalMs?: number
+}
+
+const drainPendingResults = (at: Date) =>
   Effect.gen(function* () {
     const store = yield* RemoteRunnerStore
     const transport = yield* RemoteTransport
-    const before = yield* store.recoverReceived()
+    const results = yield* store.pendingResults()
+    for (const result of results) {
+      yield* transport.publishResult(result)
+      yield* store.markResultPublished(result.resultId, at)
+    }
+  })
+
+const recordRemoteRunnerDeliveries = (
+  hostId: string,
+  at: Date,
+  deliveries: ReadonlyArray<RemoteDelivery>,
+  options: RemoteRunnerIterationOptions,
+) =>
+  Effect.gen(function* () {
+    const store = yield* RemoteRunnerStore
     const decoded = yield* Effect.forEach(deliveries, (delivery) =>
       decodeRemoteHostMessage(delivery.data).pipe(
         Effect.match({
@@ -39,13 +52,29 @@ export const processRemoteRunnerDeliveries = (
       yield* options.afterDurableReceipt()
     }
     yield* Effect.forEach(deliveries, (delivery) => delivery.acknowledge, { discard: true })
+    return outcomes
+  })
+
+const executeReceivedAndDrainResults = (at: Date, drainResults = true) =>
+  Effect.gen(function* () {
+    const store = yield* RemoteRunnerStore
     const recoverable = yield* store.recoverReceived()
     for (const command of recoverable) yield* store.executeProbe(command, at)
-    const results = yield* store.pendingResults()
-    for (const result of results) {
-      yield* transport.publishResult(result)
-      yield* store.markResultPublished(result.resultId, at)
-    }
+    if (drainResults) yield* drainPendingResults(at)
+    return recoverable
+  })
+
+export const processRemoteRunnerDeliveries = (
+  hostId: string,
+  at: Date,
+  deliveries: ReadonlyArray<RemoteDelivery>,
+  options: RemoteRunnerIterationOptions = {},
+) =>
+  Effect.gen(function* () {
+    const store = yield* RemoteRunnerStore
+    const before = yield* store.recoverReceived()
+    const outcomes = yield* recordRemoteRunnerDeliveries(hostId, at, deliveries, options)
+    const recoverable = yield* executeReceivedAndDrainResults(at)
     const command = recoverable[0]
     if (command !== undefined) {
       return {
@@ -74,24 +103,47 @@ export const runRemoteRunnerIteration = (
     return yield* processRemoteRunnerDeliveries(hostId, at, deliveries, options)
   })
 
-export const runRemoteRunnerLoop = (hostId: string) =>
+export const runRemoteRunnerLoop = (hostId: string, options: RemoteRunnerLoopOptions = {}) =>
   Effect.gen(function* () {
     const transport = yield* RemoteTransport
-    yield* processRemoteRunnerDeliveries(hostId, new Date(), [])
+    const outboxRetryIntervalMs = options.outboxRetryIntervalMs ?? 1_000
+    yield* Effect.forever(
+      Effect.suspend(() => drainPendingResults(new Date())).pipe(
+        Effect.catchAllCause((cause) =>
+          Effect.logError("Remote runner result outbox drain failed", cause),
+        ),
+        Effect.andThen(Effect.sleep(outboxRetryIntervalMs)),
+      ),
+    ).pipe(Effect.forkScoped)
     const queue = yield* Queue.unbounded<RemoteDelivery>()
     yield* Effect.forever(
       Effect.gen(function* () {
         const first = yield* Queue.take(queue)
         const batch = [first]
-        for (let index = 0; index < first.pending; index += 1) {
-          batch.push(yield* Queue.take(queue))
+        while (batch.length < 100) {
+          const next = yield* Queue.poll(queue)
+          if (Option.isNone(next)) break
+          batch.push(next.value)
         }
-        yield* processRemoteRunnerDeliveries(hostId, new Date(), batch)
+        yield* recordRemoteRunnerDeliveries(hostId, new Date(), batch, {})
+        if (batch.at(-1)?.pending === 0) {
+          yield* executeReceivedAndDrainResults(new Date(), false)
+        }
       }).pipe(
         Effect.catchAllCause((cause) =>
           Effect.logError("Remote runner delivery batch failed", cause),
         ),
       ),
     ).pipe(Effect.forkScoped)
-    return yield* transport.consumeHost(hostId, (delivery) => Queue.offer(queue, delivery))
+    return yield* Effect.forever(
+      transport
+        .consumeHost(hostId, (delivery) => Queue.offer(queue, delivery))
+        .pipe(
+          Effect.catchAllCause((cause) =>
+            Effect.logError("Remote runner consumer failed", cause).pipe(
+              Effect.andThen(Effect.sleep(1_000)),
+            ),
+          ),
+        ),
+    )
   })

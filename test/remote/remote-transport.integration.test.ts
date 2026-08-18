@@ -1,7 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Scope } from "effect"
 import { connect } from "@nats-io/transport-node"
-import { AckPolicy, jetstreamManager } from "@nats-io/jetstream"
+import {
+  AckPolicy,
+  DeliverPolicy,
+  DiscardPolicy,
+  RetentionPolicy,
+  StorageType,
+  jetstreamManager,
+} from "@nats-io/jetstream"
 import {
   RemoteTransport,
   RemoteTransportLive,
@@ -31,15 +38,15 @@ beforeAll(async () => {
     container,
     "-p",
     `127.0.0.1:${port}:4222`,
-    "nats:2-alpine",
+    "nats:2.11.8-alpine",
     "-js",
   )
   server = `nats://127.0.0.1:${port}`
-})
+}, 60_000)
 
 afterAll(async () => {
   await docker("rm", "-f", container).catch(() => undefined)
-})
+}, 30_000)
 
 const runTransport = <A, E>(effect: Effect.Effect<A, E, RemoteTransportPort | Scope.Scope>) =>
   Effect.runPromise(
@@ -153,21 +160,36 @@ describe.serial("real NATS Effect transport", () => {
     const admin = await connect({ servers: server })
     try {
       const manager = await jetstreamManager(admin)
-      await manager.consumers.add("WORKFLOWD_COMMANDS_V1", {
-        durable_name: "runner-host-incompatible",
-        ack_policy: AckPolicy.None,
-        filter_subject: "workflowd.v1.commands.other-host",
-      })
-      const result = await runTransport(
-        Effect.gen(function* () {
-          const transport = yield* RemoteTransport
-          return yield* transport.takeHost("host-incompatible", 1_000).pipe(Effect.either)
-        }),
-      )
-      expect(result).toMatchObject({
-        _tag: "Left",
-        left: { _tag: "RemoteTransportError", operation: "consume" },
-      })
+      const cases = [
+        { name: "ack-policy", override: { ack_policy: AckPolicy.None } },
+        { name: "deliver-policy", override: { deliver_policy: DeliverPolicy.New } },
+        { name: "max-deliver", override: { max_deliver: 1 } },
+        { name: "ack-wait", override: { ack_wait: 1_000_000_000 } },
+        { name: "max-ack-pending", override: { max_ack_pending: 1 } },
+      ] as const
+      for (const item of cases) {
+        const hostId = `host-incompatible-${item.name}`
+        await manager.consumers.add("WORKFLOWD_COMMANDS_V1", {
+          durable_name: `runner-${hostId}`,
+          ack_policy: AckPolicy.Explicit,
+          deliver_policy: DeliverPolicy.All,
+          filter_subject: `workflowd.v1.commands.${hostId}`,
+          max_deliver: 20,
+          ack_wait: 2_000_000_000,
+          max_ack_pending: 1_000,
+          ...item.override,
+        })
+        const result = await runTransport(
+          Effect.gen(function* () {
+            const transport = yield* RemoteTransport
+            return yield* transport.takeHost(hostId, 100).pipe(Effect.either)
+          }),
+        )
+        expect(result).toMatchObject({
+          _tag: "Left",
+          left: { _tag: "RemoteTransportError", operation: "consume" },
+        })
+      }
     } finally {
       await admin.close()
     }
@@ -183,17 +205,42 @@ describe.serial("real NATS Effect transport", () => {
     const admin = await connect({ servers: server })
     try {
       const manager = await jetstreamManager(admin)
-      await manager.streams.update("WORKFLOWD_COMMANDS_V1", { max_msg_size: 32_768 })
-      const result = await runTransport(
-        Effect.gen(function* () {
-          const transport = yield* RemoteTransport
-          return yield* transport.ensureInfrastructure().pipe(Effect.either)
-        }),
-      )
-      expect(result).toMatchObject({
-        _tag: "Left",
-        left: { _tag: "RemoteTransportError", operation: "ensure" },
-      })
+      const expected = {
+        name: "WORKFLOWD_COMMANDS_V1",
+        subjects: ["workflowd.v1.commands.*"],
+        retention: RetentionPolicy.Limits,
+        storage: StorageType.File,
+        discard: DiscardPolicy.Old,
+        max_age: 24 * 60 * 60 * 1_000_000_000,
+        max_bytes: 64 * 1024 * 1024,
+        max_msg_size: 16_384,
+      }
+      const cases = [
+        { name: "retention", override: { retention: RetentionPolicy.Interest } },
+        { name: "discard", override: { discard: DiscardPolicy.New } },
+        {
+          name: "subjects",
+          override: { subjects: ["workflowd.v1.commands.wrong"] as Array<string> },
+        },
+        { name: "storage", override: { storage: StorageType.Memory } },
+        { name: "max-age", override: { max_age: 1_000_000_000 } },
+        { name: "max-bytes", override: { max_bytes: 1_024 } },
+        { name: "max-message-size", override: { max_msg_size: 32_768 } },
+      ] as const
+      for (const item of cases) {
+        await manager.streams.delete(expected.name)
+        await manager.streams.add({ ...expected, ...item.override })
+        const result = await runTransport(
+          Effect.gen(function* () {
+            const transport = yield* RemoteTransport
+            return yield* transport.ensureInfrastructure().pipe(Effect.either)
+          }),
+        )
+        expect(result).toMatchObject({
+          _tag: "Left",
+          left: { _tag: "RemoteTransportError", operation: "ensure" },
+        })
+      }
     } finally {
       await admin.close()
     }

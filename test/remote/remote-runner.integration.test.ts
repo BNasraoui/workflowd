@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect } from "effect"
+import { Effect, Fiber, Logger, Scope } from "effect"
 import {
   RemoteRunnerStore,
   RemoteRunnerStoreLive,
   type RemoteRunnerStorePort,
 } from "../../src/remote/runner-store"
-import { runRemoteRunnerIteration } from "../../src/remote/runner"
-import { encodeRemoteCommand } from "../../src/remote/codec"
+import { runRemoteRunnerIteration, runRemoteRunnerLoop } from "../../src/remote/runner"
+import { decodeRemoteResult, encodeRemoteCommand, encodeRemoteFence } from "../../src/remote/codec"
 import {
   RemoteTransport,
   RemoteTransportLive,
@@ -18,6 +18,10 @@ const container = `workflowd-nats-runner-${process.pid}`
 const port = 46_000 + (process.pid % 500)
 const server = `nats://127.0.0.1:${port}`
 const now = new Date("2026-08-14T12:00:00.000Z")
+const SilentLogger = Logger.replace(
+  Logger.defaultLogger,
+  Logger.make(() => undefined),
+)
 
 const docker = async (...arguments_: ReadonlyArray<string>) => {
   const process = Bun.spawn(["docker", ...arguments_], { stdout: "pipe", stderr: "pipe" })
@@ -38,14 +42,14 @@ beforeAll(async () => {
     container,
     "-p",
     `127.0.0.1:${port}:4222`,
-    "nats:2-alpine",
+    "nats:2.11.8-alpine",
     "-js",
   )
-})
+}, 60_000)
 
 afterAll(async () => {
   await docker("rm", "-f", container).catch(() => undefined)
-})
+}, 30_000)
 
 const database = () => `${process.cwd()}/remote-runner-${crypto.randomUUID()}.sqlite`
 const removeDatabase = async (filename: string) => {
@@ -60,7 +64,7 @@ const removeDatabase = async (filename: string) => {
 
 const run = <A, E>(
   filename: string,
-  effect: Effect.Effect<A, E, RemoteRunnerStorePort | RemoteTransportPort>,
+  effect: Effect.Effect<A, E, RemoteRunnerStorePort | RemoteTransportPort | Scope.Scope>,
 ) =>
   Effect.runPromise(
     Effect.scoped(
@@ -69,7 +73,7 @@ const run = <A, E>(
         Effect.provide(SqliteClient.layer({ filename })),
         Effect.provide(RemoteTransportLive({ servers: [server] })),
       ),
-    ),
+    ).pipe(Effect.provide(SilentLogger)),
   )
 
 const command = (commandId: string, generation: number) => ({
@@ -85,6 +89,67 @@ const command = (commandId: string, generation: number) => ({
 })
 
 describe.serial("remote runner against real JetStream", () => {
+  test("idle runner publishes a saved result after real broker recovery", async () => {
+    const filename = database()
+    try {
+      const published = await run(
+        filename,
+        Effect.gen(function* () {
+          const transport = yield* RemoteTransport
+          const store = yield* RemoteRunnerStore
+          yield* transport.ensureInfrastructure()
+          const savedCommand = {
+            ...command("saved-idle-result", 1),
+            jobId: "saved-idle-job",
+            hostId: "host-idle-recovery",
+          }
+          const fence = {
+            version: 1 as const,
+            kind: "fence" as const,
+            jobId: savedCommand.jobId,
+            generation: 1,
+            hostId: savedCommand.hostId,
+            disposition: "current" as const,
+            issuedAt: now.toISOString(),
+          }
+          yield* store.recordBatch(
+            savedCommand.hostId,
+            [
+              { deliveryId: "saved-fence", data: yield* encodeRemoteFence(fence), message: fence },
+              {
+                deliveryId: "saved-command",
+                data: yield* encodeRemoteCommand(savedCommand),
+                message: savedCommand,
+              },
+            ],
+            now,
+          )
+          yield* store.executeProbe(savedCommand, now)
+          yield* Effect.tryPromise(() => docker("kill", "--signal", "KILL", container))
+          const loop = yield* runRemoteRunnerLoop(savedCommand.hostId, {
+            outboxRetryIntervalMs: 50,
+          }).pipe(Effect.forkScoped)
+          yield* Effect.sleep(250)
+          yield* Effect.tryPromise(() => docker("start", container))
+          yield* Effect.sleep(3_000)
+          const deliveries = yield* transport.takeResults(10_000)
+          const decoded = yield* decodeRemoteResult(deliveries[0]!.data)
+          yield* deliveries[0]!.acknowledge
+          yield* Fiber.interrupt(loop)
+          return decoded
+        }),
+      )
+
+      expect(published).toMatchObject({
+        resultId: "result-saved-idle-result",
+        commandId: "saved-idle-result",
+      })
+    } finally {
+      await docker("start", container).catch(() => undefined)
+      await removeDatabase(filename)
+    }
+  }, 30_000)
+
   test("old-first queued delivery is rejected after a coordinator currentness fence", async () => {
     const filename = database()
     try {

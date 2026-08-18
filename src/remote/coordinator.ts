@@ -72,17 +72,10 @@ export const runRemoteReconciliationIteration = (at: Date) =>
     const store = yield* RemoteCoordinatorStore
     const transport = yield* RemoteTransport
     const actions = yield* store.reconcileExpired(at)
-    for (const action of actions) {
-      if (!action.publishCancellation) continue
-      yield* transport.publishFence({
-        version: 1,
-        kind: "fence",
-        jobId: action.jobId,
-        generation: action.nextGeneration,
-        hostId: action.hostId,
-        disposition: "cancelled",
-        issuedAt: at.toISOString(),
-      })
+    const pendingFences = yield* store.pendingCancellationFences()
+    for (const pending of pendingFences) {
+      yield* transport.publishFence(pending.fence)
+      yield* store.markCancellationFencePublished(pending.commandId, at)
     }
     return {
       retried: actions.filter((action) => action.outcome === "retry_scheduled").length,

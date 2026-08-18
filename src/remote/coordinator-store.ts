@@ -7,7 +7,7 @@ import {
   KernelJobStoreDataError,
   type KernelJobStoreError,
 } from "../kernel/job-store"
-import { RemoteProbeJobV1, type RemoteResult } from "./contract"
+import { RemoteProbeJobV1, type RemoteFence, type RemoteResult } from "./contract"
 
 export type RemoteDispatch = {
   readonly commandId: string
@@ -58,6 +58,14 @@ export type RemoteCoordinatorStorePort = {
   readonly reconcileExpired: (
     at: Date,
   ) => Effect.Effect<ReadonlyArray<RemoteExpiryAction>, RemoteCoordinatorError>
+  readonly pendingCancellationFences: () => Effect.Effect<
+    ReadonlyArray<{ readonly commandId: string; readonly fence: RemoteFence }>,
+    RemoteCoordinatorError
+  >
+  readonly markCancellationFencePublished: (
+    commandId: string,
+    at: Date,
+  ) => Effect.Effect<void, RemoteCoordinatorError>
   readonly acceptResult: (
     result: RemoteResult,
     at: Date,
@@ -433,6 +441,14 @@ const make = Effect.gen(function* () {
         yield* sql`UPDATE kernel_remote_dispatches
           SET state = ${exhausted ? "cancelled" : "superseded"}
           WHERE command_id = ${dispatch.command_id}`
+        if (dispatch.state !== "prepared") {
+          yield* sql`INSERT INTO kernel_remote_cancellation_outbox (
+            command_id, job_id, generation, host_id, issued_at
+          ) VALUES (
+            ${dispatch.command_id}, ${dispatch.job_id}, ${dispatch.generation + 1},
+            ${dispatch.host_id}, ${at.toISOString()}
+          ) ON CONFLICT (command_id) DO NOTHING`
+        }
         actions.push({
           commandId: dispatch.command_id,
           jobId: dispatch.job_id,
@@ -444,6 +460,37 @@ const make = Effect.gen(function* () {
       }
       return actions
     }).pipe(sql.withTransaction)
+
+  const pendingCancellationFences: RemoteCoordinatorStorePort["pendingCancellationFences"] = () =>
+    sql<{
+      readonly command_id: string
+      readonly job_id: string
+      readonly generation: number
+      readonly host_id: string
+      readonly issued_at: string
+    }>`SELECT command_id, job_id, generation, host_id, issued_at
+      FROM kernel_remote_cancellation_outbox WHERE published_at IS NULL
+      ORDER BY issued_at, command_id`.pipe(
+      Effect.map((rows) =>
+        rows.map((row) => ({
+          commandId: row.command_id,
+          fence: {
+            version: 1 as const,
+            kind: "fence" as const,
+            jobId: row.job_id,
+            generation: row.generation,
+            hostId: row.host_id,
+            disposition: "cancelled" as const,
+            issuedAt: row.issued_at,
+          },
+        })),
+      ),
+    )
+
+  const markCancellationFencePublished: RemoteCoordinatorStorePort["markCancellationFencePublished"] =
+    (commandId, at) =>
+      sql`UPDATE kernel_remote_cancellation_outbox SET published_at = ${at.toISOString()}
+        WHERE command_id = ${commandId} AND published_at IS NULL`.pipe(Effect.asVoid)
 
   const recordRejectedDelivery: RemoteCoordinatorStorePort["recordRejectedDelivery"] = (input) =>
     Effect.gen(function* () {
@@ -483,6 +530,8 @@ const make = Effect.gen(function* () {
     markPublishing,
     supersede,
     reconcileExpired,
+    pendingCancellationFences,
+    markCancellationFencePublished,
     acceptResult,
     acceptDelivery,
     recordRejectedDelivery,

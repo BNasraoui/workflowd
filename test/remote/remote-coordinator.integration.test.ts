@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Scope } from "effect"
+import { SqlClient } from "@effect/sql"
 import { KernelJobStore, type KernelJobStorePort } from "../../src/kernel/job-store"
 import {
   RemoteCoordinatorStore,
@@ -49,14 +50,14 @@ beforeAll(async () => {
     container,
     "-p",
     `127.0.0.1:${port}:4222`,
-    "nats:2-alpine",
+    "nats:2.11.8-alpine",
     "-js",
   )
-})
+}, 60_000)
 
 afterAll(async () => {
   await docker("rm", "-f", container).catch(() => undefined)
-})
+}, 30_000)
 
 const run = <A, E>(
   filename: string,
@@ -67,6 +68,7 @@ const run = <A, E>(
     | RemoteCoordinatorStorePort
     | RemoteProbeProducerPort
     | RemoteTransportPort
+    | SqlClient.SqlClient
     | Scope.Scope
   >,
 ) => {
@@ -79,6 +81,105 @@ const run = <A, E>(
 }
 
 describe.serial("kernel-backed coordinator against real JetStream", () => {
+  test("restart publishes a cancellation fence committed before a simulated crash", async () => {
+    const filename = `${process.cwd()}/remote-cancellation-outbox-${crypto.randomUUID()}.sqlite`
+    try {
+      await run(
+        filename,
+        Effect.gen(function* () {
+          const producer = yield* RemoteProbeProducer
+          const coordinator = yield* RemoteCoordinatorStore
+          const transport = yield* RemoteTransport
+          yield* transport.ensureInfrastructure()
+          yield* producer.enqueue({ probeId: "cancellation-outbox", hostId: "host-outbox" }, now)
+          yield* runRemoteDispatchIteration({
+            commandId: () => "cancellation-outbox-command",
+            workerId: "coordinator-before-crash",
+            now: () => now,
+            leaseDurationMs: 100,
+            commandTtlMs: 100,
+          })
+          yield* coordinator.reconcileExpired(new Date(now.getTime() + 200))
+        }),
+      )
+
+      const recovered = await run(
+        filename,
+        Effect.gen(function* () {
+          const transport = yield* RemoteTransport
+          const reconciliation = yield* runRemoteReconciliationIteration(
+            new Date(now.getTime() + 300),
+          )
+          const deliveries = yield* transport.takeHostBatch("host-outbox", 1_000)
+          const messages = yield* Effect.forEach(deliveries, (delivery) =>
+            decodeRemoteHostMessage(delivery.data).pipe(Effect.tap(() => delivery.acknowledge)),
+          )
+          return { reconciliation, messages }
+        }),
+      )
+
+      expect(recovered.reconciliation).toEqual({ retried: 0, terminal: 0 })
+      expect(recovered.messages.at(-1)).toMatchObject({
+        kind: "fence",
+        disposition: "cancelled",
+        generation: 2,
+      })
+    } finally {
+      await removeDatabase(filename)
+    }
+  }, 20_000)
+
+  test("terminal remote attempt durably publishes its cancellation fence", async () => {
+    const filename = `${process.cwd()}/remote-terminal-cancellation-${crypto.randomUUID()}.sqlite`
+    try {
+      const outcome = await run(
+        filename,
+        Effect.gen(function* () {
+          const producer = yield* RemoteProbeProducer
+          const transport = yield* RemoteTransport
+          const jobs = yield* KernelJobStore
+          const sql = yield* SqlClient.SqlClient
+          yield* transport.ensureInfrastructure()
+          const submitted = yield* producer.enqueue(
+            { probeId: "terminal-cancellation", hostId: "host-terminal" },
+            now,
+          )
+          yield* sql`UPDATE kernel_workflow_jobs SET max_attempts = 1
+            WHERE job_id = ${submitted.jobId}`
+          yield* runRemoteDispatchIteration({
+            commandId: () => "terminal-cancellation-command",
+            workerId: "terminal-coordinator",
+            now: () => now,
+            leaseDurationMs: 100,
+            commandTtlMs: 100,
+          })
+          const reconciliation = yield* runRemoteReconciliationIteration(
+            new Date(now.getTime() + 200),
+          )
+          const deliveries = yield* transport.takeHostBatch("host-terminal", 1_000)
+          const messages = yield* Effect.forEach(deliveries, (delivery) =>
+            decodeRemoteHostMessage(delivery.data).pipe(Effect.tap(() => delivery.acknowledge)),
+          )
+          return {
+            reconciliation,
+            messages,
+            job: yield* jobs.readJob(submitted.jobId),
+          }
+        }),
+      )
+
+      expect(outcome.reconciliation).toEqual({ retried: 0, terminal: 1 })
+      expect(outcome.job).toMatchObject({ state: "failed", attempt: 1 })
+      expect(outcome.messages.at(-1)).toMatchObject({
+        kind: "fence",
+        disposition: "cancelled",
+        generation: 2,
+      })
+    } finally {
+      await removeDatabase(filename)
+    }
+  }, 20_000)
+
   test("restart after published expiry supersedes custody and emits a cancelled fence", async () => {
     const filename = `${process.cwd()}/remote-published-expiry-${crypto.randomUUID()}.sqlite`
     try {
