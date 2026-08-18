@@ -14,10 +14,27 @@ test("runner config is explicit and reads its NATS token from a credential file"
 
   expect(config).toEqual({
     servers: ["nats://control.example.ts.net:4222"],
-    token: "secret-token",
+    auth: { mode: "token", token: "secret-token" },
     hostId: "gpu-host",
     databasePath: "/var/lib/workflowd/runner.db",
   })
+})
+
+test("runner config reads a per-identity NATS creds file", async () => {
+  const creds =
+    "-----BEGIN NATS USER JWT-----\njwt\n------END NATS USER JWT------\n\n" +
+    "-----BEGIN USER NKEY SEED-----\nseed\n------END USER NKEY SEED------"
+  const config = await loadRemoteProcessConfig(
+    {
+      WORKFLOWD_NATS_SERVERS: "nats://control.example.ts.net:4222",
+      WORKFLOWD_NATS_CREDS_FILE: "/run/credentials/nats-creds",
+      WORKFLOWD_REMOTE_HOST_ID: "gpu-host",
+      WORKFLOWD_REMOTE_DATABASE_PATH: "/var/lib/workflowd/runner.db",
+    },
+    { readFile: async () => `${creds}\n` },
+  )
+
+  expect(config.auth).toEqual({ mode: "creds", creds })
 })
 
 test("runner config rejects simultaneous direct and file secrets", async () => {
@@ -28,7 +45,7 @@ test("runner config rejects simultaneous direct and file secrets", async () => {
       WORKFLOWD_NATS_TOKEN_FILE: "/token",
       WORKFLOWD_REMOTE_HOST_ID: "host-a",
     }),
-  ).rejects.toThrow("cannot both be set")
+  ).rejects.toThrow("Set exactly one of")
 })
 
 test("remote config accepts a TLS NATS endpoint", async () => {

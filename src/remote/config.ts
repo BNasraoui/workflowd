@@ -1,11 +1,12 @@
-import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { loadRemoteNatsAuth } from "./auth"
+import type { RemoteNatsAuth } from "./auth"
 import { parseNatsServers } from "./nats-url"
 
 export type RemoteProcessConfig = {
   readonly servers: ReadonlyArray<string>
-  readonly token: string
+  readonly auth: RemoteNatsAuth
   readonly hostId: string
   readonly databasePath: string
 }
@@ -26,28 +27,14 @@ export async function loadRemoteProcessConfig(
   env: Record<string, string | undefined>,
   options: RemoteConfigOptions = {},
 ): Promise<RemoteProcessConfig> {
-  const direct = env.WORKFLOWD_NATS_TOKEN
-  const file = env.WORKFLOWD_NATS_TOKEN_FILE
-  if (direct !== undefined && file !== undefined) {
-    throw new Error("WORKFLOWD_NATS_TOKEN and WORKFLOWD_NATS_TOKEN_FILE cannot both be set")
-  }
-  if (direct === undefined && file === undefined) {
-    throw new Error("Set exactly one of WORKFLOWD_NATS_TOKEN or WORKFLOWD_NATS_TOKEN_FILE")
-  }
-  const token =
-    direct ??
-    (await (options.readFile ?? ((path: string) => readFile(path, "utf8")))(file!)).replace(
-      /\r?\n$/,
-      "",
-    )
-  if (token === "") throw new Error("NATS token must not be empty")
+  const auth = await loadRemoteNatsAuth(env, options.readFile)
   const rawServers = env.WORKFLOWD_NATS_SERVERS
   if (rawServers === undefined) throw new Error("WORKFLOWD_NATS_SERVERS is required")
   const servers = parseNatsServers(rawServers)
   const home = options.home ?? homedir()
   return {
     servers,
-    token,
+    auth,
     hostId: hostId(env.WORKFLOWD_REMOTE_HOST_ID),
     databasePath:
       env.WORKFLOWD_REMOTE_DATABASE_PATH ?? join(home, ".local/state/workflowd-runner/runner.db"),

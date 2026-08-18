@@ -57,7 +57,7 @@ describe("loadConfig", () => {
 
     expect(config.remoteCoordinator).toEqual({
       servers: ["tls://nats.example.ts.net:4222", "nats://127.0.0.1:4222"],
-      token: "remote-token",
+      auth: { mode: "token", token: "remote-token" },
       workerId: "mint:remote-coordinator",
       leaseDurationMs: 60_000,
       commandTtlMs: 300_000,
