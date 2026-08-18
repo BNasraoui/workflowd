@@ -87,6 +87,9 @@ const transientPublishFailure = (error: RemoteTransportError) => {
   return message.includes("timeout") || message.includes("disconnect") || message.includes("closed")
 }
 
+const hasExpectedSubjects = (actual: ReadonlyArray<string>, expected: ReadonlyArray<string>) =>
+  actual.length === expected.length && expected.every((subject) => actual.includes(subject))
+
 const toDelivery = (stream: string, message: JsMsg): RemoteDelivery => ({
   deliveryId: `${stream}:${message.info.streamSequence}`,
   data: message.data,
@@ -235,8 +238,7 @@ const make = (config: RemoteTransportConfig) =>
                 info.config.max_msg_size !== MAX_REMOTE_MESSAGE_BYTES ||
                 info.config.max_age !== STREAM_MAX_AGE_NANOS ||
                 info.config.max_bytes !== STREAM_MAX_BYTES ||
-                info.config.subjects.length !== stream.subjects.length ||
-                !stream.subjects.every((subject) => info.config.subjects.includes(subject))
+                !hasExpectedSubjects(info.config.subjects, stream.subjects)
               ) {
                 throw new Error(`incompatible JetStream stream ${stream.name}`)
               }
