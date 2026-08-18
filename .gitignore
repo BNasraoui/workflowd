@@ -17,3 +17,6 @@ env
 .dolt/
 .beads-credential-key
 .beads/proxieddb/
+
+# Provenance local cache (state is tracked, cache is not)
+.provenance/cache/

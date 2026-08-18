@@ -5,6 +5,13 @@ import { join } from "node:path"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Effect, Fiber, Layer, Schema } from "effect"
+import {
+  changedTicketSupersedesStart,
+  kickoffIsIdempotent,
+  notReadyCreatesNoTechnicalWork,
+  openPullRequestBlocksBranchMutation,
+  uncertainCreationIsObservedBeforeRetry,
+} from "../../provenance/qrspi.spec"
 import { AgentHarness, AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
 import {
   QrspiRepository,
@@ -483,16 +490,21 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("returns NeedsWork and creates zero technical work", async () => {
-    const filename = await databasePath()
-    const fake = fakes({ ticket: { ...readyTicket, acceptanceCriteria: [] } })
+  test("returns NeedsWork and creates zero technical work", () =>
+    notReadyCreatesNoTechnicalWork.verify(
+      "not-ready-zero-technical-work",
+      async () => {
+        const filename = await databasePath()
+        const fake = fakes({ ticket: { ...readyTicket, acceptanceCriteria: [] } })
 
-    const result = await start(filename, fake)
+        const result = await start(filename, fake)
 
-    expect(result._tag).toBe("NeedsWork")
-    expect(await counts(filename, fake)).toEqual([0, 0, 0])
-    expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
-  })
+        expect(result._tag).toBe("NeedsWork")
+        expect(await counts(filename, fake)).toEqual([0, 0, 0])
+        expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
+      },
+      { file: import.meta.path },
+    ))
 
   test("creates no branch or durable technical work for contradictory product direction", async () => {
     const filename = await databasePath()
@@ -524,17 +536,22 @@ describe("WorkflowStart integration", () => {
     expect(fake.counts()).toMatchObject({ createCalls: 0, pullRequestCalls: 0 })
   })
 
-  test("makes duplicate kickoff idempotent", async () => {
-    const filename = await databasePath()
-    const fake = fakes()
+  test("makes duplicate kickoff idempotent", () =>
+    kickoffIsIdempotent.verify(
+      "duplicate-kickoff",
+      async () => {
+        const filename = await databasePath()
+        const fake = fakes()
 
-    const first = await start(filename, fake)
-    const second = await start(filename, fake)
+        const first = await start(filename, fake)
+        const second = await start(filename, fake)
 
-    expect(second).toEqual(first)
-    expect(await counts(filename, fake)).toEqual([1, 3, 1])
-    expect(fake.counts().createCalls).toBe(1)
-  })
+        expect(second).toEqual(first)
+        expect(await counts(filename, fake)).toEqual([1, 3, 1])
+        expect(fake.counts().createCalls).toBe(1)
+      },
+      { file: import.meta.path },
+    ))
 
   test("re-observes a succeeded duplicate without entering unconsumed reconciliation", async () => {
     const filename = await databasePath()
@@ -564,14 +581,19 @@ describe("WorkflowStart integration", () => {
     expect(Number(reconciliation.operations[0]?.count)).toBe(0)
   })
 
-  test("rejects any open pull request for the head before branch mutation", async () => {
-    const filename = await databasePath()
-    const fake = fakes({ openPullRequest: true })
+  test("rejects any open pull request for the head before branch mutation", () =>
+    openPullRequestBlocksBranchMutation.verify(
+      "open-pull-request-blocks-start",
+      async () => {
+        const filename = await databasePath()
+        const fake = fakes({ openPullRequest: true })
 
-    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
+        await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartConflict" })
 
-    expect(fake.counts().createCalls).toBe(0)
-  })
+        expect(fake.counts().createCalls).toBe(0)
+      },
+      { file: import.meta.path },
+    ))
 
   test("replaces a retryable terminal start after a temporary open PR closes", async () => {
     const filename = await databasePath()
@@ -648,25 +670,32 @@ describe("WorkflowStart integration", () => {
     expect(rows).toEqual([{ generation_state: "running", reconciliations: 0 }])
   })
 
-  test("records unknown accepted create outcome as waiting_external and recovers by observation", async () => {
-    const filename = await databasePath()
-    const fake = fakes({ unknownAfterAcceptance: true })
+  test("records unknown accepted create outcome as waiting_external and recovers by observation", () =>
+    uncertainCreationIsObservedBeforeRetry.verify(
+      "observe-unknown-branch-creation-before-retry",
+      async () => {
+        const filename = await databasePath()
+        const fake = fakes({ unknownAfterAcceptance: true })
 
-    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartUncertain" })
-    const waiting = await Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient
-        return yield* sql<{ readonly state: string }>`
-          SELECT state FROM workflow_operations WHERE kind = 'WorkflowStart'
-        `
-      }).pipe(Effect.provide(layer(filename, fake))),
-    )
-    expect(waiting).toEqual([{ state: "waiting_external" }])
+        await expect(start(filename, fake)).rejects.toMatchObject({
+          _tag: "WorkflowStartUncertain",
+        })
+        const waiting = await Effect.runPromise(
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient
+            return yield* sql<{ readonly state: string }>`
+              SELECT state FROM workflow_operations WHERE kind = 'WorkflowStart'
+            `
+          }).pipe(Effect.provide(layer(filename, fake))),
+        )
+        expect(waiting).toEqual([{ state: "waiting_external" }])
 
-    const recovered = await start(filename, fake)
-    expect(recovered).toMatchObject({ _tag: "Started" })
-    expect(fake.counts().createCalls).toBe(1)
-  })
+        const recovered = await start(filename, fake)
+        expect(recovered).toMatchObject({ _tag: "Started" })
+        expect(fake.counts().createCalls).toBe(1)
+      },
+      { file: import.meta.path },
+    ))
 
   test("times out a repository operation before lease expiry and records uncertainty", async () => {
     const filename = await databasePath()
@@ -1121,20 +1150,29 @@ describe("WorkflowStart integration", () => {
     })
   })
 
-  test("supersedes a start when the ticket changes during its final recheck", async () => {
-    const filename = await databasePath()
-    const fake = fakes()
-    const originalCreate = fake.repositories.createBranch
-    fake.repositories.createBranch = (input: Parameters<QrspiRepositoryPort["createBranch"]>[0]) =>
-      originalCreate(input).pipe(
-        Effect.tap(() =>
-          Effect.sync(() => fake.setTicket({ ...readyTicket, title: "Changed product title" })),
-        ),
-      )
+  test("supersedes a start when the ticket changes during its final recheck", () =>
+    changedTicketSupersedesStart.verify(
+      "changed-ticket-supersedes-start",
+      async () => {
+        const filename = await databasePath()
+        const fake = fakes()
+        const originalCreate = fake.repositories.createBranch
+        fake.repositories.createBranch = (
+          input: Parameters<QrspiRepositoryPort["createBranch"]>[0],
+        ) =>
+          originalCreate(input).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => fake.setTicket({ ...readyTicket, title: "Changed product title" })),
+            ),
+          )
 
-    await expect(start(filename, fake)).rejects.toMatchObject({ _tag: "WorkflowStartSuperseded" })
-    expect(await counts(filename, fake)).toEqual([0, 1, 1])
-  })
+        await expect(start(filename, fake)).rejects.toMatchObject({
+          _tag: "WorkflowStartSuperseded",
+        })
+        expect(await counts(filename, fake)).toEqual([0, 1, 1])
+      },
+      { file: import.meta.path },
+    ))
 
   test("recovers waiting external intent after constructing a new service and database layer", async () => {
     const filename = await databasePath()

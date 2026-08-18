@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHash } from "node:crypto"
+import { ticketRevisionIsHashVerified } from "../../provenance/qrspi.spec"
 import {
   TicketRevision,
   ticketRevisionSha256For,
@@ -165,11 +166,16 @@ async function readMutation(mutation: Mutation) {
 }
 
 describe("exact immutable ticket revision replay", () => {
-  test("reads the exact workflow and ticket hash row", async () => {
-    const result = await readMutation("valid")
-    expect(result._tag).toBe("Right")
-    if (result._tag === "Right") expect(result.right).toEqual(ticketRevision())
-  })
+  test("reads the exact workflow and ticket hash row", () =>
+    ticketRevisionIsHashVerified.verify(
+      "exact-ticket-revision-row",
+      async () => {
+        const result = await readMutation("valid")
+        expect(result._tag).toBe("Right")
+        if (result._tag === "Right") expect(result.right).toEqual(ticketRevision())
+      },
+      { file: import.meta.path },
+    ))
 
   test.each([
     ["missing", "missing"],

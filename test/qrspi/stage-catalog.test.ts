@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
+import { catalogIdentityIncludesExecutableRevision } from "../../provenance/qrspi.spec"
 import {
   AgentHarnessError,
   MAX_STAGE_REQUEST_BYTES,
@@ -284,23 +285,28 @@ describe("TrustedStageCatalog", () => {
     })
   })
 
-  test("includes the trusted executable implementation revision in registration identity", () => {
-    const firstRegistration = {
-      ...fixtureContract,
-      implementationRevision: "fixture.document.v1",
-    }
-    const changedRegistration = {
-      ...fixtureContract,
-      implementationRevision: "fixture.document.v2",
-    }
+  test("includes the trusted executable implementation revision in registration identity", () =>
+    catalogIdentityIncludesExecutableRevision.verify(
+      "registration-implementation-revision",
+      () => {
+        const firstRegistration = {
+          ...fixtureContract,
+          implementationRevision: "fixture.document.v1",
+        }
+        const changedRegistration = {
+          ...fixtureContract,
+          implementationRevision: "fixture.document.v2",
+        }
 
-    const first = new TrustedStageCatalog([firstRegistration])
-    const changed = new TrustedStageCatalog([changedRegistration])
+        const first = new TrustedStageCatalog([firstRegistration])
+        const changed = new TrustedStageCatalog([changedRegistration])
 
-    expect(first.descriptor(fixtureContract.ref).registrationSha256).not.toBe(
-      changed.descriptor(fixtureContract.ref).registrationSha256,
-    )
-  })
+        expect(first.descriptor(fixtureContract.ref).registrationSha256).not.toBe(
+          changed.descriptor(fixtureContract.ref).registrationSha256,
+        )
+      },
+      { file: import.meta.path },
+    ))
 
   test("rejects duplicate, unknown, and lookalike registrations with stable reasons", () => {
     expect(() => new TrustedStageCatalog([fixtureContract, fixtureContract])).toThrow(

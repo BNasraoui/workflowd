@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { createHash } from "node:crypto"
+import { orderedPredecessorsAreExact } from "../../provenance/qrspi.spec"
 import {
   AcceptedPredecessorPointer,
   ArtifactReference,
@@ -226,23 +227,30 @@ const assemblyInput = (
 })
 
 describe("trusted Research source assembly", () => {
-  test("assembles one accepted Questions artifact in canonical authority order", async () => {
-    const reader = repositoryReader()
+  test("assembles one accepted Questions artifact in canonical authority order", () =>
+    orderedPredecessorsAreExact.verify(
+      "canonical-predecessor-authority-order",
+      async () => {
+        const reader = repositoryReader()
 
-    const result = await Effect.runPromise(assembleExactStageSources(assemblyInput(reader.port)))
+        const result = await Effect.runPromise(
+          assembleExactStageSources(assemblyInput(reader.port)),
+        )
 
-    const expectedSource = {
-      role: "Questions" as const,
-      artifact: sourceArtifact,
-      acceptedPointer,
-      content: sourceContent,
-    }
-    expect(result.sources).toEqual([expectedSource])
-    expect(result.sourceSetSha256).toBe(
-      canonicalSha256([{ role: "Questions", artifact: sourceArtifact }]),
-    )
-    expect(reader.calls()).toBe(1)
-  })
+        const expectedSource = {
+          role: "Questions" as const,
+          artifact: sourceArtifact,
+          acceptedPointer,
+          content: sourceContent,
+        }
+        expect(result.sources).toEqual([expectedSource])
+        expect(result.sourceSetSha256).toBe(
+          canonicalSha256([{ role: "Questions", artifact: sourceArtifact }]),
+        )
+        expect(reader.calls()).toBe(1)
+      },
+      { file: import.meta.path },
+    ))
 
   test("assembles one source at the advertised individual byte boundary", async () => {
     const content = "x".repeat(MAX_STAGE_SOURCE_BYTES)
