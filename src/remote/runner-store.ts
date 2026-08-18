@@ -109,13 +109,173 @@ const make = Effect.gen(function* () {
     published_at TEXT
   ) STRICT`
 
+  const replayDelivery = (
+    delivery: RunnerDeliveryInput,
+    hash: string,
+    replay: {
+      readonly disposition: string
+      readonly command_id: string | null
+      readonly payload_sha256: string
+      readonly payload_bytes: number
+    },
+  ) =>
+    Effect.gen(function* () {
+      const changed =
+        replay.payload_sha256 !== hash || replay.payload_bytes !== delivery.data.byteLength
+      if (changed) {
+        yield* sql`UPDATE remote_runner_deliveries SET disposition = 'conflict'
+          WHERE delivery_id = ${delivery.deliveryId}`
+      }
+      return {
+        deliveryId: delivery.deliveryId,
+        ...(replay.command_id === null ? {} : { commandId: replay.command_id }),
+        disposition: changed ? "conflict" : replay.disposition,
+      }
+    })
+
+  const recordRejectedDelivery = (delivery: RunnerDeliveryInput, hash: string, at: Date) =>
+    Effect.gen(function* () {
+      const disposition = delivery.rejection ?? "malformed"
+      yield* sql`INSERT INTO remote_runner_deliveries (
+        delivery_id, payload_sha256, payload_bytes, disposition, received_at
+      ) VALUES (
+        ${delivery.deliveryId}, ${hash}, ${delivery.data.byteLength},
+        ${disposition}, ${at.toISOString()}
+      )`
+      return { deliveryId: delivery.deliveryId, disposition }
+    })
+
+  const recordFenceDelivery = (
+    hostId: string,
+    delivery: RunnerDeliveryInput & { readonly message: { readonly kind: "fence" } },
+    hash: string,
+    at: Date,
+  ) =>
+    Effect.gen(function* () {
+      const fence = delivery.message
+      const disposition = fence.hostId === hostId ? "fence" : "wrong_host"
+      if (disposition === "fence") {
+        if (fence.disposition === "cancelled") {
+          yield* sql`UPDATE remote_runner_current SET disposition = 'cancelled',
+            command_id = NULL, updated_at = ${at.toISOString()}
+            WHERE job_id = ${fence.jobId} AND generation = ${fence.generation}`
+        } else {
+          yield* sql`UPDATE remote_runner_current SET disposition = 'current',
+            updated_at = ${at.toISOString()}
+            WHERE job_id = ${fence.jobId} AND generation = ${fence.generation}`
+        }
+      }
+      yield* sql`INSERT INTO remote_runner_deliveries (
+        delivery_id, payload_sha256, payload_bytes, disposition, received_at
+      ) VALUES (
+        ${delivery.deliveryId}, ${hash}, ${delivery.data.byteLength},
+        ${disposition}, ${at.toISOString()}
+      )`
+      return { deliveryId: delivery.deliveryId, disposition }
+    })
+
+  const initialCommandDisposition = (
+    hostId: string,
+    command: Exclude<NonNullable<RunnerDeliveryInput["message"]>, { readonly kind: "fence" }>,
+    current: {
+      readonly generation: number
+      readonly command_id: string | null
+      readonly disposition: string
+    } | null,
+    at: Date,
+  ) => {
+    if (command.hostId !== hostId) return "wrong_host"
+    if (new Date(command.expiresAt).getTime() <= at.getTime()) return "expired"
+    if (
+      current === null ||
+      command.generation < current.generation ||
+      current.disposition === "cancelled"
+    ) {
+      return "stale"
+    }
+    if (current.command_id !== null && current.command_id !== command.commandId) return "conflict"
+    return "received"
+  }
+
+  const recordCommandDelivery = (
+    hostId: string,
+    delivery: RunnerDeliveryInput & {
+      readonly message: Exclude<
+        NonNullable<RunnerDeliveryInput["message"]>,
+        { readonly kind: "fence" }
+      >
+    },
+    hash: string,
+    at: Date,
+  ) =>
+    Effect.gen(function* () {
+      const command = delivery.message
+      const currentRows = yield* sql<{
+        readonly generation: number
+        readonly command_id: string | null
+        readonly disposition: string
+      }>`SELECT generation, command_id, disposition FROM remote_runner_current
+        WHERE job_id = ${command.jobId}`
+      let disposition = initialCommandDisposition(hostId, command, currentRows[0] ?? null, at)
+      const existing = yield* sql<{ readonly envelope_json: string }>`SELECT envelope_json
+        FROM remote_runner_inbox WHERE command_id = ${command.commandId}`
+      if (existing.length > 0) {
+        disposition =
+          existing[0]!.envelope_json === JSON.stringify(command) ? "duplicate" : "conflict"
+      } else {
+        yield* sql`INSERT INTO remote_runner_inbox (
+          command_id, job_id, attempt, generation, host_id, envelope_json,
+          state, execution_count, received_at
+        ) VALUES (
+          ${command.commandId}, ${command.jobId}, ${command.attempt}, ${command.generation},
+          ${command.hostId}, ${JSON.stringify(command)},
+          ${disposition === "received" ? "received" : "rejected"}, 0, ${at.toISOString()}
+        )`
+        if (disposition === "received") {
+          yield* sql`UPDATE remote_runner_current SET command_id = ${command.commandId},
+            updated_at = ${at.toISOString()} WHERE job_id = ${command.jobId}
+            AND generation = ${command.generation} AND command_id IS NULL`
+        }
+      }
+      yield* sql`INSERT INTO remote_runner_deliveries (
+        delivery_id, command_id, payload_sha256, payload_bytes, disposition, received_at
+      ) VALUES (
+        ${delivery.deliveryId}, ${command.commandId}, ${hash}, ${delivery.data.byteLength},
+        ${disposition}, ${at.toISOString()}
+      )`
+      return { deliveryId: delivery.deliveryId, commandId: command.commandId, disposition }
+    })
+
+  const recordDelivery = (hostId: string, delivery: RunnerDeliveryInput, at: Date) =>
+    Effect.gen(function* () {
+      const hash = createHash("sha256").update(delivery.data).digest("hex")
+      const replay = yield* sql<{
+        readonly disposition: string
+        readonly command_id: string | null
+        readonly payload_sha256: string
+        readonly payload_bytes: number
+      }>`SELECT disposition, command_id, payload_sha256, payload_bytes
+        FROM remote_runner_deliveries WHERE delivery_id = ${delivery.deliveryId}`
+      if (replay.length > 0) return yield* replayDelivery(delivery, hash, replay[0]!)
+      if (delivery.message === undefined) return yield* recordRejectedDelivery(delivery, hash, at)
+      if (delivery.message.kind === "fence") {
+        return yield* recordFenceDelivery(
+          hostId,
+          { ...delivery, message: delivery.message },
+          hash,
+          at,
+        )
+      }
+      return yield* recordCommandDelivery(
+        hostId,
+        { ...delivery, message: delivery.message },
+        hash,
+        at,
+      )
+    })
+
   const recordBatch: RemoteRunnerStorePort["recordBatch"] = (hostId, deliveries, at) =>
     Effect.gen(function* () {
-      const outcomes: Array<{
-        deliveryId: string
-        commandId?: string
-        disposition: string
-      }> = []
       const messages = deliveries.flatMap((delivery) =>
         delivery.message === undefined ? [] : [delivery.message],
       )
@@ -139,137 +299,9 @@ const make = Effect.gen(function* () {
             WHEN excluded.generation > remote_runner_current.generation THEN 'current'
             ELSE remote_runner_current.disposition END,
           updated_at = excluded.updated_at
-        WHERE excluded.generation > remote_runner_current.generation`
+          WHERE excluded.generation > remote_runner_current.generation`
       }
-      for (const delivery of deliveries) {
-        const hash = createHash("sha256").update(delivery.data).digest("hex")
-        const replay = yield* sql<{
-          readonly disposition: string
-          readonly command_id: string | null
-          readonly payload_sha256: string
-          readonly payload_bytes: number
-        }>`
-          SELECT disposition, command_id, payload_sha256, payload_bytes
-          FROM remote_runner_deliveries
-          WHERE delivery_id = ${delivery.deliveryId}`
-        if (replay.length > 0) {
-          if (
-            replay[0]!.payload_sha256 !== hash ||
-            replay[0]!.payload_bytes !== delivery.data.byteLength
-          ) {
-            yield* sql`UPDATE remote_runner_deliveries SET disposition = 'conflict'
-              WHERE delivery_id = ${delivery.deliveryId}`
-            outcomes.push({
-              deliveryId: delivery.deliveryId,
-              ...(replay[0]!.command_id === null ? {} : { commandId: replay[0]!.command_id }),
-              disposition: "conflict",
-            })
-            continue
-          }
-          outcomes.push({
-            deliveryId: delivery.deliveryId,
-            ...(replay[0]!.command_id === null ? {} : { commandId: replay[0]!.command_id }),
-            disposition: replay[0]!.disposition,
-          })
-          continue
-        }
-        if (delivery.message === undefined) {
-          const disposition = delivery.rejection ?? "malformed"
-          yield* sql`INSERT INTO remote_runner_deliveries (
-            delivery_id, payload_sha256, payload_bytes, disposition, received_at
-          ) VALUES (
-            ${delivery.deliveryId}, ${hash}, ${delivery.data.byteLength},
-            ${disposition}, ${at.toISOString()}
-          )`
-          outcomes.push({ deliveryId: delivery.deliveryId, disposition })
-          continue
-        }
-        const message = delivery.message
-        if (message.kind === "fence") {
-          const fence = message
-          if (fence.hostId !== hostId) {
-            yield* sql`INSERT INTO remote_runner_deliveries (
-              delivery_id, payload_sha256, payload_bytes, disposition, received_at
-            ) VALUES (
-              ${delivery.deliveryId}, ${hash}, ${delivery.data.byteLength},
-              'wrong_host', ${at.toISOString()}
-            )`
-            outcomes.push({ deliveryId: delivery.deliveryId, disposition: "wrong_host" })
-            continue
-          }
-          if (fence.disposition === "cancelled") {
-            yield* sql`UPDATE remote_runner_current SET disposition = 'cancelled',
-              command_id = NULL, updated_at = ${at.toISOString()}
-              WHERE job_id = ${fence.jobId} AND generation = ${fence.generation}`
-          } else {
-            yield* sql`UPDATE remote_runner_current SET disposition = 'current',
-              updated_at = ${at.toISOString()}
-              WHERE job_id = ${fence.jobId} AND generation = ${fence.generation}`
-          }
-          yield* sql`INSERT INTO remote_runner_deliveries (
-            delivery_id, payload_sha256, payload_bytes, disposition, received_at
-          ) VALUES (
-            ${delivery.deliveryId}, ${hash}, ${delivery.data.byteLength},
-            'fence', ${at.toISOString()}
-          )`
-          outcomes.push({ deliveryId: delivery.deliveryId, disposition: "fence" })
-          continue
-        }
-        const command = message
-        let disposition = "received"
-        const current = yield* sql<{
-          readonly generation: number
-          readonly command_id: string | null
-          readonly disposition: string
-        }>`SELECT generation, command_id, disposition FROM remote_runner_current
-          WHERE job_id = ${command.jobId}`
-        if (command.hostId !== hostId) disposition = "wrong_host"
-        else if (new Date(command.expiresAt).getTime() <= at.getTime()) disposition = "expired"
-        else if (
-          current.length === 0 ||
-          command.generation < current[0]!.generation ||
-          current[0]!.disposition === "cancelled"
-        ) {
-          disposition = "stale"
-        } else if (
-          current[0]!.command_id !== null &&
-          current[0]!.command_id !== command.commandId
-        ) {
-          disposition = "conflict"
-        }
-        const existing = yield* sql<{ readonly envelope_json: string }>`SELECT envelope_json
-          FROM remote_runner_inbox WHERE command_id = ${command.commandId}`
-        if (existing.length > 0) {
-          disposition =
-            existing[0]!.envelope_json === JSON.stringify(command) ? "duplicate" : "conflict"
-        } else {
-          yield* sql`INSERT INTO remote_runner_inbox (
-            command_id, job_id, attempt, generation, host_id, envelope_json,
-            state, execution_count, received_at
-          ) VALUES (
-            ${command.commandId}, ${command.jobId}, ${command.attempt}, ${command.generation},
-            ${command.hostId}, ${JSON.stringify(command)},
-            ${disposition === "received" ? "received" : "rejected"}, 0, ${at.toISOString()}
-          )`
-          if (disposition === "received") {
-            yield* sql`UPDATE remote_runner_current SET command_id = ${command.commandId},
-              updated_at = ${at.toISOString()} WHERE job_id = ${command.jobId}
-              AND generation = ${command.generation} AND command_id IS NULL`
-          }
-        }
-        yield* sql`INSERT INTO remote_runner_deliveries (
-          delivery_id, command_id, payload_sha256, payload_bytes, disposition, received_at
-        ) VALUES (
-          ${delivery.deliveryId}, ${command.commandId}, ${hash}, ${delivery.data.byteLength},
-          ${disposition}, ${at.toISOString()}
-        )`
-        outcomes.push({
-          deliveryId: delivery.deliveryId,
-          commandId: command.commandId,
-          disposition,
-        })
-      }
-      return outcomes
+      return yield* Effect.forEach(deliveries, (delivery) => recordDelivery(hostId, delivery, at))
     }).pipe(sql.withTransaction)
 
   const recoverReceived: RemoteRunnerStorePort["recoverReceived"] = () =>

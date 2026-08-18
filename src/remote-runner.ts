@@ -1,3 +1,5 @@
 import { runRemoteRunnerProcess } from "./remote-process"
 
-runRemoteRunnerProcess()
+export { runRemoteRunnerProcess }
+
+if (import.meta.main) runRemoteRunnerProcess()

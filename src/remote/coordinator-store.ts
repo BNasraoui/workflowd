@@ -270,6 +270,34 @@ const make = Effect.gen(function* () {
       ${input.receivedAt.toISOString()}
     )`
 
+  const replayDelivery = (
+    deliveryId: string,
+    replay: {
+      readonly disposition: RemoteInboxRecord["disposition"]
+      readonly payload_sha256: string
+      readonly payload_bytes: number
+    },
+    payloadSha256: string,
+    payloadBytes: number,
+  ) =>
+    Effect.gen(function* () {
+      if (replay.payload_sha256 !== payloadSha256 || replay.payload_bytes !== payloadBytes) {
+        yield* sql`UPDATE kernel_remote_result_inbox SET disposition = 'conflict'
+          WHERE delivery_id = ${deliveryId}`
+        return "conflict" as const
+      }
+      switch (replay.disposition) {
+        case "accepted":
+        case "duplicate":
+        case "wrong_host":
+        case "stale":
+        case "expired":
+        case "conflict":
+          return replay.disposition
+      }
+      return yield* new RemoteCoordinatorConflict({ key: deliveryId })
+    })
+
   const acceptDelivery: RemoteCoordinatorStorePort["acceptDelivery"] = (deliveryId, result, at) =>
     Effect.gen(function* () {
       const encoded = JSON.stringify(result)
@@ -277,26 +305,7 @@ const make = Effect.gen(function* () {
       const payloadBytes = new TextEncoder().encode(encoded).byteLength
       const replay = yield* readDelivery(deliveryId)
       if (replay.length > 0) {
-        if (
-          replay[0]!.payload_sha256 !== payloadSha256 ||
-          replay[0]!.payload_bytes !== payloadBytes
-        ) {
-          yield* sql`UPDATE kernel_remote_result_inbox SET disposition = 'conflict'
-            WHERE delivery_id = ${deliveryId}`
-          return "conflict" as const
-        }
-        const disposition = replay[0]!.disposition
-        if (
-          disposition === "accepted" ||
-          disposition === "duplicate" ||
-          disposition === "wrong_host" ||
-          disposition === "stale" ||
-          disposition === "expired" ||
-          disposition === "conflict"
-        ) {
-          return disposition
-        }
-        return yield* new RemoteCoordinatorConflict({ key: deliveryId })
+        return yield* replayDelivery(deliveryId, replay[0]!, payloadSha256, payloadBytes)
       }
       const record = (disposition: RemoteResultDisposition) =>
         insertDelivery({

@@ -8,10 +8,15 @@ import { runRemoteRunnerLoop } from "./remote/runner"
 import { RemoteRunnerStoreLive } from "./remote/runner-store"
 import { RemoteTransportLive } from "./remote/transport"
 
-export const runRemoteRunnerProcess = () => {
+type RemoteRunnerProcessOptions = {
+  readonly env?: Record<string, string | undefined>
+  readonly runMain?: (program: Effect.Effect<void, Error, never>) => void
+}
+
+export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {}) => {
   const program = Effect.gen(function* () {
     const config = yield* Effect.tryPromise({
-      try: () => loadRemoteProcessConfig(process.env),
+      try: () => loadRemoteProcessConfig(options.env ?? process.env),
       catch: (cause) => new Error(`Invalid remote configuration: ${String(cause)}`),
     })
     yield* Effect.tryPromise({
@@ -25,5 +30,13 @@ export const runRemoteRunnerProcess = () => {
       Effect.provide(Layer.merge(runner, transport)),
     )
   })
-  BunRuntime.runMain(Effect.scoped(program))
+  ;(options.runMain ?? BunRuntime.runMain)(
+    Effect.scoped(program).pipe(
+      Effect.mapError((cause) =>
+        cause instanceof Error ? cause : new Error(JSON.stringify(cause) ?? "Remote runner failed"),
+      ),
+    ),
+  )
 }
+
+if (import.meta.main) runRemoteRunnerProcess()

@@ -7,6 +7,7 @@ import {
   jetstream,
   jetstreamManager,
 } from "@nats-io/jetstream"
+import type { JsMsg } from "@nats-io/jetstream"
 import type { NatsConnection } from "@nats-io/nats-core"
 import { connect } from "@nats-io/transport-node"
 import { Context, Data, Effect, Exit, Layer, Runtime } from "effect"
@@ -81,6 +82,38 @@ const transientPublishFailure = (error: RemoteTransportError) => {
   const message = String(error.cause).toLowerCase()
   return message.includes("timeout") || message.includes("disconnect") || message.includes("closed")
 }
+
+const toDelivery = (stream: string, message: JsMsg): RemoteDelivery => ({
+  deliveryId: `${stream}:${message.info.streamSequence}`,
+  data: message.data,
+  pending: message.info.pending,
+  acknowledge: tryPromise("ack", () => message.ackAck({ timeout: 5_000 })),
+})
+
+const consumeMessages = async <E>(
+  messages: AsyncIterable<JsMsg>,
+  runtime: Runtime.Runtime<never>,
+  handle: (delivery: RemoteDelivery) => Effect.Effect<void, E>,
+  resume: (effect: Effect.Effect<void, E | RemoteTransportError>) => void,
+) => {
+  try {
+    for await (const message of messages) {
+      const exit = await Runtime.runPromiseExit(runtime)(
+        handle(toDelivery(COMMAND_STREAM, message)),
+      )
+      if (Exit.isFailure(exit)) {
+        resume(Effect.failCause(exit.cause))
+        return
+      }
+    }
+    resume(Effect.void)
+  } catch (cause) {
+    resume(Effect.fail(transportError("consume")(cause)))
+  }
+}
+
+const closeMessages = (messages: { readonly close: () => Promise<unknown> }) =>
+  tryPromise("consume", messages.close.bind(messages)).pipe(Effect.ignore)
 
 const ensureConsumer = (
   connection: NatsConnection,
@@ -170,13 +203,6 @@ const make = (config: RemoteTransportConfig) =>
         Effect.asVoid,
       )
 
-    const toDelivery = (stream: string, message: import("@nats-io/jetstream").JsMsg) => ({
-      deliveryId: `${stream}:${message.info.streamSequence}`,
-      data: message.data,
-      pending: message.info.pending,
-      acknowledge: tryPromise("ack", () => message.ackAck({ timeout: 5_000 })),
-    })
-
     const collect = (
       stream: string,
       durable: string,
@@ -215,23 +241,8 @@ const make = (config: RemoteTransportConfig) =>
         const messages = yield* tryPromise("consume", () => consumer.consume())
         const runtime = yield* Effect.runtime()
         return yield* Effect.async<void, E | RemoteTransportError>((resume) => {
-          void (async () => {
-            try {
-              for await (const message of messages) {
-                const exit = await Runtime.runPromiseExit(runtime)(
-                  handle(toDelivery(COMMAND_STREAM, message)),
-                )
-                if (Exit.isFailure(exit)) {
-                  resume(Effect.failCause(exit.cause))
-                  return
-                }
-              }
-              resume(Effect.void)
-            } catch (cause) {
-              resume(Effect.fail(transportError("consume")(cause)))
-            }
-          })()
-          return tryPromise("consume", () => messages.close()).pipe(Effect.ignore)
+          void consumeMessages(messages, runtime, handle, resume)
+          return closeMessages(messages)
         })
       })
 

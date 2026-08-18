@@ -3,7 +3,7 @@ export function parseNatsServers(
   name = "WORKFLOWD_NATS_SERVERS",
 ): ReadonlyArray<string> {
   const servers = raw.split(",").map((server) => server.trim())
-  if (servers.length === 0 || servers.some((server) => server === "")) {
+  if (servers.includes("")) {
     throw new Error(`${name} must contain at least one NATS server URL`)
   }
   for (const server of servers) {
