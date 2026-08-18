@@ -41,6 +41,20 @@ type RunnerServices = RemoteRunnerStorePort | RemoteTransportPort | SqlClientSer
 
 const oppositeHost = (host: SimHost): SimHost => (host === "runner-a" ? "runner-b" : "runner-a")
 
+type TerminalRow = {
+  readonly state: string
+  readonly attempt: number
+  readonly failure_json: string | null
+  readonly result_id: string | null
+  readonly result_json: string | null
+}
+
+const terminalSignature = (row: TerminalRow) => {
+  if (row.state === "succeeded") return `succeeded:${row.result_id}:${row.result_json}`
+  if (row.state === "failed") return `failed:${row.attempt}:${row.failure_json}`
+  return undefined
+}
+
 export type SimulationSummary = {
   readonly accepted: number
   readonly succeeded: number
@@ -85,9 +99,9 @@ export class RemoteSimulation implements AsyncDisposable {
     return new RemoteSimulation(seed, prefix, options)
   }
 
-  #now = () => new Date(this.#milliseconds)
+  readonly #now = () => new Date(this.#milliseconds)
 
-  #runCentral = <A, E>(effect: Effect.Effect<A, E, CentralServices>) => {
+  readonly #runCentral = <A, E>(effect: Effect.Effect<A, E, CentralServices>) => {
     const kernel = kernelLayer(this.#centralDatabase)
     const stores = Layer.merge(RemoteCoordinatorStoreLive, RemoteProbeProducerLive).pipe(
       Layer.provideMerge(kernel),
@@ -99,7 +113,7 @@ export class RemoteSimulation implements AsyncDisposable {
     )
   }
 
-  #runRunner = <A, E>(host: SimHost, effect: Effect.Effect<A, E, RunnerServices>) =>
+  readonly #runRunner = <A, E>(host: SimHost, effect: Effect.Effect<A, E, RunnerServices>) =>
     Effect.runPromise(
       effect.pipe(
         Effect.provide(RemoteRunnerStoreLive),
@@ -216,103 +230,113 @@ export class RemoteSimulation implements AsyncDisposable {
   async #checkSafety() {
     await this.#runCentral(
       Effect.gen(this, function* () {
-        const jobs = yield* KernelJobStore
-        const sql = yield* SqlClient.SqlClient
-        for (const jobId of this.#accepted.keys()) {
-          const job = yield* jobs.readJob(jobId)
-          if (job === null) throw new Error(`accepted work disappeared: ${jobId}`)
-          const result = yield* jobs.readResult(jobId)
-          const prior = this.#terminal.get(jobId)
-          const terminalRows = yield* sql<{
-            readonly state: string
-            readonly attempt: number
-            readonly failure_json: string | null
-            readonly result_id: string | null
-            readonly result_json: string | null
-          }>`SELECT job.state, job.attempt, job.failure_json, result.result_id, result.result_json
-            FROM kernel_workflow_jobs AS job
-            LEFT JOIN kernel_workflow_job_results AS result ON result.job_id = job.job_id
-            WHERE job.job_id = ${jobId}`
-          const terminalRow = terminalRows[0]!
-          const terminal =
-            terminalRow.state === "succeeded"
-              ? `succeeded:${terminalRow.result_id}:${terminalRow.result_json}`
-              : terminalRow.state === "failed"
-                ? `failed:${terminalRow.attempt}:${terminalRow.failure_json}`
-                : undefined
-          if (job.state === "succeeded" && result === null) {
-            throw new Error(`succeeded work lacks result: ${jobId}`)
-          }
-          if (prior !== undefined && terminal !== prior) {
-            throw new Error(`terminal result changed: ${jobId}`)
-          }
-          if (terminal !== undefined) this.#terminal.set(jobId, terminal)
-        }
-        const cursorViolations = yield* sql<{ readonly job_id: string }>`SELECT job.job_id
-          FROM kernel_workflow_jobs AS job
-          JOIN kernel_workflow_instances AS instance ON instance.instance_id = job.instance_id
-          WHERE job.expected_cursor > instance.event_cursor`
-        if (cursorViolations.length > 0) {
-          throw new Error(`cursor regressed: ${cursorViolations[0]!.job_id}`)
-        }
-        const cursors = yield* sql<{ readonly instance_id: string; readonly event_cursor: number }>`
-          SELECT instance_id, event_cursor FROM kernel_workflow_instances`
-        for (const cursor of cursors) {
-          const prior = this.#cursors.get(cursor.instance_id)
-          if (prior !== undefined && cursor.event_cursor < prior) {
-            throw new Error(`instance cursor moved backwards: ${cursor.instance_id}`)
-          }
-          this.#cursors.set(cursor.instance_id, cursor.event_cursor)
-        }
-        const custodyViolations = yield* sql<{ readonly command_id: string }>`
-          SELECT dispatch.command_id FROM kernel_remote_dispatches AS dispatch
-          JOIN kernel_workflow_jobs AS job ON job.job_id = dispatch.job_id
-          WHERE dispatch.state IN ('prepared', 'publishing', 'published') AND (
-            job.state <> 'leased' OR job.attempt <> dispatch.attempt OR
-            job.lease_worker_id <> dispatch.worker_id OR
-            job.claim_token <> dispatch.claim_token OR job.lease_until <> dispatch.lease_until
-          )`
-        if (custodyViolations.length > 0) {
-          throw new Error(`dispatch custody diverged: ${custodyViolations[0]!.command_id}`)
-        }
-        const inboxViolations = yield* sql<{ readonly delivery_id: string }>`
-          SELECT inbox.delivery_id FROM kernel_remote_result_inbox AS inbox
-          LEFT JOIN kernel_workflow_job_results AS result ON result.result_id = inbox.result_id
-          WHERE inbox.disposition = 'accepted' AND result.result_id IS NULL`
-        if (inboxViolations.length > 0) {
-          throw new Error(`accepted inbox lacks result: ${inboxViolations[0]!.delivery_id}`)
-        }
+        yield* this.#checkAcceptedJobs()
+        yield* this.#checkInstanceCursors()
+        yield* this.#checkDispatchHandoff()
       }),
     )
     for (const host of ["runner-a", "runner-b"] as const) {
-      await this.#runRunner(
-        host,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient
-          const rows = yield* sql<{
-            readonly command_id: string
-            readonly execution_count: number
-          }>`
-            SELECT command_id, execution_count FROM remote_runner_inbox
-            WHERE execution_count > 1`
-          if (rows.length > 0) throw new Error(`command applied twice: ${rows[0]!.command_id}`)
-          const hostViolations = yield* sql<{ readonly command_id: string }>`
-            SELECT command_id FROM remote_runner_inbox
-            WHERE host_id <> ${host} AND execution_count <> 0`
-          if (hostViolations.length > 0) {
-            throw new Error(`wrong-host command executed: ${hostViolations[0]!.command_id}`)
-          }
-          const outboxViolations = yield* sql<{ readonly result_id: string }>`
-            SELECT outbox.result_id FROM remote_runner_outbox AS outbox
-            JOIN remote_runner_inbox AS inbox ON inbox.command_id = outbox.command_id
-            WHERE (outbox.published_at IS NULL AND inbox.state <> 'result_ready')
-               OR (outbox.published_at IS NOT NULL AND inbox.state <> 'result_published')`
-          if (outboxViolations.length > 0) {
-            throw new Error(`runner inbox/outbox diverged: ${outboxViolations[0]!.result_id}`)
-          }
-        }),
-      )
+      await this.#runRunner(host, this.#checkRunnerLedgers(host))
     }
+  }
+
+  #checkAcceptedJobs() {
+    return Effect.gen(this, function* () {
+      const jobs = yield* KernelJobStore
+      const sql = yield* SqlClient.SqlClient
+      for (const jobId of this.#accepted.keys()) {
+        const job = yield* jobs.readJob(jobId)
+        if (job === null) throw new Error(`accepted work disappeared: ${jobId}`)
+        const result = yield* jobs.readResult(jobId)
+        const prior = this.#terminal.get(jobId)
+        const terminalRows =
+          yield* sql<TerminalRow>`SELECT job.state, job.attempt, job.failure_json, result.result_id, result.result_json
+          FROM kernel_workflow_jobs AS job
+          LEFT JOIN kernel_workflow_job_results AS result ON result.job_id = job.job_id
+          WHERE job.job_id = ${jobId}`
+        const terminal = terminalSignature(terminalRows[0]!)
+        if (job.state === "succeeded" && result === null) {
+          throw new Error(`succeeded work lacks result: ${jobId}`)
+        }
+        if (prior !== undefined && terminal !== prior) {
+          throw new Error(`terminal result changed: ${jobId}`)
+        }
+        if (terminal !== undefined) this.#terminal.set(jobId, terminal)
+      }
+    })
+  }
+
+  #checkInstanceCursors() {
+    return Effect.gen(this, function* () {
+      const sql = yield* SqlClient.SqlClient
+      const cursorViolations = yield* sql<{ readonly job_id: string }>`SELECT job.job_id
+        FROM kernel_workflow_jobs AS job
+        JOIN kernel_workflow_instances AS instance ON instance.instance_id = job.instance_id
+        WHERE job.expected_cursor > instance.event_cursor`
+      if (cursorViolations.length > 0) {
+        throw new Error(`cursor regressed: ${cursorViolations[0]!.job_id}`)
+      }
+      const cursors = yield* sql<{ readonly instance_id: string; readonly event_cursor: number }>`
+        SELECT instance_id, event_cursor FROM kernel_workflow_instances`
+      for (const cursor of cursors) {
+        const prior = this.#cursors.get(cursor.instance_id)
+        if (prior !== undefined && cursor.event_cursor < prior) {
+          throw new Error(`instance cursor moved backwards: ${cursor.instance_id}`)
+        }
+        this.#cursors.set(cursor.instance_id, cursor.event_cursor)
+      }
+    })
+  }
+
+  #checkDispatchHandoff() {
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      const custodyViolations = yield* sql<{ readonly command_id: string }>`
+        SELECT dispatch.command_id FROM kernel_remote_dispatches AS dispatch
+        JOIN kernel_workflow_jobs AS job ON job.job_id = dispatch.job_id
+        WHERE dispatch.state IN ('prepared', 'publishing', 'published') AND (
+          job.state <> 'leased' OR job.attempt <> dispatch.attempt OR
+          job.lease_worker_id <> dispatch.worker_id OR
+          job.claim_token <> dispatch.claim_token OR job.lease_until <> dispatch.lease_until
+        )`
+      if (custodyViolations.length > 0) {
+        throw new Error(`dispatch custody diverged: ${custodyViolations[0]!.command_id}`)
+      }
+      const inboxViolations = yield* sql<{ readonly delivery_id: string }>`
+        SELECT inbox.delivery_id FROM kernel_remote_result_inbox AS inbox
+        LEFT JOIN kernel_workflow_job_results AS result ON result.result_id = inbox.result_id
+        WHERE inbox.disposition = 'accepted' AND result.result_id IS NULL`
+      if (inboxViolations.length > 0) {
+        throw new Error(`accepted inbox lacks result: ${inboxViolations[0]!.delivery_id}`)
+      }
+    })
+  }
+
+  #checkRunnerLedgers(host: SimHost) {
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      const rows = yield* sql<{
+        readonly command_id: string
+        readonly execution_count: number
+      }>`
+        SELECT command_id, execution_count FROM remote_runner_inbox
+        WHERE execution_count > 1`
+      if (rows.length > 0) throw new Error(`command applied twice: ${rows[0]!.command_id}`)
+      const hostViolations = yield* sql<{ readonly command_id: string }>`
+        SELECT command_id FROM remote_runner_inbox
+        WHERE host_id <> ${host} AND execution_count <> 0`
+      if (hostViolations.length > 0) {
+        throw new Error(`wrong-host command executed: ${hostViolations[0]!.command_id}`)
+      }
+      const outboxViolations = yield* sql<{ readonly result_id: string }>`
+        SELECT outbox.result_id FROM remote_runner_outbox AS outbox
+        JOIN remote_runner_inbox AS inbox ON inbox.command_id = outbox.command_id
+        WHERE (outbox.published_at IS NULL AND inbox.state <> 'result_ready')
+           OR (outbox.published_at IS NOT NULL AND inbox.state <> 'result_published')`
+      if (outboxViolations.length > 0) {
+        throw new Error(`runner inbox/outbox diverged: ${outboxViolations[0]!.result_id}`)
+      }
+    })
   }
 
   async step(action: SimulationAction) {

@@ -15,10 +15,11 @@ export type SimulationAction =
   | { readonly type: "staleResult" }
   | { readonly type: "wrongHost" }
 
-const mulberry32 = (seed: number) => {
+export const mulberry32 = (seed: number) => {
   let state = seed >>> 0
   return () => {
-    state = (state + 0x6d2b79f5) | 0
+    // Mulberry32 wraps the counter at 32 bits; this is deliberate overflow, not truncation.
+    state = (state + 0x6d2b79f5) >>> 0
     let value = Math.imul(state ^ (state >>> 15), 1 | state)
     value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value
     return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296
@@ -109,7 +110,7 @@ export const minimizeActions = async (
 
 export const simulationBudget = (input: { readonly seeds?: string; readonly steps?: string }) => {
   const seedText = input.seeds ?? `${0xb3b009},${0x31},${0x5eed}`
-  const seeds = seedText.split(",").map((seed) => Number(seed))
+  const seeds = seedText.split(",").map(Number)
   const steps = Number(input.steps ?? 20)
   if (
     seedText.length === 0 ||
