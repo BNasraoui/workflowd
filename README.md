@@ -261,12 +261,56 @@ Operational smoke commands:
 ```bash
 systemctl --user is-active opencode-server.service workflowd.service
 curl --fail --silent --show-error http://127.0.0.1:8787/health
+curl --fail --silent --show-error http://127.0.0.1:8787/ready
 systemctl --user status workflowd.service
 journalctl --user -u workflowd.service --since "10 minutes ago"
 tailscale funnel status
 ```
 
 The health response is `{"status":"ok"}`. Confirm a GitHub test delivery receives HTTP `202`, then check that a review job produces the sticky PR comment and per-head Check Run. Port 443 remains private to the tailnet for OpenCode; only Funnel port 8443 should expose the Workflowd listener.
+
+## Operational Status
+
+`GET /health` is liveness: the process is up and the listener answers. `GET /ready` is readiness, and it is the one to watch. It returns `200` with `"status": "ready"` only when the durable store answers and all four worker lanes — job, publication, reconciliation, command — have completed an iteration and are not failing. Otherwise it returns `503`. Readiness is answered from local state and never calls GitHub, so a GitHub outage cannot make a working controller look broken and polling it costs no rate limit.
+
+The readiness body also reports how much terminally failed work has accumulated in each queue, and how many agent sessions need an operator:
+
+```json
+{
+  "status": "ready",
+  "store": "ok",
+  "workers": [{ "lane": "job", "status": "ok", "completedIterations": 42, "consecutiveFailures": 0 }],
+  "terminalFailures": {
+    "queues": [{ "queue": "jobs", "failed": 1, "quarantined": 0, "oldestFailureAt": "2026-07-19T12:02:00.000Z" }],
+    "agentSessionsAwaitingOperator": 0
+  }
+}
+```
+
+Those counts do not make the controller unready. A failed job is a backlog for a person: no restart clears it, and it is put back deliberately. The body carries counts and statuses only — error text stays in the journal and the command below, because the listener is published through Funnel.
+
+## Failed Work
+
+Inspect and retry terminally failed work with the shipped command. It reads the same database the service writes, so it is safe to run while Workflowd is up:
+
+```bash
+bun run failed-work list
+bun run failed-work list jobs --limit 20
+bun run failed-work retry jobs 41
+```
+
+`list` prints the same counts `/ready` reports, plus each failed record with its last error and whether it can go back on its queue:
+
+| Eligibility | Meaning |
+| --- | --- |
+| `eligible` | `retry` returns it to the queue; a worker claims it on the next poll. |
+| `quarantined` | The record could not be read at all. A retry would only quarantine it again; correct the record or discard it. |
+| `superseded` | A newer commit, review request, or pull-request state took precedence. The work is no longer wanted. |
+| `agent_session_pending` | A live agent session still holds the job. Let session cleanup release it, then retry. |
+
+`retry` exits `0` when the record was requeued and `1` when it was refused, printing the reason. Commands and reconciliations answer an observation that already happened, so nothing supersedes them; only quarantine refuses a retry there.
+
+Point the command at a different database with `WORKFLOWD_DATABASE_PATH`, the same variable the service uses.
 
 ## Development
 

@@ -9,6 +9,7 @@
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
+    "failed-work": "bun scripts/failed-work.ts",
     "provenance:plan": "bun scripts/provenance.ts plan",
     "provenance:apply": "bun scripts/provenance.ts apply",
     "typecheck": "tsc --noEmit",
