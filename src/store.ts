@@ -7,6 +7,7 @@ import { makeJobOperations } from "./store/jobs"
 import { runStoreMigrations } from "./store/migrations"
 import { makePublicationOperations } from "./store/publications"
 import { makePullRequestTransition } from "./store/pull-requests"
+import { makeQueueHealthOperations } from "./store/queue-health"
 import { makeReconciliationOperations } from "./store/reconciliations"
 import { makeSharedStoreOperations } from "./store/shared"
 
@@ -24,6 +25,7 @@ const make = Effect.gen(function* () {
     ...makeDeliveryOperations(sql, shared, applyPullRequestTransition),
     ...makeJobOperations(sql, shared),
     ...makePublicationOperations(sql),
+    ...makeQueueHealthOperations(sql),
     ...makeReconciliationOperations(sql, applyPullRequestTransition),
   })
 })

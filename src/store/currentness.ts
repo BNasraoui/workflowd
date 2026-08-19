@@ -80,10 +80,60 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
     )
   `)
 
+  // Everything a job must still satisfy that its own Work State cannot change:
+  // the Generation and Review Request it was accepted for, and, for Fix Work,
+  // the same-repository head and succeeded source Publication it fixes. The
+  // claim query and the operator retry check both ask through this fragment, so
+  // work an operator requeues is work a worker will actually pick up.
+  const jobFencing = sql`
+    ${currentJob}
+    AND ${latestReviewRequest}
+    AND (
+      candidate.kind = 'review'
+      OR (
+        candidate.publication_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM pull_requests AS current_pr
+          WHERE ${sql.literal(pullRequestIdentity)}
+          AND LOWER(current_pr.repository_full_name) =
+            LOWER(current_pr.head_repository_full_name)
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM publications AS source_publication
+          WHERE source_publication.id = candidate.publication_id
+          AND source_publication.repository_id = candidate.repository_id
+          AND source_publication.pull_request_number =
+            candidate.pull_request_number
+          AND source_publication.generation = candidate.generation
+          AND source_publication.review_request_number =
+            candidate.review_request_number
+          AND source_publication.state = 'succeeded'
+        )
+      )
+    )
+  `
+
+  // An agent session that is still live owns the job. Cleanup releases it; a
+  // cleanup that exhausted its attempts leaves it for an operator.
+  const noActiveAgentSession = sql`
+    NOT EXISTS (
+      SELECT 1 FROM agent_executions AS active_execution
+      WHERE active_execution.job_id = candidate.id
+      AND active_execution.state = 'session_ready'
+    )
+  `
+
+  const publicationFencing = sql`${currentPublication} AND ${latestReviewRequest}`
+
   return {
     currentJob,
     currentPublication,
     latestReviewRequest,
+    jobFencing,
+    noActiveAgentSession,
+    publicationFencing,
     jobClaimCandidate: (now: string) => sql`
       SELECT candidate.id
       FROM jobs AS candidate
@@ -91,38 +141,8 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
       AND candidate.cancel_requested = FALSE
-      AND NOT EXISTS (
-        SELECT 1 FROM agent_executions AS active_execution
-        WHERE active_execution.job_id = candidate.id
-        AND active_execution.state = 'session_ready'
-      )
-      AND ${currentJob}
-      AND ${latestReviewRequest}
-      AND (
-        candidate.kind = 'review'
-        OR (
-          candidate.publication_id IS NOT NULL
-          AND EXISTS (
-            SELECT 1
-            FROM pull_requests AS current_pr
-            WHERE ${sql.literal(pullRequestIdentity)}
-            AND LOWER(current_pr.repository_full_name) =
-              LOWER(current_pr.head_repository_full_name)
-          )
-          AND EXISTS (
-            SELECT 1
-            FROM publications AS source_publication
-            WHERE source_publication.id = candidate.publication_id
-            AND source_publication.repository_id = candidate.repository_id
-            AND source_publication.pull_request_number =
-              candidate.pull_request_number
-            AND source_publication.generation = candidate.generation
-            AND source_publication.review_request_number =
-              candidate.review_request_number
-            AND source_publication.state = 'succeeded'
-          )
-        )
-      )
+      AND ${noActiveAgentSession}
+      AND ${jobFencing}
       ORDER BY candidate.run_at ASC, candidate.id ASC
       LIMIT 1
     `,
@@ -132,8 +152,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       WHERE ${workState.claimable(now, "candidate")}
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
-      AND ${currentPublication}
-      AND ${latestReviewRequest}
+      AND ${publicationFencing}
       ORDER BY candidate.run_at ASC, candidate.id ASC
       LIMIT 1
     `,

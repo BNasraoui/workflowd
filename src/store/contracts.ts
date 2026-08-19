@@ -31,6 +31,13 @@ import type {
   RescheduleReconciliationInput,
   SupersedeJobInput,
 } from "./model"
+import type {
+  FailedWorkRecord,
+  ListFailedWorkInput,
+  RequeueDisposition,
+  RequeueFailedWorkInput,
+  TerminalFailureSummary,
+} from "./queue-health"
 
 export type WorkflowStorePort = {
   readonly recordDelivery: (
@@ -138,6 +145,13 @@ export type WorkflowStorePort = {
   readonly rescheduleCommand: (
     input: RescheduleCommandInput,
   ) => Effect.Effect<"retry" | "failed" | "stale", SqlError>
+  readonly summarizeTerminalFailures: () => Effect.Effect<TerminalFailureSummary, SqlError>
+  readonly listFailedWork: (
+    input: ListFailedWorkInput,
+  ) => Effect.Effect<ReadonlyArray<FailedWorkRecord>, SqlError>
+  readonly requeueFailedWork: (
+    input: RequeueFailedWorkInput,
+  ) => Effect.Effect<RequeueDisposition, SqlError>
 }
 
 export const WorkflowStore = Context.GenericTag<WorkflowStorePort>("workflowd/WorkflowStore")
