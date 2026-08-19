@@ -1,6 +1,9 @@
 import { Context, Effect, Layer, PubSub, type Queue, type Scope } from "effect"
 
-export type WorkLane = "job" | "publication" | "reconciliation" | "command"
+/** Every supervised worker lane, in the order operational status reports them. */
+export const workLanes = ["job", "publication", "reconciliation", "command"] as const
+
+export type WorkLane = (typeof workLanes)[number]
 
 export type WorkSignalPort = {
   readonly subscribe: (lane: WorkLane) => Effect.Effect<Queue.Dequeue<void>, never, Scope.Scope>

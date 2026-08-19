@@ -62,6 +62,9 @@ const makeStore = (overrides: Partial<WorkflowStorePort> = {}): WorkflowStorePor
   claimNextCommand: () => Effect.succeed(null),
   executeCommand: () => Effect.die("unused"),
   rescheduleCommand: () => Effect.die("unused"),
+  summarizeTerminalFailures: () => Effect.die("unused"),
+  listFailedWork: () => Effect.die("unused"),
+  requeueFailedWork: () => Effect.die("unused"),
   ...overrides,
 })
 

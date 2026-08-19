@@ -5,13 +5,18 @@ import { Effect, Layer, Logger, Queue } from "effect"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
+import { WorkerHealth, WorkerHealthLive } from "../src/worker-health"
 import { WorkSignal, WorkSignalLive, type WorkSignalPort } from "../src/work-signal"
 import { TicketSourceError } from "../src/qrspi/ports"
 import { QrspiStoreDataError } from "../src/qrspi/store"
 import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
-const TestLayer = Layer.merge(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)), WorkSignalLive)
+const TestLayer = Layer.mergeAll(
+  WorkflowStoreLive.pipe(Layer.provide(DatabaseLive)),
+  WorkSignalLive,
+  WorkerHealthLive,
+)
 
 const payload = JSON.stringify({
   action: "opened",
@@ -361,7 +366,7 @@ function dispositionLayer(store: Partial<WorkflowStorePort>, actions: Array<stri
     WorkflowStore,
     Effect.map(WorkflowStore, (live) => ({ ...live, ...store })),
   ).pipe(Layer.provide(WorkflowStoreLive.pipe(Layer.provide(DatabaseLive))))
-  return Layer.merge(StoreWithDisposition, Layer.succeed(WorkSignal, signals))
+  return Layer.mergeAll(StoreWithDisposition, Layer.succeed(WorkSignal, signals), WorkerHealthLive)
 }
 
 describe("routeRequest", () => {
@@ -375,6 +380,56 @@ describe("routeRequest", () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ status: "ok" })
+  })
+
+  test("answers readiness from local state alone, without a GitHub service", async () => {
+    // No GitHub layer is provided here, so a readiness answer that called
+    // GitHub would not build, let alone run.
+    const response = await Effect.runPromise(
+      Effect.gen(function* () {
+        const health = yield* WorkerHealth
+        yield* Effect.forEach(
+          ["job", "publication", "reconciliation", "command"] as const,
+          health.recordIteration,
+          { discard: true },
+        )
+        return yield* routeRequest(new Request("http://localhost/ready"), {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+        })
+      }).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ status: "ready", store: "ok" })
+  })
+
+  test("fails readiness with 503 while a worker lane keeps failing", async () => {
+    const response = await Effect.runPromise(
+      Effect.gen(function* () {
+        const health = yield* WorkerHealth
+        yield* Effect.forEach(
+          ["job", "publication", "reconciliation", "command"] as const,
+          health.recordIteration,
+          { discard: true },
+        )
+        yield* Effect.forEach([1, 2, 3], () => health.recordFailure("publication"), {
+          discard: true,
+        })
+        return yield* routeRequest(new Request("http://localhost/ready"), {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+        })
+      }).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      status: "not_ready",
+      workers: expect.arrayContaining([
+        { lane: "publication", status: "failing", completedIterations: 1, consecutiveFailures: 3 },
+      ]),
+    })
   })
 
   test("authenticates and decodes QRSPI kickoff before invoking the trusted handler", async () => {

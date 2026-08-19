@@ -15,6 +15,16 @@ import { claimableWorkStates } from "../domain/work-state"
  * emitting the DDL it emitted when it ran. `test/store/work-state-policy.test.ts`
  * checks the schema's CHECK constraints against this vocabulary instead.
  */
+/**
+ * Every durable queue governed by this policy, named by its table. They share
+ * the same lifecycle columns — `state`, `attempts`, `max_attempts`, `run_at`,
+ * `lease_owner`, `lease_until`, `last_error`, `updated_at` — which is what lets
+ * the lease queue and operational status treat them uniformly.
+ */
+export const durableWorkQueues = ["jobs", "publications", "commands", "reconciliations"] as const
+
+export type DurableWorkQueue = (typeof durableWorkQueues)[number]
+
 export function makeWorkStatePolicy(sql: SqlClient) {
   const column = (name: string, alias?: string) =>
     sql.literal(alias === undefined ? name : `${alias}.${name}`)

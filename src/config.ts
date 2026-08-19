@@ -229,13 +229,25 @@ async function secret(
   return value
 }
 
+/**
+ * Where the durable store lives. The controller and the operator commands must
+ * open the same file, so both resolve it here rather than each repeating the
+ * default.
+ */
+export function resolveDatabasePath(
+  env: Record<string, string | undefined>,
+  home: string = homedir(),
+): string {
+  const stateRoot = env.WORKFLOWD_STATE_DIR ?? join(home, ".local/state/workflowd")
+  return env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db")
+}
+
 export async function loadConfig(
   env: Record<string, string | undefined>,
   options: ConfigLoadOptions = {},
 ): Promise<AppConfig> {
   const home = options.home ?? homedir()
   const read = options.readFile ?? ((path: string) => readFile(path, "utf8"))
-  const stateRoot = env.WORKFLOWD_STATE_DIR ?? join(home, ".local/state/workflowd")
   const cacheRoot = env.WORKFLOWD_CACHE_DIR ?? join(home, ".local/share/workflowd")
   const webhookSecret = await secret(
     env,
@@ -314,7 +326,7 @@ export async function loadConfig(
       webhookSecret,
     },
     storage: {
-      databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db"),
+      databasePath: resolveDatabasePath(env, home),
     },
     fixWork: {
       enabled: fixWorkEnabled,

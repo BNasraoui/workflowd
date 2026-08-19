@@ -10,6 +10,7 @@ import {
   runReconciliationIteration,
 } from "./worker"
 import { WorkflowStart } from "./qrspi/workflow-start"
+import { WorkerHealth } from "./worker-health"
 import { WorkSignal, type WorkLane } from "./work-signal"
 
 export type HookHttpConfig = {
@@ -36,19 +37,28 @@ export function superviseWorker<A extends string, E, R>(
 ) {
   return Effect.gen(function* () {
     const signals = yield* WorkSignal
+    const health = yield* WorkerHealth
     const subscription = yield* signals.subscribe(lane)
     const downstream = workDownstreamLanes(lane)
+    // Supervision is the only place that sees whether a lane is working, so it
+    // is the only place that records it. The loop never exits, which is why a
+    // lane failing every iteration has to be reported rather than inferred from
+    // the process still running.
     return yield* Effect.forever(
       iteration.pipe(
+        Effect.tap(() => health.recordIteration(lane)),
         Effect.flatMap((result) =>
           result === "idle"
             ? Effect.race(Queue.take(subscription), Effect.sleep(pollIntervalMs))
             : Effect.forEach(downstream, signals.wake, { discard: true }),
         ),
         Effect.catchAllCause((cause) =>
-          Effect.logError(`${name} iteration failed`, cause).pipe(
-            Effect.andThen(Effect.sleep(pollIntervalMs)),
-          ),
+          health
+            .recordFailure(lane)
+            .pipe(
+              Effect.andThen(Effect.logError(`${name} iteration failed`, cause)),
+              Effect.andThen(Effect.sleep(pollIntervalMs)),
+            ),
         ),
       ),
     ).pipe(Effect.forkScoped)
@@ -106,8 +116,6 @@ export function serveHookHttp<R>(
   return serveHookHttpWithHandler(config, handler)
 }
 
-export type RuntimeWorkerName = "job" | "publication" | "reconciliation" | "command"
-
 export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   switch (lane) {
     case "job":
@@ -119,15 +127,7 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   }
 }
 
-export function startHookService(
-  config: AppConfig,
-  observeWorkerIteration: (name: RuntimeWorkerName) => Effect.Effect<void> = () => Effect.void,
-) {
-  const observed = <A extends string, E, R>(
-    name: RuntimeWorkerName,
-    iteration: Effect.Effect<A, E, R>,
-  ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
-
+export function startHookService(config: AppConfig) {
   return Effect.gen(function* () {
     const automation = yield* Automation
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
@@ -155,20 +155,17 @@ export function startHookService(
         "Job worker",
         config.worker.pollIntervalMs,
         "job",
-        observed(
-          "job",
-          runJobIteration({
-            workerId,
-            leaseDurationMs: config.worker.jobLeaseDurationMs,
-            maxAttempts: 3,
-            timeoutMs: config.worker.jobTimeoutMs,
-            cancellationPollIntervalMs: config.worker.pollIntervalMs,
-            agentBranchPrefixes: config.worker.agentBranchPrefixes,
-            trustedAgentUsers: config.worker.trustedAgentUsers,
-            fixWorkEnabled: config.fixWork.enabled,
-            now: () => new Date(),
-          }),
-        ),
+        runJobIteration({
+          workerId,
+          leaseDurationMs: config.worker.jobLeaseDurationMs,
+          maxAttempts: 3,
+          timeoutMs: config.worker.jobTimeoutMs,
+          cancellationPollIntervalMs: config.worker.pollIntervalMs,
+          agentBranchPrefixes: config.worker.agentBranchPrefixes,
+          trustedAgentUsers: config.worker.trustedAgentUsers,
+          fixWorkEnabled: config.fixWork.enabled,
+          now: () => new Date(),
+        }),
       )
     }
 
@@ -176,48 +173,39 @@ export function startHookService(
       "Publisher",
       config.worker.pollIntervalMs,
       "publication",
-      observed(
-        "publication",
-        runPublicationIteration({
-          workerId: `${process.pid}:publisher`,
-          leaseDurationMs: config.worker.publicationLeaseDurationMs,
-          timeoutMs: config.worker.publicationTimeoutMs,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      ),
+      runPublicationIteration({
+        workerId: `${process.pid}:publisher`,
+        leaseDurationMs: config.worker.publicationLeaseDurationMs,
+        timeoutMs: config.worker.publicationTimeoutMs,
+        maxAttempts: 5,
+        now: () => new Date(),
+      }),
     )
 
     yield* superviseWorker(
       "Reconciliation",
       config.worker.pollIntervalMs,
       "reconciliation",
-      observed(
-        "reconciliation",
-        runReconciliationIteration({
-          workerId: `${process.pid}:reconciler`,
-          leaseDurationMs: 2 * 60_000,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      ),
+      runReconciliationIteration({
+        workerId: `${process.pid}:reconciler`,
+        leaseDurationMs: 2 * 60_000,
+        maxAttempts: 5,
+        now: () => new Date(),
+      }),
     )
 
     yield* superviseWorker(
       "Command worker",
       config.worker.pollIntervalMs,
       "command",
-      observed(
-        "command",
-        runCommandIteration({
-          workerId: `${process.pid}:commands`,
-          leaseDurationMs: 60_000,
-          maxAttempts: 3,
-          commandUsers: config.worker.commandUsers,
-          fixWorkEnabled: config.fixWork.enabled,
-          now: () => new Date(),
-        }),
-      ),
+      runCommandIteration({
+        workerId: `${process.pid}:commands`,
+        leaseDurationMs: 60_000,
+        maxAttempts: 3,
+        commandUsers: config.worker.commandUsers,
+        fixWorkEnabled: config.fixWork.enabled,
+        now: () => new Date(),
+      }),
     )
 
     // Acquire the listener last so its finalizer stops acceptance and drains

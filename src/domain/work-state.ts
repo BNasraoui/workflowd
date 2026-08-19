@@ -16,7 +16,7 @@ import { Schema } from "effect"
  *     │                ├──reschedule, attempts spent─▶ failed
  *     │                ├──undecodable row───────────▶ data_error
  *     │                └──newer Generation or Review Request──▶ superseded
- *     └──requeue a failed fix────────────────────────────────────────────────┘
+ *     └──requeue a failed fix, or an operator retry──────────────────────────┘
  *
  * A lease that expires does not change the state: the row stays `leased` and
  * becomes claimable again once `lease_until` has passed, which is why
@@ -48,6 +48,25 @@ export const unfinishedWorkStates = [
   "leased",
   "retry_scheduled",
 ] as const satisfies ReadonlyArray<typeof WorkState.Type>
+
+/**
+ * States that owe an outcome but will never produce one on their own. `failed`
+ * spent its retry budget; `data_error` is quarantined because the row cannot be
+ * interpreted as its declared kind of work. Neither becomes claimable again
+ * without an operator, so both are what operational status counts.
+ */
+export const terminalFailureWorkStates = ["failed", "data_error"] as const satisfies ReadonlyArray<
+  typeof WorkState.Type
+>
+
+/**
+ * The one terminal failure an operator may put back on a queue. A `data_error`
+ * row stays quarantined: requeueing it only re-quarantines it on the next
+ * claim, because the record itself is what cannot be read.
+ */
+export const operatorRetryableWorkStates = ["failed"] as const satisfies ReadonlyArray<
+  typeof WorkState.Type
+>
 
 /**
  * States a Publication loses to a newer Review Request. A Publication that

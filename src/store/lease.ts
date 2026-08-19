@@ -4,10 +4,9 @@ import type { Fragment } from "@effect/sql/Statement"
 import { Effect, Either } from "effect"
 import type { StoreDataError } from "./errors"
 import type { LeaseClaim } from "./model"
-import { makeWorkStatePolicy } from "./work-state"
-type LeaseTable = "commands" | "jobs" | "publications" | "reconciliations"
+import { makeWorkStatePolicy, type DurableWorkQueue } from "./work-state"
 type LeaseQueueConfig<Value> = {
-  readonly table: LeaseTable
+  readonly table: DurableWorkQueue
   readonly beforeClaim?: (claimedAt: string) => Effect.Effect<void, SqlError>
   readonly claimableId: (now: string) => Fragment
   readonly returning: Fragment
