@@ -10,6 +10,7 @@ import { decodeAgentSessionReferenceRow, decodeJobRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import { SqlLeaseQueue } from "./lease"
+import { makeWorkStatePolicy } from "./work-state"
 import type { makeSharedStoreOperations } from "./shared"
 import type { CompleteReviewJobInput, RecordFixResultInput } from "./model"
 
@@ -52,6 +53,7 @@ export function makeJobOperations(
   shared: Pick<ReturnType<typeof makeSharedStoreOperations>, "enqueueFixFromReview">,
 ): JobOperations {
   const currentness = makeCurrentnessPolicy(sql)
+  const workState = makeWorkStatePolicy(sql)
   const queue = new SqlLeaseQueue<Work>(sql, {
     table: "jobs",
     beforeClaim: (claimedAt) =>
@@ -61,7 +63,7 @@ export function makeJobOperations(
         WHERE state = 'launch_intent'
         AND job_id IN (
           SELECT id FROM jobs
-          WHERE state = 'leased' AND lease_until <= ${claimedAt}
+          WHERE ${workState.leaseExpired(claimedAt)}
         )
       `.pipe(Effect.asVoid),
     claimableId: currentness.jobClaimCandidate,
@@ -108,16 +110,13 @@ export function makeJobOperations(
         UPDATE jobs AS candidate
         SET
           state = 'succeeded',
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = NULL,
           updated_at = ${timestamp}
         WHERE candidate.id = ${input.jobId}
         AND candidate.kind = 'review'
-        AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
-        AND candidate.lease_owner = ${input.workerId}
-        AND candidate.lease_until > ${timestamp}
+        AND ${workState.leaseHeldBy(input.workerId, timestamp, "candidate")}
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
         RETURNING
@@ -204,9 +203,7 @@ export function makeJobOperations(
         updated_at = ${input.recordedAt.toISOString()}
       WHERE id = ${input.jobId}
       AND kind = 'fix'
-      AND state = 'leased'
-      AND lease_owner = ${input.workerId}
-      AND lease_until > ${input.recordedAt.toISOString()}
+      AND ${workState.leaseHeldBy(input.workerId, input.recordedAt.toISOString())}
       AND fix_result_json IS NULL
       RETURNING id
     `.pipe(Effect.map((rows) => (rows.length === 0 ? ("stale" as const) : ("recorded" as const))))
@@ -291,10 +288,8 @@ export function makeJobOperations(
         SELECT 1 AS current
         FROM jobs AS candidate
         WHERE candidate.id = ${jobId}
-        AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
-        AND candidate.lease_owner = ${workerId}
-        AND candidate.lease_until > ${now.toISOString()}
+        AND ${workState.leaseHeldBy(workerId, now.toISOString(), "candidate")}
         AND ${currentness.currentJob}
         AND ${currentness.currentPublication}
         AND ${currentness.latestReviewRequest}
@@ -307,15 +302,12 @@ export function makeJobOperations(
           SET
             state = 'superseded',
             cancel_requested = TRUE,
-            lease_owner = NULL,
-            lease_until = NULL,
+            ${workState.releaseLease},
             last_error = 'Fix Work disabled',
             updated_at = ${timestamp}
           WHERE id = ${input.jobId}
           AND kind = 'fix'
-          AND state = 'leased'
-          AND lease_owner = ${input.workerId}
-          AND lease_until > ${timestamp}
+          AND ${workState.leaseHeldBy(input.workerId, timestamp)}
           RETURNING id
         `
         if (rows.length === 0) return "stale" as const
@@ -333,16 +325,13 @@ export function makeJobOperations(
         SET
           state = 'succeeded',
           controller_signing_fingerprint = ${input.controllerSigningFingerprint ?? null},
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = NULL,
           updated_at = ${input.completedAt.toISOString()}
         WHERE candidate.id = ${input.jobId}
         AND candidate.kind = 'fix'
-        AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
-        AND candidate.lease_owner = ${input.workerId}
-        AND candidate.lease_until > ${input.completedAt.toISOString()}
+        AND ${workState.leaseHeldBy(input.workerId, input.completedAt.toISOString(), "candidate")}
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
         RETURNING id
@@ -360,10 +349,8 @@ export function makeJobOperations(
           AND execution.state = 'session_ready'
           AND execution.attempt = candidate.attempts
           AND candidate.kind = 'review'
-          AND candidate.state = 'leased'
           AND candidate.cancel_requested = FALSE
-          AND candidate.lease_owner = ${input.workerId}
-          AND candidate.lease_until > ${timestamp}
+          AND ${workState.leaseHeldBy(input.workerId, timestamp, "candidate")}
           AND ${currentness.currentJob}
           AND ${currentness.latestReviewRequest}
         `
@@ -395,10 +382,8 @@ export function makeJobOperations(
           AND execution.state = 'session_ready'
           AND execution.attempt = candidate.attempts
           AND candidate.kind = 'fix'
-          AND candidate.state = 'leased'
           AND candidate.cancel_requested = FALSE
-          AND candidate.lease_owner = ${input.workerId}
-          AND candidate.lease_until > ${timestamp}
+          AND ${workState.leaseHeldBy(input.workerId, timestamp, "candidate")}
           AND ${currentness.currentJob}
           AND ${currentness.latestReviewRequest}
         `
@@ -447,10 +432,8 @@ export function makeJobOperations(
             ${timestamp}
           FROM jobs AS candidate
           WHERE candidate.id = ${input.jobId}
-          AND candidate.state = 'leased'
           AND candidate.cancel_requested = FALSE
-          AND candidate.lease_owner = ${input.workerId}
-          AND candidate.lease_until > ${timestamp}
+          AND ${workState.leaseHeldBy(input.workerId, timestamp, "candidate")}
           AND candidate.attempts = ${input.intent.attempt}
           AND ${currentness.currentJob}
           AND ${currentness.latestReviewRequest}
@@ -478,10 +461,8 @@ export function makeJobOperations(
             SELECT 1
             FROM jobs AS candidate
             WHERE candidate.id = agent_executions.job_id
-            AND candidate.state = 'leased'
             AND candidate.cancel_requested = FALSE
-            AND candidate.lease_owner = ${input.workerId}
-            AND candidate.lease_until > ${timestamp}
+            AND ${workState.leaseHeldBy(input.workerId, timestamp, "candidate")}
             AND candidate.attempts = agent_executions.attempt
             AND ${currentness.currentJob}
             AND ${currentness.latestReviewRequest}
@@ -566,10 +547,8 @@ export function makeJobOperations(
         SELECT 1 AS current
         FROM jobs AS candidate
         WHERE candidate.id = ${jobId}
-        AND candidate.state = 'leased'
         AND candidate.cancel_requested = FALSE
-        AND candidate.lease_owner = ${workerId}
-        AND candidate.lease_until > ${now.toISOString()}
+        AND ${workState.leaseHeldBy(workerId, now.toISOString(), "candidate")}
         AND ${currentness.currentJob}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length === 0)),
@@ -581,14 +560,11 @@ export function makeJobOperations(
           SET
             state = 'superseded',
             cancel_requested = TRUE,
-            lease_owner = NULL,
-            lease_until = NULL,
+            ${workState.releaseLease},
             last_error = ${input.reason.slice(0, 8_192)},
             updated_at = ${timestamp}
           WHERE id = ${input.jobId}
-          AND state = 'leased'
-          AND lease_owner = ${input.workerId}
-          AND lease_until > ${timestamp}
+          AND ${workState.leaseHeldBy(input.workerId, timestamp)}
           RETURNING id
         `
         if (rows.length === 0) return "stale" as const

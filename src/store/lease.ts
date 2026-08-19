@@ -4,6 +4,7 @@ import type { Fragment } from "@effect/sql/Statement"
 import { Effect, Either } from "effect"
 import type { StoreDataError } from "./errors"
 import type { LeaseClaim } from "./model"
+import { makeWorkStatePolicy } from "./work-state"
 type LeaseTable = "commands" | "jobs" | "publications" | "reconciliations"
 type LeaseQueueConfig<Value> = {
   readonly table: LeaseTable
@@ -29,10 +30,13 @@ const durableLeasePolicy = {
     state === undefined ? "stale" : state === "failed" ? "failed" : "retry",
 } as const
 export class SqlLeaseQueue<Value> {
+  private readonly workState: ReturnType<typeof makeWorkStatePolicy>
   constructor(
     private readonly sql: SqlClient,
     private readonly config: LeaseQueueConfig<Value>,
-  ) {}
+  ) {
+    this.workState = makeWorkStatePolicy(sql)
+  }
   claim(input: LeaseClaim): Effect.Effect<Value | null, SqlError> {
     const { claimedAt, leaseUntil } = durableLeasePolicy.claim(input)
     const { table } = this.config
@@ -44,12 +48,10 @@ export class SqlLeaseQueue<Value> {
         UPDATE ${this.sql(table)}
         SET
           state = 'failed',
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${this.workState.releaseLease},
           last_error = 'maximum attempts reached after lease expiry',
           updated_at = ${claimedAt}
-        WHERE state = 'leased'
-        AND lease_until <= ${claimedAt}
+        WHERE ${this.workState.leaseExpired(claimedAt)}
         AND attempts >= max_attempts
       `
       while (true) {
@@ -73,14 +75,11 @@ export class SqlLeaseQueue<Value> {
           UPDATE ${this.sql(table)}
           SET
             state = 'data_error',
-            lease_owner = NULL,
-            lease_until = NULL,
+            ${this.workState.releaseLease},
             last_error = ${decoded.left.message},
             updated_at = ${claimedAt}
           WHERE id = ${decoded.left.recordId}
-          AND state = 'leased'
-          AND lease_owner = ${input.workerId}
-          AND lease_until > ${claimedAt}
+          AND ${this.workState.leaseHeldBy(input.workerId, claimedAt)}
         `
       }
     }).pipe(this.sql.withTransaction)
@@ -96,14 +95,11 @@ export class SqlLeaseQueue<Value> {
         END,
         max_attempts = MAX(attempts, ${input.maxAttempts}),
         run_at = ${input.runAt.toISOString()},
-        lease_owner = NULL,
-        lease_until = NULL,
+        ${this.workState.releaseLease},
         last_error = ${input.error},
         updated_at = ${input.failedAt.toISOString()}
       WHERE id = ${input.id}
-      AND state = 'leased'
-      AND lease_owner = ${input.workerId}
-      AND lease_until > ${input.failedAt.toISOString()}
+      AND ${this.workState.leaseHeldBy(input.workerId, input.failedAt.toISOString())}
       RETURNING state
     `.pipe(Effect.map((rows) => durableLeasePolicy.retry(rows[0]?.state)))
   }

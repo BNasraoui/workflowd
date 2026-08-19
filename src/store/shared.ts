@@ -2,11 +2,18 @@ import type { SqlClient } from "@effect/sql/SqlClient"
 import { Effect } from "effect"
 import type { ReviewResult } from "../domain/review-result"
 import { decideFixCandidate } from "../domain/transaction-policy"
+import {
+  fixSourcePublicationStates,
+  publicationStatesSupersededByReviewRequest,
+  unfinishedWorkStates,
+} from "../domain/work-state"
 import type { DeliveryInput } from "./model"
 import { makeCurrentnessPolicy } from "./currentness"
+import { makeWorkStatePolicy } from "./work-state"
 
 export function makeSharedStoreOperations(sql: SqlClient) {
   const currentness = makeCurrentnessPolicy(sql)
+  const workState = makeWorkStatePolicy(sql)
   const insertDelivery = (delivery: DeliveryInput) =>
     sql<{ readonly delivery_id: string; readonly observation_sequence: number }>`
       INSERT OR IGNORE INTO webhook_deliveries (
@@ -55,8 +62,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         UPDATE publications
         SET
           state = 'superseded',
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = 'newer review requested',
           updated_at = ${input.timestamp}
         WHERE repository_id = ${input.repositoryId}
@@ -67,15 +73,14 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         AND review_request_number < (
           SELECT review_request_number FROM jobs WHERE id = ${input.reviewJobId}
         )
-        AND state IN ('ready', 'leased', 'retry_scheduled', 'succeeded')
+        AND ${workState.stateIn(publicationStatesSupersededByReviewRequest)}
       `
       yield* sql`
         UPDATE jobs
         SET
           state = 'superseded',
           cancel_requested = TRUE,
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = NULL,
           updated_at = ${input.timestamp}
         WHERE kind = 'fix'
@@ -87,7 +92,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         AND review_request_number < (
           SELECT review_request_number FROM jobs WHERE id = ${input.reviewJobId}
         )
-        AND state IN ('ready', 'leased', 'retry_scheduled')
+        AND ${workState.stateIn(unfinishedWorkStates)}
       `
     })
 
@@ -119,8 +124,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         SET
           state = 'superseded',
           cancel_requested = TRUE,
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = NULL,
           updated_at = ${input.timestamp}
         WHERE repository_id = ${input.repositoryId}
@@ -132,14 +136,13 @@ export function makeSharedStoreOperations(sql: SqlClient) {
             AND generation = ${input.generation}
           )
         )
-        AND state IN ('ready', 'retry_scheduled', 'leased')
+        AND ${workState.stateIn(unfinishedWorkStates)}
       `
       yield* sql`
         UPDATE publications
         SET
           state = 'superseded',
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${workState.releaseLease},
           last_error = ${input.publicationReason},
           updated_at = ${input.timestamp}
         WHERE repository_id = ${input.repositoryId}
@@ -151,7 +154,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
             AND generation = ${input.generation}
           )
         )
-        AND state IN ('ready', 'retry_scheduled', 'leased')
+        AND ${workState.stateIn(unfinishedWorkStates)}
       `
     })
 
@@ -216,7 +219,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
       AND ${eligible}
       AND review.kind = 'review'
       AND review.state = 'succeeded'
-      AND candidate.state IN ('ready', 'leased', 'retry_scheduled', 'succeeded')
+      AND ${workState.stateIn(fixSourcePublicationStates, "candidate")}
       AND ${currentness.currentPublication}
       AND ${currentness.latestReviewRequest}
       ON CONFLICT (
@@ -232,8 +235,7 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         attempts = 0,
         max_attempts = 3,
         run_at = excluded.run_at,
-        lease_owner = NULL,
-        lease_until = NULL,
+        ${workState.releaseLease},
         cancel_requested = FALSE,
         last_error = NULL,
         updated_at = excluded.updated_at

@@ -6,7 +6,7 @@ import {
   TrackedPullRequestState,
   decidePullRequestTransition,
 } from "../../src/domain/pull-request-transition"
-import { ReviewTarget } from "../../src/domain/review-target"
+import { ReviewTarget, reviewTargetFieldNames } from "../../src/domain/review-target"
 
 const target = {
   baseRef: "main",
@@ -72,10 +72,6 @@ const authoritative = (fields: Record<string, string> = {}) =>
     pullRequest: pullRequest(fields, observedAt),
   })
 
-const reviewTargetFieldNames = Object.keys(ReviewTarget.fields) as ReadonlyArray<
-  keyof typeof target
->
-
 describe("Review Target identity", () => {
   test("declares exactly the base and head fields that identify a Review Target", () => {
     expect([...reviewTargetFieldNames].sort()).toEqual([
@@ -85,38 +81,43 @@ describe("Review Target identity", () => {
       "headRepositoryFullName",
       "headSha",
     ])
+    expect(Object.keys(ReviewTarget.fields).sort()).toEqual([...reviewTargetFieldNames].sort())
   })
 
-  test.each(reviewTargetFieldNames)("changing %s alone starts a newer Generation", (field) => {
-    const decision = decidePullRequestTransition(
-      trackedState(),
-      observation({ [field]: replacements[field] }),
-    )
+  test("changing any single Review Target field starts a newer Generation", () => {
+    for (const field of reviewTargetFieldNames) {
+      const decision = decidePullRequestTransition(
+        trackedState(),
+        observation({ [field]: replacements[field] }),
+      )
 
-    expect(decision._tag).toBe("ApplySnapshot")
-    expect(decision.generation).toBe(4)
-    if (decision._tag !== "ApplySnapshot") return
-    expect(decision.intents.map((intent) => intent._tag)).toContain("SupersedeGeneration")
+      expect(decision._tag, field).toBe("ApplySnapshot")
+      expect(Number(decision.generation), field).toBe(4)
+      if (decision._tag !== "ApplySnapshot") continue
+      expect(
+        decision.intents.map((intent) => intent._tag),
+        field,
+      ).toContain("SupersedeGeneration")
+    }
   })
 
-  test.each(reviewTargetFieldNames)(
-    "an authoritative snapshot that changes %s alone starts a newer Generation",
-    (field) => {
+  test("an authoritative snapshot starts a newer Generation for any single field", () => {
+    for (const field of reviewTargetFieldNames) {
       const decision = decidePullRequestTransition(
         trackedState(),
         authoritative({ [field]: replacements[field] }),
       )
 
-      expect(decision._tag).toBe("ApplySnapshot")
-      expect(decision.generation).toBe(4)
-    },
-  )
+      expect(decision._tag, field).toBe("ApplySnapshot")
+      expect(Number(decision.generation), field).toBe(4)
+    }
+  })
 
   test("an identical Review Target keeps the current Generation", () => {
     const decision = decidePullRequestTransition(trackedState(), observation())
 
     expect(decision._tag).toBe("ApplySnapshot")
-    expect(decision.generation).toBe(3)
+    expect(Number(decision.generation)).toBe(3)
     if (decision._tag !== "ApplySnapshot") return
     expect(decision.intents.map((intent) => intent._tag)).not.toContain("SupersedeGeneration")
   })
@@ -125,25 +126,24 @@ describe("Review Target identity", () => {
     const decision = decidePullRequestTransition(trackedState(), observation({ author: "someone" }))
 
     expect(decision._tag).toBe("ApplySnapshot")
-    expect(decision.generation).toBe(3)
+    expect(Number(decision.generation)).toBe(3)
   })
 
-  test.each(reviewTargetFieldNames)(
-    "an untimed observation that changes %s alone is ambiguous",
-    (field) => {
+  test("an untimed observation that changes any single field is ambiguous", () => {
+    for (const field of reviewTargetFieldNames) {
       const decision = decidePullRequestTransition(
         trackedState({}, null),
         observation({ [field]: replacements[field] }, null),
       )
 
-      expect(decision._tag).toBe("RequestReconciliation")
-    },
-  )
+      expect(decision._tag, field).toBe("RequestReconciliation")
+    }
+  })
 
   test("an untimed observation with the same Review Target is not ambiguous", () => {
     const decision = decidePullRequestTransition(trackedState({}, null), observation({}, null))
 
     expect(decision._tag).toBe("ApplySnapshot")
-    expect(decision.generation).toBe(3)
+    expect(Number(decision.generation)).toBe(3)
   })
 })

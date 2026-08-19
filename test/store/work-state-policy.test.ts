@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
 import {
   changesRequestedReview,
+  decodePullRequestEvent,
   makeStoreLayer,
-  sampleCommandEvent,
-  samplePullRequestEvent,
   sampleBaseSha,
+  sampleCommandEvent,
   sampleHeadSha,
 } from "./harness"
 
@@ -15,7 +15,9 @@ const at = (minute: string, second = "00") => new Date(`2026-07-19T12:${minute}:
 const stamp = at("00").toISOString()
 const observedAt = at("20").toISOString()
 
-const run = <A, E>(effect: Effect.Effect<A, E, WorkflowStore | SqlClient.SqlClient>) =>
+type StoreServices = Layer.Layer.Success<ReturnType<typeof makeStoreLayer>>
+
+const run = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
   Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())))
 
 const durableWorkTables = ["jobs", "publications", "commands", "reconciliations"] as const
@@ -147,7 +149,7 @@ describe("durable Work State claim policy", () => {
       }),
     )
 
-    expect(claimed?.id).toBe(1)
+    expect(Number(claimed?.id)).toBe(1)
   })
 
   test.each([...unclaimable])("a review job in %s is never claimed", async (state) => {
@@ -206,7 +208,7 @@ describe("durable Work State claim policy", () => {
           now: at("11"),
           leaseDurationMs: 60_000,
         })
-        return { expired: expired?.workerId, first: first?.workerId, held }
+        return { expired: String(expired?.workerId), first: String(first?.workerId), held }
       }),
     )
 
@@ -243,7 +245,7 @@ describe("Review Target currentness", () => {
           const current = yield* store.isPublicationCurrent(1, "publisher", at("10", "30"))
           yield* sql`UPDATE publications SET ${sql(column)} = ${replacement} WHERE id = 1`
           const after = yield* store.isPublicationCurrent(1, "publisher", at("10", "30"))
-          return { after, before: before?.id, current }
+          return { after, before: Number(before?.id), current }
         }),
       )
 
@@ -268,7 +270,10 @@ describe("Review Target currentness", () => {
         })
         yield* sql`UPDATE jobs SET expected_head_sha = ${"c".repeat(40)} WHERE id = 1`
         const currentAfterHeadChange = yield* store.isJobCurrent(1, "worker", at("10", "30"))
-        return { claimedWithOtherBaseRef: claimedWithOtherBaseRef?.id, currentAfterHeadChange }
+        return {
+          claimedWithOtherBaseRef: Number(claimedWithOtherBaseRef?.id),
+          currentAfterHeadChange,
+        }
       }),
     )
 
@@ -305,15 +310,29 @@ describe("Work State supersession scope", () => {
             payload: "{}",
             receivedAt: at("20"),
           },
-          {
-            ...samplePullRequestEvent,
+          decodePullRequestEvent({
+            _tag: "PullRequest",
             action: "synchronize",
+            installationId: 91,
+            repository: {
+              id: 42,
+              fullName: "example-owner/example",
+              name: "example",
+              owner: "example-owner",
+            },
             pullRequest: {
-              ...samplePullRequestEvent.pullRequest,
+              number: 7,
+              author: "opencode-agent",
+              baseRef: "main",
+              baseSha: sampleBaseSha,
+              draft: false,
+              headRef: "opencode/example-job",
+              headRepositoryFullName: "example-owner/example",
               headSha: "e".repeat(40),
+              state: "open",
               updatedAt: observedAt,
             },
-          },
+          }),
         )
         return {
           jobs: yield* workStates("jobs"),
