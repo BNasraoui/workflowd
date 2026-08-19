@@ -110,7 +110,7 @@ const json = (value: unknown): ToolResult => text(JSON.stringify(value, null, 2)
 
 const generatedProbeId = (now: Date) => {
   const stamp = now.toISOString().replace(/[-:.]/g, "").slice(0, 15)
-  const suffix = Math.random().toString(16).slice(2, 10)
+  const suffix = crypto.randomUUID().slice(0, 8)
   return `mcp-${stamp}-${suffix}`
 }
 

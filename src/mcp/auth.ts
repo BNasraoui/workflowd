@@ -43,7 +43,7 @@ export async function loadMcpWriteAuth(
 /** Constant-time bearer comparison; never logs or echoes either value. */
 export function authorizedForWrites(auth: McpWriteAuth, header: string | null): boolean {
   if (auth.mode === "disabled") return false
-  if (header === null || !header.startsWith("Bearer ")) return false
+  if (header?.startsWith("Bearer ") !== true) return false
   const supplied = createHash("sha256").update(header.slice("Bearer ".length)).digest()
   const expected = createHash("sha256").update(auth.token).digest()
   return timingSafeEqual(supplied, expected)
