@@ -100,3 +100,8 @@ estimates, recursive-review status, and complete coverage/allocation accounting.
 
 Print one verdict only. Keep estimates advisory. Do not turn tests, migrations, recovery,
 security, or integration proof into deferred cleanup tasks.
+
+This review is advisory evidence for humans. Under the QRSPI contract, Structure fixes
+capability identity from the accepted graph and routes each capability to
+`ImplementationReady` or `SplitFlowRequired` from current repository evidence alone.
+Neither this verdict nor any estimate or threshold here selects that route.
