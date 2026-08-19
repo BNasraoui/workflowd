@@ -79,33 +79,87 @@ const actionTrace = (action: SimulationAction) => {
 export const replayTrace = (seed: number, actions: ReadonlyArray<SimulationAction>) =>
   `seed=${seed} ${actions.map(actionTrace).join(",")}`
 
+export type ShrinkBudget = {
+  readonly maxCandidates?: number
+}
+
+export type ShrinkResult = {
+  readonly actions: ReadonlyArray<SimulationAction>
+  readonly candidates: number
+  readonly truncated: boolean
+}
+
+// Every candidate costs a full simulation re-run, so the candidate count is the whole cost model.
+// Deleting one action at a time needs one re-run per action: ~500 re-runs for a 500-action
+// schedule, measured at 46.9 minutes for seed 1, which reads as a hang. Delta debugging deletes
+// halves, then quarters, then eighths, and only falls back to single actions once coarse deletions
+// stop shrinking, so a reproduction that is a small subset of the schedule is reached in far fewer
+// re-runs. The stopping condition is unchanged -- the loop only gives up once no single action can
+// be removed -- so the result is still 1-minimal.
+//
+// The budget counts candidates rather than wall-clock time deliberately: a clock cap would make
+// the reduction depend on machine load, and a recorded seed has to shrink to the same schedule on
+// every replay.
+export const defaultShrinkCandidates = 200
+
 export const minimizeActions = async (
   actions: ReadonlyArray<SimulationAction>,
   stillFails: (candidate: ReadonlyArray<SimulationAction>) => Promise<boolean>,
-) => {
+  budget: ShrinkBudget = {},
+): Promise<ShrinkResult> => {
+  const maxCandidates = budget.maxCandidates ?? defaultShrinkCandidates
   let minimal = [...actions]
-  const deleteIrrelevant = async () => {
-    for (let index = 0; index < minimal.length;) {
-      const candidate = minimal.toSpliced(index, 1)
-      if (await stillFails(candidate)) minimal = candidate
-      else index += 1
+  let candidates = 0
+  let truncated = false
+  const reproduces = async (candidate: ReadonlyArray<SimulationAction>) => {
+    if (candidates >= maxCandidates) {
+      truncated = true
+      return false
+    }
+    candidates += 1
+    return await stillFails(candidate)
+  }
+  const deleteChunks = async () => {
+    // Granularity is how many chunks the schedule is cut into: 2 (halves), 4, 8, ... up to one
+    // chunk per action. A successful deletion steps granularity back down, because the shorter
+    // schedule may tolerate a proportionally coarser cut again.
+    let granularity = 2
+    while (minimal.length >= 2) {
+      const size = Math.ceil(minimal.length / granularity)
+      let reduced = false
+      for (let start = 0; start < minimal.length; start += size) {
+        const candidate = minimal.toSpliced(start, size)
+        if (await reproduces(candidate)) {
+          minimal = candidate
+          reduced = true
+          break
+        }
+        if (truncated) return
+      }
+      if (reduced) granularity = Math.max(2, Math.min(granularity - 1, minimal.length))
+      else if (granularity >= minimal.length) return
+      else granularity = Math.min(granularity * 2, minimal.length)
     }
   }
-  await deleteIrrelevant()
-  for (let index = 0; index < minimal.length; index += 1) {
-    const action = minimal[index]!
-    if (action.type !== "advance") continue
-    for (const milliseconds of [1, 100, 1_000]) {
-      if (milliseconds >= action.milliseconds) break
-      const candidate = minimal.with(index, { type: "advance", milliseconds })
-      if (await stillFails(candidate)) {
-        minimal = candidate
-        break
+  const shrinkValues = async () => {
+    for (let index = 0; index < minimal.length; index += 1) {
+      const action = minimal[index]!
+      if (action.type !== "advance") continue
+      for (const milliseconds of [1, 100, 1_000]) {
+        if (milliseconds >= action.milliseconds) break
+        const candidate = minimal.with(index, { type: "advance", milliseconds })
+        if (await reproduces(candidate)) {
+          minimal = candidate
+          break
+        }
+        if (truncated) return
       }
     }
   }
-  await deleteIrrelevant()
-  return minimal
+  await deleteChunks()
+  await shrinkValues()
+  await deleteChunks()
+  return { actions: minimal, candidates, truncated }
 }
 
 export const simulationBudget = (input: { readonly seeds?: string; readonly steps?: string }) => {

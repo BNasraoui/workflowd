@@ -28,7 +28,44 @@ test("shrinking deletes irrelevant actions and reduces time values", async () =>
     candidate.some((action) => action.type === "advance" && action.milliseconds >= 100),
   )
 
-  expect(minimal).toEqual([{ type: "advance", milliseconds: 100 }])
+  expect(minimal.actions).toEqual([{ type: "advance", milliseconds: 100 }])
+  expect(minimal.truncated).toBe(false)
+})
+
+// Chunk deletion is the whole point of the change: a reproduction buried in a long schedule must
+// cost far fewer candidates than one re-run per action, because each candidate is a full
+// simulation re-run.
+test("shrinking deletes chunks rather than paying one candidate per action", async () => {
+  const actions: ReadonlyArray<SimulationAction> = [
+    ...Array.from({ length: 200 }, () => ({ type: "cancel" }) as const),
+    { type: "wrongHost" } as const,
+    ...Array.from({ length: 200 }, () => ({ type: "cancel" }) as const),
+  ]
+  let candidates = 0
+
+  const minimal = await minimizeActions(actions, async (candidate) => {
+    candidates += 1
+    return candidate.some((action) => action.type === "wrongHost")
+  })
+
+  expect(minimal.actions).toEqual([{ type: "wrongHost" }])
+  expect(minimal.candidates).toBe(candidates)
+  expect(candidates).toBeLessThan(actions.length / 4)
+})
+
+test("shrinking stops at the candidate budget and reports the best reduction so far", async () => {
+  const actions: ReadonlyArray<SimulationAction> = Array.from(
+    { length: 64 },
+    () => ({ type: "cancel" }) as const,
+  )
+
+  const minimal = await minimizeActions(actions, async (candidate) => candidate.length >= 4, {
+    maxCandidates: 3,
+  })
+
+  expect(minimal.truncated).toBe(true)
+  expect(minimal.candidates).toBe(3)
+  expect(minimal.actions.length).toBeLessThan(actions.length)
 })
 
 test("a longer-run budget parses explicit seeds and bounded steps", () => {
