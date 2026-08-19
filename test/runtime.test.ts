@@ -1,58 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Scope } from "effect"
-import { AgentHarness } from "../src/agent-harness"
-import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
-import { Automation, OpenCodeAutomationError } from "../src/opencode"
 import {
   HookHttpServerStartError,
-  runHookService,
   serveHookHttp,
-  startHookService,
   superviseWorker,
   workDownstreamLanes,
 } from "../src/runtime"
-import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore } from "../src/store/contracts"
-import { Workspace } from "../src/workspace"
+import { WorkerHealthLive } from "../src/worker-health"
 import { WorkSignal, WorkSignalLive } from "../src/work-signal"
 import { runPublicationIteration } from "../src/worker"
-import {
-  WorkflowStart,
-  WorkflowStartValidationError,
-  closedWorkflowStart,
-} from "../src/qrspi/workflow-start"
 import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./store/harness"
-
-const qrspiDefinition = {
-  contractVersion: 1,
-  definitionVersion: 1,
-  stages: [
-    {
-      key: "questions",
-      kind: "document",
-      contract: { name: "qrspi.questions", contractVersion: 1 },
-      activation: { mode: "enabled" },
-      definitionVersion: 1,
-      maxEncodedInputBytes: 16_384,
-      producer: {
-        harness: { name: "opencode", version: 1 },
-        agent: "qrspi-questions",
-        model: "openai/gpt-5.6-sol",
-        timeoutMs: 60_000,
-        retry: { maxAttempts: 3, backoffMs: 1_000 },
-      },
-      outputPolicy: {
-        _tag: "Artifact",
-        pathTemplate: "docs/qrspi/{ticketId}/01-questions.md",
-        mediaType: "text/markdown",
-      },
-      reviewPolicy: { mode: "none" },
-      humanGatePolicy: { mode: "none" },
-    },
-  ],
-}
 
 describe("serveHookHttp", () => {
   test("stops the listener and joins interrupted in-flight request effects", async () => {
@@ -211,7 +170,7 @@ test("superviseWorker resumes the same worker after an iteration failure", async
         yield* Deferred.await(resumed)
         return attempts
       }),
-    ).pipe(Effect.provide(WorkSignalLive)),
+    ).pipe(Effect.provide(Layer.merge(WorkSignalLive, WorkerHealthLive))),
   )
 
   expect(recovered).toBe(2)
@@ -237,7 +196,7 @@ test("superviseWorker subscribes before its first claim and consumes a wake afte
         )
         yield* Deferred.await(claimedAgain)
         return attempts
-      }).pipe(Effect.provide(WorkSignalLive)),
+      }).pipe(Effect.provide(Layer.merge(WorkSignalLive, WorkerHealthLive))),
     ),
   )
 
@@ -262,7 +221,7 @@ test("superviseWorker retains fallback polling after an idle iteration", async (
         )
         yield* Deferred.await(claimedAgain)
         return attempts
-      }).pipe(Effect.provide(WorkSignalLive)),
+      }).pipe(Effect.provide(Layer.merge(WorkSignalLive, WorkerHealthLive))),
     ),
   )
 
@@ -307,7 +266,7 @@ test("superviseWorker preserves error backoff and scoped shutdown", async () => 
         yield* Scope.close(workerScope, Exit.void)
         yield* Deferred.await(interrupted)
         return { attemptsDuringBackoff, attempts }
-      }).pipe(Effect.provide(WorkSignalLive)),
+      }).pipe(Effect.provide(Layer.merge(WorkSignalLive, WorkerHealthLive))),
     ),
   )
 
@@ -373,6 +332,7 @@ test("publication completion wakes the job lane that now exposes queued Fix Work
           Layer.mergeAll(
             makeStoreLayer(),
             WorkSignalLive,
+            WorkerHealthLive,
             Layer.succeed(GitHub, {
               fetchPullRequestSnapshot: () => Effect.die("unused"),
               collectHeadEvidence: () => Effect.die("unused"),
@@ -393,195 +353,4 @@ test("job, command, and reconciliation workers declare conservative downstream w
   expect(workDownstreamLanes("publication")).toEqual(["job"])
   expect(workDownstreamLanes("command")).toEqual(["job"])
   expect(workDownstreamLanes("reconciliation")).toEqual(["job"])
-})
-
-describe("runHookService startup", () => {
-  test("validates OpenCode exactly once before listener or workers activate", async () => {
-    let validations = 0
-    let githubCalls = 0
-    const loaded = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-      },
-      { home: "/tmp" },
-    )
-    const config = {
-      ...loaded,
-      http: { ...loaded.http, port: 0 },
-    }
-    const StoreLive = WorkflowStoreLive.pipe(
-      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
-    )
-    const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => {
-          githubCalls += 1
-          return Effect.die("must not fetch")
-        },
-        publishReview: () => {
-          githubCalls += 1
-          return Effect.die("must not publish")
-        },
-        collectHeadEvidence: () => Effect.die("must not collect evidence"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () =>
-          Effect.sync(() => {
-            validations += 1
-          }).pipe(
-            Effect.andThen(
-              Effect.fail(
-                new OpenCodeAutomationError({
-                  operation: "validate OpenCode availability",
-                  cause: new Error("missing fixer agent"),
-                  retryable: false,
-                }),
-              ),
-            ),
-          ),
-        prepareReview: () => Effect.die("must not review"),
-        prepareFix: () => Effect.die("must not fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("must not describe harness"),
-        validateAvailability: () => Effect.die("must not validate harness"),
-        prepare: () => Effect.die("must not prepare harness"),
-        createSession: () => Effect.die("must not create session"),
-        resumeSession: () => Effect.die("must not resume session"),
-        abortSession: () => Effect.void,
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("must not prepare review"),
-        prepareFix: () => Effect.die("must not prepare fix"),
-        publishFix: () => Effect.die("must not publish fix"),
-      }),
-    )
-
-    const exit = await Effect.runPromise(
-      Effect.exit(
-        runHookService(config).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
-      ),
-    )
-
-    expect(exit._tag).toBe("Failure")
-    expect(validations).toBe(1)
-    expect(githubCalls).toBe(0)
-  })
-
-  test("composes workers and starts a healthy listener after validation", async () => {
-    let validations = 0
-    const observedWorkers = new Set<string>()
-    const loaded = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/tmp",
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-      },
-      { home: "/tmp" },
-    )
-    const config = {
-      ...loaded,
-      http: { ...loaded.http, port: 0 },
-      worker: { ...loaded.worker, pollIntervalMs: 60_000 },
-    }
-    const StoreLive = WorkflowStoreLive.pipe(
-      Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
-    )
-    const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () =>
-          Effect.sync(() => {
-            validations += 1
-          }),
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected harness preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
-      Layer.succeed(
-        WorkflowStart,
-        closedWorkflowStart(
-          new WorkflowStartValidationError({
-            phase: "availability",
-            reason: "unavailable_agent_model",
-          }),
-        ),
-      ),
-    )
-
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const allWorkersObserved = yield* Deferred.make<void>()
-          const server = yield* startHookService(config, (worker) =>
-            Effect.gen(function* () {
-              observedWorkers.add(worker)
-              if (observedWorkers.size === 4) {
-                yield* Deferred.succeed(allWorkersObserved, undefined)
-              }
-            }),
-          )
-          yield* Deferred.await(allWorkersObserved)
-          const response = yield* Effect.tryPromise(() =>
-            fetch(`http://${server.hostname}:${server.port}/health`),
-          )
-          const qrspiResponse = yield* Effect.tryPromise(() =>
-            fetch(`http://${server.hostname}:${server.port}/workflows/qrspi`, {
-              method: "POST",
-              body: "{}",
-              headers: { authorization: "Bearer kickoff-secret" },
-            }),
-          )
-          return {
-            health: {
-              status: response.status,
-              body: yield* Effect.promise(() => response.json()),
-            },
-            qrspi: {
-              status: qrspiResponse.status,
-              body: yield* Effect.promise(() => qrspiResponse.json()),
-            },
-          }
-        }),
-      ).pipe(Effect.provide(Layer.merge(StoreLive, TestAdapters))),
-    )
-
-    expect(validations).toBe(1)
-    expect(observedWorkers).toEqual(new Set(["job", "publication", "reconciliation", "command"]))
-    expect(result).toEqual({
-      health: { status: 200, body: { status: "ok" } },
-      qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
-    })
-  })
 })

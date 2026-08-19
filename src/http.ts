@@ -2,6 +2,8 @@ import { timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
 import { JsonText } from "./json"
+import { operationalStatus } from "./operational-status"
+import type { WorkerHealthPort } from "./worker-health"
 import { WorkflowStore, type WorkflowStorePort } from "./store/contracts"
 import type { IngestPullRequestResult } from "./store/model"
 import { verifyWebhookSignature } from "./webhook"
@@ -23,10 +25,19 @@ export type WebhookHandlerOptions = {
 export function routeRequest(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort | WorkerHealthPort> {
   const { pathname } = new URL(request.url)
+  // Liveness: the process is up and this listener is answering. It stays a
+  // fixed answer so a stopped process is the only thing that can fail it.
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
+  }
+  if (pathname === "/ready" && request.method === "GET") {
+    return operationalStatus().pipe(
+      Effect.map((status) =>
+        Response.json(status, { status: status.status === "ready" ? 200 : 503 }),
+      ),
+    )
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
     return handleGitHubWebhook(request, options)

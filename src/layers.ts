@@ -27,6 +27,7 @@ import {
 import { StageCatalog, StageCatalogError, TrustedStageCatalog } from "./qrspi/stage-catalog"
 import { builtInStageContracts } from "./qrspi/contracts"
 import { SessionAccessResolver } from "./session-access"
+import { WorkerHealthLive } from "./worker-health"
 import { WorkSignalLive } from "./work-signal"
 
 export const makeLiveLayer = (config: AppConfig) => {
@@ -154,6 +155,7 @@ export const makeLiveLayer = (config: AppConfig) => {
   return Layer.mergeAll(
     WorkflowStoreLive,
     WorkSignalLive,
+    WorkerHealthLive,
     Layer.effect(
       GitHub,
       Effect.tryPromise({
