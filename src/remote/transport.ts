@@ -11,6 +11,8 @@ import type { JsMsg } from "@nats-io/jetstream"
 import type { NatsConnection } from "@nats-io/nats-core"
 import { connect } from "@nats-io/transport-node"
 import { Context, Data, Effect, Exit, Layer, Runtime } from "effect"
+import { natsAuthOptions } from "./auth"
+import type { RemoteNatsAuth } from "./auth"
 import {
   MAX_REMOTE_MESSAGE_BYTES,
   type RemoteCommand,
@@ -73,7 +75,7 @@ export const RemoteTransport = Context.GenericTag<RemoteTransportPort>(
 
 export type RemoteTransportConfig = {
   readonly servers: ReadonlyArray<string>
-  readonly token?: string
+  readonly auth?: RemoteNatsAuth
 }
 
 const transportError = (operation: RemoteTransportError["operation"]) => (cause: unknown) =>
@@ -187,7 +189,7 @@ const make = (config: RemoteTransportConfig) =>
         if (state.connecting !== undefined) return state.connecting
         const connecting = connect({
           servers: [...config.servers],
-          ...(config.token === undefined ? {} : { token: config.token }),
+          ...(config.auth === undefined ? {} : natsAuthOptions(config.auth)),
           maxReconnectAttempts: -1,
           reconnectTimeWait: 100,
           ignoreClusterUpdates: true,

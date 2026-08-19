@@ -25,7 +25,7 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
     })
     const database = SqliteClient.layer({ filename: config.databasePath })
     const runner = RemoteRunnerStoreLive.pipe(Layer.provide(database))
-    const transport = RemoteTransportLive({ servers: config.servers, token: config.token })
+    const transport = RemoteTransportLive({ servers: config.servers, auth: config.auth })
     return yield* runRemoteRunnerLoop(config.hostId).pipe(
       Effect.provide(Layer.merge(runner, transport)),
     )

@@ -301,7 +301,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(
             RemoteTransportLive({
               servers: config.remoteCoordinator.servers,
-              token: config.remoteCoordinator.token,
+              auth: config.remoteCoordinator.auth,
             }),
           ),
         )

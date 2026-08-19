@@ -30,6 +30,21 @@ const docker = async (...arguments_: ReadonlyArray<string>) => {
   return stdout.trim()
 }
 
+const waitForServerReady = async () => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const process = Bun.spawn(["docker", "logs", container], { stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr] = await Promise.all([
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+      process.exited,
+    ])
+    const logs = stdout + stderr
+    if (logs.includes("Server is ready")) return
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  throw new Error("nats-server did not become ready")
+}
+
 beforeAll(async () => {
   await docker(
     "run",
@@ -41,6 +56,7 @@ beforeAll(async () => {
     "nats:2.11.8-alpine",
     "-js",
   )
+  await waitForServerReady()
   server = `nats://127.0.0.1:${port}`
 }, 60_000)
 

@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/domain"
+import { loadRemoteNatsAuth } from "./remote/auth"
+import type { RemoteNatsAuth } from "./remote/auth"
 import { parseNatsServers } from "./remote/nats-url"
 
 interface HttpConfig {
@@ -91,7 +93,7 @@ export interface AppConfig {
 
 export interface RemoteCoordinatorConfig {
   readonly servers: ReadonlyArray<string>
-  readonly token: string
+  readonly auth: RemoteNatsAuth
   readonly workerId: string
   readonly leaseDurationMs: number
   readonly commandTtlMs: number
@@ -441,10 +443,10 @@ async function loadRemoteCoordinatorConfig(
   if (!enabled) return undefined
   const rawServers = required(env, "WORKFLOWD_NATS_SERVERS")
   const servers = parseNatsServers(rawServers)
-  const token = await secret(env, "WORKFLOWD_NATS_TOKEN", "WORKFLOWD_NATS_TOKEN_FILE", read)
+  const auth = await loadRemoteNatsAuth(env, read)
   return {
     servers,
-    token,
+    auth,
     workerId: `${hostId}:remote-coordinator`,
     leaseDurationMs: positiveInteger(
       env.WORKFLOWD_REMOTE_LEASE_MS,
