@@ -550,8 +550,12 @@ export const runSimulationSeed = async (seed: number, length: number) => {
     return await simulation.quiesce()
   } catch (cause) {
     const minimal = await minimizeSimulationFailure(seed, actions)
+    const truncation = minimal.truncated
+      ? ` (shrinking truncated after ${minimal.candidates} candidates; reduction is best-so-far, not minimal)`
+      : ""
     throw new Error(
-      `simulation failed ${replayTrace(seed, actions)} minimal=${replayTrace(seed, minimal)}`,
+      `simulation failed ${replayTrace(seed, actions)} ` +
+        `minimal=${replayTrace(seed, minimal.actions)}${truncation}`,
       { cause },
     )
   }

@@ -10,5 +10,8 @@ test("the harness finds and minimizes a command-before-fence ordering mutation",
     singleMessageBatches: true,
   })
 
-  expect(replayTrace(seed, minimal)).toBe("seed=2624 enqueue:runner-b,coordinator,reorder:host")
+  expect(minimal.truncated).toBe(false)
+  expect(replayTrace(seed, minimal.actions)).toBe(
+    "seed=2624 enqueue:runner-b,coordinator,reorder:host",
+  )
 }, 15_000)
