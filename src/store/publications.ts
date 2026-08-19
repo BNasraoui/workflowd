@@ -5,6 +5,7 @@ import { decodePublicationRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import { SqlLeaseQueue } from "./lease"
+import { makeWorkStatePolicy } from "./work-state"
 
 type PublicationOperations = Pick<
   WorkflowStorePort,
@@ -13,6 +14,7 @@ type PublicationOperations = Pick<
 
 export function makePublicationOperations(sql: SqlClient): PublicationOperations {
   const currentness = makeCurrentnessPolicy(sql)
+  const workState = makeWorkStatePolicy(sql)
   const queue = new SqlLeaseQueue<Publication>(sql, {
     table: "publications",
     claimableId: currentness.publicationClaimCandidate,
@@ -54,9 +56,7 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         SELECT 1 AS current
         FROM publications AS candidate
         WHERE candidate.id = ${publicationId}
-        AND candidate.state = 'leased'
-        AND candidate.lease_owner = ${workerId}
-        AND candidate.lease_until > ${now.toISOString()}
+        AND ${workState.leaseHeldBy(workerId, now.toISOString(), "candidate")}
         AND ${currentness.currentPublication}
         AND ${currentness.latestReviewRequest}
       `.pipe(Effect.map((rows) => rows.length > 0)),
@@ -67,12 +67,10 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
           input.outcome === "published"
             ? yield* sql<{ readonly id: number }>`
             UPDATE publications AS candidate
-            SET state = 'succeeded', lease_owner = NULL, lease_until = NULL,
+            SET state = 'succeeded', ${workState.releaseLease},
               last_error = NULL, updated_at = ${input.completedAt.toISOString()}
             WHERE candidate.id = ${input.publicationId}
-            AND candidate.state = 'leased'
-            AND candidate.lease_owner = ${input.workerId}
-            AND candidate.lease_until > ${input.completedAt.toISOString()}
+            AND ${workState.leaseHeldBy(input.workerId, input.completedAt.toISOString(), "candidate")}
             AND ${currentness.currentPublication}
             AND ${currentness.latestReviewRequest}
             RETURNING id
@@ -81,12 +79,10 @@ export function makePublicationOperations(sql: SqlClient): PublicationOperations
         if (published.length > 0) return "completed" as const
         yield* sql`
           UPDATE publications
-          SET state = 'superseded', lease_owner = NULL, lease_until = NULL,
+          SET state = 'superseded', ${workState.releaseLease},
             last_error = 'publication superseded', updated_at = ${input.completedAt.toISOString()}
           WHERE id = ${input.publicationId}
-          AND state = 'leased'
-          AND lease_owner = ${input.workerId}
-          AND lease_until > ${input.completedAt.toISOString()}
+          AND ${workState.leaseHeldBy(input.workerId, input.completedAt.toISOString())}
         `
         return "stale" as const
       }).pipe(sql.withTransaction),

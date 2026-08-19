@@ -6,8 +6,10 @@ import {
   TrackedPullRequestState,
   decidePullRequestTransition,
 } from "../domain/pull-request-transition"
+import { unfinishedWorkStates } from "../domain/work-state"
 import { StoreDataError } from "./errors"
 import type { makeSharedStoreOperations } from "./shared"
+import { makeWorkStatePolicy } from "./work-state"
 
 type PullRequestTransitionInput = {
   readonly appliedAt: Date
@@ -57,6 +59,7 @@ export function makePullRequestTransition(
     "supersedeOlderReviewWork" | "supersedePullRequestWork"
   >,
 ) {
+  const workState = makeWorkStatePolicy(sql)
   return (input: PullRequestTransitionInput) =>
     Effect.gen(function* () {
       const snapshot =
@@ -84,7 +87,7 @@ export function makePullRequestTransition(
             AND repository_id = pull_requests.repository_id
             AND pull_request_number = pull_requests.pull_request_number
             AND generation = pull_requests.generation
-            AND state IN ('ready', 'leased', 'retry_scheduled')
+            AND ${workState.stateIn(unfinishedWorkStates)}
           ) AS review_request_active
         FROM pull_requests
         WHERE repository_id = ${repository.id}
@@ -164,8 +167,7 @@ export function makePullRequestTransition(
             state = 'ready',
             attempts = 0,
             run_at = excluded.run_at,
-            lease_owner = NULL,
-            lease_until = NULL,
+            ${workState.releaseLease},
             last_error = NULL,
             observation_received_at = excluded.observation_received_at,
             observation_sequence = excluded.observation_sequence,
@@ -195,13 +197,12 @@ export function makePullRequestTransition(
             state = 'ready',
             attempts = 0,
             run_at = ${timestamp},
-            lease_owner = NULL,
-            lease_until = NULL,
+            ${workState.releaseLease},
             last_error = NULL,
             updated_at = ${timestamp}
           WHERE repository_id = ${repository.id}
             AND pull_request_number = ${pullRequest.number}
-            AND state IN ('ready', 'leased', 'retry_scheduled')
+            AND ${workState.stateIn(unfinishedWorkStates)}
             AND (
               observation_sequence IS NULL
               OR observation_received_at < ${timestamp}

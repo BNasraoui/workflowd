@@ -5,7 +5,7 @@ import {
   RepositoryId,
   ReviewRequestNumber,
 } from "./identifiers"
-import { ReviewTarget } from "./review-target"
+import { ReviewTarget, sameReviewTarget } from "./review-target"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 const PositiveInt = Schema.Int.pipe(Schema.positive())
@@ -90,34 +90,14 @@ const reviewableActions = new Set([
   "edited",
 ])
 
-const targetOf = (pullRequest: PullRequestRef): ReviewTarget => ({
-  baseSha: pullRequest.baseSha,
-  baseRef: pullRequest.baseRef,
-  headSha: pullRequest.headSha,
-  headRef: pullRequest.headRef,
-  headRepositoryFullName: pullRequest.headRepositoryFullName,
-})
-
-const sameTarget = (left: PullRequestRef, right: PullRequestRef) => {
-  const a = targetOf(left)
-  const b = targetOf(right)
-  return (
-    a.baseSha === b.baseSha &&
-    a.baseRef === b.baseRef &&
-    a.headSha === b.headSha &&
-    a.headRef === b.headRef &&
-    a.headRepositoryFullName === b.headRepositoryFullName
-  )
-}
-
 const sameObservedState = (left: PullRequestRef, right: PullRequestRef) =>
-  sameTarget(left, right) && left.draft === right.draft && left.state === right.state
+  sameReviewTarget(left, right) && left.draft === right.draft && left.state === right.state
 
 const generationFor = (current: TrackedPullRequestState | undefined, pullRequest: PullRequestRef) =>
   Schema.decodeSync(GenerationNumber)(
     current === undefined
       ? 1
-      : Number(current.generation) + (sameTarget(current.pullRequest, pullRequest) ? 0 : 1),
+      : Number(current.generation) + (sameReviewTarget(current.pullRequest, pullRequest) ? 0 : 1),
   )
 
 const observationDisposition = (
@@ -144,7 +124,7 @@ const observationDisposition = (
     observedTime !== undefined &&
     previousTime === observedTime &&
     !sameObservedState(previous, observed)) ||
-    (missingTimestamp && !sameTarget(previous, observed)) ||
+    (missingTimestamp && !sameReviewTarget(previous, observed)) ||
     terminalRegression ||
     (missingTimestamp &&
       ((previous.state === "closed" && observed.state === "open") ||

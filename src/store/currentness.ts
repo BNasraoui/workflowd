@@ -1,6 +1,40 @@
 import type { SqlClient } from "@effect/sql/SqlClient"
+import type { ReviewTarget } from "../domain/review-target"
+import { reviewTargetFieldNames } from "../domain/review-target"
+import { makeWorkStatePolicy } from "./work-state"
+
+/**
+ * Where each Review Target field lives in the durable schema. Claimable work
+ * records the head it was accepted for as `expected_head_sha`, while the
+ * tracked pull request records the head it currently reports as `head_sha`.
+ */
+const reviewTargetColumns: {
+  readonly [K in keyof ReviewTarget]: {
+    readonly candidate: string
+    readonly pullRequest: string
+  }
+} = {
+  baseSha: { candidate: "base_sha", pullRequest: "base_sha" },
+  baseRef: { candidate: "base_ref", pullRequest: "base_ref" },
+  headSha: { candidate: "expected_head_sha", pullRequest: "head_sha" },
+  headRef: { candidate: "head_ref", pullRequest: "head_ref" },
+  headRepositoryFullName: {
+    candidate: "head_repository_full_name",
+    pullRequest: "head_repository_full_name",
+  },
+}
+
+const sameReviewTarget = reviewTargetFieldNames
+  .map((field) => {
+    const columns = reviewTargetColumns[field]
+    return `candidate.${columns.candidate} = current_pr.${columns.pullRequest}`
+  })
+  .join("\n    AND ")
+
+const sameExpectedHead = `candidate.${reviewTargetColumns.headSha.candidate} = current_pr.${reviewTargetColumns.headSha.pullRequest}`
 
 export function makeCurrentnessPolicy(sql: SqlClient) {
+  const workState = makeWorkStatePolicy(sql)
   const pullRequestIdentity = `
     current_pr.repository_id = candidate.repository_id
     AND current_pr.pull_request_number = candidate.pull_request_number
@@ -9,29 +43,29 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
     current_pr.state = 'open'
     AND current_pr.draft = FALSE
   `
+  // Work is fenced by its Generation, its expected head, and its author. The
+  // remaining Review Target fields are covered transitively: changing any of
+  // them starts a newer Generation.
   const currentJob = sql.literal(`
     EXISTS (
       SELECT 1
       FROM pull_requests AS current_pr
       WHERE ${pullRequestIdentity}
       AND candidate.generation = current_pr.generation
-      AND candidate.expected_head_sha = current_pr.head_sha
+      AND ${sameExpectedHead}
       AND LOWER(candidate.author) = LOWER(current_pr.author)
       AND ${reviewablePullRequest}
     )
   `)
+  // A Publication carries the exact Review Target into a pull-request comment,
+  // so it is checked against every identifying field.
   const currentPublication = sql.literal(`
     EXISTS (
       SELECT 1
       FROM pull_requests AS current_pr
       WHERE ${pullRequestIdentity}
       AND candidate.generation = current_pr.generation
-      AND candidate.base_ref = current_pr.base_ref
-      AND candidate.base_sha = current_pr.base_sha
-      AND candidate.expected_head_sha = current_pr.head_sha
-      AND candidate.head_ref = current_pr.head_ref
-      AND candidate.head_repository_full_name =
-        current_pr.head_repository_full_name
+      AND ${sameReviewTarget}
       AND ${reviewablePullRequest}
     )
   `)
@@ -53,10 +87,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
     jobClaimCandidate: (now: string) => sql`
       SELECT candidate.id
       FROM jobs AS candidate
-      WHERE (
-        candidate.state IN ('ready', 'retry_scheduled')
-        OR (candidate.state = 'leased' AND candidate.lease_until <= ${now})
-      )
+      WHERE ${workState.claimable(now, "candidate")}
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
       AND candidate.cancel_requested = FALSE
@@ -98,10 +129,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
     publicationClaimCandidate: (now: string) => sql`
       SELECT candidate.id
       FROM publications AS candidate
-      WHERE (
-        candidate.state IN ('ready', 'retry_scheduled')
-        OR (candidate.state = 'leased' AND candidate.lease_until <= ${now})
-      )
+      WHERE ${workState.claimable(now, "candidate")}
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
       AND ${currentPublication}

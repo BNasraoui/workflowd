@@ -2,6 +2,7 @@ import type { SqlClient } from "@effect/sql/SqlClient"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Effect } from "effect"
 import { decideFixCandidate } from "../domain/transaction-policy"
+import { fixSourcePublicationStates, unfinishedWorkStates } from "../domain/work-state"
 import { decodeCommandRow, decodePublicationReviewRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
@@ -10,6 +11,7 @@ import { commandClaimCandidate } from "./internal-claim-queries"
 import { SqlLeaseQueue } from "./lease"
 import type { AgentCommand } from "./model"
 import type { makeSharedStoreOperations } from "./shared"
+import { makeWorkStatePolicy } from "./work-state"
 type CommandOperations = Pick<
   WorkflowStorePort,
   "claimNextCommand" | "executeCommand" | "ingestCommand" | "rescheduleCommand"
@@ -32,6 +34,7 @@ export class SqlCommandStore implements CommandOperations {
     "enqueueFixFromReview" | "insertDelivery" | "supersedeOlderReviewWork"
   >
   readonly #queue: SqlLeaseQueue<AgentCommand>
+  readonly #workState: ReturnType<typeof makeWorkStatePolicy>
   constructor(
     sql: SqlClient,
     support: Pick<
@@ -41,6 +44,7 @@ export class SqlCommandStore implements CommandOperations {
   ) {
     this.#sql = sql
     this.#support = support
+    this.#workState = makeWorkStatePolicy(sql)
     this.#queue = new SqlLeaseQueue(sql, {
       table: "commands",
       claimableId: (now) => commandClaimCandidate(sql, now),
@@ -66,9 +70,7 @@ export class SqlCommandStore implements CommandOperations {
         SELECT command, repository_id, pull_request_number
         FROM commands
         WHERE id = ${input.commandId}
-        AND state = 'leased'
-        AND lease_owner = ${input.workerId}
-        AND lease_until > ${input.completedAt.toISOString()}
+        AND ${this.#workState.leaseHeldBy(input.workerId, input.completedAt.toISOString())}
       `
       const command = commands[0]
       if (command === undefined) return "stale" as const
@@ -93,14 +95,11 @@ export class SqlCommandStore implements CommandOperations {
         UPDATE commands
         SET
           state = 'succeeded',
-          lease_owner = NULL,
-          lease_until = NULL,
+          ${this.#workState.releaseLease},
           last_error = NULL,
           updated_at = ${timestamp}
         WHERE id = ${input.commandId}
-        AND state = 'leased'
-        AND lease_owner = ${input.workerId}
-        AND lease_until > ${timestamp}
+        AND ${this.#workState.leaseHeldBy(input.workerId, timestamp)}
       `
       return disposition
     }).pipe(this.#sql.withTransaction)
@@ -230,7 +229,7 @@ export class SqlCommandStore implements CommandOperations {
           AND repository_id = pull_requests.repository_id
           AND pull_request_number = pull_requests.pull_request_number
           AND generation = pull_requests.generation
-          AND state IN ('ready', 'leased', 'retry_scheduled')
+          AND ${this.#workState.stateIn(unfinishedWorkStates)}
         )
         RETURNING id
       `
@@ -269,7 +268,7 @@ export class SqlCommandStore implements CommandOperations {
         AND review.repository_id = ${command.repository_id}
         AND review.pull_request_number = ${command.pull_request_number}
         AND review.state = 'succeeded'
-        AND candidate.state IN ('ready', 'leased', 'retry_scheduled', 'succeeded')
+        AND ${this.#workState.stateIn(fixSourcePublicationStates, "candidate")}
         AND ${currentness.currentPublication}
         AND ${currentness.latestReviewRequest}
         ORDER BY candidate.id DESC

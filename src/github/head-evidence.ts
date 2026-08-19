@@ -1,13 +1,14 @@
-import { Data, Effect, Schema } from "effect"
+import { Data, Effect } from "effect"
 import {
   repositoryRequiredCheckContexts,
   sanitizeUntrustedText,
   type CheckEvidence,
   type HeadEvidence,
   type MergeabilityEvidence,
-  type SonarEvidence,
 } from "../domain/head-evidence"
+import { sameReviewTarget, type ReviewTargetIdentity } from "../domain/review-target"
 import { normalizeError } from "../errors"
+import { collectSonar, passingSonarEvidence } from "./sonar-evidence"
 import type {
   GitHubCheckRun,
   GitHubCommitStatus,
@@ -27,44 +28,11 @@ export type CollectHeadEvidenceInput = {
   readonly client: GitHubInstallationAdapter
   readonly repository: { readonly owner: string; readonly repo: string }
   readonly pullRequestNumber: number
-  readonly target: {
-    readonly baseRef: string
-    readonly baseSha: string
-    readonly headRef: string
-    readonly headRepositoryFullName: string
-    readonly headSha: string
-  }
+  readonly target: ReviewTargetIdentity
   readonly sonarRequest: SonarRequest
   readonly workflowdAppId: number
   readonly requiredCheckContexts?: ReadonlyArray<string>
 }
-
-const SonarPullRequests = Schema.Struct({
-  pullRequests: Schema.Array(
-    Schema.Struct({ key: Schema.String, commit: Schema.Struct({ sha: Schema.String }) }),
-  ),
-})
-const SonarIssues = Schema.Struct({
-  paging: Schema.Struct({ total: Schema.Number }),
-  issues: Schema.Array(
-    Schema.Struct({
-      severity: Schema.optional(Schema.String),
-      message: Schema.String,
-      component: Schema.optional(Schema.String),
-      line: Schema.optional(Schema.Number),
-    }),
-  ),
-})
-const SonarMeasures = Schema.Struct({
-  component: Schema.Struct({
-    measures: Schema.Array(
-      Schema.Struct({
-        metric: Schema.String,
-        periods: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String }))),
-      }),
-    ),
-  }),
-})
 
 export function collectHeadEvidence(
   input: CollectHeadEvidenceInput,
@@ -78,13 +46,14 @@ export function collectHeadEvidence(
         request: { signal },
       }),
     )
-    if (!matchesTarget(before.pullRequest, input.target)) return staleEvidence(input.target.headSha)
+    if (!sameReviewTarget(before.pullRequest, input.target))
+      return staleEvidence(input.target.headSha)
 
     const checks = yield* collectChecks(input, policy.requiredCheckContexts)
     const sonar =
       policy.sonarProjectKey === undefined
         ? passingSonarEvidence(input.target.headSha)
-        : yield* collectSonar(input, policy.sonarProjectKey).pipe(
+        : yield* collectSonar(input, policy.sonarProjectKey, attempt).pipe(
             Effect.catchAll((error) =>
               Effect.succeed({ state: "unavailable", reason: error.cause.message } as const),
             ),
@@ -96,7 +65,8 @@ export function collectHeadEvidence(
         request: { signal },
       }),
     )
-    if (!matchesTarget(after.pullRequest, input.target)) return staleEvidence(input.target.headSha)
+    if (!sameReviewTarget(after.pullRequest, input.target))
+      return staleEvidence(input.target.headSha)
 
     return {
       headSha: input.target.headSha,
@@ -477,73 +447,6 @@ async function appendJobPageLogs(
   return false
 }
 
-function collectSonar(
-  input: CollectHeadEvidenceInput,
-  project: string,
-): Effect.Effect<SonarEvidence, HeadEvidenceError> {
-  return Effect.gen(function* () {
-    const pullRequest = String(input.pullRequestNumber)
-    const listPath = `/api/project_pull_requests/list?project=${encodeURIComponent(project)}`
-    const first = yield* sonarJson(input.sonarRequest, listPath, SonarPullRequests)
-    const analyzed = first.pullRequests.find((candidate) => candidate.key === pullRequest)
-    if (analyzed === undefined) {
-      return { state: "missing", reason: "No public Sonar PR analysis is available." }
-    }
-    if (analyzed.commit.sha !== input.target.headSha) {
-      return {
-        state: "stale",
-        reason: `Sonar analyzed ${analyzed.commit.sha}, not ${input.target.headSha}.`,
-      }
-    }
-
-    const issues = yield* sonarJson(
-      input.sonarRequest,
-      `/api/issues/search?componentKeys=${encodeURIComponent(project)}&pullRequest=${encodeURIComponent(pullRequest)}&resolved=false&ps=100`,
-      SonarIssues,
-    )
-    if (!Number.isInteger(issues.paging.total) || issues.paging.total < 0) {
-      return { state: "unavailable", reason: "Sonar issue count is invalid." }
-    }
-    const measures = yield* sonarJson(
-      input.sonarRequest,
-      `/api/measures/component?component=${encodeURIComponent(project)}&pullRequest=${encodeURIComponent(pullRequest)}&metricKeys=new_duplicated_lines_density`,
-      SonarMeasures,
-    )
-    const duplication = measures.component.measures.find(
-      (measure) => measure.metric === "new_duplicated_lines_density",
-    )?.periods?.[0]?.value
-    if (
-      duplication === undefined ||
-      !Number.isFinite(Number(duplication)) ||
-      Number(duplication) < 0
-    ) {
-      return { state: "unavailable", reason: "Sonar new-code duplication measure is unavailable." }
-    }
-
-    const second = yield* sonarJson(input.sonarRequest, listPath, SonarPullRequests)
-    const confirmed = second.pullRequests.find((candidate) => candidate.key === pullRequest)
-    if (confirmed?.commit.sha !== input.target.headSha) {
-      return { state: "stale", reason: "Sonar PR analysis changed during evidence collection." }
-    }
-    const findings = issues.issues.slice(0, 20).map((issue) => ({
-      severity: issue.severity ?? "unknown",
-      message: sanitizeUntrustedText(issue.message, 1_000),
-      ...(issue.component === undefined
-        ? {}
-        : { path: issue.component.replace(`${project}:`, "").slice(0, 1_024) }),
-      ...(issue.line === undefined ? {} : { line: Math.max(1, Math.trunc(issue.line)) }),
-    }))
-    const duplicatedNewLinesPercent = Number(duplication)
-    return {
-      state: issues.paging.total === 0 && duplicatedNewLinesPercent <= 1 ? "pass" : "fail",
-      headSha: input.target.headSha,
-      unresolvedIssueCount: issues.paging.total,
-      duplicatedNewLinesPercent,
-      findings,
-    }
-  })
-}
-
 function qualityGatePolicy(
   repository: CollectHeadEvidenceInput["repository"],
   baseRef: string,
@@ -563,30 +466,6 @@ function qualityGatePolicy(
     : { requiredCheckContexts: [] }
 }
 
-function passingSonarEvidence(headSha: string): SonarEvidence {
-  return {
-    state: "pass",
-    headSha,
-    unresolvedIssueCount: 0,
-    duplicatedNewLinesPercent: 0,
-    findings: [],
-  }
-}
-
-function sonarJson<A, I>(
-  request: SonarRequest,
-  path: string,
-  schema: Schema.Schema<A, I>,
-): Effect.Effect<A, HeadEvidenceError> {
-  return attempt(`read public Sonar endpoint ${path.split("?", 1)[0]}`, async (signal) => {
-    const response = await request(path, signal)
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`Sonar returned HTTP ${response.status}`)
-    }
-    return Schema.decodeUnknownSync(schema)(response.body)
-  })
-}
-
 function mergeability(value: boolean | null | undefined): MergeabilityEvidence {
   if (value === true) return { state: "mergeable" }
   if (value === false) return { state: "conflicting" }
@@ -600,25 +479,6 @@ function staleEvidence(headSha: string): HeadEvidence {
     sonar: { state: "stale", reason: "Pull request head changed during collection." },
     mergeability: { state: "unavailable", reason: "Pull request head changed during collection." },
   }
-}
-
-function matchesTarget(
-  pullRequest: {
-    readonly baseRef: string
-    readonly baseSha: string
-    readonly headRef: string
-    readonly headRepositoryFullName: string
-    readonly headSha: string
-  },
-  target: CollectHeadEvidenceInput["target"],
-): boolean {
-  return (
-    pullRequest.baseRef === target.baseRef &&
-    pullRequest.baseSha === target.baseSha &&
-    pullRequest.headRef === target.headRef &&
-    pullRequest.headRepositoryFullName === target.headRepositoryFullName &&
-    pullRequest.headSha === target.headSha
-  )
 }
 
 function failedJob(job: GitHubWorkflowJob): boolean {
