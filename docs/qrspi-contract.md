@@ -31,6 +31,9 @@ The words MUST, MUST NOT, SHOULD, and MAY are normative.
    Structure cannot start from human approval alone.
 9. Structure is a coverage projection of accepted Design meaning and one immutable,
    authoritatively observed Provenance graph snapshot. It is not authority to invent work.
+10. Structure fixes capability identity from the accepted graph, routes each fixed
+    capability from current repository evidence, and stops at human review. It never
+    sizes work into a delivery limit and never starts delivery itself.
 
 ## System Boundaries
 
@@ -910,13 +913,20 @@ The Structure artifact is a coverage projection, not a list of every graph node.
 structured result classifies every in-scope semantic node and records graph-node identity
 and version, classification rationale, and coverage:
 
-| Graph meaning                                          | Required Structure treatment                                                                                                                |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Implementation-bearing requirement or accepted control | Map to terminal work in this Structure, or to an explicit existing downstream owner with stable identity and authority.                     |
-| Cross-cutting rule or control                          | Carry as a constraint on every affected work item and preserve its verification or operational obligation; do not hide it in prose.         |
-| Informational source or context                        | Preserve traceability and classification, but create no spurious task.                                                                      |
-| Accepted residual risk                                 | Carry its disposition, conditions, accountable owner, monitoring or follow-up obligation, and affected work; do not rewrite it as resolved. |
-| Work owned outside this Structure                      | Name the existing owner and authority boundary; do not duplicate its work.                                                                  |
+| Graph meaning                                          | Required Structure treatment                                                                                                                                        | Mints a capability |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| Accepted work-authorizing decision                     | Mint exactly one terminal capability under the identity rules below and route it.                                                                                  | Yes                |
+| Implementation-bearing requirement or accepted control | Map to the capability or capabilities that satisfy it, or to an explicit existing downstream owner with stable identity and authority.                              | No                 |
+| Cross-cutting rule, control, or prohibition            | Carry as a constraint on every affected capability and preserve its verification or operational obligation; do not hide it in prose.                                | No                 |
+| Verification obligation                                | Attach to the capability that owns the proof and name the verifying capability or external owner; a verification record alone is not delivery work.                 | No                 |
+| Owner assignment                                       | Name the existing owner and authority boundary; do not duplicate or re-plan that owner's work.                                                                      | No                 |
+| Accepted residual risk                                 | Carry its disposition, conditions, accountable owner, monitoring or follow-up obligation, and affected capabilities; do not rewrite it as resolved.                 | No                 |
+| Informational source or context                        | Preserve traceability and classification, but create no spurious task.                                                                                              | No                 |
+
+Structure MUST NOT create delivery work from an informational source, an owner
+assignment, a risk disposition, a verification record, or a prohibition alone. Each of
+those attaches to capabilities that some accepted work-authorizing decision already
+created, or to a named external owner, or to neither; none of them is a capability.
 
 Every created task MUST cite an accepted graph node that authorizes implementation and
 the exact coverage edge. A relation, evidence item, reviewer suggestion, or informational
@@ -924,13 +934,295 @@ node alone grants no authority to create a task. Structure succeeds only when ev
 implementation-bearing requirement and accepted control has terminal-work or explicit
 owner coverage, every cross-cutting constraint and residual risk is carried, every
 informational node is accounted for without fabricated work, and no task lacks authority.
-The successful artifact and result bind the accepted package, gate response, pinned
-snapshot, and exact Design, promotion, and Structure policy revisions and hashes.
+Structure also succeeds only when capability identity follows the rules below, every
+capability carries exactly one route with cited repository evidence, the artifact follows
+the required schema, and the run stops at `AwaitingHumanStructureReview`. The successful
+artifact and result bind the accepted package, gate response, pinned snapshot, and exact
+Design, promotion, and Structure policy revisions and hashes.
 
 A semantic defect found while producing or reviewing Structure routes back to a new
 Design revision when it changes or questions a requirement, rule, decision, control,
 residual-risk disposition, ownership assignment, or Design impact. Structure may revise
 itself only to correct its projection of unchanged accepted meaning.
+
+### Deterministic capability identity
+
+A Structure capability is a stable semantic unit of accepted meaning. Its identity comes
+from the accepted graph, never from a producer's sense of good size, tidy grouping, or
+convenient delivery. Two independent Structure producers reading the same accepted
+package and pinned snapshot MUST produce the same capability set, the same names, and the
+same order.
+
+Capability identity is fixed in this order, and the first available rule wins:
+
+1. **Explicit accepted grouping.** If the accepted package records a capability grouping,
+   meaning an approved decision, resolution, or manifest that names capabilities and
+   assigns accepted nodes to them, Structure adopts exactly those capabilities and that
+   assignment.
+2. **Accepted work-authorizing decisions.** Otherwise, Structure mints exactly one
+   capability for each accepted decision node whose approved position authorizes work to
+   be performed in this repository, including decisions whose authorized work is
+   verification construction.
+3. **Implementation-bearing requirements.** Otherwise, when the accepted package contains
+   no decision layer, Structure mints exactly one capability for each accepted
+   implementation-bearing requirement.
+
+These rules are role-based. No decision, requirement, or capability identifier from any
+particular ticket is normative; a producer MUST derive identity from the roles of the
+nodes in the pinned snapshot it was given.
+
+A capability key is derived from the accepted node that minted it, so the same accepted
+graph always yields the same keys. The artifact prints a short logical key of the form
+`CAP-<accepted node logical ID>` and the exact graph node ID it binds.
+
+Nodes that authorize no repository work mint no capability. A prohibition-only decision,
+an owner assignment, an accepted residual-risk disposition, a verification obligation,
+and an informational source each receive their required treatment from the table above
+and are recorded in the classification, but none of them becomes a capability.
+
+Capability boundaries are not negotiable inside Structure:
+
+- Structure MUST NOT merge two accepted work-authorizing nodes into one capability
+  because they feel small, related, or cheap to deliver together.
+- Structure MUST NOT split one accepted work-authorizing node into several capabilities
+  because it feels large, risky, or long. Decomposition of a large capability is the job
+  of the later split flow, not of Structure.
+- A capability that turns out to be tiny stays a capability. A capability that turns out
+  to be enormous stays one capability and routes to `SplitFlowRequired`.
+
+Every capability records its dependencies on other capabilities, and capabilities appear
+in an order where no capability precedes a capability it depends on. Dependencies come
+from accepted dependency edges between the minting nodes where the graph states them. The
+absence of such an edge does not mean the absence of a dependency: where the graph states
+none, Structure MUST still derive dependencies from what the accepted outcomes require of
+each other, because a capability that cannot be delivered before another exists depends on
+it. Recording no dependencies is a claim that no capability needs another first, and the
+artifact states the basis for it. Independent capabilities are ordered by ascending exact
+graph node ID.
+
+A producer that believes the accepted capability set is wrong has found a semantic
+defect. It routes that finding back to a new Design revision under the rules above; it
+does not repair the boundary inside Structure.
+
+### Implementation-decomposition readiness and routing
+
+Routing answers a different question from Design acceptance. Design acceptance asks
+whether the accepted meaning is complete, owned, and its risk accepted. Routing asks
+whether the current repository already contains the concrete seams, interfaces, records,
+lifecycles, and verification patterns that delivering this capability needs. A complete
+Design says nothing about that; the repository does. A capability may therefore have
+complete accepted meaning and still require pre-implementation decomposition.
+
+Structure assigns each fixed capability exactly one route:
+
+| Route                | Meaning                                                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ImplementationReady` | Every applicable readiness check passes on current repository evidence, so the capability can go to Plan and Implementation without a split flow. |
+| `SplitFlowRequired`   | At least one applicable readiness check fails, so the capability needs a just-in-time split flow before Implementation.                          |
+
+Routing runs only after capability identity is fixed, and only per capability. The route
+predicate is the conjunction of the applicable checks: a capability is
+`ImplementationReady` when every applicable check passes, and `SplitFlowRequired`
+otherwise. Nothing else enters the predicate.
+
+Evidence rules bind every check:
+
+- Evidence is current repository state at the accepted implementation baseline commit,
+  cited by path, and by symbol or declaration where the claim concerns a specific
+  declaration.
+- A planned, designed, or future seam is not current evidence, including one that another
+  capability in this same Structure will build.
+- A named seam is complete only when it already names and accepts every direct dependency
+  interface that the complete capability requires. A generic composition point that will
+  need new tags, ports, parameters, or services is not yet a complete seam.
+- Design text, ticket text, reviewer opinion, and producer confidence are not evidence.
+- Unavailable or unverifiable evidence fails its check. Routing fails closed.
+- A check whose subject the capability does not require passes and records why.
+
+Common readiness checks apply to every capability in every domain:
+
+| Common check                    | Passes when                                                                                                                                       |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Existing complete named seam    | An existing named seam already declares and accepts every direct dependency interface the complete capability needs.                              |
+| No new module or boundary       | Delivery introduces no new named interface, module boundary, or dependency direction. A new file inside an existing module that keeps its declared interfaces is not a new boundary. |
+| Existing verification pattern   | Every verification obligation the capability owns is provable with a fixture or test pattern the repository already has.                           |
+| No unresolved material choice   | No open choice between materially different implementations survives acceptance, such as reuse versus build, which existing component, or which external dependency. |
+
+A capability that adds a small cohesive change inside seams, patterns, and fixtures the
+repository already has passes all four and is `ImplementationReady`. Ordinary
+implementation detail inside an existing seam is not a reason to split.
+
+### Domain evidence profiles
+
+Domain profiles add checks for the surfaces a capability actually touches. They are
+profiles, not universal rules: a capability that touches no persistence never answers a
+persistence check, and a capability that touches no user interface never answers an
+interface check. Where several profiles apply, all of their checks apply. Profiles carry
+the same evidence rules, and a profile check whose subject the capability does not
+require passes with its reason recorded.
+
+**Backend and stateful profile**, for capabilities that touch durable state, transactions,
+external effects, or service lifecycles:
+
+| Check                                 | Passes when                                                                                                                     |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| No new transaction boundary           | Every atomic or guarded update the accepted outcome requires is already exposed by a current complete named seam.                |
+| No new durable record, schema, or migration | The capability needs no new durable record, column, index, or migration.                                                  |
+| No new lifecycle or state machine     | The capability introduces no new durable lifecycle, state machine, or cursor whose transitions must be defined and fenced.       |
+| No uncertain external or cross-owner effect | The capability performs no external or cross-owner effect whose outcome can be unknown and therefore needs a recovery rule. |
+| No multi-resource recovery fixture    | Proving the capability needs no new fixture that coordinates several resources under faults, restarts, or partial failure.       |
+
+**User-interface profile**, for capabilities that touch a user-visible surface:
+
+| Check                              | Passes when                                                                                                                              |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| No new user-visible surface        | The capability adds no new route, screen, navigation entry, or entry point to an existing surface set.                                   |
+| No new interaction state set       | The capability introduces no new loading, empty, partial, error, retry, or optimistic-update behaviour beyond the patterns already in use. |
+| No new shared presentation contract | The capability needs no new shared component, layout, or design-token or style contract that other surfaces would depend on.             |
+| Existing accessibility and responsive pattern | The capability's accessibility, keyboard, and responsive obligations are met by patterns the repository already applies.       |
+| No new client data seam            | The capability needs no new client fetching, caching, invalidation, or client-state seam.                                                |
+
+**CLI and library profile**, for capabilities that change a surface published to consumers
+outside this repository: a command, an exported package API, or a documented wire contract.
+The accepted package or the repository must evidence those external consumers, through a
+published package export, a documented command, or a named external consumer. A boundary
+that is merely exported within this repository, or merely reachable over the network, is
+ordinary internal structure and does not select this profile:
+
+| Check                          | Passes when                                                                                                                    |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| No new public surface          | The capability adds no new command, subcommand, exported function, or exported type to the published interface.                 |
+| Existing argument and option grammar | Every input the capability needs fits the existing argument, option, and configuration grammar without a new parsing form. |
+| Stable output and exit contract | The capability changes no documented output format, stream usage, or exit-code contract that consumers depend on.              |
+| No compatibility obligation    | The capability creates no deprecation, migration, or version-compatibility obligation for existing consumers.                   |
+| No new packaging surface       | The capability needs no new entry point, package export, binary, or distribution artifact.                                      |
+
+Each artifact records which profiles it applied and why. Applying a profile whose checks
+all pass cannot change a route, so an arguable extra profile is harmless as long as its
+selection reason is stated; omitting a profile whose surfaces the capability does touch is
+a routing defect.
+
+Profiles are extensible. New profiles enter through the same acceptance path as any other
+change to this contract; a producer MUST NOT invent a profile during a run. When a
+capability touches surfaces that no recorded profile covers, Structure records `no
+matching profile` with the surfaces in question, routes from the common checks alone, and
+carries the gap as a residual risk for human Structure review.
+
+Changed-line estimates, file counts, task counts, and effort ranges are advisory
+evidence for humans. They MAY appear in a section marked advisory. They MUST NOT appear
+as a check, and they MUST NOT influence a route. This contract defines no numeric
+threshold, size target, task-count target, or hard or soft delivery limit, and no
+downstream size or scope review may supply one to Structure routing.
+
+### Structure artifact schema
+
+Every Structure artifact uses this section order, so that human review, comparison of
+independent runs, and later split flow read the same surface:
+
+```text
+# Structure: <ticket title>
+
+## Binding and deviation
+    exact accepted package, gate response, promotion request and result, pinned graph
+    snapshot, and Design, promotion, and Structure policy revisions and hashes;
+    the accepted implementation baseline commit; any authorized deviation, stated
+    explicitly with what it does and does not relax
+
+## <capability key>: <capability name>            (one per capability, dependency order)
+    Authority and exact accepted graph edge IDs
+    Dependencies                                  (other capability keys, or none)
+    Outcome                                       (the accepted meaning delivered)
+    Verification ownership                        (owning capability or external owner,
+                                                   and the verification obligations)
+    Likely implementation surfaces                (advisory; not authority)
+    Out of scope                                  (explicit exclusions)
+    Residual risks and owners                     (carried dispositions, conditions,
+                                                   accountable owners, follow-up)
+    Evidence checks                               (table: check, result, cited current
+                                                   repository evidence)
+    Route                                         (ImplementationReady |
+                                                   SplitFlowRequired)
+
+## Prohibition-only treatment
+    each prohibition and what it forbids, with the capabilities it constrains
+
+## Semantic classification
+    every in-scope record: logical ID, exact graph ID, classification, treatment
+
+## Advisory notes                                  (optional; estimates live only here)
+
+## Coverage conclusion
+    complete coverage accounting and the route summary
+
+AwaitingHumanStructureReview
+```
+
+Likely implementation surfaces are a reviewer's orientation aid. They do not authorize
+work, do not constrain Plan, and do not become a file list for Implementation.
+
+### Structure terminal state
+
+Structure ends at `AwaitingHumanStructureReview`. That state is terminal for the run.
+
+A Structure run MUST NOT run a split flow, run Plan, run Implementation, create child
+delivery issues or tracker records, mutate product intent, change product code, commit,
+push, or open a pull request. `SplitFlowRequired` records that a later split flow is
+needed; it neither starts one nor authorizes one. `ImplementationReady` records that no
+split flow is needed; it does not release Plan on its own. Human Structure review, under
+the gate rules of this contract, decides what happens next.
+
+### Structure routing examples
+
+These worked examples are illustrative applications of the rules above, not additional
+rules.
+
+1. **Whole-feature runtime change.** The accepted package for `workflowd-vs3.4` contains
+   thirteen approved decisions. Twelve authorize repository work, so Structure mints
+   twelve capabilities in accepted dependency order; the thirteenth forbids an aggregate
+   capacity subsystem and mints none, staying a prohibition carried by the capabilities
+   it constrains. Each of the twelve fails at least one check on current repository
+   evidence, including absent catalog and contract seams, absent stage records and
+   migrations, absent producer and custody lifecycles, and uncertain session and
+   publication effects, so all twelve route `SplitFlowRequired`. The accepted controls, verification obligations,
+   residual risks, and external owners attach to those twelve capabilities without
+   minting work of their own.
+2. **Small cohesive capability.** One accepted decision adds two derived fields to an
+   existing response, computed inside an existing service from columns the existing store
+   query already selects, and proved by the fixture pattern that already covers that
+   response. All four common checks pass. The backend profile applies because the
+   capability reads durable state, and its transaction, record, lifecycle, effect, and
+   fixture checks all pass: the work adds no write path, no column, no migration, no
+   lifecycle, and no external effect. The capability routes `ImplementationReady`, and
+   Structure does not decompose it further.
+3. **Mixed stateful package.** Two accepted decisions produce two capabilities. The first
+   extends an existing durable table through its existing store seam and routes
+   `ImplementationReady`. The second introduces a new durable queue with its own
+   lifecycle, a new migration, and an uncertain external delivery effect, so it routes
+   `SplitFlowRequired`. The route difference comes from repository evidence, not from
+   relative size.
+4. **Interface and command surfaces.** A capability that adds a column to an existing
+   table view with existing components, states, and accessibility patterns routes
+   `ImplementationReady`. A capability that adds a new screen with new asynchronous
+   states and a new shared component routes `SplitFlowRequired`. A capability that adds
+   an option to an existing command inside the existing grammar and output contract
+   routes `ImplementationReady`, while one that exports a new public API with a
+   deprecation obligation for existing consumers routes `SplitFlowRequired`.
+
+### Structure determinism evidence
+
+The rules above generalize a recorded experiment on the `workflowd-vs3.4` accepted
+package. The reports are evidence for why the contract reads as it does. They are not
+normative inputs, and no producer needs them to run Structure.
+
+| Report                                              | SHA-256                                                            | Finding                                                                                          |
+| --------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `04-structure-two-pass-comparison.md`               | `933876cbe6a1e88e00630c1853adbc7bd94da8dfe0633ecf391dfc3b9c936ff5` | Coupling decomposition to a changed-line rule diverged at 15 versus 30 tasks; freezing semantic boundaries first converged at 12 versus 11. |
+| `04-structure-progressive-comparison.md`            | `1ff7e68562148b49b0c19727d9512026eb8dface0555a2077e6a7b41c0304f97` | Removing numeric sizing converged capability projection but diverged routing maximally while the route rule stayed subjective. |
+| `04-structure-canonical-route-comparison.md`        | `dbe9ba54a86ca4c1d18d13579a1d51acf315f449489e56fb825ff9375c5649b0` | Graph-derived capability identity plus a repository-evidence checklist produced substantively identical output from two independent producers. |
+| `04-structure-canonical-replication-comparison.md`  | `b7f631b6a0629a6dc47600434a2ff57803ef95820b6eb623fc5e183d098bbde7` | A fresh pair reproduced the same capabilities, order, routes, coverage, and stop state; two residual evidence cells motivated the seam and transaction evidence rules above. |
+
+The reports live with the `workflowd-vs3.4` task record. Where a report and this contract
+differ, this contract governs.
 
 ### Graph change and derived-work currentness
 
@@ -976,6 +1268,23 @@ vs3.5, vs3.6, or vs3.9.
 4. **Semantic supersession:** Given Structure and Plan depend on an accepted requirement,
    when an approved requirement supersedes it, then dependency closure identifies the
    affected Structure and Plan outputs and marks them for reevaluation.
+5. **Independent producers agree:** Given two Structure producers receive the same
+   accepted package and pinned snapshot, when both run without seeing each other's work,
+   then they produce the same capability keys, names, dependency order, and routes, and
+   differ at most in presentation.
+6. **Prohibition creates no work:** Given the accepted package contains a prohibition,
+   an owner assignment, a residual-risk disposition, a verification obligation, and
+   informational sources, when Structure runs, then none of them mints a capability,
+   each receives its required treatment, and no task is created without a
+   work-authorizing accepted node.
+7. **Small capability stays ready:** Given a capability whose complete delivery fits
+   existing seams, interfaces, records, lifecycles, and fixtures, when Structure routes
+   it, then the route is `ImplementationReady` regardless of any estimate, and Structure
+   does not decompose it.
+8. **Routing stops at review:** Given every capability is routed, when Structure
+   finishes, then the run stops at `AwaitingHumanStructureReview` and has started no
+   split flow, Plan, Implementation, child delivery record, commit, push, or pull
+   request.
 
 ### Implementation loop
 
@@ -1575,6 +1884,13 @@ Follow-on work conforms only when it:
 - allows only vs3.9 to mutate and authoritatively observe Provenance or produce snapshots;
 - requires Structure to cover implementation authority, controls, cross-cutting concerns,
   residual risks, informational nodes, and downstream ownership without invented tasks;
+- derives Structure capability identity from accepted graph roles or an explicit accepted
+  grouping, never from producer preference, and routes each fixed capability to
+  `ImplementationReady` or `SplitFlowRequired` from current repository evidence alone;
+- keeps size and effort estimates advisory and outside every routing predicate, and
+  defines no numeric threshold or delivery limit;
+- stops every Structure run at `AwaitingHumanStructureReview` without split flow, Plan,
+  Implementation, child delivery records, commits, pushes, or pull requests;
 - invalidates affected derived work for semantic supersession but not evidence-only links;
 - caps automated revision loops;
 - holds no lease during human waits;

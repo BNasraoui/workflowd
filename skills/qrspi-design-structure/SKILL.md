@@ -1,6 +1,6 @@
 ---
 name: qrspi-design-structure
-description: Produce or review QRSPI Design revisions and Provenance-backed Structure artifacts using exact acceptance-package identities. Use for Design ownership or impact review, Design acceptance, or Structure coverage work.
+description: Produce or review QRSPI Design revisions and Provenance-backed Structure artifacts using exact acceptance-package identities. Use for Design ownership or impact review, Design acceptance, or Structure coverage, capability-identity, and split-routing work.
 ---
 
 # QRSPI Design and Structure
@@ -73,34 +73,65 @@ revision invalidates every earlier report, decision, response, approval, and pro
    and StructureInput all bind the same Design/source/Generation/WorkflowDefinition and
    Design, promotion, and Structure policy identities. Never select Structure policy
    after approval or substitute graph head or “latest” state.
-2. Classify each in-scope semantic node before creating work. Map implementation-bearing
-   requirements and accepted controls to terminal work or an explicit existing owner.
-3. Apply cross-cutting constraints to every affected item. Carry residual-risk
-   disposition, owner, conditions, and monitoring/follow-up. Preserve informational
-   nodes as traceability without making tasks.
-4. Cite the accepted graph authority and exact coverage edge for every task. Reviewer
-   suggestions, evidence links, and informational nodes do not authorize work.
-5. Check complete coverage and record the pinned snapshot in the artifact/result. Route
-   projection mistakes to another Structure revision; route semantic or authority defects
-   back to a new Design revision.
+2. Fix capability identity before anything else. Use an explicit accepted capability
+   grouping if the package has one; otherwise mint exactly one capability per accepted
+   decision that authorizes repository work, including verification-construction work;
+   otherwise, with no decision layer, one per accepted implementation-bearing
+   requirement. Derive identity from node roles, never from named IDs of a past ticket.
+   Record each capability's dependencies, taking them from accepted dependency edges
+   where the graph states them. A missing edge is not a missing dependency: derive the
+   rest from what the accepted outcomes require of each other, and treat "no
+   dependencies" as a claim you must justify. Order capabilities so none precedes a
+   capability it depends on, and order independent ones by ascending exact graph node ID.
+3. Do not merge capabilities that feel small or split capabilities that feel large. A
+   capability that looks tiny stays a capability; one that looks enormous stays one
+   capability and routes to `SplitFlowRequired`. If the accepted boundaries look wrong,
+   that is a semantic defect for a new Design revision, not a Structure repair.
+4. Classify every in-scope semantic node. Prohibitions, owner assignments, residual-risk
+   dispositions, verification obligations, and informational sources mint no capability;
+   attach each to the capabilities it constrains, proves, or informs, or to a named
+   external owner. Create no delivery work from any of them alone.
+5. Route each fixed capability from current repository evidence at the accepted baseline
+   commit, cited by path and by symbol where the claim is about a declaration. Apply the
+   four common checks, then the checks of every domain profile whose surfaces the
+   capability touches, recording which profiles you applied and why. All applicable checks
+   pass means `ImplementationReady`; any failure means `SplitFlowRequired`. A planned seam, including one another capability in
+   this same run will build, is not evidence. A named seam counts as complete only when
+   it already names and accepts every direct dependency interface. Unavailable evidence
+   fails its check.
+6. Keep estimates out of routing. No changed-line count, file count, task count, effort
+   range, or threshold may appear as a check or influence a route; put any estimate in
+   the advisory section only. Ordinary implementation detail inside an existing seam is
+   not a reason to split.
+7. Write the artifact in the required schema, in order, with one route per capability and
+   the exact accepted graph binding and edge IDs. Check complete coverage and record the
+   pinned snapshot in the artifact/result. Route projection mistakes to another Structure
+   revision; route semantic or authority defects back to a new Design revision.
+8. Stop at `AwaitingHumanStructureReview`. Run no split flow, Plan, or Implementation,
+   create no child delivery issues or tracker records, change no product code, and make
+   no commit, push, or pull request.
 
-**Structure exit:** all implementation obligations and controls have terminal-work or
-owner coverage, cross-cutting constraints and residual risks are carried, informational
-nodes produce no spurious tasks, no task lacks authority, and the result binds the exact
-accepted package and snapshot.
+**Structure exit:** capability identity follows the accepted graph, every capability has
+one evidence-cited route, all implementation obligations and controls have terminal-work
+or owner coverage, cross-cutting constraints and residual risks are carried, informational
+nodes produce no spurious tasks, no task lacks authority, the result binds the exact
+accepted package and snapshot, and the run ends at `AwaitingHumanStructureReview`.
 
 Later implementation/test/type/schema/commit/monitoring/alert/runbook evidence links do
 not stale Structure when accepted semantics are unchanged. Approved semantic
 supersession makes affected Structure and Plan outputs require reevaluation.
 
-Before exit, exercise the four examples in **Required contract scenarios** in the bundled
+Before exit, exercise the eight examples in **Required contract scenarios** in the bundled
 normative contract: revision 3 versus revision 2, uncertain publication recovery,
-evidence-only graph extension, and approved semantic supersession.
+evidence-only graph extension, approved semantic supersession, independent producers
+agreeing, a prohibition creating no work, a small capability staying
+`ImplementationReady`, and routing stopping at human review.
 
 ## Boundaries
 
 - Do not implement or operate workers, stores, reviewers, gates, Provenance adapters,
-  task sizing, child issue creation, arbitrary DAGs, Plan, or Implementation here.
+  task sizing, child issue creation, arbitrary DAGs, split flow, Plan, or Implementation
+  here. `SplitFlowRequired` is a recorded route for human review, not a trigger.
 - workflowd-vs3.4 owns linear stage execution, accepted-revision and Design-reentry state,
   deterministic promotion-request construction, and exact request/result handoff only.
 - workflowd-vs3.5 owns independent reviews, synthesis, and bounded revision routing.

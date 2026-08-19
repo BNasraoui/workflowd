@@ -91,6 +91,16 @@ export const qrspiSpec = defineSpec("qrspi-runtime")
           )
           .implementedBy(workflowStartRuntime.makeWorkflowStart),
       ),
+    requirement("agent-contract-fidelity")
+      .statement(
+        "Stage agents apply the exact canonical QRSPI contract through a generated hash-bound bundled reference",
+      )
+      .from(qrspiContract)
+      .rules(
+        rule("bundled-contract-hash-match").statement(
+          "The bundled Design and Structure skill reference is generated from the canonical contract and records that contract's exact SHA-256",
+        ),
+      ),
     requirement("authoritative-stage-progression")
       .statement(
         "Only confirmed current Workflowd publication may advance a QRSPI stage or generation",
@@ -113,6 +123,10 @@ export const qrspiSpec = defineSpec("qrspi-runtime")
 const trustedStage = qrspiSpec.requirements["trusted-stage-execution"]
 const exactReplay = qrspiSpec.requirements["exact-replay-authority"]
 const workflowStart = qrspiSpec.requirements["safe-workflow-start"]
+const agentContractFidelity = qrspiSpec.requirements["agent-contract-fidelity"]
+
+export const bundledContractMatchesCanonicalContract =
+  agentContractFidelity.rules["bundled-contract-hash-match"]
 
 export const catalogIdentityIncludesExecutableRevision =
   trustedStage.rules["complete-registration-identity"]
@@ -124,5 +138,4 @@ export const kickoffIsIdempotent = workflowStart.rules["idempotent-kickoff"]
 export const openPullRequestBlocksBranchMutation = workflowStart.rules["open-pr-blocks-start"]
 export const uncertainCreationIsObservedBeforeRetry =
   workflowStart.rules["observe-uncertain-creation"]
-export const changedTicketSupersedesStart =
-  workflowStart.rules["changed-ticket-supersedes-start"]
+export const changedTicketSupersedesStart = workflowStart.rules["changed-ticket-supersedes-start"]

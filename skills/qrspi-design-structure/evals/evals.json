@@ -1,0 +1,110 @@
+{
+  "skill_name": "qrspi-design-structure",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "Twelve capabilities, one per accepted work-authorizing decision D1 through D12, all routed SplitFlowRequired on current repository evidence, with D13 preserved as a prohibition and the run stopped at AwaitingHumanStructureReview.",
+      "files": ["evals/fixtures/workflowd-vs3.4-canonical.md"],
+      "expectations": [
+        "The artifact contains exactly twelve capabilities, one for each of the accepted decisions D1 through D12, with no capability merged, split, added, or omitted.",
+        "D13 mints no capability and is treated as a prohibition carried by the capabilities it constrains, including the requirement that C18 is never presented as an aggregate-capacity control.",
+        "Every capability routes SplitFlowRequired, and each route is justified by at least one failed check citing a repository fact from the fixture inventory.",
+        "Every capability records authority with exact accepted graph edge IDs, dependencies, outcome, verification ownership, likely implementation surfaces, exclusions, residual risks and owners, an evidence-check table, and one route.",
+        "Capabilities appear in an order where no capability precedes a capability it declares as a dependency.",
+        "All 83 accepted records are classified: 10 sources, 11 requirements, 33 resolutions, and 29 rules, with each mapped to a capability or a named external owner.",
+        "Residual risk R9 is carried as accepted with workflowd-8bg named as the external follow-up, and no capacity capability, owner, or task is invented for it.",
+        "Ownership assignments O1 through O11 name their external owners without duplicating or re-planning that owner's work.",
+        "The binding section records the accepted package, gate response, promotion request and result, Structure policy, baseline commit, and the manual-authorization deviation with the exact export SHA-256.",
+        "No changed-line estimate, file count, task count, size target, or numeric threshold is used to select any route.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "One capability for the single accepted work-authorizing decision, routed ImplementationReady because every common check and every applicable backend profile check passes on current repository evidence.",
+      "files": ["evals/fixtures/small-cohesive-ready.md"],
+      "expectations": [
+        "The artifact contains exactly one capability, minted from accepted decision D1, and does not decompose it.",
+        "The capability routes ImplementationReady.",
+        "All four common checks pass with cited repository evidence naming the existing assembler, query, contract, and migration facts from the fixture.",
+        "The backend and stateful profile is applied, and its transaction, durable record, lifecycle, external effect, and multi-resource fixture checks all pass with reasons.",
+        "Profile selection is stated with a reason: the user-interface profile is not applied, and if the CLI and library profile is applied for the published response contract, every one of its checks passes and the route is unchanged.",
+        "Verification obligations V1 and V2 are attached to the capability with named verification ownership, and residual risk R1 is carried with its conditions and accountable human.",
+        "No estimate, size target, or numeric threshold appears in any check or influences the route.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "One capability from the single work-authorizing decision. The prohibition, three ownership assignments, three residual risks, four verification obligations, and five informational sources create no work of their own.",
+      "files": ["evals/fixtures/no-spurious-work.md"],
+      "expectations": [
+        "The artifact contains exactly one capability, minted from accepted decision D1.",
+        "D2 mints no capability and is treated as a prohibition; no sampling, quota, or volume-shaping work appears anywhere in the artifact.",
+        "Ownership assignments O1, O2, and O3 are named as external owner boundaries with no duplicated credential rotation, category curation, or dashboard work.",
+        "Residual risks R1, R2, and R3 are carried with their dispositions, conditions, accountable human, and follow-up owners, and no purge task is created for the historic buffer owned by tex-93.",
+        "Verification obligations V1 through V4 are attached to the capability or a named owner without becoming separate delivery work.",
+        "All five informational sources are preserved as traceability and produce no task.",
+        "The capability routes ImplementationReady with cited repository evidence from the fixture inventory, including the existing batch assembler, redaction utility, category loader, and buffer seams.",
+        "No estimate, size target, or numeric threshold appears in any check or influences the route.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "Four capabilities. The daily debit cap guard and the held-amount balance field route ImplementationReady; the durable accrual runs and the correspondent settlement instruction route SplitFlowRequired on the backend and stateful profile.",
+      "files": ["evals/fixtures/stateful-mixed-routes.md"],
+      "expectations": [
+        "The artifact contains exactly four capabilities, minted from accepted decisions D1, D2, D3, and D4.",
+        "The capability for D1 routes ImplementationReady, citing the existing guard registry, PostingGuard interface, PostingReader, seeded rejection reason, and the runGuard and seed fixture pattern.",
+        "The capability for D2 routes ImplementationReady, citing the existing HoldStore total, BalanceService transaction, additive BalanceView field convention, and balance harness fixture.",
+        "The capability for D3 routes SplitFlowRequired on at least the new durable record and migration and the new lifecycle or state machine checks, citing the absence of any accrual table, cursor, or state machine.",
+        "The capability for D4 routes SplitFlowRequired on at least the uncertain external effect and multi-resource recovery fixture checks, citing the read-only CorrespondentClient and the absence of fault injection support.",
+        "The backend and stateful profile is applied to all four capabilities, and the user-interface and CLI or library profiles are not applied.",
+        "D5 mints no capability and is carried as a prohibition on notification surfaces; D6 names FINOPS-2214 as the external owner without re-planning the extract.",
+        "Residual risks X1, X2, and X3 are carried with owner, condition, and follow-up ticket, and verification obligations V1 through V4 are attached to their capabilities.",
+        "No estimate, size target, or numeric threshold appears in any check or influences a route, and the relative size of the four capabilities is not used as a reason to split or merge any of them.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "Three capabilities. The extra tickets list column routes ImplementationReady; the escalations screen and the shared severity badge with its client taxonomy cache route SplitFlowRequired on the user-interface profile.",
+      "files": ["evals/fixtures/ui-surface-mixed-routes.md"],
+      "expectations": [
+        "The artifact contains exactly three capabilities, minted from accepted decisions D1, D2, and D3.",
+        "The capability for D1 routes ImplementationReady, citing the existing list query field, shared column definition, relative time formatter, and existing list test pattern.",
+        "The capability for D2 routes SplitFlowRequired on at least the new user-visible surface and new interaction state checks, citing the absence of that route, navigation entry, and self-refreshing state pattern.",
+        "The capability for D3 routes SplitFlowRequired on at least the new shared presentation contract and new client data seam checks, citing the absence of the badge and of any client-side taxonomy fetch or cache.",
+        "The user-interface profile is applied to all three capabilities, and backend or stateful checks are either not applied or recorded as passing because the capability owns no durable state, transaction, or external effect.",
+        "D4 mints no capability and is carried as a browser-storage prohibition constraining every capability; D5 names PLATCFG-881 as the taxonomy owner without duplicating that work.",
+        "Residual risks X1, X2, and X3 are carried with owner, condition, and follow-up, and verification obligations V1 through V4 are attached to a capability or to the prohibition without becoming separate delivery work.",
+        "No estimate, size target, or numeric threshold appears in any check or influences a route.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Produce the QRSPI Structure artifact for the accepted Structure input package in the supplied fixture. Use only the fixture as your input package and repository evidence. Return the complete Structure artifact and do not change any source.",
+      "expected_output": "Four capabilities. The new scan option and the manifest ordering fix route ImplementationReady; the new verify subcommand and the new exported workspace API with its deprecation route SplitFlowRequired on the CLI and library profile.",
+      "files": ["evals/fixtures/cli-library-mixed-routes.md"],
+      "expectations": [
+        "The artifact contains exactly four capabilities, minted from accepted decisions D1, D2, D3, and D4.",
+        "The capability for D1 routes ImplementationReady, citing the existing option specification, bytes value parser, unchanged column and exit-code contract, and existing command test pattern.",
+        "The capability for D2 routes ImplementationReady, citing the unchanged exported signature and the existing library test pattern.",
+        "The capability for D3 routes SplitFlowRequired on at least the new public surface and the output or exit-code contract checks, citing the absence of a verify command, a fourth exit code, and any stable machine-readable report format.",
+        "The capability for D4 routes SplitFlowRequired on at least the new public surface, compatibility obligation, and packaging surface checks, citing the absent workspace export, absent deprecation machinery, and absent consumer compatibility fixture.",
+        "The CLI and library profile is applied to all four capabilities, and the user-interface profile is not applied.",
+        "D5 mints no capability and is carried as a filesystem prohibition; D6 names DXTEAM-417 as the documentation owner without re-planning release notes or site content.",
+        "Residual risks are carried with owner, condition, and follow-up, and every verification obligation is attached to a capability or a named owner.",
+        "No estimate, size target, or numeric threshold appears in any check or influences a route.",
+        "The artifact ends at AwaitingHumanStructureReview and starts no split flow, Plan, Implementation, child delivery record, commit, push, or pull request."
+      ]
+    }
+  ]
+}
