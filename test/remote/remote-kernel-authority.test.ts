@@ -149,6 +149,45 @@ test("remote result fencing rejects a distinct command identity without completi
   expect(result.job).toMatchObject({ state: "leased" })
 })
 
+test("terminal remote expiry records one failure completion event across reconciliation replays", async () => {
+  const result = await runKernel(
+    ":memory:",
+    withCoordinator(
+      Effect.gen(function* () {
+        const remote = yield* RemoteCoordinatorStore
+        const sql = yield* SqlClient.SqlClient
+        yield* arrangeJob("remote-terminal-event", { kind: "remote_probe", hostId: "host-a" })
+        yield* sql`UPDATE kernel_workflow_jobs SET max_attempts = 1
+          WHERE job_id = 'remote-terminal-event'`
+        yield* remote.prepareNext({
+          commandId: "terminal-event-command",
+          workerId: "coordinator",
+          now,
+          leaseDurationMs: 100,
+          expiresAt: new Date(now.getTime() + 100),
+        })
+        const at = new Date(now.getTime() + 200)
+        const first = yield* remote.reconcileExpired(at)
+        const second = yield* remote.reconcileExpired(at)
+        const events = yield* sql`SELECT event_key, payload_json FROM kernel_events
+          WHERE event_type = 'job.completed'`
+        return { first, second, events }
+      }),
+    ),
+  )
+
+  expect(result.first).toMatchObject([{ jobId: "remote-terminal-event", outcome: "failed" }])
+  expect(result.second).toEqual([])
+  expect(result.events).toEqual([
+    {
+      event_key: "remote-terminal-event",
+      payload_json:
+        '{"completedAt":"2026-08-12T10:00:00.200Z","failureCategory":"transient",' +
+        '"failureVersion":1,"jobId":"remote-terminal-event","outcome":"failed"}',
+    },
+  ])
+})
+
 test("dispatch insertion failure rolls back the remote kernel claim without losing an attempt", async () => {
   const result = await runKernel(
     ":memory:",

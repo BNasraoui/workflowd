@@ -3,6 +3,13 @@ import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import {
+  KernelEventStore,
+  type KernelStoreConflictError,
+  type KernelStoreDataError,
+  type KernelStoreInputError,
+} from "../kernel/event-store"
+import { jobCompletionEvent } from "../kernel/job-completion-contract"
+import {
   KernelJobStore,
   KernelJobStoreDataError,
   type KernelJobStoreError,
@@ -32,7 +39,13 @@ export class RemoteCoordinatorDataError extends Data.TaggedError("RemoteCoordina
 }> {}
 
 export type RemoteCoordinatorError =
-  SqlError | KernelJobStoreError | RemoteCoordinatorConflict | RemoteCoordinatorDataError
+  | SqlError
+  | KernelJobStoreError
+  | KernelStoreConflictError
+  | KernelStoreDataError
+  | KernelStoreInputError
+  | RemoteCoordinatorConflict
+  | RemoteCoordinatorDataError
 
 export type RemoteCoordinatorStorePort = {
   readonly prepareNext: (input: {
@@ -164,6 +177,7 @@ const toDispatch = (row: DispatchRow): RemoteDispatch => ({
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   const jobs = yield* KernelJobStore
+  const events = yield* KernelEventStore
 
   const prepareNext: RemoteCoordinatorStorePort["prepareNext"] = (input) =>
     Effect.gen(function* () {
@@ -384,6 +398,15 @@ const make = Effect.gen(function* () {
       )`
       yield* sql`UPDATE kernel_remote_dispatches SET state = 'completed',
         completed_at = ${at.toISOString()} WHERE command_id = ${dispatch.command_id}`
+      yield* events.recordEvent(
+        jobCompletionEvent({
+          jobId: dispatch.job_id,
+          outcome: "succeeded",
+          resultId: result.resultId,
+          resultVersion: 1,
+          completedAt: at.toISOString(),
+        }),
+      )
       yield* insertDelivery({
         deliveryId,
         resultId: result.resultId,
@@ -437,6 +460,17 @@ const make = Effect.gen(function* () {
           RETURNING job_id`
         if (updated.length === 0) {
           return yield* new RemoteCoordinatorConflict({ key: dispatch.command_id })
+        }
+        if (exhausted) {
+          yield* events.recordEvent(
+            jobCompletionEvent({
+              jobId: dispatch.job_id,
+              outcome: "failed",
+              failureCategory: "transient",
+              failureVersion: 1,
+              completedAt: at.toISOString(),
+            }),
+          )
         }
         yield* sql`UPDATE kernel_remote_dispatches
           SET state = ${exhausted ? "cancelled" : "superseded"}

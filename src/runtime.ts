@@ -4,6 +4,7 @@ import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
 import { enqueueNextAgentHandoff } from "./kernel/agent-handoff-reducer"
+import { enqueueNextJobCompletionResume } from "./kernel/job-completion-reducer"
 import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
@@ -261,6 +262,7 @@ export function startHookService(
         Effect.suspend(() => {
           const iterationAt = new Date()
           return enqueueNextAgentHandoff(iterationAt).pipe(
+            Effect.zipRight(enqueueNextJobCompletionResume(iterationAt)),
             Effect.zipRight(
               runKernelJobIteration({
                 workerId: `${process.pid}:kernel-job`,

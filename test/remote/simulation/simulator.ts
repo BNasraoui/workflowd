@@ -68,6 +68,7 @@ export type SimulationSummary = {
   readonly staleResults: number
   readonly expiredLeases: number
   readonly duplicates: number
+  readonly completionEvents: number
 }
 
 export class RemoteSimulation implements AsyncDisposable {
@@ -421,6 +422,8 @@ export class RemoteSimulation implements AsyncDisposable {
           FROM kernel_remote_result_inbox WHERE disposition = 'stale'`
         const expiredLeases = yield* sql<{ readonly count: number }>`SELECT COUNT(*) AS count
           FROM kernel_remote_dispatches WHERE lease_until <= ${now}`
+        const completionEvents = yield* sql<{ readonly count: number }>`SELECT COUNT(*) AS count
+          FROM kernel_events WHERE event_type = 'job.completed'`
         const succeeded = rows.find((row) => row.state === "succeeded")
         const failed = rows.find((row) => row.state === "failed")
         return {
@@ -429,6 +432,7 @@ export class RemoteSimulation implements AsyncDisposable {
           latestAttempt: Math.max(succeeded?.latest_attempt ?? 0, failed?.latest_attempt ?? 0),
           staleResults: inbox[0]!.count,
           expiredLeases: expiredLeases[0]!.count,
+          completionEvents: completionEvents[0]!.count,
         }
       }),
     )
@@ -472,6 +476,7 @@ export class RemoteSimulation implements AsyncDisposable {
       staleResults: central.staleResults,
       expiredLeases: central.expiredLeases,
       duplicates,
+      completionEvents: central.completionEvents,
     }
   }
 
