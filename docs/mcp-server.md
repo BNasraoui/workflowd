@@ -12,9 +12,10 @@ database the coordinator and the remote-enqueue CLI use.
 Every write tool returns a **receipt**, never a result. Work runs
 asynchronously in the durable job queue. There is deliberately **no blocking
 wait tool** — an agent that enqueues work should end its turn after the ack
-and read outcomes with `job_status` in a later turn (or be prompted on
-completion once resume wiring lands). The tool descriptions repeat this
-contract so agents learn it from the schema itself.
+and read outcomes with `job_status` in a later turn. When an OpenCode resume
+target is supplied, workflowd instead registers a durable wait before
+acknowledging and prompts that session with the terminal job outcome. The tool
+descriptions repeat this contract so agents learn it from the schema itself.
 
 ## Tools
 
@@ -23,15 +24,17 @@ contract so agents learn it from the schema itself.
 | `job_status(job_id)` | read | Durable state of one job, plus its recorded result when complete. |
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
-| `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
+| `enqueue_probe(host, probe_id?, resume?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 
 `enqueue_probe` with an explicit `probe_id` is idempotent (the same identity
 maps to the same job); omitting it generates a fresh probe identity per call.
 
-Resuming an OpenCode session when the probe completes is designed but not
-wired in this slice: the kernel does not yet record a typed event at job
-completion, so there is no condition a durable wait could match. The
-parameter will return once that surface exists.
+`resume: { provider: "opencode", sessionId, host }` registers a durable wait
+for the probe's typed `job.completed` event. On success or terminal failure,
+the reducer creates a `resume_parent_agent` job containing the durable outcome;
+the OpenCode resume worker then prompts the registered session on the named
+host. Without `resume`, enqueue behavior is unchanged and callers inspect the
+outcome later with `job_status`.
 
 ## Authorization
 

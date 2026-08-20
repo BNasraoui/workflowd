@@ -299,7 +299,7 @@ describe("test-job canary HTTP integration", () => {
     expect(observed).toEqual({
       statuses: Array.from({ length: 8 }, () => 202),
       started: { _tag: "Completed", value: undefined },
-      counts: { events: 1, deliveries: 1, jobs: 1 },
+      counts: { events: 2, deliveries: 1, jobs: 1 },
       executions: 1,
       conflictStatus: 409,
       conflictBody: { error: "conflict" },

@@ -4,6 +4,14 @@ import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import {
+  KernelEventStore,
+  KernelEventStoreLive,
+  type KernelStoreConflictError,
+  type KernelStoreDataError,
+  type KernelStoreInputError,
+} from "./event-store"
+import { jobCompletionEvent } from "./job-completion-contract"
+import {
   type ClaimAuthority,
   type EnqueueJobInput,
   EnqueueJobInput as EnqueueJobInputSchema,
@@ -35,6 +43,9 @@ export class KernelJobStoreDataError extends Data.TaggedError("KernelJobStoreDat
 
 export type KernelJobStoreError =
   | SqlError
+  | KernelStoreConflictError
+  | KernelStoreDataError
+  | KernelStoreInputError
   | KernelJobStoreConflictError
   | KernelJobStoreDataError
   | KernelJobStoreInputError
@@ -179,6 +190,7 @@ const toRecord = (row: typeof JobRow.Type): JobRecord => ({
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const events = yield* KernelEventStore
   yield* sql`PRAGMA foreign_keys = ON`
   yield* sql`PRAGMA busy_timeout = 5000`
 
@@ -416,6 +428,15 @@ const make = Effect.gen(function* () {
         ${input.claimToken}, ${input.expectedLeaseUntil.toISOString()}, ${version},
         ${payload.json}, ${input.now.toISOString()}
       )`
+      yield* events.recordEvent(
+        jobCompletionEvent({
+          jobId: input.jobId,
+          outcome: "succeeded",
+          resultId,
+          resultVersion: version,
+          completedAt: input.now.toISOString(),
+        }),
+      )
       return { status: "completed" as const }
     }).pipe(sql.withTransaction)
 
@@ -439,6 +460,15 @@ const make = Effect.gen(function* () {
         failure_json = ${payload.json}, updated_at = ${input.now.toISOString()}
         WHERE ${authorityWhere(input)} RETURNING job_id`
       if (rows.length === 0) return yield* leaseFailure(input.jobId)
+      yield* events.recordEvent(
+        jobCompletionEvent({
+          jobId: input.jobId,
+          outcome: state,
+          failureCategory: category,
+          failureVersion: version,
+          completedAt: input.now.toISOString(),
+        }),
+      )
       return { status: state }
     }).pipe(sql.withTransaction)
 
@@ -455,6 +485,17 @@ const make = Effect.gen(function* () {
         lease_until = NULL, failure_category = 'transient', failure_version = ${version},
         failure_json = ${payload.json}, updated_at = ${input.now.toISOString()}
         WHERE ${authorityWhere(input)}`
+      if (exhausted) {
+        yield* events.recordEvent(
+          jobCompletionEvent({
+            jobId: input.jobId,
+            outcome: "failed",
+            failureCategory: "transient",
+            failureVersion: version,
+            completedAt: input.now.toISOString(),
+          }),
+        )
+      }
       return exhausted
         ? { status: "failed" as const, attempt: attempts[0]!.attempt }
         : { status: "retry_scheduled" as const, attempt: attempts[0]!.attempt, runAt: input.runAt }
@@ -511,4 +552,6 @@ const make = Effect.gen(function* () {
 })
 
 /** Requires the shared WorkflowStore migration bootstrap. */
-export const KernelJobStoreLive = Layer.effect(KernelJobStore, make)
+export const KernelJobStoreLive = Layer.effect(KernelJobStore, make).pipe(
+  Layer.provideMerge(KernelEventStoreLive),
+)

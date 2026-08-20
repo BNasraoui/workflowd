@@ -69,6 +69,17 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description: "Optional stable probe identity for idempotent enqueue.",
         },
+        resume: {
+          type: "object",
+          description: "Optional durable OpenCode session resume target for the job outcome.",
+          properties: {
+            provider: { type: "string", const: "opencode" },
+            sessionId: { type: "string" },
+            host: { type: "string" },
+          },
+          required: ["provider", "sessionId", "host"],
+          additionalProperties: false,
+        },
       },
       required: ["host"],
       additionalProperties: false,
@@ -98,6 +109,13 @@ const EnqueueProbeArguments = Schema.Struct({
       Schema.maxLength(128),
       Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
     ),
+  ),
+  resume: Schema.optional(
+    Schema.Struct({
+      provider: Schema.Literal("opencode"),
+      sessionId: Schema.NonEmptyString.pipe(Schema.maxLength(256)),
+      host: RemoteHostId,
+    }),
   ),
 })
 
@@ -172,14 +190,22 @@ const enqueueProbe = (args: unknown, context: ToolCallContext) =>
     if (input._tag === "Left") {
       return failure(
         "invalid arguments: host must match a workflowd host id and probe_id, when " +
-          "given, must start with an alphanumeric and use only [A-Za-z0-9_.-]",
+          "given, must start with an alphanumeric and use only [A-Za-z0-9_.-]; " +
+          "resume must specify provider 'opencode', sessionId, and host",
       )
     }
     const now = context.now()
     const probeId = input.right.probe_id ?? generatedProbeId(now)
     const producer = yield* RemoteProbeProducer
     const enqueued = yield* producer
-      .enqueue({ probeId, hostId: input.right.host }, now)
+      .enqueue(
+        {
+          probeId,
+          hostId: input.right.host,
+          ...(input.right.resume === undefined ? {} : { resume: input.right.resume }),
+        },
+        now,
+      )
       .pipe(Effect.either)
     if (enqueued._tag === "Left") {
       return failure(
@@ -191,9 +217,13 @@ const enqueueProbe = (args: unknown, context: ToolCallContext) =>
       enqueued.right.status === "duplicate"
         ? `Already received: probe ${probeId} was previously accepted as job ${enqueued.right.jobId}.`
         : `Received: probe ${probeId} accepted as durable job ${enqueued.right.jobId} for host ${input.right.host}.`
+    const contract =
+      input.right.resume === undefined
+        ? "no blocking wait exists. End your turn now. Use job_status " +
+          `("${enqueued.right.jobId}") in a later turn to read the outcome.`
+        : `workflowd will prompt OpenCode session ${input.right.resume.sessionId} on host ` +
+          `${input.right.resume.host} with this job's durable outcome. End your turn now.`
     return text(
-      `${received} This is a fire-and-ack receipt — the job runs asynchronously and ` +
-        "no blocking wait exists. End your turn now. Use job_status " +
-        `("${enqueued.right.jobId}") in a later turn to read the outcome.`,
+      `${received} This is a fire-and-ack receipt — the job runs asynchronously and ${contract}`,
     )
   })

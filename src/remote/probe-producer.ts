@@ -9,13 +9,27 @@ import {
 } from "../kernel/event-store"
 import { KernelJobStore, type KernelJobStoreError } from "../kernel/job-store"
 import type { ParseResult } from "effect"
+import {
+  jobCompletionCondition,
+  WAIT_FOR_JOB_WORKFLOW_VERSION,
+} from "../kernel/job-completion-contract"
 import { RemoteHostId } from "./contract"
 
 const ProbeId = Schema.NonEmptyString.pipe(
   Schema.maxLength(128),
   Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
 )
-const ProbeInput = Schema.Struct({ probeId: ProbeId, hostId: RemoteHostId })
+const ProbeInput = Schema.Struct({
+  probeId: ProbeId,
+  hostId: RemoteHostId,
+  resume: Schema.optional(
+    Schema.Struct({
+      provider: Schema.Literal("opencode"),
+      sessionId: Schema.NonEmptyString.pipe(Schema.maxLength(256)),
+      host: RemoteHostId,
+    }),
+  ),
+})
 
 export type RemoteProbeProducerPort = {
   readonly enqueue: (
@@ -58,7 +72,10 @@ const make = Effect.gen(function* () {
         workflowType: "remote-probe",
         workflowVersion: 1,
         workflowKey: jobId,
-        payload: { hostId: decoded.hostId },
+        payload:
+          decoded.resume === undefined
+            ? { hostId: decoded.hostId }
+            : { hostId: decoded.hostId, resume: decoded.resume },
         createdAt: now,
       })
       const wait = yield* events.registerWait({
@@ -85,6 +102,24 @@ const make = Effect.gen(function* () {
         runAt: now,
         createdAt: now,
       })
+      if (decoded.resume !== undefined) {
+        const resumeInstanceId = `remote-probe-resume-instance-${decoded.probeId}`
+        const completion = jobCompletionCondition(jobId)
+        const resumeInstance = yield* events.createInstance({
+          instanceId: resumeInstanceId,
+          workflowType: "wait_for_job",
+          workflowVersion: WAIT_FOR_JOB_WORKFLOW_VERSION,
+          workflowKey: jobId,
+          payload: { kind: "wait_for_job", jobId, ...decoded.resume },
+          createdAt: now,
+        })
+        yield* events.registerWait({
+          instanceId: resumeInstanceId,
+          waitId: `remote-probe-resume-wait-${decoded.probeId}`,
+          condition: completion,
+          registeredAt: resumeInstance.instance.createdAt,
+        })
+      }
       return { status: enqueued.status, jobId }
     }).pipe(sql.withTransaction)
 

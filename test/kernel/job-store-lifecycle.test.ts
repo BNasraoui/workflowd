@@ -106,11 +106,108 @@ describe("kernel job creation", () => {
 })
 
 describe("kernel job outcomes", () => {
+  test("records one typed completion event for a successful job replay", async () => {
+    const result = await runKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const jobs = yield* KernelJobStore
+        const sql = yield* SqlClient.SqlClient
+        const claim = yield* claimJob("completion-event-success")
+        const completion = {
+          ...authority(claim),
+          resultId: "completion-result",
+          resultVersion: 1,
+          result: { verdict: "pass" },
+        }
+        yield* jobs.complete(completion)
+        yield* jobs.complete(completion)
+        return yield* sql`SELECT source_event_id, event_type, event_version, event_key,
+          correlation, payload_json FROM kernel_events WHERE event_type = 'job.completed'`
+      }),
+    )
+
+    expect(result).toEqual([
+      {
+        source_event_id: "job-completed:completion-event-success",
+        event_type: "job.completed",
+        event_version: 1,
+        event_key: "completion-event-success",
+        correlation: "completion-event-success",
+        payload_json:
+          '{"completedAt":"2026-08-12T10:00:01.000Z","jobId":"completion-event-success",' +
+          '"outcome":"succeeded","resultId":"completion-result","resultVersion":1}',
+      },
+    ])
+  })
+
+  test("records one typed completion event when failure becomes terminal", async () => {
+    const result = await runKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const jobs = yield* KernelJobStore
+        const sql = yield* SqlClient.SqlClient
+        const claim = yield* claimJob("completion-event-failure")
+        const failure = {
+          ...authority(claim),
+          failureVersion: 1,
+          failure: { message: "permanent failure" },
+          category: "permanent" as const,
+        }
+        yield* jobs.fail(failure)
+        yield* jobs.fail(failure).pipe(Effect.ignore)
+        return yield* sql`SELECT event_type, event_key, payload_json FROM kernel_events
+          WHERE event_type = 'job.completed'`
+      }),
+    )
+
+    expect(result).toEqual([
+      {
+        event_type: "job.completed",
+        event_key: "completion-event-failure",
+        payload_json:
+          '{"completedAt":"2026-08-12T10:00:01.000Z","failureCategory":"permanent",' +
+          '"failureVersion":1,"jobId":"completion-event-failure","outcome":"failed"}',
+      },
+    ])
+  })
+
+  test("rolls back the terminal state and result when completion event recording aborts", async () => {
+    const result = await runKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const jobs = yield* KernelJobStore
+        const sql = yield* SqlClient.SqlClient
+        const claim = yield* claimJob("completion-event-rollback")
+        yield* sql`CREATE TRIGGER reject_job_completion_event BEFORE INSERT ON kernel_events
+          WHEN NEW.event_type = 'job.completed'
+          BEGIN SELECT RAISE(ABORT, 'injected event failure'); END`
+        const completed = yield* jobs
+          .complete({
+            ...authority(claim),
+            resultId: "rollback-result",
+            resultVersion: 1,
+            result: { verdict: "pass" },
+          })
+          .pipe(Effect.either)
+        return {
+          completed,
+          job: yield* jobs.readJob(claim.jobId),
+          storedResult: yield* jobs.readResult(claim.jobId),
+        }
+      }),
+    )
+
+    expect(result.completed._tag).toBe("Left")
+    expect(result.job).toMatchObject({ state: "leased" })
+    expect(result.storedResult).toBeNull()
+  })
+
   test("honors retry run_at and fails instead of scheduling beyond max attempts", async () => {
     const result = await runKernel(
       ":memory:",
       Effect.gen(function* () {
         const jobs = yield* KernelJobStore
+        const sql = yield* SqlClient.SqlClient
         const first = yield* claimJob("retry")
         const runAt = new Date("2026-08-12T10:05:00.000Z")
         const retried = yield* jobs.retry({
@@ -150,7 +247,9 @@ describe("kernel job outcomes", () => {
           failureVersion: 1,
           failure: { message: "last failure" },
         })
-        return { retried, early, second, exhausted }
+        const events = yield* sql<{ readonly count: number }>`SELECT COUNT(*) AS count
+          FROM kernel_events WHERE event_type = 'job.completed'`
+        return { retried, early, second, exhausted, completionEvents: events[0]!.count }
       }),
     )
 
@@ -161,6 +260,7 @@ describe("kernel job outcomes", () => {
     expect(result.early).toBeNull()
     expect(result.second.attempt).toBe(2)
     expect(result.exhausted).toMatchObject({ status: "failed", attempt: 3 })
+    expect(result.completionEvents).toBe(1)
   })
 
   test("replays an identical result and rejects a changed result identity or content", async () => {

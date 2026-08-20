@@ -82,6 +82,65 @@ test("enqueue_probe generates a probe identity when none is given", async () => 
   expect(firstText(result)).toMatch(/durable job remote-probe-mcp-\d{8}T\d{6}-[0-9a-f]+/)
 })
 
+test("enqueue_probe registers an OpenCode completion wait and states the resume contract", async () => {
+  const result = await run(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      const ack = yield* callTool(
+        "enqueue_probe",
+        {
+          host: "host-a",
+          probe_id: "resume-probe",
+          resume: { provider: "opencode", sessionId: "session-1", host: "mint" },
+        },
+        authorized,
+      )
+      const waits = yield* sql`SELECT event_type, event_key, correlation FROM kernel_waits
+        WHERE instance_id = 'remote-probe-resume-instance-resume-probe'`
+      return { ack, waits }
+    }),
+  )
+
+  expect(result.ack.isError).toBeUndefined()
+  expect(result.waits).toEqual([
+    {
+      event_type: "job.completed",
+      event_key: "remote-probe-resume-probe",
+      correlation: "remote-probe-resume-probe",
+    },
+  ])
+  expect(firstText(result.ack)).toContain(
+    "workflowd will prompt OpenCode session session-1 on host mint with this job's durable outcome",
+  )
+  expect(firstText(result.ack)).toContain("End your turn now")
+})
+
+test("enqueue_probe rejects malformed resume parameters", async () => {
+  const wrongProvider = await run(
+    callTool(
+      "enqueue_probe",
+      {
+        host: "host-a",
+        resume: { provider: "other", sessionId: "session-1", host: "mint" },
+      },
+      authorized,
+    ),
+  )
+  const missingHost = await run(
+    callTool(
+      "enqueue_probe",
+      { host: "host-a", resume: { provider: "opencode", sessionId: "session-1" } },
+      authorized,
+    ),
+  )
+
+  expect(wrongProvider.isError).toBe(true)
+  expect(missingHost.isError).toBe(true)
+  expect(firstText(wrongProvider)).toContain(
+    "resume must specify provider 'opencode', sessionId, and host",
+  )
+})
+
 test("enqueue_probe refuses when the server has no token configured", async () => {
   const result = await run(
     callTool(

@@ -26,7 +26,11 @@ test("duplicate command and result delivery applies terminal work once", async (
     { type: "duplicate", channel: "result" },
   ])
 
-  expect(await simulation.quiesce()).toMatchObject({ succeeded: 1, executions: 1 })
+  expect(await simulation.quiesce()).toMatchObject({
+    succeeded: 1,
+    executions: 1,
+    completionEvents: 1,
+  })
 })
 
 test("controlled time releases delayed delivery", async () => {
@@ -215,7 +219,12 @@ test("stale result tokens cannot advance coordinator state", async () => {
     { type: "coordinator" },
   ])
 
-  expect(await simulation.quiesce()).toMatchObject({ succeeded: 1, executions: 1, staleResults: 1 })
+  expect(await simulation.quiesce()).toMatchObject({
+    succeeded: 1,
+    executions: 1,
+    staleResults: 1,
+    completionEvents: 1,
+  })
 })
 
 test("fault injection tolerates a disconnected result publisher", async () => {
