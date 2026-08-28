@@ -4,24 +4,32 @@
 // CRAP score. Note: crap4ts uses the cubed formula (CC^2 * (1 - cov)^3 + CC)
 // and Bun coverage is line-based, so scores are an approximation, not classic
 // Savoia CRAP.
-import { generateReport, formatReport } from "@sebassdc/crap4ts"
+import { generateReport, formatReport, type CrapEntry } from "@sebassdc/crap4ts"
 import { statSync } from "node:fs"
 import { resolve } from "node:path"
 import { lcovToIstanbul } from "./lcov-to-istanbul"
 
-const highRiskThreshold = 30
+export const highRiskThreshold = 30
+
+export function crapKey(entry: CrapEntry): string {
+  return `${entry.module}.${entry.name}`
+}
+
+export function generateCrapEntries(repoRoot: string): CrapEntry[] {
+  process.chdir(repoRoot)
+  lcovToIstanbul(repoRoot)
+  return generateReport({
+    srcDir: resolve(repoRoot, "src"),
+    coverageDir: resolve(repoRoot, "coverage"),
+  }).entries
+}
 
 function main(): void {
   const repoRoot = resolve(import.meta.dir, "..")
-  process.chdir(repoRoot)
-  const lcovPath = resolve(repoRoot, "coverage", "lcov.info")
-  lcovToIstanbul(repoRoot)
-  const { entries } = generateReport({
-    srcDir: resolve(repoRoot, "src"),
-    coverageDir: resolve(repoRoot, "coverage"),
-  })
+  const entries = generateCrapEntries(repoRoot)
   console.log(formatReport(entries))
   const risky = entries.filter((entry) => entry.crap >= highRiskThreshold)
+  const lcovPath = resolve(repoRoot, "coverage", "lcov.info")
   console.log(
     `${risky.length} of ${entries.length} functions at CRAP >= ${highRiskThreshold}` +
       ` (coverage from ${lcovPath}, written ${statSync(lcovPath).mtime.toISOString()})`,

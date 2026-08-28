@@ -17,6 +17,8 @@
     "coverage:istanbul": "bun scripts/lcov-to-istanbul.ts",
     "crap": "bun scripts/crap-report.ts",
     "crap:full": "bun run test:coverage && bun scripts/crap-report.ts",
+    "crap:check": "bun scripts/check-crap.ts",
+    "crap:baseline": "bun scripts/check-crap.ts --write-baseline",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
@@ -26,7 +28,7 @@
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage"
+    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage && bun run crap:check"
   },
   "dependencies": {
     "@effect/platform": "0.97.0",
