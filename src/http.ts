@@ -15,6 +15,12 @@ import {
   type TestJobCanaryError,
   type TestJobCanaryPort,
 } from "./kernel/test-job-canary"
+import {
+  AgentWaitCustodyError,
+  AgentWaitSubmission,
+  type AgentWaitIngressError,
+  type AgentWaitIngressPort,
+} from "./kernel/agent-wait-ingress"
 
 type QrspiIngress = {
   readonly token: string
@@ -25,12 +31,17 @@ type TestJobIngress = Pick<TestJobCanaryPort, "submit" | "status"> & {
   readonly token: string
 }
 
+type AgentWaitIngressBinding = Pick<AgentWaitIngressPort, "register"> & {
+  readonly token: string
+}
+
 export type WebhookHandlerOptions = {
   readonly webhookSecret: string
   readonly now: Date
   readonly maxBodyBytes?: number
   readonly qrspi?: QrspiIngress
   readonly testJobs?: TestJobIngress
+  readonly agentWaits?: AgentWaitIngressBinding
 }
 
 export function routeRequest(
@@ -46,6 +57,18 @@ export function routeRequest(
   }
   if (pathname === "/workflows/qrspi" && request.method === "POST" && options.qrspi !== undefined) {
     return handleQrspiStart(request, options.qrspi, options.maxBodyBytes ?? 1_048_576)
+  }
+  if (
+    pathname === "/workflows/agent-waits" &&
+    request.method === "POST" &&
+    options.agentWaits !== undefined
+  ) {
+    return handleAgentWaitRegister(
+      request,
+      options.agentWaits,
+      options.now,
+      options.maxBodyBytes ?? 1_048_576,
+    )
   }
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
@@ -134,6 +157,67 @@ function testJobStatusFailure(error: TestJobCanaryError): Response {
   }
   if ("_tag" in error && error._tag === "ParseError") {
     return Response.json({ error: "invalid test job ID" }, { status: 400 })
+  }
+  return Response.json({ error: "internal server error" }, { status: 500 })
+}
+
+function handleAgentWaitRegister(
+  request: Request,
+  ingress: AgentWaitIngressBinding,
+  now: Date,
+  maxBodyBytes: number,
+) {
+  return Effect.gen(function* () {
+    if (!authorized(request.headers.get("authorization"), ingress.token)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 })
+    }
+    const bytes = new Uint8Array(yield* Effect.tryPromise(() => request.arrayBuffer()))
+    if (bytes.byteLength > maxBodyBytes) {
+      return Response.json({ error: "payload too large" }, { status: 413 })
+    }
+    const json = yield* Schema.decodeUnknown(JsonText)(new TextDecoder().decode(bytes)).pipe(
+      Effect.catchAll(() => Effect.succeed(undefined)),
+    )
+    if (json === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
+    const input = yield* Schema.decodeUnknown(AgentWaitSubmission)(json, {
+      onExcessProperty: "error",
+    }).pipe(Effect.either)
+    if (input._tag === "Left") {
+      return Response.json(
+        {
+          error:
+            "invalid agent wait: parentSessionId, childSessionId and resumePrompt are " +
+            "required non-empty strings, with an optional idempotencyKey",
+        },
+        { status: 400 },
+      )
+    }
+    return yield* ingress.register(input.right, now).pipe(
+      Effect.match({
+        onFailure: agentWaitFailure,
+        onSuccess: (receipt) => Response.json(receipt, { status: 202 }),
+      }),
+    )
+  }).pipe(
+    Effect.catchAllCause((cause) =>
+      Effect.logError("Agent-wait ingress failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
+}
+
+/**
+ * Custody refusals are the caller's problem and name the exact missing
+ * custody; every other failure is a store or provider fault and stays
+ * opaque.
+ */
+function agentWaitFailure(error: AgentWaitIngressError): Response {
+  if (error instanceof AgentWaitCustodyError) {
+    return Response.json(
+      { error: "custody", reason: error.reason, detail: error.explanation },
+      { status: 409 },
+    )
   }
   return Response.json({ error: "internal server error" }, { status: 500 })
 }

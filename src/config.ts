@@ -45,6 +45,7 @@ interface OpenCodeConfig {
   readonly model: string
   readonly reviewerAgent: string
   readonly fixerAgent: string
+  readonly agentWakeAgent: string
   readonly pollIntervalMs: number
 }
 
@@ -88,6 +89,7 @@ export interface AppConfig {
   readonly worker: WorkerConfig
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
+  readonly agentWaits?: { readonly token: string }
   readonly remoteCoordinator?: RemoteCoordinatorConfig
 }
 
@@ -282,6 +284,15 @@ export async function loadConfig(
   if (testJobToken !== undefined && testJobToken.length < 8) {
     throw new Error("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
   }
+  const agentWaitToken = await optionalSecret(
+    env,
+    "WORKFLOWD_AGENT_WAIT_TOKEN",
+    "WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
+    read,
+  )
+  if (agentWaitToken !== undefined && agentWaitToken.length < 8) {
+    throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN must contain at least 8 characters")
+  }
   const jobTimeoutMs = positiveInteger(
     env.WORKFLOWD_JOB_TIMEOUT_MS,
     30 * 60_000,
@@ -399,6 +410,10 @@ export async function loadConfig(
         "WORKFLOWD_REVIEWER_AGENT",
       ),
       fixerAgent: agentId(env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer", "WORKFLOWD_FIXER_AGENT"),
+      agentWakeAgent: agentId(
+        env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
+        "WORKFLOWD_AGENT_WAKE_AGENT",
+      ),
       pollIntervalMs: positiveInteger(
         env.WORKFLOWD_OPENCODE_POLL_INTERVAL_MS,
         1_000,
@@ -427,6 +442,7 @@ export async function loadConfig(
     },
     ...(qrspi === undefined ? {} : { qrspi }),
     ...(testJobToken === undefined ? {} : { testJobCanary: { token: testJobToken } }),
+    ...(agentWaitToken === undefined ? {} : { agentWaits: { token: agentWaitToken } }),
     ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
   }
 }

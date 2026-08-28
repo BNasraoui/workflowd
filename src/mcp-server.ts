@@ -8,7 +8,12 @@ import { KernelEventStoreLive } from "./kernel/event-store"
 import { KernelJobStoreLive } from "./kernel/job-store"
 import { RemoteProbeProducerLive } from "./remote/probe-producer"
 import { WorkflowStoreLive } from "./store"
-import { loadMcpWriteAuth, type McpWriteAuth } from "./mcp/auth"
+import {
+  loadAgentWaitDaemon,
+  loadMcpWriteAuth,
+  type AgentWaitDaemonConfig,
+  type McpWriteAuth,
+} from "./mcp/auth"
 import { createMcpFetchHandler, type RunTool } from "./mcp/server"
 import { McpQueriesLive } from "./mcp/queries"
 import { callTool, type ToolResult } from "./mcp/tools"
@@ -42,6 +47,7 @@ const databaseLayer = (filename: string) => {
 export type StartedMcpServer = {
   readonly port: number
   readonly writesEnabled: boolean
+  readonly agentWaitsEnabled: boolean
   readonly stop: () => Promise<void>
 }
 
@@ -60,6 +66,10 @@ export const startMcpServer = (
     })
     const auth: McpWriteAuth = yield* Effect.tryPromise({
       try: () => loadMcpWriteAuth(env),
+      catch: (cause) => new Error(String(cause)),
+    })
+    const agentWaitDaemon: AgentWaitDaemonConfig | undefined = yield* Effect.tryPromise({
+      try: () => loadAgentWaitDaemon(env),
       catch: (cause) => new Error(String(cause)),
     })
     const filename =
@@ -85,7 +95,11 @@ export const startMcpServer = (
           content: [{ type: "text", text: "tool call failed: internal error" }],
           isError: true,
         }))
-    const fetchHandler = createMcpFetchHandler({ runTool, auth })
+    const fetchHandler = createMcpFetchHandler({
+      runTool,
+      auth,
+      ...(agentWaitDaemon === undefined ? {} : { agentWaitDaemon }),
+    })
     const server = yield* Effect.try({
       try: () => Bun.serve({ hostname: "127.0.0.1", port, fetch: fetchHandler }),
       catch: (cause) => new Error(`Could not start MCP server: ${String(cause)}`),
@@ -93,6 +107,7 @@ export const startMcpServer = (
     return {
       port: server.port ?? port,
       writesEnabled: auth.mode === "enabled",
+      agentWaitsEnabled: agentWaitDaemon !== undefined,
       stop: async () => {
         await server.stop(true)
         await runtime.dispose()
@@ -105,7 +120,8 @@ const program = (env: Record<string, string | undefined>) =>
     const started = yield* startMcpServer(env)
     yield* Effect.logInfo(
       `workflowd MCP server listening on 127.0.0.1:${started.port} ` +
-        `(writes ${started.writesEnabled ? "enabled" : "disabled"})`,
+        `(writes ${started.writesEnabled ? "enabled" : "disabled"}, ` +
+        `agent waits ${started.agentWaitsEnabled ? "enabled" : "disabled"})`,
     )
     return yield* Effect.never
   })

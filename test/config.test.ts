@@ -107,6 +107,7 @@ describe("loadConfig", () => {
         model: "openai/gpt-5.6-sol",
         reviewerAgent: "pr-reviewer",
         fixerAgent: "pr-fixer",
+        agentWakeAgent: "build",
         pollIntervalMs: 1_000,
       },
       worker: {

@@ -74,11 +74,14 @@ test("the streamable HTTP endpoint lists every tool with the fire-and-ack contra
     "host_health",
     "job_status",
     "list_recent_jobs",
+    "wait_for_agent",
   ])
-  const enqueue = listed.tools.find((tool) => tool.name === "enqueue_probe")
-  expect(enqueue?.description).toContain("returns a receipt")
-  expect(enqueue?.description).toContain("end your turn")
-  expect(enqueue?.description).toContain("none exists")
+  for (const name of ["enqueue_probe", "wait_for_agent"]) {
+    const write = listed.tools.find((tool) => tool.name === name)
+    expect(write?.description).toContain("returns a receipt")
+    expect(write?.description).toContain("end your turn")
+    expect(write?.description).toContain("none exists")
+  }
 })
 
 test("an MCP initialize handshake succeeds statelessly", async () => {
