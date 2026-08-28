@@ -17,6 +17,19 @@ export function findCrapViolations(entries: CrapEntry[]): CrapViolation[] {
     .map((entry) => ({ key: crapKey(entry), crap: entry.crap }))
 }
 
+export function reportCrapViolations(violations: CrapViolation[]): string[] {
+  const lines = violations.map(
+    (violation) =>
+      `crap: ${violation.key} scores CRAP ${violation.crap.toFixed(1)}` +
+      ` (threshold ${highRiskThreshold})`,
+  )
+  lines.push(
+    `crap: split the function or cover its branches until it scores below ` +
+      `CRAP ${highRiskThreshold}`,
+  )
+  return lines
+}
+
 function main(): void {
   const repoRoot = resolve(import.meta.dir, "..")
   const violations = findCrapViolations(generateCrapEntries(repoRoot))
@@ -24,16 +37,7 @@ function main(): void {
     console.log(`crap: all functions below CRAP ${highRiskThreshold}`)
     return
   }
-  for (const violation of violations) {
-    console.error(
-      `crap: ${violation.key} scores CRAP ${violation.crap.toFixed(1)}` +
-        ` (threshold ${highRiskThreshold})`,
-    )
-  }
-  console.error(
-    `crap: split the function or cover its branches until it scores below CRAP ` +
-      `${highRiskThreshold}`,
-  )
+  for (const line of reportCrapViolations(violations)) console.error(line)
   process.exitCode = 1
 }
 

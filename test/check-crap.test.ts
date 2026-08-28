@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { CrapEntry } from "@sebassdc/crap4ts"
-import { findCrapViolations } from "../scripts/check-crap"
+import { findCrapViolations, reportCrapViolations } from "../scripts/check-crap"
 
 function entry(module: string, name: string, crap: number): CrapEntry {
   return { name, module, complexity: 10, coverage: 50, crap }
@@ -28,6 +28,14 @@ describe("crap gate", () => {
       "qrspi.workflow-start.toWorkflowStartValidationError",
       "http.workflowStartStatus",
       "config.loadConfig",
+    ])
+  })
+
+  test("renders one line per violation plus remediation guidance", () => {
+    const lines = reportCrapViolations([{ key: "config.loadConfig", crap: 34 }])
+    expect(lines).toEqual([
+      "crap: config.loadConfig scores CRAP 34.0 (threshold 30)",
+      "crap: split the function or cover its branches until it scores below CRAP 30",
     ])
   })
 })
