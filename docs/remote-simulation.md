@@ -28,10 +28,15 @@ WORKFLOWD_SIM_SEEDS=1,49,24301,11776009 WORKFLOWD_SIM_STEPS=500 bun run soak:rem
 
 It prints one result line per seed and exits non-zero if any seed fails to settle.
 
-`bun run simulate:remote` sizes its timeout from the seed and step counts. Override it directly with
-`WORKFLOWD_SIM_TIMEOUT_MS` on a slow machine. Note that a *failing* seed then pays for shrinking,
-which re-runs the whole schedule once per candidate action and is effectively unbounded on long
-schedules, so prefer `soak:remote` when a long run is expected to find something.
+Every simulation test sizes its own timeout through `simulationTimeoutMs` in
+`test/remote/simulation/budget.ts`, from a measured *unloaded* cost rather than a hand-picked cap.
+No assertion in these tests depends on the clock -- schedules come from a seed, the harness advances
+a virtual clock only on an `advance` action, shrinking stops at a candidate budget, and quiescence
+stops at a round budget -- so the timeout is only a hang guard, and it is deliberately generous
+enough to survive the process being descheduled when the whole suite runs under load. Override it
+directly with `WORKFLOWD_SIM_TIMEOUT_MS` on a machine slower still, or to shorten a run. Note that a
+*failing* seed additionally pays for shrinking, which re-runs the whole schedule once per candidate,
+so prefer `soak:remote` when a long run is expected to find something.
 
 The intentionally broken `singleMessageBatches` mutation seam is test-only. Its test demonstrates
 that command-before-fence ordering is found and deletion/value shrinking reduces the replay to the

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { simulationTimeoutMs, unloadedMillisecondsPerStep } from "./budget"
 import { simulationBudget } from "./generator"
 import { runSimulationSeed } from "./simulator"
 
@@ -11,18 +12,11 @@ const budget = simulationBudget({
     : { steps: process.env.WORKFLOWD_SIM_STEPS }),
 })
 
-// Worst observed cost is ~400ms per step on the slowest supported machine, so 600ms adds headroom.
-// A failing seed additionally pays for shrinking, which is unbounded here; long runs should use
-// `bun run soak:remote`, which has no test timeout at all.
-const millisecondsPerStep = 600
-const defaultTimeout = Math.max(30_000, budget.seeds.length * budget.steps * millisecondsPerStep)
-const timeout =
-  process.env.WORKFLOWD_SIM_TIMEOUT_MS === undefined
-    ? defaultTimeout
-    : Number(process.env.WORKFLOWD_SIM_TIMEOUT_MS)
-if (!Number.isSafeInteger(timeout) || timeout < 1) {
-  throw new Error("WORKFLOWD_SIM_TIMEOUT_MS must be a positive integer number of milliseconds")
-}
+// A failing seed additionally pays for shrinking, which is bounded by candidates rather than by
+// steps; long runs should use `bun run soak:remote`, which has no test timeout at all.
+const timeout = simulationTimeoutMs(
+  budget.seeds.length * budget.steps * unloadedMillisecondsPerStep,
+)
 
 test(
   "fixed CI seed corpus settles recoverable generated schedules",
