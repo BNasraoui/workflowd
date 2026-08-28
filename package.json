@@ -18,7 +18,6 @@
     "crap": "bun scripts/crap-report.ts",
     "crap:full": "bun run test:coverage && bun scripts/crap-report.ts",
     "crap:check": "bun scripts/check-crap.ts",
-    "crap:baseline": "bun scripts/check-crap.ts --write-baseline",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
