@@ -1,5 +1,11 @@
-import { expect, test } from "bun:test"
+import { expect, setDefaultTimeout, test } from "bun:test"
+import { simulationTimeoutMs } from "./budget"
 import { RemoteSimulation } from "./simulator"
+
+// Costs here are per test rather than per file, and the dearest of them is the backlog test
+// below at ~0.5s unloaded. Bun's 5s default left that one only a handful of times its own
+// cost, which a loaded machine eats; the rest of the file gets the same floor for free.
+setDefaultTimeout(simulationTimeoutMs(600))
 
 test("enqueue and delivery settle through the real coordinator, stores, runner, and transport", async () => {
   await using simulation = await RemoteSimulation.make(101)

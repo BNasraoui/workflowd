@@ -1,14 +1,29 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { SqlError } from "@effect/sql/SqlError"
 import { Effect, Layer, Logger, Queue } from "effect"
+import { AgentHarnessError } from "../src/agent-harness"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
 import { WorkflowStore, type WorkflowStorePort } from "../src/store/contracts"
 import { WorkSignal, WorkSignalLive, type WorkSignalPort } from "../src/work-signal"
-import { TicketSourceError } from "../src/qrspi/ports"
+import { WorkflowDefinitionValidationError } from "../src/qrspi/domain"
+import { QrspiRepositoryError, TicketSourceError } from "../src/qrspi/ports"
+import { StageCatalogError } from "../src/qrspi/stage-catalog"
 import { QrspiStoreDataError } from "../src/qrspi/store"
-import { WorkflowStartValidationError } from "../src/qrspi/workflow-start"
+import {
+  TicketReadError,
+  WorkflowStartBusy,
+  WorkflowStartConflict,
+  WorkflowStartNeedsOperator,
+  WorkflowStartRetryExhausted,
+  WorkflowStartSuperseded,
+  WorkflowStartUnauthorized,
+  WorkflowStartUncertain,
+  WorkflowStartValidationError,
+  type WorkflowStartError,
+} from "../src/qrspi/workflow-start"
 import { TestJobCanaryConflict, TestJobCanaryNotFound } from "../src/kernel/test-job-canary"
 
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
@@ -657,4 +672,62 @@ describe("routeRequest", () => {
       expect(await response.json()).toEqual({ error: "WorkflowStartValidationError" })
     },
   )
+})
+
+describe("QRSPI ingress status mapping", () => {
+  const failures: ReadonlyArray<readonly [WorkflowStartError, number]> = [
+    [new WorkflowStartUnauthorized({ reason: "Repository is not authorized" }), 400],
+    [new TicketReadError({ reason: "Beads ticket could not be decoded" }), 400],
+    [new WorkflowStartConflict({ reason: "Target reconciliation is still active" }), 409],
+    [new WorkflowStartSuperseded({ reason: "Authoritative input changed" }), 409],
+    [new WorkflowStartBusy({ reason: "WorkflowStart is leased by another caller" }), 409],
+    [new WorkflowStartUncertain({ reason: "Repository outcome is unknown" }), 409],
+    [new WorkflowStartNeedsOperator({ reason: "WorkflowStart requires an operator" }), 409],
+    [new WorkflowStartRetryExhausted({ reason: "Retry budget exhausted" }), 409],
+    [new TicketSourceError({ cause: new Error("bd unavailable") }), 503],
+    [new QrspiRepositoryError({ operation: "inspect", cause: new Error("api down") }), 503],
+    [new StageCatalogError({ reason: "unknown_reference", reference: "research@1" }), 503],
+    [
+      new AgentHarnessError({
+        operation: "describe",
+        cause: new Error("model unavailable"),
+        retryable: true,
+      }),
+      503,
+    ],
+    [new WorkflowDefinitionValidationError({ phase: "pure", reason: "no_runnable_stage" }), 503],
+    [
+      new WorkflowStartValidationError({ phase: "contract", reason: "unknown_contract_reference" }),
+      503,
+    ],
+    [new SqlError({ cause: new Error("database is locked") }), 503],
+    [
+      new QrspiStoreDataError({
+        record: "workflow_definition",
+        recordId: "definition-1",
+        message: "row is not decodable",
+      }),
+      500,
+    ],
+  ]
+
+  test.each(failures)("answers %s with its ingress status", async (error, status) => {
+    const response = await Effect.runPromise(
+      routeRequest(
+        new Request("http://localhost/workflows/qrspi", {
+          method: "POST",
+          body: "{}",
+          headers: { authorization: "Bearer kickoff-secret" },
+        }),
+        {
+          webhookSecret: "secret",
+          now: new Date("2026-07-19T12:00:00.000Z"),
+          qrspi: { token: "kickoff-secret", start: () => Effect.fail(error) },
+        },
+      ).pipe(Effect.provide(TestLayer)),
+    )
+
+    expect(response.status).toBe(status)
+    expect(await response.json()).toEqual({ error: error._tag })
+  })
 })
