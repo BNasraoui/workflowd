@@ -4,7 +4,7 @@ import { Effect, Layer, Schema } from "effect"
 import { KernelJobStore } from "../../src/kernel/job-store"
 import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
 import { McpQueriesLive } from "../../src/mcp/queries"
-import { callTool, type ToolCallContext } from "../../src/mcp/tools"
+import { callTool, TOOL_DEFINITIONS, type ToolCallContext } from "../../src/mcp/tools"
 import { kernelLayer, now } from "../kernel/job-store-harness"
 
 const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
@@ -49,6 +49,21 @@ const HostHealthJson = Schema.Struct({
   ),
 })
 
+test("all tools advertise structured outputs and semantic annotations", () => {
+  for (const tool of TOOL_DEFINITIONS) expect(tool.outputSchema.type).toBe("object")
+  for (const name of ["job_status", "list_recent_jobs", "host_health"]) {
+    expect(TOOL_DEFINITIONS.find((tool) => tool.name === name)?.annotations).toMatchObject({
+      readOnlyHint: true,
+    })
+  }
+  expect(TOOL_DEFINITIONS.find((tool) => tool.name === "enqueue_probe")?.annotations).toMatchObject(
+    {
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+  )
+})
+
 test("enqueue_probe acks immediately with the durable job id and the fire-and-ack contract", async () => {
   const result = await run(
     callTool("enqueue_probe", { host: "host-a", probe_id: "ack-shape" }, authorized),
@@ -61,6 +76,12 @@ test("enqueue_probe acks immediately with the durable job id and the fire-and-ac
   expect(text).toContain("End your turn now")
   expect(text).toContain("no blocking wait exists")
   expect(text).toContain('job_status ("remote-probe-ack-shape")')
+  expect(result.structuredContent).toEqual({
+    probe_id: "ack-shape",
+    job_id: "remote-probe-ack-shape",
+    host: "host-a",
+    status: "enqueued",
+  })
 })
 
 test("enqueue_probe with the same probe_id is idempotent and says so", async () => {

@@ -2,9 +2,65 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "@effect/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
-import { runStoreMigrations, runStoreMigrationsThrough0012 } from "../../src/store/migrations"
+import {
+  runStoreMigrations,
+  runStoreMigrationsThrough0012,
+  runStoreMigrationsThrough0016,
+} from "../../src/store/migrations"
 
 describe("migration 13: kernel session store", () => {
+  test("migration 17 preserves populated completion watches while removing baselines", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* runStoreMigrationsThrough0016
+        yield* sql`INSERT INTO kernel_workflow_instances (
+          instance_id, workflow_type, workflow_version, workflow_key, payload_json,
+          event_cursor, created_at
+        ) VALUES ('handoff', 'wait_for_agent', 1, 'parent:child', '{}', 0,
+          '2026-08-12T10:00:00.000Z')`
+        yield* sql`INSERT INTO kernel_working_resources (
+          resource_id, owning_host_id, absolute_path, kind, state, created_at, updated_at
+        ) VALUES ('resource', 'mint', '/tmp/workflowd-watch', 'worktree', 'reserved',
+          '2026-08-12T10:00:00.000Z', '2026-08-12T10:00:00.000Z')`
+        yield* sql`INSERT INTO kernel_sessions (
+          session_id, provider_kind, provider_version, provider_id, server_id, owning_host_id,
+          endpoint_alias, endpoint_identity, native_session_id, resource_id, state, revision,
+          created_at, updated_at
+        ) VALUES ('child', 'opencode', 1, 'provider', 'server', 'mint', 'local',
+          'http://127.0.0.1:4096', 'ses_child', 'resource', 'ready', 1,
+          '2026-08-12T10:00:00.000Z', '2026-08-12T10:00:00.000Z')`
+        yield* sql`INSERT INTO kernel_agent_completion_watches (
+          instance_id, wait_id, child_session_id, child_session_generation, provider_kind,
+          provider_version, provider_id, server_id, owning_host_id, endpoint_alias,
+          endpoint_identity, native_session_id, resource_id, baseline_version, baseline_json,
+          state, completion_event_sequence, registered_at, updated_at
+        ) VALUES ('handoff', 'wait', 'child', 1, 'opencode', 1, 'provider', 'server', 'mint',
+          'local', 'http://127.0.0.1:4096', 'ses_child', 'resource', 1,
+          '{"version":1,"messageFingerprints":["old"]}', 'watching', NULL,
+          '2026-08-12T10:00:00.000Z', '2026-08-12T10:00:00.000Z')`
+        yield* runStoreMigrations
+        const rows = yield* sql`SELECT * FROM kernel_agent_completion_watches`
+        const columns = yield* sql<{
+          readonly name: string
+        }>`PRAGMA table_xinfo(kernel_agent_completion_watches)`
+        const foreignKeyErrors = yield* sql`PRAGMA foreign_key_check`
+        const indexes = yield* sql<{
+          readonly name: string
+        }>`PRAGMA index_list(kernel_agent_completion_watches)`
+        return { rows, columns, foreignKeyErrors, indexes }
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+
+    expect(result.rows).toHaveLength(1)
+    expect(result.rows[0]).toMatchObject({ instance_id: "handoff", state: "watching" })
+    expect(result.columns.map(({ name }) => name)).not.toContain("baseline_json")
+    expect(result.foreignKeyErrors).toEqual([])
+    expect(result.indexes.map(({ name }) => name)).toContain(
+      "kernel_agent_completion_watches_active",
+    )
+  })
+
   test("upgrades the predecessor without losing data and creates strict session tables", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -35,6 +91,7 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 14, name: "kernel_agent_handoff" },
       { migration_id: 15, name: "kernel_remote_dispatch" },
       { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
+      { migration_id: 17, name: "remove_agent_completion_baseline" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(10)

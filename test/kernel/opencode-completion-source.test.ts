@@ -15,7 +15,6 @@ import {
 } from "../../src/kernel/opencode-resume-worker"
 import {
   OpenCodeCompletionProvider,
-  registerOpenCodeAgentWait,
   runOpenCodeCompletionSourceIteration,
   type OpenCodeCompletionProviderPort,
 } from "../../src/kernel/opencode-completion-source"
@@ -81,7 +80,7 @@ const arrange = Effect.gen(function* () {
       outputContractVersion: 1,
       retryPolicy: { maxAttempts: 3 },
     },
-    baseline: { version: 1, messageFingerprints: [] },
+    completionSource: options,
     registeredAt: at,
   })
 })
@@ -97,7 +96,7 @@ const options = {
 }
 
 describe("OpenCode agent completion source", () => {
-  test("captures bounded history after persisting the workflow boundary and before activating the watch", async () => {
+  test("catches up history after the durable registration boundary", async () => {
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
       listMessages: async () => [childAnswer],
@@ -111,51 +110,10 @@ describe("OpenCode agent completion source", () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
-        const sessions = yield* KernelSessionStore
-        for (const name of ["child", "parent"] as const) {
-          yield* sessions.registerResource({
-            resourceId: `${name}-resource`,
-            owningHostId: "mint",
-            absolutePath: name === "child" ? process.cwd() : `${process.cwd()}/src`,
-            kind: "worktree",
-            createdAt: at,
-          })
-          yield* sessions.registerSession({
-            sessionId: `${name}-stable`,
-            providerKind: "opencode",
-            providerVersion: 1,
-            providerId: "opencode-primary",
-            serverId: "server-a",
-            owningHostId: "mint",
-            endpointAlias: "local",
-            endpointIdentity: "http://127.0.0.1:4096",
-            nativeSessionId: `ses_${name}`,
-            resourceId: `${name}-resource`,
-            createdAt: at,
-          })
-        }
-        const registered = yield* registerOpenCodeAgentWait(
-          {
-            instanceId: "registered-through-adapter",
-            waitId: "wait-child",
-            workflow: {
-              kind: "wait_for_agent",
-              childSessionId: "child-stable",
-              childSessionGeneration: 1,
-              parentSessionId: "parent-stable",
-              resumePrompt: { task: "Continue." },
-              resumePromptText: '{"task":"Continue."}',
-              outputContract: "test.parent-result",
-              outputContractVersion: 1,
-              retryPolicy: { maxAttempts: 3 },
-            },
-            registeredAt: at,
-          },
-          options,
-        )
-        const rows = yield* sql<{ readonly baseline_json: string }>`SELECT baseline_json
-          FROM kernel_agent_completion_watches WHERE instance_id = 'registered-through-adapter'`
-        return { registered, baseline: JSON.parse(rows[0]!.baseline_json) }
+        yield* arrange
+        const completed = yield* runOpenCodeCompletionSourceIteration(options)
+        const rows = yield* sql`SELECT event_type FROM kernel_events`
+        return { completed, rows }
       }).pipe(
         Effect.provide(stores),
         Effect.provideService(OpenCodeCompletionProvider, provider),
@@ -163,8 +121,8 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(result.registered.status).toBe("registered")
-    expect(result.baseline.messageFingerprints).toEqual(["id:msg_terminal_1"])
+    expect(result.completed.status).toBe("completed")
+    expect(result.rows).toHaveLength(1)
   })
 
   test("observes without prompting, commits one neutral fact, then wakes durable delivery work", async () => {
@@ -181,6 +139,7 @@ describe("OpenCode agent completion source", () => {
       subscribeEvents: async () => {
         providerOperations.push("subscribeEvents")
         return (async function* () {
+          providerOperations.push("streamStarted")
           yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
         })()
       },
@@ -210,7 +169,12 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(providerOperations).toEqual(["sessionExists", "subscribeEvents", "listMessages"])
+    expect(providerOperations).toEqual([
+      "sessionExists",
+      "subscribeEvents",
+      "streamStarted",
+      "listMessages",
+    ])
     expect(result.iteration).toMatchObject({ status: "completed", childSessionId: "child-stable" })
     expect(result.rows).toHaveLength(1)
     expect(result.rows[0]).toMatchObject({ event_type: "agent.session.completed" })
@@ -259,7 +223,7 @@ describe("OpenCode agent completion source", () => {
     expect(subscriptions).toBe(1)
   })
 
-  test("fails closed when bounded history contains only a stale terminal answer", async () => {
+  test("ignores stale history and accepts a live completion", async () => {
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
       listMessages: async () => [
@@ -269,7 +233,10 @@ describe("OpenCode agent completion source", () => {
           time: { created: at.getTime() - 2_000, completed: at.getTime() - 1_000 },
         },
       ],
-      subscribeEvents: async () => (async function* () {})(),
+      subscribeEvents: async () =>
+        (async function* () {
+          yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
+        })(),
     }
     const signals: WorkSignalPort = {
       subscribe: () => Effect.die(new Error("unused")),
@@ -292,11 +259,48 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(result.iteration).toMatchObject({
-      status: "operator_required",
-      reason: "stale_completion",
-    })
-    expect(result.count).toBe(0)
+    expect(result.iteration).toMatchObject({ status: "completed" })
+    expect(result.count).toBe(1)
+  })
+
+  test("ignores a stale terminal event replayed by the live subscription", async () => {
+    const stale = {
+      id: "msg_stale_replay",
+      role: "assistant" as const,
+      time: { created: at.getTime() - 2_000, completed: at.getTime() - 1_000 },
+    }
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      listMessages: async () => [],
+      subscribeEvents: async () =>
+        (async function* () {
+          yield { type: "message.updated" as const, sessionID: "ses_child", message: stale }
+          yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
+        })(),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* arrange
+        const iteration = yield* runOpenCodeCompletionSourceIteration(options)
+        const events = yield* sql<{
+          readonly payload_json: string
+        }>`SELECT payload_json FROM kernel_events`
+        return { iteration, payload: JSON.parse(events[0]!.payload_json) }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.iteration.status).toBe("completed")
+    expect(result.payload.completedAt).toBe(new Date(childAnswer.time.completed).toISOString())
   })
 
   test("quarantines custody mismatch without calling the provider", async () => {

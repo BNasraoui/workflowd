@@ -68,7 +68,14 @@ const arrangeDelivery = Effect.gen(function* () {
       outputContractVersion: 1,
       retryPolicy: { maxAttempts: 3 },
     },
-    baseline: { version: 1, messageFingerprints: [] },
+    completionSource: {
+      owningHostId: "mint",
+      providerId: "opencode-primary",
+      serverId: "server-a",
+      endpointAlias: "local",
+      endpointIdentity: "http://127.0.0.1:4096",
+      providerVersion: 1,
+    },
     registeredAt: at,
   })
   yield* recordAgentSessionCompletion({

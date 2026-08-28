@@ -21,6 +21,7 @@ import {
   type AgentWaitIngressError,
   type AgentWaitIngressPort,
 } from "./kernel/agent-wait-ingress"
+import { KernelStoreConflictError } from "./kernel/event-store"
 
 type QrspiIngress = {
   readonly token: string
@@ -218,6 +219,9 @@ function agentWaitFailure(error: AgentWaitIngressError): Response {
       { error: "custody", reason: error.reason, detail: error.explanation },
       { status: 409 },
     )
+  }
+  if (error instanceof KernelStoreConflictError) {
+    return Response.json({ error: "conflict", reason: "idempotency_conflict" }, { status: 409 })
   }
   return Response.json({ error: "internal server error" }, { status: 500 })
 }

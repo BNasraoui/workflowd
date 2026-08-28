@@ -231,7 +231,6 @@ export const makeLiveLayer = (config: AppConfig) => {
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const agentWaitIngressLayer = AgentWaitIngressLive(completionSourceOptions).pipe(
     Layer.provideMerge(storeLayer),
-    Layer.provideMerge(providerLayer),
     Layer.provideMerge(workSignalLayer),
   )
   const qrspiLayer =

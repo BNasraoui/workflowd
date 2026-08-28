@@ -68,6 +68,11 @@ describe("wait_for_agent", () => {
       "child_session_id",
       "resume_prompt",
     ])
+    expect(definition!.outputSchema.required).toEqual(["wait_id", "instance_id", "status"])
+    expect(definition!.annotations).toMatchObject({
+      destructiveHint: false,
+      idempotentHint: true,
+    })
   })
 
   test("proxies to the daemon ingress and acks with the wait id", async () => {
@@ -94,6 +99,11 @@ describe("wait_for_agent", () => {
     expect(text).toContain("agent-wait-abc")
     expect(text).toContain("End your turn now")
     expect(text).toContain("Do not poll")
+    expect(result.structuredContent).toEqual({
+      wait_id: "agent-wait-abc",
+      instance_id: "agent-wait-instance-abc",
+      status: "registered",
+    })
 
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe("http://127.0.0.1:8787/workflows/agent-waits")
@@ -189,6 +199,35 @@ describe("wait_for_agent", () => {
 
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain("child session child-stable is not in kernel custody")
+  })
+
+  test("relays idempotency conflicts as a structured refusal", async () => {
+    const result = await run(
+      callTool(
+        "wait_for_agent",
+        args,
+        daemon(() => json({ error: "conflict", reason: "idempotency_conflict" }, 409)),
+      ),
+    )
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: "conflict", reason: "idempotency_conflict" },
+    })
+    expect(firstText(result)).toContain("idempotency_conflict")
+  })
+
+  test("rejects a multibyte prompt that exceeds the daemon byte bound", async () => {
+    const calls: Array<Call> = []
+    const result = await run(
+      callTool(
+        "wait_for_agent",
+        { ...args, resume_prompt: "é".repeat(20_000) },
+        daemon(() => json({}), calls),
+      ),
+    )
+    expect(result.isError).toBe(true)
+    expect(calls).toHaveLength(0)
   })
 
   test("reports an unreachable daemon as an actionable tool error", async () => {

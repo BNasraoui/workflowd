@@ -9,6 +9,7 @@ import {
   type AgentWaitIngressPort,
   type AgentWaitReceipt,
 } from "../../src/kernel/agent-wait-ingress"
+import { KernelStoreConflictError } from "../../src/kernel/event-store"
 
 const token = "agent-wait-secret"
 const now = new Date("2026-08-14T09:00:00.000Z")
@@ -151,5 +152,19 @@ describe("POST /workflows/agent-waits", () => {
     expect(payload.reason).toBe("not_in_kernel_custody")
     expect(payload.detail).toContain("child session child-stable")
     expect(payload.detail).toContain("kernel_sessions")
+  })
+
+  test("surfaces immutable idempotency conflicts as an opaque caller conflict", async () => {
+    const response = await route(post(body, authorization), () =>
+      Effect.fail(
+        new KernelStoreConflictError({ record: "instance", key: "secret", instanceId: "secret" }),
+      ),
+    )
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({
+      error: "conflict",
+      reason: "idempotency_conflict",
+    })
   })
 })

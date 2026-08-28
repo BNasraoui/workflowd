@@ -7,6 +7,13 @@ runs on mint beside the coordinator, listens on loopback
 no workflow state of its own — every tool call reads or writes the same
 database the coordinator and the remote-enqueue CLI use.
 
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All five
+tools advertise an `outputSchema` and return the corresponding
+`structuredContent` in addition to a human-readable text rendering. Tool
+names use the SEP-986 canonical character set. The three query tools carry
+`readOnlyHint`; the two receipt tools carry non-destructive and idempotency
+annotations.
+
 ## The fire-and-ack contract
 
 Every write tool returns a **receipt**, never a result. Work runs
@@ -74,14 +81,25 @@ child's custody generation, and the prompt, so re-registering an identical
 handoff returns `status: "duplicate"` with the same `wait_id` rather than
 forking a second watch. Passing `idempotency_key` pins that identity
 explicitly. Workflow instance payloads are immutable, so reusing a key with a
-different `resume_prompt` is refused rather than silently rewritten.
+different `resume_prompt` or child generation is refused with the
+machine-readable reason `idempotency_conflict` rather than silently rewritten.
 
-**Transport.** Unlike the four read tools, which query SQLite directly, this
+**Transport.** Unlike the three read tools, which query SQLite directly, this
 tool proxies to the workflowd daemon's `POST /workflows/agent-waits` ingress.
-Registering a wait has to capture a live OpenCode history baseline and wake
-kernel work, so the MCP process stays stateless and lets the daemon own that
-machinery. The tool is disabled unless the MCP unit is configured with a
-daemon URL and ingress token (below).
+The daemon atomically persists the workflow instance, completion watch, wait,
+and complete custody predicate before acknowledging. Its asynchronous
+completion source then eagerly opens the provider event subscription and
+performs bounded history catch-up around that durable registration boundary.
+The MCP process stays stateless. The tool is disabled unless the MCP unit is
+configured with a daemon URL and ingress token (below).
+
+SDK 1.30.0 includes experimental SEP-1686 Tasks support, but workflowd does
+not advertise it yet. The SDK requires a real `TaskStore` and task-result
+lifecycle; merely mapping protocol methods by hand would be non-conformant.
+A follow-up can expose durable workflow jobs through `tasks/get` and
+`tasks/result`, then mark `wait_for_agent` and `enqueue_probe` with
+`execution.taskSupport: "optional"`. Until then their documented contract is
+the existing receipt plus `job_status` polling.
 
 Only the `opencode` provider is supported in this slice; the underlying store
 already allows `codex` and `claude` for later.
@@ -89,7 +107,7 @@ already allows `codex` and `claude` for later.
 ## Authorization
 
 Reads need no credential beyond reaching the transport (loopback or your
-tailnet). The single write tool is gated by a bearer token:
+tailnet). Both write tools are gated by a bearer token:
 
 - `WORKFLOWD_MCP_TOKEN` — token value directly (development only).
 - `WORKFLOWD_MCP_TOKEN_FILE` — path to a file containing the token. The
@@ -197,6 +215,6 @@ Responses:
 | 202 | Registered. Body is `{ waitId, instanceId, status }` with `status` either `registered` or `duplicate`. |
 | 400 | Malformed JSON or payload. |
 | 401 | Missing or wrong bearer token. |
-| 409 | Custody refusal. Body carries `reason` and a `detail` naming the exact missing custody. |
+| 409 | Custody or immutable idempotency conflict. Custody bodies carry a precise reason and detail; immutable replay conflicts carry `reason: "idempotency_conflict"` without internal detail. |
 | 413 | Body exceeds `WORKFLOWD_MAX_WEBHOOK_BYTES`. |
-| 500 | Store or provider fault; details stay server-side. |
+| 500 | Store fault; details stay server-side. |

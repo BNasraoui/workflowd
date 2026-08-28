@@ -3,19 +3,22 @@ import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import type { ParseResult } from "effect"
+import {
+  AgentWaitReceipt,
+  AgentWaitSubmission,
+  type AgentWaitSubmission as AgentWaitSubmissionType,
+} from "../agent-wait-contract"
 import { WorkSignal } from "../work-signal"
-import { AgentHandoffStore, type AgentHandoffStoreError } from "./agent-handoff-store"
+import {
+  AgentHandoffStore,
+  type AgentCompletionSourceIdentity,
+  type AgentHandoffStoreError,
+} from "./agent-handoff-store"
 import type {
   KernelStoreConflictError,
   KernelStoreDataError,
   KernelStoreInputError,
 } from "./event-store"
-import {
-  OpenCodeCompletionProvider,
-  registerOpenCodeAgentWait,
-  type OpenCodeCompletionSourceError,
-  type OpenCodeCompletionSourceOptions,
-} from "./opencode-completion-source"
 import { canonicalJson } from "./session-store-support"
 
 /**
@@ -34,32 +37,8 @@ export const AgentWakeResult = Schema.Struct({
 export const AGENT_WAKE_MAX_OUTPUT_BYTES = 16_384
 
 /** Bounded well inside the store's 65 536-byte canonical prompt ceiling. */
-export const MAX_RESUME_PROMPT_BYTES = 32_768
-const MAX_SESSION_ID_BYTES = 256
-const MAX_IDEMPOTENCY_KEY_BYTES = 128
 const RESUME_MAX_ATTEMPTS = 3
-
-const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
-const bounded = (maximum: number) =>
-  Schema.NonEmptyString.pipe(
-    Schema.filter((value) => utf8Bytes(value) <= maximum, {
-      message: () => `must be at most ${maximum} UTF-8 bytes`,
-    }),
-  )
-
-export const AgentWaitSubmission = Schema.Struct({
-  parentSessionId: bounded(MAX_SESSION_ID_BYTES),
-  childSessionId: bounded(MAX_SESSION_ID_BYTES),
-  resumePrompt: bounded(MAX_RESUME_PROMPT_BYTES),
-  idempotencyKey: Schema.optional(bounded(MAX_IDEMPOTENCY_KEY_BYTES)),
-})
-export type AgentWaitSubmission = typeof AgentWaitSubmission.Type
-
-export type AgentWaitReceipt = {
-  readonly waitId: string
-  readonly instanceId: string
-  readonly status: "registered" | "duplicate"
-}
+export { AgentWaitReceipt, AgentWaitSubmission }
 
 export type AgentWaitCustodyReason =
   | "not_in_kernel_custody"
@@ -106,7 +85,6 @@ export class AgentWaitCustodyError extends Data.TaggedError("AgentWaitCustodyErr
 export type AgentWaitIngressError =
   | AgentWaitCustodyError
   | AgentHandoffStoreError
-  | OpenCodeCompletionSourceError
   | KernelStoreConflictError
   | KernelStoreDataError
   | KernelStoreInputError
@@ -115,7 +93,7 @@ export type AgentWaitIngressError =
 
 export type AgentWaitIngressPort = {
   readonly register: (
-    input: AgentWaitSubmission,
+    input: AgentWaitSubmissionType,
     now: Date,
   ) => Effect.Effect<AgentWaitReceipt, AgentWaitIngressError>
 }
@@ -215,11 +193,10 @@ const readCustody = (role: "parent" | "child", sessionId: string) =>
     return custody
   })
 
-const make = (options: OpenCodeCompletionSourceOptions) =>
+const make = (completionSource: AgentCompletionSourceIdentity) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     const handoffs = yield* AgentHandoffStore
-    const provider = yield* OpenCodeCompletionProvider
     const signals = yield* WorkSignal
 
     const register: AgentWaitIngressPort["register"] = (input, now) =>
@@ -240,35 +217,33 @@ const make = (options: OpenCodeCompletionSourceOptions) =>
           resumePromptText: prompt.resumePromptText,
           idempotencyKey: submission.idempotencyKey,
         })
-        const registered = yield* registerOpenCodeAgentWait(
-          {
-            instanceId: identifiers.instanceId,
-            waitId: identifiers.waitId,
-            workflow: {
-              kind: "wait_for_agent",
-              childSessionId: submission.childSessionId,
-              childSessionGeneration: child.revision,
-              parentSessionId: submission.parentSessionId,
-              resumePrompt: prompt.resumePrompt,
-              resumePromptText: prompt.resumePromptText,
-              outputContract: AGENT_WAKE_CONTRACT.name,
-              outputContractVersion: AGENT_WAKE_CONTRACT.version,
-              retryPolicy: { maxAttempts: RESUME_MAX_ATTEMPTS },
-            },
-            registeredAt: now,
+        const registered = yield* handoffs.register({
+          instanceId: identifiers.instanceId,
+          waitId: identifiers.waitId,
+          workflow: {
+            kind: "wait_for_agent",
+            childSessionId: submission.childSessionId,
+            childSessionGeneration: child.revision,
+            parentSessionId: submission.parentSessionId,
+            resumePrompt: prompt.resumePrompt,
+            resumePromptText: prompt.resumePromptText,
+            outputContract: AGENT_WAKE_CONTRACT.name,
+            outputContractVersion: AGENT_WAKE_CONTRACT.version,
+            retryPolicy: { maxAttempts: RESUME_MAX_ATTEMPTS },
           },
-          options,
-        )
+          completionSource,
+          registeredAt: now,
+        })
+        yield* signals.wake("agent-completion")
         return { ...identifiers, status: registered.status }
       }).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.provideService(AgentHandoffStore, handoffs),
-        Effect.provideService(OpenCodeCompletionProvider, provider),
         Effect.provideService(WorkSignal, signals),
       )
 
     return AgentWaitIngress.of({ register })
   })
 
-export const AgentWaitIngressLive = (options: OpenCodeCompletionSourceOptions) =>
-  Layer.effect(AgentWaitIngress, make(options))
+export const AgentWaitIngressLive = (completionSource: AgentCompletionSourceIdentity) =>
+  Layer.effect(AgentWaitIngress, make(completionSource))

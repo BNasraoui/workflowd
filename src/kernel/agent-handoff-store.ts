@@ -20,16 +20,6 @@ import {
   type RecordEventResult,
 } from "./event-store"
 
-export const MAX_AGENT_COMPLETION_BASELINE_MESSAGES = 20
-
-const Baseline = Schema.Struct({
-  version: Schema.Literal(1),
-  messageFingerprints: Schema.Array(Schema.NonEmptyString.pipe(Schema.maxLength(2_048))).pipe(
-    Schema.maxItems(MAX_AGENT_COMPLETION_BASELINE_MESSAGES),
-  ),
-})
-export type AgentCompletionBaseline = typeof Baseline.Type
-
 const SessionCustodyRow = Schema.Struct({
   session_id: Schema.String,
   provider_kind: Schema.Literal("opencode", "codex", "claude"),
@@ -41,6 +31,7 @@ const SessionCustodyRow = Schema.Struct({
   endpoint_identity: Schema.String,
   native_session_id: Schema.String,
   resource_id: Schema.String,
+  resource_state: Schema.String,
   state: Schema.String,
   revision: Schema.Int.pipe(Schema.positive()),
 })
@@ -58,14 +49,20 @@ export type RegisterAgentWaitInput = {
   readonly instanceId: string
   readonly waitId: string
   readonly workflow: WaitForAgentWorkflowV1
-  readonly baseline: AgentCompletionBaseline
+  readonly completionSource: AgentCompletionSourceIdentity
   readonly registeredAt: Date
 }
 
+export type AgentCompletionSourceIdentity = {
+  readonly owningHostId: string
+  readonly providerId: string
+  readonly serverId: string
+  readonly endpointAlias: string
+  readonly endpointIdentity: string
+  readonly providerVersion: number
+}
+
 export type AgentHandoffStorePort = {
-  readonly prepare: (
-    input: Omit<RegisterAgentWaitInput, "baseline">,
-  ) => Effect.Effect<{ readonly status: "prepared" | "duplicate" }, StoreError>
   readonly register: (
     input: RegisterAgentWaitInput,
   ) => Effect.Effect<{ readonly status: "registered" | "duplicate" }, StoreError>
@@ -97,10 +94,10 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   const events = yield* KernelEventStore
 
-  const prepare: AgentHandoffStorePort["prepare"] = (input) =>
+  const register: AgentHandoffStorePort["register"] = (input) =>
     Effect.gen(function* () {
       const workflow = yield* decodeWorkflow(input.workflow)
-      const created = yield* events.createInstance({
+      yield* events.createInstance({
         instanceId: input.instanceId,
         workflowType: WAIT_FOR_AGENT_WORKFLOW_TYPE,
         workflowVersion: WAIT_FOR_AGENT_WORKFLOW_VERSION,
@@ -108,36 +105,44 @@ const make = Effect.gen(function* () {
         payload: workflow,
         createdAt: input.registeredAt,
       })
-      return {
-        status: created.status === "created" ? ("prepared" as const) : ("duplicate" as const),
-      }
-    })
-
-  const register: AgentHandoffStorePort["register"] = (input) =>
-    Effect.gen(function* () {
-      const workflow = yield* decodeWorkflow(input.workflow)
-      const baseline = yield* Schema.decodeUnknown(Baseline)(input.baseline, {
-        onExcessProperty: "error",
-      }).pipe(Effect.mapError(decodeError("decode child history baseline")))
-      yield* prepare(input)
-      const sessionRows = yield* sql`SELECT * FROM kernel_sessions
-        WHERE session_id = ${workflow.childSessionId}`
+      const sessionRows = yield* sql`SELECT session.*, resource.state AS resource_state
+        FROM kernel_sessions AS session
+        JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
+        WHERE session.session_id = ${workflow.childSessionId}`
       const child = yield* Schema.decodeUnknown(SessionCustodyRow)(sessionRows[0]).pipe(
         Effect.mapError(decodeError("decode child session custody")),
       )
       if (
         child.session_id !== workflow.childSessionId ||
         child.revision !== workflow.childSessionGeneration ||
-        !["ready", "active"].includes(child.state)
+        !["ready", "active"].includes(child.state) ||
+        child.resource_state !== "reserved" ||
+        child.provider_kind !== "opencode" ||
+        child.provider_version !== input.completionSource.providerVersion ||
+        child.provider_id !== input.completionSource.providerId ||
+        child.server_id !== input.completionSource.serverId ||
+        child.owning_host_id !== input.completionSource.owningHostId ||
+        child.endpoint_alias !== input.completionSource.endpointAlias ||
+        child.endpoint_identity !== input.completionSource.endpointIdentity
       ) {
         return yield* new AgentHandoffStoreError({
           operation: "validate child session generation",
           cause: new Error("child session is stale or unavailable"),
         })
       }
-      const parentRows = yield* sql`SELECT session_id FROM kernel_sessions
-        WHERE session_id = ${workflow.parentSessionId} AND state IN ('ready', 'active')`
-      if (parentRows.length !== 1) {
+      const parentRows = yield* sql`SELECT session.*, resource.state AS resource_state
+        FROM kernel_sessions AS session
+        JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
+        WHERE session.session_id = ${workflow.parentSessionId}`
+      const parent = yield* Schema.decodeUnknown(SessionCustodyRow)(parentRows[0]).pipe(
+        Effect.mapError(decodeError("decode parent session custody")),
+      )
+      if (
+        parent.session_id !== workflow.parentSessionId ||
+        !["ready", "active"].includes(parent.state) ||
+        parent.resource_state !== "reserved" ||
+        parent.provider_kind !== "opencode"
+      ) {
         return yield* new AgentHandoffStoreError({
           operation: "validate parent session",
           cause: new Error("parent session is unavailable"),
@@ -147,27 +152,33 @@ const make = Effect.gen(function* () {
         instance_id, wait_id, child_session_id, child_session_generation,
         provider_kind, provider_version, provider_id, server_id, owning_host_id,
         endpoint_alias, endpoint_identity, native_session_id, resource_id,
-        baseline_version, baseline_json, state, completion_event_sequence,
-        registered_at, updated_at
+        state, completion_event_sequence, registered_at, updated_at
       ) VALUES (
         ${input.instanceId}, ${input.waitId}, ${child.session_id}, ${workflow.childSessionGeneration},
         ${child.provider_kind}, ${child.provider_version}, ${child.provider_id}, ${child.server_id},
         ${child.owning_host_id}, ${child.endpoint_alias}, ${child.endpoint_identity},
-        ${child.native_session_id}, ${child.resource_id}, ${baseline.version},
-        ${canonicalJson(baseline)}, 'watching', NULL,
+        ${child.native_session_id}, ${child.resource_id}, 'watching', NULL,
         ${input.registeredAt.toISOString()}, ${input.registeredAt.toISOString()}
       ) ON CONFLICT (instance_id) DO NOTHING RETURNING instance_id`
       if (inserted.length === 0) {
         const existing = yield* sql`SELECT wait_id, child_session_id, child_session_generation,
-            baseline_version, baseline_json
+            provider_kind, provider_version, provider_id, server_id, owning_host_id,
+            endpoint_alias, endpoint_identity, native_session_id, resource_id
           FROM kernel_agent_completion_watches WHERE instance_id = ${input.instanceId}`
         const row = existing[0]
         const exact =
           row?.wait_id === input.waitId &&
           row.child_session_id === workflow.childSessionId &&
           row.child_session_generation === workflow.childSessionGeneration &&
-          row.baseline_version === baseline.version &&
-          row.baseline_json === canonicalJson(baseline)
+          row.provider_kind === child.provider_kind &&
+          row.provider_version === child.provider_version &&
+          row.provider_id === child.provider_id &&
+          row.server_id === child.server_id &&
+          row.owning_host_id === child.owning_host_id &&
+          row.endpoint_alias === child.endpoint_alias &&
+          row.endpoint_identity === child.endpoint_identity &&
+          row.native_session_id === child.native_session_id &&
+          row.resource_id === child.resource_id
         if (!exact) {
           return yield* new AgentHandoffStoreError({
             operation: "validate saved watch replay",
@@ -184,7 +195,7 @@ const make = Effect.gen(function* () {
       return { status: inserted.length > 0 ? ("registered" as const) : ("duplicate" as const) }
     }).pipe(sql.withTransaction)
 
-  return AgentHandoffStore.of({ prepare, register })
+  return AgentHandoffStore.of({ register })
 })
 
 export const AgentHandoffStoreLive = Layer.effect(AgentHandoffStore, make)

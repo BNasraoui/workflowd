@@ -11,10 +11,6 @@ import {
 } from "../../src/kernel/agent-wait-ingress"
 import { KernelEventStoreLive, KernelStoreConflictError } from "../../src/kernel/event-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
-import {
-  OpenCodeCompletionProvider,
-  type OpenCodeCompletionProviderPort,
-} from "../../src/kernel/opencode-completion-source"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignal, type WorkSignalPort } from "../../src/work-signal"
 
@@ -27,13 +23,6 @@ const options = {
   endpointAlias: "local",
   endpointIdentity: "http://127.0.0.1:4096",
   providerVersion: 1,
-  now: () => at,
-}
-
-const provider: OpenCodeCompletionProviderPort = {
-  sessionExists: async () => true,
-  listMessages: async () => [],
-  subscribeEvents: async () => (async function* () {})(),
 }
 
 const signals: WorkSignalPort = {
@@ -53,7 +42,6 @@ const layer = (() => {
   const stores = Layer.mergeAll(events, sessions, handoffs)
   return AgentWaitIngressLive(options).pipe(
     Layer.provideMerge(stores),
-    Layer.provideMerge(Layer.succeed(OpenCodeCompletionProvider, provider)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 })()
@@ -192,6 +180,32 @@ describe("agent wait ingress", () => {
     // The workflow instance payload is immutable, so the store refuses the
     // conflicting replay instead of overwriting the recorded prompt.
     expect(failure).toBeInstanceOf(KernelStoreConflictError)
+  })
+
+  test("generation changes conflict for a keyed retry but create a new unkeyed wait", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        yield* enterCustody
+        const ingress = yield* AgentWaitIngress
+        const keyed = yield* ingress.register({ ...submission, idempotencyKey: "handoff-7" }, at)
+        const unkeyed = yield* ingress.register(submission, at)
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_sessions SET revision = 2 WHERE session_id = 'child-stable'`
+        const keyedRetry = yield* ingress
+          .register({ ...submission, idempotencyKey: "handoff-7" }, at)
+          .pipe(Effect.either)
+        const nextGeneration = yield* ingress.register(submission, at)
+        return { keyed, unkeyed, keyedRetry, nextGeneration }
+      }),
+    )
+
+    expect(result.keyedRetry._tag).toBe("Left")
+    if (result.keyedRetry._tag === "Left") {
+      expect(result.keyedRetry.left).toBeInstanceOf(KernelStoreConflictError)
+    }
+    expect(result.nextGeneration.status).toBe("registered")
+    expect(result.nextGeneration.instanceId).not.toBe(result.unkeyed.instanceId)
+    expect(result.nextGeneration.instanceId).not.toBe(result.keyed.instanceId)
   })
 
   test("refuses a child that is not in kernel custody and names the missing custody", async () => {
