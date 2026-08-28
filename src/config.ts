@@ -253,14 +253,26 @@ async function optionalSecret(
   return secret(env, directName, fileName, read)
 }
 
-export async function loadConfig(
+interface JobTiming {
+  readonly jobTimeoutMs: number
+  readonly jobLeaseDurationMs: number
+}
+
+interface PublicationTiming {
+  readonly publicationTimeoutMs: number
+  readonly publicationLeaseDurationMs: number
+}
+
+interface ResolvedSecrets {
+  readonly webhookSecret: string
+  readonly openCodePassword: string
+  readonly testJobToken: string | undefined
+}
+
+async function loadSecrets(
   env: Record<string, string | undefined>,
-  options: ConfigLoadOptions = {},
-): Promise<AppConfig> {
-  const home = options.home ?? homedir()
-  const read = options.readFile ?? ((path: string) => readFile(path, "utf8"))
-  const stateRoot = env.WORKFLOWD_STATE_DIR ?? join(home, ".local/state/workflowd")
-  const cacheRoot = env.WORKFLOWD_CACHE_DIR ?? join(home, ".local/share/workflowd")
+  read: (path: string) => Promise<string>,
+): Promise<ResolvedSecrets> {
   const webhookSecret = await secret(
     env,
     "GITHUB_WEBHOOK_SECRET",
@@ -282,6 +294,10 @@ export async function loadConfig(
   if (testJobToken !== undefined && testJobToken.length < 8) {
     throw new Error("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
   }
+  return { webhookSecret, openCodePassword, testJobToken }
+}
+
+function loadJobTiming(env: Record<string, string | undefined>): JobTiming {
   const jobTimeoutMs = positiveInteger(
     env.WORKFLOWD_JOB_TIMEOUT_MS,
     30 * 60_000,
@@ -295,6 +311,10 @@ export async function loadConfig(
   if (jobLeaseDurationMs <= jobTimeoutMs) {
     throw new Error("WORKFLOWD_JOB_LEASE_MS must be greater than WORKFLOWD_JOB_TIMEOUT_MS")
   }
+  return { jobTimeoutMs, jobLeaseDurationMs }
+}
+
+function loadPublicationTiming(env: Record<string, string | undefined>): PublicationTiming {
   const publicationTimeoutMs = positiveInteger(
     env.WORKFLOWD_PUBLICATION_TIMEOUT_MS,
     60_000,
@@ -310,12 +330,14 @@ export async function loadConfig(
       "WORKFLOWD_PUBLICATION_LEASE_MS must be greater than WORKFLOWD_PUBLICATION_TIMEOUT_MS",
     )
   }
-  const qrspi = loadQrspiConfig(env)
-  const fixWorkEnabled = booleanSetting(
-    env.WORKFLOWD_FIX_WORK_ENABLED,
-    "WORKFLOWD_FIX_WORK_ENABLED",
-  )
-  const configuredTrustedAgentUsers = trustedAgentUsers(env.WORKFLOWD_TRUSTED_AGENT_USERS)
+  return { publicationTimeoutMs, publicationLeaseDurationMs }
+}
+
+function fixWorkSigningKey(
+  env: Record<string, string | undefined>,
+  fixWorkEnabled: boolean,
+  configuredTrustedAgentUsers: ReadonlyArray<string>,
+): string | undefined {
   const gitSigningKey = env.WORKFLOWD_GIT_SIGNING_KEY
   if (fixWorkEnabled && gitSigningKey === undefined) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY is required when Fix Work is enabled")
@@ -326,107 +348,183 @@ export async function loadConfig(
   if (gitSigningKey !== undefined && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(gitSigningKey)) {
     throw new Error("WORKFLOWD_GIT_SIGNING_KEY must be a full OpenPGP fingerprint")
   }
-  const openCodeBaseUrl = httpUrl(
-    env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
-    "OPENCODE_SERVER_URL",
+  return gitSigningKey
+}
+
+function openCodeBaseUrl(env: Record<string, string | undefined>): string {
+  return httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL")
+}
+
+function workerHostId(env: Record<string, string | undefined>): string {
+  return agentId(env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost", "WORKFLOWD_HOST_ID")
+}
+
+function stateRoot(env: Record<string, string | undefined>, home: string): string {
+  return env.WORKFLOWD_STATE_DIR ?? join(home, ".local/state/workflowd")
+}
+
+function cacheRoot(env: Record<string, string | undefined>, home: string): string {
+  return env.WORKFLOWD_CACHE_DIR ?? join(home, ".local/share/workflowd")
+}
+
+function httpSection(env: Record<string, string | undefined>): HttpConfig {
+  return {
+    host: env.WORKFLOWD_HOST ?? "127.0.0.1",
+    port: port(env.WORKFLOWD_PORT),
+    maxWebhookBytes: positiveInteger(
+      env.WORKFLOWD_MAX_WEBHOOK_BYTES,
+      1_048_576,
+      "WORKFLOWD_MAX_WEBHOOK_BYTES",
+    ),
+  }
+}
+
+function githubSection(
+  env: Record<string, string | undefined>,
+  webhookSecret: string,
+): GitHubConfig {
+  return {
+    appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
+    privateKeyPath: required(env, "GITHUB_PRIVATE_KEY_PATH"),
+    webhookSecret,
+  }
+}
+
+function storageSection(env: Record<string, string | undefined>, home: string): StorageConfig {
+  return {
+    databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot(env, home), "workflowd.db"),
+  }
+}
+
+function workspaceSection(
+  env: Record<string, string | undefined>,
+  home: string,
+  gitSigningKey: string | undefined,
+): WorkspaceConfig {
+  const cache = cacheRoot(env, home)
+  return {
+    repositoryRoot: env.WORKFLOWD_REPOSITORY_ROOT ?? join(cache, "repositories"),
+    worktreeRoot: env.WORKFLOWD_WORKTREE_ROOT ?? join(cache, "worktrees"),
+    worktreeRegistry:
+      env.OPENCODE_WORKTREE_REGISTRY ?? join(home, ".local/share/opencode/worktree-jobs"),
+    localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ?? join(home, "Documents/repos"))
+      .split(":")
+      .filter(Boolean),
+    maxDiffBytes: positiveInteger(
+      env.WORKFLOWD_MAX_DIFF_BYTES,
+      2_000_000,
+      "WORKFLOWD_MAX_DIFF_BYTES",
+    ),
+    ...(gitSigningKey === undefined ? {} : { gitSigningKey }),
+  }
+}
+
+function openCodeSection(
+  env: Record<string, string | undefined>,
+  baseUrl: string,
+  password: string,
+): OpenCodeConfig {
+  return {
+    baseUrl,
+    attachUrl: credentialFreeHttpUrl(
+      required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
+      "WORKFLOWD_OPENCODE_ATTACH_URL",
+    ),
+    serverId: agentId(
+      env.WORKFLOWD_OPENCODE_SERVER_ID ?? "opencode-primary",
+      "WORKFLOWD_OPENCODE_SERVER_ID",
+    ),
+    endpointAlias: agentId(
+      env.WORKFLOWD_OPENCODE_ENDPOINT_ALIAS ?? "private-opencode",
+      "WORKFLOWD_OPENCODE_ENDPOINT_ALIAS",
+    ),
+    username: required(
+      {
+        OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode",
+      },
+      "OPENCODE_SERVER_USERNAME",
+    ),
+    password,
+    model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
+    reviewerAgent: agentId(
+      env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
+      "WORKFLOWD_REVIEWER_AGENT",
+    ),
+    fixerAgent: agentId(env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer", "WORKFLOWD_FIXER_AGENT"),
+    pollIntervalMs: positiveInteger(
+      env.WORKFLOWD_OPENCODE_POLL_INTERVAL_MS,
+      1_000,
+      "WORKFLOWD_OPENCODE_POLL_INTERVAL_MS",
+    ),
+  }
+}
+
+function workerSection(
+  env: Record<string, string | undefined>,
+  identity: {
+    readonly hostId: string
+    readonly trustedAgentUsers: ReadonlyArray<string>
+  },
+  timing: JobTiming & PublicationTiming,
+): WorkerConfig {
+  return {
+    hostId: identity.hostId,
+    concurrency: positiveInteger(
+      env.WORKFLOWD_WORKER_CONCURRENCY,
+      2,
+      "WORKFLOWD_WORKER_CONCURRENCY",
+    ),
+    pollIntervalMs: positiveInteger(
+      env.WORKFLOWD_POLL_INTERVAL_MS,
+      1_000,
+      "WORKFLOWD_POLL_INTERVAL_MS",
+    ),
+    jobTimeoutMs: timing.jobTimeoutMs,
+    jobLeaseDurationMs: timing.jobLeaseDurationMs,
+    publicationTimeoutMs: timing.publicationTimeoutMs,
+    publicationLeaseDurationMs: timing.publicationLeaseDurationMs,
+    agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
+    trustedAgentUsers: identity.trustedAgentUsers,
+    commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
+  }
+}
+
+export async function loadConfig(
+  env: Record<string, string | undefined>,
+  options: ConfigLoadOptions = {},
+): Promise<AppConfig> {
+  const home = options.home ?? homedir()
+  const read = options.readFile ?? ((path: string) => readFile(path, "utf8"))
+  const secrets = await loadSecrets(env, read)
+  const jobTiming = loadJobTiming(env)
+  const publicationTiming = loadPublicationTiming(env)
+  const qrspi = loadQrspiConfig(env)
+  const fixWorkEnabled = booleanSetting(
+    env.WORKFLOWD_FIX_WORK_ENABLED,
+    "WORKFLOWD_FIX_WORK_ENABLED",
   )
-  const workerHostId = agentId(
-    env.WORKFLOWD_HOST_ID ?? env.HOSTNAME ?? "localhost",
-    "WORKFLOWD_HOST_ID",
-  )
-  const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, workerHostId)
+  const configuredTrustedAgentUsers = trustedAgentUsers(env.WORKFLOWD_TRUSTED_AGENT_USERS)
+  const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
+  const baseUrl = openCodeBaseUrl(env)
+  const hostId = workerHostId(env)
+  const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
-    http: {
-      host: env.WORKFLOWD_HOST ?? "127.0.0.1",
-      port: port(env.WORKFLOWD_PORT),
-      maxWebhookBytes: positiveInteger(
-        env.WORKFLOWD_MAX_WEBHOOK_BYTES,
-        1_048_576,
-        "WORKFLOWD_MAX_WEBHOOK_BYTES",
-      ),
-    },
-    github: {
-      appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
-      privateKeyPath: required(env, "GITHUB_PRIVATE_KEY_PATH"),
-      webhookSecret,
-    },
-    storage: {
-      databasePath: env.WORKFLOWD_DATABASE_PATH ?? join(stateRoot, "workflowd.db"),
-    },
-    fixWork: {
-      enabled: fixWorkEnabled,
-    },
-    workspace: {
-      repositoryRoot: env.WORKFLOWD_REPOSITORY_ROOT ?? join(cacheRoot, "repositories"),
-      worktreeRoot: env.WORKFLOWD_WORKTREE_ROOT ?? join(cacheRoot, "worktrees"),
-      worktreeRegistry:
-        env.OPENCODE_WORKTREE_REGISTRY ?? join(home, ".local/share/opencode/worktree-jobs"),
-      localRepositories: (env.WORKFLOWD_LOCAL_REPOSITORIES ?? join(home, "Documents/repos"))
-        .split(":")
-        .filter(Boolean),
-      maxDiffBytes: positiveInteger(
-        env.WORKFLOWD_MAX_DIFF_BYTES,
-        2_000_000,
-        "WORKFLOWD_MAX_DIFF_BYTES",
-      ),
-      ...(gitSigningKey === undefined ? {} : { gitSigningKey }),
-    },
-    openCode: {
-      baseUrl: openCodeBaseUrl,
-      attachUrl: credentialFreeHttpUrl(
-        required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
-        "WORKFLOWD_OPENCODE_ATTACH_URL",
-      ),
-      serverId: agentId(
-        env.WORKFLOWD_OPENCODE_SERVER_ID ?? "opencode-primary",
-        "WORKFLOWD_OPENCODE_SERVER_ID",
-      ),
-      endpointAlias: agentId(
-        env.WORKFLOWD_OPENCODE_ENDPOINT_ALIAS ?? "private-opencode",
-        "WORKFLOWD_OPENCODE_ENDPOINT_ALIAS",
-      ),
-      username: required(
-        {
-          OPENCODE_SERVER_USERNAME: env.OPENCODE_SERVER_USERNAME ?? "opencode",
-        },
-        "OPENCODE_SERVER_USERNAME",
-      ),
-      password: openCodePassword,
-      model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
-      reviewerAgent: agentId(
-        env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
-        "WORKFLOWD_REVIEWER_AGENT",
-      ),
-      fixerAgent: agentId(env.WORKFLOWD_FIXER_AGENT ?? "pr-fixer", "WORKFLOWD_FIXER_AGENT"),
-      pollIntervalMs: positiveInteger(
-        env.WORKFLOWD_OPENCODE_POLL_INTERVAL_MS,
-        1_000,
-        "WORKFLOWD_OPENCODE_POLL_INTERVAL_MS",
-      ),
-    },
-    worker: {
-      hostId: workerHostId,
-      concurrency: positiveInteger(
-        env.WORKFLOWD_WORKER_CONCURRENCY,
-        2,
-        "WORKFLOWD_WORKER_CONCURRENCY",
-      ),
-      pollIntervalMs: positiveInteger(
-        env.WORKFLOWD_POLL_INTERVAL_MS,
-        1_000,
-        "WORKFLOWD_POLL_INTERVAL_MS",
-      ),
-      jobTimeoutMs,
-      jobLeaseDurationMs,
-      publicationTimeoutMs,
-      publicationLeaseDurationMs,
-      agentBranchPrefixes: branchPrefixes(env.WORKFLOWD_AGENT_BRANCH_PREFIXES),
-      trustedAgentUsers: configuredTrustedAgentUsers,
-      commandUsers: commandUsers(env.WORKFLOWD_COMMAND_USERS),
-    },
+    http: httpSection(env),
+    github: githubSection(env, secrets.webhookSecret),
+    storage: storageSection(env, home),
+    fixWork: { enabled: fixWorkEnabled },
+    workspace: workspaceSection(env, home, gitSigningKey),
+    openCode: openCodeSection(env, baseUrl, secrets.openCodePassword),
+    worker: workerSection(
+      env,
+      { hostId, trustedAgentUsers: configuredTrustedAgentUsers },
+      { ...jobTiming, ...publicationTiming },
+    ),
     ...(qrspi === undefined ? {} : { qrspi }),
-    ...(testJobToken === undefined ? {} : { testJobCanary: { token: testJobToken } }),
+    ...(secrets.testJobToken === undefined
+      ? {}
+      : { testJobCanary: { token: secrets.testJobToken } }),
     ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
   }
 }
