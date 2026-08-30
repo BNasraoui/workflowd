@@ -391,7 +391,7 @@ test("wait registration begins with a write and survives a committed writer inte
 
     expect(result).toMatchObject({
       _tag: "Success",
-      right: {
+      value: {
         deliveries: [{ instanceId: "instance-a", waitId: "interleaved-wait", eventSequence: 1 }],
       },
     })

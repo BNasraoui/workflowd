@@ -31,7 +31,7 @@ describe("custody registration races", () => {
       expect(results.filter((x) => x._tag === "Success")).toHaveLength(1)
       expect(results.filter((x) => x._tag === "Failure")).toHaveLength(1)
       expect(results.find((x) => x._tag === "Failure")).toMatchObject({
-        left: { _tag: "KernelSessionStoreConflictError", record: "resource", key: "r" },
+        failure: { _tag: "KernelSessionStoreConflictError", record: "resource", key: "r" },
       })
     } finally {
       await removeDatabase(file)
@@ -79,7 +79,7 @@ describe("custody registration races", () => {
       const results = await Promise.all([register("s1"), register("s2")])
       expect(results.filter((x) => x._tag === "Success")).toHaveLength(1)
       expect(results.find((x) => x._tag === "Failure")).toMatchObject({
-        left: { _tag: "KernelSessionStoreConflictError", record: "session" },
+        failure: { _tag: "KernelSessionStoreConflictError", record: "session" },
       })
     } finally {
       await removeDatabase(file)
@@ -144,7 +144,7 @@ describe("custody registration races", () => {
     expect(result.duplicateNative._tag).toBe("Failure")
     expect(result.replacement).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
   })
 })

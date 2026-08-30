@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlError } from "effect/unstable/sql"
-import { Effect, Layer, Logger, Queue } from "effect"
+import { Effect, Layer, Logger, PubSub } from "effect"
 import { AgentHarnessError } from "../src/agent-harness"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
@@ -149,7 +149,7 @@ describe("handleGitHubWebhook", () => {
     expect(await response.json()).toEqual({ error: "internal server error" })
     expect(logs).toEqual([
       {
-        level: "ERROR",
+        level: "Error",
         message: ["Webhook ingestion failed"],
       },
     ])
@@ -300,7 +300,7 @@ describe("handleGitHubWebhook", () => {
             signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
             { webhookSecret: secret, now: new Date("2026-07-19T12:01:01.000Z") },
           )
-          yield* Queue.take(wake)
+          yield* PubSub.take(wake)
           const rearmed = yield* store.claimNextReconciliation({
             workerId: "second-reconciler",
             now: new Date("2026-07-19T12:01:02.000Z"),

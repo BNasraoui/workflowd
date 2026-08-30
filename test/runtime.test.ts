@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
@@ -157,7 +157,7 @@ describe("serveHookHttp", () => {
       expect(lifecycle.requestExit._tag).toBe("Success")
       expect(logs).toHaveLength(1)
       expect(logs[0]).toMatchObject({
-        level: "ERROR",
+        level: "Error",
         message: ["Failed to stop webhook listener", { _tag: "UnknownError" }],
       })
     } finally {
@@ -402,7 +402,7 @@ test("publication completion wakes the job lane that now exposes queued Fix Work
             now: () => new Date("2026-07-20T12:02:00.000Z"),
           }),
         )
-        yield* Queue.take(jobWake)
+        yield* PubSub.take(jobWake)
         const fix = yield* store.claimNextJob({
           workerId: "fix-worker",
           now: new Date("2026-07-20T12:02:01.000Z"),

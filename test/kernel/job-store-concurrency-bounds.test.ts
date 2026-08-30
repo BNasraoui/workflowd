@@ -108,7 +108,7 @@ describe("kernel job storage envelopes", () => {
     expect(result.accepted._tag).toBe("Success")
     expect(result.oversized).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreInputError" },
+      failure: { _tag: "KernelJobStoreInputError" },
     })
   })
 

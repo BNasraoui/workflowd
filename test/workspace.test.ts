@@ -425,7 +425,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(await readFile(userFile, "utf8")).toBe("keep me\n")
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({
-      level: "WARN",
+      level: "Warn",
       message: [{ operation: "remove review context" }],
     })
   })
@@ -666,7 +666,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(await readFile(marker, "utf8")).toBe("workflowd:v1\n")
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({
-      level: "WARN",
+      level: "Warn",
       message: [{ operation: "remove review context" }],
     })
   })
@@ -1022,8 +1022,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(exit).toMatchObject({
       _tag: "Failure",
       cause: {
-        _tag: "Fail",
-        error: { operation: "verify controller fix signature" },
+        reasons: [{ _tag: "Fail", error: { operation: "verify controller fix signature" } }],
       },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
@@ -1053,7 +1052,7 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { operation: "verify fix ancestry" } },
+      cause: { reasons: [{ _tag: "Fail", error: { operation: "verify fix ancestry" } }] },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
@@ -1083,7 +1082,7 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { operation: "verify fix commit ownership" } },
+      cause: { reasons: [{ _tag: "Fail", error: { operation: "verify fix commit ownership" } }] },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })

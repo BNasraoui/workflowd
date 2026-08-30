@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Queue, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Scope, PubSub } from "effect"
 import { routeRequest } from "../../src/http"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
 import { TestJobCanary, TestJobCanaryLive } from "../../src/kernel/test-job-canary"
@@ -83,10 +83,28 @@ describe("test-job canary HTTP integration", () => {
             }),
           )
           const wake = yield* within(Deferred.await(executed))
-          const get = yield* request(
-            new Request("http://localhost/workflows/test-jobs/wake-and-echo", {
-              headers: authorization,
-            }),
+          const getSettled = Effect.gen(function* () {
+            while (true) {
+              const response = yield* request(
+                new Request("http://localhost/workflows/test-jobs/wake-and-echo", {
+                  headers: authorization,
+                }),
+              )
+              const payload: unknown = yield* Effect.promise(() => response.clone().json())
+              const status =
+                typeof payload === "object" && payload !== null && "status" in payload
+                  ? payload.status
+                  : undefined
+              if (status !== "running") return response
+              yield* Effect.sleep(10)
+            }
+          })
+          const get = yield* within(getSettled).pipe(
+            Effect.flatMap((settled) =>
+              settled._tag === "Completed"
+                ? Effect.succeed(settled.value)
+                : Effect.die(new Error("job never settled after wake")),
+            ),
           )
 
           return {
@@ -181,7 +199,7 @@ describe("test-job canary HTTP integration", () => {
               body,
             }),
           )
-          const wake = yield* within(Queue.take(duplicateWake), 100)
+          const wake = yield* within(PubSub.take(duplicateWake), 100)
 
           return {
             statuses: [first.status, duplicate.status],

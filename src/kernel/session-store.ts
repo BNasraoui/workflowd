@@ -253,7 +253,7 @@ const validateCleanupAuthority = (input: CleanupAuthority) =>
 const dataError = (record: string, key: string) => (error: unknown) =>
   new KernelSessionStoreDataError({ record, key, message: String(error) })
 const decodeRead = (
-  schema: Schema.Codec<any, any>,
+  schema: Schema.Codec<unknown, unknown>,
   record: string,
   key: string,
   row: Record<string, unknown>,
@@ -941,7 +941,7 @@ const make = Effect.gen(function* () {
     table: string,
     key: string,
     value: string,
-    schema: Schema.Codec<any, any>,
+    schema: Schema.Codec<unknown, unknown>,
     record: string,
   ) =>
     sql

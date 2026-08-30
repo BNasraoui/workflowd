@@ -132,7 +132,7 @@ describe("agent handoff registration", () => {
       }).pipe(Effect.provide(layer)),
     )
 
-    expect(result).toMatchObject({ right: { status: "duplicate" } })
+    expect(result).toMatchObject({ success: { status: "duplicate" } })
   })
 
   test("rejects a resume prompt whose exact text does not match its payload", async () => {
@@ -153,7 +153,7 @@ describe("agent handoff registration", () => {
 
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "AgentHandoffStoreError", operation: "validate exact resume prompt" },
+      failure: { _tag: "AgentHandoffStoreError", operation: "validate exact resume prompt" },
     })
   })
 

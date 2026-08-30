@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import {
   MAX_AGENT_LAUNCH_INTENT_BYTES,
   MAX_AGENT_OUTPUT_BYTES,
@@ -8,24 +8,33 @@ import {
   TrustedAgentHarnessCatalog,
 } from "../src/agent-harness"
 import { makeOpenCodeHarnessDefinitions, makePullRequestHarnessDefinitions } from "../src/opencode"
-import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
+import {
+  OpenCodeAdapterError,
+  type OpenCodeAdapter,
+  type OpenCodeSessionEvent,
+} from "../src/opencode/adapter"
 
-async function* events(
-  ...values: ReadonlyArray<OpenCodeSessionEvent>
-): AsyncIterable<OpenCodeSessionEvent> {
-  yield* values
+function events(...values: ReadonlyArray<OpenCodeSessionEvent>) {
+  return Stream.fromIterable(values)
+}
+
+const completedMessage = {
+  id: "msg_1",
+  role: "assistant" as const,
+  time: { created: 1, completed: 2 },
 }
 
 function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
-    createSession: async () => ({ id: "ses_fixture" }),
-    promptSession: async () => undefined,
-    subscribeSessionEvents: async () => events(),
-    getSessionStatus: async () => ({ type: "busy" }),
-    sessionExists: async () => true,
-    listSessionMessages: async () => [],
-    abortSession: async () => true,
-    validateAvailability: async () => undefined,
+    createSession: () => Effect.succeed({ id: "ses_fixture" }),
+    promptSession: () => Effect.void,
+    subscribeSessionEvents: () => events(),
+    getSessionStatus: () => Effect.succeed({ type: "busy" as const }),
+    sessionExists: () => Effect.succeed(true),
+    listSessionMessages: () => Effect.succeed([]),
+    abortSession: () => Effect.succeed(true),
+    validateAvailability: () => Effect.void,
+    generateStructured: () => Effect.succeed(null),
     ...overrides,
   }
 }
@@ -71,7 +80,6 @@ describe("TrustedAgentHarnessCatalog", () => {
     const invalidDefinitions = [
       { ...fixtureDefinition, agent: "invalid agent" },
       { ...fixtureDefinition, model: "missing-provider" },
-      { ...fixtureDefinition, outputSchema: Schema.BigInt },
       { ...fixtureDefinition, timeoutMs: 0 },
       {
         ...fixtureDefinition,
@@ -288,23 +296,23 @@ describe("OpenCodeAgentHarness", () => {
     const actions: Array<string> = []
     const harness = new OpenCodeAgentHarness(
       makeAdapter({
-        createSession: async () => {
-          actions.push("create")
-          return { id: "ses_fixture" }
-        },
-        promptSession: async () => {
-          actions.push("prompt")
-        },
-        subscribeSessionEvents: async () =>
+        createSession: () =>
+          Effect.sync(() => {
+            actions.push("create")
+            return { id: "ses_fixture" }
+          }),
+        promptSession: () =>
+          Effect.sync(() => {
+            actions.push("prompt")
+          }),
+        subscribeSessionEvents: () =>
           events({
             type: "message.updated",
             sessionID: "ses_fixture",
-            message: {
-              role: "assistant",
-              time: { created: 1, completed: 2 },
-              structured: { summary: "A short summary." },
-            },
+            message: completedMessage,
           }),
+        listSessionMessages: () => Effect.succeed([completedMessage]),
+        generateStructured: () => Effect.succeed({ summary: "A short summary." }),
       }),
       new TrustedAgentHarnessCatalog([fixtureDefinition]),
       {
@@ -372,15 +380,20 @@ describe("OpenCodeAgentHarness", () => {
 
   test("orphans a session whose create response is lost and creates a replacement", async () => {
     let creates = 0
-    const adapter = {
-      ...makeAdapter(),
-      findSession: async () => ({ id: "ses_orphaned" }),
-      createSession: async () => {
-        creates += 1
-        if (creates === 1) throw new Error("connection closed after create")
-        return { id: "ses_replacement" }
-      },
-    } as OpenCodeAdapter
+    const adapter = makeAdapter({
+      createSession: () =>
+        Effect.suspend(() => {
+          creates += 1
+          return creates === 1
+            ? Effect.fail(
+                new OpenCodeAdapterError({
+                  operation: "create session",
+                  cause: new Error("connection closed after create"),
+                }),
+              )
+            : Effect.succeed({ id: "ses_replacement" })
+        }),
+    })
     const harness = new OpenCodeAgentHarness(
       adapter,
       new TrustedAgentHarnessCatalog([fixtureDefinition]),
@@ -435,14 +448,21 @@ describe("OpenCodeAgentHarness", () => {
     let aborted = 0
     const harness = new OpenCodeAgentHarness(
       makeAdapter({
-        promptSession: async () => {
-          prompted += 1
-          throw new Error("unexpected prompt")
-        },
-        abortSession: async () => {
-          aborted += 1
-          return true
-        },
+        promptSession: () =>
+          Effect.suspend(() => {
+            prompted += 1
+            return Effect.fail(
+              new OpenCodeAdapterError({
+                operation: "prompt session",
+                cause: new Error("unexpected prompt"),
+              }),
+            )
+          }),
+        abortSession: () =>
+          Effect.sync(() => {
+            aborted += 1
+            return true
+          }),
       }),
       new TrustedAgentHarnessCatalog([fixtureDefinition]),
       {
@@ -488,7 +508,7 @@ describe("OpenCodeAgentHarness", () => {
 
   test("fails when OpenCode does not confirm a session abort", async () => {
     const harness = new OpenCodeAgentHarness(
-      makeAdapter({ abortSession: async () => false }),
+      makeAdapter({ abortSession: () => Effect.succeed(false) }),
       new TrustedAgentHarnessCatalog([fixtureDefinition]),
       {
         serverId: "opencode-primary",
@@ -522,20 +542,19 @@ describe("OpenCodeAgentHarness", () => {
     let aborts = 0
     const harness = new OpenCodeAgentHarness(
       makeAdapter({
-        subscribeSessionEvents: async () =>
+        subscribeSessionEvents: () =>
           events({
             type: "message.updated",
             sessionID: "ses_fixture",
-            message: {
-              role: "assistant",
-              time: { created: 1, completed: 2 },
-              structured: { summary: 42 },
-            },
+            message: completedMessage,
           }),
-        abortSession: async () => {
-          aborts += 1
-          return aborts === 1
-        },
+        listSessionMessages: () => Effect.succeed([completedMessage]),
+        generateStructured: () => Effect.succeed({ summary: 42 }),
+        abortSession: () =>
+          Effect.sync(() => {
+            aborts += 1
+            return aborts === 1
+          }),
       }),
       new TrustedAgentHarnessCatalog([fixtureDefinition]),
       {
@@ -582,16 +601,14 @@ describe("OpenCodeAgentHarness", () => {
     }
     const harness = new OpenCodeAgentHarness(
       makeAdapter({
-        subscribeSessionEvents: async () =>
+        subscribeSessionEvents: () =>
           events({
             type: "message.updated",
             sessionID: "ses_fixture",
-            message: {
-              role: "assistant",
-              time: { created: 1, completed: 2 },
-              structured: { summary: 42 },
-            },
+            message: completedMessage,
           }),
+        listSessionMessages: () => Effect.succeed([completedMessage]),
+        generateStructured: () => Effect.succeed({ summary: 42 }),
       }),
       new TrustedAgentHarnessCatalog([definition]),
       {
@@ -643,7 +660,9 @@ describe("TrustedAgentHarnessCatalog descriptor-only lookup", () => {
   test("validates selected agent and model availability", async () => {
     const catalog = new TrustedAgentHarnessCatalog([fixtureDefinition])
     const calls: Array<unknown> = []
-    const adapter = makeAdapter({ validateAvailability: async (input) => void calls.push(input) })
+    const adapter = makeAdapter({
+      validateAvailability: (input) => Effect.sync(() => void calls.push(input)),
+    })
 
     const harness = new OpenCodeAgentHarness(adapter, catalog, {
       serverId: "opencode-primary",

@@ -6,7 +6,7 @@ import {
   agentSessionCompletionCondition,
 } from "../../src/kernel/agent-handoff-contract"
 
-const decode = <A>(schema: Schema.Schema<A>, value: unknown) =>
+const decode = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
   Effect.runPromise(Schema.decodeUnknownEffect(schema)(value, { onExcessProperty: "error" }))
 
 describe("provider-neutral agent handoff contracts", () => {

@@ -18,7 +18,7 @@ const registration = Effect.gen(function* () {
   })
 }).pipe(Effect.provide(KernelEventStoreLive.pipe(Layer.provideMerge(database))))
 
-const fiber = Effect.runFork(registration)
 await Bun.write(startedPath, "started")
+const fiber = Effect.runFork(registration)
 const result = await Effect.runPromise(Fiber.join(fiber).pipe(Effect.result))
 await Bun.write(resultPath, JSON.stringify(result))

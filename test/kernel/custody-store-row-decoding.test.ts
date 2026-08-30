@@ -159,7 +159,10 @@ describe("custody row decoding", () => {
         return yield* store.readRecoverableCleanup("h").pipe(Effect.result)
       }),
     )
-    expect(result).toMatchObject({ _tag: "Failure", left: { _tag: "KernelSessionStoreDataError" } })
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      failure: { _tag: "KernelSessionStoreDataError" },
+    })
   })
 
   test("quarantines malformed cleanup claim rows", async () => {

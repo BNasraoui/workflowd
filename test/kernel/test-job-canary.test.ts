@@ -62,7 +62,7 @@ describe("test job canary", () => {
 
     expect(conflict).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "TestJobCanaryConflict", jobId: "deployment-43" },
+      failure: { _tag: "TestJobCanaryConflict", jobId: "deployment-43" },
     })
   })
 
@@ -156,7 +156,7 @@ describe("test job canary", () => {
     expect(observed.failed).toEqual({ jobId: "deployment-failed", status: "failed" })
     expect(observed.unknown).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "TestJobCanaryNotFound", jobId: "unknown" },
+      failure: { _tag: "TestJobCanaryNotFound", jobId: "unknown" },
     })
   })
 
@@ -220,7 +220,7 @@ describe("test job canary", () => {
 
       expect(outcome).toMatchObject({
         _tag: "Failure",
-        left: { _tag: "KernelJobStoreDataError", record: "result" },
+        failure: { _tag: "KernelJobStoreDataError", record: "result" },
       })
     }
   })

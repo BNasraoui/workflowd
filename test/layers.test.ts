@@ -215,7 +215,7 @@ test("composes the explicit six-contract catalog by default", async () => {
     )
     expect(preflight).toMatchObject({
       _tag: "Failure",
-      left: { phase: "availability", reason: "unavailable_agent_model" },
+      failure: { phase: "availability", reason: "unavailable_agent_model" },
     })
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -251,7 +251,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "WorkflowStartUnauthorized" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "WorkflowStartUnauthorized" } }] },
     })
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -317,7 +317,7 @@ test("keeps unrelated services available when configured QRSPI is closed", async
     expect(result.methods.every((method) => typeof method === "function")).toBe(true)
     expect(result.closed).toMatchObject({
       _tag: "Failure",
-      left: {
+      failure: {
         _tag: "WorkflowStartValidationError",
         phase: "contract",
         reason: "unknown_contract_reference",

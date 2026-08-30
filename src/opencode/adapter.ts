@@ -138,7 +138,11 @@ export type OpenCodeSdkClient = {
 export class OpenCodeAdapterError extends Data.TaggedError("OpenCodeAdapterError")<{
   readonly operation: string
   readonly cause: unknown
-}> {}
+}> {
+  override get message(): string {
+    return `${this.operation}: ${toError(this.cause).message}`
+  }
+}
 
 type AdapterCall<Input, Output> = (input: Input) => Effect.Effect<Output, OpenCodeAdapterError>
 

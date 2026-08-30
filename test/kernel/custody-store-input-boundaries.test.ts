@@ -22,7 +22,7 @@ describe("custody input boundaries", () => {
     )
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreInputError" },
+      failure: { _tag: "KernelSessionStoreInputError" },
     })
   })
 
@@ -44,7 +44,7 @@ describe("custody input boundaries", () => {
     )
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreInputError" },
+      failure: { _tag: "KernelSessionStoreInputError" },
     })
   })
 
@@ -156,7 +156,7 @@ describe("custody input boundaries", () => {
     )
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreInputError" },
+      failure: { _tag: "KernelSessionStoreInputError" },
     })
   })
 })

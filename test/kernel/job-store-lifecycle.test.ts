@@ -81,7 +81,7 @@ describe("kernel job creation", () => {
     expect([result.first.status, result.exact.status]).toEqual(["enqueued", "duplicate"])
     expect(result.conflict).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreConflictError", record: "job", key: "replay" },
+      failure: { _tag: "KernelJobStoreConflictError", record: "job", key: "replay" },
     })
   })
 
@@ -100,7 +100,7 @@ describe("kernel job creation", () => {
 
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreConflictError", record: "job", key: "provenance" },
+      failure: { _tag: "KernelJobStoreConflictError", record: "job", key: "provenance" },
     })
   })
 })
@@ -216,7 +216,7 @@ describe("kernel job outcomes", () => {
 
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreLeaseError", jobId: "stale-result-replay" },
+      failure: { _tag: "KernelJobStoreLeaseError", jobId: "stale-result-replay" },
     })
   })
 
@@ -246,7 +246,7 @@ describe("kernel job outcomes", () => {
 
     expect(result).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreConflictError", record: "result", key: "shared-identity" },
+      failure: { _tag: "KernelJobStoreConflictError", record: "result", key: "shared-identity" },
     })
   })
 

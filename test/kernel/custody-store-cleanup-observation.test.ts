@@ -100,7 +100,7 @@ describe("cleanup and observation lifecycle", () => {
     expect(result.replay.status).toBe("duplicate")
     expect(result.conflict).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.attempt).toEqual([{ state: "failed" }])
     expect(result.observation).toMatchObject({ observation_id: "o", disposition: "missing" })
@@ -180,7 +180,7 @@ describe("cleanup and observation lifecycle", () => {
     )
     expect(result.blocked).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.cleanup).toMatchObject({ resourceId: "r", owningHostId: "h", attempt: 1 })
     expect(result.completed.status).toBe("completed")
@@ -214,7 +214,7 @@ describe("cleanup and observation lifecycle", () => {
     )
     expect(result.cleanup).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.request).toMatchObject({ state: "ready" })
     expect(result.resource).toMatchObject({ state: "reserved" })

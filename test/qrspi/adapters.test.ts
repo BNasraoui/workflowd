@@ -459,7 +459,7 @@ describe("QRSPI external adapters", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "TicketSourceMalformedError" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "TicketSourceMalformedError" } }] },
     })
   })
 
@@ -651,7 +651,7 @@ describe("QRSPI external adapters", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "QrspiRepositoryError" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "QrspiRepositoryError" } }] },
     })
     expect(Date.now() - startedAt).toBeLessThan(1_000)
   })

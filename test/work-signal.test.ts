@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Option, Queue } from "effect"
+import { Effect, Option, PubSub } from "effect"
 import { WorkSignal, WorkSignalLive } from "../src/work-signal"
+const poll = (subscription: PubSub.Subscription<void>) =>
+  Effect.map(PubSub.takeUpTo(subscription, 1), (taken) =>
+    taken.length === 0 ? Option.none<void>() : Option.some<void>(undefined),
+  )
 
 describe("WorkSignal", () => {
   test("retains a wake published after subscription but before waiting", async () => {
@@ -10,7 +14,7 @@ describe("WorkSignal", () => {
           const signals = yield* WorkSignal
           const subscription = yield* signals.subscribe("job")
           yield* signals.wake("job")
-          yield* Queue.take(subscription)
+          yield* PubSub.take(subscription)
           return true
         }).pipe(Effect.provide(WorkSignalLive)),
       ),
@@ -28,8 +32,8 @@ describe("WorkSignal", () => {
           yield* signals.wake("job")
           yield* signals.wake("job")
           yield* signals.wake("job")
-          yield* Queue.take(subscription)
-          return yield* Queue.poll(subscription)
+          yield* PubSub.take(subscription)
+          return yield* poll(subscription)
         }).pipe(Effect.provide(WorkSignalLive)),
       ),
     )
@@ -45,7 +49,7 @@ describe("WorkSignal", () => {
           const first = yield* signals.subscribe("job")
           const second = yield* signals.subscribe("job")
           yield* signals.wake("job")
-          return [yield* Queue.size(first), yield* Queue.size(second)]
+          return [yield* PubSub.remaining(first), yield* PubSub.remaining(second)]
         }).pipe(Effect.provide(WorkSignalLive)),
       ),
     )
@@ -62,8 +66,8 @@ describe("WorkSignal", () => {
           const legacyJobs = yield* signals.subscribe("job")
           yield* signals.wake("kernel-job")
           return {
-            kernelJob: yield* Queue.poll(kernelJobs),
-            legacyJob: yield* Queue.poll(legacyJobs),
+            kernelJob: yield* poll(kernelJobs),
+            legacyJob: yield* poll(legacyJobs),
           }
         }).pipe(Effect.provide(WorkSignalLive)),
       ),
@@ -83,8 +87,8 @@ describe("WorkSignal", () => {
           yield* signals.wake("session-resume")
           yield* signals.wake("session-resume")
           return {
-            resume: yield* Queue.size(resumes),
-            job: yield* Queue.poll(jobs),
+            resume: yield* PubSub.remaining(resumes),
+            job: yield* poll(jobs),
           }
         }).pipe(Effect.provide(WorkSignalLive)),
       ),

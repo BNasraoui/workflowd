@@ -43,7 +43,7 @@ const actionableReview = {
   ],
 }
 
-const decode = <A>(schema: Schema.Schema<A>, input: unknown) =>
+const decode = <A, I>(schema: Schema.Codec<A, I>, input: unknown) =>
   Effect.runPromise(Schema.decodeUnknownEffect(schema)(input))
 
 describe("domain schemas", () => {

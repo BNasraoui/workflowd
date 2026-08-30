@@ -1445,7 +1445,7 @@ function toStartRecord(row: OperationRow, branchName: string) {
     const leaseUntil =
       row.lease_until === null
         ? undefined
-        : yield* Schema.decodeUnknownEffect(Schema.Date)(row.lease_until).pipe(
+        : yield* Schema.decodeUnknownEffect(Schema.DateFromString)(row.lease_until).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", row.operation_id, cause)),
           )
     return yield* Schema.decodeUnknownEffect(StartRecord)({

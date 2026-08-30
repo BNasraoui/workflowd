@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
-import { Effect, Fiber, Layer, Schema } from "effect"
+import { Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import {
   OpenCodeResumeAdapter,
@@ -80,16 +80,18 @@ describe("OpenCode local resume worker", () => {
   test("adapts the saved prompt to OpenCode promptAsync without changing its text", async () => {
     let prompted: unknown
     const adapter = new OpenCodeResumeAdapter({
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async (input) => {
-        prompted = input
-      },
-      subscribeSessionEvents: async () => (async function* () {})(),
-      getSessionStatus: async () => ({ type: "idle" }),
-      sessionExists: async () => true,
-      listSessionMessages: async () => [],
-      abortSession: async () => true,
-      validateAvailability: async () => undefined,
+      createSession: () => Effect.succeed({ id: "unused" }),
+      promptSession: (input) =>
+        Effect.sync(() => {
+          prompted = input
+        }),
+      subscribeSessionEvents: () => Stream.empty,
+      getSessionStatus: () => Effect.succeed({ type: "idle" as const }),
+      sessionExists: () => Effect.succeed(true),
+      listSessionMessages: () => Effect.succeed([]),
+      abortSession: () => Effect.succeed(true),
+      validateAvailability: () => Effect.void,
+      generateStructured: () => Effect.succeed(null),
     })
 
     await adapter.promptAsync(
@@ -99,14 +101,14 @@ describe("OpenCode local resume worker", () => {
         prompt: '{"task":"continue exactly"}',
         agent: "resume-agent",
         model: { providerID: "openai", modelID: "gpt-5.6-sol" },
-        jsonSchema: { type: "object" },
       },
       new AbortController().signal,
     )
 
     expect(prompted).toMatchObject({
-      parts: [{ type: "text", text: '{"task":"continue exactly"}' }],
-      format: { type: "json_schema", retryCount: 2 },
+      sessionID: "ses_exact",
+      agent: "resume-agent",
+      text: '{"task":"continue exactly"}',
     })
   })
 
@@ -131,10 +133,10 @@ describe("OpenCode local resume worker", () => {
             message: {
               role: "assistant" as const,
               time: { created: 1, completed: 2 },
-              structured: { answer: "done" },
             },
           }
         })(),
+      generate: async () => ({ answer: "done" }),
     }
     const Provider = Layer.succeed(OpenCodeResumeProvider, provider)
 
@@ -174,6 +176,7 @@ describe("OpenCode local resume worker", () => {
         throw new Error("connection lost before acceptance was knowable")
       },
       subscribeEvents: async () => (async function* () {})(),
+      generate: async () => null,
     }
     const Provider = Layer.succeed(OpenCodeResumeProvider, provider)
 
@@ -217,7 +220,6 @@ describe("OpenCode local resume worker", () => {
     const answer = {
       role: "assistant" as const,
       time: { created: 10, completed: 20 },
-      structured: { answer: "recovered" },
     }
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
@@ -231,6 +233,7 @@ describe("OpenCode local resume worker", () => {
           clock = new Date(startedAt.getTime() + 60_000)
           yield { type: "message.updated" as const, sessionID: "ses_exact", message: answer }
         })(),
+      generate: async () => ({ answer: "recovered" }),
     }
     const Provider = Layer.succeed(OpenCodeResumeProvider, provider)
 
@@ -288,10 +291,10 @@ describe("OpenCode local resume worker", () => {
             message: {
               role: "assistant" as const,
               time: { created: 1, completed: 2 },
-              structured: { answer: "after-heartbeats" },
             },
           }
         })(),
+      generate: async () => ({ answer: "after-heartbeats" }),
     }
 
     const outcome = await runSessionKernel(
@@ -321,6 +324,7 @@ describe("OpenCode local resume worker", () => {
       listMessages: async () => [],
       promptAsync: async () => undefined,
       subscribeEvents: async () => (async function* () {})(),
+      generate: async () => null,
     }
 
     const outcome = await runSessionKernel(
@@ -350,6 +354,7 @@ describe("OpenCode local resume worker", () => {
         prompts += 1
       },
       subscribeEvents: async () => (async function* () {})(),
+      generate: async () => null,
     }
 
     const outcome = await runSessionKernel(
@@ -391,11 +396,11 @@ describe("OpenCode local resume worker", () => {
             message: {
               role: "assistant" as const,
               time: { created: 1, completed: 2 },
-              structured: { answer: "observed" },
             },
           }
         })()
       },
+      generate: async () => ({ answer: "observed" }),
     }
 
     await runSessionKernel(
@@ -427,10 +432,10 @@ describe("OpenCode local resume worker", () => {
             message: {
               role: "assistant" as const,
               time: { created: 1, completed: 2 },
-              structured: { answer: "once" },
             },
           }
         })(),
+      generate: async () => ({ answer: "once" }),
     }
     const Provider = Layer.succeed(OpenCodeResumeProvider, provider)
 
@@ -461,6 +466,7 @@ describe("OpenCode local resume worker", () => {
       listMessages: async () => [],
       promptAsync: async () => undefined,
       subscribeEvents: async () => (async function* () {})(),
+      generate: async () => null,
     }
     const mismatches = [
       { owningHostId: "other-host" },
@@ -503,9 +509,8 @@ describe("OpenCode local resume worker", () => {
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
       listMessages: async () => [],
-      promptAsync: async () => {
-        prompted.resolve()
-      },
+      promptAsync: async () => undefined,
+      generate: async () => null,
       subscribeEvents: async (_input, signal) =>
         (async function* () {
           await new Promise<void>((resolve) => {
@@ -517,6 +522,7 @@ describe("OpenCode local resume worker", () => {
               },
               { once: true },
             )
+            prompted.resolve()
           })
           if (signal.aborted) return
           yield {
@@ -551,6 +557,7 @@ describe("OpenCode local resume worker", () => {
       sessionExists: async () => true,
       listMessages: async () => [],
       promptAsync: async () => prompted.resolve(),
+      generate: async () => null,
       subscribeEvents: async (_input, signal) =>
         (async function* () {
           await new Promise<void>((resolve) =>

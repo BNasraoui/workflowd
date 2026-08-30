@@ -703,7 +703,8 @@ describe("WorkflowStart integration", () => {
           makeWorkflowStart(options)(request).pipe(Effect.provide(layer(filename, fake))),
         )
         yield* Effect.promise(() => enteredPromise)
-        return yield* Effect.exit(Fiber.join(fiber))
+        yield* Fiber.interrupt(fiber)
+        return yield* Fiber.await(fiber)
       }),
     )
 

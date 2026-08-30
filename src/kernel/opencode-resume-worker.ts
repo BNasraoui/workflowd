@@ -83,7 +83,7 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
 export type TrustedResumeContract = {
   readonly name: string
   readonly version: number
-  readonly schema: Schema.Codec<any, any>
+  readonly schema: Schema.Codec<unknown, unknown>
   readonly jsonSchema: object
   readonly agent: string
   readonly model: OpenCodeModel

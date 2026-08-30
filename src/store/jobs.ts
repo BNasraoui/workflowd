@@ -36,7 +36,7 @@ type JobOperations = Pick<
 
 const encodeDurablePayload = <A, I>(
   schema: Schema.Codec<A, I>,
-  envelope: Schema.Schema<unknown>,
+  envelope: Schema.Codec<unknown, unknown>,
   value: unknown,
 ) =>
   Schema.decodeUnknownEffect(envelope)(value).pipe(

@@ -157,7 +157,7 @@ function testJobStatusFailure(error: TestJobCanaryError): Response {
   if (error instanceof TestJobCanaryNotFound) {
     return Response.json({ error: "not found" }, { status: 404 })
   }
-  if ("_tag" in error && error._tag === "ParseError") {
+  if ("_tag" in error && error._tag === "SchemaError") {
     return Response.json({ error: "invalid test job ID" }, { status: 400 })
   }
   return Response.json({ error: "internal server error" }, { status: 500 })

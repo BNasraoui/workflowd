@@ -208,14 +208,14 @@ describe("resume authority transitions", () => {
         return { changed, exact, stale }
       }),
     )
-    expect(result.exact).toMatchObject({ _tag: "Success", right: { status: "duplicate" } })
+    expect(result.exact).toMatchObject({ _tag: "Success", success: { status: "duplicate" } })
     expect(result.changed).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.stale).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreAuthorityError" },
+      failure: { _tag: "KernelSessionStoreAuthorityError" },
     })
   })
 

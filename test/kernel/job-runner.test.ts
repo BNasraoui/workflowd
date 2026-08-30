@@ -216,7 +216,7 @@ describe("kernel job runner", () => {
     expect(result.second).toEqual({ status: "completed", jobId: "echo-authority" })
     expect(result.late).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelJobStoreLeaseError", jobId: "echo-authority" },
+      failure: { _tag: "KernelJobStoreLeaseError", jobId: "echo-authority" },
     })
     expect(result.job).toMatchObject({ state: "succeeded", attempt: 2 })
     expect(result.stored?.result).toEqual({ kind: "echo", value: "first" })
@@ -248,7 +248,7 @@ describe("kernel job runner", () => {
 
       expect(result.late).toMatchObject({
         _tag: "Failure",
-        left: { _tag: "KernelJobStoreLeaseError", jobId: `echo-expired-${outcome}` },
+        failure: { _tag: "KernelJobStoreLeaseError", jobId: `echo-expired-${outcome}` },
       })
       expect(result.job).toMatchObject({ state: "leased", attempt: 1 })
     }

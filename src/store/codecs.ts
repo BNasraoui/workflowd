@@ -124,8 +124,8 @@ const FixJobRow = Schema.Struct({
 
 const ReviewWorkRow = ReviewJobRow.pipe(
   Schema.decodeTo(
-    ReviewWork,
-    SchemaTransformation.transform({
+    Schema.toType(ReviewWork),
+    SchemaTransformation.transform<(typeof ReviewWork)["Type"], (typeof ReviewJobRow)["Type"]>({
       decode: (row) => ({ _tag: "ReviewWork" as const, ...toWork(row) }),
       encode: (work) => ({
         ...workFields(work),
@@ -139,8 +139,8 @@ const ReviewWorkRow = ReviewJobRow.pipe(
 )
 const FixWorkRow = FixJobRow.pipe(
   Schema.decodeTo(
-    FixWork,
-    SchemaTransformation.transform({
+    Schema.toType(FixWork),
+    SchemaTransformation.transform<(typeof FixWork)["Type"], (typeof FixJobRow)["Type"]>({
       decode: (row) => ({
         _tag: "FixWork" as const,
         ...toWork(row),
@@ -203,8 +203,11 @@ const PublicationStorageRow = Schema.Struct({
 )
 const PublicationRow = PublicationStorageRow.pipe(
   Schema.decodeTo(
-    Publication,
-    SchemaTransformation.transform({
+    Schema.toType(Publication),
+    SchemaTransformation.transform<
+      (typeof Publication)["Type"],
+      (typeof PublicationStorageRow)["Type"]
+    >({
       decode: (row) => ({
         id: row.id,
         operationKey: row.operationKey,
@@ -306,19 +309,23 @@ const decodeRow =
   (row: unknown): Effect.Effect<A, StoreDataError, R> =>
     Schema.decodeUnknownEffect(schema)(row).pipe(
       Effect.mapError((error) => {
-        const message = String(error)
+        const raw = String(error)
+        const column =
+          raw.includes("review_json") || raw.includes('["review"]')
+            ? "review_json"
+            : raw.includes("fix_result_json") || raw.includes('["fixResult"]')
+              ? "fix_result_json"
+              : raw.includes('["sessionReference"]')
+                ? "session_reference_json"
+                : undefined
         return new StoreDataError({
           record,
           recordId: Option.getOrElse(
             Schema.decodeUnknownOption(RowId)(row).pipe(Option.map(({ id }) => id)),
             () => 0,
           ),
-          field: message.includes("review_json")
-            ? "review_json"
-            : message.includes("fix_result_json")
-              ? "fix_result_json"
-              : "row",
-          message,
+          field: column === "review_json" || column === "fix_result_json" ? column : "row",
+          message: column === undefined ? raw : `${column}: ${raw}`,
         })
       }),
     )

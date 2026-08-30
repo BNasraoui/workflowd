@@ -162,7 +162,7 @@ describe("custody durability", () => {
     expect(result.exact._tag).toBe("Success")
     expect(result.large).toMatchObject({
       _tag: "Failure",
-      left: { _tag: "KernelSessionStoreInputError" },
+      failure: { _tag: "KernelSessionStoreInputError" },
     })
   })
 
