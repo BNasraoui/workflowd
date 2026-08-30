@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import { runSessionKernel } from "./session-store-harness"
@@ -51,19 +51,19 @@ describe("custody row decoding", () => {
         yield* sql`PRAGMA ignore_check_constraints = ON`
         const reads = [
           sql`UPDATE kernel_working_resources SET created_at = 'bad' WHERE resource_id = 'r'`.pipe(
-            Effect.zipRight(store.readResource("r")),
+            Effect.andThen(store.readResource("r")),
           ),
           sql`UPDATE kernel_sessions SET revision = 0 WHERE session_id = 's'`.pipe(
-            Effect.zipRight(store.readSession("s")),
+            Effect.andThen(store.readSession("s")),
           ),
           sql`UPDATE kernel_resume_requests SET prompt_json = '{bad' WHERE request_id = 'q'`.pipe(
-            Effect.zipRight(store.readResumeRequest("q")),
+            Effect.andThen(store.readResumeRequest("q")),
           ),
         ]
         return yield* Effect.forEach(reads, (read) =>
           read.pipe(
-            Effect.either,
-            Effect.map((result) => result._tag === "Left" && result.left._tag),
+            Effect.result,
+            Effect.map((result) => result._tag === "Failure" && result.failure._tag),
           ),
         )
       }),
@@ -156,10 +156,10 @@ describe("custody row decoding", () => {
         })
         yield* sql`PRAGMA ignore_check_constraints = ON`
         yield* sql`UPDATE kernel_cleanup_requests SET run_at = 'bad' WHERE cleanup_id = 'c'`
-        return yield* store.readRecoverableCleanup("h").pipe(Effect.either)
+        return yield* store.readRecoverableCleanup("h").pipe(Effect.result)
       }),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "KernelSessionStoreDataError" } })
+    expect(result).toMatchObject({ _tag: "Failure", left: { _tag: "KernelSessionStoreDataError" } })
   })
 
   test("quarantines malformed cleanup claim rows", async () => {

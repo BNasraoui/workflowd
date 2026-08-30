@@ -17,10 +17,13 @@ describe("custody input boundaries", () => {
             kind: "workspace",
             createdAt: new Date(Number.NaN),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "KernelSessionStoreInputError" } })
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      left: { _tag: "KernelSessionStoreInputError" },
+    })
   })
 
   test("rejects an oversized path at the Effect boundary", async () => {
@@ -36,10 +39,13 @@ describe("custody input boundaries", () => {
             kind: "workspace",
             createdAt: new Date("2026-08-12T10:00:00.000Z"),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "KernelSessionStoreInputError" } })
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      left: { _tag: "KernelSessionStoreInputError" },
+    })
   })
 
   test("rejects invalid claim and authority dates as typed input errors", async () => {
@@ -89,7 +95,7 @@ describe("custody input boundaries", () => {
             now: new Date(Number.NaN),
             leaseDurationMs: 1,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const claim = yield* store.claimResume({
           owningHostId: "h",
           workerId: "w",
@@ -107,14 +113,13 @@ describe("custody input boundaries", () => {
             expectedLeaseUntil: new Date(Number.NaN),
             now: at,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return [invalidClaim, invalidAuthority]
       }),
     )
-    expect(results.map((result) => (result._tag === "Left" ? result.left._tag : "Right"))).toEqual([
-      "KernelSessionStoreInputError",
-      "KernelSessionStoreInputError",
-    ])
+    expect(
+      results.map((result) => (result._tag === "Failure" ? result.failure._tag : "Success")),
+    ).toEqual(["KernelSessionStoreInputError", "KernelSessionStoreInputError"])
   })
 
   test("rejects lease deadline overflow as a typed input error", async () => {
@@ -146,9 +151,12 @@ describe("custody input boundaries", () => {
             now: at,
             leaseDurationMs: Number.MAX_SAFE_INTEGER,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "KernelSessionStoreInputError" } })
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      left: { _tag: "KernelSessionStoreInputError" },
+    })
   })
 })

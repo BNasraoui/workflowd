@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import {
   KernelEventStore,
@@ -58,7 +58,7 @@ const bootstrap = (filename: string) => {
 
 const runKernel = <A, E>(
   filename: string,
-  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>,
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
 ) => {
   const database = SqliteClient.layer({ filename })
   return Effect.runPromise(

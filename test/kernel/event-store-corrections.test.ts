@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -41,7 +40,9 @@ const event = (sourceEventId: string, correlation = "gate-7", instanceId = "inst
   recordedAt: timestamp,
 })
 
-const runKernel = <A, E>(effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>) => {
+const runKernel = <A, E>(
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
+) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   return Effect.runPromise(
@@ -50,7 +51,7 @@ const runKernel = <A, E>(effect: Effect.Effect<A, E, KernelEventStorePort | SqlC
 }
 
 const runUnmigratedKernel = <A, E>(
-  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>,
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
 ) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   return Effect.runPromise(
@@ -129,13 +130,13 @@ describe("one-shot global event ledger corrections", () => {
         const created = yield* store.createInstance(instance("instance-1"))
         const registered = yield* store.registerWait(wait("instance-1", "wait-1"))
         return { created, registered }
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
-    expect(result._tag).toBe("Right")
-    if (result._tag === "Right") {
-      expect(result.right.created.instance.eventCursor).toBe(1)
-      expect(result.right.registered.deliveries).toEqual([])
+    expect(result._tag).toBe("Success")
+    if (result._tag === "Success") {
+      expect(result.success.created.instance.eventCursor).toBe(1)
+      expect(result.success.registered.deliveries).toEqual([])
     }
   })
 
@@ -175,13 +176,13 @@ describe("one-shot global event ledger corrections", () => {
         yield* store.recordEvent(event("immutable"))
         yield* sql`PRAGMA ignore_check_constraints = ON`
         return yield* Effect.all([
-          sql`UPDATE kernel_events SET payload_json = '{}'`.pipe(Effect.either),
-          sql`DELETE FROM kernel_events`.pipe(Effect.either),
+          sql`UPDATE kernel_events SET payload_json = '{}'`.pipe(Effect.result),
+          sql`DELETE FROM kernel_events`.pipe(Effect.result),
         ])
       }),
     )
 
-    expect(result.map(({ _tag }) => _tag)).toEqual(["Left", "Left"])
+    expect(result.map(({ _tag }) => _tag)).toEqual(["Failure", "Failure"])
   })
 
   test("event immutability rejects replacement writes", async () => {
@@ -196,11 +197,11 @@ describe("one-shot global event ledger corrections", () => {
         ) VALUES (
           ${recorded.event.sequence}, 'github', 'replace-target', 'approval', 1, 'gate-7',
           'gate-7', '{"approved":false}', ${timestamp.toISOString()}
-        )`.pipe(Effect.either)
+        )`.pipe(Effect.result)
       }),
     )
 
-    expect(result._tag).toBe("Left")
+    expect(result._tag).toBe("Failure")
   })
 
   test("event immutability rejects identical replacement without a sequence", async () => {
@@ -215,11 +216,11 @@ describe("one-shot global event ledger corrections", () => {
         ) VALUES (
           'github', 'replace-identical', 'approval', 1, 'gate-7', 'gate-7',
           '{"approved":true}', ${timestamp.toISOString()}
-        )`.pipe(Effect.either)
+        )`.pipe(Effect.result)
       }),
     )
 
-    expect(result._tag).toBe("Left")
+    expect(result._tag).toBe("Failure")
   })
 
   test("event immutability rejects timestamp-only raw replacement", async () => {
@@ -234,11 +235,11 @@ describe("one-shot global event ledger corrections", () => {
         ) VALUES (
           ${recorded.event.sequence}, 'github', 'replace-timestamp', 'approval', 1,
           'gate-7', 'gate-7', '{"approved":true}', '2026-08-11T12:00:00.000Z'
-        )`.pipe(Effect.either)
+        )`.pipe(Effect.result)
       }),
     )
 
-    expect(result._tag).toBe("Left")
+    expect(result._tag).toBe("Failure")
   })
 
   test("durable text bounds count UTF-8 bytes rather than characters", async () => {
@@ -246,18 +247,18 @@ describe("one-shot global event ledger corrections", () => {
       Effect.gen(function* () {
         const store = yield* KernelEventStore
         const exactInstance = "é".repeat(128)
-        const accepted = yield* store.createInstance(instance(exactInstance)).pipe(Effect.either)
+        const accepted = yield* store.createInstance(instance(exactInstance)).pipe(Effect.result)
         const rejected = yield* store
           .createInstance(instance(`${exactInstance}a`))
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { accepted, rejected }
       }),
     )
 
-    expect(result.accepted._tag).toBe("Right")
-    expect(result.rejected._tag).toBe("Left")
-    if (result.rejected._tag === "Left") {
-      expect(result.rejected.left._tag).toBe("KernelStoreInputError")
+    expect(result.accepted._tag).toBe("Success")
+    expect(result.rejected._tag).toBe("Failure")
+    if (result.rejected._tag === "Failure") {
+      expect(result.rejected.failure._tag).toBe("KernelStoreInputError")
     }
   })
 
@@ -289,13 +290,13 @@ describe("one-shot global event ledger corrections", () => {
           )
         `
         const results = yield* Effect.all([
-          insertEvent({ sequence: 100, source: `${"é".repeat(64)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 101, sourceEventId: `${"é".repeat(128)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 102, type: `${"é".repeat(64)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 103, key: `${"é".repeat(128)}a` }).pipe(Effect.either),
-          insertEvent({ sequence: 104, correlation: `${"é".repeat(128)}a` }).pipe(Effect.either),
+          insertEvent({ sequence: 100, source: `${"é".repeat(64)}a` }).pipe(Effect.result),
+          insertEvent({ sequence: 101, sourceEventId: `${"é".repeat(128)}a` }).pipe(Effect.result),
+          insertEvent({ sequence: 102, type: `${"é".repeat(64)}a` }).pipe(Effect.result),
+          insertEvent({ sequence: 103, key: `${"é".repeat(128)}a` }).pipe(Effect.result),
+          insertEvent({ sequence: 104, correlation: `${"é".repeat(128)}a` }).pipe(Effect.result),
           insertEvent({ sequence: 105, payload: JSON.stringify("p".repeat(65_535)) }).pipe(
-            Effect.either,
+            Effect.result,
           ),
           sql`INSERT INTO kernel_workflow_instances (
             instance_id, workflow_type, workflow_version, workflow_key, payload_json,
@@ -303,19 +304,19 @@ describe("one-shot global event ledger corrections", () => {
           ) VALUES (
             ${`${"é".repeat(128)}a`}, 'review', 1, 'key', 'null', 0,
             ${timestamp.toISOString()}
-          )`.pipe(Effect.either),
+          )`.pipe(Effect.result),
           sql`INSERT INTO kernel_waits (
             instance_id, wait_id, event_type, event_version, event_key, correlation,
             after_sequence, state, registered_at
           ) VALUES (
             'instance-1', ${`${"é".repeat(128)}a`}, 'type', 1, 'key', 'correlation',
             0, 'pending', ${timestamp.toISOString()}
-          )`.pipe(Effect.either),
+          )`.pipe(Effect.result),
         ])
         return results.map(({ _tag }) => _tag)
       }),
     )
 
-    expect(tags).toEqual(Array.from({ length: 8 }, () => "Left"))
+    expect(tags).toEqual(Array.from({ length: 8 }, () => "Failure"))
   })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import {
   KernelJobStore,
@@ -82,8 +82,8 @@ describe("kernel lease authority", () => {
             ":memory:",
             Effect.gen(function* () {
               const claim = yield* claimJob(`${transition.name}-${index}`)
-              const result = yield* Effect.either(transition.run(claim, mutate(claim)))
-              return result._tag === "Left" ? result.left._tag : result._tag
+              const result = yield* Effect.result(transition.run(claim, mutate(claim)))
+              return result._tag === "Failure" ? result.failure._tag : result._tag
             }),
           ),
         )

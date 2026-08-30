@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Schema } from "effect"
 import { AgentHandoffStore, AgentHandoffStoreLive } from "../../src/kernel/agent-handoff-store"

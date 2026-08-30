@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Fiber, Layer, Schema } from "effect"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import {
@@ -145,7 +145,7 @@ describe("OpenCode local resume worker", () => {
         yield* registerRequest
         const crashed = yield* runOpenCodeResumeIteration(options).pipe(
           Effect.provide(Provider),
-          Effect.either,
+          Effect.result,
         )
         const first = yield* store.readResumeRequest("resume-1")
         const retried = yield* runOpenCodeResumeIteration({
@@ -157,7 +157,7 @@ describe("OpenCode local resume worker", () => {
       }),
     )
 
-    expect(outcome.crashed._tag).toBe("Left")
+    expect(outcome.crashed._tag).toBe("Failure")
     expect(outcome.first).toMatchObject({ state: "leased", attempt: 1 })
     expect(outcome.retried).toMatchObject({ status: "completed", requestId: "resume-1" })
     expect(outcome.result).toMatchObject({ result_json: '{"answer":"done"}', attempt: 2 })
@@ -184,7 +184,7 @@ describe("OpenCode local resume worker", () => {
         yield* registerRequest
         const first = yield* runOpenCodeResumeIteration(options).pipe(
           Effect.provide(Provider),
-          Effect.either,
+          Effect.result,
         )
         const restarted = yield* runOpenCodeResumeIteration({
           ...options,
@@ -200,7 +200,7 @@ describe("OpenCode local resume worker", () => {
       }),
     )
 
-    expect(outcome.first._tag).toBe("Left")
+    expect(outcome.first._tag).toBe("Failure")
     expect(outcome.restarted).toMatchObject({
       status: "operator_required",
       requestId: "resume-1",
@@ -241,7 +241,7 @@ describe("OpenCode local resume worker", () => {
         yield* registerRequest
         const first = yield* runOpenCodeResumeIteration({ ...options, now: () => clock }).pipe(
           Effect.provide(Provider),
-          Effect.either,
+          Effect.result,
         )
         const restarted = yield* runOpenCodeResumeIteration({
           ...options,
@@ -258,7 +258,7 @@ describe("OpenCode local resume worker", () => {
       }),
     )
 
-    expect(outcome.first._tag).toBe("Left")
+    expect(outcome.first._tag).toBe("Failure")
     expect(outcome.restarted).toMatchObject({ status: "completed", requestId: "resume-1" })
     expect(outcome.request).toMatchObject({ state: "completed", attempt: 1 })
     expect(outcome.observation).toMatchObject({
@@ -531,7 +531,7 @@ describe("OpenCode local resume worker", () => {
       ":memory:",
       Effect.gen(function* () {
         yield* registerRequest
-        const worker = yield* Effect.fork(
+        const worker = yield* Effect.forkChild(
           runOpenCodeResumeIteration(options).pipe(
             Effect.provide(Layer.succeed(OpenCodeResumeProvider, provider)),
           ),
@@ -571,7 +571,7 @@ describe("OpenCode local resume worker", () => {
         const sql = yield* SqlClient.SqlClient
         const store = yield* KernelSessionStore
         yield* registerRequest
-        const worker = yield* Effect.fork(
+        const worker = yield* Effect.forkChild(
           runOpenCodeResumeIteration({
             ...options,
             leaseDurationMs: 100,

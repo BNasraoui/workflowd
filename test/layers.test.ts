@@ -210,11 +210,11 @@ test("composes the explicit six-contract catalog by default", async () => {
     const preflight = await Effect.runPromise(
       Effect.gen(function* () {
         const workflowStart = yield* WorkflowStart
-        return yield* workflowStart.preflight.pipe(Effect.either)
+        return yield* workflowStart.preflight.pipe(Effect.result)
       }).pipe(Effect.provide(Live)),
     )
     expect(preflight).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { phase: "availability", reason: "unavailable_agent_model" },
     })
   } finally {
@@ -309,14 +309,14 @@ test("keeps unrelated services available when configured QRSPI is closed", async
             agentHarness.createSession,
             workspace.prepareReview,
           ],
-          closed: yield* Effect.either(workflowStart.start({})),
+          closed: yield* Effect.result(workflowStart.start({})),
         }
       }).pipe(Effect.provide(Live)),
     )
 
     expect(result.methods.every((method) => typeof method === "function")).toBe(true)
     expect(result.closed).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: {
         _tag: "WorkflowStartValidationError",
         phase: "contract",
@@ -354,10 +354,12 @@ test("fails live composition when the configured GitHub key cannot be read", asy
 
     const exit = await Effect.runPromiseExit(Effect.scoped(Layer.build(Live)))
 
-    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
-      _tag: "Some",
-      value: expect.any(Error),
-    })
+    expect(Cause.findErrorOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject(
+      {
+        _tag: "Some",
+        value: expect.any(Error),
+      },
+    )
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

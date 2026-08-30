@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { KernelSessionStore, MAX_CUSTODY_JSON_BYTES } from "../../src/kernel/session-store"
 import { removeDatabase } from "./job-store-harness"
@@ -106,11 +106,11 @@ describe("custody durability", () => {
         BEGIN SELECT RAISE(ABORT, 'injected'); END`
         const failed = yield* store
           .claimResume({ owningHostId: "h", workerId: "w", now, leaseDurationMs: 60_000 })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { failed, request: yield* store.readResumeRequest("q") }
       }),
     )
-    expect(result.failed._tag).toBe("Left")
+    expect(result.failed._tag).toBe("Failure")
     expect(result.request).toMatchObject({ state: "ready", attempt: 0 })
   })
 
@@ -155,13 +155,13 @@ describe("custody durability", () => {
               runAt: now,
               createdAt: now,
             })
-            .pipe(Effect.either)
+            .pipe(Effect.result)
         return { exact: yield* add("exact", exact), large: yield* add("large", `${exact}a`) }
       }),
     )
-    expect(result.exact._tag).toBe("Right")
+    expect(result.exact._tag).toBe("Success")
     expect(result.large).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreInputError" },
     })
   })
@@ -211,7 +211,7 @@ describe("custody durability", () => {
             outcomeVersion: 1,
             outcome: {},
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const attempt = yield* sql`SELECT state FROM kernel_cleanup_attempts WHERE cleanup_id = 'c'`
         const request = yield* sql`SELECT state FROM kernel_cleanup_requests WHERE cleanup_id = 'c'`
         const resource =
@@ -219,7 +219,7 @@ describe("custody durability", () => {
         return { attempt, failed, request, resource }
       }),
     )
-    expect(result.failed._tag).toBe("Left")
+    expect(result.failed._tag).toBe("Failure")
     expect(result.attempt).toEqual([{ state: "leased" }])
     expect(result.request).toEqual([{ state: "leased" }])
     expect(result.resource).toEqual([{ state: "cleanup_leased" }])

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import { runSessionKernel } from "./session-store-harness"
 

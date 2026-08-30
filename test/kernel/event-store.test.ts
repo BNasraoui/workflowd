@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -38,7 +37,9 @@ const wait = (waitId: string) => ({
   registeredAt: timestamp,
 })
 
-const runKernel = <A, E>(effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>) => {
+const runKernel = <A, E>(
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
+) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   return Effect.runPromise(
@@ -138,11 +139,11 @@ describe("kernel event store replay", () => {
         yield* store.recordEvent(original)
         return yield* store
           .recordEvent({ ...original, event: { ...original.event, key: "key-b" } })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
 
-    expect(result._tag).toBe("Left")
+    expect(result._tag).toBe("Failure")
   })
 
   test("event replay ignores a later receipt timestamp and returns no deliveries", async () => {
@@ -213,16 +214,16 @@ describe("kernel event store replay", () => {
             ...wait("invalid"),
             condition: { ...wait("invalid").condition, version: 0 },
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const missingParent = yield* store
           .registerWait({ ...wait("missing"), instanceId: "missing-instance" })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { invalid, missingParent }
       }),
     )
 
-    expect(result.invalid._tag).toBe("Left")
-    expect(result.missingParent._tag).toBe("Left")
+    expect(result.invalid._tag).toBe("Failure")
+    expect(result.missingParent._tag).toBe("Failure")
   })
 })
 
@@ -318,16 +319,16 @@ describe("kernel byte envelopes", () => {
       Effect.gen(function* () {
         const store = yield* KernelEventStore
         yield* store.createInstance(instance())
-        const exact = yield* store.registerWait({ ...wait("é".repeat(128)) }).pipe(Effect.either)
+        const exact = yield* store.registerWait({ ...wait("é".repeat(128)) }).pipe(Effect.result)
         const oversized = yield* store
           .registerWait({ ...wait(`${"é".repeat(128)}a`) })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { exact, oversized }
       }),
     )
 
-    expect(result.exact._tag).toBe("Right")
-    expect(result.oversized._tag).toBe("Left")
+    expect(result.exact._tag).toBe("Success")
+    expect(result.oversized._tag).toBe("Failure")
   })
 
   test("accepts exact ASCII and Unicode byte maxima", async () => {
@@ -371,34 +372,36 @@ describe("kernel byte envelopes", () => {
         const store = yield* KernelEventStore
         const base = event("bounded")
         const results = yield* Effect.all([
-          store.recordEvent({ ...base, source: `${"é".repeat(64)}a` }).pipe(Effect.either),
-          store.recordEvent({ ...base, sourceEventId: `${"é".repeat(128)}a` }).pipe(Effect.either),
+          store.recordEvent({ ...base, source: `${"é".repeat(64)}a` }).pipe(Effect.result),
+          store.recordEvent({ ...base, sourceEventId: `${"é".repeat(128)}a` }).pipe(Effect.result),
           store
             .recordEvent({
               ...base,
               event: { ...base.event, type: `${"é".repeat(64)}a` },
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
           store
             .recordEvent({
               ...base,
               event: { ...base.event, key: `${"é".repeat(128)}a` },
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
           store
             .recordEvent({
               ...base,
               event: { ...base.event, correlation: `${"é".repeat(128)}a` },
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
           store
             .recordEvent({
               ...base,
               event: { ...base.event, payload: "p".repeat(65_535) },
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
         ])
-        return results.map((result) => (result._tag === "Left" ? result.left._tag : result._tag))
+        return results.map((result) =>
+          result._tag === "Failure" ? result.failure._tag : result._tag,
+        )
       }),
     )
 

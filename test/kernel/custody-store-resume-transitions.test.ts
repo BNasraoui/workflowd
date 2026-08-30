@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelSessionStore, type ResumeClaim } from "../../src/kernel/session-store"
 import { runSessionKernel } from "./session-store-harness"
 
@@ -140,9 +140,9 @@ describe("resume authority transitions", () => {
                       : dimension === "deadline"
                         ? { ...base, expectedLeaseUntil: new Date(claim.leaseUntil.getTime() + 1) }
                         : { ...base, now: claim.leaseUntil }
-            const failed = yield* store.failResume(changed).pipe(Effect.either)
+            const failed = yield* store.failResume(changed).pipe(Effect.result)
             return {
-              tag: failed._tag === "Left" && failed.left._tag,
+              tag: failed._tag === "Failure" && failed.failure._tag,
               request: yield* store.readResumeRequest("q"),
             }
           }),
@@ -198,23 +198,23 @@ describe("resume authority transitions", () => {
         }
         yield* store.completeResume(completion)
         const afterExpiry = { ...completion, now: claim.leaseUntil }
-        const exact = yield* store.completeResume(afterExpiry).pipe(Effect.either)
+        const exact = yield* store.completeResume(afterExpiry).pipe(Effect.result)
         const changed = yield* store
           .completeResume({ ...afterExpiry, result: { value: 2 } })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const stale = yield* store
           .completeResume({ ...afterExpiry, claimToken: "stale" })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { changed, exact, stale }
       }),
     )
-    expect(result.exact).toMatchObject({ _tag: "Right", right: { status: "duplicate" } })
+    expect(result.exact).toMatchObject({ _tag: "Success", right: { status: "duplicate" } })
     expect(result.changed).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.stale).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreAuthorityError" },
     })
   })
@@ -229,7 +229,7 @@ describe("resume authority transitions", () => {
         yield* store.markResumeSent(auth)
         const release = yield* store
           .releaseResume({ ...auth, runAt: new Date(now.getTime() + 10) })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const request = yield* store.readResumeRequest("q")
         const resend = yield* store.claimResume({
           owningHostId: "h",
@@ -242,6 +242,6 @@ describe("resume authority transitions", () => {
     )
     expect(result.resend).toBeNull()
     expect(result.request).toMatchObject({ state: "observation_required" })
-    expect(result.release._tag).toBe("Right")
+    expect(result.release._tag).toBe("Success")
   })
 })

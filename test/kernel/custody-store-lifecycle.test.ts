@@ -92,8 +92,8 @@ describe("kernel custody lifecycle", () => {
                 createdAt: now,
               })
               .pipe(
-                Effect.either,
-                Effect.map((result) => result._tag === "Left" && result.left._tag),
+                Effect.result,
+                Effect.map((result) => result._tag === "Failure" && result.failure._tag),
               ),
         )
       }),
