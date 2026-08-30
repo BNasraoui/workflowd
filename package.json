@@ -14,6 +14,10 @@
     "soak:remote": "bun scripts/soak-remote.ts",
     "test:coverage": "bun test --coverage",
     "coverage:changed": "bun scripts/check-changed-line-coverage.ts",
+    "coverage:istanbul": "bun scripts/lcov-to-istanbul.ts",
+    "crap": "bun scripts/crap-report.ts",
+    "crap:full": "bun run test:coverage && bun scripts/crap-report.ts",
+    "crap:check": "bun scripts/check-crap.ts",
     "typecheck": "tsc --noEmit",
     "effect:check": "bun scripts/check-effect-diagnostics.mjs",
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
@@ -23,7 +27,7 @@
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage"
+    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage && bun run crap:check"
   },
   "dependencies": {
     "@effect/platform": "0.97.0",
@@ -42,6 +46,7 @@
   "devDependencies": {
     "@effect/language-service": "0.87.0",
     "@eslint/js": "^10.0.1",
+    "@sebassdc/crap4ts": "^0.1.1",
     "@types/bun": "1.3.5",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
