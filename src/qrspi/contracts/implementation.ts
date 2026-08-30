@@ -16,32 +16,37 @@ export const MAX_SCENARIO_EVIDENCE_ITEMS = 256
 export const MAX_SCENARIO_EVIDENCE_BYTES = 4_000
 
 const ImplementationSources = ExactStageSources.pipe(
-  Schema.filter((sources) =>
-    isOrderedRoleSubsequence(
-      sources.sources.map(({ role }) => role),
-      ["Plan", "Structure", "Design", "Research", "Questions"],
-    )
-      ? true
-      : "Implementation accepts only the Plan/Structure/Design/Research/Questions predecessor subsequence",
+  Schema.check(
+    Schema.makeFilter((sources) =>
+      isOrderedRoleSubsequence(
+        sources.sources.map(({ role }) => role),
+        ["Plan", "Structure", "Design", "Research", "Questions"],
+      )
+        ? true
+        : "Implementation accepts only the Plan/Structure/Design/Research/Questions predecessor subsequence",
+    ),
   ),
 )
 
 const ChangedPath = RepositoryRelativePath.pipe(
-  Schema.filter((path) =>
-    Buffer.byteLength(path, "utf8") <= MAX_CHANGED_PATH_BYTES
-      ? true
-      : `Changed path exceeds ${MAX_CHANGED_PATH_BYTES} UTF-8 bytes`,
+  Schema.check(
+    Schema.makeFilter((path) =>
+      Buffer.byteLength(path, "utf8") <= MAX_CHANGED_PATH_BYTES
+        ? true
+        : `Changed path exceeds ${MAX_CHANGED_PATH_BYTES} UTF-8 bytes`,
+    ),
   ),
 )
 
 export const BoundedChangedPaths = Schema.Array(ChangedPath).pipe(
-  Schema.minItems(1),
-  Schema.maxItems(MAX_CHANGED_PATHS),
+  Schema.check(Schema.isMinLength(1), Schema.isMaxLength(MAX_CHANGED_PATHS)),
 )
 
 export const BoundedScenarioEvidence = Schema.Array(
-  boundedUtf8(MAX_SCENARIO_EVIDENCE_BYTES, "Scenario evidence").pipe(Schema.minLength(1)),
-).pipe(Schema.minItems(1), Schema.maxItems(MAX_SCENARIO_EVIDENCE_ITEMS))
+  boundedUtf8(MAX_SCENARIO_EVIDENCE_BYTES, "Scenario evidence").pipe(
+    Schema.check(Schema.isMinLength(1)),
+  ),
+).pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(MAX_SCENARIO_EVIDENCE_ITEMS)))
 
 export const ImplementationRequest = Schema.Struct({
   _tag: Schema.Literal("ImplementationRequest"),
@@ -49,14 +54,16 @@ export const ImplementationRequest = Schema.Struct({
   checkpointPosition: PositiveVersion,
   expectedParentSha: GitSha,
 }).pipe(
-  Schema.filter((request) =>
-    request.expectedParentSha === request.sources.target.expectedParentSha
-      ? true
-      : "Implementation expected parent does not match the repository target",
+  Schema.check(
+    Schema.makeFilter((request) =>
+      request.expectedParentSha === request.sources.target.expectedParentSha
+        ? true
+        : "Implementation expected parent does not match the repository target",
+    ),
   ),
 )
 
-export const ImplementationResult = Schema.Union(
+export const ImplementationResult = Schema.Union([
   Schema.TaggedStruct("PreparedCommit", {
     candidateCommitSha: GitSha,
     expectedParentSha: GitSha,
@@ -71,7 +78,7 @@ export const ImplementationResult = Schema.Union(
     final: Schema.Literal(true),
     scenarioEvidence: BoundedScenarioEvidence,
   }),
-)
+])
 
 export const implementationStageContract = {
   ref: { name: "qrspi.implementation", contractVersion: 1 },

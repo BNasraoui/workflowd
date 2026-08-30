@@ -8,14 +8,14 @@ import {
 import { ReviewTarget } from "./review-target"
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
-const PositiveInt = Schema.Int.pipe(Schema.positive())
+const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
 
 export const RepositoryRef = Schema.Struct({
   id: RepositoryId,
   fullName: Schema.NonEmptyString,
   name: Schema.NonEmptyString,
   owner: Schema.NonEmptyString,
-}).annotations(exact)
+}).annotate(exact)
 export type RepositoryRef = typeof RepositoryRef.Type
 
 export const PullRequestRef = Schema.Struct({
@@ -23,22 +23,22 @@ export const PullRequestRef = Schema.Struct({
   author: Schema.NonEmptyString,
   ...ReviewTarget.fields,
   draft: Schema.Boolean,
-  state: Schema.Literal("open", "closed"),
+  state: Schema.Literals(["open", "closed"]),
   updatedAt: Schema.optional(Schema.NonEmptyString),
-}).annotations(exact)
+}).annotate(exact)
 type PullRequestRef = typeof PullRequestRef.Type
 
 export const PullRequestData = Schema.Struct({
   repository: RepositoryRef,
   pullRequest: PullRequestRef,
-}).annotations(exact)
+}).annotate(exact)
 export type PullRequestData = typeof PullRequestData.Type
 
 export const PullRequestObservation = Schema.TaggedStruct("PullRequest", {
   action: Schema.NonEmptyString,
   installationId: PositiveInt,
   ...PullRequestData.fields,
-}).annotations(exact)
+}).annotate(exact)
 export type PullRequestObservation = typeof PullRequestObservation.Type
 
 export const AuthoritativePullRequestSnapshot = Schema.TaggedStruct(
@@ -47,7 +47,7 @@ export const AuthoritativePullRequestSnapshot = Schema.TaggedStruct(
     installationId: PositiveInt,
     ...PullRequestData.fields,
   },
-).annotations(exact)
+).annotate(exact)
 export type AuthoritativePullRequestSnapshot = typeof AuthoritativePullRequestSnapshot.Type
 
 export const TrackedPullRequestState = Schema.TaggedStruct("TrackedPullRequestState", {
@@ -56,7 +56,7 @@ export const TrackedPullRequestState = Schema.TaggedStruct("TrackedPullRequestSt
   generation: GenerationNumber,
   latestReviewRequestNumber: Schema.optional(ReviewRequestNumber),
   reviewRequestActive: Schema.Boolean,
-}).annotations(exact)
+}).annotate(exact)
 export type TrackedPullRequestState = typeof TrackedPullRequestState.Type
 
 export type PullRequestTransitionIntent = Data.TaggedEnum<{

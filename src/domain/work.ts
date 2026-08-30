@@ -15,7 +15,7 @@ import { ReviewTarget } from "./review-target"
 
 const WorkFields = {
   id: JobId,
-  installationId: Schema.Int.pipe(Schema.positive()),
+  installationId: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   repositoryId: RepositoryId,
   repositoryFullName: Schema.NonEmptyString,
   pullRequestNumber: PullRequestNumber,
@@ -29,7 +29,7 @@ const WorkFields = {
 
 const exact = { parseOptions: { onExcessProperty: "error" as const } }
 
-export const ReviewWork = Schema.TaggedStruct("ReviewWork", WorkFields).annotations(exact)
+export const ReviewWork = Schema.TaggedStruct("ReviewWork", WorkFields).annotate(exact)
 export type ReviewWork = typeof ReviewWork.Type
 
 export const FixWork = Schema.TaggedStruct("FixWork", {
@@ -37,8 +37,8 @@ export const FixWork = Schema.TaggedStruct("FixWork", {
   sourcePublicationId: PublicationId,
   review: ChangesRequestedReviewResult,
   checkpoint: Schema.optional(FixResult),
-}).annotations(exact)
+}).annotate(exact)
 export type FixWork = typeof FixWork.Type
 
-export const Work = Schema.Union(ReviewWork, FixWork)
+export const Work = Schema.Union([ReviewWork, FixWork])
 export type Work = typeof Work.Type

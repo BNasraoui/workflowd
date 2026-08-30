@@ -23,10 +23,12 @@ export const MAX_TASK_PROMPT_BYTES = 4 * 1024
 
 export const boundedUtf8 = (maximumBytes: number, name: string) =>
   Schema.String.pipe(
-    Schema.filter((value) =>
-      Buffer.byteLength(value, "utf8") <= maximumBytes
-        ? true
-        : `${name} exceeds ${maximumBytes} UTF-8 bytes`,
+    Schema.check(
+      Schema.makeFilter((value) =>
+        Buffer.byteLength(value, "utf8") <= maximumBytes
+          ? true
+          : `${name} exceeds ${maximumBytes} UTF-8 bytes`,
+      ),
     ),
   )
 
@@ -102,32 +104,36 @@ export const StructureAuthority = Schema.Struct({
   promotionResult: ProvenancePromotionResultReference,
   graph: GraphReference,
 }).pipe(
-  Schema.filter((authority) =>
-    authority.acceptancePackage.workflowId === authority.gateResponse.workflowId &&
-    authority.acceptancePackage.workflowId === authority.promotionResult.workflowId &&
-    authority.acceptancePackage.workflowId === authority.graph.workflowId &&
-    authority.acceptancePackage.generation === authority.gateResponse.generation &&
-    authority.acceptancePackage.generation === authority.promotionResult.generation &&
-    authority.acceptancePackage.generation === authority.graph.generation &&
-    authority.acceptancePackage.designStageRevision ===
-      authority.gateResponse.designStageRevision &&
-    authority.acceptancePackage.designStageRevision ===
-      authority.promotionResult.designStageRevision &&
-    authority.acceptancePackage.packageSha256 === authority.gateResponse.packageSha256 &&
-    authority.acceptancePackage.packageSha256 === authority.promotionResult.packageSha256 &&
-    authority.gateResponse.responseSha256 === authority.promotionResult.gateResponseSha256
-      ? true
-      : "Structure authority references do not identify one accepted Design result",
+  Schema.check(
+    Schema.makeFilter((authority) =>
+      authority.acceptancePackage.workflowId === authority.gateResponse.workflowId &&
+      authority.acceptancePackage.workflowId === authority.promotionResult.workflowId &&
+      authority.acceptancePackage.workflowId === authority.graph.workflowId &&
+      authority.acceptancePackage.generation === authority.gateResponse.generation &&
+      authority.acceptancePackage.generation === authority.promotionResult.generation &&
+      authority.acceptancePackage.generation === authority.graph.generation &&
+      authority.acceptancePackage.designStageRevision ===
+        authority.gateResponse.designStageRevision &&
+      authority.acceptancePackage.designStageRevision ===
+        authority.promotionResult.designStageRevision &&
+      authority.acceptancePackage.packageSha256 === authority.gateResponse.packageSha256 &&
+      authority.acceptancePackage.packageSha256 === authority.promotionResult.packageSha256 &&
+      authority.gateResponse.responseSha256 === authority.promotionResult.gateResponseSha256
+        ? true
+        : "Structure authority references do not identify one accepted Design result",
+    ),
   ),
 )
 export type StructureAuthority = typeof StructureAuthority.Type
 
 export const exactPolicyReference = (expected: typeof PolicyReference.Type) =>
   PolicyReference.pipe(
-    Schema.filter((actual) =>
-      actual.name === expected.name && actual.version === expected.version
-        ? true
-        : `Expected ${expected.name}@${expected.version}`,
+    Schema.check(
+      Schema.makeFilter((actual) =>
+        actual.name === expected.name && actual.version === expected.version
+          ? true
+          : `Expected ${expected.name}@${expected.version}`,
+      ),
     ),
   )
 
@@ -175,30 +181,31 @@ export function isOrderedRoleSubsequence(
   return true
 }
 
-export const StageSourceRole = Schema.Literal(
+export const StageSourceRole = Schema.Literals([
   "Questions",
   "Research",
   "Design",
   "Structure",
   "Plan",
   "Implementation",
-)
+])
 export type StageSourceRole = typeof StageSourceRole.Type
 
 export const RepositoryRelativePath = Schema.String.pipe(
-  Schema.minLength(1),
-  Schema.maxLength(512),
-  Schema.filter((path) => path === path.normalize("NFC")),
-  Schema.filter(
-    (path) =>
-      !path.startsWith("/") &&
-      !path.includes("\\") &&
-      !path.includes("\0") &&
-      path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
+  Schema.check(Schema.isMinLength(1), Schema.isMaxLength(512)),
+  Schema.check(Schema.makeFilter((path) => path === path.normalize("NFC"))),
+  Schema.check(
+    Schema.makeFilter(
+      (path) =>
+        !path.startsWith("/") &&
+        !path.includes("\\") &&
+        !path.includes("\0") &&
+        path.split("/").every((segment) => segment !== "" && segment !== "." && segment !== ".."),
+    ),
   ),
 )
 export const BoundedMediaType = Schema.String.pipe(
-  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]{0,127}$/),
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]{0,127}$/)),
 )
 
 export const ArtifactReference = Schema.Struct({
@@ -228,12 +235,14 @@ const AcceptedPredecessorPointerBase = Schema.Struct({
 })
 
 export const AcceptedPredecessorPointer = AcceptedPredecessorPointerBase.pipe(
-  Schema.filter((pointer) => {
-    const { pointerSha256: _, ...identity } = pointer
-    return pointer.pointerSha256 === canonicalSha256(identity)
-      ? true
-      : "pointerSha256 does not match accepted predecessor identity"
-  }),
+  Schema.check(
+    Schema.makeFilter((pointer) => {
+      const { pointerSha256: _, ...identity } = pointer
+      return pointer.pointerSha256 === canonicalSha256(identity)
+        ? true
+        : "pointerSha256 does not match accepted predecessor identity"
+    }),
+  ),
 )
 export type AcceptedPredecessorPointer = typeof AcceptedPredecessorPointer.Type
 
@@ -243,17 +252,21 @@ export const ExactArtifactSource = Schema.Struct({
   acceptedPointer: AcceptedPredecessorPointer,
   content: boundedUtf8(MAX_STAGE_SOURCE_BYTES, "Stage source"),
 }).pipe(
-  Schema.filter((source) =>
-    source.role === source.acceptedPointer.role &&
-    canonicalSha256(source.artifact) === canonicalSha256(source.acceptedPointer.artifact)
-      ? true
-      : "Source artifact does not match its accepted predecessor pointer",
+  Schema.check(
+    Schema.makeFilter((source) =>
+      source.role === source.acceptedPointer.role &&
+      canonicalSha256(source.artifact) === canonicalSha256(source.acceptedPointer.artifact)
+        ? true
+        : "Source artifact does not match its accepted predecessor pointer",
+    ),
   ),
-  Schema.filter((source) =>
-    createHash("sha256").update(source.content, "utf8").digest("hex") ===
-    source.artifact.contentSha256
-      ? true
-      : "Source content does not match contentSha256",
+  Schema.check(
+    Schema.makeFilter((source) =>
+      createHash("sha256").update(source.content, "utf8").digest("hex") ===
+      source.artifact.contentSha256
+        ? true
+        : "Source content does not match contentSha256",
+    ),
   ),
 )
 export type ExactArtifactSource = typeof ExactArtifactSource.Type
@@ -322,7 +335,7 @@ export function compareAcceptedPredecessorCurrentness(
   return undefined
 }
 
-const TechnicalSources = Schema.Array(ExactArtifactSource).pipe(Schema.maxItems(5))
+const TechnicalSources = Schema.Array(ExactArtifactSource).pipe(Schema.check(Schema.isMaxLength(5)))
 
 const ExactStageSourcesBase = Schema.Struct({
   ...ExactStageScope.fields,
@@ -334,33 +347,39 @@ const ExactStageSourcesBase = Schema.Struct({
 })
 
 export const ExactStageSources = ExactStageSourcesBase.pipe(
-  Schema.filter((value) =>
-    value.sourceSetSha256 ===
-    canonicalSha256(value.sources.map(({ role, artifact }) => ({ role, artifact })))
-      ? true
-      : "sourceSetSha256 does not match ordered source identities",
+  Schema.check(
+    Schema.makeFilter((value) =>
+      value.sourceSetSha256 ===
+      canonicalSha256(value.sources.map(({ role, artifact }) => ({ role, artifact })))
+        ? true
+        : "sourceSetSha256 does not match ordered source identities",
+    ),
   ),
-  Schema.filter((value) => {
-    const repository = value.target.repository
-    const valid =
-      value.ticketRevision.workflowId === value.workflowId &&
-      value.sources.every(({ role, artifact, acceptedPointer }) => {
-        const expectedStageKey = stageKeyBySourceRole[role]
-        return (
-          artifact.workflowId === value.workflowId &&
-          artifact.generation === value.generation &&
-          artifact.stageKey === expectedStageKey &&
-          artifact.repository.providerInstanceId === repository.providerInstanceId &&
-          artifact.repository.repositoryId === repository.repositoryId &&
-          acceptedPointer.acceptedStageRevision === artifact.stageRevision
-        )
-      })
-    return valid ? true : "Source authority does not match the request scope and target"
-  }),
-  Schema.filter((value) =>
-    encodedBytes(value) <= MAX_EXACT_STAGE_SOURCES_BYTES
-      ? true
-      : `Exact stage sources exceed ${MAX_EXACT_STAGE_SOURCES_BYTES} encoded bytes`,
+  Schema.check(
+    Schema.makeFilter((value) => {
+      const repository = value.target.repository
+      const valid =
+        value.ticketRevision.workflowId === value.workflowId &&
+        value.sources.every(({ role, artifact, acceptedPointer }) => {
+          const expectedStageKey = stageKeyBySourceRole[role]
+          return (
+            artifact.workflowId === value.workflowId &&
+            artifact.generation === value.generation &&
+            artifact.stageKey === expectedStageKey &&
+            artifact.repository.providerInstanceId === repository.providerInstanceId &&
+            artifact.repository.repositoryId === repository.repositoryId &&
+            acceptedPointer.acceptedStageRevision === artifact.stageRevision
+          )
+        })
+      return valid ? true : "Source authority does not match the request scope and target"
+    }),
+  ),
+  Schema.check(
+    Schema.makeFilter((value) =>
+      encodedBytes(value) <= MAX_EXACT_STAGE_SOURCES_BYTES
+        ? true
+        : `Exact stage sources exceed ${MAX_EXACT_STAGE_SOURCES_BYTES} encoded bytes`,
+    ),
   ),
 )
 export type ExactStageSources = typeof ExactStageSources.Type
@@ -385,14 +404,14 @@ export const StageExecutionContext = Schema.Struct({
 })
 export type StageExecutionContext = typeof StageExecutionContext.Type
 
-export const PreparedStageOutput = Schema.Union(
+export const PreparedStageOutput = Schema.Union([
   Schema.TaggedStruct("Document", {
     text: BoundedMarkdown(MAX_DOCUMENT_RESULT_BYTES),
   }),
   Schema.TaggedStruct("ImplementationStep", {
     value: JsonValueSchema,
   }),
-)
+])
 export type PreparedStageOutput = typeof PreparedStageOutput.Type
 
 export function prepareDocumentOutput(result: { readonly document: string }) {
@@ -415,29 +434,35 @@ function requestSources(request: unknown): unknown {
 }
 
 export const StageProduceInput = StageProduceInputBase.pipe(
-  Schema.filter((value) =>
-    value.requestSha256 === canonicalSha256(value.request)
-      ? true
-      : "requestSha256 does not match request",
-  ),
-  Schema.filter((value) => {
-    try {
-      Schema.decodeUnknownSync(ExactStageSources)(requestSources(value.request))
-      return true
-    } catch {
-      return "sourceSetSha256 does not match ordered source identities"
-    }
-  }),
-  Schema.filter((value) => {
-    try {
-      const nestedScope = Schema.decodeUnknownSync(ExactStageScope)(requestSources(value.request))
-      return canonicalSha256(value.scope) === canonicalSha256(nestedScope)
+  Schema.check(
+    Schema.makeFilter((value) =>
+      value.requestSha256 === canonicalSha256(value.request)
         ? true
-        : "scope does not match request sources"
-    } catch {
-      return "scope does not match request sources"
-    }
-  }),
+        : "requestSha256 does not match request",
+    ),
+  ),
+  Schema.check(
+    Schema.makeFilter((value) => {
+      try {
+        Schema.decodeUnknownSync(ExactStageSources)(requestSources(value.request))
+        return true
+      } catch {
+        return "sourceSetSha256 does not match ordered source identities"
+      }
+    }),
+  ),
+  Schema.check(
+    Schema.makeFilter((value) => {
+      try {
+        const nestedScope = Schema.decodeUnknownSync(ExactStageScope)(requestSources(value.request))
+        return canonicalSha256(value.scope) === canonicalSha256(nestedScope)
+          ? true
+          : "scope does not match request sources"
+      } catch {
+        return "scope does not match request sources"
+      }
+    }),
+  ),
 )
 export type StageProduceInput = typeof StageProduceInput.Type
 

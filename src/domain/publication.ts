@@ -14,7 +14,7 @@ import { ReviewTarget } from "./review-target"
 export const Publication = Schema.Struct({
   id: PublicationId,
   operationKey: Schema.NonEmptyString,
-  installationId: Schema.Int.pipe(Schema.positive()),
+  installationId: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   repositoryId: RepositoryId,
   repositoryFullName: Schema.NonEmptyString,
   pullRequestNumber: PullRequestNumber,
@@ -23,11 +23,11 @@ export const Publication = Schema.Struct({
   reviewRequestNumber: ReviewRequestNumber,
   review: ReviewResult,
   sessionReferenceId: Schema.optional(
-    Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+    Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
   ),
   sessionReference: Schema.optional(SessionReference),
   sessionExecutionState: Schema.optional(
-    Schema.Literal("launch_intent", "session_ready", "succeeded", "failed", "superseded"),
+    Schema.Literals(["launch_intent", "session_ready", "succeeded", "failed", "superseded"]),
   ),
   attempt: AttemptNumber,
 })

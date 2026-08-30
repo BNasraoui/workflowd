@@ -11,8 +11,10 @@ import {
 export const QuestionsRequest = Schema.Struct({
   _tag: Schema.Literal("QuestionsRequest"),
   sources: ExactStageSources.pipe(
-    Schema.filter((sources) =>
-      sources.sources.length === 0 ? true : "Questions accepts no predecessor sources",
+    Schema.check(
+      Schema.makeFilter((sources) =>
+        sources.sources.length === 0 ? true : "Questions accepts no predecessor sources",
+      ),
     ),
   ),
 })

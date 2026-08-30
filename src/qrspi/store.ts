@@ -1,5 +1,4 @@
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient, SqlError } from "effect/unstable/sql"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { runStoreMigrations } from "../store/migrations"
 import {
@@ -19,7 +18,7 @@ import {
 } from "./domain"
 import { StageProduceInput, type StageProduceInput as StageProduceInputType } from "./contracts"
 
-const OperationState = Schema.Literal(
+const OperationState = Schema.Literals([
   "blocked",
   "ready",
   "leased",
@@ -30,28 +29,28 @@ const OperationState = Schema.Literal(
   "cancelled",
   "superseded",
   "data_error",
-)
+])
 
 const StartRecord = Schema.Struct({
   operationId: Schema.NonEmptyString,
   logicalOperationId: Schema.NonEmptyString,
-  operationRevision: Schema.Int.pipe(Schema.positive()),
+  operationRevision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   state: OperationState,
-  attempt: Schema.Int.pipe(Schema.nonNegative()),
-  maxAttempts: Schema.Int.pipe(Schema.positive()),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  maxAttempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   leaseToken: Schema.optional(Schema.NonEmptyString),
-  leaseUntil: Schema.optional(Schema.DateFromSelf),
-  inputSha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  leaseUntil: Schema.optional(Schema.Date),
+  inputSha256: Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
   branchName: Schema.NonEmptyString,
   output: Schema.optional(WorkflowStartOutput),
   terminalRetryPolicy: Schema.optional(
-    Schema.Literal(
+    Schema.Literals([
       "retryable",
       "retry_budget_exhausted",
       "operator_required",
       "cancelled",
       "data_error",
-    ),
+    ]),
   ),
 })
 export type StartRecord = typeof StartRecord.Type
@@ -59,7 +58,7 @@ export type StartRecord = typeof StartRecord.Type
 const OperationRow = Schema.Struct({
   operation_id: Schema.NonEmptyString,
   logical_operation_id: Schema.NonEmptyString,
-  operation_revision: Schema.Int.pipe(Schema.positive()),
+  operation_revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   retry_of: Schema.NullOr(Schema.String),
   kind: Schema.String,
   scope_json: Schema.String,
@@ -67,37 +66,35 @@ const OperationRow = Schema.Struct({
   input_sha256: Schema.String,
   output_json: Schema.NullOr(Schema.String),
   state: OperationState,
-  is_current: Schema.Literal(0, 1),
-  attempt: Schema.Int.pipe(Schema.nonNegative()),
-  max_attempts: Schema.Int.pipe(Schema.positive()),
+  is_current: Schema.Literals([0, 1]),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  max_attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   lease_owner: Schema.NullOr(Schema.String),
   lease_token: Schema.NullOr(Schema.String),
   lease_until: Schema.NullOr(Schema.String),
   run_at: Schema.String,
   external_intent_json: Schema.NullOr(Schema.String),
   external_observation_json: Schema.NullOr(Schema.String),
-  observation_attempts: Schema.Int.pipe(Schema.nonNegative()),
-  max_observation_attempts: Schema.Int.pipe(Schema.positive()),
+  observation_attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  max_observation_attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   parent_effect_json: Schema.String,
   last_error: Schema.NullOr(Schema.String),
   terminal_failure_reason: Schema.NullOr(Schema.String),
   terminal_retry_policy: Schema.NullOr(
-    Schema.Literal(
+    Schema.Literals([
       "retryable",
       "retry_budget_exhausted",
       "operator_required",
       "cancelled",
       "data_error",
-    ),
+    ]),
   ),
   created_at: Schema.String,
   updated_at: Schema.String,
 })
 type OperationRow = typeof OperationRow.Type
 
-const JsonObjectText = Schema.parseJson(
-  Schema.Record({ key: Schema.String, value: Schema.Unknown }),
-)
+const JsonObjectText = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 const WorkflowScope = Schema.Struct({
   _tag: Schema.Literal("WorkflowScope"),
   workflowId: Schema.NonEmptyString,
@@ -112,8 +109,8 @@ const LegacyWorkflowStartInput = Schema.Struct({
   baseSha: WorkflowStartInput.fields.baseSha,
   branchName: WorkflowStartInput.fields.branchName,
 })
-const PersistedWorkflowStartInput = Schema.Union(WorkflowStartInput, LegacyWorkflowStartInput)
-const decodeOutput = Schema.decodeUnknown(Schema.parseJson(WorkflowStartOutput))
+const PersistedWorkflowStartInput = Schema.Union([WorkflowStartInput, LegacyWorkflowStartInput])
+const decodeOutput = Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowStartOutput))
 const PersistedTicketRevision = Schema.Struct({
   ...TicketRevision.fields,
   checkedAt: Schema.DateFromString,
@@ -132,8 +129,8 @@ const StageProduceOperationRow = Schema.Struct({
 
 const CurrentGenerationSnapshotRow = Schema.Struct({
   workflow_id: Schema.NonEmptyString,
-  generation: Schema.Int.pipe(Schema.positive()),
-  workflow_definition_sha256: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/)),
+  generation: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  workflow_definition_sha256: Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/))),
   workflow_definition_json: Schema.NullOr(Schema.String),
   stage_definition_sha256: Schema.NullOr(Schema.String),
   stage_key: Schema.NullOr(Schema.String),
@@ -188,12 +185,15 @@ export type CurrentGenerationSnapshotSet = {
 }
 
 type StoreError =
-  SqlError | QrspiStoreDataError | WorkflowStartCurrentnessError | WorkflowStartRetryExhaustedError
+  | SqlError.SqlError
+  | QrspiStoreDataError
+  | WorkflowStartCurrentnessError
+  | WorkflowStartRetryExhaustedError
 
 export type QrspiStorePort = {
   readonly loadCurrentGenerationSnapshotSets: () => Effect.Effect<
     ReadonlyArray<CurrentGenerationSnapshotSet>,
-    SqlError | QrspiStoreDataError
+    SqlError.SqlError | QrspiStoreDataError
   >
   readonly getCurrentCursor: (workflowId: string) => Effect.Effect<
     {
@@ -204,13 +204,13 @@ export type QrspiStorePort = {
       readonly baseSha: string
       readonly state: string
     } | null,
-    SqlError
+    SqlError.SqlError
   >
   readonly resolveBranch: (
     workflowId: string,
     proposedBranchName: string,
     now: Date,
-  ) => Effect.Effect<string, SqlError>
+  ) => Effect.Effect<string, SqlError.SqlError>
   readonly prepareStart: (input: PrepareStartInput) => Effect.Effect<StartRecord, StoreError>
   readonly claimStart: (
     operationId: string,
@@ -223,69 +223,69 @@ export type QrspiStorePort = {
     leaseToken: string,
     intentJson: string,
     now: Date,
-  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  ) => Effect.Effect<"recorded" | "stale", SqlError.SqlError>
   readonly validateLease: (
     operationId: string,
     leaseToken: string,
     now: Date,
-  ) => Effect.Effect<boolean, SqlError>
+  ) => Effect.Effect<boolean, SqlError.SqlError>
   readonly isStartCurrent: (
     operationId: string,
     inputSha256: string,
-  ) => Effect.Effect<boolean, SqlError>
+  ) => Effect.Effect<boolean, SqlError.SqlError>
   readonly markWaitingExternal: (
     operationId: string,
     leaseToken: string,
     observationJson: string,
     now: Date,
-  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  ) => Effect.Effect<"recorded" | "stale", SqlError.SqlError>
   readonly recordUnknownOutcome: (
     operationId: string,
     leaseToken: string,
     observationJson: string,
     now: Date,
-  ) => Effect.Effect<"recorded" | "stale", SqlError>
+  ) => Effect.Effect<"recorded" | "stale", SqlError.SqlError>
   readonly recoverExpiredLease: (
     operationId: string,
     outcome: "present" | "absent" | "unknown",
     observationJson: string,
     now: Date,
     intentJson?: string,
-  ) => Effect.Effect<"waiting_external" | "failed" | "waiting_human" | "stale", SqlError>
+  ) => Effect.Effect<"waiting_external" | "failed" | "waiting_human" | "stale", SqlError.SqlError>
   readonly recordBranchAbsent: (
     operationId: string,
     observationJson: string,
     now: Date,
-  ) => Effect.Effect<"ready" | "waiting_human" | "stale", SqlError>
+  ) => Effect.Effect<"ready" | "waiting_human" | "stale", SqlError.SqlError>
   readonly supersedeStart: (
     operationId: string,
     reason: string,
     now: Date,
-  ) => Effect.Effect<void, SqlError>
+  ) => Effect.Effect<void, SqlError.SqlError>
   readonly failStart: (
     operationId: string,
     reason: string,
     retryPolicy: WorkflowStartTerminalRetryPolicy,
     now: Date,
-  ) => Effect.Effect<void, SqlError>
+  ) => Effect.Effect<void, SqlError.SqlError>
   readonly waitStartForOperator: (
     operationId: string,
     reason: string,
     now: Date,
-  ) => Effect.Effect<void, SqlError>
+  ) => Effect.Effect<void, SqlError.SqlError>
   readonly completeStart: (
     input: CompleteStartInput,
   ) => Effect.Effect<WorkflowStartOutput, StoreError>
   readonly readTicketRevision: (input: {
     readonly workflowId: string
     readonly ticketRevisionSha256: string
-  }) => Effect.Effect<TicketRevision, SqlError | QrspiStoreDataError>
+  }) => Effect.Effect<TicketRevision, SqlError.SqlError | QrspiStoreDataError>
   readonly readStageProduceInput: (
     operationId: string,
-  ) => Effect.Effect<StageProduceInputType, SqlError | QrspiStoreDataError>
+  ) => Effect.Effect<StageProduceInputType, SqlError.SqlError | QrspiStoreDataError>
 }
 
-export const QrspiStore = Context.GenericTag<QrspiStorePort>("workflowd/qrspi/QrspiStore")
+export const QrspiStore = Context.Service<QrspiStorePort>("workflowd/qrspi/QrspiStore")
 
 export class QrspiStoreDataError extends Data.TaggedError("QrspiStoreDataError")<{
   readonly record:
@@ -355,9 +355,9 @@ function decodeCurrentGenerationSnapshotSet(
         }),
       )
     }
-    const workflowDefinition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
-      first.workflow_definition_json,
-    ).pipe(
+    const workflowDefinition = yield* Schema.decodeUnknownEffect(
+      Schema.fromJsonString(WorkflowDefinition),
+    )(first.workflow_definition_json).pipe(
       Effect.mapError((cause) =>
         dataError("workflow_definition", first.workflow_definition_sha256, cause, {
           ...identity,
@@ -446,9 +446,9 @@ function decodeCurrentGenerationSnapshotSet(
               }),
             )
           }
-          const definition = yield* Schema.decodeUnknown(Schema.parseJson(StageDefinition))(
-            row.definition_json,
-          ).pipe(
+          const definition = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(StageDefinition),
+          )(row.definition_json).pipe(
             Effect.mapError((cause) =>
               dataError("stage_definition", recordId, cause, {
                 ...identity,
@@ -457,7 +457,7 @@ function decodeCurrentGenerationSnapshotSet(
               }),
             ),
           )
-          const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
+          const snapshot = yield* Schema.decodeUnknownEffect(ExecutableStageSnapshot)({
             sequencePosition,
             stageDefinitionSha256: recordId,
             definition,
@@ -559,7 +559,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             }),
           )
         }
-        const row = yield* Schema.decodeUnknown(StageProduceOperationRow)(raw).pipe(
+        const row = yield* Schema.decodeUnknownEffect(StageProduceOperationRow)(raw).pipe(
           Effect.mapError((cause) =>
             dataError("workflow_operation", operationId, cause, { reason: "malformed" }),
           ),
@@ -571,7 +571,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             }),
           )
         }
-        const input = yield* Schema.decodeUnknown(Schema.parseJson(StageProduceInput), {
+        const input = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(StageProduceInput), {
           onExcessProperty: "error",
         })(row.input_json).pipe(
           Effect.mapError((cause) =>
@@ -614,7 +614,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             }),
           )
         }
-        const row = yield* Schema.decodeUnknown(TicketRevisionRow)(raw).pipe(
+        const row = yield* Schema.decodeUnknownEffect(TicketRevisionRow)(raw).pipe(
           Effect.mapError((cause) =>
             dataError("ticket_revision", recordId, cause, {
               reason: "malformed",
@@ -622,9 +622,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             }),
           ),
         )
-        const revision = yield* Schema.decodeUnknown(Schema.parseJson(PersistedTicketRevision))(
-          row.revision_json,
-        ).pipe(
+        const revision = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(PersistedTicketRevision),
+        )(row.revision_json).pipe(
           Effect.mapError((cause) =>
             dataError("ticket_revision", recordId, cause, {
               reason: "malformed",
@@ -688,7 +688,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
         const rows = yield* Effect.forEach(
           rawRows,
           (raw) =>
-            Schema.decodeUnknown(CurrentGenerationSnapshotRow)(raw).pipe(
+            Schema.decodeUnknownEffect(CurrentGenerationSnapshotRow)(raw).pipe(
               Effect.mapError((cause) =>
                 dataError(
                   "stage_definition",
@@ -890,7 +890,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             )
           }
           const row = yield* selectOperation(operationId)
-          const scope = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowScope))(
+          const scope = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowScope))(
             row.scope_json,
           ).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", row.operation_id, cause)),
@@ -1105,18 +1105,18 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               }),
             )
           }
-          const persistedInput = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
-            operation.input_json,
-          ).pipe(
+          const persistedInput = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(WorkflowStartInput),
+          )(operation.input_json).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", input.operationId, cause)),
           )
-          const persistedScope = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowScope))(
-            operation.scope_json,
-          ).pipe(
+          const persistedScope = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(WorkflowScope),
+          )(operation.scope_json).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", input.operationId, cause)),
           )
-          const suppliedRepository = yield* Schema.decodeUnknown(
-            Schema.parseJson(RepositoryReference),
+          const suppliedRepository = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(RepositoryReference),
           )(input.repositoryJson).pipe(
             Effect.mapError(
               (cause) =>
@@ -1126,10 +1126,12 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
                 }),
             ),
           )
-          const authoritativeObservation = yield* Schema.decodeUnknown(
+          const authoritativeObservation = yield* Schema.decodeUnknownEffect(
             Schema.Struct({
               headRef: Schema.NonEmptyString,
-              sha: Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+              sha: Schema.String.pipe(
+                Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+              ),
             }),
           )(input.authoritativeObservation).pipe(
             Effect.mapError(
@@ -1172,9 +1174,9 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
               ),
             )
           }
-          const definition = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowDefinition))(
-            definitionJson,
-          ).pipe(
+          const definition = yield* Schema.decodeUnknownEffect(
+            Schema.fromJsonString(WorkflowDefinition),
+          )(definitionJson).pipe(
             Effect.mapError((cause) =>
               dataError("workflow_definition", input.workflowDefinitionSha256, cause),
             ),
@@ -1197,7 +1199,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             input.stageSnapshots,
             (suppliedSnapshot, index) =>
               Effect.gen(function* () {
-                const snapshot = yield* Schema.decodeUnknown(ExecutableStageSnapshot)(
+                const snapshot = yield* Schema.decodeUnknownEffect(ExecutableStageSnapshot)(
                   suppliedSnapshot,
                 ).pipe(
                   Effect.mapError((cause) =>
@@ -1270,7 +1272,7 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
             FROM qrspi_generations WHERE workflow_id = ${input.workflowId}
           `
           const generation = Number(generations[0]?.generation ?? 1)
-          const output = yield* Schema.decodeUnknown(WorkflowStartOutput)({
+          const output = yield* Schema.decodeUnknownEffect(WorkflowStartOutput)({
             _tag: "Started",
             workflowId: input.workflowId,
             generation,
@@ -1396,19 +1398,21 @@ function make(sql: SqlClient.SqlClient): QrspiStorePort {
   function decodeRow(raw: Record<string, unknown>) {
     const readableId = typeof raw.operation_id === "string" ? raw.operation_id : "unreadable"
     return Effect.gen(function* () {
-      const row = yield* Schema.decodeUnknown(OperationRow)(raw).pipe(
+      const row = yield* Schema.decodeUnknownEffect(OperationRow)(raw).pipe(
         Effect.mapError((cause) => dataError("workflow_operation", readableId, cause)),
       )
       const [scope, operationInput] = yield* Effect.all([
-        Schema.decodeUnknown(Schema.parseJson(WorkflowScope))(row.scope_json),
-        Schema.decodeUnknown(Schema.parseJson(PersistedWorkflowStartInput))(row.input_json),
-        Schema.decodeUnknown(JsonObjectText)(row.parent_effect_json),
+        Schema.decodeUnknownEffect(Schema.fromJsonString(WorkflowScope))(row.scope_json),
+        Schema.decodeUnknownEffect(Schema.fromJsonString(PersistedWorkflowStartInput))(
+          row.input_json,
+        ),
+        Schema.decodeUnknownEffect(JsonObjectText)(row.parent_effect_json),
         row.external_intent_json === null
           ? Effect.void
-          : Schema.decodeUnknown(JsonObjectText)(row.external_intent_json),
+          : Schema.decodeUnknownEffect(JsonObjectText)(row.external_intent_json),
         row.external_observation_json === null
           ? Effect.void
-          : Schema.decodeUnknown(JsonObjectText)(row.external_observation_json),
+          : Schema.decodeUnknownEffect(JsonObjectText)(row.external_observation_json),
       ]).pipe(Effect.mapError((cause) => dataError("workflow_operation", row.operation_id, cause)))
       const leased = row.state === "leased"
       const hasLease =
@@ -1441,10 +1445,10 @@ function toStartRecord(row: OperationRow, branchName: string) {
     const leaseUntil =
       row.lease_until === null
         ? undefined
-        : yield* Schema.decodeUnknown(Schema.Date)(row.lease_until).pipe(
+        : yield* Schema.decodeUnknownEffect(Schema.Date)(row.lease_until).pipe(
             Effect.mapError((cause) => dataError("workflow_operation", row.operation_id, cause)),
           )
-    return yield* Schema.decodeUnknown(StartRecord)({
+    return yield* Schema.decodeUnknownEffect(StartRecord)({
       operationId: row.operation_id,
       logicalOperationId: row.logical_operation_id,
       operationRevision: row.operation_revision,

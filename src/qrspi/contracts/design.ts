@@ -15,13 +15,15 @@ export const promotionPolicyReference = { name: "qrspi.promotion-policy", versio
 export const structurePolicyReference = { name: "qrspi.structure-policy", version: 1 } as const
 
 const DesignSources = ExactStageSources.pipe(
-  Schema.filter((sources) =>
-    isOrderedRoleSubsequence(
-      sources.sources.map(({ role }) => role),
-      ["Research", "Questions"],
-    )
-      ? true
-      : "Design accepts only the Research/Questions predecessor subsequence",
+  Schema.check(
+    Schema.makeFilter((sources) =>
+      isOrderedRoleSubsequence(
+        sources.sources.map(({ role }) => role),
+        ["Research", "Questions"],
+      )
+        ? true
+        : "Design accepts only the Research/Questions predecessor subsequence",
+    ),
   ),
 )
 
