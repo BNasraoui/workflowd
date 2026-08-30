@@ -1,4 +1,4 @@
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Schema, SchemaTransformation } from "effect"
 import { SessionReference } from "../agent-harness"
 import {
   AttemptNumber,
@@ -18,28 +18,41 @@ import { FixWork, ReviewWork, type Work } from "../domain/work"
 import { StoreDataError } from "./errors"
 import type { AgentCommand, PullRequestReconciliation } from "./model"
 
-const PositiveInt = Schema.Int.pipe(Schema.positive())
+const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
 const RowId = Schema.Struct({ id: Schema.Int })
-const json = <S extends Schema.Schema.Any>(schema: S) => Schema.parseJson(schema)
-const column = <K extends string, S extends Schema.Schema.Any>(key: K, schema: S) =>
-  Schema.propertySignature(schema).pipe(Schema.fromKey(key))
+const json = <S extends Schema.Top>(schema: S) => Schema.fromJsonString(schema)
 
 const workRowFields = {
   id: JobId,
-  installationId: column("installation_id", PositiveInt),
-  repositoryId: column("repository_id", RepositoryId),
-  repositoryFullName: column("repository_full_name", Schema.NonEmptyString),
-  pullRequestNumber: column("pull_request_number", PullRequestNumber),
+  installationId: PositiveInt,
+  repositoryId: RepositoryId,
+  repositoryFullName: Schema.NonEmptyString,
+  pullRequestNumber: PullRequestNumber,
   author: Schema.NonEmptyString,
-  baseRef: column("base_ref", Schema.NonEmptyString),
-  baseSha: column("base_sha", GitObjectId),
-  expectedHeadSha: column("expected_head_sha", GitObjectId),
-  headRef: column("head_ref", Schema.NonEmptyString),
-  headRepositoryFullName: column("head_repository_full_name", Schema.NonEmptyString),
+  baseRef: Schema.NonEmptyString,
+  baseSha: GitObjectId,
+  expectedHeadSha: GitObjectId,
+  headRef: Schema.NonEmptyString,
+  headRepositoryFullName: Schema.NonEmptyString,
   generation: GenerationNumber,
-  reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
-  workerId: column("lease_owner", WorkerId),
-  attempt: column("attempts", AttemptNumber),
+  reviewRequestNumber: ReviewRequestNumber,
+  workerId: WorkerId,
+  attempt: AttemptNumber,
+} as const
+
+const workRowKeys = {
+  installationId: "installation_id",
+  repositoryId: "repository_id",
+  repositoryFullName: "repository_full_name",
+  pullRequestNumber: "pull_request_number",
+  baseRef: "base_ref",
+  baseSha: "base_sha",
+  expectedHeadSha: "expected_head_sha",
+  headRef: "head_ref",
+  headRepositoryFullName: "head_repository_full_name",
+  reviewRequestNumber: "review_request_number",
+  workerId: "lease_owner",
+  attempt: "attempts",
 } as const
 
 const workFields = (work: Work) => ({
@@ -83,152 +96,215 @@ const toWork = (row: typeof ReviewJobRow.Type | typeof FixJobRow.Type) => ({
 const ReviewJobRow = Schema.Struct({
   ...workRowFields,
   kind: Schema.Literal("review"),
-  publicationId: column("publication_id", Schema.Null),
-  review: column("review_json", Schema.Null),
-  fixResult: column("fix_result_json", Schema.Null),
-})
+  publicationId: Schema.Null,
+  review: Schema.Null,
+  fixResult: Schema.Null,
+}).pipe(
+  Schema.encodeKeys({
+    ...workRowKeys,
+    publicationId: "publication_id",
+    review: "review_json",
+    fixResult: "fix_result_json",
+  }),
+)
 const FixJobRow = Schema.Struct({
   ...workRowFields,
   kind: Schema.Literal("fix"),
-  publicationId: column("publication_id", PublicationId),
-  review: column("review_json", json(ChangesRequestedReviewResult)),
-  fixResult: column("fix_result_json", Schema.NullOr(json(FixResult))),
-})
+  publicationId: PublicationId,
+  review: json(ChangesRequestedReviewResult),
+  fixResult: Schema.NullOr(json(FixResult)),
+}).pipe(
+  Schema.encodeKeys({
+    ...workRowKeys,
+    publicationId: "publication_id",
+    review: "review_json",
+    fixResult: "fix_result_json",
+  }),
+)
 
-const ReviewWorkRow = Schema.transform(ReviewJobRow, ReviewWork, {
-  strict: true,
-  decode: (row) => ({ _tag: "ReviewWork" as const, ...toWork(row) }),
-  encode: (_, work) => ({
-    ...workFields(work),
-    kind: "review" as const,
-    publicationId: null,
-    review: null,
-    fixResult: null,
-  }),
-})
-const FixWorkRow = Schema.transform(FixJobRow, FixWork, {
-  strict: true,
-  decode: (row) => ({
-    _tag: "FixWork" as const,
-    ...toWork(row),
-    sourcePublicationId: row.publicationId,
-    review: row.review,
-    checkpoint: row.fixResult ?? undefined,
-  }),
-  encode: (_, work) => ({
-    ...workFields(work),
-    kind: "fix" as const,
-    publicationId: work.sourcePublicationId,
-    review: work.review,
-    fixResult: work.checkpoint ?? null,
-  }),
-})
-const WorkRow = Schema.Union(ReviewWorkRow, FixWorkRow)
+const ReviewWorkRow = ReviewJobRow.pipe(
+  Schema.decodeTo(
+    ReviewWork,
+    SchemaTransformation.transform({
+      decode: (row) => ({ _tag: "ReviewWork" as const, ...toWork(row) }),
+      encode: (work) => ({
+        ...workFields(work),
+        kind: "review" as const,
+        publicationId: null,
+        review: null,
+        fixResult: null,
+      }),
+    }),
+  ),
+)
+const FixWorkRow = FixJobRow.pipe(
+  Schema.decodeTo(
+    FixWork,
+    SchemaTransformation.transform({
+      decode: (row) => ({
+        _tag: "FixWork" as const,
+        ...toWork(row),
+        sourcePublicationId: row.publicationId,
+        review: row.review,
+        checkpoint: row.fixResult ?? undefined,
+      }),
+      encode: (work) => ({
+        ...workFields(work),
+        kind: "fix" as const,
+        publicationId: work.sourcePublicationId,
+        review: work.review,
+        fixResult: work.checkpoint ?? null,
+      }),
+    }),
+  ),
+)
+const WorkRow = Schema.Union([ReviewWorkRow, FixWorkRow])
 
 const PublicationStorageRow = Schema.Struct({
   id: PublicationId,
-  operationKey: column("operation_key", Schema.NonEmptyString),
-  installationId: column("installation_id", PositiveInt),
-  repositoryId: column("repository_id", RepositoryId),
-  repositoryFullName: column("repository_full_name", Schema.NonEmptyString),
-  pullRequestNumber: column("pull_request_number", PullRequestNumber),
-  baseRef: column("base_ref", Schema.NonEmptyString),
-  baseSha: column("base_sha", GitObjectId),
-  expectedHeadSha: column("expected_head_sha", GitObjectId),
-  headRef: column("head_ref", Schema.NonEmptyString),
-  headRepositoryFullName: column("head_repository_full_name", Schema.NonEmptyString),
+  operationKey: Schema.NonEmptyString,
+  installationId: PositiveInt,
+  repositoryId: RepositoryId,
+  repositoryFullName: Schema.NonEmptyString,
+  pullRequestNumber: PullRequestNumber,
+  baseRef: Schema.NonEmptyString,
+  baseSha: GitObjectId,
+  expectedHeadSha: GitObjectId,
+  headRef: Schema.NonEmptyString,
+  headRepositoryFullName: Schema.NonEmptyString,
   generation: GenerationNumber,
-  reviewRequestNumber: column("review_request_number", ReviewRequestNumber),
-  review: column("review_json", json(ReviewResult)),
-  sessionReferenceId: column("session_reference_id", Schema.NullOr(Schema.NonEmptyString)),
-  sessionReference: column("session_reference_json", Schema.NullOr(json(SessionReference))),
-  sessionExecutionState: column(
-    "session_execution_state",
-    Schema.NullOr(
-      Schema.Literal("launch_intent", "session_ready", "succeeded", "failed", "superseded"),
-    ),
+  reviewRequestNumber: ReviewRequestNumber,
+  review: json(ReviewResult),
+  sessionReferenceId: Schema.NullOr(Schema.NonEmptyString),
+  sessionReference: Schema.NullOr(json(SessionReference)),
+  sessionExecutionState: Schema.NullOr(
+    Schema.Literals(["launch_intent", "session_ready", "succeeded", "failed", "superseded"]),
   ),
-  attempt: column("attempts", AttemptNumber),
-})
-const PublicationRow = Schema.transform(PublicationStorageRow, Publication, {
-  strict: true,
-  decode: (row) => ({
-    id: row.id,
-    operationKey: row.operationKey,
-    installationId: row.installationId,
-    repositoryId: row.repositoryId,
-    repositoryFullName: row.repositoryFullName,
-    pullRequestNumber: row.pullRequestNumber,
-    target: {
-      baseRef: row.baseRef,
-      baseSha: row.baseSha,
-      headSha: row.expectedHeadSha,
-      headRef: row.headRef,
-      headRepositoryFullName: row.headRepositoryFullName,
-    },
-    generation: row.generation,
-    reviewRequestNumber: row.reviewRequestNumber,
-    review: row.review,
-    ...(row.sessionReferenceId === null ? {} : { sessionReferenceId: row.sessionReferenceId }),
-    ...(row.sessionReference === null ? {} : { sessionReference: row.sessionReference }),
-    ...(row.sessionExecutionState === null
-      ? {}
-      : { sessionExecutionState: row.sessionExecutionState }),
-    attempt: row.attempt,
+  attempt: AttemptNumber,
+}).pipe(
+  Schema.encodeKeys({
+    operationKey: "operation_key",
+    installationId: "installation_id",
+    repositoryId: "repository_id",
+    repositoryFullName: "repository_full_name",
+    pullRequestNumber: "pull_request_number",
+    baseRef: "base_ref",
+    baseSha: "base_sha",
+    expectedHeadSha: "expected_head_sha",
+    headRef: "head_ref",
+    headRepositoryFullName: "head_repository_full_name",
+    reviewRequestNumber: "review_request_number",
+    review: "review_json",
+    sessionReferenceId: "session_reference_id",
+    sessionReference: "session_reference_json",
+    sessionExecutionState: "session_execution_state",
+    attempt: "attempts",
   }),
-  encode: (_, publication) => ({
-    id: publication.id,
-    operationKey: publication.operationKey,
-    installationId: publication.installationId,
-    repositoryId: publication.repositoryId,
-    repositoryFullName: publication.repositoryFullName,
-    pullRequestNumber: publication.pullRequestNumber,
-    baseRef: publication.target.baseRef,
-    baseSha: publication.target.baseSha,
-    expectedHeadSha: publication.target.headSha,
-    headRef: publication.target.headRef,
-    headRepositoryFullName: publication.target.headRepositoryFullName,
-    generation: publication.generation,
-    reviewRequestNumber: publication.reviewRequestNumber,
-    review: publication.review,
-    sessionReferenceId: publication.sessionReferenceId ?? null,
-    sessionReference: publication.sessionReference ?? null,
-    sessionExecutionState: publication.sessionExecutionState ?? null,
-    attempt: publication.attempt,
-  }),
-})
+)
+const PublicationRow = PublicationStorageRow.pipe(
+  Schema.decodeTo(
+    Publication,
+    SchemaTransformation.transform({
+      decode: (row) => ({
+        id: row.id,
+        operationKey: row.operationKey,
+        installationId: row.installationId,
+        repositoryId: row.repositoryId,
+        repositoryFullName: row.repositoryFullName,
+        pullRequestNumber: row.pullRequestNumber,
+        target: {
+          baseRef: row.baseRef,
+          baseSha: row.baseSha,
+          headSha: row.expectedHeadSha,
+          headRef: row.headRef,
+          headRepositoryFullName: row.headRepositoryFullName,
+        },
+        generation: row.generation,
+        reviewRequestNumber: row.reviewRequestNumber,
+        review: row.review,
+        ...(row.sessionReferenceId === null ? {} : { sessionReferenceId: row.sessionReferenceId }),
+        ...(row.sessionReference === null ? {} : { sessionReference: row.sessionReference }),
+        ...(row.sessionExecutionState === null
+          ? {}
+          : { sessionExecutionState: row.sessionExecutionState }),
+        attempt: row.attempt,
+      }),
+      encode: (publication) => ({
+        id: publication.id,
+        operationKey: publication.operationKey,
+        installationId: publication.installationId,
+        repositoryId: publication.repositoryId,
+        repositoryFullName: publication.repositoryFullName,
+        pullRequestNumber: publication.pullRequestNumber,
+        baseRef: publication.target.baseRef,
+        baseSha: publication.target.baseSha,
+        expectedHeadSha: publication.target.headSha,
+        headRef: publication.target.headRef,
+        headRepositoryFullName: publication.target.headRepositoryFullName,
+        generation: publication.generation,
+        reviewRequestNumber: publication.reviewRequestNumber,
+        review: publication.review,
+        sessionReferenceId: publication.sessionReferenceId ?? null,
+        sessionReference: publication.sessionReference ?? null,
+        sessionExecutionState: publication.sessionExecutionState ?? null,
+        attempt: publication.attempt,
+      }),
+    }),
+  ),
+)
 const CommandRow = Schema.Struct({
   id: PositiveInt,
-  command: Schema.Literal("fix", "review", "status"),
-  commentId: column("comment_id", PositiveInt),
+  command: Schema.Literals(["fix", "review", "status"]),
+  commentId: PositiveInt,
   commenter: Schema.NonEmptyString,
-  installationId: column("installation_id", PositiveInt),
-  repositoryId: column("repository_id", PositiveInt),
-  repositoryFullName: column("repository_full_name", Schema.NonEmptyString),
-  pullRequestNumber: column("pull_request_number", PositiveInt),
-  attempts: Schema.Int.pipe(Schema.positive()),
-})
+  installationId: PositiveInt,
+  repositoryId: PositiveInt,
+  repositoryFullName: Schema.NonEmptyString,
+  pullRequestNumber: PositiveInt,
+  attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+}).pipe(
+  Schema.encodeKeys({
+    commentId: "comment_id",
+    installationId: "installation_id",
+    repositoryId: "repository_id",
+    repositoryFullName: "repository_full_name",
+    pullRequestNumber: "pull_request_number",
+  }),
+)
 const ReconciliationRow = Schema.Struct({
   id: PositiveInt,
-  installationId: column("installation_id", PositiveInt),
-  repositoryId: column("repository_id", PositiveInt),
-  repositoryFullName: column("repository_full_name", Schema.NonEmptyString),
-  pullRequestNumber: column("pull_request_number", PositiveInt),
-  attempts: Schema.Int.pipe(Schema.positive()),
-})
+  installationId: PositiveInt,
+  repositoryId: PositiveInt,
+  repositoryFullName: Schema.NonEmptyString,
+  pullRequestNumber: PositiveInt,
+  attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+}).pipe(
+  Schema.encodeKeys({
+    installationId: "installation_id",
+    repositoryId: "repository_id",
+    repositoryFullName: "repository_full_name",
+    pullRequestNumber: "pull_request_number",
+  }),
+)
 const PublicationReviewRow = Schema.Struct({
-  reviewJobId: column("review_job_id", JobId),
-  id: column("publication_id", PublicationId),
-  review: column("review_json", json(ReviewResult)),
-})
+  reviewJobId: JobId,
+  id: PublicationId,
+  review: json(ReviewResult),
+}).pipe(
+  Schema.encodeKeys({
+    reviewJobId: "review_job_id",
+    id: "publication_id",
+    review: "review_json",
+  }),
+)
 const AgentSessionReferenceRow = Schema.Struct({
-  sessionReference: column("session_reference_json", json(SessionReference)),
-})
+  sessionReference: json(SessionReference),
+}).pipe(Schema.encodeKeys({ sessionReference: "session_reference_json" }))
 
 const decodeRow =
-  <A, I, R>(schema: Schema.Schema<A, I, R>, record: StoreDataError["record"]) =>
+  <A, I, R>(schema: Schema.Codec<A, I, R>, record: StoreDataError["record"]) =>
   (row: unknown): Effect.Effect<A, StoreDataError, R> =>
-    Schema.decodeUnknown(schema)(row).pipe(
+    Schema.decodeUnknownEffect(schema)(row).pipe(
       Effect.mapError((error) => {
         const message = String(error)
         return new StoreDataError({

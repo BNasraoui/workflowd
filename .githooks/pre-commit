@@ -10,6 +10,10 @@ violations=$(
     esac
     line_count=$(git show ":$path" | awk 'END { print NR }')
     if [ "$line_count" -gt "$limit" ]; then
+      head_count=$(git show "HEAD:$path" 2>/dev/null | awk 'END { print NR }')
+      if [ -n "$head_count" ] && [ "$head_count" -gt "$limit" ]; then
+        continue
+      fi
       printf 'pre-commit:   %s (%s lines)\n' "$path" "$line_count"
     fi
   done

@@ -1,7 +1,7 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
-import type { SqlError } from "@effect/sql/SqlError"
-import type { Fragment } from "@effect/sql/Statement"
-import { Effect, Either } from "effect"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
+import type { SqlError } from "effect/unstable/sql/SqlError"
+import type { Fragment } from "effect/unstable/sql/Statement"
+import { Effect, Result } from "effect"
 import type { StoreDataError } from "./errors"
 import type { LeaseClaim } from "./model"
 type LeaseTable = "commands" | "jobs" | "publications" | "reconciliations"
@@ -36,7 +36,7 @@ export class SqlLeaseQueue<Value> {
   claim(input: LeaseClaim): Effect.Effect<Value | null, SqlError> {
     const { claimedAt, leaseUntil } = durableLeasePolicy.claim(input)
     const { table } = this.config
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       if (this.config.beforeClaim !== undefined) {
         yield* this.config.beforeClaim(claimedAt)
       }
@@ -67,17 +67,17 @@ export class SqlLeaseQueue<Value> {
         `
         const row = rows[0]
         if (row === undefined) return null
-        const decoded = yield* Effect.either(this.config.decode(row))
-        if (Either.isRight(decoded)) return decoded.right
+        const decoded = yield* Effect.result(this.config.decode(row))
+        if (Result.isSuccess(decoded)) return decoded.success
         yield* this.sql`
           UPDATE ${this.sql(table)}
           SET
             state = 'data_error',
             lease_owner = NULL,
             lease_until = NULL,
-            last_error = ${decoded.left.message},
+            last_error = ${decoded.failure.message},
             updated_at = ${claimedAt}
-          WHERE id = ${decoded.left.recordId}
+          WHERE id = ${decoded.failure.recordId}
           AND state = 'leased'
           AND lease_owner = ${input.workerId}
           AND lease_until > ${claimedAt}

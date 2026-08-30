@@ -52,7 +52,7 @@ export type GitHubPort = {
   ) => Effect.Effect<HeadEvidence, GitHubClientError>
 }
 
-export const GitHub = Context.GenericTag<GitHubPort>("workflowd/GitHub")
+export const GitHub = Context.Service<GitHubPort>("workflowd/GitHub")
 
 export class GitHubAppAdapter implements GitHubPort {
   constructor(
@@ -65,7 +65,7 @@ export class GitHubAppAdapter implements GitHubPort {
   readonly collectHeadEvidence = (
     input: FetchPullRequestSnapshotInput & { readonly target: Publication["target"] },
   ): Effect.Effect<HeadEvidence, GitHubClientError> =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       const repository = yield* parseRepositoryName(input.repositoryFullName)
       const client = yield* this.client(input.installationId)
       return yield* collectHeadEvidence({
@@ -89,7 +89,7 @@ export class GitHubAppAdapter implements GitHubPort {
   readonly fetchPullRequestSnapshot = (
     input: FetchPullRequestSnapshotInput,
   ): Effect.Effect<PullRequestSnapshot, GitHubClientError> =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       const repository = yield* parseRepositoryName(input.repositoryFullName)
       const client = yield* this.client(input.installationId)
       const snapshot = yield* this.attempt("get pull request", (signal) =>
@@ -110,7 +110,7 @@ export class GitHubAppAdapter implements GitHubPort {
     publication: Publication,
     isCurrent: PublicationCurrentness<E, R>,
   ): Effect.Effect<"published" | "stale", GitHubClientError | E, R> =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       const repository = yield* parseRepositoryName(publication.repositoryFullName)
       const client = yield* this.client(publication.installationId)
       const pull = yield* this.attempt("get pull request", (signal) =>
@@ -210,7 +210,7 @@ export class GitHubAppAdapter implements GitHubPort {
     body: string,
     isCurrent: PublicationCurrentness<E, R>,
   ): Effect.Effect<"published" | "stale", GitHubClientError | E, R> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const existing = yield* this.ownedComment(client, repository, publication)
       const write =
         existing === undefined
@@ -267,7 +267,7 @@ export class GitHubAppAdapter implements GitHubPort {
     comment: string,
     isCurrent: PublicationCurrentness<E, R>,
   ): Effect.Effect<"published" | "stale", GitHubClientError | E, R> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const existing = yield* this.ownedCheck(client, repository, publication)
       const presentation = presentReviewCheck(publication, comment)
       const now = new Date(yield* Effect.clockWith((clock) => clock.currentTimeMillis))

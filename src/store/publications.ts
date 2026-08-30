@@ -1,4 +1,4 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { Effect } from "effect"
 import type { Publication } from "../domain/publication"
 import { decodePublicationRow } from "./codecs"

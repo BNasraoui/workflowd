@@ -1,7 +1,6 @@
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Context, Effect, Layer, Schema } from "effect"
-import type { SqlError } from "@effect/sql/SqlError"
-import type { ParseResult } from "effect"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { KernelJobStore, type KernelJobStoreError } from "../kernel/job-store"
 import type { JsonValue } from "../json"
 
@@ -60,7 +59,7 @@ export type HostHealthView = {
   readonly consumerLiveness: "responding" | "pending-work" | "no-evidence"
 }
 
-export type McpQueriesError = SqlError | KernelJobStoreError | ParseResult.ParseError
+export type McpQueriesError = SqlError | KernelJobStoreError | Schema.SchemaError
 
 export type McpQueriesPort = {
   readonly jobStatus: (jobId: string) => Effect.Effect<JobStatusView | null, McpQueriesError>
@@ -70,7 +69,7 @@ export type McpQueriesPort = {
   readonly hostHealth: () => Effect.Effect<ReadonlyArray<HostHealthView>, McpQueriesError>
 }
 
-export const McpQueries = Context.GenericTag<McpQueriesPort>("workflowd/mcp/McpQueries")
+export const McpQueries = Context.Service<McpQueriesPort>("workflowd/mcp/McpQueries")
 
 export const MAX_RECENT_JOBS = 100
 
@@ -113,7 +112,9 @@ const make = Effect.gen(function* () {
       const rows = yield* sql`SELECT job_id, instance_id, state, attempt, max_attempts,
         run_at, created_at, updated_at FROM kernel_workflow_jobs
         ORDER BY updated_at DESC, job_id LIMIT ${bounded}`
-      const decoded = yield* Effect.forEach(rows, (row) => Schema.decodeUnknown(RecentJobRow)(row))
+      const decoded = yield* Effect.forEach(rows, (row) =>
+        Schema.decodeUnknownEffect(RecentJobRow)(row),
+      )
       return decoded.map((row) => ({
         jobId: row.job_id,
         instanceId: row.instance_id,
@@ -140,7 +141,7 @@ const make = Effect.gen(function* () {
             ORDER BY issued_at DESC, command_id DESC LIMIT 1) AS last_state
         FROM kernel_remote_dispatches GROUP BY host_id ORDER BY host_id`
       const decoded = yield* Effect.forEach(rows, (row) =>
-        Schema.decodeUnknown(HostDispatchRow)(row),
+        Schema.decodeUnknownEffect(HostDispatchRow)(row),
       )
       return decoded.map((row) => ({
         hostId: row.host_id,

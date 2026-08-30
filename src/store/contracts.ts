@@ -1,4 +1,4 @@
-import type { SqlError } from "@effect/sql/SqlError"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, type Effect } from "effect"
 import type { SessionReference } from "../agent-harness"
 import type { Publication } from "../domain/publication"
@@ -140,4 +140,4 @@ export type WorkflowStorePort = {
   ) => Effect.Effect<"retry" | "failed" | "stale", SqlError>
 }
 
-export const WorkflowStore = Context.GenericTag<WorkflowStorePort>("workflowd/WorkflowStore")
+export const WorkflowStore = Context.Service<WorkflowStorePort>("workflowd/WorkflowStore")

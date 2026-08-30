@@ -153,7 +153,7 @@ export class ReviewContextFiles {
   }
 
   prepareReview(work: ReviewWork, resolved: ResolvedWorktree, evidence?: HeadEvidence) {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.#cleanupExisting(resolved.directory)
       yield* this.#requireClean(resolved.directory, "check worktree status")
       if (resolved.pull) {
@@ -178,7 +178,7 @@ export class ReviewContextFiles {
   }
 
   prepareFix(work: FixWork, resolved: ResolvedWorktree, evidence?: HeadEvidence) {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* this.#cleanupExisting(resolved.directory)
       if (this.#gitSigningKey !== undefined) {
         yield* this.#configureSigning(resolved.directory, this.#gitSigningKey)
@@ -283,7 +283,7 @@ export class ReviewContextFiles {
   }
 
   #write(work: Work, directory: string, evidence?: HeadEvidence) {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* runGit(
         "verify base commit",
         directory,
@@ -310,7 +310,7 @@ export class ReviewContextFiles {
     temporaryContext: string,
     contextDirectory: string,
   ) {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* filesystemEffect("create review context directory", () => mkdir(temporaryContext))
       yield* filesystemEffect("write review context owner", (signal) =>
         writeFile(join(temporaryContext, contextMarker), contextOwner, {

@@ -3,16 +3,22 @@ import { Effect, Schema } from "effect"
 import type { SessionReference } from "./agent-harness"
 import type { OpenCodeAdapter } from "./opencode/adapter"
 
-const SessionReferenceId = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128))
+const SessionReferenceId = Schema.String.pipe(
+  Schema.check(Schema.isMinLength(1)),
+  Schema.check(Schema.isMaxLength(128)),
+)
 
-export const SessionAccess = Schema.Union(
+export const SessionAccess = Schema.Union([
   Schema.TaggedStruct("Available", {
     sessionReferenceId: SessionReferenceId,
-    command: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(8192)),
+    command: Schema.String.pipe(
+      Schema.check(Schema.isMinLength(1)),
+      Schema.check(Schema.isMaxLength(8192)),
+    ),
   }),
   Schema.TaggedStruct("Unavailable", {
     sessionReferenceId: SessionReferenceId,
-    reason: Schema.Literal(
+    reason: Schema.Literals([
       "missing",
       "expired",
       "aborted",
@@ -21,9 +27,9 @@ export const SessionAccess = Schema.Union(
       "endpoint_mismatch",
       "directory_missing",
       "unreachable",
-    ),
+    ]),
   }),
-)
+])
 export type SessionAccess = typeof SessionAccess.Type
 
 export type SessionEndpoint = {
@@ -63,7 +69,7 @@ export class SessionAccessResolver {
     }
 
     return Effect.tryPromise(() => this.directoryExists(reference.directory)).pipe(
-      Effect.catchAll(() => Effect.succeed(false)),
+      Effect.catch(() => Effect.succeed(false)),
       Effect.flatMap((exists) =>
         exists
           ? Effect.tryPromise((signal) =>
@@ -81,7 +87,7 @@ export class SessionAccessResolver {
                     }
                   : this.unavailable(reference, "missing"),
               ),
-              Effect.catchAll(() => Effect.succeed(this.unavailable(reference, "unreachable"))),
+              Effect.catch(() => Effect.succeed(this.unavailable(reference, "unreachable"))),
             )
           : Effect.succeed(this.unavailable(reference, "directory_missing")),
       ),

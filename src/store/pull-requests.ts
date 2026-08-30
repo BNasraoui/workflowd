@@ -1,4 +1,4 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { Effect, Schema } from "effect"
 import {
   AuthoritativePullRequestSnapshot,
@@ -38,7 +38,7 @@ type PullRequestRow = {
 }
 
 const decodeTracked = (row: unknown) =>
-  Schema.decodeUnknown(TrackedPullRequestState)(row).pipe(
+  Schema.decodeUnknownEffect(TrackedPullRequestState)(row).pipe(
     Effect.mapError(
       (error) =>
         new StoreDataError({
@@ -61,10 +61,12 @@ export function makePullRequestTransition(
     Effect.gen(function* () {
       const snapshot =
         input.snapshot._tag === "PullRequest"
-          ? yield* Schema.decodeUnknown(PullRequestObservation)(input.snapshot).pipe(Effect.orDie)
-          : yield* Schema.decodeUnknown(AuthoritativePullRequestSnapshot)(input.snapshot).pipe(
+          ? yield* Schema.decodeUnknownEffect(PullRequestObservation)(input.snapshot).pipe(
               Effect.orDie,
             )
+          : yield* Schema.decodeUnknownEffect(AuthoritativePullRequestSnapshot)(
+              input.snapshot,
+            ).pipe(Effect.orDie)
       const { pullRequest, repository } = snapshot
       const existing = yield* sql<PullRequestRow>`
         SELECT
@@ -132,7 +134,7 @@ export function makePullRequestTransition(
         const timestamp = input.appliedAt.toISOString()
         const observationSequence = input.observationSequence
         if (observationSequence === undefined) {
-          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+          return yield* Effect.die(new Error("webhook observation is missing its durable sequence"))
         }
         yield* sql`
           INSERT INTO reconciliations (
@@ -187,7 +189,7 @@ export function makePullRequestTransition(
       if (snapshot._tag === "PullRequest") {
         const observationSequence = input.observationSequence
         if (observationSequence === undefined) {
-          return yield* Effect.dieMessage("webhook observation is missing its durable sequence")
+          return yield* Effect.die(new Error("webhook observation is missing its durable sequence"))
         }
         yield* sql`
           UPDATE reconciliations

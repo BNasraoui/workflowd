@@ -21,7 +21,7 @@ export class ManagedWorkspaceLifecycle {
   }
 
   remove(repository: string, directory: string) {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       yield* runGit(
         "remove managed review worktree",
         repository,
@@ -45,7 +45,7 @@ export class ManagedWorkspaceLifecycle {
   }
 
   create(work: Work): Effect.Effect<ResolvedWorktree, WorkspaceError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const parts = work.repositoryFullName.split("/")
       if (parts.length !== 2 || parts.some((part) => !/^[A-Za-z0-9_.-]+$/.test(part))) {
         return yield* Effect.fail(
@@ -159,7 +159,7 @@ export class ManagedWorkspaceLifecycle {
       ).pipe(
         Effect.onError(() =>
           this.remove(repository, directory).pipe(
-            Effect.catchAll((error) => Effect.logWarning(error)),
+            Effect.catch((error) => Effect.logWarning(error)),
           ),
         ),
       )

@@ -28,7 +28,7 @@ const WorktreeRegistryRecord = Schema.Struct({
   worktree: Schema.String,
 })
 
-const WorktreeRegistryRecordJson = Schema.parseJson(WorktreeRegistryRecord)
+const WorktreeRegistryRecordJson = Schema.fromJsonString(WorktreeRegistryRecord)
 
 const defaultCatalogIo: LocalRepositoryCatalogIo = {
   now: Date.now,
@@ -152,7 +152,7 @@ export class ExistingWorktreeDiscovery {
   }
 
   discover(work: Work): Effect.Effect<ResolvedWorktree | null, WorkspaceError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const expectedRemote = normalizeRemote(this.#remoteUrl(work.target.headRepositoryFullName))
       const registered = yield* this.#registryCandidates(work)
       const registeredMatch = yield* this.#inspect(work, expectedRemote, registered)

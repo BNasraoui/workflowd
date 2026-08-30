@@ -26,8 +26,14 @@ export type OpenCodeAutomationConfig = {
 
 export const RunPullRequestAutomationInput = Schema.Struct({
   jobId: Schema.optional(JobId),
-  directory: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(4096)),
-  repositoryFullName: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(256)),
+  directory: Schema.String.pipe(
+    Schema.check(Schema.isMinLength(1)),
+    Schema.check(Schema.isMaxLength(4096)),
+  ),
+  repositoryFullName: Schema.String.pipe(
+    Schema.check(Schema.isMinLength(1)),
+    Schema.check(Schema.isMaxLength(256)),
+  ),
   pullRequestNumber: PullRequestNumber,
   baseSha: GitObjectId,
   headSha: GitObjectId,
@@ -70,7 +76,7 @@ export type AutomationPort = {
   ) => Effect.Effect<FixAgentWork, OpenCodeAutomationError>
 }
 
-export const Automation = Context.GenericTag<AutomationPort>("workflowd/Automation")
+export const Automation = Context.Service<AutomationPort>("workflowd/Automation")
 
 export const stageHarnessRef = { name: "opencode", version: 1 } as const
 

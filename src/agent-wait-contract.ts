@@ -7,9 +7,11 @@ export const MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES = 128
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 export const utf8BoundedText = (maximum: number) =>
   Schema.NonEmptyString.pipe(
-    Schema.filter((value) => utf8Bytes(value) <= maximum, {
-      message: () => `must be at most ${maximum} UTF-8 bytes`,
-    }),
+    Schema.check(
+      Schema.makeFilter((value) =>
+        utf8Bytes(value) <= maximum ? true : `must be at most ${maximum} UTF-8 bytes`,
+      ),
+    ),
   )
 
 export const AgentWaitSubmission = Schema.Struct({
@@ -23,7 +25,7 @@ export type AgentWaitSubmission = typeof AgentWaitSubmission.Type
 export const AgentWaitReceipt = Schema.Struct({
   waitId: Schema.String,
   instanceId: Schema.String,
-  status: Schema.Literal("registered", "duplicate"),
+  status: Schema.Literals(["registered", "duplicate"]),
 })
 export type AgentWaitReceipt = typeof AgentWaitReceipt.Type
 
