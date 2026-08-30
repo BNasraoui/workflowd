@@ -1,6 +1,12 @@
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import {
+  parseAgentRunRepositories,
+  parseAgentRunRoutes,
+  type AgentRunRepository,
+  type AgentRunRoute,
+} from "./agent-run-contract"
 import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/domain"
 import { loadRemoteNatsAuth } from "./remote/auth"
 import type { RemoteNatsAuth } from "./remote/auth"
@@ -79,6 +85,17 @@ export interface QrspiConfig {
   readonly workflowDefinition: WorkflowDefinition
 }
 
+export interface AgentRunConfig {
+  readonly token: string
+  readonly routes: ReadonlyArray<AgentRunRoute>
+  readonly repositories: ReadonlyArray<AgentRunRepository>
+  readonly agent: string
+  readonly verifyTimeoutMs: number
+  readonly verifyPollIntervalMs: number
+  readonly progressWindowMs: number
+  readonly maxAttempts: number
+}
+
 export interface AppConfig {
   readonly http: HttpConfig
   readonly github: GitHubConfig
@@ -90,6 +107,7 @@ export interface AppConfig {
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
   readonly agentWaits?: { readonly token: string }
+  readonly agentRuns?: AgentRunConfig
   readonly remoteCoordinator?: RemoteCoordinatorConfig
 }
 
@@ -270,6 +288,7 @@ interface ResolvedSecrets {
   readonly openCodePassword: string
   readonly testJobToken: string | undefined
   readonly agentWaitToken: string | undefined
+  readonly agentRunToken: string | undefined
 }
 
 async function loadSecrets(
@@ -306,7 +325,54 @@ async function loadSecrets(
   if (agentWaitToken !== undefined && agentWaitToken.length < 8) {
     throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN must contain at least 8 characters")
   }
-  return { webhookSecret, openCodePassword, testJobToken, agentWaitToken }
+  const agentRunToken = await optionalSecret(
+    env,
+    "WORKFLOWD_AGENT_RUN_TOKEN",
+    "WORKFLOWD_AGENT_RUN_TOKEN_FILE",
+    read,
+  )
+  if (agentRunToken !== undefined && agentRunToken.length < 8) {
+    throw new Error("WORKFLOWD_AGENT_RUN_TOKEN must contain at least 8 characters")
+  }
+  return { webhookSecret, openCodePassword, testJobToken, agentWaitToken, agentRunToken }
+}
+
+function loadAgentRunConfig(
+  env: Record<string, string | undefined>,
+  token: string | undefined,
+): AgentRunConfig | undefined {
+  if (token === undefined) {
+    if (env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined) {
+      throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
+    }
+    return undefined
+  }
+  return {
+    token,
+    routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
+    repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
+    agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
+    verifyTimeoutMs: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS,
+      120_000,
+      "WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS",
+    ),
+    verifyPollIntervalMs: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS,
+      2_000,
+      "WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS",
+    ),
+    progressWindowMs: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS,
+      20 * 60_000,
+      "WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS",
+    ),
+    maxAttempts: positiveInteger(
+      env.WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS,
+      3,
+      "WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS",
+    ),
+  }
 }
 
 function loadJobTiming(env: Record<string, string | undefined>): JobTiming {
@@ -523,6 +589,7 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
+  const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
@@ -544,6 +611,7 @@ export async function loadConfig(
     ...(secrets.agentWaitToken === undefined
       ? {}
       : { agentWaits: { token: secrets.agentWaitToken } }),
+    ...(agentRuns === undefined ? {} : { agentRuns }),
     ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
   }
 }

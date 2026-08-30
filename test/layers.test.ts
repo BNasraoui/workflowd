@@ -8,6 +8,8 @@ import { Cause, Effect, Layer } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
+import { AgentRunIngress } from "../src/kernel/agent-run-ingress"
+import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
 import { KernelEventStore } from "../src/kernel/event-store"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
@@ -100,6 +102,9 @@ test("starts and restarts the full live layer with both kernel stores", async ()
         WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
         WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
         WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+        WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
       },
       { home: directory },
     )
@@ -112,7 +117,15 @@ test("starts and restarts the full live layer with both kernel stores", async ()
           yield* WorkflowStore
           yield* WorkflowStart
           const testJobs = yield* TestJobCanary
-          return [events.readReadyDeliveries, jobs.readRecoverable, testJobs.submit]
+          const agentRuns = yield* AgentRunIngress
+          const watchdog = yield* AgentRunWatchdog
+          return [
+            events.readReadyDeliveries,
+            jobs.readRecoverable,
+            testJobs.submit,
+            agentRuns.register,
+            () => watchdog.iteration,
+          ]
         }).pipe(
           Effect.provide(
             makeLiveLayer(config).pipe(

@@ -21,6 +21,8 @@ function makeClient(overrides: Partial<OpenCodeSdkClient> = {}): OpenCodeSdkClie
     generateText: () => Effect.succeed("{}"),
     listAgents: () => Effect.succeed([]),
     listModels: () => Effect.succeed([]),
+    listProviders: () => Effect.succeed([]),
+    sessionTelemetry: () => Effect.succeed(undefined),
     ...overrides,
   }
 }
@@ -167,6 +169,57 @@ describe("SdkOpenCodeAdapter.validateAvailability", () => {
       expect(String(result.failure.cause)).toContain(
         "Unavailable OpenCode integration: agent pr-fixer, model anthropic/claude-sonnet-4-6",
       )
+    }
+  })
+})
+
+describe("SdkOpenCodeAdapter run-provider surface", () => {
+  test("passes provider and model listings through for route pre-flight", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        listProviders: () => Effect.succeed(["zai-coding-plan", "anthropic"]),
+        listModels: () => Effect.succeed([{ providerID: "zai-coding-plan", id: "glm-5.3-flash" }]),
+      }),
+    )
+    expect(await Effect.runPromise(adapter.listProviders({}))).toEqual([
+      "zai-coding-plan",
+      "anthropic",
+    ])
+    expect(await Effect.runPromise(adapter.listModels({}))).toEqual([
+      { providerID: "zai-coding-plan", id: "glm-5.3-flash" },
+    ])
+  })
+
+  test("passes session telemetry through, including its absence", async () => {
+    const telemetry = {
+      directory: "/repo",
+      outputTokens: 12,
+      updatedAtMs: 1_000,
+      idle: true,
+      outcome: "succeeded" as const,
+    }
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({ sessionTelemetry: () => Effect.succeed(telemetry) }),
+    )
+    expect(await Effect.runPromise(adapter.sessionTelemetry({ sessionID: "ses_1" }))).toEqual(
+      telemetry,
+    )
+    const missing = new SdkOpenCodeAdapter(
+      makeClient({ sessionTelemetry: () => Effect.succeed(undefined) }),
+    )
+    expect(
+      await Effect.runPromise(missing.sessionTelemetry({ sessionID: "ses_gone" })),
+    ).toBeUndefined()
+  })
+
+  test("wraps provider failures in an adapter error naming the operation", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({ listProviders: () => Effect.fail(new Error("boom")) }),
+    )
+    const result = await Effect.runPromise(adapter.listProviders({}).pipe(Effect.result))
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      expect(result.failure.operation).toBe("list providers")
     }
   })
 })

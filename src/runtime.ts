@@ -8,6 +8,8 @@ import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
+import { AgentRunIngress } from "./kernel/agent-run-ingress"
+import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
@@ -129,6 +131,7 @@ export function serveHookHttp<R>(
 export type RuntimeWorkerName =
   | "job"
   | "agent-completion"
+  | "agent-run"
   | "kernel-job"
   | "session-resume"
   | "publication"
@@ -173,6 +176,8 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
       return ["publication"]
     case "agent-completion":
       return ["kernel-job"]
+    case "agent-run":
+      return ["agent-completion"]
     case "kernel-job":
     case "session-resume":
       return []
@@ -198,6 +203,8 @@ export function startHookService(
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
     const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
+    const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
+    const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
     const remoteCoordinator = yield* RemoteCoordinator
@@ -209,6 +216,12 @@ export function startHookService(
     }
     if (config.agentWaits !== undefined && Option.isNone(agentWaits)) {
       return yield* Effect.die(new Error("Agent waits are configured without their service"))
+    }
+    if (
+      config.agentRuns !== undefined &&
+      (Option.isNone(agentRuns) || Option.isNone(agentRunWatchdog))
+    ) {
+      return yield* Effect.die(new Error("Agent runs are configured without their services"))
     }
     if (config.remoteCoordinator !== undefined && remoteCoordinator === null) {
       return yield* Effect.die(new Error("Remote coordinator is configured without its service"))
@@ -295,6 +308,15 @@ export function startHookService(
         60_000,
         "session-resume",
         observed("session-resume", resumeWorker.value.iteration),
+      )
+    }
+
+    if (Option.isSome(agentRunWatchdog)) {
+      yield* superviseWorker(
+        "Agent-run watchdog",
+        60_000,
+        "agent-run",
+        observed("agent-run", agentRunWatchdog.value.iteration),
       )
     }
 
@@ -386,6 +408,14 @@ export function startHookService(
                 agentWaits: {
                   token: config.agentWaits.token,
                   register: Option.getOrThrow(agentWaits).register,
+                },
+              }),
+          ...(config.agentRuns === undefined
+            ? {}
+            : {
+                agentRuns: {
+                  token: config.agentRuns.token,
+                  register: Option.getOrThrow(agentRuns).register,
                 },
               }),
         }),

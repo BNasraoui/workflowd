@@ -131,7 +131,7 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches'
+              'kernel_agent_completion_watches', 'kernel_agent_runs'
           )
           ORDER BY name
         `
@@ -162,8 +162,9 @@ describe("strict initial store schema", () => {
       { migration_id: 15, name: "kernel_remote_dispatch" },
       { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
       { migration_id: 17, name: "remove_agent_completion_baseline" },
+      { migration_id: 18, name: "kernel_agent_runs" },
     ])
-    expect(result.tables).toHaveLength(31)
+    expect(result.tables).toHaveLength(32)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

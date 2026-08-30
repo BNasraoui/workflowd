@@ -9,8 +9,10 @@ import { KernelJobStoreLive } from "./kernel/job-store"
 import { RemoteProbeProducerLive } from "./remote/probe-producer"
 import { WorkflowStoreLive } from "./store"
 import {
+  loadAgentRunDaemon,
   loadAgentWaitDaemon,
   loadMcpWriteAuth,
+  requireDaemonTokenWithUrl,
   type AgentWaitDaemonConfig,
   type McpWriteAuth,
 } from "./mcp/auth"
@@ -48,6 +50,7 @@ export type StartedMcpServer = {
   readonly port: number
   readonly writesEnabled: boolean
   readonly agentWaitsEnabled: boolean
+  readonly agentRunsEnabled: boolean
   readonly stop: () => Promise<void>
 }
 
@@ -70,6 +73,14 @@ export const startMcpServer = (
     })
     const agentWaitDaemon: AgentWaitDaemonConfig | undefined = yield* Effect.tryPromise({
       try: () => loadAgentWaitDaemon(env),
+      catch: (cause) => new Error(String(cause)),
+    })
+    const agentRunDaemon: AgentWaitDaemonConfig | undefined = yield* Effect.tryPromise({
+      try: () => loadAgentRunDaemon(env),
+      catch: (cause) => new Error(String(cause)),
+    })
+    yield* Effect.try({
+      try: () => requireDaemonTokenWithUrl(env, [agentWaitDaemon, agentRunDaemon]),
       catch: (cause) => new Error(String(cause)),
     })
     const filename =
@@ -99,6 +110,7 @@ export const startMcpServer = (
       runTool,
       auth,
       ...(agentWaitDaemon === undefined ? {} : { agentWaitDaemon }),
+      ...(agentRunDaemon === undefined ? {} : { agentRunDaemon }),
     })
     const server = yield* Effect.try({
       try: () => Bun.serve({ hostname: "127.0.0.1", port, fetch: fetchHandler }),
@@ -108,6 +120,7 @@ export const startMcpServer = (
       port: server.port ?? port,
       writesEnabled: auth.mode === "enabled",
       agentWaitsEnabled: agentWaitDaemon !== undefined,
+      agentRunsEnabled: agentRunDaemon !== undefined,
       stop: async () => {
         await server.stop(true)
         await runtime.dispose()
@@ -121,7 +134,8 @@ const program = (env: Record<string, string | undefined>) =>
     yield* Effect.logInfo(
       `workflowd MCP server listening on 127.0.0.1:${started.port} ` +
         `(writes ${started.writesEnabled ? "enabled" : "disabled"}, ` +
-        `agent waits ${started.agentWaitsEnabled ? "enabled" : "disabled"})`,
+        `agent waits ${started.agentWaitsEnabled ? "enabled" : "disabled"}, ` +
+        `agent runs ${started.agentRunsEnabled ? "enabled" : "disabled"})`,
     )
     return yield* Effect.never
   })

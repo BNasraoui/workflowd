@@ -19,6 +19,14 @@ import {
   AgentWakeResult,
 } from "./kernel/agent-wait-ingress"
 import { KernelJobStoreLive } from "./kernel/job-store"
+import {
+  AgentRunIngressLive,
+  AgentRunProvider,
+  AgentRunWorktrees,
+  gitAgentRunWorktrees,
+} from "./kernel/agent-run-ingress"
+import { AgentRunStoreLive } from "./kernel/agent-run-store"
+import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import {
   OpenCodeResumeAdapter,
@@ -247,6 +255,34 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.provideMerge(storeLayer),
     Layer.provideMerge(workSignalLayer),
   )
+  const agentRunLayer =
+    config.agentRuns === undefined
+      ? Layer.empty
+      : Layer.merge(
+          AgentRunIngressLive({
+            routes: config.agentRuns.routes,
+            repositories: config.agentRuns.repositories,
+            agent: config.agentRuns.agent,
+            worktreeRoot: config.workspace.worktreeRoot,
+            verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,
+            verifyPollIntervalMs: config.agentRuns.verifyPollIntervalMs,
+            maxAttempts: config.agentRuns.maxAttempts,
+            identity: completionSourceOptions,
+          }),
+          AgentRunWatchdogLive({
+            progressWindowMs: config.agentRuns.progressWindowMs,
+            // A run stuck before verification for ten verify windows was
+            // abandoned by its dispatching request; the watchdog fails it.
+            staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
+            now: () => new Date(),
+          }),
+        ).pipe(
+          Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
+          Layer.provideMerge(agentWaitIngressLayer),
+          Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
+          Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provideMerge(workSignalLayer),
+        )
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
@@ -378,6 +414,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     qrspiWithStores,
     testJobCanaryLayer,
     agentWaitIngressLayer,
+    agentRunLayer,
     remoteCoordinatorLayer,
   )
 }

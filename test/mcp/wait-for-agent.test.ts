@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
 import { McpQueriesLive } from "../../src/mcp/queries"
-import { callTool, TOOL_DEFINITIONS, type ToolCallContext } from "../../src/mcp/tools"
+import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
+import { callTool, type ToolCallContext } from "../../src/mcp/tools"
 import { kernelLayer, now } from "../kernel/job-store-harness"
 
 const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(

@@ -3,6 +3,7 @@ import { Context, Effect, Layer, PubSub, type Scope } from "effect"
 export type WorkLane =
   | "job"
   | "agent-completion"
+  | "agent-run"
   | "kernel-job"
   | "session-resume"
   | "publication"
@@ -24,6 +25,7 @@ export const WorkSignalLive = Layer.effect(
     const lanes = {
       job: yield* PubSub.sliding<void>(1),
       "agent-completion": yield* PubSub.sliding<void>(1),
+      "agent-run": yield* PubSub.sliding<void>(1),
       "kernel-job": yield* PubSub.sliding<void>(1),
       "session-resume": yield* PubSub.sliding<void>(1),
       publication: yield* PubSub.sliding<void>(1),

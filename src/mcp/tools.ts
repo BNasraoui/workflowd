@@ -10,174 +10,13 @@ import {
   MAX_RESUME_PROMPT_BYTES,
   utf8BoundedText,
 } from "../agent-wait-contract"
-
-const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
-  type: "object" as const,
-  properties,
-  required: [...required],
-  additionalProperties: false,
-})
-
-const readAnnotations = { readOnlyHint: true, openWorldHint: false } as const
-
-const RECEIPT_CONTRACT =
-  "This tool returns a receipt, not a result: the work runs asynchronously " +
-  "in workflowd's durable job queue. There is no tool that waits or blocks on " +
-  "completion — none exists. After receiving the receipt, end your turn. " +
-  "If a completion prompt is configured you will be prompted when the job " +
-  "finishes; otherwise check job_status in a later turn."
-
-export const TOOL_DEFINITIONS = [
-  {
-    name: "job_status",
-    description:
-      "Read the current durable state of one workflowd job by its job id " +
-      "(state, attempt counts, schedule, and the recorded result when the job " +
-      "has completed). Read-only; safe to call at any time. This reads the " +
-      "authoritative SQLite store directly — nothing is cached.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        job_id: { type: "string", description: "The job id from an enqueue receipt." },
-      },
-      required: ["job_id"],
-      additionalProperties: false,
-    },
-    outputSchema: objectSchema(
-      {
-        jobId: { type: "string" },
-        state: { type: "string" },
-        attempt: { type: "integer" },
-        maxAttempts: { type: "integer" },
-        runAt: { type: "string" },
-        result: { type: ["object", "null"] },
-      },
-      ["jobId", "state", "attempt", "maxAttempts", "runAt", "result"],
-    ),
-    annotations: readAnnotations,
-  },
-  {
-    name: "list_recent_jobs",
-    description:
-      "List the most recently updated workflowd jobs (newest first). " +
-      `Read-only. Optional limit, 1-${MAX_RECENT_JOBS}, default 20.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        limit: { type: "integer", minimum: 1, maximum: MAX_RECENT_JOBS },
-      },
-      additionalProperties: false,
-    },
-    outputSchema: objectSchema({ jobs: { type: "array", items: { type: "object" } } }, ["jobs"]),
-    annotations: readAnnotations,
-  },
-  {
-    name: "host_health",
-    description:
-      "Per-host health derived from durable remote dispatch records: last " +
-      "runner result time, pending dispatch counts, and consumer liveness " +
-      "where it can be derived from the database. Read-only. A host that has " +
-      "never received a dispatch will not appear.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    outputSchema: objectSchema({ hosts: { type: "array", items: { type: "object" } } }, ["hosts"]),
-    annotations: readAnnotations,
-  },
-  {
-    name: "enqueue_probe",
-    description:
-      "Enqueue a durable remote probe job for a workflowd runner host. " +
-      "Requires bearer-token authorization; without it this tool refuses. " +
-      "The ack returns immediately with the job id. " +
-      RECEIPT_CONTRACT +
-      " Provide probe_id to make the enqueue idempotent (the same probe_id " +
-      "always maps to the same job); omit it to get a fresh probe each call.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        host: {
-          type: "string",
-          description: "Runner host id (e.g. 'mint'), as registered with workflowd.",
-        },
-        probe_id: {
-          type: "string",
-          description: "Optional stable probe identity for idempotent enqueue.",
-        },
-      },
-      required: ["host"],
-      additionalProperties: false,
-    },
-    outputSchema: objectSchema(
-      {
-        probe_id: { type: "string" },
-        job_id: { type: "string" },
-        host: { type: "string" },
-        status: { type: "string", enum: ["enqueued", "duplicate"] },
-      },
-      ["probe_id", "job_id", "host", "status"],
-    ),
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: false,
-    },
-  },
-  {
-    name: "wait_for_agent",
-    description:
-      "Register a durable wait so a parent agent session is woken when a child " +
-      "agent session finishes. Requires bearer-token authorization; without it " +
-      "this tool refuses. Both sessions must already be in workflowd kernel " +
-      "custody and in a ready or active state; if either is not, the call is " +
-      "refused and names the missing custody. " +
-      RECEIPT_CONTRACT +
-      " Specifically: the returned wait_id is NOT a result and this tool does " +
-      "NOT block. The workflowd resume worker prompts the parent session with " +
-      "your resume_prompt when the child completes, or flips the watch to " +
-      "operator_required if the child cannot be observed. Do not poll: register " +
-      "the wait, then end your turn. Provide idempotency_key to make " +
-      "re-registration safe; the same key always maps to the same wait.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        parent_session_id: {
-          type: "string",
-          description: "Kernel custody id of the session to wake when the child finishes.",
-        },
-        child_session_id: {
-          type: "string",
-          description: "Kernel custody id of the session to watch for completion.",
-        },
-        resume_prompt: {
-          type: "string",
-          description:
-            "Text delivered to the parent session on completion. The parent " +
-            `receives it as the JSON document {"task":"<resume_prompt>"}; maximum ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes.`,
-        },
-        idempotency_key: {
-          type: "string",
-          description: "Optional stable identity making re-registration a no-op.",
-        },
-      },
-      required: ["parent_session_id", "child_session_id", "resume_prompt"],
-      additionalProperties: false,
-    },
-    outputSchema: objectSchema(
-      {
-        wait_id: { type: "string" },
-        instance_id: { type: "string" },
-        status: { type: "string", enum: ["registered", "duplicate"] },
-      },
-      ["wait_id", "instance_id", "status"],
-    ),
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
-    },
-  },
-] as const
+import {
+  AgentRunReceipt,
+  MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES,
+  MAX_AGENT_RUN_PROMPT_BYTES,
+  MAX_AGENT_RUN_REPOSITORY_BYTES,
+  MAX_AGENT_RUN_ROUTE_BYTES,
+} from "../agent-run-contract"
 
 export type ToolResult = {
   content: Array<{ type: "text"; text: string }>
@@ -204,6 +43,7 @@ export type ToolCallContext = {
   readonly writesConfigured: boolean
   readonly now: () => Date
   readonly agentWaitDaemon?: AgentWaitDaemon
+  readonly agentRunDaemon?: AgentWaitDaemon
 }
 
 const JobStatusArguments = Schema.Struct({ job_id: Schema.NonEmptyString })
@@ -228,6 +68,22 @@ const WaitForAgentArguments = Schema.Struct({
   resume_prompt: utf8BoundedText(MAX_RESUME_PROMPT_BYTES),
   idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES)),
 })
+
+const DispatchAgentArguments = Schema.Struct({
+  route: utf8BoundedText(MAX_AGENT_RUN_ROUTE_BYTES),
+  repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
+  prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
+  parent_session_id: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES)),
+  resume_prompt: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES)),
+  idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES)),
+})
+
+/**
+ * Dispatch holds the HTTP request open through the daemon's bounded
+ * first-token verification (up to ~2 minutes), so its timeout is far larger
+ * than the agent-wait proxy's.
+ */
+const DISPATCH_AGENT_TIMEOUT_MS = 180_000
 
 const structured = (value: Record<string, unknown>, rendering?: string): ToolResult => ({
   content: [{ type: "text", text: rendering ?? JSON.stringify(value, null, 2) }],
@@ -287,6 +143,8 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
         return yield* enqueueProbe(args, context)
       case "wait_for_agent":
         return yield* waitForAgent(args, context)
+      case "dispatch_agent":
+        return yield* dispatchAgent(args, context)
       default:
         return failure(`unknown tool: ${name}`)
     }
@@ -339,6 +197,65 @@ const enqueueProbe = (args: unknown, context: ToolCallContext) =>
     )
   })
 
+/**
+ * Posts one write to a daemon ingress and normalizes transport, non-JSON,
+ * and refusal outcomes into in-band tool failures. Success returns the
+ * decoded-later JSON payload.
+ */
+const postToDaemon = (
+  daemon: AgentWaitDaemon,
+  request: {
+    readonly path: string
+    readonly subject: string
+    readonly timeoutMs: number
+    readonly body: Record<string, unknown>
+  },
+) =>
+  Effect.gen(function* () {
+    const send = daemon.send ?? ((input: URL, init: RequestInit) => fetch(input, init))
+    const response = yield* Effect.tryPromise(() =>
+      send(new URL(request.path, daemon.baseUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${daemon.token}`,
+        },
+        signal: AbortSignal.timeout(request.timeoutMs),
+        body: JSON.stringify(request.body),
+      }),
+    ).pipe(Effect.timeout(request.timeoutMs), Effect.result)
+    if (response._tag === "Failure") {
+      return {
+        failure: failure(
+          `could not reach the workflowd daemon to register ${request.subject}; the daemon ` +
+            "may be down or WORKFLOWD_DAEMON_URL may be wrong",
+        ),
+      }
+    }
+    const payload = yield* Effect.tryPromise(() => response.success.json()).pipe(Effect.result)
+    if (payload._tag === "Failure") {
+      return {
+        failure: failure(
+          `the workflowd daemon returned a non-JSON response (HTTP ${response.success.status})`,
+        ),
+      }
+    }
+    if (!response.success.ok) {
+      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.success).pipe(Effect.result)
+      const detail =
+        refusal._tag === "Success"
+          ? (refusal.success.detail ?? refusal.success.reason ?? refusal.success.error)
+          : `HTTP ${response.success.status}`
+      return {
+        failure: failure(
+          `${request.subject} was refused: ${detail}`,
+          refusal._tag === "Success" ? { ...refusal.success } : undefined,
+        ),
+      }
+    }
+    return { payload: payload.success }
+  })
+
 const waitForAgent = (args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
     if (!context.writesConfigured) {
@@ -366,50 +283,21 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
           "and idempotency_key, when given, must be a non-empty string",
       )
     }
-    const body = JSON.stringify({
-      parentSessionId: input.success.parent_session_id,
-      childSessionId: input.success.child_session_id,
-      resumePrompt: input.success.resume_prompt,
-      ...(input.success.idempotency_key === undefined
-        ? {}
-        : { idempotencyKey: input.success.idempotency_key }),
+    const outcome = yield* postToDaemon(daemon, {
+      path: "/workflows/agent-waits",
+      subject: "the wait",
+      timeoutMs: 10_000,
+      body: {
+        parentSessionId: input.success.parent_session_id,
+        childSessionId: input.success.child_session_id,
+        resumePrompt: input.success.resume_prompt,
+        ...(input.success.idempotency_key === undefined
+          ? {}
+          : { idempotencyKey: input.success.idempotency_key }),
+      },
     })
-    const send = daemon.send ?? ((input: URL, init: RequestInit) => fetch(input, init))
-    const response = yield* Effect.tryPromise(() =>
-      send(new URL("/workflows/agent-waits", daemon.baseUrl), {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${daemon.token}`,
-        },
-        signal: AbortSignal.timeout(10_000),
-        body,
-      }),
-    ).pipe(Effect.timeout("10 seconds"), Effect.result)
-    if (response._tag === "Failure") {
-      return failure(
-        "could not reach the workflowd daemon to register the wait; the daemon may be " +
-          "down or WORKFLOWD_DAEMON_URL may be wrong",
-      )
-    }
-    const payload = yield* Effect.tryPromise(() => response.success.json()).pipe(Effect.result)
-    if (payload._tag === "Failure") {
-      return failure(
-        `the workflowd daemon returned a non-JSON response (HTTP ${response.success.status})`,
-      )
-    }
-    if (!response.success.ok) {
-      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.success).pipe(Effect.result)
-      const detail =
-        refusal._tag === "Success"
-          ? (refusal.success.detail ?? refusal.success.reason ?? refusal.success.error)
-          : `HTTP ${response.success.status}`
-      return failure(
-        `the wait was refused: ${detail}`,
-        refusal._tag === "Success" ? { ...refusal.success } : undefined,
-      )
-    }
-    const receipt = yield* decodeArguments(AgentWaitReceipt, payload.success).pipe(Effect.result)
+    if ("failure" in outcome) return outcome.failure
+    const receipt = yield* decodeArguments(AgentWaitReceipt, outcome.payload).pipe(Effect.result)
     if (receipt._tag === "Failure") {
       return failure("the workflowd daemon returned an unrecognized agent-wait receipt")
     }
@@ -427,5 +315,84 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
       `${received} This is a fire-and-ack receipt — no blocking wait exists. End your turn ` +
         "now. workflowd will prompt the parent session when the child completes, or mark " +
         "the watch operator_required if the child cannot be observed. Do not poll.",
+    )
+  })
+
+const dispatchAgent = (args: unknown, context: ToolCallContext) =>
+  Effect.gen(function* () {
+    if (!context.writesConfigured) {
+      return failure(
+        "writes are disabled: no WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE is " +
+          "configured on the server, so dispatch_agent refuses all calls",
+      )
+    }
+    if (!context.writesAuthorized) {
+      return failure("unauthorized: dispatch_agent requires a valid bearer token")
+    }
+    const daemon = context.agentRunDaemon
+    if (daemon === undefined) {
+      return failure(
+        "agent dispatch is not configured on this MCP server: set WORKFLOWD_DAEMON_URL and " +
+          "WORKFLOWD_AGENT_RUN_TOKEN (or WORKFLOWD_AGENT_RUN_TOKEN_FILE) on the MCP unit " +
+          "so dispatch_agent can reach the workflowd daemon's /workflows/agent-runs ingress",
+      )
+    }
+    const input = yield* decodeArguments(DispatchAgentArguments, args).pipe(Effect.result)
+    if (input._tag === "Failure") {
+      return failure(
+        "invalid arguments: route, repository and prompt must be non-empty strings " +
+          `(prompt at most ${MAX_AGENT_RUN_PROMPT_BYTES} UTF-8 bytes), and ` +
+          "parent_session_id/resume_prompt/idempotency_key, when given, must be non-empty strings",
+      )
+    }
+    const outcome = yield* postToDaemon(daemon, {
+      path: "/workflows/agent-runs",
+      subject: "the dispatch",
+      timeoutMs: DISPATCH_AGENT_TIMEOUT_MS,
+      body: {
+        route: input.success.route,
+        repository: input.success.repository,
+        prompt: input.success.prompt,
+        ...(input.success.parent_session_id === undefined
+          ? {}
+          : { parentSessionId: input.success.parent_session_id }),
+        ...(input.success.resume_prompt === undefined
+          ? {}
+          : { resumePrompt: input.success.resume_prompt }),
+        ...(input.success.idempotency_key === undefined
+          ? {}
+          : { idempotencyKey: input.success.idempotency_key }),
+      },
+    })
+    if ("failure" in outcome) return outcome.failure
+    const receipt = yield* decodeArguments(AgentRunReceipt, outcome.payload).pipe(Effect.result)
+    if (receipt._tag === "Failure") {
+      return failure("the workflowd daemon returned an unrecognized agent-run receipt")
+    }
+    const verified =
+      `session ${receipt.success.nativeSessionId} on route ` +
+      `${input.success.route} is generating (${receipt.success.outputTokens} tokens observed)`
+    const received =
+      receipt.success.status === "duplicate"
+        ? `Already dispatched: ${verified}.`
+        : `Dispatched and verified: ${verified}.`
+    return structured(
+      {
+        run_id: receipt.success.runId,
+        session_id: receipt.success.sessionId,
+        native_session_id: receipt.success.nativeSessionId,
+        provider_id: receipt.success.providerId,
+        model_id: receipt.success.modelId,
+        output_tokens: receipt.success.outputTokens,
+        status: receipt.success.status,
+        wait: receipt.success.wait === undefined ? null : { ...receipt.success.wait },
+      },
+      `${received} This receipt is first-token-verified; the workflowd watchdog now ` +
+        "supervises the run, auto-recovers stalls, and escalates to operator_required. " +
+        "End your turn now" +
+        (receipt.success.wait === undefined
+          ? " and check back later via your own means; no wait was registered."
+          : "; workflowd will prompt your session when the child completes.") +
+        " Do not poll.",
     )
   })

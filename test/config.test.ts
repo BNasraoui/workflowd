@@ -40,6 +40,50 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("loads the optional agent-run section with routes and repositories", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+        WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+        WORKFLOWD_AGENT_RUN_AGENT: "remote-worker",
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.agentRuns).toEqual({
+      token: "agent-run-secret",
+      routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],
+      repositories: [{ name: "workflowd", directory: "/home/test/repos/workflowd" }],
+      agent: "remote-worker",
+      verifyTimeoutMs: 120_000,
+      verifyPollIntervalMs: 2_000,
+      progressWindowMs: 20 * 60_000,
+      maxAttempts: 3,
+    })
+  })
+
+  test("agent runs stay disabled without a token, and settings without one are an error", async () => {
+    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    expect(disabled.agentRuns).toBeUndefined()
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_TOKEN is required")
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_ROUTES")
+  })
+
   test("loads an optional central remote coordinator with token-file credentials", async () => {
     const config = await loadConfig(
       {

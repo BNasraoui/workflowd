@@ -67,7 +67,8 @@ function parseDaemonBaseUrl(env: Record<string, string | undefined>): URL | unde
   return parsed
 }
 
-async function readAgentWaitTokenFile(
+async function readDaemonTokenFile(
+  fileName: string,
   file: string,
   read: (path: string) => Promise<string>,
 ): Promise<string> {
@@ -75,39 +76,84 @@ async function readAgentWaitTokenFile(
   try {
     value = await read(file)
   } catch (cause) {
-    throw new Error(`Could not read WORKFLOWD_AGENT_WAIT_TOKEN_FILE at ${file}`, { cause })
+    throw new Error(`Could not read ${fileName} at ${file}`, { cause })
   }
   value = value.replace(/\r?\n$/, "")
-  if (value === "") throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN_FILE must not be empty")
+  if (value === "") throw new Error(`${fileName} must not be empty`)
   return value
+}
+
+async function loadDaemonBinding(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string>,
+  directName: string,
+  fileName: string,
+  purpose: string,
+): Promise<AgentWaitDaemonConfig | undefined> {
+  const direct = env[directName]
+  const file = env[fileName]
+  const hasDirect = direct !== undefined && direct !== ""
+  const hasFile = file !== undefined && file !== ""
+  if (hasDirect && hasFile) {
+    throw new Error(`Set at most one of ${directName} or ${fileName}`)
+  }
+  const parsed = parseDaemonBaseUrl(env)
+  const token = hasDirect
+    ? direct
+    : hasFile
+      ? await readDaemonTokenFile(fileName, file, read)
+      : undefined
+  if (token === undefined) return undefined
+  if (parsed === undefined) {
+    throw new Error(`WORKFLOWD_DAEMON_URL is required when an ${purpose} token is configured`)
+  }
+  return { baseUrl: parsed.origin, token }
 }
 
 export async function loadAgentWaitDaemon(
   env: Record<string, string | undefined>,
   read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
 ): Promise<AgentWaitDaemonConfig | undefined> {
-  const direct = env.WORKFLOWD_AGENT_WAIT_TOKEN
-  const file = env.WORKFLOWD_AGENT_WAIT_TOKEN_FILE
-  const hasDirect = direct !== undefined && direct !== ""
-  const hasFile = file !== undefined && file !== ""
-  if (hasDirect && hasFile) {
-    throw new Error(
-      "Set at most one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
-    )
+  return loadDaemonBinding(
+    env,
+    read,
+    "WORKFLOWD_AGENT_WAIT_TOKEN",
+    "WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
+    "agent-wait",
+  )
+}
+
+/**
+ * A configured WORKFLOWD_DAEMON_URL with no daemon token at all is a
+ * misconfiguration: nothing could ever use it. Called once at server start
+ * after every binding has been loaded.
+ */
+export function requireDaemonTokenWithUrl(
+  env: Record<string, string | undefined>,
+  bindings: ReadonlyArray<AgentWaitDaemonConfig | undefined>,
+): void {
+  if (parseDaemonBaseUrl(env) === undefined) return
+  if (bindings.every((binding) => binding === undefined)) {
+    throw new Error("Set an agent-wait or agent-run daemon token when WORKFLOWD_DAEMON_URL is set")
   }
-  const parsed = parseDaemonBaseUrl(env)
-  const token = hasDirect ? direct : hasFile ? await readAgentWaitTokenFile(file, read) : undefined
-  if (parsed === undefined && token === undefined) return undefined
-  if (parsed === undefined) {
-    throw new Error("WORKFLOWD_DAEMON_URL is required when an agent-wait token is configured")
-  }
-  if (token === undefined) {
-    throw new Error(
-      "Set exactly one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE " +
-        "when WORKFLOWD_DAEMON_URL is set",
-    )
-  }
-  return { baseUrl: parsed.origin, token }
+}
+
+/**
+ * How this MCP process reaches the daemon's agent-run ingress. Same shape
+ * and LoadCredential pattern as the agent-wait binding; the token is the
+ * daemon's WORKFLOWD_AGENT_RUN_TOKEN.
+ */
+export async function loadAgentRunDaemon(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<AgentWaitDaemonConfig | undefined> {
+  return loadDaemonBinding(
+    env,
+    read,
+    "WORKFLOWD_AGENT_RUN_TOKEN",
+    "WORKFLOWD_AGENT_RUN_TOKEN_FILE",
+    "agent-run",
+  )
 }
 
 /** Constant-time bearer comparison; never logs or echoes either value. */

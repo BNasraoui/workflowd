@@ -92,6 +92,9 @@ describe("OpenCode local resume worker", () => {
       abortSession: () => Effect.succeed(true),
       validateAvailability: () => Effect.void,
       generateStructured: () => Effect.succeed(null),
+      listProviders: () => Effect.succeed([]),
+      listModels: () => Effect.succeed([]),
+      sessionTelemetry: () => Effect.succeed(undefined),
     })
 
     await adapter.promptAsync(

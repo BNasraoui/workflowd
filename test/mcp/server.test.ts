@@ -70,6 +70,7 @@ test("the streamable HTTP endpoint lists every tool with the fire-and-ack contra
   const listed = Schema.decodeUnknownSync(ToolList)(await rpc("tools/list", {}))
 
   expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+    "dispatch_agent",
     "enqueue_probe",
     "host_health",
     "job_status",
