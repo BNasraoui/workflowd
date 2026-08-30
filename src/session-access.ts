@@ -72,23 +72,23 @@ export class SessionAccessResolver {
       Effect.catch(() => Effect.succeed(false)),
       Effect.flatMap((exists) =>
         exists
-          ? Effect.tryPromise((signal) =>
-              this.openCode.sessionExists(
-                { sessionID: reference.nativeSessionId, directory: reference.directory },
-                signal,
-              ),
-            ).pipe(
-              Effect.map((sessionExists) =>
-                sessionExists
-                  ? {
-                      _tag: "Available" as const,
-                      sessionReferenceId: reference.sessionReferenceId,
-                      command: renderAttachCommand(this.endpoint.attachUrl, reference),
-                    }
-                  : this.unavailable(reference, "missing"),
-              ),
-              Effect.catch(() => Effect.succeed(this.unavailable(reference, "unreachable"))),
-            )
+          ? this.openCode
+              .sessionExists({
+                sessionID: reference.nativeSessionId,
+                directory: reference.directory,
+              })
+              .pipe(
+                Effect.map((sessionExists) =>
+                  sessionExists
+                    ? {
+                        _tag: "Available" as const,
+                        sessionReferenceId: reference.sessionReferenceId,
+                        command: renderAttachCommand(this.endpoint.attachUrl, reference),
+                      }
+                    : this.unavailable(reference, "missing"),
+                ),
+                Effect.catch(() => Effect.succeed(this.unavailable(reference, "unreachable"))),
+              )
           : Effect.succeed(this.unavailable(reference, "directory_missing")),
       ),
     )

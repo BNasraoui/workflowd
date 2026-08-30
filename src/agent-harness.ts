@@ -9,7 +9,7 @@ import {
 } from "./agent-payload"
 import { normalizeError } from "./errors"
 import { toJsonSchemaObject } from "./json"
-import type { OpenCodeAdapter, OpenCodeModel } from "./opencode/adapter"
+import { OpenCodeAdapterError, type OpenCodeAdapter, type OpenCodeModel } from "./opencode/adapter"
 import { StructuredSession, StructuredSessionError } from "./opencode/structured-session"
 
 export {
@@ -456,15 +456,14 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       (selection) => {
         const descriptor = this.describe(selection.ref)
         return Effect.flatMap(descriptor, () =>
-          this.attempt("validate OpenCode availability", true, (signal) =>
-            this.adapter.validateAvailability(
-              {
-                ...(input.directory === undefined ? {} : { directory: input.directory }),
-                agents: [selection.agent],
-                model: parseModel(selection.model),
-              },
-              signal,
-            ),
+          this.attempt(
+            "validate OpenCode availability",
+            true,
+            this.adapter.validateAvailability({
+              ...(input.directory === undefined ? {} : { directory: input.directory }),
+              agents: [selection.agent],
+              model: parseModel(selection.model),
+            }),
           ),
         ).pipe(
           Effect.mapError(
@@ -567,7 +566,7 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
 
   readonly createSession: AgentHarnessPort["createSession"] = (prepared) => {
     const session = this.structuredSession(prepared)
-    const create = this.attempt("create session", true, (signal) => session.create(signal))
+    const create = this.attempt("create session", true, session.create())
     return create.pipe(
       Effect.flatMap((created) =>
         Schema.decodeUnknownEffect(SessionReference)({
@@ -596,11 +595,13 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
       return Effect.fail(this.error("validate SessionReference", new Error(mismatch), false))
     }
     const retryable = structuredOutputPolicy(prepared).invalidOutput === "retry"
-    return this.attempt("run structured agent session", retryable, (signal) =>
-      this.structuredSession(prepared).resume(
-        { sessionID: reference.nativeSessionId, directory: reference.directory },
-        signal,
-      ),
+    return this.attempt(
+      "run structured agent session",
+      retryable,
+      this.structuredSession(prepared).resume({
+        sessionID: reference.nativeSessionId,
+        directory: reference.directory,
+      }),
     ).pipe(
       Effect.timeoutOrElse({
         duration: prepared.launchIntent.timeoutMs,
@@ -621,11 +622,13 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
     if (mismatch !== undefined) {
       return Effect.fail(this.error("abort session", new Error(mismatch), false))
     }
-    return this.attempt("abort session", true, (signal) =>
-      this.adapter.abortSession(
-        { sessionID: reference.nativeSessionId, directory: reference.directory },
-        signal,
-      ),
+    return this.attempt(
+      "abort session",
+      true,
+      this.adapter.abortSession({
+        sessionID: reference.nativeSessionId,
+        directory: reference.directory,
+      }),
     ).pipe(
       Effect.flatMap((aborted) =>
         aborted
@@ -654,11 +657,8 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
         title: prepared.title,
         agent: prepared.launchIntent.agent,
         model: prepared.model,
-        format: {
-          type: "json_schema",
-          schema: prepared.outputJsonSchema,
-          retryCount: structuredOutputPolicy(prepared).structuredOutputRetryCount,
-        },
+        outputJsonSchema: prepared.outputJsonSchema,
+        retryCount: structuredOutputPolicy(prepared).structuredOutputRetryCount,
         prompt: prepared.prompt,
         pollIntervalMs: prepared.pollIntervalMs,
         maxOutputBytes: prepared.maxOutputBytes,
@@ -670,24 +670,24 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   private attempt<A>(
     operation: string,
     retryable: boolean,
-    run: (signal: AbortSignal) => Promise<A>,
+    effect: Effect.Effect<A, StructuredSessionError | OpenCodeAdapterError>,
   ): Effect.Effect<A, AgentHarnessError> {
-    return Effect.tryPromise({
-      try: run,
-      catch: (cause) => {
-        if (cause instanceof StructuredSessionError) {
-          const invalidOutput =
-            cause.operation === "decode structured session output" ||
-            cause.message.includes("decode structured session output") ||
-            cause.cause.message.includes("decode structured session output")
-          return this.error(
-            invalidOutput ? "decode structured session output" : cause.operation,
-            cause.cause,
-            invalidOutput ? retryable : true,
-          )
-        }
-        return this.error(operation, cause, retryable)
-      },
+    return Effect.mapError(effect, (cause) => {
+      if (cause instanceof StructuredSessionError) {
+        const invalidOutput =
+          cause.operation === "decode structured session output" ||
+          cause.message.includes("decode structured session output") ||
+          cause.cause.message.includes("decode structured session output")
+        return this.error(
+          invalidOutput ? "decode structured session output" : cause.operation,
+          cause.cause,
+          invalidOutput ? retryable : true,
+        )
+      }
+      if (cause instanceof OpenCodeAdapterError) {
+        return this.error(operation, cause.cause, retryable)
+      }
+      return this.error(operation, cause, retryable)
     })
   }
 

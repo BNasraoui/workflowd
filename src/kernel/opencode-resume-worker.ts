@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { stat } from "node:fs/promises"
 import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
-import { Context, Data, Effect, Schema } from "effect"
+import { Context, Data, Effect, Schema, Stream } from "effect"
 import type { ParseResult } from "effect"
 import { boundedAgentPayload } from "../agent-payload"
 import { JsonValueSchema } from "../json"
@@ -30,7 +30,6 @@ export type OpenCodeResumeProviderPort = {
       readonly prompt: string
       readonly agent: string
       readonly model: OpenCodeModel
-      readonly jsonSchema: object
     },
     signal: AbortSignal,
   ) => Promise<void>
@@ -38,6 +37,14 @@ export type OpenCodeResumeProviderPort = {
     input: { readonly directory: string },
     signal: AbortSignal,
   ) => Promise<AsyncIterable<OpenCodeSessionEvent>>
+  readonly generate: (
+    input: {
+      readonly sessionID: string
+      readonly directory: string
+      readonly jsonSchema: object
+    },
+    signal: AbortSignal,
+  ) => Promise<unknown>
 }
 
 export const OpenCodeResumeProvider = Context.GenericTag<OpenCodeResumeProviderPort>(
@@ -48,26 +55,30 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
   constructor(private readonly adapter: OpenCodeAdapter) {}
 
   readonly sessionExists: OpenCodeResumeProviderPort["sessionExists"] = (input, signal) =>
-    this.adapter.sessionExists(input, signal)
+    Effect.runPromise(this.adapter.sessionExists(input), { signal })
 
   readonly listMessages: OpenCodeResumeProviderPort["listMessages"] = (input, signal) =>
-    this.adapter.listSessionMessages(input, signal)
+    Effect.runPromise(this.adapter.listSessionMessages(input), { signal })
 
   readonly subscribeEvents: OpenCodeResumeProviderPort["subscribeEvents"] = (input, signal) =>
-    this.adapter.subscribeSessionEvents(input, signal)
+    Effect.runPromise(Stream.toAsyncIterableEffect(this.adapter.subscribeSessionEvents(input)), {
+      signal,
+    })
 
   readonly promptAsync: OpenCodeResumeProviderPort["promptAsync"] = (input, signal) =>
-    this.adapter.promptSession(
-      {
+    Effect.runPromise(
+      this.adapter.promptSession({
         sessionID: input.sessionID,
         directory: input.directory,
         agent: input.agent,
         model: input.model,
-        format: { type: "json_schema", schema: input.jsonSchema, retryCount: 2 },
-        parts: [{ type: "text", text: input.prompt }],
-      },
-      signal,
+        text: input.prompt,
+      }),
+      { signal },
     )
+
+  readonly generate: OpenCodeResumeProviderPort["generate"] = (input, signal) =>
+    Effect.runPromise(this.adapter.generateStructured(input), { signal })
 }
 
 export type TrustedResumeContract = {
@@ -168,9 +179,9 @@ const sentAuthority = (claim: ResumeClaim, expectedLeaseUntil: Date, now: Date) 
 
 const fingerprint = (message: ResumeMessage) =>
   JSON.stringify({
+    id: message.id ?? null,
     created: message.time.created,
     completed: message.time.completed ?? null,
-    structured: message.structured ?? null,
     error: message.error ?? null,
   })
 
@@ -259,11 +270,13 @@ const waitForAnswer = (events: AsyncIterable<OpenCodeSessionEvent>, sessionID: s
       if (
         event.type === "message.updated" &&
         event.sessionID === sessionID &&
-        event.message.time.completed !== undefined &&
-        (event.message.structured !== undefined || event.message.error !== undefined)
+        event.message.time.completed !== undefined
       ) {
         if (event.message.error !== undefined) throw new Error("OpenCode session failed")
-        return event.message.structured
+        return
+      }
+      if (event.type === "session.error" && (event.sessionID ?? sessionID) === sessionID) {
+        throw new Error("OpenCode session failed")
       }
     }
     throw new Error("OpenCode event stream ended before completion")
@@ -367,7 +380,7 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
     const answers = messages.filter(
       (message) =>
         message.time.completed !== undefined &&
-        message.structured !== undefined &&
+        message.error === undefined &&
         !baseline.has(fingerprint(message)),
     )
     if (answers.length !== 1) {
@@ -376,14 +389,19 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         candidateCount: answers.length,
       })
     }
-    const decoded = yield* Schema.decodeUnknown(
-      boundedAgentPayload(contract.maxOutputBytes, "OpenCode resume output"),
-    )(answers[0]!.structured).pipe(
-      Effect.flatMap((value) => Schema.decodeUnknown(contract.schema)(value)),
-      Effect.flatMap((value) => Schema.decodeUnknown(JsonValueSchema)(value)),
-      Effect.either,
+    const decoded = yield* providerCall("extract OpenCode resume output after restart", (signal) =>
+      provider.generate({ ...reference, jsonSchema: contract.jsonSchema }, signal),
+    ).pipe(
+      Effect.flatMap(
+        Schema.decodeUnknownEffect(
+          boundedAgentPayload(contract.maxOutputBytes, "OpenCode resume output"),
+        ),
+      ),
+      Effect.flatMap((value) => Schema.decodeUnknownEffect(contract.schema)(value)),
+      Effect.flatMap((value) => Schema.decodeUnknownEffect(JsonValueSchema)(value)),
+      Effect.result,
     )
-    if (decoded._tag === "Left") {
+    if (decoded._tag === "Failure") {
       return yield* recordObservation(request, options, "operator_required", {
         reason: "malformed_attributable_answer",
       })
@@ -394,7 +412,7 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
       "completed",
       {
         reason: "uniquely_attributed_answer",
-        result: decoded.right,
+        result: decoded.success,
       },
       contract.version,
     )
@@ -515,12 +533,14 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
               prompt: claim.promptText,
               agent: contract.agent,
               model: contract.model,
-              jsonSchema: contract.jsonSchema,
             },
             signal,
           ),
         )
-        return yield* waitForAnswer(events, custody.nativeSessionId)
+        yield* waitForAnswer(events, custody.nativeSessionId)
+        return yield* providerCall("extract OpenCode resume output", (signal) =>
+          provider.generate({ ...reference, jsonSchema: contract.jsonSchema }, signal),
+        )
       }),
       heartbeat,
     ).pipe(Effect.ensuring(Effect.sync(() => observationController.abort())))

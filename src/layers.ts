@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { SqlClient } from "effect/unstable/sql"
 import { Cause, Effect, Layer, Option, Schema } from "effect"
 import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
@@ -98,12 +99,21 @@ export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
-  const openCodeClient = createOpencodeClient({
-    baseUrl: config.openCode.baseUrl,
-    headers: { Authorization: `Basic ${authorization}` },
-    throwOnError: true,
-  })
-  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClient))
+  const openCodeHttpLayer = Layer.effect(
+    HttpClient.HttpClient,
+    Effect.map(HttpClient.HttpClient, (client) =>
+      HttpClient.mapRequest(
+        client,
+        HttpClientRequest.setHeader("authorization", `Basic ${authorization}`),
+      ),
+    ),
+  ).pipe(Layer.provide(FetchHttpClient.layer))
+  const openCodeClientEffect = Effect.runSync(
+    Effect.cached(
+      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+    ),
+  )
+  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
