@@ -227,16 +227,16 @@ const WaitForAgentArguments = Schema.Struct({
   idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES)),
 })
 
-const structured = (value: object, rendering?: string): ToolResult => ({
+const structured = (value: Record<string, unknown>, rendering?: string): ToolResult => ({
   content: [{ type: "text", text: rendering ?? JSON.stringify(value, null, 2) }],
-  structuredContent: Object.fromEntries(Object.entries(value)),
+  structuredContent: value,
 })
 const failure = (value: string, refusal?: Record<string, unknown>): ToolResult => ({
   content: [{ type: "text", text: value }],
   ...(refusal === undefined ? {} : { structuredContent: refusal }),
   isError: true,
 })
-const json = (value: object): ToolResult => structured(value)
+const json = (value: Record<string, unknown>): ToolResult => structured(value)
 
 const generatedProbeId = (now: Date) => {
   const stamp = now.toISOString().replace(/[-:.]/g, "").slice(0, 15)

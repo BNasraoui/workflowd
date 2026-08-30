@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { stat } from "node:fs/promises"
 import { SqlClient } from "@effect/sql"
 import type { SqlError } from "@effect/sql/SqlError"
-import { Context, Data, Effect, Schema } from "effect"
+import { Context, Data, Effect, Option, Schema } from "effect"
 import type { OpenCodeSessionEvent } from "../opencode/adapter"
 import { WorkSignal } from "../work-signal"
 import { recordAgentSessionCompletion } from "./agent-handoff-store"
@@ -45,12 +45,13 @@ export type OpenCodeCompletionSourceOptions = {
   readonly endpointAlias: string
   readonly endpointIdentity: string
   readonly providerVersion: number
+  readonly observationTimeoutMs: number
   readonly now: () => Date
 }
 
 export type OpenCodeCompletionSourcePort = {
   readonly iteration: Effect.Effect<
-    "idle" | "completed" | "operator_required",
+    "idle" | "completed" | "operator_required" | "yielded",
     | OpenCodeCompletionSourceError
     | SqlError
     | KernelStoreConflictError
@@ -110,6 +111,25 @@ const providerCall = <A>(operation: string, run: (signal: AbortSignal) => Promis
 const isTerminalAnswer = (message: CompletionMessage) =>
   message.time.completed !== undefined && message.error === undefined
 
+const completionSourceName = (watch: typeof WatchRow.Type) =>
+  `agent-session-source:${watch.provider_kind}:${createHash("sha256")
+    .update(`${watch.provider_id}\0${watch.server_id}\0${watch.endpoint_identity}`)
+    .digest("hex")}`
+
+const completionIdentity = (watch: typeof WatchRow.Type, messageId: string) =>
+  createHash("sha256")
+    .update(
+      [
+        watch.provider_kind,
+        watch.provider_id,
+        watch.server_id,
+        watch.endpoint_identity,
+        watch.native_session_id,
+        messageId,
+      ].join("\0"),
+    )
+    .digest("hex")
+
 const custodyMatches = (watch: typeof WatchRow.Type, options: OpenCodeCompletionSourceOptions) =>
   watch.provider_version === options.providerVersion &&
   watch.provider_id === options.providerId &&
@@ -128,12 +148,17 @@ const custodyMatches = (watch: typeof WatchRow.Type, options: OpenCodeCompletion
   watch.current_native_session_id === watch.native_session_id &&
   watch.current_resource_id === watch.resource_id
 
+type ObservedCompletion = {
+  readonly message: CompletionMessage
+  readonly completedTimestamp: number
+}
+
 const firstTerminalEvent = async (
   iterator: AsyncIterator<OpenCodeSessionEvent>,
   nativeSessionId: string,
   registeredAt: Date,
   signal: AbortSignal,
-) => {
+): Promise<ObservedCompletion> => {
   const aborted = new Promise<never>((_, reject) => {
     signal.addEventListener(
       "abort",
@@ -147,14 +172,14 @@ const firstTerminalEvent = async (
     const next = await Promise.race([iterator.next(), aborted])
     if (next.done) throw new Error("OpenCode completion event stream disconnected")
     const event = next.value
+    if (event.type !== "message.updated" || event.sessionID !== nativeSessionId) continue
+    const completed = event.message.time.completed
     if (
-      event.type === "message.updated" &&
-      event.sessionID === nativeSessionId &&
       isTerminalAnswer(event.message) &&
-      event.message.time.completed !== undefined &&
-      event.message.time.completed >= registeredAt.getTime()
+      completed !== undefined &&
+      completed >= registeredAt.getTime()
     ) {
-      return event.message
+      return { message: event.message, completedTimestamp: completed }
     }
   }
 }
@@ -164,6 +189,7 @@ const observeCompletion = (
   watch: typeof WatchRow.Type,
   reference: { readonly sessionID: string; readonly directory: string },
   registeredAt: Date,
+  isConsumed: (message: CompletionMessage) => boolean,
 ) =>
   Effect.tryPromise({
     try: async (effectSignal) => {
@@ -171,7 +197,7 @@ const observeCompletion = (
       const interrupt = () => controller.abort(effectSignal.reason)
       effectSignal.addEventListener("abort", interrupt, { once: true })
       let iterator: AsyncIterator<OpenCodeSessionEvent> | undefined
-      let live: Promise<CompletionMessage> | undefined
+      let live: Promise<ObservedCompletion> | undefined
       try {
         const stream = await provider.subscribeEvents(
           { directory: watch.absolute_path },
@@ -191,16 +217,27 @@ const observeCompletion = (
         if (history.length > MAX_AGENT_COMPLETION_CATCHUP_MESSAGES) {
           return { _tag: "OperatorRequired" as const, reason: "history_exceeds_bound" }
         }
-        const candidates = history.filter(
-          (message) =>
-            isTerminalAnswer(message) &&
-            message.time.completed !== undefined &&
-            message.time.completed >= registeredAt.getTime(),
+        const terminal = history.filter(isTerminalAnswer)
+        const candidates = terminal.flatMap((message) =>
+          message.time.completed !== undefined && message.time.completed >= registeredAt.getTime()
+            ? [{ message, completedTimestamp: message.time.completed }]
+            : [],
         )
         if (candidates.length > 1) {
           return { _tag: "OperatorRequired" as const, reason: "ambiguous_new_answers" }
         }
-        return { _tag: "Completed" as const, message: candidates[0] ?? (await live) }
+        const fresh = candidates[0]
+        if (fresh !== undefined) {
+          return { _tag: "Completed" as const, ...fresh }
+        }
+        // An unrecorded terminal answer older than the durable registration
+        // boundary means the child may have finished inside the registration
+        // round-trip. The live stream never replays it, so awaiting the stream
+        // would park the watch silently forever; hand it to an operator instead.
+        if (terminal.some((message) => !isConsumed(message))) {
+          return { _tag: "OperatorRequired" as const, reason: "stale_completion" }
+        }
+        return { _tag: "Completed" as const, ...(await live) }
       } finally {
         controller.abort()
         effectSignal.removeEventListener("abort", interrupt)
@@ -241,7 +278,7 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_working_resources AS resource ON resource.resource_id = watch.resource_id
       WHERE watch.provider_kind = 'opencode' AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
-      ORDER BY watch.registered_at, watch.instance_id LIMIT 1`
+      ORDER BY watch.updated_at, watch.registered_at, watch.instance_id LIMIT 1`
     if (rows.length === 0) return { status: "idle" as const }
     const decoded = yield* Schema.decodeUnknown(WatchRow)(rows[0]).pipe(
       Effect.mapError(sourceError("decode saved OpenCode completion watch")),
@@ -279,7 +316,31 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
     if (Number.isNaN(registeredAt.getTime())) {
       return yield* markOperatorRequired(watch.instance_id, options.now(), "corrupt_saved_watch")
     }
-    const observed = yield* observeCompletion(provider, watch, reference, registeredAt)
+    const source = completionSourceName(watch)
+    // Terminal answers this source already recorded as completion events. A
+    // stale answer in provider history is only alarming when it is not here.
+    const consumedRows = yield* sql<{ readonly source_event_id: string }>`SELECT source_event_id
+      FROM kernel_events WHERE source = ${source} AND event_key = ${watch.child_session_id}`
+    const consumed = new Set(consumedRows.map((row) => row.source_event_id))
+    const isConsumed = (message: CompletionMessage) =>
+      message.id !== undefined && consumed.has(completionIdentity(watch, message.id))
+    const observation = yield* observeCompletion(
+      provider,
+      watch,
+      reference,
+      registeredAt,
+      isConsumed,
+    ).pipe(Effect.timeoutOption(options.observationTimeoutMs))
+    if (Option.isNone(observation)) {
+      // The child is still running (or unobservable). Rotate this watch to the
+      // back of the queue so it cannot head-of-line-block newer watches behind
+      // the LIMIT 1 selection; its completion is caught by history catch-up on
+      // a later turn.
+      yield* sql`UPDATE kernel_agent_completion_watches SET updated_at = ${options.now().toISOString()}
+        WHERE instance_id = ${watch.instance_id} AND state = 'watching'`
+      return { status: "yielded" as const, instanceId: watch.instance_id }
+    }
+    const observed = observation.value
     if (observed._tag === "OperatorRequired") {
       return yield* markOperatorRequired(watch.instance_id, options.now(), observed.reason)
     }
@@ -291,26 +352,8 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
         "missing_message_identity",
       )
     }
-    const completedTimestamp = message.time.completed
-    if (completedTimestamp === undefined) {
-      return yield* markOperatorRequired(watch.instance_id, options.now(), "stale_completion")
-    }
-    const identity = createHash("sha256")
-      .update(
-        [
-          watch.provider_kind,
-          watch.provider_id,
-          watch.server_id,
-          watch.endpoint_identity,
-          watch.native_session_id,
-          message.id,
-        ].join("\0"),
-      )
-      .digest("hex")
-    const completedAt = new Date(completedTimestamp)
-    const source = `agent-session-source:${watch.provider_kind}:${createHash("sha256")
-      .update(`${watch.provider_id}\0${watch.server_id}\0${watch.endpoint_identity}`)
-      .digest("hex")}`
+    const identity = completionIdentity(watch, message.id)
+    const completedAt = new Date(observed.completedTimestamp)
     const recorded = yield* Effect.gen(function* () {
       const result = yield* recordAgentSessionCompletion({
         source,

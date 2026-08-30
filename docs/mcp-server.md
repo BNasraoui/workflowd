@@ -14,6 +14,15 @@ names use the SEP-986 canonical character set. The three query tools carry
 `readOnlyHint`; the two receipt tools carry non-destructive and idempotency
 annotations.
 
+A tool's declared `outputSchema` describes its **success** payload only. On
+`isError: true` results the tools deliberately deviate from it: refusals with
+a machine-readable cause (for example `wait_for_agent`'s
+`idempotency_conflict`) carry the daemon's refusal object
+(`{error, reason?, detail?}`) as `structuredContent`, and other failures carry
+text only. The MCP spec does not pin down `structuredContent` conformance for
+error results and the SDK does not validate it, so clients should only match
+error payloads against the refusal shape, never the success schema.
+
 ## The fire-and-ack contract
 
 Every write tool returns a **receipt**, never a result. Work runs

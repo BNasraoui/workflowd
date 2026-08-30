@@ -115,6 +115,9 @@ export const makeLiveLayer = (config: AppConfig) => {
     endpointAlias: config.openCode.endpointAlias,
     endpointIdentity: config.openCode.baseUrl,
     providerVersion: 1,
+    // Bounds one live-stream observation so a still-running child yields its
+    // completion-source slot to newer watches instead of holding it open.
+    observationTimeoutMs: 30_000,
     now: () => new Date(),
   }
   const resumeContracts = [

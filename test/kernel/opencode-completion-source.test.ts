@@ -92,8 +92,23 @@ const options = {
   endpointAlias: "local",
   endpointIdentity: "http://127.0.0.1:4096",
   providerVersion: 1,
+  observationTimeoutMs: 5_000,
   now: () => at,
 }
+
+// The generator body only starts on the first next() pull, which can lose the
+// race against observation cleanup — so honour an already-aborted signal too.
+const abortAwareHangingStream = (signal: AbortSignal) =>
+  (async function* () {
+    yield* []
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve()
+        return
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true })
+    })
+  })()
 
 describe("OpenCode agent completion source", () => {
   test("catches up history after the durable registration boundary", async () => {
@@ -223,7 +238,10 @@ describe("OpenCode agent completion source", () => {
     expect(subscriptions).toBe(1)
   })
 
-  test("ignores stale history and accepts a live completion", async () => {
+  test("escalates when the child completed before registration and nothing further happens", async () => {
+    // The child finished while the registration round-trip was in flight: its
+    // terminal answer predates the registration boundary and the live stream
+    // will never replay it. The watch must escalate loudly, not park forever.
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
       listMessages: async () => [
@@ -233,10 +251,7 @@ describe("OpenCode agent completion source", () => {
           time: { created: at.getTime() - 2_000, completed: at.getTime() - 1_000 },
         },
       ],
-      subscribeEvents: async () =>
-        (async function* () {
-          yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
-        })(),
+      subscribeEvents: async (_input, signal) => abortAwareHangingStream(signal),
     }
     const signals: WorkSignalPort = {
       subscribe: () => Effect.die(new Error("unused")),
@@ -251,7 +266,10 @@ describe("OpenCode agent completion source", () => {
         const events = yield* sql<{
           readonly count: number
         }>`SELECT COUNT(*) AS count FROM kernel_events`
-        return { iteration, count: events[0]!.count }
+        const watch = yield* sql<{
+          readonly state: string
+        }>`SELECT state FROM kernel_agent_completion_watches`
+        return { iteration, count: events[0]!.count, watchState: watch[0]!.state }
       }).pipe(
         Effect.provide(stores),
         Effect.provideService(OpenCodeCompletionProvider, provider),
@@ -259,8 +277,74 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(result.iteration).toMatchObject({ status: "completed" })
-    expect(result.count).toBe(1)
+    expect(result.iteration).toMatchObject({
+      status: "operator_required",
+      reason: "stale_completion",
+    })
+    expect(result.count).toBe(0)
+    expect(result.watchState).toBe("operator_required")
+  })
+
+  test("ignores an already-recorded stale answer and accepts a live completion", async () => {
+    // A second wait on the same child sees the first wait's consumed answer in
+    // provider history. That answer is stale for the new boundary but already
+    // recorded as a completion event, so the watch keeps waiting live.
+    const secondAnswer = {
+      id: "msg_terminal_next",
+      role: "assistant" as const,
+      time: { created: at.getTime() + 2_500, completed: at.getTime() + 3_000 },
+    }
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      listMessages: async () => [childAnswer],
+      subscribeEvents: async () =>
+        (async function* () {
+          yield { type: "message.updated" as const, sessionID: "ses_child", message: secondAnswer }
+        })(),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const handoffs = yield* AgentHandoffStore
+        yield* arrange
+        const first = yield* runOpenCodeCompletionSourceIteration(options)
+        yield* handoffs.register({
+          instanceId: "handoff-2",
+          waitId: "wait-child-2",
+          workflow: {
+            kind: "wait_for_agent",
+            childSessionId: "child-stable",
+            childSessionGeneration: 1,
+            parentSessionId: "parent-stable",
+            resumePrompt: { task: "Continue again." },
+            resumePromptText: '{"task":"Continue again."}',
+            outputContract: "test.parent-result",
+            outputContractVersion: 1,
+            retryPolicy: { maxAttempts: 3 },
+          },
+          completionSource: options,
+          registeredAt: new Date(at.getTime() + 2_000),
+        })
+        const second = yield* runOpenCodeCompletionSourceIteration(options)
+        const events = yield* sql<{
+          readonly count: number
+        }>`SELECT COUNT(*) AS count FROM kernel_events WHERE event_type = 'agent.session.completed'`
+        return { first, second, count: events[0]!.count }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.first.status).toBe("completed")
+    expect(result.second.status).toBe("completed")
+    expect(result.count).toBe(2)
   })
 
   test("ignores a stale terminal event replayed by the live subscription", async () => {
@@ -301,6 +385,139 @@ describe("OpenCode agent completion source", () => {
 
     expect(result.iteration.status).toBe("completed")
     expect(result.payload.completedAt).toBe(new Date(childAnswer.time.completed).toISOString())
+  })
+
+  test("quarantines unbounded catch-up history and a corrupt registration boundary", async () => {
+    const flood = Array.from({ length: 21 }, (_, index) => ({
+      id: `msg_${index}`,
+      role: "assistant" as const,
+      time: { created: at.getTime(), completed: at.getTime() + 1_000 + index },
+    }))
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      listMessages: async () => flood,
+      subscribeEvents: async () => (async function* () {})(),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* arrange
+        yield* sql`UPDATE kernel_agent_completion_watches SET registered_at = 'not-a-date'
+          WHERE instance_id = 'handoff-1'`
+        const corrupt = yield* runOpenCodeCompletionSourceIteration(options)
+        yield* sql`UPDATE kernel_agent_completion_watches SET state = 'watching',
+          registered_at = ${at.toISOString()} WHERE instance_id = 'handoff-1'`
+        const flooded = yield* runOpenCodeCompletionSourceIteration(options)
+        return { corrupt, flooded }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.corrupt).toMatchObject({
+      status: "operator_required",
+      reason: "corrupt_saved_watch",
+    })
+    expect(result.flooded).toMatchObject({
+      status: "operator_required",
+      reason: "history_exceeds_bound",
+    })
+  })
+
+  test("a stuck watch yields its slot so a newer watch still completes", async () => {
+    // Watch 1's child never produces a terminal answer, so its observation
+    // times out. That must rotate it to the back of the queue instead of
+    // head-of-line-blocking watch 2, whose child has already completed.
+    const secondChildAnswer = {
+      id: "msg_terminal_second_child",
+      role: "assistant" as const,
+      time: { created: at.getTime() + 4_000, completed: at.getTime() + 5_000 },
+    }
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      listMessages: async (input) => (input.sessionID === "ses_child2" ? [secondChildAnswer] : []),
+      subscribeEvents: async (_input, signal) => abortAwareHangingStream(signal),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+    const impatient = {
+      ...options,
+      observationTimeoutMs: 50,
+      now: () => new Date(at.getTime() + 60_000),
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const sessions = yield* KernelSessionStore
+        const handoffs = yield* AgentHandoffStore
+        yield* arrange
+        yield* sessions.registerResource({
+          resourceId: "child2-resource",
+          owningHostId: "mint",
+          absolutePath: `${process.cwd()}/test`,
+          kind: "worktree",
+          createdAt: at,
+        })
+        yield* sessions.registerSession({
+          sessionId: "child2-stable",
+          providerKind: "opencode",
+          providerVersion: 1,
+          providerId: "opencode-primary",
+          serverId: "server-a",
+          owningHostId: "mint",
+          endpointAlias: "local",
+          endpointIdentity: "http://127.0.0.1:4096",
+          nativeSessionId: "ses_child2",
+          resourceId: "child2-resource",
+          createdAt: at,
+        })
+        yield* handoffs.register({
+          instanceId: "handoff-2",
+          waitId: "wait-child-2",
+          workflow: {
+            kind: "wait_for_agent",
+            childSessionId: "child2-stable",
+            childSessionGeneration: 1,
+            parentSessionId: "parent-stable",
+            resumePrompt: { task: "Continue." },
+            resumePromptText: '{"task":"Continue."}',
+            outputContract: "test.parent-result",
+            outputContractVersion: 1,
+            retryPolicy: { maxAttempts: 3 },
+          },
+          completionSource: options,
+          registeredAt: new Date(at.getTime() + 1_000),
+        })
+        const first = yield* runOpenCodeCompletionSourceIteration(impatient)
+        const second = yield* runOpenCodeCompletionSourceIteration(impatient)
+        const watches = yield* sql<{
+          readonly instance_id: string
+          readonly state: string
+        }>`SELECT instance_id, state FROM kernel_agent_completion_watches ORDER BY instance_id`
+        return { first, second, watches }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.first).toMatchObject({ status: "yielded", instanceId: "handoff-1" })
+    expect(result.second).toMatchObject({ status: "completed", childSessionId: "child2-stable" })
+    expect(result.watches).toEqual([
+      { instance_id: "handoff-1", state: "watching" },
+      { instance_id: "handoff-2", state: "completed" },
+    ])
   })
 
   test("quarantines custody mismatch without calling the provider", async () => {
