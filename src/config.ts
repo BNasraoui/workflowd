@@ -45,6 +45,7 @@ interface OpenCodeConfig {
   readonly model: string
   readonly reviewerAgent: string
   readonly fixerAgent: string
+  readonly agentWakeAgent: string
   readonly pollIntervalMs: number
 }
 
@@ -86,7 +87,6 @@ export interface AppConfig {
   readonly workspace: WorkspaceConfig
   readonly openCode: OpenCodeConfig
   readonly worker: WorkerConfig
-  readonly agentWakeAgent: string
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
   readonly agentWaits?: { readonly token: string }
@@ -438,6 +438,10 @@ function openCodeSection(
 ): OpenCodeConfig {
   return {
     baseUrl,
+    agentWakeAgent: agentId(
+      env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
+      "WORKFLOWD_AGENT_WAKE_AGENT",
+    ),
     attachUrl: credentialFreeHttpUrl(
       required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
       "WORKFLOWD_OPENCODE_ATTACH_URL",
@@ -520,10 +524,6 @@ export async function loadConfig(
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
-  const agentWakeAgent = agentId(
-    env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
-    "WORKFLOWD_AGENT_WAKE_AGENT",
-  )
 
   return {
     http: httpSection(env),
@@ -537,7 +537,6 @@ export async function loadConfig(
       { hostId, trustedAgentUsers: configuredTrustedAgentUsers },
       { ...jobTiming, ...publicationTiming },
     ),
-    agentWakeAgent,
     ...(qrspi === undefined ? {} : { qrspi }),
     ...(secrets.testJobToken === undefined
       ? {}
