@@ -102,6 +102,7 @@ describe("loadConfig", () => {
         attachUrl: "https://mint.example-tailnet.ts.net:4096",
         serverId: "opencode-primary",
         endpointAlias: "private-opencode",
+        apiMode: "v1",
         username: "opencode",
         password: "server-password",
         model: "openai/gpt-5.6-sol",
@@ -122,6 +123,27 @@ describe("loadConfig", () => {
         commandUsers: [],
       },
     })
+  })
+
+  test("defaults the OpenCode API mode to v1 and validates the cutover switch", async () => {
+    const defaulted = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    expect(defaulted.openCode.apiMode).toBe("v1")
+
+    const v2 = await loadConfig(
+      { ...requiredEnvironment, OPENCODE_API_MODE: "v2" },
+      { home: "/home/test" },
+    )
+    expect(v2.openCode.apiMode).toBe("v2")
+
+    const explicitV1 = await loadConfig(
+      { ...requiredEnvironment, OPENCODE_API_MODE: "v1" },
+      { home: "/home/test" },
+    )
+    expect(explicitV1.openCode.apiMode).toBe("v1")
+
+    await expect(
+      loadConfig({ ...requiredEnvironment, OPENCODE_API_MODE: "v3" }, { home: "/home/test" }),
+    ).rejects.toThrow("OPENCODE_API_MODE must be v1 or v2")
   })
 
   test("configures a credential-free private URL for resumable session commands", async () => {

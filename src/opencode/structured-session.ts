@@ -59,6 +59,10 @@ export class StructuredSession<A, I> {
         {
           directory: this.request.directory,
           title: this.request.title,
+          // v2 binds the agent and model at session creation; v1 ignores these
+          // and binds them per prompt instead.
+          agent: this.request.agent,
+          model: this.request.model,
         },
         operationSignal,
       ),

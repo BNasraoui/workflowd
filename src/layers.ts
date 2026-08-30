@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
+import { OpenCode } from "@opencode-ai/client"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 import { SqlClient } from "@effect/sql"
 import { Effect, JSONSchema, Layer, Schema } from "effect"
@@ -25,6 +26,7 @@ import {
 } from "./kernel/opencode-completion-source"
 import { TestJobCanaryLive } from "./kernel/test-job-canary"
 import { Automation, OpenCodeAutomationAdapter, makeOpenCodeHarnessDefinitions } from "./opencode"
+import { ClientOpenCodeAdapter, makeOpenCodeV2Client } from "./opencode/adapter-v2"
 import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "./opencode/adapter"
 import { WorkflowStoreLive } from "./store"
 import { WorkflowStore } from "./store/contracts"
@@ -91,12 +93,31 @@ export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
-  const openCodeClient = createOpencodeClient({
-    baseUrl: config.openCode.baseUrl,
-    headers: { Authorization: `Basic ${authorization}` },
-    throwOnError: true,
-  })
-  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClient))
+  const authHeaders = { Authorization: `Basic ${authorization}` }
+  // OPENCODE_API_MODE selects the server API generation. "v1" (default) talks
+  // to the legacy REST API through @opencode-ai/sdk; "v2" is the cutover
+  // switch to the /api namespace served by v2-line opencode builds through
+  // @opencode-ai/client. Hosts stay on v1 until their server is cut over.
+  const openCodeAdapter =
+    config.openCode.apiMode === "v2"
+      ? new ClientOpenCodeAdapter(
+          makeOpenCodeV2Client(
+            OpenCode.make({
+              baseUrl: config.openCode.baseUrl,
+              headers: authHeaders,
+            }),
+            { baseUrl: config.openCode.baseUrl, headers: authHeaders },
+          ),
+        )
+      : new SdkOpenCodeAdapter(
+          makeOpenCodeSdkClient(
+            createOpencodeClient({
+              baseUrl: config.openCode.baseUrl,
+              headers: authHeaders,
+              throwOnError: true,
+            }),
+          ),
+        )
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,

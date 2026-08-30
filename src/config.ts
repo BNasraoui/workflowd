@@ -35,11 +35,14 @@ interface WorkspaceConfig {
   readonly gitSigningKey?: string
 }
 
+export type OpenCodeApiMode = "v1" | "v2"
+
 interface OpenCodeConfig {
   readonly baseUrl: string
   readonly attachUrl: string
   readonly serverId: string
   readonly endpointAlias: string
+  readonly apiMode: OpenCodeApiMode
   readonly username: string
   readonly password: string
   readonly model: string
@@ -419,6 +422,12 @@ function workspaceSection(
   }
 }
 
+function openCodeApiMode(value: string | undefined): OpenCodeApiMode {
+  if (value === undefined || value === "v1") return "v1"
+  if (value === "v2") return "v2"
+  throw new Error("OPENCODE_API_MODE must be v1 or v2")
+}
+
 function openCodeSection(
   env: Record<string, string | undefined>,
   baseUrl: string,
@@ -426,6 +435,7 @@ function openCodeSection(
 ): OpenCodeConfig {
   return {
     baseUrl,
+    apiMode: openCodeApiMode(env.OPENCODE_API_MODE),
     attachUrl: credentialFreeHttpUrl(
       required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
       "WORKFLOWD_OPENCODE_ATTACH_URL",

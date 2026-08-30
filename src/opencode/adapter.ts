@@ -10,12 +10,22 @@ export type OpenCodeModel = {
   readonly modelID: string
 }
 
-type OpenCodeCreateSessionInput = {
+export type OpenCodeCreateSessionInput = {
   readonly directory: string
   readonly title: string
+  /**
+   * v2 binds the agent at session creation. v1 sets it per prompt and ignores
+   * this field.
+   */
+  readonly agent?: string
+  /**
+   * v2 binds the model at session creation. v1 sets it per prompt and ignores
+   * this field.
+   */
+  readonly model?: OpenCodeModel
 }
 
-type OpenCodeSession = { readonly id: string }
+export type OpenCodeSession = { readonly id: string }
 
 export type OpenCodePromptSessionInput = {
   readonly sessionID: string
@@ -33,7 +43,7 @@ export type OpenCodePromptSessionInput = {
   }>
 }
 
-type OpenCodeSessionInput = {
+export type OpenCodeSessionInput = {
   readonly sessionID: string
   readonly directory: string
 }
@@ -41,12 +51,21 @@ type OpenCodeSessionInput = {
 type OpenCodeSessionDirectoryInput = { readonly directory: string }
 type OpenCodeSdkDirectoryInput = { readonly directory?: string }
 
-type OpenCodeAssistantMessage = {
+/**
+ * Session-level error payload. v1 encodes provider errors as
+ * `{ name, data: { message } }`; v2 encodes them as `{ type, message }`.
+ */
+export type OpenCodeMessageError =
+  | AssistantMessage["error"]
+  | { readonly type: string; readonly message: string }
+  | { readonly name: string; readonly message: string }
+
+export type OpenCodeAssistantMessage = {
   readonly id?: AssistantMessage["id"]
   readonly role: AssistantMessage["role"]
   readonly time: AssistantMessage["time"]
   readonly structured?: AssistantMessage["structured"]
-  readonly error?: AssistantMessage["error"]
+  readonly error?: OpenCodeMessageError
 }
 
 export type OpenCodeSessionEvent =
@@ -63,16 +82,16 @@ export type OpenCodeSessionEvent =
   | {
       readonly type: "session.error"
       readonly sessionID?: string
-      readonly error?: AssistantMessage["error"]
+      readonly error?: OpenCodeMessageError
     }
 
-type OpenCodeAvailabilityInput = {
+export type OpenCodeAvailabilityInput = {
   readonly directory?: string
   readonly agents: ReadonlyArray<string>
   readonly model: OpenCodeModel
 }
 
-type OpenCodeProviderAvailability = {
+export type OpenCodeProviderAvailability = {
   readonly id: string
   readonly modelIDs: ReadonlyArray<string>
 }
@@ -123,7 +142,7 @@ class OpenCodeAvailabilityError extends Error {
   }
 }
 
-function validateOpenCodeAvailability(
+export function validateOpenCodeAvailability(
   requested: Pick<OpenCodeAvailabilityInput, "agents" | "model">,
   availableAgents: ReadonlyArray<string>,
   availableProviders: ReadonlyArray<OpenCodeProviderAvailability>,
