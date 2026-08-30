@@ -78,6 +78,8 @@ export class AgentWaitCustodyError extends Data.TaggedError("AgentWaitCustodyErr
           `${subject} has a working resource in state '${this.observed}', not reserved, ` +
           "so its working directory is not held for this session"
         )
+      default:
+        return `${subject} cannot be watched or woken (reason: ${String(this.reason)}, observed: ${this.observed ?? "unknown"})`
     }
   }
 }
