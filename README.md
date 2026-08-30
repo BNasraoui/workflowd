@@ -40,7 +40,7 @@ Managed review worktree paths include the immutable job generation and attempt. 
 Workflowd checkpoints the configured OpenCode server identity and exact native session ID before prompting an agent. Applicable review publications resolve that durable, generation-bound reference and include a copy-pastable command of the form:
 
 ```sh
-opencode attach 'https://mint.example-tailnet.ts.net:4096' --dir '/exact/worktree' --session 'ses_exact'
+opencode2 --server 'https://mint.example-tailnet.ts.net:4096' --session 'ses_exact'
 ```
 
 Set `WORKFLOWD_OPENCODE_ATTACH_URL` to a credential-free URL reachable only through the private network. The command intentionally omits Basic-auth values and never uses `--continue`; OpenCode obtains credentials from the reviewer's local environment. Firewall, listener, and tailnet policy—not URL secrecy—must prevent public access.
@@ -112,6 +112,19 @@ The shipped user unit assumes:
 - Credential source files: `%h/.config/workflowd/github-webhook-secret` and `%h/.config/workflowd/opencode-server-password`
 
 Edit the unit if the repository or Bun is installed elsewhere.
+
+## OpenCode 2 Server
+
+Workflowd speaks the OpenCode 2 protocol only. Run the server from the v2 CLI, pinned to the same build as `@opencode-ai/client` in `package.json`:
+
+```bash
+bun add -g @opencode-ai/cli@0.0.0-beta-18684
+OPENCODE_PASSWORD=... opencode2 serve --port 4096
+```
+
+The v2 and v1 binaries install side by side; an existing OpenCode 1 server can keep serving other tooling on another port. The client pin and the effect runtime move in lockstep (`0.0.0-beta-N` pairs with one exact `effect@4.0.0-rc.M`); upgrade both together or neither.
+
+Cutting an existing installation over: resume fingerprints and agent-harness registration hashes changed shape with the v2 message model, so persisted pre-migration baselines resolve to `operator_required` on first restart instead of resuming silently. That is the intended safety valve; expect to re-drive or discard in-flight resumes once at cutover.
 
 ## Configuration
 

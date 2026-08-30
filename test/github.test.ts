@@ -231,8 +231,7 @@ describe("GitHubAppAdapter.publishReview", () => {
         Effect.succeed({
           _tag: "Available" as const,
           sessionReferenceId: sessionReference.sessionReferenceId,
-          command:
-            "opencode attach 'https://mint.tailnet.example:4096' --dir '/worktrees/review-1' --session 'ses_exact'",
+          command: "opencode2 --server 'https://mint.tailnet.example:4096' --session 'ses_exact'",
         }),
     })
 
@@ -240,7 +239,7 @@ describe("GitHubAppAdapter.publishReview", () => {
 
     const comment = callInput(recording.calls, "issues.createComment")
     expect(comment.body).toContain("### Resume agent session")
-    expect(comment.body).toContain("opencode attach")
+    expect(comment.body).toContain("opencode2 --server")
     expect(comment.body).toContain("--session 'ses_exact'")
   })
 
@@ -318,7 +317,7 @@ describe("GitHubAppAdapter.publishReview", () => {
         Effect.succeed({
           _tag: "Available" as const,
           sessionReferenceId: sessionReference.sessionReferenceId,
-          command: "opencode attach 'https://mint' --dir '/worktree' --session 'ses_exact'",
+          command: "opencode2 --server 'https://mint' --session 'ses_exact'",
         }),
     })
 

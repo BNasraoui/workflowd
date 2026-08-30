@@ -3,6 +3,7 @@ import { Effect, Stream } from "effect"
 import {
   SdkOpenCodeAdapter,
   structuredExtractionPrompt,
+  toWireEvent,
   type OpenCodeAssistantMessage,
   type OpenCodeSdkClient,
   type OpenCodeWireEvent,
@@ -298,4 +299,78 @@ test("SdkOpenCodeAdapter forwards session lifecycle calls through the seam", asy
     { operation: "messages", input: { sessionID: "ses_1", limit: 20 } },
     { operation: "interrupt", input: { sessionID: "ses_1" } },
   ])
+})
+
+describe("toWireEvent", () => {
+  const located = { location: { directory: "/repo" } }
+
+  test("drops events without a session id", () => {
+    expect(toWireEvent({ type: "session.idle", data: {} })).toBeUndefined()
+    expect(toWireEvent({ type: "session.idle", data: { sessionID: 7 } })).toBeUndefined()
+  })
+
+  test("maps session.status for known status types only", () => {
+    for (const statusType of ["busy", "retry", "idle"] as const) {
+      expect(
+        toWireEvent({
+          type: "session.status",
+          data: { sessionID: "ses_1", status: { type: statusType } },
+          ...located,
+        }),
+      ).toEqual({
+        type: "session.status",
+        sessionID: "ses_1",
+        status: { type: statusType },
+        directory: "/repo",
+      })
+    }
+    expect(
+      toWireEvent({
+        type: "session.status",
+        data: { sessionID: "ses_1", status: { type: "queued" } },
+      }),
+    ).toBeUndefined()
+    expect(toWireEvent({ type: "session.status", data: { sessionID: "ses_1" } })).toBeUndefined()
+  })
+
+  test("maps idle and execution outcomes with optional location", () => {
+    expect(toWireEvent({ type: "session.idle", data: { sessionID: "ses_1" } })).toEqual({
+      type: "session.idle",
+      sessionID: "ses_1",
+    })
+    expect(
+      toWireEvent({
+        type: "session.execution.succeeded",
+        data: { sessionID: "ses_1" },
+        ...located,
+      }),
+    ).toEqual({ type: "execution.succeeded", sessionID: "ses_1", directory: "/repo" })
+    expect(
+      toWireEvent({ type: "session.execution.interrupted", data: { sessionID: "ses_1" } }),
+    ).toEqual({ type: "execution.interrupted", sessionID: "ses_1" })
+  })
+
+  test("maps execution.failed with and without an error payload", () => {
+    expect(
+      toWireEvent({
+        type: "session.execution.failed",
+        data: { sessionID: "ses_1", error: { name: "boom" } },
+        ...located,
+      }),
+    ).toEqual({
+      type: "execution.failed",
+      sessionID: "ses_1",
+      error: { name: "boom" },
+      directory: "/repo",
+    })
+    expect(toWireEvent({ type: "session.execution.failed", data: { sessionID: "ses_1" } })).toEqual(
+      { type: "execution.failed", sessionID: "ses_1" },
+    )
+  })
+
+  test("drops unrelated event types", () => {
+    expect(
+      toWireEvent({ type: "session.message.content.updated", data: { sessionID: "ses_1" } }),
+    ).toBeUndefined()
+  })
 })

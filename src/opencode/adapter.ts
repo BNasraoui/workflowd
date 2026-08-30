@@ -446,7 +446,7 @@ type WireEventData = {
   readonly error?: unknown
 }
 
-type RawWireEvent = {
+export type RawWireEvent = {
   readonly type: string
   readonly location?: { readonly directory: string } | undefined
   readonly data: unknown
@@ -456,7 +456,7 @@ const wireEventFilter = Filter.fromPredicateOption((event: RawWireEvent) =>
   Option.fromUndefinedOr(toWireEvent(event)),
 )
 
-function toWireEvent(event: RawWireEvent): OpenCodeWireEvent | undefined {
+export function toWireEvent(event: RawWireEvent): OpenCodeWireEvent | undefined {
   const data = (event.data ?? {}) as WireEventData
   const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined
   if (sessionID === undefined) return undefined

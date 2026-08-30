@@ -57,8 +57,7 @@ describe("SessionAccessResolver", () => {
     expect(access).toEqual({
       _tag: "Available",
       sessionReferenceId: "session-reference-1",
-      command:
-        "opencode attach 'https://mint.tailnet.example:4096' --dir '/worktrees/issue with '\"'\"'quotes'\"'\"'' --session 'ses_exact'",
+      command: "opencode2 --server 'https://mint.tailnet.example:4096' --session 'ses_exact'",
     })
     if (access._tag !== "Available") throw new Error("expected available session")
     expect(access.command).not.toContain("password")

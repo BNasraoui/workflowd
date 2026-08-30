@@ -104,10 +104,9 @@ export class SessionAccessResolver {
 
 export function renderAttachCommand(attachUrl: string, reference: SessionReference): string {
   return [
-    "opencode attach",
+    "opencode2",
+    "--server",
     shellQuote(attachUrl),
-    "--dir",
-    shellQuote(reference.directory),
     "--session",
     shellQuote(reference.nativeSessionId),
   ].join(" ")
