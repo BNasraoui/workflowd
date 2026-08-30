@@ -90,6 +90,7 @@ const seedVerifiedRun = Effect.gen(function* () {
     maxAttempts: 2,
     createdAt: at,
   })
+  yield* store.claimSpawn({ runId: "agent-run-x", now: at })
   yield* store.markSpawned({
     runId: "agent-run-x",
     resourceId: "run-resource",

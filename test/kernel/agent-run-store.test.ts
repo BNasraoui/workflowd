@@ -61,6 +61,7 @@ const spawn = (store: typeof AgentRunStore.Service) =>
       resourceId: "resource-1",
       createdAt: at,
     })
+    yield* store.claimSpawn({ runId: input.runId, now: at })
     yield* store.markSpawned({
       runId: input.runId,
       resourceId: "resource-1",
@@ -89,6 +90,22 @@ describe("agent-run store", () => {
     if (result.conflict._tag === "Failure") {
       expect(result.conflict.failure).toBeInstanceOf(AgentRunStoreConflictError)
     }
+  })
+
+  test("claimSpawn admits exactly one dispatcher before any side effect", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create(input)
+        const winner = yield* store.claimSpawn({ runId: input.runId, now: at }).pipe(Effect.result)
+        const loser = yield* store.claimSpawn({ runId: input.runId, now: at }).pipe(Effect.result)
+        const record = yield* store.read(input.runId)
+        return { winner, loser, record }
+      }),
+    )
+    expect(result.winner._tag).toBe("Success")
+    expect(result.loser._tag).toBe("Failure")
+    expect(result.record?.state).toBe("spawning")
   })
 
   test("walks the state machine and refuses transitions from the wrong state", async () => {

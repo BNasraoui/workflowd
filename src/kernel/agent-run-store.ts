@@ -7,13 +7,14 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
  * ingress resumes from after a crash mid-dispatch and the watchdog acts on
  * afterwards.
  *
- * States: accepted (row exists, nothing external yet) → spawned (worktree,
- * session and custody exist, prompt sent) → verified (first generated token
- * observed; the receipt has been issued) → completed | failed |
- * operator_required.
+ * States: accepted (row exists, nothing external yet) → spawning (exactly
+ * one dispatching request holds the spawn; concurrent duplicates conflict
+ * before any external side effect) → spawned (worktree, session and custody
+ * exist, prompt sent) → verified (first generated token observed; the
+ * receipt has been issued) → completed | failed | operator_required.
  */
 export type AgentRunState =
-  "accepted" | "spawned" | "verified" | "completed" | "failed" | "operator_required"
+  "accepted" | "spawning" | "spawned" | "verified" | "completed" | "failed" | "operator_required"
 
 const AgentRunRow = Schema.Struct({
   run_id: Schema.String,
@@ -31,6 +32,7 @@ const AgentRunRow = Schema.Struct({
   native_session_id: Schema.NullOr(Schema.String),
   state: Schema.Literals([
     "accepted",
+    "spawning",
     "spawned",
     "verified",
     "completed",
@@ -107,6 +109,7 @@ export type AgentRunStorePort = {
   readonly create: (
     input: AgentRunCreateInput,
   ) => Effect.Effect<{ readonly status: "created" | "duplicate" }, AgentRunStoreError>
+  readonly claimSpawn: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly read: (runId: string) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
   readonly markSpawned: (
     input: Authority & {
@@ -224,12 +227,27 @@ const make = Effect.gen(function* () {
       return { status: "created" as const }
     }).pipe(sql.withTransaction)
 
+  /**
+   * Exactly one dispatching request wins the accepted→spawning transition;
+   * a concurrent duplicate conflicts here BEFORE any external side effect,
+   * so identical retries can never double-spawn sessions.
+   */
+  const claimSpawn: AgentRunStorePort["claimSpawn"] = (input) =>
+    transition(
+      input.runId,
+      "run is not in accepted state; another dispatch may hold the spawn",
+      sql`UPDATE kernel_agent_runs SET state = 'spawning',
+        updated_at = ${input.now.toISOString()}
+        WHERE run_id = ${input.runId} AND state = 'accepted' RETURNING run_id`,
+    )
+
   const markSpawned: AgentRunStorePort["markSpawned"] = (input) =>
     Effect.gen(function* () {
       const existing = yield* readRow(input.runId)
       if (
         existing !== null &&
         existing.state !== "accepted" &&
+        existing.state !== "spawning" &&
         existing.sessionId === input.sessionId &&
         existing.nativeSessionId === input.nativeSessionId
       ) {
@@ -237,11 +255,11 @@ const make = Effect.gen(function* () {
       }
       yield* transition(
         input.runId,
-        "run is not in accepted state",
+        "run is not in spawning state",
         sql`UPDATE kernel_agent_runs SET state = 'spawned', resource_id = ${input.resourceId},
           session_id = ${input.sessionId}, native_session_id = ${input.nativeSessionId},
           updated_at = ${input.now.toISOString()}
-          WHERE run_id = ${input.runId} AND state = 'accepted' RETURNING run_id`,
+          WHERE run_id = ${input.runId} AND state = 'spawning' RETURNING run_id`,
       )
     }).pipe(sql.withTransaction)
 
@@ -269,7 +287,7 @@ const make = Effect.gen(function* () {
       input.runId,
       "run is not active",
       sql`UPDATE kernel_agent_runs SET updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified')
         RETURNING run_id`,
     )
 
@@ -299,7 +317,7 @@ const make = Effect.gen(function* () {
       "run is not in a failable state",
       sql`UPDATE kernel_agent_runs SET state = 'failed', diagnostic = ${input.diagnostic},
         updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawned') RETURNING run_id`,
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned') RETURNING run_id`,
     )
 
   const operatorRequired: AgentRunStorePort["operatorRequired"] = (input) =>
@@ -308,7 +326,7 @@ const make = Effect.gen(function* () {
       "run is not active",
       sql`UPDATE kernel_agent_runs SET state = 'operator_required',
         diagnostic = ${input.diagnostic}, updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified')
         RETURNING run_id`,
     )
 
@@ -317,13 +335,14 @@ const make = Effect.gen(function* () {
       const staleBefore = new Date(input.now.getTime() - input.staleAfterMs).toISOString()
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
         WHERE state = 'verified'
-        OR (state IN ('accepted', 'spawned') AND updated_at < ${staleBefore})
+        OR (state IN ('accepted', 'spawning', 'spawned') AND updated_at < ${staleBefore})
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
     })
 
   return AgentRunStore.of({
     create,
+    claimSpawn,
     read: readRow,
     markSpawned,
     markVerified,

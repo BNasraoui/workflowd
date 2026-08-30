@@ -1242,7 +1242,7 @@ const kernelAgentRuns = Effect.gen(function* () {
         native_session_id IS NULL OR length(CAST(native_session_id AS BLOB)) BETWEEN 1 AND 256
       ),
       state TEXT NOT NULL CHECK (state IN (
-        'accepted', 'spawned', 'verified', 'completed', 'failed', 'operator_required'
+        'accepted', 'spawning', 'spawned', 'verified', 'completed', 'failed', 'operator_required'
       )),
       attempt INTEGER NOT NULL CHECK (attempt > 0),
       max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
@@ -1259,7 +1259,7 @@ const kernelAgentRuns = Effect.gen(function* () {
   `
   yield* sql`CREATE INDEX kernel_agent_runs_watchable
     ON kernel_agent_runs (state, updated_at, run_id)
-    WHERE state IN ('accepted', 'spawned', 'verified')`
+    WHERE state IN ('accepted', 'spawning', 'spawned', 'verified')`
 })
 
 const migrationsThrough0008 = {

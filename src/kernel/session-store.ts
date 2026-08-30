@@ -688,7 +688,11 @@ const make = Effect.gen(function* () {
       ${version}, ${payload.json}, ${input.now.toISOString()})`
       yield* sql`UPDATE kernel_resume_requests SET state = 'completed', updated_at = ${input.now.toISOString()}
       WHERE request_id = ${input.requestId}`
-      yield* sql`UPDATE kernel_sessions SET state = 'completed', revision = revision + 1,
+      // A delivered wake concludes this resume, not the session: the parent
+      // remains held and wakeable, so it returns to 'ready' under the next
+      // custody generation. Leaving it terminal would make every parent
+      // one-shot — its second dispatch could never register a wait.
+      yield* sql`UPDATE kernel_sessions SET state = 'ready', revision = revision + 1,
         updated_at = ${input.now.toISOString()} WHERE session_id = (
           SELECT session_id FROM kernel_resume_requests WHERE request_id = ${input.requestId})`
       return { status: "completed" as const }
@@ -737,7 +741,14 @@ const make = Effect.gen(function* () {
         AND attempt = ${input.attempt} AND state = 'observation_required'`
       yield* sql`UPDATE kernel_resume_requests SET state = ${state}, updated_at = ${input.observedAt.toISOString()}
       WHERE request_id = ${input.requestId} AND state = 'observation_required'`
-      const sessionState = input.disposition === "missing" ? "missing" : state
+      const sessionState =
+        input.disposition === "missing"
+          ? "missing"
+          : input.disposition === "completed"
+            ? // Same as completeResume: a delivered wake leaves the parent
+              // held and wakeable under its next generation.
+              "ready"
+            : state
       yield* sql`UPDATE kernel_sessions SET state = ${sessionState}, revision = revision + 1,
         updated_at = ${input.observedAt.toISOString()} WHERE session_id = (
           SELECT session_id FROM kernel_resume_requests WHERE request_id = ${input.requestId})`

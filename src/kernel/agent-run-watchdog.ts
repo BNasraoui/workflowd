@@ -49,6 +49,14 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
     if (run === null) return "idle" as const
 
     if (run.state !== "verified" || run.nativeSessionId === null) {
+      // The dispatching request died before verification. When it got far
+      // enough to record the session, that session is likely still burning
+      // tokens unsupervised — abort it before abandoning the run.
+      if (run.nativeSessionId !== null) {
+        yield* provider
+          .abortSession({ sessionID: run.nativeSessionId, directory: run.directory })
+          .pipe(Effect.ignore)
+      }
       yield* store.fail({
         runId: run.runId,
         diagnostic:

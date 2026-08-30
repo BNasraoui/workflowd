@@ -287,6 +287,10 @@ const make = (options: AgentRunIngressOptions) =>
           resourceId: parentResourceId,
           createdAt: run.createdAt,
         })
+        // The wait's registration boundary is anchored at run creation, not
+        // the request clock: a retry after a transient wait failure must not
+        // move the boundary past a child answer that already completed, or
+        // the completion source would quarantine it as stale.
         const receipt = yield* waits.register(
           {
             parentSessionId,
@@ -294,7 +298,7 @@ const make = (options: AgentRunIngressOptions) =>
             resumePrompt: run.resumePrompt,
             idempotencyKey: `${run.runId}-wait`,
           },
-          run.now,
+          run.createdAt,
         )
         return {
           waitId: receipt.waitId,
@@ -315,11 +319,29 @@ const make = (options: AgentRunIngressOptions) =>
     ) =>
       Effect.gen(function* () {
         let nativeSessionId = run.nativeSessionId
+        if (run.state === "spawning") {
+          // Another in-flight request holds the spawn; refusing here keeps
+          // concurrent duplicates from ever creating a second session.
+          return yield* refuse(
+            "run_conflict",
+            "an identical dispatch is already spawning this run; retry after it settles",
+          )
+        }
         if (run.state === "accepted" || nativeSessionId === null) {
+          yield* store.claimSpawn({ runId: run.runId, now })
           yield* worktrees.create({
             repository: target.repositoryDirectory,
             directory: run.directory,
             branch: `agent-run/${target.short}`,
+          })
+          // Custody for the worktree is registered before the session is
+          // created so the external-effect window holds as little
+          // unrecorded state as possible.
+          yield* ensureResource({
+            resourceId: target.resourceId,
+            absolutePath: run.directory,
+            kind: "worktree",
+            createdAt: run.createdAt,
           })
           const session = yield* provider.createSession({
             directory: run.directory,
@@ -328,12 +350,6 @@ const make = (options: AgentRunIngressOptions) =>
             model: { providerID: route.providerID, modelID: route.modelID },
           })
           nativeSessionId = session.id
-          yield* ensureResource({
-            resourceId: target.resourceId,
-            absolutePath: run.directory,
-            kind: "worktree",
-            createdAt: run.createdAt,
-          })
           const sessionId = yield* ensureSession({
             nativeSessionId,
             resourceId: target.resourceId,
@@ -362,7 +378,12 @@ const make = (options: AgentRunIngressOptions) =>
           const detail =
             `session ${nativeSessionId} generated no tokens within ` +
             `${options.verifyTimeoutMs}ms of dispatch; it was aborted`
-          yield* store.fail({ runId: run.runId, diagnostic: `no_first_token: ${detail}`, now })
+          // A re-dispatch of an already-verified run whose session died is
+          // the watchdog's to escalate; the refusal must still name the
+          // real reason rather than a state conflict.
+          yield* store
+            .fail({ runId: run.runId, diagnostic: `no_first_token: ${detail}`, now })
+            .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
           return yield* refuse("no_first_token", detail)
         }
         yield* store.markVerified({ runId: run.runId, outputTokens, now })
