@@ -87,7 +87,7 @@ describe.serial("real NATS Effect transport", () => {
       Effect.gen(function* () {
         const transport = yield* RemoteTransport
         yield* transport.ensureInfrastructure()
-        const waiting = yield* transport.takeHost("host-online", 10_000).pipe(Effect.fork)
+        const waiting = yield* transport.takeHost("host-online", 10_000).pipe(Effect.forkChild)
         yield* Effect.sleep(25)
         yield* transport.publishCommand(command("online", "host-online"))
         const deliveries = yield* Fiber.join(waiting)
@@ -110,7 +110,7 @@ describe.serial("real NATS Effect transport", () => {
         const consumer = yield* transport
           .consumeHost("host-continuous", (delivery) =>
             delivery.acknowledge.pipe(
-              Effect.zipRight(Deferred.succeed(received, delivery.deliveryId)),
+              Effect.andThen(Deferred.succeed(received, delivery.deliveryId)),
               Effect.asVoid,
             ),
           )
@@ -156,13 +156,13 @@ describe.serial("real NATS Effect transport", () => {
         yield* transport.ensureInfrastructure()
         return yield* transport
           .publishRaw("workflowd.v1.commands.host-oversized", new Uint8Array(16_385))
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "RemoteTransportError", operation: "publish" },
+      _tag: "Failure",
+      failure: { _tag: "RemoteTransportError", operation: "publish" },
     })
   }, 20_000)
 
@@ -198,12 +198,12 @@ describe.serial("real NATS Effect transport", () => {
         const result = await runTransport(
           Effect.gen(function* () {
             const transport = yield* RemoteTransport
-            return yield* transport.takeHost(hostId, 100).pipe(Effect.either)
+            return yield* transport.takeHost(hostId, 100).pipe(Effect.result)
           }),
         )
         expect(result).toMatchObject({
-          _tag: "Left",
-          left: { _tag: "RemoteTransportError", operation: "consume" },
+          _tag: "Failure",
+          failure: { _tag: "RemoteTransportError", operation: "consume" },
         })
       }
     } finally {
@@ -249,12 +249,12 @@ describe.serial("real NATS Effect transport", () => {
         const result = await runTransport(
           Effect.gen(function* () {
             const transport = yield* RemoteTransport
-            return yield* transport.ensureInfrastructure().pipe(Effect.either)
+            return yield* transport.ensureInfrastructure().pipe(Effect.result)
           }),
         )
         expect(result).toMatchObject({
-          _tag: "Left",
-          left: { _tag: "RemoteTransportError", operation: "ensure" },
+          _tag: "Failure",
+          failure: { _tag: "RemoteTransportError", operation: "ensure" },
         })
       }
     } finally {

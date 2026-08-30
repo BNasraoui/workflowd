@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Scope } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelJobStore, type KernelJobStorePort } from "../../src/kernel/job-store"
 import {
   RemoteCoordinatorStore,
@@ -361,10 +361,12 @@ describe.serial("kernel-backed coordinator against real JetStream", () => {
                   observedAt: new Date(now.getTime() + 100).toISOString(),
                 })
                 .pipe(
-                  Effect.zipRight(runRemoteResultIteration(new Date(now.getTime() + 200))),
-                  Effect.tap((processed) => {
-                    raceDisposition = processed.dispositions
-                  }),
+                  Effect.andThen(runRemoteResultIteration(new Date(now.getTime() + 200))),
+                  Effect.tap((processed) =>
+                    Effect.sync(() => {
+                      raceDisposition = processed.dispositions
+                    }),
+                  ),
                   Effect.asVoid,
                 ),
           })
