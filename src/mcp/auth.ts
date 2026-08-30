@@ -49,25 +49,9 @@ export async function loadMcpWriteAuth(
  */
 export type AgentWaitDaemonConfig = { readonly baseUrl: string; readonly token: string }
 
-export async function loadAgentWaitDaemon(
-  env: Record<string, string | undefined>,
-  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
-): Promise<AgentWaitDaemonConfig | undefined> {
+function parseDaemonBaseUrl(env: Record<string, string | undefined>): URL | undefined {
   const baseUrl = env.WORKFLOWD_DAEMON_URL
-  const direct = env.WORKFLOWD_AGENT_WAIT_TOKEN
-  const file = env.WORKFLOWD_AGENT_WAIT_TOKEN_FILE
-  const hasBaseUrl = baseUrl !== undefined && baseUrl !== ""
-  const hasDirect = direct !== undefined && direct !== ""
-  const hasFile = file !== undefined && file !== ""
-  if (hasDirect && hasFile) {
-    throw new Error(
-      "Set at most one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
-    )
-  }
-  if (!hasBaseUrl && !hasDirect && !hasFile) return undefined
-  if (!hasBaseUrl) {
-    throw new Error("WORKFLOWD_DAEMON_URL is required when an agent-wait token is configured")
-  }
+  if (baseUrl === undefined || baseUrl === "") return undefined
   let parsed: URL
   try {
     parsed = new URL(baseUrl)
@@ -80,22 +64,50 @@ export async function loadAgentWaitDaemon(
   if (parsed.username !== "" || parsed.password !== "") {
     throw new Error("WORKFLOWD_DAEMON_URL must not include credentials")
   }
-  if (!hasDirect && !hasFile) {
-    throw new Error(
-      "Set exactly one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE " +
-        "when WORKFLOWD_DAEMON_URL is set",
-    )
-  }
-  if (hasDirect) return { baseUrl: parsed.origin, token: direct }
+  return parsed
+}
+
+async function readAgentWaitTokenFile(
+  file: string,
+  read: (path: string) => Promise<string>,
+): Promise<string> {
   let value: string
   try {
-    value = await read(file!)
+    value = await read(file)
   } catch (cause) {
     throw new Error(`Could not read WORKFLOWD_AGENT_WAIT_TOKEN_FILE at ${file}`, { cause })
   }
   value = value.replace(/\r?\n$/, "")
   if (value === "") throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN_FILE must not be empty")
-  return { baseUrl: parsed.origin, token: value }
+  return value
+}
+
+export async function loadAgentWaitDaemon(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<AgentWaitDaemonConfig | undefined> {
+  const direct = env.WORKFLOWD_AGENT_WAIT_TOKEN
+  const file = env.WORKFLOWD_AGENT_WAIT_TOKEN_FILE
+  const hasDirect = direct !== undefined && direct !== ""
+  const hasFile = file !== undefined && file !== ""
+  if (hasDirect && hasFile) {
+    throw new Error(
+      "Set at most one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
+    )
+  }
+  const parsed = parseDaemonBaseUrl(env)
+  const token = hasDirect ? direct : hasFile ? await readAgentWaitTokenFile(file, read) : undefined
+  if (parsed === undefined && token === undefined) return undefined
+  if (parsed === undefined) {
+    throw new Error("WORKFLOWD_DAEMON_URL is required when an agent-wait token is configured")
+  }
+  if (token === undefined) {
+    throw new Error(
+      "Set exactly one of WORKFLOWD_AGENT_WAIT_TOKEN or WORKFLOWD_AGENT_WAIT_TOKEN_FILE " +
+        "when WORKFLOWD_DAEMON_URL is set",
+    )
+  }
+  return { baseUrl: parsed.origin, token }
 }
 
 /** Constant-time bearer comparison; never logs or echoes either value. */
