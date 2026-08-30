@@ -109,7 +109,7 @@ export const runRemoteRunnerLoop = (hostId: string, options: RemoteRunnerLoopOpt
     const outboxRetryIntervalMs = options.outboxRetryIntervalMs ?? 1_000
     yield* Effect.forever(
       Effect.suspend(() => drainPendingResults(new Date())).pipe(
-        Effect.catchAllCause((cause) =>
+        Effect.catchCause((cause) =>
           Effect.logError("Remote runner result outbox drain failed", cause),
         ),
         Effect.andThen(Effect.sleep(outboxRetryIntervalMs)),
@@ -130,16 +130,14 @@ export const runRemoteRunnerLoop = (hostId: string, options: RemoteRunnerLoopOpt
           yield* executeReceivedAndDrainResults(new Date(), false)
         }
       }).pipe(
-        Effect.catchAllCause((cause) =>
-          Effect.logError("Remote runner delivery batch failed", cause),
-        ),
+        Effect.catchCause((cause) => Effect.logError("Remote runner delivery batch failed", cause)),
       ),
     ).pipe(Effect.forkScoped)
     return yield* Effect.forever(
       transport
         .consumeHost(hostId, (delivery) => Queue.offer(queue, delivery))
         .pipe(
-          Effect.catchAllCause((cause) =>
+          Effect.catchCause((cause) =>
             Effect.logError("Remote runner consumer failed", cause).pipe(
               Effect.andThen(Effect.sleep(1_000)),
             ),

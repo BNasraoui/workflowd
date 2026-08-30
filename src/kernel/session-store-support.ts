@@ -20,15 +20,15 @@ export const canonicalJson = (value: JsonValue): string => {
 }
 
 export const Timestamp = Schema.String.pipe(
-  Schema.pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)),
 )
-export const JsonText = Schema.parseJson(JsonValueSchema)
+export const JsonText = Schema.fromJsonString(JsonValueSchema)
 export const ResourceReadRow = Schema.Struct({
   resource_id: Schema.String,
   owning_host_id: Schema.String,
   absolute_path: Schema.String,
-  kind: Schema.Literal("workspace", "worktree", "checkout"),
-  state: Schema.Literal(
+  kind: Schema.Literals(["workspace", "worktree", "checkout"]),
+  state: Schema.Literals([
     "reserved",
     "cleanup_required",
     "cleanup_leased",
@@ -36,17 +36,17 @@ export const ResourceReadRow = Schema.Struct({
     "missing",
     "operator_required",
     "data_error",
-  ),
+  ]),
   created_at: Timestamp,
   updated_at: Timestamp,
 })
 export const SessionReadRow = Schema.Struct({
   session_id: Schema.String,
-  provider_kind: Schema.Literal("opencode", "codex", "claude"),
-  provider_version: Schema.Int.pipe(Schema.positive()),
+  provider_kind: Schema.Literals(["opencode", "codex", "claude"]),
+  provider_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   owning_host_id: Schema.String,
   resource_id: Schema.String,
-  state: Schema.Literal(
+  state: Schema.Literals([
     "ready",
     "active",
     "completed",
@@ -55,8 +55,8 @@ export const SessionReadRow = Schema.Struct({
     "cleaned",
     "operator_required",
     "data_error",
-  ),
-  revision: Schema.Int.pipe(Schema.positive()),
+  ]),
+  revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   created_at: Timestamp,
   updated_at: Timestamp,
 })
@@ -67,7 +67,7 @@ export const ResumeReadRow = Schema.Struct({
   prompt_json: JsonText,
   prompt_text: Schema.String,
   prompt_sha256: Schema.String,
-  state: Schema.Literal(
+  state: Schema.Literals([
     "ready",
     "leased",
     "sent",
@@ -77,9 +77,9 @@ export const ResumeReadRow = Schema.Struct({
     "cancelled",
     "operator_required",
     "data_error",
-  ),
-  attempt: Schema.Int.pipe(Schema.nonNegative()),
-  max_attempts: Schema.Int.pipe(Schema.positive()),
+  ]),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  max_attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   run_at: Timestamp,
   created_at: Timestamp,
   updated_at: Timestamp,
@@ -89,7 +89,7 @@ export const CleanupReadRow = Schema.Struct({
   resource_id: Schema.String,
   owning_host_id: Schema.String,
   reason: Schema.String,
-  state: Schema.Literal(
+  state: Schema.Literals([
     "pending",
     "leased",
     "completed",
@@ -97,9 +97,9 @@ export const CleanupReadRow = Schema.Struct({
     "retry_scheduled",
     "operator_required",
     "data_error",
-  ),
-  attempt: Schema.Int.pipe(Schema.nonNegative()),
-  max_attempts: Schema.Int.pipe(Schema.positive()),
+  ]),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  max_attempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   run_at: Timestamp,
   created_at: Timestamp,
   updated_at: Timestamp,
@@ -107,12 +107,12 @@ export const CleanupReadRow = Schema.Struct({
 export const ObservationReadRow = Schema.Struct({
   observation_id: Schema.String,
   request_id: Schema.String,
-  attempt: Schema.Int.pipe(Schema.positive()),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   observer_host_id: Schema.String,
   observer_worker_id: Schema.String,
   observer_token: Schema.String,
-  disposition: Schema.Literal("completed", "missing", "failed", "operator_required"),
-  evidence_version: Schema.Int.pipe(Schema.positive()),
+  disposition: Schema.Literals(["completed", "missing", "failed", "operator_required"]),
+  evidence_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   evidence_json: JsonText,
   observed_at: Timestamp,
 })

@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { stat } from "node:fs/promises"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Schema, Stream } from "effect"
-import type { ParseResult } from "effect"
 import { boundedAgentPayload } from "../agent-payload"
 import { JsonValueSchema } from "../json"
 import type { OpenCodeAdapter, OpenCodeModel, OpenCodeSessionEvent } from "../opencode/adapter"
@@ -47,7 +46,7 @@ export type OpenCodeResumeProviderPort = {
   ) => Promise<unknown>
 }
 
-export const OpenCodeResumeProvider = Context.GenericTag<OpenCodeResumeProviderPort>(
+export const OpenCodeResumeProvider = Context.Service<OpenCodeResumeProviderPort>(
   "workflowd/kernel/OpenCodeResumeProvider",
 )
 
@@ -84,7 +83,7 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
 export type TrustedResumeContract = {
   readonly name: string
   readonly version: number
-  readonly schema: Schema.Schema.AnyNoContext
+  readonly schema: Schema.Codec<any, any>
   readonly jsonSchema: object
   readonly agent: string
   readonly model: OpenCodeModel
@@ -113,17 +112,17 @@ export class OpenCodeResumeWorkerError extends Data.TaggedError("OpenCodeResumeW
 export type OpenCodeResumeWorkerPort = {
   readonly iteration: Effect.Effect<
     "idle" | "completed" | "missing" | "operator_required",
-    OpenCodeResumeWorkerError | KernelSessionStoreError | SqlError | ParseResult.ParseError
+    OpenCodeResumeWorkerError | KernelSessionStoreError | SqlError | Schema.SchemaError
   >
 }
 
-export const OpenCodeResumeWorker = Context.GenericTag<OpenCodeResumeWorkerPort>(
+export const OpenCodeResumeWorker = Context.Service<OpenCodeResumeWorkerPort>(
   "workflowd/kernel/OpenCodeResumeWorker",
 )
 
 const SessionRow = Schema.Struct({
   session_id: Schema.String,
-  provider_kind: Schema.Literal("opencode", "codex", "claude"),
+  provider_kind: Schema.Literals(["opencode", "codex", "claude"]),
   provider_version: Schema.Int,
   provider_id: Schema.String,
   server_id: Schema.String,
@@ -213,7 +212,7 @@ const validateCustody = (
   Effect.gen(function* () {
     const store = yield* KernelSessionStore
     const sessionUnknown = yield* store.readSession(claim.sessionId)
-    const session = yield* Schema.decodeUnknown(SessionRow)(sessionUnknown).pipe(
+    const session = yield* Schema.decodeUnknownEffect(SessionRow)(sessionUnknown).pipe(
       Effect.mapError(
         (cause) => new OpenCodeResumeWorkerError({ operation: "decode saved session", cause }),
       ),
@@ -235,7 +234,7 @@ const validateCustody = (
       })
     }
     const resourceUnknown = yield* store.readResource(session.resource_id)
-    const resource = yield* Schema.decodeUnknown(ResourceRow)(resourceUnknown).pipe(
+    const resource = yield* Schema.decodeUnknownEffect(ResourceRow)(resourceUnknown).pipe(
       Effect.mapError(
         (cause) => new OpenCodeResumeWorkerError({ operation: "decode saved resource", cause }),
       ),
@@ -307,7 +306,7 @@ const recordObservation = (
         observedAt,
       })
       if (disposition === "completed" && resultVersion !== undefined) {
-        const completed = yield* Schema.decodeUnknown(CompletedObservationEvidence)(evidence)
+        const completed = yield* Schema.decodeUnknownEffect(CompletedObservationEvidence)(evidence)
         yield* sql`INSERT INTO kernel_resume_results (result_id, request_id, attempt, result_version,
           result_json, completed_at) VALUES (${`${request.request_id}:result`}, ${request.request_id},
           ${request.attempt}, ${resultVersion}, ${canonicalJson(completed.result)}, ${observedAt.toISOString()})`
@@ -324,7 +323,7 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
     const recoverable = yield* store.readRecoverableResume(options.owningHostId)
     const candidate = recoverable.find((row) => row.state === "observation_required")
     if (candidate === undefined) return null
-    const request = yield* Schema.decodeUnknown(ObservationRequestRow)(candidate).pipe(
+    const request = yield* Schema.decodeUnknownEffect(ObservationRequestRow)(candidate).pipe(
       Effect.mapError(
         (cause) => new OpenCodeResumeWorkerError({ operation: "decode observed request", cause }),
       ),
@@ -337,9 +336,9 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
       })
     }
     const custody = yield* validateCustody({ sessionId: request.session_id }, options).pipe(
-      Effect.either,
+      Effect.result,
     )
-    if (custody._tag === "Left") {
+    if (custody._tag === "Failure") {
       return yield* recordObservation(request, options, "operator_required", {
         reason: "invalid_saved_custody",
       })
@@ -348,17 +347,20 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
       FROM kernel_resume_checkpoints WHERE request_id = ${request.request_id}
         AND attempt = ${request.attempt} AND checkpoint_version = 1
       ORDER BY created_at DESC LIMIT 1`
-    const checkpoint = yield* Schema.decodeUnknown(Schema.parseJson(BaselineCheckpoint))(
+    const checkpoint = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(BaselineCheckpoint))(
       checkpointRows[0]?.checkpoint_json,
-    ).pipe(Effect.either)
-    if (checkpoint._tag === "Left" || checkpoint.right.messages.length > MAX_BASELINE_MESSAGES) {
+    ).pipe(Effect.result)
+    if (
+      checkpoint._tag === "Failure" ||
+      checkpoint.success.messages.length > MAX_BASELINE_MESSAGES
+    ) {
       return yield* recordObservation(request, options, "operator_required", {
         reason: "missing_or_malformed_baseline",
       })
     }
     const reference = {
-      sessionID: custody.right.nativeSessionId,
-      directory: custody.right.directory,
+      sessionID: custody.success.nativeSessionId,
+      directory: custody.success.directory,
     }
     const exists = yield* providerCall("inspect OpenCode session after restart", (signal) =>
       provider.sessionExists(reference, signal),
@@ -376,7 +378,7 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         reason: "history_exceeds_bound",
       })
     }
-    const baseline = new Set(checkpoint.right.messages)
+    const baseline = new Set(checkpoint.success.messages)
     const answers = messages.filter(
       (message) =>
         message.time.completed !== undefined &&
@@ -437,8 +439,8 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
     const prepared = yield* Effect.all([
       requireContract(claim, options),
       validateCustody(claim, options),
-    ]).pipe(Effect.either)
-    if (prepared._tag === "Left") {
+    ]).pipe(Effect.result)
+    if (prepared._tag === "Failure") {
       const failedAt = options.now()
       const changed = yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
         sent_at = ${failedAt.toISOString()}, updated_at = ${failedAt.toISOString()}
@@ -446,14 +448,14 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
           AND owning_host_id = ${claim.owningHostId} AND worker_id = ${claim.workerId}
           AND claim_token = ${claim.claimToken} AND lease_until = ${claim.leaseUntil.toISOString()}
           AND lease_until > ${failedAt.toISOString()} AND state = 'leased' RETURNING request_id`
-      if (changed.length === 0) return yield* prepared.left
+      if (changed.length === 0) return yield* prepared.failure
       yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
         updated_at = ${failedAt.toISOString()} WHERE request_id = ${claim.requestId} AND state = 'leased'`
       yield* sql`UPDATE kernel_sessions SET state = 'operator_required', revision = revision + 1,
         updated_at = ${failedAt.toISOString()} WHERE session_id = ${claim.sessionId}`
       return { status: "operator_required" as const, requestId: claim.requestId }
     }
-    const [contract, custody] = prepared.right
+    const [contract, custody] = prepared.success
     const reference = { sessionID: custody.nativeSessionId, directory: custody.directory }
     const exists = yield* providerCall("inspect OpenCode session", (signal) =>
       provider.sessionExists(reference, signal),
@@ -544,11 +546,11 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
       }),
       heartbeat,
     ).pipe(Effect.ensuring(Effect.sync(() => observationController.abort())))
-    const result = yield* Schema.decodeUnknown(
+    const result = yield* Schema.decodeUnknownEffect(
       boundedAgentPayload(contract.maxOutputBytes, "OpenCode resume output"),
     )(encoded).pipe(
-      Effect.flatMap((value) => Schema.decodeUnknown(contract.schema)(value)),
-      Effect.flatMap((value) => Schema.decodeUnknown(JsonValueSchema)(value)),
+      Effect.flatMap((value) => Schema.decodeUnknownEffect(contract.schema)(value)),
+      Effect.flatMap((value) => Schema.decodeUnknownEffect(JsonValueSchema)(value)),
     )
     yield* store.completeResume({
       ...sentAuthority(claim, leaseUntil, options.now()),

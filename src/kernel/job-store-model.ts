@@ -7,25 +7,27 @@ export const MAX_KERNEL_JOB_PAYLOAD_BYTES = 65_536
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const boundedText = (bytes: number) =>
   Schema.NonEmptyString.pipe(
-    Schema.filter((value) => utf8Bytes(value) <= bytes, {
-      message: () => `must be at most ${bytes} UTF-8 bytes`,
-    }),
+    Schema.check(
+      Schema.makeFilter((value) => utf8Bytes(value) <= bytes, {
+        message: `must be at most ${bytes} UTF-8 bytes`,
+      }),
+    ),
   )
 
 export const JobIdentifier = boundedText(MAX_KERNEL_JOB_IDENTIFIER_BYTES)
-export const JobVersion = Schema.Int.pipe(Schema.positive())
+export const JobVersion = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
 
 export const EnqueueJobInput = Schema.Struct({
   jobId: JobIdentifier,
   instanceId: JobIdentifier,
   waitId: JobIdentifier,
-  eventSequence: Schema.Int.pipe(Schema.positive()),
-  expectedCursor: Schema.Int.pipe(Schema.nonNegative()),
+  eventSequence: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  expectedCursor: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
   inputVersion: JobVersion,
   input: JsonValueSchema,
-  maxAttempts: Schema.Int.pipe(Schema.positive()),
-  runAt: Schema.DateFromSelf,
-  createdAt: Schema.DateFromSelf,
+  maxAttempts: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  runAt: Schema.Date,
+  createdAt: Schema.Date,
 })
 export type EnqueueJobInput = typeof EnqueueJobInput.Type
 

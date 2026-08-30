@@ -1,5 +1,5 @@
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Effect, Layer, Schema } from "effect"
 import {
   KernelEventStore,
@@ -8,12 +8,11 @@ import {
   type KernelStoreInputError,
 } from "../kernel/event-store"
 import { KernelJobStore, type KernelJobStoreError } from "../kernel/job-store"
-import type { ParseResult } from "effect"
 import { RemoteHostId } from "./contract"
 
 const ProbeId = Schema.NonEmptyString.pipe(
-  Schema.maxLength(128),
-  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
+  Schema.check(Schema.isMaxLength(128)),
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/)),
 )
 const ProbeInput = Schema.Struct({ probeId: ProbeId, hostId: RemoteHostId })
 
@@ -28,11 +27,11 @@ export type RemoteProbeProducerPort = {
     | KernelStoreDataError
     | KernelStoreInputError
     | KernelJobStoreError
-    | ParseResult.ParseError
+    | Schema.SchemaError
   >
 }
 
-export const RemoteProbeProducer = Context.GenericTag<RemoteProbeProducerPort>(
+export const RemoteProbeProducer = Context.Service<RemoteProbeProducerPort>(
   "workflowd/remote/RemoteProbeProducer",
 )
 
@@ -43,7 +42,9 @@ const make = Effect.gen(function* () {
 
   const enqueue: RemoteProbeProducerPort["enqueue"] = (input, now) =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(ProbeInput)(input, { onExcessProperty: "error" })
+      const decoded = yield* Schema.decodeUnknownEffect(ProbeInput)(input, {
+        onExcessProperty: "error",
+      })
       const jobId = `remote-probe-${decoded.probeId}`
       const instanceId = `remote-probe-instance-${decoded.probeId}`
       const waitId = `remote-probe-wait-${decoded.probeId}`

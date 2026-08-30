@@ -13,12 +13,12 @@ const EchoJobInput = Schema.Struct({
   kind: Schema.Literal("echo"),
   value: JsonValueSchema,
 })
-const VersionOneJobInput = Schema.Union(EchoJobInput, ResumeParentAgentJobV1)
+const VersionOneJobInput = Schema.Union([EchoJobInput, ResumeParentAgentJobV1])
 
 const ParentSessionRow = Schema.Struct({
   session_id: Schema.String,
   owning_host_id: Schema.String,
-  state: Schema.Literal("ready", "active"),
+  state: Schema.Literals(["ready", "active"]),
 })
 
 export const MAX_KERNEL_JOB_RETRY_DELAY_MS = 60 * 60_000
@@ -92,8 +92,10 @@ const runParentResumeJob = (
       return { status: "operator_required" as const, jobId: claim.jobId }
     }
     const parentUnknown = yield* sessionStore.value.readSession(input.parentSessionId)
-    const parent = yield* Schema.decodeUnknown(ParentSessionRow)(parentUnknown).pipe(Effect.either)
-    if (parent._tag === "Left" || parent.right.session_id !== input.parentSessionId) {
+    const parent = yield* Schema.decodeUnknownEffect(ParentSessionRow)(parentUnknown).pipe(
+      Effect.result,
+    )
+    if (parent._tag === "Failure" || parent.success.session_id !== input.parentSessionId) {
       yield* failOperatorRequired(
         jobs,
         claim,
@@ -105,8 +107,8 @@ const runParentResumeJob = (
     const registeredAt = new Date(input.registeredAt)
     yield* sessionStore.value.registerResumeRequest({
       requestId: `${claim.jobId}:request`,
-      sessionId: parent.right.session_id,
-      owningHostId: parent.right.owning_host_id,
+      sessionId: parent.success.session_id,
+      owningHostId: parent.success.owning_host_id,
       prompt: input.resumePrompt,
       promptText: input.resumePromptText,
       promptSha256: createHash("sha256").update(input.resumePromptText).digest("hex"),
@@ -117,9 +119,9 @@ const runParentResumeJob = (
       createdAt: registeredAt,
     })
     const postRegistration = yield* (options.afterResumeRegistered?.() ?? Effect.void).pipe(
-      Effect.either,
+      Effect.result,
     )
-    if (postRegistration._tag === "Left") {
+    if (postRegistration._tag === "Failure") {
       return yield* retryClaim(jobs, claim, options, "transient post-registration handoff failure")
     }
     yield* workSignal.value.wake("session-resume")
@@ -139,8 +141,8 @@ const runEchoJob = (
   options: KernelJobIterationOptions,
 ) =>
   Effect.gen(function* () {
-    const execution = yield* (options.execute?.(input.value) ?? Effect.void).pipe(Effect.either)
-    if (execution._tag === "Left") {
+    const execution = yield* (options.execute?.(input.value) ?? Effect.void).pipe(Effect.result)
+    if (execution._tag === "Failure") {
       return yield* retryClaim(jobs, claim, options, "transient job execution failure")
     }
     yield* jobs.complete({
@@ -168,10 +170,10 @@ export const runKernelJobIteration = (options: KernelJobIterationOptions) =>
       return { status: "operator_required" as const, jobId: claim.jobId }
     }
 
-    const decoded = yield* Schema.decodeUnknown(VersionOneJobInput)(claim.input, {
+    const decoded = yield* Schema.decodeUnknownEffect(VersionOneJobInput)(claim.input, {
       onExcessProperty: "error",
-    }).pipe(Effect.either)
-    if (decoded._tag === "Left") {
+    }).pipe(Effect.result)
+    if (decoded._tag === "Failure") {
       yield* failOperatorRequired(
         jobs,
         claim,
@@ -180,7 +182,7 @@ export const runKernelJobIteration = (options: KernelJobIterationOptions) =>
       )
       return { status: "operator_required" as const, jobId: claim.jobId }
     }
-    return decoded.right.kind === "resume_parent_agent"
-      ? yield* runParentResumeJob(jobs, claim, decoded.right, options)
-      : yield* runEchoJob(jobs, claim, decoded.right, options)
+    return decoded.success.kind === "resume_parent_agent"
+      ? yield* runParentResumeJob(jobs, claim, decoded.success, options)
+      : yield* runEchoJob(jobs, claim, decoded.success, options)
   })
