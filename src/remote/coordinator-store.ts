@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import {
   KernelJobStore,
@@ -103,39 +103,41 @@ export type RemoteInboxRecord = {
   readonly disposition: RemoteResultDisposition | "malformed" | "oversized"
 }
 
-export const RemoteCoordinatorStore = Context.GenericTag<RemoteCoordinatorStorePort>(
+export const RemoteCoordinatorStore = Context.Service<RemoteCoordinatorStorePort>(
   "workflowd/remote/RemoteCoordinatorStore",
 )
 
 const Timestamp = Schema.String.pipe(
-  Schema.filter((value) => !Number.isNaN(Date.parse(value)), {
-    message: () => "must be an ISO timestamp",
-  }),
+  Schema.check(
+    Schema.makeFilter((value) => !Number.isNaN(Date.parse(value)), {
+      message: "must be an ISO timestamp",
+    }),
+  ),
 )
 const DispatchRow = Schema.Struct({
   command_id: Schema.String,
   job_id: Schema.String,
-  attempt: Schema.Int.pipe(Schema.positive()),
-  generation: Schema.Int.pipe(Schema.positive()),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  generation: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   host_id: Schema.String,
   worker_id: Schema.String,
   claim_token: Schema.String,
   lease_until: Timestamp,
   issued_at: Timestamp,
   expires_at: Timestamp,
-  state: Schema.Literal(
+  state: Schema.Literals([
     "prepared",
     "publishing",
     "published",
     "completed",
     "superseded",
     "cancelled",
-  ),
+  ]),
 })
 type DispatchRow = typeof DispatchRow.Type
 
 const decodeDispatch = (row: unknown, key: string) =>
-  Schema.decodeUnknown(DispatchRow)(row).pipe(
+  Schema.decodeUnknownEffect(DispatchRow)(row).pipe(
     Effect.mapError((error) => new RemoteCoordinatorDataError({ key, message: String(error) })),
   )
 
@@ -169,7 +171,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const claim = yield* jobs.claimRemoteProbe(input)
       if (claim === null) return null
-      const probe = yield* Schema.decodeUnknown(RemoteProbeJobV1)(claim.input).pipe(
+      const probe = yield* Schema.decodeUnknownEffect(RemoteProbeJobV1)(claim.input).pipe(
         Effect.mapError(
           (error) =>
             new KernelJobStoreDataError({

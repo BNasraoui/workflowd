@@ -5,16 +5,20 @@ import type { EventCondition } from "./event-store"
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 const boundedText = (maximum: number) =>
   Schema.NonEmptyString.pipe(
-    Schema.filter((value) => utf8Bytes(value) <= maximum, {
-      message: () => `must be at most ${maximum} UTF-8 bytes`,
-    }),
+    Schema.check(
+      Schema.makeFilter((value) => utf8Bytes(value) <= maximum, {
+        message: `must be at most ${maximum} UTF-8 bytes`,
+      }),
+    ),
   )
 
 const StableSessionId = boundedText(256)
 const ContractName = boundedText(256)
 const PromptText = boundedText(65_536)
-const PositiveInteger = Schema.Int.pipe(Schema.positive())
-const Instant = Schema.String.pipe(Schema.pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/))
+const PositiveInteger = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
+const Instant = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)),
+)
 
 export const AGENT_SESSION_COMPLETED_TYPE = "agent.session.completed"
 export const AGENT_SESSION_COMPLETED_VERSION = 1

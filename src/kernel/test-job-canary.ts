@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Context, Data, Effect, Layer, Schema } from "effect"
-import type { ParseResult } from "effect"
 import { JsonValueSchema, type JsonValue } from "../json"
 import { KernelEventStore } from "./event-store"
 import {
@@ -15,18 +14,22 @@ import type {
   KernelStoreDataError,
   KernelStoreInputError,
 } from "./event-store"
-import type { SqlError } from "@effect/sql/SqlError"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 
 export const MAX_TEST_JOB_ID_BYTES = 128
 
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
 export const TestJobId = Schema.NonEmptyString.pipe(
-  Schema.filter((value) => utf8Bytes(value) <= MAX_TEST_JOB_ID_BYTES, {
-    message: () => `must be at most ${MAX_TEST_JOB_ID_BYTES} UTF-8 bytes`,
-  }),
-  Schema.filter((value) => value !== "." && value !== "..", {
-    message: () => "must not be a URL dot segment",
-  }),
+  Schema.check(
+    Schema.makeFilter((value) => utf8Bytes(value) <= MAX_TEST_JOB_ID_BYTES, {
+      message: `must be at most ${MAX_TEST_JOB_ID_BYTES} UTF-8 bytes`,
+    }),
+  ),
+  Schema.check(
+    Schema.makeFilter((value) => value !== "." && value !== "..", {
+      message: "must not be a URL dot segment",
+    }),
+  ),
 )
 
 export const TestJobSubmission = Schema.Struct({
@@ -72,9 +75,9 @@ export type TestJobCanaryError =
   | KernelJobStoreError
   | TestJobCanaryConflict
   | TestJobCanaryNotFound
-  | ParseResult.ParseError
+  | Schema.SchemaError
 
-export const TestJobCanary = Context.GenericTag<TestJobCanaryPort>("workflowd/kernel/TestJobCanary")
+export const TestJobCanary = Context.Service<TestJobCanaryPort>("workflowd/kernel/TestJobCanary")
 
 const identifiers = (jobId: string) => {
   const digest = createHash("sha256").update(jobId, "utf8").digest("hex")
@@ -111,7 +114,7 @@ const make = Effect.gen(function* () {
 
   const status: TestJobCanaryPort["status"] = (jobId) =>
     Effect.gen(function* () {
-      const decodedId = yield* Schema.decodeUnknown(TestJobId)(jobId)
+      const decodedId = yield* Schema.decodeUnknownEffect(TestJobId)(jobId)
       const job = yield* jobs.readJob(identifiers(decodedId).kernelJobId)
       if (job === null) return yield* new TestJobCanaryNotFound({ jobId: decodedId })
       const state = publicStatus(job.state)
@@ -124,7 +127,7 @@ const make = Effect.gen(function* () {
           message: result === null ? "succeeded job has no result" : "unsupported result version",
         })
       }
-      const decoded = yield* Schema.decodeUnknown(TestJobResult)(result.result, {
+      const decoded = yield* Schema.decodeUnknownEffect(TestJobResult)(result.result, {
         onExcessProperty: "error",
       }).pipe(
         Effect.mapError(
@@ -141,7 +144,7 @@ const make = Effect.gen(function* () {
 
   const submit: TestJobCanaryPort["submit"] = (input, now) =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(TestJobSubmission)(input, {
+      const decoded = yield* Schema.decodeUnknownEffect(TestJobSubmission)(input, {
         onExcessProperty: "error",
       })
       const ids = identifiers(decoded.jobId)

@@ -14,8 +14,8 @@ export class RemoteContractError extends Data.TaggedError("RemoteContractError")
   readonly reason: "malformed" | "oversized"
 }> {}
 
-const encode = <A>(schema: Schema.Schema<A>, value: unknown) =>
-  Schema.decodeUnknown(schema)(value, { onExcessProperty: "error" }).pipe(
+const encode = <A>(schema: Schema.Codec<A, A>, value: unknown) =>
+  Schema.decodeUnknownEffect(schema)(value, { onExcessProperty: "error" }).pipe(
     Effect.mapError(() => new RemoteContractError({ reason: "malformed" })),
     Effect.flatMap((decoded) => {
       const bytes = new TextEncoder().encode(JSON.stringify(decoded))
@@ -25,7 +25,7 @@ const encode = <A>(schema: Schema.Schema<A>, value: unknown) =>
     }),
   )
 
-const decode = <A>(schema: Schema.Schema<A>, bytes: Uint8Array) => {
+const decode = <A>(schema: Schema.Codec<A, A>, bytes: Uint8Array) => {
   if (bytes.byteLength > MAX_REMOTE_MESSAGE_BYTES) {
     return Effect.fail(new RemoteContractError({ reason: "oversized" }))
   }
@@ -34,7 +34,7 @@ const decode = <A>(schema: Schema.Schema<A>, bytes: Uint8Array) => {
     catch: () => new RemoteContractError({ reason: "malformed" }),
   }).pipe(
     Effect.flatMap((value) =>
-      Schema.decodeUnknown(schema)(value, { onExcessProperty: "error" }).pipe(
+      Schema.decodeUnknownEffect(schema)(value, { onExcessProperty: "error" }).pipe(
         Effect.mapError(() => new RemoteContractError({ reason: "malformed" })),
       ),
     ),

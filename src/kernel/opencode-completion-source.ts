@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { stat } from "node:fs/promises"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Option, Schema } from "effect"
 import type { OpenCodeSessionEvent } from "../opencode/adapter"
 import { WorkSignal } from "../work-signal"
@@ -34,7 +34,7 @@ export type OpenCodeCompletionProviderPort = {
   ) => Promise<AsyncIterable<OpenCodeSessionEvent>>
 }
 
-export const OpenCodeCompletionProvider = Context.GenericTag<OpenCodeCompletionProviderPort>(
+export const OpenCodeCompletionProvider = Context.Service<OpenCodeCompletionProviderPort>(
   "workflowd/kernel/OpenCodeCompletionProvider",
 )
 
@@ -60,7 +60,7 @@ export type OpenCodeCompletionSourcePort = {
   >
 }
 
-export const OpenCodeCompletionSource = Context.GenericTag<OpenCodeCompletionSourcePort>(
+export const OpenCodeCompletionSource = Context.Service<OpenCodeCompletionSourcePort>(
   "workflowd/kernel/OpenCodeCompletionSource",
 )
 
@@ -75,9 +75,9 @@ const WatchRow = Schema.Struct({
   instance_id: Schema.String,
   wait_id: Schema.String,
   child_session_id: Schema.String,
-  child_session_generation: Schema.Int.pipe(Schema.positive()),
-  provider_kind: Schema.Literal("opencode"),
-  provider_version: Schema.Int.pipe(Schema.positive()),
+  child_session_generation: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  provider_kind: Schema.Literals(["opencode"]),
+  provider_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   provider_id: Schema.String,
   server_id: Schema.String,
   owning_host_id: Schema.String,
@@ -85,14 +85,14 @@ const WatchRow = Schema.Struct({
   endpoint_identity: Schema.String,
   native_session_id: Schema.String,
   resource_id: Schema.String,
-  state: Schema.Literal("watching"),
+  state: Schema.Literals(["watching"]),
   registered_at: Schema.String,
   absolute_path: Schema.String,
-  resource_state: Schema.Literal("reserved"),
-  session_state: Schema.Literal("ready", "active"),
-  session_revision: Schema.Int.pipe(Schema.positive()),
-  current_provider_kind: Schema.Literal("opencode", "codex", "claude"),
-  current_provider_version: Schema.Int.pipe(Schema.positive()),
+  resource_state: Schema.Literals(["reserved"]),
+  session_state: Schema.Literals(["ready", "active"]),
+  session_revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  current_provider_kind: Schema.Literals(["opencode", "codex", "claude"]),
+  current_provider_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   current_provider_id: Schema.String,
   current_server_id: Schema.String,
   current_owning_host_id: Schema.String,
@@ -280,16 +280,16 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
         AND watch.state = 'watching'
       ORDER BY watch.updated_at, watch.registered_at, watch.instance_id LIMIT 1`
     if (rows.length === 0) return { status: "idle" as const }
-    const decoded = yield* Schema.decodeUnknown(WatchRow)(rows[0]).pipe(
+    const decoded = yield* Schema.decodeUnknownEffect(WatchRow)(rows[0]).pipe(
       Effect.mapError(sourceError("decode saved OpenCode completion watch")),
-      Effect.either,
+      Effect.result,
     )
-    if (decoded._tag === "Left") {
+    if (decoded._tag === "Failure") {
       const instanceId = typeof rows[0]?.instance_id === "string" ? rows[0].instance_id : ""
-      if (instanceId.length === 0) return yield* decoded.left
+      if (instanceId.length === 0) return yield* decoded.failure
       return yield* markOperatorRequired(instanceId, options.now(), "corrupt_saved_watch")
     }
-    const watch = decoded.right
+    const watch = decoded.success
     if (!custodyMatches(watch, options)) {
       return yield* markOperatorRequired(watch.instance_id, options.now(), "custody_mismatch")
     }

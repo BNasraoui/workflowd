@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import {
@@ -90,15 +90,13 @@ export type KernelJobStorePort = {
   readonly readRecoverable: () => Effect.Effect<ReadonlyArray<JobRecord>, KernelJobStoreError>
 }
 
-export const KernelJobStore = Context.GenericTag<KernelJobStorePort>(
-  "workflowd/kernel/KernelJobStore",
-)
+export const KernelJobStore = Context.Service<KernelJobStorePort>("workflowd/kernel/KernelJobStore")
 
 const Timestamp = Schema.String.pipe(
-  Schema.pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)),
 )
-const JsonText = Schema.parseJson(JsonValueSchema)
-const JobState = Schema.Literal(
+const JsonText = Schema.fromJsonString(JsonValueSchema)
+const JobState = Schema.Literals([
   "ready",
   "leased",
   "retry_scheduled",
@@ -106,17 +104,17 @@ const JobState = Schema.Literal(
   "failed",
   "operator_required",
   "data_error",
-)
+])
 const JobRow = Schema.Struct({
   job_id: JobIdentifier,
   instance_id: JobIdentifier,
   wait_id: JobIdentifier,
-  event_sequence: Schema.Int.pipe(Schema.positive()),
-  expected_cursor: Schema.Int.pipe(Schema.nonNegative()),
+  event_sequence: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  expected_cursor: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
   input_version: JobVersion,
   input_json: JsonText,
   state: JobState,
-  attempt: Schema.Int.pipe(Schema.nonNegative()),
+  attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
   max_attempts: JobVersion,
   run_at: Timestamp,
   created_at: Timestamp,
@@ -155,7 +153,7 @@ const inputError = (error: unknown) => new KernelJobStoreInputError({ message: S
 const dataError = (record: "job" | "result", key: string) => (error: unknown) =>
   new KernelJobStoreDataError({ record, key, message: String(error) })
 const boundedJson = (value: unknown) =>
-  Schema.decodeUnknown(JsonValueSchema)(value).pipe(
+  Schema.decodeUnknownEffect(JsonValueSchema)(value).pipe(
     Effect.mapError(inputError),
     Effect.flatMap((decoded) => {
       const json = canonicalJson(decoded)
@@ -165,7 +163,9 @@ const boundedJson = (value: unknown) =>
     }),
   )
 const positiveDuration = (value: number) =>
-  Schema.decodeUnknown(Schema.Int.pipe(Schema.positive()))(value).pipe(Effect.mapError(inputError))
+  Schema.decodeUnknownEffect(Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))))(value).pipe(
+    Effect.mapError(inputError),
+  )
 
 const toRecord = (row: typeof JobRow.Type): JobRecord => ({
   jobId: row.job_id,
@@ -183,13 +183,13 @@ const make = Effect.gen(function* () {
   yield* sql`PRAGMA busy_timeout = 5000`
 
   const decodeJob = (row: unknown, key: string) =>
-    Schema.decodeUnknown(JobRow)(row).pipe(Effect.mapError(dataError("job", key)))
+    Schema.decodeUnknownEffect(JobRow)(row).pipe(Effect.mapError(dataError("job", key)))
   const decodeResult = (row: unknown, key: string) =>
-    Schema.decodeUnknown(ResultRow)(row).pipe(Effect.mapError(dataError("result", key)))
+    Schema.decodeUnknownEffect(ResultRow)(row).pipe(Effect.mapError(dataError("result", key)))
 
   const enqueueFromDelivery: KernelJobStorePort["enqueueFromDelivery"] = (input) =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(EnqueueJobInputSchema)(input).pipe(
+      const decoded = yield* Schema.decodeUnknownEffect(EnqueueJobInputSchema)(input).pipe(
         Effect.mapError(inputError),
       )
       const payload = yield* boundedJson(decoded.input)
@@ -259,7 +259,7 @@ const make = Effect.gen(function* () {
 
   const claimMatching = (remoteProbe: boolean, input: ClaimInput) =>
     Effect.gen(function* () {
-      const workerId = yield* Schema.decodeUnknown(JobIdentifier)(input.workerId).pipe(
+      const workerId = yield* Schema.decodeUnknownEffect(JobIdentifier)(input.workerId).pipe(
         Effect.mapError(inputError),
       )
       const duration = yield* positiveDuration(input.leaseDurationMs)
@@ -317,19 +317,19 @@ const make = Effect.gen(function* () {
             input_version, input_json, state, attempt, max_attempts, run_at, created_at,
             lease_worker_id, claim_token, lease_until`
         if (rows.length === 0) continue
-        const decoded = yield* decodeJob(rows[0], candidate.job_id).pipe(Effect.either)
-        if (decoded._tag === "Left") {
-          yield* quarantine(candidate.job_id, nowText, decoded.left.message)
+        const decoded = yield* decodeJob(rows[0], candidate.job_id).pipe(Effect.result)
+        if (decoded._tag === "Failure") {
+          yield* quarantine(candidate.job_id, nowText, decoded.failure.message)
           continue
         }
         return {
-          jobId: decoded.right.job_id,
-          instanceId: decoded.right.instance_id,
-          inputVersion: decoded.right.input_version,
-          input: decoded.right.input_json,
+          jobId: decoded.success.job_id,
+          instanceId: decoded.success.instance_id,
+          inputVersion: decoded.success.input_version,
+          input: decoded.success.input_json,
           workerId,
-          attempt: decoded.right.attempt,
-          maxAttempts: decoded.right.max_attempts,
+          attempt: decoded.success.attempt,
+          maxAttempts: decoded.success.max_attempts,
           claimToken: token,
           leaseUntil: new Date(leaseUntil),
         }
@@ -365,10 +365,10 @@ const make = Effect.gen(function* () {
 
   const complete: KernelJobStorePort["complete"] = (input) =>
     Effect.gen(function* () {
-      const resultId = yield* Schema.decodeUnknown(JobIdentifier)(input.resultId).pipe(
+      const resultId = yield* Schema.decodeUnknownEffect(JobIdentifier)(input.resultId).pipe(
         Effect.mapError(inputError),
       )
-      const version = yield* Schema.decodeUnknown(JobVersion)(input.resultVersion).pipe(
+      const version = yield* Schema.decodeUnknownEffect(JobVersion)(input.resultVersion).pipe(
         Effect.mapError(inputError),
       )
       const payload = yield* boundedJson(input.result)
@@ -421,7 +421,7 @@ const make = Effect.gen(function* () {
 
   const failurePayload = (input: FailureInput) =>
     Effect.all({
-      version: Schema.decodeUnknown(JobVersion)(input.failureVersion).pipe(
+      version: Schema.decodeUnknownEffect(JobVersion)(input.failureVersion).pipe(
         Effect.mapError(inputError),
       ),
       payload: boundedJson(input.failure),
@@ -462,7 +462,7 @@ const make = Effect.gen(function* () {
 
   const readJob: KernelJobStorePort["readJob"] = (jobId) =>
     Effect.gen(function* () {
-      const key = yield* Schema.decodeUnknown(JobIdentifier)(jobId).pipe(
+      const key = yield* Schema.decodeUnknownEffect(JobIdentifier)(jobId).pipe(
         Effect.mapError(inputError),
       )
       const rows = yield* sql`SELECT job_id, instance_id, wait_id, event_sequence,

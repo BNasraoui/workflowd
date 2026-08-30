@@ -1,4 +1,4 @@
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Schema } from "effect"
 import { AgentSessionCompletedEventV1, WaitForAgentWorkflowV1 } from "./agent-handoff-contract"
 import { KernelJobStore } from "./job-store"
@@ -6,10 +6,10 @@ import { KernelJobStore } from "./job-store"
 const CandidateRow = Schema.Struct({
   instance_id: Schema.String,
   wait_id: Schema.String,
-  event_sequence: Schema.Int.pipe(Schema.positive()),
-  event_cursor: Schema.Int.pipe(Schema.nonNegative()),
-  payload_json: Schema.parseJson(WaitForAgentWorkflowV1),
-  event_payload_json: Schema.parseJson(AgentSessionCompletedEventV1),
+  event_sequence: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  event_cursor: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  payload_json: Schema.fromJsonString(WaitForAgentWorkflowV1),
+  event_payload_json: Schema.fromJsonString(AgentSessionCompletedEventV1),
 })
 
 const matches = (row: typeof CandidateRow.Type) =>
@@ -30,10 +30,10 @@ export const enqueueNextAgentHandoff = (now: Date) =>
         AND delivery.state = 'ready'
       ORDER BY delivery.event_sequence, instance.instance_id`
     for (const candidate of candidates) {
-      const decoded = yield* Schema.decodeUnknown(CandidateRow)(candidate, {
+      const decoded = yield* Schema.decodeUnknownEffect(CandidateRow)(candidate, {
         onExcessProperty: "error",
-      }).pipe(Effect.either)
-      if (decoded._tag === "Left" || !matches(decoded.right)) {
+      }).pipe(Effect.result)
+      if (decoded._tag === "Failure" || !matches(decoded.success)) {
         const instanceId = typeof candidate.instance_id === "string" ? candidate.instance_id : ""
         if (instanceId.length > 0) {
           yield* sql`UPDATE kernel_agent_completion_watches SET state = 'data_error',
@@ -42,7 +42,7 @@ export const enqueueNextAgentHandoff = (now: Date) =>
         }
         continue
       }
-      const row = decoded.right
+      const row = decoded.success
       const workflow = row.payload_json
       const jobId = `${row.instance_id}:resume-parent`
       const result = yield* jobs.enqueueFromDelivery({

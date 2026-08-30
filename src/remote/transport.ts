@@ -10,7 +10,7 @@ import {
 import type { JsMsg } from "@nats-io/jetstream"
 import type { NatsConnection } from "@nats-io/nats-core"
 import { connect } from "@nats-io/transport-node"
-import { Context, Data, Effect, Exit, Layer, Runtime } from "effect"
+import { Context, Data, Effect, Exit, Layer } from "effect"
 import { natsAuthOptions } from "./auth"
 import type { RemoteNatsAuth } from "./auth"
 import {
@@ -69,7 +69,7 @@ export type RemoteTransportPort = {
   ) => Effect.Effect<void, E | RemoteTransportError>
 }
 
-export const RemoteTransport = Context.GenericTag<RemoteTransportPort>(
+export const RemoteTransport = Context.Service<RemoteTransportPort>(
   "workflowd/remote/RemoteTransport",
 )
 
@@ -101,13 +101,13 @@ const toDelivery = (stream: string, message: JsMsg): RemoteDelivery => ({
 
 const consumeMessages = async <E>(
   messages: AsyncIterable<JsMsg>,
-  runtime: Runtime.Runtime<never>,
+  context: Context.Context<never>,
   handle: (delivery: RemoteDelivery) => Effect.Effect<void, E>,
   resume: (effect: Effect.Effect<void, E | RemoteTransportError>) => void,
 ) => {
   try {
     for await (const message of messages) {
-      const exit = await Runtime.runPromiseExit(runtime)(
+      const exit = await Effect.runPromiseExitWith(context)(
         handle(toDelivery(COMMAND_STREAM, message)),
       )
       if (Exit.isFailure(exit)) {
@@ -296,9 +296,9 @@ const make = (config: RemoteTransportConfig) =>
           commandSubject(hostId),
         )
         const messages = yield* tryPromise("consume", () => consumer.consume())
-        const runtime = yield* Effect.runtime()
-        return yield* Effect.async<void, E | RemoteTransportError>((resume) => {
-          void consumeMessages(messages, runtime, handle, resume)
+        const context = yield* Effect.context<never>()
+        return yield* Effect.callback<void, E | RemoteTransportError>((resume) => {
+          void consumeMessages(messages, context, handle, resume)
           return closeMessages(messages)
         })
       })
@@ -332,4 +332,4 @@ const make = (config: RemoteTransportConfig) =>
   })
 
 export const RemoteTransportLive = (config: RemoteTransportConfig) =>
-  Layer.scoped(RemoteTransport, make(config))
+  Layer.effect(RemoteTransport, make(config))

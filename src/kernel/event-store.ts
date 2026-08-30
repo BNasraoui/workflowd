@@ -1,5 +1,5 @@
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import {
@@ -58,23 +58,23 @@ export type KernelEventStorePort = {
   ) => Effect.Effect<ReadonlyArray<ReadyWaitEventDelivery>, KernelStoreError>
 }
 
-export const KernelEventStore = Context.GenericTag<KernelEventStorePort>(
+export const KernelEventStore = Context.Service<KernelEventStorePort>(
   "workflowd/kernel/KernelEventStore",
 )
 
 const Timestamp = Schema.String.pipe(
-  Schema.pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)),
 )
 const Identifier = WorkflowInstanceInput.fields.instanceId
 const TypeName = WorkflowInstanceInput.fields.workflowType
-const PositiveSequence = Schema.Int.pipe(Schema.positive())
-const NonNegativeSequence = Schema.Int.pipe(Schema.nonNegative())
-const JsonText = Schema.parseJson(JsonValueSchema)
+const PositiveSequence = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
+const NonNegativeSequence = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))
+const JsonText = Schema.fromJsonString(JsonValueSchema)
 
 const InstanceRow = Schema.Struct({
   instance_id: Identifier,
   workflow_type: TypeName,
-  workflow_version: Schema.Int.pipe(Schema.positive()),
+  workflow_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   workflow_key: Identifier,
   payload_json: JsonText,
   event_cursor: NonNegativeSequence,
@@ -85,7 +85,7 @@ const EventRow = Schema.Struct({
   source: RecordEventInputSchema.fields.source,
   source_event_id: RecordEventInputSchema.fields.sourceEventId,
   event_type: RecordEventInputSchema.fields.event.fields.type,
-  event_version: Schema.Int.pipe(Schema.positive()),
+  event_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   event_key: Identifier,
   correlation: Identifier,
   payload_json: JsonText,
@@ -95,26 +95,26 @@ const WaitRow = Schema.Struct({
   instance_id: Identifier,
   wait_id: Identifier,
   event_type: RegisterWaitInputSchema.fields.condition.fields.type,
-  event_version: Schema.Int.pipe(Schema.positive()),
+  event_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   event_key: Identifier,
   correlation: Identifier,
   after_sequence: NonNegativeSequence,
-  state: Schema.Literal("pending", "matched", "consumed", "cancelled"),
+  state: Schema.Literals(["pending", "matched", "consumed", "cancelled"]),
   registered_at: Timestamp,
 })
 const DeliveryRow = Schema.Struct({
   instance_id: Identifier,
   wait_id: Identifier,
   event_sequence: PositiveSequence,
-  state: Schema.Literal("ready", "consumed", "cancelled"),
+  state: Schema.Literals(["ready", "consumed", "cancelled"]),
 })
 const ReadyDeliveryRow = Schema.Struct({
   ...DeliveryRow.fields,
-  wait_state: Schema.Literal("matched"),
+  wait_state: Schema.Literals(["matched"]),
   source: RecordEventInputSchema.fields.source,
   source_event_id: RecordEventInputSchema.fields.sourceEventId,
   event_type: RecordEventInputSchema.fields.event.fields.type,
-  event_version: Schema.Int.pipe(Schema.positive()),
+  event_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   event_key: Identifier,
   correlation: Identifier,
   payload_json: JsonText,
@@ -124,8 +124,8 @@ const ConsumeStateRow = Schema.Struct({
   event_cursor: NonNegativeSequence,
   event_sequence: PositiveSequence,
   after_sequence: NonNegativeSequence,
-  delivery_state: Schema.Literal("ready", "consumed", "cancelled"),
-  wait_state: Schema.Literal("pending", "matched", "consumed", "cancelled"),
+  delivery_state: Schema.Literals(["ready", "consumed", "cancelled"]),
+  wait_state: Schema.Literals(["pending", "matched", "consumed", "cancelled"]),
 })
 
 const compareJsonEntries = ([left]: [string, unknown], [right]: [string, unknown]): number => {
@@ -163,13 +163,13 @@ const boundedPayload = <A>(decoded: A, payload: unknown) => {
 }
 
 const decodeInstanceInput = (input: WorkflowInstanceInput) =>
-  Schema.decodeUnknown(WorkflowInstanceInput)(input).pipe(
+  Schema.decodeUnknownEffect(WorkflowInstanceInput)(input).pipe(
     Effect.mapError(inputError),
     Effect.flatMap((decoded) => boundedPayload(decoded, decoded.payload)),
   )
 
 const decodeEventInput = (input: RecordEventInput) =>
-  Schema.decodeUnknown(RecordEventInputSchema)(input).pipe(
+  Schema.decodeUnknownEffect(RecordEventInputSchema)(input).pipe(
     Effect.mapError(inputError),
     Effect.flatMap((decoded) => boundedPayload(decoded, decoded.event.payload)),
   )
@@ -195,7 +195,7 @@ const toReadyDelivery = (decoded: typeof ReadyDeliveryRow.Type) => ({
 })
 
 const decodeReadyDelivery = (row: unknown, instanceId: string) =>
-  Schema.decodeUnknown(ReadyDeliveryRow)(row).pipe(
+  Schema.decodeUnknownEffect(ReadyDeliveryRow)(row).pipe(
     Effect.mapError(dataError("delivery", instanceId, instanceId)),
     Effect.map(toReadyDelivery),
   )
@@ -207,7 +207,7 @@ const make = Effect.gen(function* () {
 
   const decodeDeliveries = (rows: ReadonlyArray<unknown>, key: string, instanceId?: string) =>
     Effect.forEach(rows, (row) =>
-      Schema.decodeUnknown(DeliveryRow)(row).pipe(
+      Schema.decodeUnknownEffect(DeliveryRow)(row).pipe(
         Effect.mapError(dataError("delivery", key, instanceId)),
         Effect.map(toDelivery),
       ),
@@ -237,7 +237,7 @@ const make = Effect.gen(function* () {
       }
       const rows = yield* sql`SELECT * FROM kernel_workflow_instances
         WHERE instance_id = ${decoded.instanceId}`
-      const row = yield* Schema.decodeUnknown(InstanceRow)(rows[0]).pipe(
+      const row = yield* Schema.decodeUnknownEffect(InstanceRow)(rows[0]).pipe(
         Effect.mapError(dataError("instance", decoded.instanceId, decoded.instanceId)),
       )
       if (
@@ -302,7 +302,7 @@ const make = Effect.gen(function* () {
             AND wait.correlation = ${decoded.event.correlation}
             AND wait.after_sequence < ${sequence}`
         yield* Effect.forEach(pendingWaits, (row) =>
-          Schema.decodeUnknown(WaitRow)(row).pipe(
+          Schema.decodeUnknownEffect(WaitRow)(row).pipe(
             Effect.mapError(dataError("wait", decoded.sourceEventId)),
           ),
         )
@@ -340,7 +340,7 @@ const make = Effect.gen(function* () {
         status = "duplicate"
         const rows = yield* sql`SELECT * FROM kernel_events
           WHERE source = ${decoded.source} AND source_event_id = ${decoded.sourceEventId}`
-        const row = yield* Schema.decodeUnknown(EventRow)(rows[0]).pipe(
+        const row = yield* Schema.decodeUnknownEffect(EventRow)(rows[0]).pipe(
           Effect.mapError(dataError("event", `${decoded.source}:${decoded.sourceEventId}`)),
         )
         if (
@@ -386,7 +386,7 @@ const make = Effect.gen(function* () {
 
   const registerWait: KernelEventStorePort["registerWait"] = (input) =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(RegisterWaitInputSchema)(input).pipe(
+      const decoded = yield* Schema.decodeUnknownEffect(RegisterWaitInputSchema)(input).pipe(
         Effect.mapError(inputError),
       )
       const inserted = yield* sql`
@@ -410,7 +410,7 @@ const make = Effect.gen(function* () {
       if (rows.length === 0) {
         const instanceRows = yield* sql`SELECT * FROM kernel_workflow_instances
           WHERE instance_id = ${decoded.instanceId}`
-        yield* Schema.decodeUnknown(InstanceRow)(instanceRows[0]).pipe(
+        yield* Schema.decodeUnknownEffect(InstanceRow)(instanceRows[0]).pipe(
           Effect.mapError(dataError("instance", decoded.instanceId, decoded.instanceId)),
         )
         return yield* new KernelStoreConflictError({
@@ -419,7 +419,7 @@ const make = Effect.gen(function* () {
           instanceId: decoded.instanceId,
         })
       }
-      let storedWait = yield* Schema.decodeUnknown(WaitRow)(rows[0]).pipe(
+      let storedWait = yield* Schema.decodeUnknownEffect(WaitRow)(rows[0]).pipe(
         Effect.mapError(dataError("wait", decoded.waitId, decoded.instanceId)),
       )
       if (inserted.length > 0) {
@@ -431,7 +431,7 @@ const make = Effect.gen(function* () {
             AND sequence > ${storedWait.after_sequence}
           ORDER BY sequence LIMIT 1`
         if (eventRows.length > 0) {
-          const event = yield* Schema.decodeUnknown(EventRow)(eventRows[0]).pipe(
+          const event = yield* Schema.decodeUnknownEffect(EventRow)(eventRows[0]).pipe(
             Effect.mapError(dataError("event", decoded.waitId, decoded.instanceId)),
           )
           yield* sql`
@@ -478,7 +478,7 @@ const make = Effect.gen(function* () {
 
   const consumeDelivery: KernelEventStorePort["consumeDelivery"] = (input) =>
     Effect.gen(function* () {
-      const decoded = yield* Schema.decodeUnknown(ConsumeDeliveryInputSchema)(input).pipe(
+      const decoded = yield* Schema.decodeUnknownEffect(ConsumeDeliveryInputSchema)(input).pipe(
         Effect.mapError(inputError),
       )
       const advanced = yield* sql<{ readonly event_cursor: number }>`
@@ -521,7 +521,7 @@ const make = Effect.gen(function* () {
         JOIN kernel_wait_event_deliveries AS delivery
           ON delivery.instance_id = wait.instance_id AND delivery.wait_id = wait.wait_id
         WHERE instance.instance_id = ${decoded.instanceId} AND wait.wait_id = ${decoded.waitId}`
-      const state = yield* Schema.decodeUnknown(ConsumeStateRow)(rows[0]).pipe(
+      const state = yield* Schema.decodeUnknownEffect(ConsumeStateRow)(rows[0]).pipe(
         Effect.mapError(dataError("delivery", decoded.waitId, decoded.instanceId)),
       )
       if (
@@ -542,7 +542,7 @@ const make = Effect.gen(function* () {
 
   const readReadyDeliveries: KernelEventStorePort["readReadyDeliveries"] = (instanceId) =>
     Effect.gen(function* () {
-      const decodedInstanceId = yield* Schema.decodeUnknown(Identifier)(instanceId).pipe(
+      const decodedInstanceId = yield* Schema.decodeUnknownEffect(Identifier)(instanceId).pipe(
         Effect.mapError(inputError),
       )
       const rows = yield* sql`SELECT
