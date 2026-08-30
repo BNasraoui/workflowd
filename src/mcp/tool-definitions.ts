@@ -204,7 +204,23 @@ export const TOOL_DEFINITIONS = [
         },
         parent_session_id: {
           type: "string",
-          description: "Optional native OpenCode session id of the caller; requires resume_prompt.",
+          description:
+            "Optional native session id of the caller (OpenCode session id, or Claude Code " +
+            "session UUID with parent_kind 'claude'); requires resume_prompt.",
+        },
+        parent_kind: {
+          type: "string",
+          enum: ["opencode", "claude"],
+          description:
+            "Harness holding the parent session. Default 'opencode'. With 'claude', the " +
+            "wake is delivered by resuming the Claude Code session through the claude CLI " +
+            "on the daemon host; parent_directory is required.",
+        },
+        parent_directory: {
+          type: "string",
+          description:
+            "Working directory the Claude parent session was created in (its cwd). " +
+            "Required with parent_kind 'claude'.",
         },
         resume_prompt: {
           type: "string",
