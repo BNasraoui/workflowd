@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelJobStore } from "../../src/kernel/job-store"
 import {
   RemoteCoordinatorStore,
@@ -169,7 +169,7 @@ test("dispatch insertion failure rolls back the remote kernel claim without losi
             leaseDurationMs: 60_000,
             expiresAt: new Date(now.getTime() + 60_000),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const afterFailure = yield* jobs.readJob("atomic-remote-claim")
         yield* sql`DROP TRIGGER reject_remote_dispatch`
         const retry = yield* remote.prepareNext({
@@ -184,7 +184,7 @@ test("dispatch insertion failure rolls back the remote kernel claim without losi
     ),
   )
 
-  expect(result.failed._tag).toBe("Left")
+  expect(result.failed._tag).toBe("Failure")
   expect(result.afterFailure).toMatchObject({ state: "ready", attempt: 0 })
   expect(result.retry).toMatchObject({ attempt: 1, commandId: "atomic-command" })
 })
@@ -213,7 +213,7 @@ test("duplicate command identity rolls back the second job claim", async () => {
             leaseDurationMs: 60_000,
             expiresAt: new Date(now.getTime() + 60_000),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const afterConflict = yield* jobs.readJob("command-owner-b")
         const retry = yield* remote.prepareNext({
           commandId: "owner-b-command",
@@ -227,7 +227,7 @@ test("duplicate command identity rolls back the second job claim", async () => {
     ),
   )
 
-  expect(result.conflict._tag).toBe("Left")
+  expect(result.conflict._tag).toBe("Failure")
   expect(result.afterConflict).toMatchObject({ state: "ready", attempt: 0 })
   expect(result.retry).toMatchObject({ jobId: "command-owner-b", attempt: 1 })
 })

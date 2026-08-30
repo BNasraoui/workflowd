@@ -1,5 +1,5 @@
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { KernelJobStore, type KernelJobStorePort } from "../../../src/kernel/job-store"
@@ -126,7 +126,7 @@ export class RemoteSimulation implements AsyncDisposable {
     const probeId = `sim-${this.seed}-${this.#nextProbe++}`
     const jobId = `remote-probe-${probeId}`
     await this.#runCentral(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         const producer = yield* RemoteProbeProducer
         yield* producer.enqueue({ probeId, hostId: host }, this.#now())
       }),
@@ -137,7 +137,7 @@ export class RemoteSimulation implements AsyncDisposable {
   async #coordinator() {
     const commandId = `sim-command-${this.seed}-${this.#nextCommand++}`
     await this.#runCentral(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         yield* runRemoteDispatchIteration({
           commandId: () => commandId,
           workerId: "sim-coordinator",
@@ -192,7 +192,7 @@ export class RemoteSimulation implements AsyncDisposable {
 
   async #injectStaleResult() {
     const result = await this.#runCentral(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         const sql = yield* SqlClient.SqlClient
         const rows = yield* sql<{
           readonly command_id: string
@@ -229,7 +229,7 @@ export class RemoteSimulation implements AsyncDisposable {
 
   async #checkSafety() {
     await this.#runCentral(
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         yield* this.#checkAcceptedJobs()
         yield* this.#checkInstanceCursors()
         yield* this.#checkDispatchHandoff()
@@ -241,7 +241,7 @@ export class RemoteSimulation implements AsyncDisposable {
   }
 
   #checkAcceptedJobs() {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const jobs = yield* KernelJobStore
       const sql = yield* SqlClient.SqlClient
       for (const jobId of this.#accepted.keys()) {
@@ -267,7 +267,7 @@ export class RemoteSimulation implements AsyncDisposable {
   }
 
   #checkInstanceCursors() {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const sql = yield* SqlClient.SqlClient
       const cursorViolations = yield* sql<{ readonly job_id: string }>`SELECT job.job_id
         FROM kernel_workflow_jobs AS job

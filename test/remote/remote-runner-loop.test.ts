@@ -21,10 +21,7 @@ const result = {
   observedAt: "2026-08-18T12:00:00.000Z",
 }
 
-const SilentLogger = Logger.replace(
-  Logger.defaultLogger,
-  Logger.make(() => undefined),
-)
+const SilentLogger = Logger.layer([Logger.make(() => undefined)])
 
 describe("remote runner loop", () => {
   test("publishes a durable result after broker recovery without another delivery", async () => {

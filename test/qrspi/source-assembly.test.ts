@@ -291,12 +291,12 @@ describe("trusted Research source assembly", () => {
           ...selectedScope,
           workflowDefinitionSha256: workflowDefinitionSha256(differentDefinition),
         },
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "StageSourceAssemblyError", reason: "selected_snapshot_mismatch" },
+      _tag: "Failure",
+      failure: { _tag: "StageSourceAssemblyError", reason: "selected_snapshot_mismatch" },
     })
     expect(reader.calls()).toBe(0)
   })
@@ -366,12 +366,12 @@ describe("trusted Research source assembly", () => {
     })
 
     const result = await Effect.runPromise(
-      assembleExactStageSources(assemblyInput(reader.port, pointers)).pipe(Effect.either),
+      assembleExactStageSources(assemblyInput(reader.port, pointers)).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "StageSourceAssemblyError" },
+      _tag: "Failure",
+      failure: { _tag: "StageSourceAssemblyError" },
     })
     expect(reader.calls()).toBe(0)
   })
@@ -400,12 +400,12 @@ describe("trusted Research source assembly", () => {
       assembleExactStageSources({
         ...assemblyInput(reader.port, [substitutedPointer]),
         currentAcceptedPointers: [acceptedPointer],
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "StageSourceAssemblyError", reason: "identity_mismatch" },
+      _tag: "Failure",
+      failure: { _tag: "StageSourceAssemblyError", reason: "identity_mismatch" },
     })
     expect(reader.calls()).toBe(0)
   })
@@ -452,12 +452,12 @@ describe("trusted Research source assembly", () => {
     const reader = repositoryReader(observation)
 
     const result = await Effect.runPromise(
-      assembleExactStageSources(assemblyInput(reader.port)).pipe(Effect.either),
+      assembleExactStageSources(assemblyInput(reader.port)).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "StageSourceAssemblyError", role: "Questions", index: 0 },
+      _tag: "Failure",
+      failure: { _tag: "StageSourceAssemblyError", role: "Questions", index: 0 },
     })
     expect(reader.calls()).toBe(1)
   })
@@ -474,9 +474,9 @@ describe("trusted Research source assembly", () => {
 
     expect(
       await Effect.runPromise(
-        assembleExactStageSources(assemblyInput(failingPort)).pipe(Effect.either),
+        assembleExactStageSources(assemblyInput(failingPort)).pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    ).toMatchObject({ _tag: "Failure", failure: { _tag: "QrspiRepositoryError" } })
   })
 })
 
@@ -661,10 +661,10 @@ describe("generalized document predecessor assembly through Plan", () => {
     }))
     const result = await Effect.runPromise(
       assembleExactStageSources({ ...fixture.input, acceptedPointers: changed }).pipe(
-        Effect.either,
+        Effect.result,
       ),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "StageSourceAssemblyError" } })
+    expect(result).toMatchObject({ _tag: "Failure", failure: { _tag: "StageSourceAssemblyError" } })
     expect(fixture.calls()).toBe(0)
   })
 })

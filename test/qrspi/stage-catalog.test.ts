@@ -31,8 +31,12 @@ import {
   type StageContract,
 } from "../../src/qrspi/stage-catalog"
 
-const FixtureRequest = Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) })
-const FixtureResult = Schema.Struct({ summary: Schema.String.pipe(Schema.maxLength(100)) })
+const FixtureRequest = Schema.Struct({
+  text: Schema.String.pipe(Schema.check(Schema.isMaxLength(100))),
+})
+const FixtureResult = Schema.Struct({
+  summary: Schema.String.pipe(Schema.check(Schema.isMaxLength(100))),
+})
 
 const fixtureContract: StageContract<
   typeof FixtureRequest.Type,
@@ -243,9 +247,9 @@ describe("TrustedStageCatalog", () => {
       await Effect.runPromise(
         port
           .buildTask({ input: malformedInput, ticketRevision, replayAuthority })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
     expect(
       await Effect.runPromise(
         port
@@ -254,9 +258,9 @@ describe("TrustedStageCatalog", () => {
             result: { _tag: "OtherResult", document: "selected" },
             context: { scope: exactSources, target: exactSources.target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_result" } })
 
     expect(calls).toEqual({
       selected: { assemble: 1, build: 1, prepare: 1 },
@@ -360,11 +364,11 @@ describe("TrustedStageCatalog", () => {
             result: { summary: "fixture" },
             context,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       )
       expect(result).toMatchObject({
-        _tag: "Left",
-        left: { reason: "malformed_output" },
+        _tag: "Failure",
+        failure: { reason: "malformed_output" },
       })
     }
   })
@@ -450,11 +454,11 @@ describe("TrustedStageCatalog", () => {
           definition,
           stageCatalog: catalog.port(),
           agentHarness: harness,
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
     ).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "contract",
         reason: "incompatible_definition",
@@ -515,11 +519,11 @@ describe("TrustedStageCatalog", () => {
           },
           stageCatalog: catalog.port(),
           agentHarness: harness,
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       )
       expect(result).toMatchObject({
-        _tag: "Left",
-        left: { phase: "contract", reason: "unsupported_policy", stageKey: "fixture" },
+        _tag: "Failure",
+        failure: { phase: "contract", reason: "unsupported_policy", stageKey: "fixture" },
       })
     }
   })
@@ -575,12 +579,12 @@ describe("TrustedStageCatalog", () => {
         },
         stageCatalog: catalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "harness",
         reason: "incompatible_definition",
         stageKey: "fixture",
@@ -652,12 +656,12 @@ describe("TrustedStageCatalog", () => {
         },
         stageCatalog: catalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "availability",
         reason: "unavailable_agent_model",
@@ -749,12 +753,12 @@ describe("TrustedStageCatalog", () => {
         },
         stageCatalog: catalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: fixture.phase,
         reason: fixture.reason,
@@ -828,12 +832,12 @@ describe("persisted stage snapshots", () => {
         snapshots: validated.stageSnapshots,
         stageCatalog: incompatibleCatalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "contract",
         reason: "incompatible_definition",
         stageKey: "fixture",
@@ -947,11 +951,11 @@ describe("persisted stage snapshots", () => {
             )
           },
         },
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(unavailable).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "availability",
         reason: "unavailable_agent_model",
         stageKey: "fixture",
@@ -972,11 +976,11 @@ describe("persisted stage snapshots", () => {
         ],
         stageCatalog: catalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(changed).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "contract",
         reason: "registration_hash_mismatch",
@@ -994,11 +998,11 @@ describe("persisted stage snapshots", () => {
         snapshots: validated.stageSnapshots,
         stageCatalog: changedImplementation.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(changedImplementationResult).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "contract",
         reason: "registration_hash_mismatch",
         expectedRegistrationSha256: catalog.descriptor(fixtureContract.ref).registrationSha256,
@@ -1013,11 +1017,11 @@ describe("persisted stage snapshots", () => {
         snapshots: validated.stageSnapshots,
         stageCatalog: new TrustedStageCatalog([]).port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(missingContract).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         reason: "unknown_contract_reference",
         stageKey: "fixture",
         sequencePosition: 1,
@@ -1040,11 +1044,11 @@ describe("persisted stage snapshots", () => {
               }),
             ),
         },
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(missingHarness).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         reason: "unknown_harness_reference",
         stageKey: "fixture",
         sequencePosition: 1,
@@ -1062,11 +1066,11 @@ describe("persisted stage snapshots", () => {
         ],
         stageCatalog: catalog.port(),
         agentHarness: harness,
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(changedHarness).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "harness",
         reason: "registration_hash_mismatch",
         expectedRegistrationSha256: "d".repeat(64),
@@ -1086,11 +1090,11 @@ describe("persisted stage snapshots", () => {
           ...harness,
           describe: (ref) => Effect.succeed(changedHarnessCatalog.describe(ref)),
         },
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
     expect(changedHarnessImplementation).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         phase: "harness",
         reason: "registration_hash_mismatch",
         expectedRegistrationSha256: harnessCatalog.describe(harnessDefinition.ref)
@@ -1138,9 +1142,9 @@ describe("Questions and Research contract compatibility", () => {
     ]) {
       expect(
         await Effect.runPromise(
-          catalog.validateCompatibility({ ...definition, ...change }).pipe(Effect.either),
+          catalog.validateCompatibility({ ...definition, ...change }).pipe(Effect.result),
         ),
-      ).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+      ).toMatchObject({ _tag: "Failure", failure: { reason: "incompatible_definition" } })
     }
   })
 
@@ -1185,11 +1189,11 @@ describe("Questions and Research contract compatibility", () => {
             snapshots: [snapshot],
             stageCatalog: catalog.port(),
             agentHarness: harness,
-          }).pipe(Effect.either),
+          }).pipe(Effect.result),
         ),
       ).toMatchObject({
-        _tag: "Left",
-        left: { phase: "contract", reason: "incompatible_definition", stageKey },
+        _tag: "Failure",
+        failure: { phase: "contract", reason: "incompatible_definition", stageKey },
       })
     },
   )
@@ -1235,9 +1239,12 @@ describe("Design contract compatibility", () => {
       new TrustedStageCatalog([designStageContract])
         .port()
         .validateCompatibility({ ...designDefinition, ...change })
-        .pipe(Effect.either),
+        .pipe(Effect.result),
     )
-    expect(result).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+    expect(result).toMatchObject({
+      _tag: "Failure",
+      failure: { reason: "incompatible_definition" },
+    })
   })
 
   test("reapplies Design compatibility to persisted snapshots", async () => {
@@ -1279,11 +1286,11 @@ describe("Design contract compatibility", () => {
           snapshots: [incompatible],
           stageCatalog: catalog.port(),
           agentHarness: harness,
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
     ).toMatchObject({
-      _tag: "Left",
-      left: { phase: "contract", reason: "incompatible_definition", stageKey: "design" },
+      _tag: "Failure",
+      failure: { phase: "contract", reason: "incompatible_definition", stageKey: "design" },
     })
   })
 })
@@ -1323,9 +1330,9 @@ describe("Structure contract compatibility", () => {
         new TrustedStageCatalog([structureStageContract])
           .port()
           .validateCompatibility({ ...definition, ...change })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "incompatible_definition" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "incompatible_definition" } })
   })
 })
 

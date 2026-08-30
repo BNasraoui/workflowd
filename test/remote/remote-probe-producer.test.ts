@@ -49,12 +49,12 @@ test("probe producer is idempotent and rejects a changed host for the same probe
       const duplicate = yield* producer.enqueue({ probeId: "stable-id", hostId: "host-a" }, now)
       const conflict = yield* producer
         .enqueue({ probeId: "stable-id", hostId: "host-b" }, now)
-        .pipe(Effect.either)
+        .pipe(Effect.result)
       return { first, duplicate, conflict }
     }).pipe(Effect.provide(RemoteProbeProducerLive)),
   )
 
   expect(result.first.status).toBe("enqueued")
   expect(result.duplicate.status).toBe("duplicate")
-  expect(result.conflict._tag).toBe("Left")
+  expect(result.conflict._tag).toBe("Failure")
 })

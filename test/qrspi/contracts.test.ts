@@ -542,9 +542,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             ticketRevision: verifiedTicket,
             replayAuthority: replayAuthorityFor(questionsStageContract, sources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
     const validRequest = encodeStageProduceInput(scope, questionsStageContract.ref, {
       _tag: "QuestionsRequest",
       sources,
@@ -557,9 +557,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             ticketRevision: wrongTicket,
             replayAuthority: replayAuthorityFor(questionsStageContract, sources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
     expect(
       await Effect.runPromise(
         catalog
@@ -568,9 +568,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             result: { _tag: "Research", document: "wrong" },
             context: { scope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_result" } })
   })
 
   test("rejects changed ticket semantics that retain the referenced hash", async () => {
@@ -592,9 +592,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             ticketRevision: changedTicket,
             replayAuthority: replayAuthorityFor(questionsStageContract, sources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
   })
 
   test("rejects an execution context for a different stage", async () => {
@@ -608,9 +608,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             result: { _tag: "Questions", document: "# Questions" },
             context: { scope: researchScope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
   })
 
   test("rejects predecessor authority for Questions during assembly and replay", async () => {
@@ -629,9 +629,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             sources: invalidSources,
             maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
 
     const request = { _tag: "QuestionsRequest" as const, sources: invalidSources }
     expect(
@@ -642,9 +642,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             ticketRevision: verifiedTicket,
             replayAuthority: replayAuthorityFor(questionsStageContract, invalidSources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("enforces exact UTF-8 document and configured complete-request byte boundaries", async () => {
@@ -682,9 +682,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             sources,
             maxEncodedInputBytes: exactBytes - 1,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "request_too_large" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "request_too_large" } })
 
     const exactResult = { _tag: "Questions" as const, document: "é" }
     const exactResultBytes = Buffer.byteLength(JSON.stringify(exactResult), "utf8")
@@ -711,9 +711,9 @@ describe("exact Questions contract through erased catalog execution", () => {
             result: { ...exactResult, document: "éa" },
             context: { scope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "result_too_large" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "result_too_large" } })
   })
 })
 
@@ -763,9 +763,9 @@ describe("exact Research contract through erased catalog execution", () => {
             sources: wrongRole,
             maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
     expect(
       await Effect.runPromise(
         catalog
@@ -777,9 +777,9 @@ describe("exact Research contract through erased catalog execution", () => {
             ticketRevision: verifiedTicket,
             replayAuthority: replayAuthorityFor(researchStageContract, researchSources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("rejects rehashed cross-scope artifact authority during durable replay", async () => {
@@ -802,9 +802,9 @@ describe("exact Research contract through erased catalog execution", () => {
             ticketRevision: verifiedTicket,
             replayAuthority: replayAuthorityFor(researchStageContract, changedSources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("rechecks the complete encoded request bound during durable replay", async () => {
@@ -821,9 +821,9 @@ describe("exact Research contract through erased catalog execution", () => {
             ticketRevision: verifiedTicket,
             replayAuthority: replayAuthorityFor(researchStageContract, oversizedSources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "request_too_large" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "request_too_large" } })
   })
 
   test("projects only bounded Research results", async () => {
@@ -909,9 +909,9 @@ describe("exact Design contract through erased catalog execution", () => {
             sources: reversed,
             maxEncodedInputBytes: MAX_STAGE_REQUEST_BYTES,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
     expect(
       await Effect.runPromise(
         catalog
@@ -920,9 +920,9 @@ describe("exact Design contract through erased catalog execution", () => {
             result: { _tag: "Research", document: "wrong" },
             context: { scope: designScope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_result" } })
   })
 
   test("keeps the Design result distinct and projects a bounded document", async () => {
@@ -1116,9 +1116,9 @@ describe("exact Plan contract through erased catalog execution", () => {
             result: { _tag: "Structure", document: "wrong" },
             context: { scope: planScope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_result" } })
   })
 })
 
@@ -1203,9 +1203,9 @@ describe("exact Implementation contract through erased catalog execution", () =>
               result,
               context: { scope: implementationScope, target },
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
         ),
-      ).toMatchObject({ _tag: "Left" })
+      ).toMatchObject({ _tag: "Failure" })
     }
   })
 
