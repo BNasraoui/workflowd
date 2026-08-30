@@ -18,6 +18,12 @@ export type OpenCodeResumeProviderPort = {
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
   ) => Promise<boolean>
+  /** Whether the session's run has ended (idle with a recorded outcome); see
+   * the completion provider's probe for why completed messages cannot serve. */
+  readonly sessionFinished: (
+    input: { readonly sessionID: string; readonly directory: string },
+    signal: AbortSignal,
+  ) => Promise<boolean>
   readonly listMessages: (
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
@@ -55,6 +61,14 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
 
   readonly sessionExists: OpenCodeResumeProviderPort["sessionExists"] = (input, signal) =>
     Effect.runPromise(this.adapter.sessionExists(input), { signal })
+
+  readonly sessionFinished: OpenCodeResumeProviderPort["sessionFinished"] = (input, signal) =>
+    Effect.runPromise(
+      this.adapter
+        .sessionTelemetry({ sessionID: input.sessionID })
+        .pipe(Effect.map((telemetry) => telemetry !== undefined && telemetry.idle)),
+      { signal },
+    )
 
   readonly listMessages: OpenCodeResumeProviderPort["listMessages"] = (input, signal) =>
     Effect.runPromise(this.adapter.listSessionMessages(input), { signal })
@@ -370,6 +384,14 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         reason: "provider_session_missing",
       })
     }
+    // The parent may still be generating its answer to the pre-crash prompt.
+    // OpenCode 2 completes an assistant message per tool step, so history is
+    // only attributable once the run has ended; until then the observation
+    // stays pending for a later iteration.
+    const finished = yield* providerCall("probe OpenCode session after restart", (signal) =>
+      provider.sessionFinished(reference, signal),
+    )
+    if (!finished) return null
     const messages = yield* providerCall("inspect OpenCode history after restart", (signal) =>
       provider.listMessages(reference, signal),
     )
@@ -385,10 +407,13 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         message.error === undefined &&
         !baseline.has(fingerprint(message)),
     )
-    if (answers.length !== 1) {
+    // A finished multi-step answer leaves several completed messages beyond
+    // the baseline; the run being over makes the set attributable as one
+    // answer, extracted from the session's own context by `generate`.
+    if (answers.length === 0) {
       return yield* recordObservation(request, options, "operator_required", {
-        reason: answers.length === 0 ? "no_attributable_answer" : "ambiguous_answers",
-        candidateCount: answers.length,
+        reason: "no_attributable_answer",
+        candidateCount: 0,
       })
     }
     const decoded = yield* providerCall("extract OpenCode resume output after restart", (signal) =>

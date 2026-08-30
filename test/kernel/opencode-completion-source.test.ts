@@ -114,6 +114,7 @@ describe("OpenCode agent completion source", () => {
   test("catches up history after the durable registration boundary", async () => {
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [childAnswer],
       subscribeEvents: async () => (async function* () {})(),
     }
@@ -145,6 +146,10 @@ describe("OpenCode agent completion source", () => {
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => {
         providerOperations.push("sessionExists")
+        return true
+      },
+      sessionFinished: async () => {
+        providerOperations.push("sessionFinished")
         return true
       },
       listMessages: async () => {
@@ -188,6 +193,7 @@ describe("OpenCode agent completion source", () => {
       "sessionExists",
       "subscribeEvents",
       "streamStarted",
+      "sessionFinished",
       "listMessages",
     ])
     expect(result.iteration).toMatchObject({ status: "completed", childSessionId: "child-stable" })
@@ -202,6 +208,7 @@ describe("OpenCode agent completion source", () => {
     let subscriptions = 0
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [childAnswer],
       subscribeEvents: async () => {
         subscriptions += 1
@@ -244,6 +251,7 @@ describe("OpenCode agent completion source", () => {
     // will never replay it. The watch must escalate loudly, not park forever.
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [
         {
           id: "msg_stale",
@@ -296,6 +304,7 @@ describe("OpenCode agent completion source", () => {
     }
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [childAnswer],
       subscribeEvents: async () =>
         (async function* () {
@@ -355,6 +364,7 @@ describe("OpenCode agent completion source", () => {
     }
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       subscribeEvents: async () =>
         (async function* () {
@@ -395,6 +405,7 @@ describe("OpenCode agent completion source", () => {
     }))
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => flood,
       subscribeEvents: async () => (async function* () {})(),
     }
@@ -442,6 +453,7 @@ describe("OpenCode agent completion source", () => {
     }
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async (input) => (input.sessionID === "ses_child2" ? [secondChildAnswer] : []),
       subscribeEvents: async (_input, signal) => abortAwareHangingStream(signal),
     }
@@ -527,6 +539,10 @@ describe("OpenCode agent completion source", () => {
         providerCalls += 1
         return true
       },
+      sessionFinished: async () => {
+        providerCalls += 1
+        return true
+      },
       listMessages: async () => [],
       subscribeEvents: async () => (async function* () {})(),
     }
@@ -553,9 +569,67 @@ describe("OpenCode agent completion source", () => {
     expect(providerCalls).toBe(0)
   })
 
-  test("quarantines ambiguous catch-up history without recording a completion", async () => {
+  test("never completes a still-running child from its mid-turn step messages", async () => {
+    // The live premature-wake regression (workflowd-hcq): OpenCode 2 completes
+    // an assistant message per tool step, so a busy child already has
+    // completed messages in history. Until the run has ended they are not
+    // answers; the watch must keep waiting, not complete or escalate.
+    let historyReads = 0
     const provider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: async () => false,
+      listMessages: async () => {
+        historyReads += 1
+        return [
+          childAnswer,
+          {
+            ...childAnswer,
+            id: "msg_step_2",
+            time: { ...childAnswer.time, completed: childAnswer.time.completed + 1 },
+          },
+        ]
+      },
+      subscribeEvents: async (_input, signal) => abortAwareHangingStream(signal),
+    }
+    const signals: WorkSignalPort = {
+      subscribe: () => Effect.die(new Error("unused")),
+      wake: () => Effect.void,
+    }
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* arrange
+        const iteration = yield* runOpenCodeCompletionSourceIteration({
+          ...options,
+          observationTimeoutMs: 50,
+        })
+        const events = yield* sql<{
+          readonly count: number
+        }>`SELECT COUNT(*) AS count FROM kernel_events`
+        const watch = yield* sql<
+          Record<string, unknown>
+        >`SELECT state FROM kernel_agent_completion_watches`
+        return { iteration, count: events[0]!.count, watch }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+
+    expect(result.iteration).toMatchObject({ status: "yielded" })
+    expect(result.count).toBe(0)
+    expect(result.watch[0]).toMatchObject({ state: "watching" })
+    // History is never consulted while the run is live; the terminal signal
+    // is the finished probe plus the execution-succeeded live event.
+    expect(historyReads).toBe(0)
+  })
+
+  test("attributes the latest completed message of a finished multi-step run", async () => {
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [
         childAnswer,
         {
@@ -587,17 +661,17 @@ describe("OpenCode agent completion source", () => {
       ),
     )
 
-    expect(result.iteration).toMatchObject({
-      status: "operator_required",
-      reason: "ambiguous_new_answers",
-    })
-    expect(result.count).toBe(0)
+    // OpenCode 2 completes an assistant message per tool step, so several
+    // fresh completed messages are one finished answer, not ambiguity.
+    expect(result.iteration).toMatchObject({ status: "completed" })
+    expect(result.count).toBe(1)
   })
 
   test("continues the parent end to end through the existing resume worker", async () => {
     let parentPrompts = 0
     const completionProvider: OpenCodeCompletionProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       subscribeEvents: async () =>
         (async function* () {
@@ -606,6 +680,7 @@ describe("OpenCode agent completion source", () => {
     }
     const resumeProvider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => {
         parentPrompts += 1
