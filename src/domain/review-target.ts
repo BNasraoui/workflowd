@@ -7,6 +7,6 @@ export const ReviewTarget = Schema.Struct({
   headSha: GitObjectId,
   headRef: Schema.NonEmptyString,
   headRepositoryFullName: Schema.NonEmptyString,
-}).annotations({ parseOptions: { onExcessProperty: "error" } })
+}).annotate({ parseOptions: { onExcessProperty: "error" } })
 
 export type ReviewTarget = typeof ReviewTarget.Type

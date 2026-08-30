@@ -1,4 +1,4 @@
-import { Context, Data, Effect, JSONSchema, Schema } from "effect"
+import { Context, Data, Effect, Schema } from "effect"
 import {
   MAX_AGENT_OUTPUT_BYTES,
   MAX_STAGE_REQUEST_BYTES,
@@ -49,10 +49,14 @@ const StageReplayAuthority = Schema.Struct({
   scope: ExactStageScope,
   stageSnapshot: Schema.Struct({
     ...ReplaySnapshotAuthority.fields,
-    maxEncodedInputBytes: Schema.Int.pipe(Schema.positive()),
+    maxEncodedInputBytes: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   }),
-  predecessorSnapshots: Schema.Array(ReplaySnapshotAuthority).pipe(Schema.maxItems(5)),
-  acceptedPointers: Schema.Array(AcceptedPredecessorPointer).pipe(Schema.maxItems(5)),
+  predecessorSnapshots: Schema.Array(ReplaySnapshotAuthority).pipe(
+    Schema.check(Schema.isMaxLength(5)),
+  ),
+  acceptedPointers: Schema.Array(AcceptedPredecessorPointer).pipe(
+    Schema.check(Schema.isMaxLength(5)),
+  ),
 })
 export type StageReplayAuthority = typeof StageReplayAuthority.Type
 
@@ -65,15 +69,15 @@ export type AgentTask<Result, ResultEncoded> = {
   readonly title: string
   readonly prompt: string
   readonly authority: StageTaskAuthority
-  readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
+  readonly resultSchema: Schema.Codec<Result, ResultEncoded>
 }
 
 type StageContractBase<Request, RequestEncoded, Result, ResultEncoded> = {
   readonly ref: StageContractRef
   readonly stageKey: string
   readonly implementationRevision: string
-  readonly requestSchema: Schema.Schema<Request, RequestEncoded, never>
-  readonly resultSchema: Schema.Schema<Result, ResultEncoded, never>
+  readonly requestSchema: Schema.Codec<Request, RequestEncoded>
+  readonly resultSchema: Schema.Codec<Result, ResultEncoded>
   readonly maxRequestBytes: number
   readonly maxResultBytes: number
   readonly compatibility: (definition: StageDefinition) => void
@@ -150,8 +154,8 @@ export class StageCatalogError extends Data.TaggedError("StageCatalogError")<{
 type RuntimeRegistration = {
   readonly source: StageContractRegistration
   readonly descriptor: StageContractDescriptor
-  readonly requestSchema: Schema.Schema<unknown, unknown, never>
-  readonly resultSchema: Schema.Schema<unknown, unknown, never>
+  readonly requestSchema: Schema.Codec<unknown, unknown>
+  readonly resultSchema: Schema.Codec<unknown, unknown>
   readonly compatibility: (definition: StageDefinition) => void
   readonly assembleRequest: (sources: ExactStageSources, local?: JsonValue) => unknown
   readonly buildTask: (request: unknown) => AgentTask<unknown, unknown>
@@ -162,11 +166,13 @@ const exactParseOptions = { onExcessProperty: "error" as const }
 
 const RegistrationMetadata = Schema.Struct({
   ref: StageContractRef,
-  stageKey: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(64)),
-  implementationRevision: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
-  kind: Schema.Literal("document", "implementation"),
-  maxRequestBytes: Schema.Int.pipe(Schema.positive()),
-  maxResultBytes: Schema.Int.pipe(Schema.positive()),
+  stageKey: Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
+  implementationRevision: Schema.String.pipe(
+    Schema.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+  ),
+  kind: Schema.Literals(["document", "implementation"]),
+  maxRequestBytes: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+  maxResultBytes: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
 })
 
 const referenceKey = (ref: StageContractRef) => `${ref.name}@${ref.contractVersion}`
@@ -180,7 +186,7 @@ function diagnosticReference(source: unknown): string {
   }
 }
 
-function isErasedSchema(value: unknown): value is Schema.Schema<unknown, unknown, never> {
+function isErasedSchema(value: unknown): value is Schema.Codec<unknown, unknown> {
   return Schema.isSchema(value)
 }
 
@@ -206,8 +212,8 @@ export class TrustedStageCatalog {
   constructor(registrations: ReadonlyArray<StageContractRegistration>) {
     for (const source of registrations) {
       let metadata: typeof RegistrationMetadata.Type
-      let requestSchema: Schema.Schema<unknown, unknown, never>
-      let resultSchema: Schema.Schema<unknown, unknown, never>
+      let requestSchema: Schema.Codec<unknown, unknown>
+      let resultSchema: Schema.Codec<unknown, unknown>
       let compatibility: (definition: StageDefinition) => void
       let assembleRequest: (sources: ExactStageSources, local?: JsonValue) => unknown
       let buildTask: (request: unknown) => AgentTask<unknown, unknown>
@@ -237,8 +243,8 @@ export class TrustedStageCatalog {
         assembleRequest = source.assembleRequest
         buildTask = source.buildTask
         prepareOutput = source.prepareOutput
-        requestJsonSchema = JSONSchema.make(requestSchema)
-        resultJsonSchema = JSONSchema.make(resultSchema)
+        requestJsonSchema = Schema.toJsonSchemaDocument(requestSchema)
+        resultJsonSchema = Schema.toJsonSchemaDocument(resultSchema)
         if (
           metadata.maxRequestBytes > MAX_STAGE_REQUEST_BYTES ||
           metadata.maxResultBytes > MAX_AGENT_OUTPUT_BYTES
@@ -648,7 +654,7 @@ export type StageCatalogPort = {
   }) => Effect.Effect<PreparedStageOutput, StageCatalogError>
 }
 
-export const StageCatalog = Context.GenericTag<StageCatalogPort>("workflowd/qrspi/StageCatalog")
+export const StageCatalog = Context.Service<StageCatalogPort>("workflowd/qrspi/StageCatalog")
 
 export const validateWorkflowDefinition = (input: {
   readonly definition: WorkflowDefinition
@@ -969,7 +975,7 @@ function resolveExecutableSnapshot(
         }),
       )
     }
-    return yield* Schema.decodeUnknown(ExecutableStageSnapshot)({
+    return yield* Schema.decodeUnknownEffect(ExecutableStageSnapshot)({
       sequencePosition,
       stageDefinitionSha256: stageDefinitionSha256(stage),
       definition: stage,

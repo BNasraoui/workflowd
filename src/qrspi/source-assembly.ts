@@ -79,7 +79,7 @@ export const assembleExactStageSources = (input: {
     const sourceSetSha256 = canonicalSha256(
       sources.map(({ role, artifact }) => ({ role, artifact })),
     )
-    return yield* Schema.decodeUnknown(ExactStageSources)({
+    return yield* Schema.decodeUnknownEffect(ExactStageSources)({
       ...authority.scope,
       ticketRevision: authority.ticketRevision,
       sources,

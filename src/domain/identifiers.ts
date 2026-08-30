@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 
-const PositiveInt = Schema.Int.pipe(Schema.positive())
+const PositiveInt = Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0)))
 
 export const RepositoryId = PositiveInt.pipe(Schema.brand("RepositoryId"))
 export type RepositoryId = typeof RepositoryId.Type
@@ -27,7 +27,7 @@ export const WorkerId = Schema.NonEmptyString.pipe(Schema.brand("WorkerId"))
 export type WorkerId = typeof WorkerId.Type
 
 export const GitObjectId = Schema.String.pipe(
-  Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i),
+  Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
   Schema.brand("GitObjectId"),
 )
 export type GitObjectId = typeof GitObjectId.Type
