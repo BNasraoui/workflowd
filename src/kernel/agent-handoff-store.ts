@@ -141,7 +141,9 @@ const make = Effect.gen(function* () {
         parent.session_id !== workflow.parentSessionId ||
         !["ready", "active"].includes(parent.state) ||
         parent.resource_state !== "reserved" ||
-        parent.provider_kind !== "opencode"
+        // Parents are woken by their own provider's resume worker: opencode
+        // via the server API, claude via the claude CLI.
+        !["opencode", "claude"].includes(parent.provider_kind)
       ) {
         return yield* new AgentHandoffStoreError({
           operation: "validate parent session",

@@ -165,6 +165,19 @@ parent's custody (idempotently) and an agent wait in the same dispatch, so
 one call means "run this and wake me when it finishes". Without them the
 receipt carries the child's custody id for a later `wait_for_agent` call.
 
+Parents come in two kinds (`parent_kind`, default `opencode`):
+
+- `opencode` — a session on the managed OpenCode server, woken via the
+  server API by the OpenCode resume worker.
+- `claude` — a Claude Code session on the daemon's host, woken by the
+  Claude resume worker through two `claude -p --resume` turns (the wake
+  document, then the structured-ack extraction). Requires
+  `parent_directory`, the cwd the session was created in; the session
+  transcript must exist under `~/.claude/projects/` for that directory.
+  Waking Claude sessions on *other* hosts is the cross-machine routing
+  slice (workflowd-b3b.23) and is not supported yet; Codex parents are
+  workflowd-b3b.21.
+
 The dispatch call holds its HTTP request open through verification, so it is
 the one write tool that can take a couple of minutes to ack. It is still a
 receipt: end the turn after it arrives.

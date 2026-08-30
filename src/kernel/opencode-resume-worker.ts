@@ -456,6 +456,7 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
       workerId: options.workerId,
       now: options.now(),
       leaseDurationMs: options.leaseDurationMs,
+      providerKind: "opencode",
     })
     if (claim === null) {
       return (yield* observeRestartedResume(options)) ?? { status: "idle" as const }

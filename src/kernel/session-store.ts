@@ -64,6 +64,9 @@ type ClaimInput = {
   readonly workerId: string
   readonly now: Date
   readonly leaseDurationMs: number
+  /** Restricts the claim to sessions held by one provider kind, so each
+   * provider's resume worker only ever claims wakes it can deliver. */
+  readonly providerKind?: "opencode" | "codex" | "claude"
 }
 type Replay = Effect.Effect<{ readonly status: "created" | "duplicate" }, KernelSessionStoreError>
 
@@ -472,6 +475,7 @@ const make = Effect.gen(function* () {
       JOIN kernel_sessions AS session ON session.session_id = request.session_id
       JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
       WHERE request.owning_host_id = ${input.owningHostId} AND session.owning_host_id = ${input.owningHostId}
+        AND (${input.providerKind ?? null} IS NULL OR session.provider_kind = ${input.providerKind ?? null})
         AND ((request.state = 'ready' AND request.run_at <= ${nowText}) OR
           (request.state = 'leased' AND EXISTS (SELECT 1 FROM kernel_resume_attempts AS attempt_row
             WHERE attempt_row.request_id = request.request_id AND attempt_row.attempt = request.attempt

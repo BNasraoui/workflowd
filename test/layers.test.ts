@@ -10,6 +10,7 @@ import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
 import { AgentRunIngress } from "../src/kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
+import { ClaudeResumeWorker } from "../src/kernel/claude-resume-worker"
 import { KernelEventStore } from "../src/kernel/event-store"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
@@ -119,12 +120,19 @@ test("starts and restarts the full live layer with both kernel stores", async ()
           const testJobs = yield* TestJobCanary
           const agentRuns = yield* AgentRunIngress
           const watchdog = yield* AgentRunWatchdog
+          const claudeResume = yield* ClaudeResumeWorker
+          // Both supervised iterations run once against the empty store so
+          // the composed worker pipelines execute, not just resolve.
+          const watchdogStatus = yield* watchdog.iteration
+          const claudeStatus = yield* claudeResume.iteration
+          if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
+            return yield* Effect.die(new Error("expected idle iterations on an empty store"))
+          }
           return [
             events.readReadyDeliveries,
             jobs.readRecoverable,
             testJobs.submit,
             agentRuns.register,
-            () => watchdog.iteration,
           ]
         }).pipe(
           Effect.provide(

@@ -54,6 +54,7 @@ describe("loadConfig", () => {
 
     expect(config.agentRuns).toEqual({
       token: "agent-run-secret",
+      claudeBinary: "claude",
       routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],
       repositories: [{ name: "workflowd", directory: "/home/test/repos/workflowd" }],
       agent: "remote-worker",

@@ -15,6 +15,13 @@ import type { WorkspaceError } from "../workspace/errors"
 import { pathExists } from "../workspace/filesystem"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
+import {
+  CLAUDE_ENDPOINT_ALIAS,
+  CLAUDE_PROVIDER_ID,
+  ClaudeCli,
+  claudeEndpointIdentity,
+  claudeSessionCustodyId,
+} from "./claude-session"
 import type { AgentCompletionSourceIdentity } from "./agent-handoff-store"
 import { AgentRunStore, type AgentRunRecord, type AgentRunStoreError } from "./agent-run-store"
 import { KernelSessionStore, type KernelSessionStoreError } from "./session-store"
@@ -170,6 +177,7 @@ const make = (options: AgentRunIngressOptions) =>
     const provider = yield* AgentRunProvider
     const worktrees = yield* AgentRunWorktrees
     const waits = yield* AgentWaitIngress
+    const claude = yield* ClaudeCli
     const signals = yield* WorkSignal
 
     /** Registers custody rows read-first so replays and shared parents are
@@ -196,20 +204,26 @@ const make = (options: AgentRunIngressOptions) =>
       readonly nativeSessionId: string
       readonly resourceId: string
       readonly createdAt: Date
+      readonly kind?: "opencode" | "claude"
     }) =>
       Effect.gen(function* () {
-        const sessionId = opencodeSessionCustodyId(input.nativeSessionId)
+        const claude = input.kind === "claude"
+        const sessionId = claude
+          ? claudeSessionCustodyId(input.nativeSessionId)
+          : opencodeSessionCustodyId(input.nativeSessionId)
         const existing = yield* sessions.readSession(sessionId)
         if (existing !== null) return sessionId
         yield* sessions.registerSession({
           sessionId,
-          providerKind: "opencode",
+          providerKind: claude ? "claude" : "opencode",
           providerVersion: options.identity.providerVersion,
-          providerId: options.identity.providerId,
-          serverId: options.identity.serverId,
+          providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
+          serverId: claude ? options.identity.owningHostId : options.identity.serverId,
           owningHostId: options.identity.owningHostId,
-          endpointAlias: options.identity.endpointAlias,
-          endpointIdentity: options.identity.endpointIdentity,
+          endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
+          endpointIdentity: claude
+            ? claudeEndpointIdentity(options.identity.owningHostId)
+            : options.identity.endpointIdentity,
           nativeSessionId: input.nativeSessionId,
           resourceId: input.resourceId,
           createdAt: input.createdAt,
@@ -257,28 +271,60 @@ const make = (options: AgentRunIngressOptions) =>
         return null
       })
 
+    /** Resolves the parent's working directory in its own harness: the
+     * opencode server for opencode parents, the local session transcript
+     * for claude parents. Refusal happens before anything is spawned. */
+    const resolveParentDirectory = (parent: {
+      readonly nativeSessionId: string
+      readonly kind: "opencode" | "claude"
+      readonly directory: string | undefined
+    }) =>
+      Effect.gen(function* () {
+        if (parent.kind === "claude") {
+          if (parent.directory === undefined) {
+            return yield* refuse(
+              "invalid_wait_pairing",
+              "parentDirectory is required when parentKind is claude",
+            )
+          }
+          const exists = yield* claude.sessionExists({
+            nativeSessionId: parent.nativeSessionId,
+            directory: parent.directory,
+          })
+          if (!exists) {
+            return yield* refuse(
+              "missing_parent_session",
+              `claude session ${parent.nativeSessionId} has no transcript for ` +
+                `directory ${parent.directory} on this host`,
+            )
+          }
+          return parent.directory
+        }
+        const telemetry = yield* provider.sessionTelemetry({ sessionID: parent.nativeSessionId })
+        if (telemetry === undefined) {
+          return yield* refuse(
+            "missing_parent_session",
+            `parent session ${parent.nativeSessionId} does not exist on the OpenCode server`,
+          )
+        }
+        return telemetry.directory
+      })
+
     const registerWait = (run: {
       readonly runId: string
       readonly parentNativeSessionId: string
+      readonly parentKind: "opencode" | "claude"
+      readonly parentDirectory: string
       readonly childSessionId: string
       readonly resumePrompt: string
       readonly createdAt: Date
       readonly now: Date
     }) =>
       Effect.gen(function* () {
-        const parent = yield* provider.sessionTelemetry({
-          sessionID: run.parentNativeSessionId,
-        })
-        if (parent === undefined) {
-          return yield* refuse(
-            "missing_parent_session",
-            `parent session ${run.parentNativeSessionId} does not exist on the OpenCode server`,
-          )
-        }
-        const parentResourceId = `opencode-session-resource-${run.parentNativeSessionId}`
+        const parentResourceId = `${run.parentKind}-session-resource-${run.parentNativeSessionId}`
         yield* ensureResource({
           resourceId: parentResourceId,
-          absolutePath: parent.directory,
+          absolutePath: run.parentDirectory,
           kind: "checkout",
           createdAt: run.createdAt,
         })
@@ -286,6 +332,7 @@ const make = (options: AgentRunIngressOptions) =>
           nativeSessionId: run.parentNativeSessionId,
           resourceId: parentResourceId,
           createdAt: run.createdAt,
+          kind: run.parentKind,
         })
         // The wait's registration boundary is anchored at run creation, not
         // the request clock: a retry after a transient wait failure must not
@@ -428,24 +475,25 @@ const make = (options: AgentRunIngressOptions) =>
           )
         }
         yield* preflightRoute(resolution.route)
+        const parentKind = submission.parentKind ?? "opencode"
         // The parent is validated before anything external is spawned so a
         // caller naming a dead parent gets a refusal, not an orphaned child.
-        if (submission.parentSessionId !== undefined) {
-          const parent = yield* provider.sessionTelemetry({
-            sessionID: submission.parentSessionId,
-          })
-          if (parent === undefined) {
-            return yield* refuse(
-              "missing_parent_session",
-              `parent session ${submission.parentSessionId} does not exist on the OpenCode server`,
-            )
-          }
-        }
+        const parentDirectory =
+          submission.parentSessionId === undefined
+            ? undefined
+            : yield* resolveParentDirectory({
+                nativeSessionId: submission.parentSessionId,
+                kind: parentKind,
+                directory: submission.parentDirectory,
+              })
         const identifiers = agentRunIdentifiers({
           route: resolution.route.name,
           repository: submission.repository,
           prompt: submission.prompt,
-          parentSessionId: submission.parentSessionId ?? null,
+          parentSessionId:
+            submission.parentSessionId === undefined
+              ? null
+              : `${parentKind}:${submission.parentSessionId}`,
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
         })
@@ -493,11 +541,15 @@ const make = (options: AgentRunIngressOptions) =>
               )
         const childSessionId = opencodeSessionCustodyId(dispatched.nativeSessionId)
         const wait =
-          submission.parentSessionId === undefined || submission.resumePrompt === undefined
+          submission.parentSessionId === undefined ||
+          submission.resumePrompt === undefined ||
+          parentDirectory === undefined
             ? undefined
             : yield* registerWait({
                 runId: identifiers.runId,
                 parentNativeSessionId: submission.parentSessionId,
+                parentKind,
+                parentDirectory,
                 childSessionId,
                 resumePrompt: submission.resumePrompt,
                 createdAt: run.createdAt,

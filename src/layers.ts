@@ -27,6 +27,8 @@ import {
 } from "./kernel/agent-run-ingress"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
+import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
+import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import {
   OpenCodeResumeAdapter,
@@ -255,6 +257,41 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.provideMerge(storeLayer),
     Layer.provideMerge(workSignalLayer),
   )
+  const claudeCliLayer = Layer.succeed(
+    ClaudeCli,
+    makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
+  )
+  const claudeResumeWorkerLayer =
+    config.agentRuns === undefined
+      ? Layer.empty
+      : Layer.effect(
+          ClaudeResumeWorker,
+          Effect.gen(function* () {
+            const sessions = yield* KernelSessionStore
+            const sql = yield* SqlClient.SqlClient
+            const cli = yield* ClaudeCli
+            return {
+              iteration: runClaudeResumeIteration({
+                owningHostId: config.worker.hostId,
+                workerId: `${process.pid}:claude-resume`,
+                leaseDurationMs: config.worker.jobLeaseDurationMs,
+                heartbeatIntervalMs: Math.max(
+                  1_000,
+                  Math.floor(config.worker.jobLeaseDurationMs / 3),
+                ),
+                resumeTimeoutMs: 5 * 60_000,
+                retryDelayMs: 30_000,
+                now: () => new Date(),
+                contracts: resumeContracts,
+              }).pipe(
+                Effect.provideService(KernelSessionStore, sessions),
+                Effect.provideService(SqlClient.SqlClient, sql),
+                Effect.provideService(ClaudeCli, cli),
+                Effect.map((result) => result.status),
+              ),
+            }
+          }),
+        ).pipe(Layer.provideMerge(kernelStoreLayer), Layer.provideMerge(claudeCliLayer))
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -281,6 +318,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(workSignalLayer),
         )
   const qrspiLayer =
@@ -415,6 +453,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     testJobCanaryLayer,
     agentWaitIngressLayer,
     agentRunLayer,
+    claudeResumeWorkerLayer,
     remoteCoordinatorLayer,
   )
 }

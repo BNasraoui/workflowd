@@ -14,6 +14,7 @@ import {
   type AgentRunWorktreesPort,
 } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import { ClaudeCli, type ClaudeCliPort } from "../../src/kernel/claude-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { OpenCodeSessionTelemetry } from "../../src/opencode/adapter"
@@ -109,6 +110,11 @@ const signals: WorkSignalPort = {
   wake: () => Effect.void,
 }
 
+const claudeCli: ClaudeCliPort = {
+  sessionExists: (input) => Effect.succeed(input.nativeSessionId === "claude-parent-1"),
+  resume: () => Effect.die(new Error("unused in ingress tests")),
+}
+
 const makeLayer = (provider: AgentRunProviderPort, trees: AgentRunWorktreesPort) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
@@ -127,6 +133,7 @@ const makeLayer = (provider: AgentRunProviderPort, trees: AgentRunWorktreesPort)
     Layer.provideMerge(Layer.mergeAll(runs, sessions, waits)),
     Layer.provideMerge(Layer.succeed(AgentRunProvider, provider)),
     Layer.provideMerge(Layer.succeed(AgentRunWorktrees, trees)),
+    Layer.provideMerge(Layer.succeed(ClaudeCli, claudeCli)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 }
@@ -318,6 +325,66 @@ describe("agent-run ingress", () => {
       ),
     )
     expect(refusal.reason).toBe("missing_parent_session")
+    expect(state.created).toHaveLength(0)
+  })
+
+  test("dispatch with a claude parent registers claude custody and the wait", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({
+          ...submission,
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude",
+          parentDirectory: "/home/ben/repos/workflowd",
+          resumePrompt: "Child finished; review its branch.",
+        })
+        const sql = yield* SqlClient.SqlClient
+        const parent = yield* sql<{
+          readonly provider_kind: string
+          readonly endpoint_identity: string
+        }>`SELECT provider_kind, endpoint_identity FROM kernel_sessions
+          WHERE session_id = 'claude-session-claude-parent-1'`
+        const watches = yield* sql<{
+          readonly state: string
+        }>`SELECT state FROM kernel_agent_completion_watches`
+        return { receipt, parent, watches }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.receipt.wait?.status).toBe("registered")
+    expect(result.parent).toHaveLength(1)
+    expect(result.parent[0]!.provider_kind).toBe("claude")
+    expect(result.parent[0]!.endpoint_identity).toBe("claude-cli://mint")
+    expect(result.watches[0]!.state).toBe("watching")
+  })
+
+  test("a claude parent without a directory or transcript is refused before spawning", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const unpaired = await refusalOf(
+      Effect.runPromise(
+        register({
+          ...submission,
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude",
+          resumePrompt: "wake me",
+        }).pipe(Effect.provide(layer)),
+      ),
+    )
+    expect(unpaired.reason).toBe("invalid_wait_pairing")
+    const missing = await refusalOf(
+      Effect.runPromise(
+        register({
+          ...submission,
+          parentSessionId: "claude-parent-unknown",
+          parentKind: "claude",
+          parentDirectory: "/home/ben/repos/workflowd",
+          resumePrompt: "wake me",
+        }).pipe(Effect.provide(layer)),
+      ),
+    )
+    expect(missing.reason).toBe("missing_parent_session")
     expect(state.created).toHaveLength(0)
   })
 

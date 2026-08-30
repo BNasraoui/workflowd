@@ -118,6 +118,13 @@ export const AgentRunSubmission = Schema.Struct({
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
   prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
   parentSessionId: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_SESSION_ID_BYTES)),
+  /** Which harness holds the parent: an opencode session on the managed
+   * server (default), or a Claude Code session woken through the claude
+   * CLI. Children are always opencode. */
+  parentKind: Schema.optional(Schema.Literals(["opencode", "claude"])),
+  /** The Claude parent's working directory — the cwd its session was
+   * created in. Required with parentKind "claude"; ignored otherwise. */
+  parentDirectory: Schema.optional(utf8BoundedText(4_096)),
   resumePrompt: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES)),
   idempotencyKey: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES)),
 })

@@ -87,6 +87,7 @@ export interface QrspiConfig {
 
 export interface AgentRunConfig {
   readonly token: string
+  readonly claudeBinary: string
   readonly routes: ReadonlyArray<AgentRunRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
@@ -349,6 +350,7 @@ function loadAgentRunConfig(
   }
   return {
     token,
+    claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
     repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),

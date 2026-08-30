@@ -10,6 +10,7 @@ import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
+import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
@@ -205,6 +206,7 @@ export function startHookService(
     const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
     const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
     const remoteCoordinator = yield* RemoteCoordinator
@@ -317,6 +319,15 @@ export function startHookService(
         60_000,
         "agent-run",
         observed("agent-run", agentRunWatchdog.value.iteration),
+      )
+    }
+
+    if (Option.isSome(claudeResumeWorker)) {
+      yield* superviseWorker(
+        "Claude resume worker",
+        60_000,
+        "session-resume",
+        observed("session-resume", claudeResumeWorker.value.iteration),
       )
     }
 
