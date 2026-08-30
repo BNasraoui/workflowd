@@ -112,8 +112,8 @@ describe("custody common authority matrix", () => {
                           : operation === "cancel"
                             ? store.cancelResume(input)
                             : store.releaseResume({ ...input, runAt: now })
-              const result = yield* effect.pipe(Effect.either)
-              return result._tag === "Left" && result.left._tag
+              const result = yield* effect.pipe(Effect.result)
+              return result._tag === "Failure" && result.failure._tag
             }),
           ),
         ),
@@ -181,7 +181,7 @@ describe("custody common authority matrix", () => {
                 operation === "heartbeat"
                   ? yield* store
                       .heartbeatCleanup({ ...input, leaseDurationMs: 1 })
-                      .pipe(Effect.either)
+                      .pipe(Effect.result)
                   : yield* store
                       .completeCleanup({
                         ...input,
@@ -190,8 +190,8 @@ describe("custody common authority matrix", () => {
                         outcomeVersion: 1,
                         outcome: {},
                       })
-                      .pipe(Effect.either)
-              return result._tag === "Left" && result.left._tag
+                      .pipe(Effect.result)
+              return result._tag === "Failure" && result.failure._tag
             }),
           ),
         ),

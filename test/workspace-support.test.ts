@@ -28,19 +28,13 @@ test("an interrupted keyed-lock waiter does not release the holder or retain the
     Effect.scoped(
       locks.acquire("worktree").pipe(
         Effect.tap(() => Deferred.succeed(holderEntered, undefined)),
-        Effect.zipRight(Deferred.await(releaseHolder)),
+        Effect.andThen(Deferred.await(releaseHolder)),
       ),
     ),
   )
   await Effect.runPromise(Deferred.await(holderEntered))
   const waiter = Effect.runFork(Effect.scoped(locks.acquire("worktree")))
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      while ((yield* Fiber.status(waiter))._tag !== "Suspended") {
-        yield* Effect.yieldNow()
-      }
-    }),
-  )
+  await Bun.sleep(100)
 
   await Effect.runPromise(Fiber.interrupt(waiter))
   const contenderEntered = Effect.runSync(Deferred.make<void>())
@@ -51,7 +45,7 @@ test("an interrupted keyed-lock waiter does not release the holder or retain the
         .pipe(Effect.tap(() => Deferred.succeed(contenderEntered, undefined))),
     ),
   )
-  await Effect.runPromise(Effect.yieldNow())
+  await Effect.runPromise(Effect.yieldNow)
   expect(await Effect.runPromise(Deferred.isDone(contenderEntered))).toBe(false)
   await Effect.runPromise(Deferred.succeed(releaseHolder, undefined))
   await Effect.runPromise(Fiber.join(holder))

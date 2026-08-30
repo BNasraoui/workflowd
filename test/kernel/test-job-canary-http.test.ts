@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Queue, Scope } from "effect"
 import { routeRequest } from "../../src/http"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
@@ -312,7 +312,7 @@ describe("test-job canary HTTP integration", () => {
         Effect.gen(function* () {
           const idle = yield* Deferred.make<void>()
           const workerScope = yield* Scope.make()
-          const worker = yield* Scope.extend(
+          const worker = yield* Scope.provide(
             superviseWorker(
               "Idle kernel shutdown test worker",
               60_000,
@@ -328,7 +328,7 @@ describe("test-job canary HTTP integration", () => {
             stopped,
             interrupted:
               stopped._tag === "Completed" && Exit.isFailure(stopped.value)
-                ? Cause.isInterruptedOnly(stopped.value.cause)
+                ? Cause.hasInterruptsOnly(stopped.value.cause)
                 : false,
           }
         }).pipe(Effect.provide(WorkSignalLive)),

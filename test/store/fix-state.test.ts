@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Schema } from "effect"
 import { FixResult } from "../../src/domain/fix-result"
 import { WorkflowStore } from "../../src/store/contracts"

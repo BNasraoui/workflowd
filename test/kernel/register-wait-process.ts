@@ -20,5 +20,5 @@ const registration = Effect.gen(function* () {
 
 const fiber = Effect.runFork(registration)
 await Bun.write(startedPath, "started")
-const result = await Effect.runPromise(Fiber.join(fiber).pipe(Effect.either))
+const result = await Effect.runPromise(Fiber.join(fiber).pipe(Effect.result))
 await Bun.write(resultPath, JSON.stringify(result))

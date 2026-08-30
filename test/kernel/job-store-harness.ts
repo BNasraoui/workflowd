@@ -1,6 +1,5 @@
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import type { JsonValue } from "../../src/json"
 import {
@@ -36,7 +35,7 @@ export const kernelLayer = (filename: string) => {
 
 export const runKernel = <A, E>(
   filename: string,
-  effect: Effect.Effect<A, E, KernelEventStorePort | KernelJobStorePort | SqlClientService>,
+  effect: Effect.Effect<A, E, KernelEventStorePort | KernelJobStorePort | SqlClient.SqlClient>,
 ) => Effect.runPromise(effect.pipe(Effect.provide(kernelLayer(filename))))
 
 export const deliveryInput = (jobId: string, input?: JsonValue) => {

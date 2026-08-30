@@ -6,8 +6,8 @@ import {
   agentSessionCompletionCondition,
 } from "../../src/kernel/agent-handoff-contract"
 
-const decode = <A, I>(schema: Schema.Schema<A, I, never>, value: unknown) =>
-  Effect.runPromise(Schema.decodeUnknown(schema)(value, { onExcessProperty: "error" }))
+const decode = <A>(schema: Schema.Schema<A>, value: unknown) =>
+  Effect.runPromise(Schema.decodeUnknownEffect(schema)(value, { onExcessProperty: "error" }))
 
 describe("provider-neutral agent handoff contracts", () => {
   test("decodes a versioned wait without provider-native identity", async () => {

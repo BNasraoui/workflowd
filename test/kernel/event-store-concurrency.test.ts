@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -48,7 +47,7 @@ const removeDatabase = async (filename: string) => {
 
 const runOnFile = <A, E>(
   filename: string,
-  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>,
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
 ) => {
   const database = SqliteClient.layer({ filename })
   return Effect.runPromise(
@@ -86,14 +85,14 @@ test("independent connections replay one exact event without duplicate rows", as
         Effect.gen(function* () {
           const store = yield* KernelEventStore
           return yield* store.recordEvent(event("same"))
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
       runOnFile(
         filename,
         Effect.gen(function* () {
           const store = yield* KernelEventStore
           return yield* store.recordEvent(event("same"))
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
     ])
     const rows = await runOnFile(
@@ -106,11 +105,15 @@ test("independent connections replay one exact event without duplicate rows", as
       }),
     )
 
-    expect(results.every((result) => result._tag === "Right")).toBe(true)
+    expect(results.every((result) => result._tag === "Success")).toBe(true)
     expect(
-      results.flatMap((result) => (result._tag === "Right" ? [result.right.status] : [])).sort(),
+      results
+        .flatMap((result) => (result._tag === "Success" ? [result.success.status] : []))
+        .sort(),
     ).toEqual(["duplicate", "recorded"])
-    const successful = results.flatMap((result) => (result._tag === "Right" ? [result.right] : []))
+    const successful = results.flatMap((result) =>
+      result._tag === "Success" ? [result.success] : [],
+    )
     expect(successful.find(({ status }) => status === "recorded")?.deliveries).toHaveLength(1)
     expect(successful.find(({ status }) => status === "duplicate")?.deliveries).toEqual([])
     expect(rows.events).toHaveLength(1)
@@ -176,18 +179,18 @@ test("a concurrent changed source replay returns a typed conflict", async () => 
         Effect.gen(function* () {
           const store = yield* KernelEventStore
           return yield* store.recordEvent(event("same"))
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
       runOnFile(
         filename,
         Effect.gen(function* () {
           const store = yield* KernelEventStore
           return yield* store.recordEvent(changed)
-        }).pipe(Effect.either),
+        }).pipe(Effect.result),
       ),
     ])
 
-    const errors = results.flatMap((result) => (result._tag === "Left" ? [result.left] : []))
+    const errors = results.flatMap((result) => (result._tag === "Failure" ? [result.failure] : []))
     expect(errors).toHaveLength(1)
     expect(errors[0]).toMatchObject({ _tag: "KernelStoreConflictError", record: "event" })
   } finally {
@@ -387,7 +390,7 @@ test("wait registration begins with a write and survives a committed writer inte
     const result: unknown = await Bun.file(registrationResult).json()
 
     expect(result).toMatchObject({
-      _tag: "Right",
+      _tag: "Success",
       right: {
         deliveries: [{ instanceId: "instance-a", waitId: "interleaved-wait", eventSequence: 1 }],
       },

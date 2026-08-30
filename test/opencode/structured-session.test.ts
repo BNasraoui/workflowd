@@ -60,7 +60,9 @@ describe("StructuredSession", () => {
           },
         }),
     })
-    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(5 * 1024 * 1024)) })
+    const schema = Schema.Struct({
+      value: Schema.String.pipe(Schema.check(Schema.isMaxLength(5 * 1024 * 1024))),
+    })
 
     await expect(new StructuredSession(adapter, request, schema).run()).rejects.toThrow(
       "decode structured session output",
@@ -80,7 +82,9 @@ describe("StructuredSession", () => {
           },
         }),
     })
-    const schema = Schema.Struct({ value: Schema.String.pipe(Schema.maxLength(100)) })
+    const schema = Schema.Struct({
+      value: Schema.String.pipe(Schema.check(Schema.isMaxLength(100))),
+    })
 
     await expect(
       new StructuredSession(adapter, { ...request, maxOutputBytes: 50 }, schema).run(),

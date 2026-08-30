@@ -115,7 +115,7 @@ const makeWorkerLayer = (options: {
             ? (automation?.runReview?.() ?? Effect.die("unused"))
             : (automation?.runFix?.() ?? Effect.die("unused"))
         return execution.pipe(
-          Effect.flatMap((result) => Schema.decodeUnknown(prepared.outputSchema)(result)),
+          Effect.flatMap((result) => Schema.decodeUnknownEffect(prepared.outputSchema)(result)),
           Effect.orDie,
         )
       },
@@ -654,7 +654,9 @@ describe("Review Work processing", () => {
                     findings: [],
                   }
                 }).pipe(
-                  Effect.flatMap((result) => Schema.decodeUnknown(agentWork.outputSchema)(result)),
+                  Effect.flatMap((result) =>
+                    Schema.decodeUnknownEffect(agentWork.outputSchema)(result),
+                  ),
                   Effect.orDie,
                 ),
             },
@@ -1794,7 +1796,7 @@ describe("runReconciliationIteration", () => {
           }),
         )
 
-        const workerA = yield* Effect.fork(
+        const workerA = yield* Effect.forkChild(
           runReconciliationIteration({
             workerId: "reconciler-a",
             leaseDurationMs: 1_000,

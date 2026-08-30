@@ -190,10 +190,10 @@ describe("kernel job runner", () => {
           retryDelayMs: 1_000,
           execute: () =>
             Deferred.succeed(started, undefined).pipe(
-              Effect.zipRight(Deferred.await(release)),
+              Effect.andThen(Deferred.await(release)),
               Effect.asVoid,
             ),
-        }).pipe(Effect.either, Effect.fork)
+        }).pipe(Effect.result, Effect.forkChild)
         yield* Deferred.await(started)
         const second = yield* runKernelJobIteration({
           workerId: "runner-b",
@@ -215,7 +215,7 @@ describe("kernel job runner", () => {
 
     expect(result.second).toEqual({ status: "completed", jobId: "echo-authority" })
     expect(result.late).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelJobStoreLeaseError", jobId: "echo-authority" },
     })
     expect(result.job).toMatchObject({ state: "succeeded", attempt: 2 })
@@ -241,13 +241,13 @@ describe("kernel job runner", () => {
               outcome === "complete"
                 ? Effect.void
                 : Effect.fail(new Error("injected transient failure")),
-          }).pipe(Effect.either)
+          }).pipe(Effect.result)
           return { late, job: yield* jobs.readJob(`echo-expired-${outcome}`) }
         }),
       )
 
       expect(result.late).toMatchObject({
-        _tag: "Left",
+        _tag: "Failure",
         left: { _tag: "KernelJobStoreLeaseError", jobId: `echo-expired-${outcome}` },
       })
       expect(result.job).toMatchObject({ state: "leased", attempt: 1 })

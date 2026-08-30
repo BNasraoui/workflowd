@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import { runSessionKernel } from "./session-store-harness"
 
@@ -84,7 +84,7 @@ describe("cleanup and observation lifecycle", () => {
         const replay = yield* store.observeResume(observation)
         const conflict = yield* store
           .observeResume({ ...observation, observationId: "other", disposition: "completed" })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const sql = yield* SqlClient.SqlClient
         const attempt = yield* sql`SELECT state FROM kernel_resume_attempts
           WHERE request_id = 'q' AND attempt = 1`
@@ -99,7 +99,7 @@ describe("cleanup and observation lifecycle", () => {
     )
     expect(result.replay.status).toBe("duplicate")
     expect(result.conflict).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.attempt).toEqual([{ state: "failed" }])
@@ -129,7 +129,7 @@ describe("cleanup and observation lifecycle", () => {
             runAt: now,
             createdAt: now,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         if (!resume) return yield* Effect.die(new Error("claim"))
         yield* store.cancelResume({
           requestId: "q",
@@ -179,7 +179,7 @@ describe("cleanup and observation lifecycle", () => {
       }),
     )
     expect(result.blocked).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.cleanup).toMatchObject({ resourceId: "r", owningHostId: "h", attempt: 1 })
@@ -204,7 +204,7 @@ describe("cleanup and observation lifecycle", () => {
             runAt: now,
             createdAt: now,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return {
           cleanup,
           request: yield* store.readResumeRequest("q"),
@@ -213,7 +213,7 @@ describe("cleanup and observation lifecycle", () => {
       }),
     )
     expect(result.cleanup).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "KernelSessionStoreConflictError" },
     })
     expect(result.request).toMatchObject({ state: "ready" })

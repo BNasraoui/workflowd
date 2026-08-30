@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Schema } from "effect"
 import { type AgentLaunchIntent, SessionReference } from "../../src/agent-harness"
 import { WorkflowStore } from "../../src/store/contracts"
@@ -439,7 +439,7 @@ test("rejects a durable launch intent larger than its 64 KiB envelope", async ()
         "22222222-2222-4222-8222-222222222222",
         "2026-07-20T12:01:01.000Z",
       )
-      const recorded = yield* Effect.either(
+      const recorded = yield* Effect.result(
         store.recordAgentLaunchIntent({
           jobId: work.id,
           workerId: "agent-worker",
@@ -457,7 +457,7 @@ test("rejects a durable launch intent larger than its 64 KiB envelope", async ()
     }).pipe(Effect.provide(makeStoreLayer())),
   )
 
-  expect(result.recorded._tag).toBe("Left")
+  expect(result.recorded._tag).toBe("Failure")
   expect(result.launchIntentLength).toBeUndefined()
 })
 

@@ -10,7 +10,8 @@ const validFinding = {
   line: 81,
 }
 
-const decode = (input: unknown) => Effect.runPromise(Schema.decodeUnknown(ReviewResult)(input))
+const decode = (input: unknown) =>
+  Effect.runPromise(Schema.decodeUnknownEffect(ReviewResult)(input))
 
 describe("ReviewResult", () => {
   test("decodes a structured review result", async () => {

@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -10,7 +9,9 @@ import {
 } from "../../src/kernel/event-store"
 import { WorkflowStoreLive } from "../../src/store"
 
-const runKernel = <A, E>(effect: Effect.Effect<A, E, KernelEventStorePort | SqlClientService>) => {
+const runKernel = <A, E>(
+  effect: Effect.Effect<A, E, KernelEventStorePort | SqlClient.SqlClient>,
+) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   return Effect.runPromise(
@@ -117,7 +118,7 @@ test("stale consumption is rejected and exact consumption replay is duplicate", 
           eventSequence: recorded.event.sequence,
           expectedCursor: 99,
         })
-        .pipe(Effect.either)
+        .pipe(Effect.result)
       const readyAfterStale = yield* store.readReadyDeliveries("instance-1")
       const consumed = yield* store.consumeDelivery({
         instanceId: "instance-1",
@@ -135,7 +136,7 @@ test("stale consumption is rejected and exact consumption replay is duplicate", 
     }),
   )
 
-  expect(result.stale._tag).toBe("Left")
+  expect(result.stale._tag).toBe("Failure")
   expect(result.readyAfterStale).toHaveLength(1)
   expect(result.consumed.status).toBe("consumed")
   expect(result.duplicate).toEqual({ status: "duplicate", eventCursor: 1 })
@@ -169,7 +170,7 @@ test("consume replay stays exact after later progress and rejects a changed guar
           eventSequence: first.event.sequence,
           expectedCursor: 0,
         })
-        .pipe(Effect.either)
+        .pipe(Effect.result)
       const changedGuard = yield* store
         .consumeDelivery({
           instanceId: "instance-1",
@@ -177,13 +178,13 @@ test("consume replay stays exact after later progress and rejects a changed guar
           eventSequence: first.event.sequence,
           expectedCursor: 99,
         })
-        .pipe(Effect.either)
+        .pipe(Effect.result)
       return { exact, changedGuard }
     }),
   )
 
-  expect(result.exact._tag).toBe("Right")
-  expect(result.changedGuard._tag).toBe("Left")
+  expect(result.exact._tag).toBe("Success")
+  expect(result.changedGuard._tag).toBe("Failure")
 })
 
 test("an instance permits only one pending or matched wait", async () => {
@@ -192,12 +193,12 @@ test("an instance permits only one pending or matched wait", async () => {
       const store = yield* KernelEventStore
       yield* store.createInstance(instance)
       yield* store.registerWait(wait("wait-a"))
-      const second = yield* store.registerWait(wait("wait-b")).pipe(Effect.either)
+      const second = yield* store.registerWait(wait("wait-b")).pipe(Effect.result)
       return second
     }),
   )
 
-  expect(result._tag).toBe("Left")
+  expect(result._tag).toBe("Failure")
 })
 
 test("a matched wait also blocks another active wait", async () => {
@@ -207,11 +208,11 @@ test("a matched wait also blocks another active wait", async () => {
       yield* store.createInstance(instance)
       yield* store.registerWait(wait("wait-a"))
       yield* store.recordEvent(event("event-1"))
-      return yield* store.registerWait(wait("wait-b")).pipe(Effect.either)
+      return yield* store.registerWait(wait("wait-b")).pipe(Effect.result)
     }),
   )
 
-  expect(result._tag).toBe("Left")
+  expect(result._tag).toBe("Failure")
 })
 
 test("replaying a matched wait returns its ready delivery", async () => {
@@ -265,12 +266,12 @@ test("ready recovery fails closed when the wait is not matched", async () => {
       yield* store.recordEvent(event("event-1"))
       yield* sql`UPDATE kernel_waits SET state = 'consumed'
         WHERE instance_id = 'instance-1' AND wait_id = 'wait-a'`
-      return yield* store.readReadyDeliveries("instance-1").pipe(Effect.either)
+      return yield* store.readReadyDeliveries("instance-1").pipe(Effect.result)
     }),
   )
 
-  expect(result._tag).toBe("Left")
-  if (result._tag === "Left") {
-    expect(result.left).toMatchObject({ _tag: "KernelStoreDataError", record: "delivery" })
+  expect(result._tag).toBe("Failure")
+  if (result._tag === "Failure") {
+    expect(result.failure).toMatchObject({ _tag: "KernelStoreDataError", record: "delivery" })
   }
 })

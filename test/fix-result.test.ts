@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
 import { FixResult } from "../src/domain/fix-result"
 
-const decode = (input: unknown) => Effect.runPromise(Schema.decodeUnknown(FixResult)(input))
+const decode = (input: unknown) => Effect.runPromise(Schema.decodeUnknownEffect(FixResult)(input))
 
 describe("FixResult", () => {
   test("decodes a completed fixer result", async () => {

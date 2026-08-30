@@ -35,8 +35,10 @@ const fixtureDefinition = {
   implementationRevision: "fixture.summary.v1",
   agent: "fixture-agent",
   model: "openai/gpt-5.6-sol",
-  inputSchema: Schema.Struct({ text: Schema.String.pipe(Schema.maxLength(100)) }),
-  outputSchema: Schema.Struct({ summary: Schema.String.pipe(Schema.maxLength(100)) }),
+  inputSchema: Schema.Struct({ text: Schema.String.pipe(Schema.check(Schema.isMaxLength(100))) }),
+  outputSchema: Schema.Struct({
+    summary: Schema.String.pipe(Schema.check(Schema.isMaxLength(100))),
+  }),
   maxInputBytes: 611,
   maxOutputBytes: 614,
   promptContract: "fixture-summary-prompt",
@@ -69,7 +71,7 @@ describe("TrustedAgentHarnessCatalog", () => {
     const invalidDefinitions = [
       { ...fixtureDefinition, agent: "invalid agent" },
       { ...fixtureDefinition, model: "missing-provider" },
-      { ...fixtureDefinition, outputSchema: Schema.BigIntFromSelf },
+      { ...fixtureDefinition, outputSchema: Schema.BigInt },
       { ...fixtureDefinition, timeoutMs: 0 },
       {
         ...fixtureDefinition,

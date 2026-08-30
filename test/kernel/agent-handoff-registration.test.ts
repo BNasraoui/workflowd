@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -128,7 +128,7 @@ describe("agent handoff registration", () => {
             completionSource,
             registeredAt: at,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer)),
     )
 
@@ -147,12 +147,12 @@ describe("agent handoff registration", () => {
             completionSource,
             registeredAt: at,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer)),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
+      _tag: "Failure",
       left: { _tag: "AgentHandoffStoreError", operation: "validate exact resume prompt" },
     })
   })
@@ -188,13 +188,13 @@ describe("agent handoff registration", () => {
               completionSource,
               registeredAt: at,
             })
-            .pipe(Effect.either)
+            .pipe(Effect.result)
           const instances = yield* sql`SELECT instance_id FROM kernel_workflow_instances
             WHERE instance_id = ${`invalid-${invalidation}`}`
           return { attempted, instances }
         }).pipe(Effect.provide(layer)),
       )
-      expect(result.attempted._tag, invalidation).toBe("Left")
+      expect(result.attempted._tag, invalidation).toBe("Failure")
       expect(result.instances, invalidation).toHaveLength(0)
     }
   })

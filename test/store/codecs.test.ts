@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import { Effect, Either } from "effect"
+import { SqlClient } from "effect/unstable/sql"
+import { Effect, Result } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
 import { StoreDataError } from "../../src/store/errors"
 import {
@@ -36,7 +36,7 @@ describe("persisted row decoding", () => {
         `
         yield* sql`PRAGMA ignore_check_constraints = OFF`
 
-        const transition = yield* Effect.either(
+        const transition = yield* Effect.result(
           store.ingestPullRequest(
             {
               deliveryId: "codec-pull-request-transition",
@@ -64,10 +64,10 @@ describe("persisted row decoding", () => {
       }),
     )
 
-    expect(Either.isLeft(result.transition)).toBe(true)
-    if (Either.isRight(result.transition)) throw new Error("expected StoreDataError")
-    expect(result.transition.left).toBeInstanceOf(StoreDataError)
-    expect(result.transition.left).toMatchObject({
+    expect(Result.isFailure(result.transition)).toBe(true)
+    if (Result.isSuccess(result.transition)) throw new Error("expected StoreDataError")
+    expect(result.transition.failure).toBeInstanceOf(StoreDataError)
+    expect(result.transition.failure).toMatchObject({
       field: "row",
       record: "pull_request",
       recordId: 0,
@@ -433,7 +433,7 @@ describe("persisted row decoding", () => {
         })
         if (command === null) throw new Error("expected command")
 
-        return yield* Effect.either(
+        return yield* Effect.result(
           store.executeCommand({
             commandId: command.id,
             workerId: "command-worker",
@@ -445,10 +445,10 @@ describe("persisted row decoding", () => {
       }),
     )
 
-    expect(Either.isLeft(result)).toBe(true)
-    if (Either.isRight(result)) throw new Error("expected StoreDataError")
-    expect(result.left).toBeInstanceOf(StoreDataError)
-    expect(result.left).toMatchObject({
+    expect(Result.isFailure(result)).toBe(true)
+    if (Result.isSuccess(result)) throw new Error("expected StoreDataError")
+    expect(result.failure).toBeInstanceOf(StoreDataError)
+    expect(result.failure).toMatchObject({
       field: "review_json",
       record: "publication",
     })
