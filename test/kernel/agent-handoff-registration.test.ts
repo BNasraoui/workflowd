@@ -26,6 +26,14 @@ const workflow = {
   outputContractVersion: 1,
   retryPolicy: { maxAttempts: 3 },
 }
+const completionSource = {
+  owningHostId: "mint",
+  providerId: "opencode-primary",
+  serverId: "server-a",
+  endpointAlias: "local",
+  endpointIdentity: "http://127.0.0.1:4096",
+  providerVersion: 1,
+}
 
 const layer = (() => {
   const database = SqliteClient.layer({ filename: ":memory:" })
@@ -71,13 +79,13 @@ const register = Effect.gen(function* () {
     instanceId: "handoff-parent-child",
     waitId: "await-child",
     workflow,
-    baseline: { version: 1, messageFingerprints: ["old-answer"] },
+    completionSource,
     registeredAt: at,
   })
 })
 
 describe("agent handoff registration", () => {
-  test("atomically persists the neutral workflow, OpenCode custody baseline, and wait", async () => {
+  test("atomically persists the neutral workflow, completion watch, and wait", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -106,7 +114,7 @@ describe("agent handoff registration", () => {
     expect(result.waits).toHaveLength(1)
   })
 
-  test("rejects replay that changes the saved child-history baseline", async () => {
+  test("accepts an exact replay without recapturing mutable provider history", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const handoffs = yield* AgentHandoffStore
@@ -117,17 +125,14 @@ describe("agent handoff registration", () => {
             instanceId: "handoff-parent-child",
             waitId: "await-child",
             workflow,
-            baseline: { version: 1, messageFingerprints: ["different-answer"] },
+            completionSource,
             registeredAt: at,
           })
           .pipe(Effect.either)
       }).pipe(Effect.provide(layer)),
     )
 
-    expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "AgentHandoffStoreError", operation: "validate saved watch replay" },
-    })
+    expect(result).toMatchObject({ right: { status: "duplicate" } })
   })
 
   test("rejects a resume prompt whose exact text does not match its payload", async () => {
@@ -139,7 +144,7 @@ describe("agent handoff registration", () => {
             instanceId: "bad-prompt-handoff",
             waitId: "bad-prompt-wait",
             workflow: { ...workflow, resumePromptText: '{"task":"different"}' },
-            baseline: { version: 1, messageFingerprints: [] },
+            completionSource,
             registeredAt: at,
           })
           .pipe(Effect.either)
@@ -152,22 +157,55 @@ describe("agent handoff registration", () => {
     })
   })
 
-  test("matches the same completion both before and after wait registration", async () => {
-    for (const order of ["event-first", "wait-first"] as const) {
+  test("revalidates reserved resources and provider custody inside registration", async () => {
+    for (const invalidation of [
+      "child-resource",
+      "parent-provider",
+      "child-provider",
+      "child-source",
+    ] as const) {
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          const handoffs = yield* AgentHandoffStore
+          yield* arrangeSessions
+          if (invalidation === "child-resource") {
+            yield* sql`UPDATE kernel_working_resources SET state = 'cleaned'
+              WHERE resource_id = 'child-resource'`
+          } else if (invalidation !== "child-source") {
+            const sessionId = invalidation === "parent-provider" ? "parent-stable" : "child-stable"
+            yield* sql`UPDATE kernel_sessions SET provider_kind = 'codex'
+              WHERE session_id = ${sessionId}`
+          } else {
+            yield* sql`UPDATE kernel_sessions SET provider_id = 'different-source'
+              WHERE session_id = 'child-stable'`
+          }
+          const attempted = yield* handoffs
+            .register({
+              instanceId: `invalid-${invalidation}`,
+              waitId: `invalid-wait-${invalidation}`,
+              workflow,
+              completionSource,
+              registeredAt: at,
+            })
+            .pipe(Effect.either)
+          const instances = yield* sql`SELECT instance_id FROM kernel_workflow_instances
+            WHERE instance_id = ${`invalid-${invalidation}`}`
+          return { attempted, instances }
+        }).pipe(Effect.provide(layer)),
+      )
+      expect(result.attempted._tag, invalidation).toBe("Left")
+      expect(result.instances, invalidation).toHaveLength(0)
+    }
+  })
+
+  test("matches a completion after atomic wait registration", async () => {
+    for (const order of ["wait-first"] as const) {
       const delivered = await Effect.runPromise(
         Effect.gen(function* () {
           const events = yield* KernelEventStore
-          const handoffs = yield* AgentHandoffStore
           yield* arrangeSessions
-          if (order === "wait-first") yield* register
-          if (order === "event-first") {
-            yield* handoffs.prepare({
-              instanceId: "handoff-parent-child",
-              waitId: "await-child",
-              workflow,
-              registeredAt: at,
-            })
-          }
+          yield* register
           yield* recordAgentSessionCompletion({
             source: "agent-provider:opencode-primary:server-a",
             sourceEventId: createHash("sha256").update(`${order}:message-7`).digest("hex"),
@@ -176,7 +214,6 @@ describe("agent handoff registration", () => {
             completionId: "message-7",
             completedAt: at,
           })
-          if (order === "event-first") yield* register
           return yield* events.readReadyDeliveries("handoff-parent-child")
         }).pipe(Effect.provide(layer)),
       )
@@ -184,6 +221,26 @@ describe("agent handoff registration", () => {
       expect(delivered, order).toHaveLength(1)
       expect(delivered[0]!.event.payload).toMatchObject({ childSessionId: "child-stable" })
     }
+  })
+
+  test("returns duplicate when an exact lost-ack retry arrives after child completion", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* arrangeSessions
+        yield* register
+        yield* recordAgentSessionCompletion({
+          source: "test-source",
+          sourceEventId: "completed-before-retry",
+          childSessionId: "child-stable",
+          childSessionGeneration: 1,
+          completionId: "completed-before-retry",
+          completedAt: new Date(at.getTime() + 1_000),
+        })
+        return yield* register
+      }).pipe(Effect.provide(layer)),
+    )
+
+    expect(result.status).toBe("duplicate")
   })
 
   test("delivers one child completion independently to every waiting parent", async () => {
@@ -218,7 +275,7 @@ describe("agent handoff registration", () => {
           instanceId: "handoff-parent-two-child",
           waitId: "await-child-two",
           workflow: { ...workflow, parentSessionId: "parent-two-stable" },
-          baseline: { version: 1, messageFingerprints: [] },
+          completionSource,
           registeredAt: at,
         })
         yield* recordAgentSessionCompletion({

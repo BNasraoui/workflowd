@@ -7,6 +7,7 @@ import { enqueueNextAgentHandoff } from "./kernel/agent-handoff-reducer"
 import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
+import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
@@ -196,6 +197,7 @@ export function startHookService(
     const signals = yield* WorkSignal
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
+    const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
     const remoteCoordinator = yield* RemoteCoordinator
@@ -204,6 +206,9 @@ export function startHookService(
     }
     if (config.testJobCanary !== undefined && Option.isNone(testJobCanary)) {
       return yield* Effect.die(new Error("Test-job canary is configured without its service"))
+    }
+    if (config.agentWaits !== undefined && Option.isNone(agentWaits)) {
+      return yield* Effect.die(new Error("Agent waits are configured without their service"))
     }
     if (config.remoteCoordinator !== undefined && remoteCoordinator === null) {
       return yield* Effect.die(new Error("Remote coordinator is configured without its service"))
@@ -373,6 +378,14 @@ export function startHookService(
                         ),
                       ),
                   status: Option.getOrThrow(testJobCanary).status,
+                },
+              }),
+          ...(config.agentWaits === undefined
+            ? {}
+            : {
+                agentWaits: {
+                  token: config.agentWaits.token,
+                  register: Option.getOrThrow(agentWaits).register,
                 },
               }),
         }),

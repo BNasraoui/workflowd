@@ -45,6 +45,7 @@ interface OpenCodeConfig {
   readonly model: string
   readonly reviewerAgent: string
   readonly fixerAgent: string
+  readonly agentWakeAgent: string
   readonly pollIntervalMs: number
 }
 
@@ -88,6 +89,7 @@ export interface AppConfig {
   readonly worker: WorkerConfig
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
+  readonly agentWaits?: { readonly token: string }
   readonly remoteCoordinator?: RemoteCoordinatorConfig
 }
 
@@ -267,6 +269,7 @@ interface ResolvedSecrets {
   readonly webhookSecret: string
   readonly openCodePassword: string
   readonly testJobToken: string | undefined
+  readonly agentWaitToken: string | undefined
 }
 
 async function loadSecrets(
@@ -294,7 +297,16 @@ async function loadSecrets(
   if (testJobToken !== undefined && testJobToken.length < 8) {
     throw new Error("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
   }
-  return { webhookSecret, openCodePassword, testJobToken }
+  const agentWaitToken = await optionalSecret(
+    env,
+    "WORKFLOWD_AGENT_WAIT_TOKEN",
+    "WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
+    read,
+  )
+  if (agentWaitToken !== undefined && agentWaitToken.length < 8) {
+    throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN must contain at least 8 characters")
+  }
+  return { webhookSecret, openCodePassword, testJobToken, agentWaitToken }
 }
 
 function loadJobTiming(env: Record<string, string | undefined>): JobTiming {
@@ -426,6 +438,10 @@ function openCodeSection(
 ): OpenCodeConfig {
   return {
     baseUrl,
+    agentWakeAgent: agentId(
+      env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
+      "WORKFLOWD_AGENT_WAKE_AGENT",
+    ),
     attachUrl: credentialFreeHttpUrl(
       required(env, "WORKFLOWD_OPENCODE_ATTACH_URL"),
       "WORKFLOWD_OPENCODE_ATTACH_URL",
@@ -525,6 +541,9 @@ export async function loadConfig(
     ...(secrets.testJobToken === undefined
       ? {}
       : { testJobCanary: { token: secrets.testJobToken } }),
+    ...(secrets.agentWaitToken === undefined
+      ? {}
+      : { agentWaits: { token: secrets.agentWaitToken } }),
     ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
   }
 }

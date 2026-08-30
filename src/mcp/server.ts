@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { authorizedForWrites, type McpWriteAuth } from "./auth"
+import { authorizedForWrites, type AgentWaitDaemonConfig, type McpWriteAuth } from "./auth"
 import { TOOL_DEFINITIONS, type ToolCallContext, type ToolResult } from "./tools"
 
 export const MCP_SERVER_NAME = "workflowd"
@@ -18,6 +18,7 @@ export type RunTool = (name: string, args: unknown, context: ToolCallContext) =>
 export type McpHttpHandlerOptions = {
   readonly runTool: RunTool
   readonly auth: McpWriteAuth
+  readonly agentWaitDaemon?: AgentWaitDaemonConfig
   readonly now?: () => Date
 }
 
@@ -41,6 +42,9 @@ export const createMcpFetchHandler = (options: McpHttpHandlerOptions) => {
       writesConfigured: options.auth.mode === "enabled",
       writesAuthorized: authorizedForWrites(options.auth, request.headers.get("authorization")),
       now,
+      ...(options.agentWaitDaemon === undefined
+        ? {}
+        : { agentWaitDaemon: options.agentWaitDaemon }),
     }
     const server = new Server(
       { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },

@@ -2,6 +2,23 @@ import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
 import { McpQueries, MAX_RECENT_JOBS } from "./queries"
+import {
+  AgentWaitReceipt,
+  AgentWaitRefusal,
+  MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES,
+  MAX_AGENT_WAIT_SESSION_ID_BYTES,
+  MAX_RESUME_PROMPT_BYTES,
+  utf8BoundedText,
+} from "../agent-wait-contract"
+
+const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
+  type: "object" as const,
+  properties,
+  required: [...required],
+  additionalProperties: false,
+})
+
+const readAnnotations = { readOnlyHint: true, openWorldHint: false } as const
 
 const RECEIPT_CONTRACT =
   "This tool returns a receipt, not a result: the work runs asynchronously " +
@@ -26,6 +43,18 @@ export const TOOL_DEFINITIONS = [
       required: ["job_id"],
       additionalProperties: false,
     },
+    outputSchema: objectSchema(
+      {
+        jobId: { type: "string" },
+        state: { type: "string" },
+        attempt: { type: "integer" },
+        maxAttempts: { type: "integer" },
+        runAt: { type: "string" },
+        result: { type: ["object", "null"] },
+      },
+      ["jobId", "state", "attempt", "maxAttempts", "runAt", "result"],
+    ),
+    annotations: readAnnotations,
   },
   {
     name: "list_recent_jobs",
@@ -39,6 +68,8 @@ export const TOOL_DEFINITIONS = [
       },
       additionalProperties: false,
     },
+    outputSchema: objectSchema({ jobs: { type: "array", items: { type: "object" } } }, ["jobs"]),
+    annotations: readAnnotations,
   },
   {
     name: "host_health",
@@ -48,6 +79,8 @@ export const TOOL_DEFINITIONS = [
       "where it can be derived from the database. Read-only. A host that has " +
       "never received a dispatch will not appear.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: objectSchema({ hosts: { type: "array", items: { type: "object" } } }, ["hosts"]),
+    annotations: readAnnotations,
   },
   {
     name: "enqueue_probe",
@@ -73,18 +106,104 @@ export const TOOL_DEFINITIONS = [
       required: ["host"],
       additionalProperties: false,
     },
+    outputSchema: objectSchema(
+      {
+        probe_id: { type: "string" },
+        job_id: { type: "string" },
+        host: { type: "string" },
+        status: { type: "string", enum: ["enqueued", "duplicate"] },
+      },
+      ["probe_id", "job_id", "host", "status"],
+    ),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "wait_for_agent",
+    description:
+      "Register a durable wait so a parent agent session is woken when a child " +
+      "agent session finishes. Requires bearer-token authorization; without it " +
+      "this tool refuses. Both sessions must already be in workflowd kernel " +
+      "custody and in a ready or active state; if either is not, the call is " +
+      "refused and names the missing custody. " +
+      RECEIPT_CONTRACT +
+      " Specifically: the returned wait_id is NOT a result and this tool does " +
+      "NOT block. The workflowd resume worker prompts the parent session with " +
+      "your resume_prompt when the child completes, or flips the watch to " +
+      "operator_required if the child cannot be observed. Do not poll: register " +
+      "the wait, then end your turn. Provide idempotency_key to make " +
+      "re-registration safe; the same key always maps to the same wait.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        parent_session_id: {
+          type: "string",
+          description: "Kernel custody id of the session to wake when the child finishes.",
+        },
+        child_session_id: {
+          type: "string",
+          description: "Kernel custody id of the session to watch for completion.",
+        },
+        resume_prompt: {
+          type: "string",
+          description:
+            "Text delivered to the parent session on completion. The parent " +
+            `receives it as the JSON document {"task":"<resume_prompt>"}; maximum ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes.`,
+        },
+        idempotency_key: {
+          type: "string",
+          description: "Optional stable identity making re-registration a no-op.",
+        },
+      },
+      required: ["parent_session_id", "child_session_id", "resume_prompt"],
+      additionalProperties: false,
+    },
+    outputSchema: objectSchema(
+      {
+        wait_id: { type: "string" },
+        instance_id: { type: "string" },
+        status: { type: "string", enum: ["registered", "duplicate"] },
+      },
+      ["wait_id", "instance_id", "status"],
+    ),
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
   },
 ] as const
 
 export type ToolResult = {
   content: Array<{ type: "text"; text: string }>
+  structuredContent?: Record<string, unknown>
   isError?: boolean
+}
+
+/**
+ * How the MCP process reaches the workflowd daemon. The read tools go
+ * straight to SQLite, while registering an agent wait must atomically commit
+ * kernel custody and wake completion work, so `wait_for_agent` posts to the
+ * daemon's own ingress instead of duplicating that machinery here.
+ * The MCP process therefore stays stateless.
+ */
+export type AgentWaitDaemon = {
+  readonly baseUrl: string
+  readonly token: string
+  /** Seam for tests; defaults to the global fetch. */
+  readonly send?: (input: URL, init: RequestInit) => Promise<Response>
 }
 
 export type ToolCallContext = {
   readonly writesAuthorized: boolean
   readonly writesConfigured: boolean
   readonly now: () => Date
+  readonly agentWaitDaemon?: AgentWaitDaemon
 }
 
 const JobStatusArguments = Schema.Struct({ job_id: Schema.NonEmptyString })
@@ -101,12 +220,23 @@ const EnqueueProbeArguments = Schema.Struct({
   ),
 })
 
-const text = (value: string): ToolResult => ({ content: [{ type: "text", text: value }] })
-const failure = (value: string): ToolResult => ({
+const WaitForAgentArguments = Schema.Struct({
+  parent_session_id: utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES),
+  child_session_id: utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES),
+  resume_prompt: utf8BoundedText(MAX_RESUME_PROMPT_BYTES),
+  idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES)),
+})
+
+const structured = (value: Record<string, unknown>, rendering?: string): ToolResult => ({
+  content: [{ type: "text", text: rendering ?? JSON.stringify(value, null, 2) }],
+  structuredContent: value,
+})
+const failure = (value: string, refusal?: Record<string, unknown>): ToolResult => ({
   content: [{ type: "text", text: value }],
+  ...(refusal === undefined ? {} : { structuredContent: refusal }),
   isError: true,
 })
-const json = (value: unknown): ToolResult => text(JSON.stringify(value, null, 2))
+const json = (value: Record<string, unknown>): ToolResult => structured(value)
 
 const generatedProbeId = (now: Date) => {
   const stamp = now.toISOString().replace(/[-:.]/g, "").slice(0, 15)
@@ -152,6 +282,8 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
       }
       case "enqueue_probe":
         return yield* enqueueProbe(args, context)
+      case "wait_for_agent":
+        return yield* waitForAgent(args, context)
       default:
         return failure(`unknown tool: ${name}`)
     }
@@ -191,9 +323,106 @@ const enqueueProbe = (args: unknown, context: ToolCallContext) =>
       enqueued.right.status === "duplicate"
         ? `Already received: probe ${probeId} was previously accepted as job ${enqueued.right.jobId}.`
         : `Received: probe ${probeId} accepted as durable job ${enqueued.right.jobId} for host ${input.right.host}.`
-    return text(
+    return structured(
+      {
+        probe_id: probeId,
+        job_id: enqueued.right.jobId,
+        host: input.right.host,
+        status: enqueued.right.status === "duplicate" ? "duplicate" : "enqueued",
+      },
       `${received} This is a fire-and-ack receipt — the job runs asynchronously and ` +
         "no blocking wait exists. End your turn now. Use job_status " +
         `("${enqueued.right.jobId}") in a later turn to read the outcome.`,
+    )
+  })
+
+const waitForAgent = (args: unknown, context: ToolCallContext) =>
+  Effect.gen(function* () {
+    if (!context.writesConfigured) {
+      return failure(
+        "writes are disabled: no WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE is " +
+          "configured on the server, so wait_for_agent refuses all calls",
+      )
+    }
+    if (!context.writesAuthorized) {
+      return failure("unauthorized: wait_for_agent requires a valid bearer token")
+    }
+    const daemon = context.agentWaitDaemon
+    if (daemon === undefined) {
+      return failure(
+        "agent waits are not configured on this MCP server: set WORKFLOWD_DAEMON_URL and " +
+          "WORKFLOWD_AGENT_WAIT_TOKEN (or WORKFLOWD_AGENT_WAIT_TOKEN_FILE) on the MCP unit " +
+          "so wait_for_agent can reach the workflowd daemon's /workflows/agent-waits ingress",
+      )
+    }
+    const input = yield* decodeArguments(WaitForAgentArguments, args).pipe(Effect.either)
+    if (input._tag === "Left") {
+      return failure(
+        "invalid arguments: parent_session_id, child_session_id and resume_prompt must be " +
+          `non-empty strings (resume_prompt at most ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes), ` +
+          "and idempotency_key, when given, must be a non-empty string",
+      )
+    }
+    const body = JSON.stringify({
+      parentSessionId: input.right.parent_session_id,
+      childSessionId: input.right.child_session_id,
+      resumePrompt: input.right.resume_prompt,
+      ...(input.right.idempotency_key === undefined
+        ? {}
+        : { idempotencyKey: input.right.idempotency_key }),
+    })
+    const send = daemon.send ?? ((input: URL, init: RequestInit) => fetch(input, init))
+    const response = yield* Effect.tryPromise(() =>
+      send(new URL("/workflows/agent-waits", daemon.baseUrl), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${daemon.token}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+        body,
+      }),
+    ).pipe(Effect.timeout("10 seconds"), Effect.either)
+    if (response._tag === "Left") {
+      return failure(
+        "could not reach the workflowd daemon to register the wait; the daemon may be " +
+          "down or WORKFLOWD_DAEMON_URL may be wrong",
+      )
+    }
+    const payload = yield* Effect.tryPromise(() => response.right.json()).pipe(Effect.either)
+    if (payload._tag === "Left") {
+      return failure(
+        `the workflowd daemon returned a non-JSON response (HTTP ${response.right.status})`,
+      )
+    }
+    if (!response.right.ok) {
+      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.right).pipe(Effect.either)
+      const detail =
+        refusal._tag === "Right"
+          ? (refusal.right.detail ?? refusal.right.reason ?? refusal.right.error)
+          : `HTTP ${response.right.status}`
+      return failure(
+        `the wait was refused: ${detail}`,
+        refusal._tag === "Right" ? { ...refusal.right } : undefined,
+      )
+    }
+    const receipt = yield* decodeArguments(AgentWaitReceipt, payload.right).pipe(Effect.either)
+    if (receipt._tag === "Left") {
+      return failure("the workflowd daemon returned an unrecognized agent-wait receipt")
+    }
+    const received =
+      receipt.right.status === "duplicate"
+        ? `Already registered: this wait already exists as ${receipt.right.waitId}.`
+        : `Received: watching ${input.right.child_session_id} on behalf of ` +
+          `${input.right.parent_session_id} as wait ${receipt.right.waitId}.`
+    return structured(
+      {
+        wait_id: receipt.right.waitId,
+        instance_id: receipt.right.instanceId,
+        status: receipt.right.status,
+      },
+      `${received} This is a fire-and-ack receipt — no blocking wait exists. End your turn ` +
+        "now. workflowd will prompt the parent session when the child completes, or mark " +
+        "the watch operator_required if the child cannot be observed. Do not poll.",
     )
   })

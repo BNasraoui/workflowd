@@ -137,7 +137,10 @@ describe("strict initial store schema", () => {
         `
         const foreignKeys = yield* sql`PRAGMA foreign_keys`
         const busyTimeout = yield* sql`PRAGMA busy_timeout`
-        return { busyTimeout, foreignKeys, migrations, tables }
+        const watchColumns = yield* sql<{
+          readonly name: string
+        }>`PRAGMA table_xinfo(kernel_agent_completion_watches)`
+        return { busyTimeout, foreignKeys, migrations, tables, watchColumns }
       }),
     )
 
@@ -158,11 +161,14 @@ describe("strict initial store schema", () => {
       { migration_id: 14, name: "kernel_agent_handoff" },
       { migration_id: 15, name: "kernel_remote_dispatch" },
       { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
+      { migration_id: 17, name: "remove_agent_completion_baseline" },
     ])
     expect(result.tables).toHaveLength(31)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
+    expect(result.watchColumns.map(({ name }) => name)).not.toContain("baseline_json")
+    expect(result.watchColumns.map(({ name }) => name)).not.toContain("baseline_version")
   })
 
   test("backfills reused reconciliation authority from its latest update", async () => {

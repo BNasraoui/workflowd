@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { authorizedForWrites, loadMcpWriteAuth } from "../../src/mcp/auth"
+import { authorizedForWrites, loadAgentWaitDaemon, loadMcpWriteAuth } from "../../src/mcp/auth"
 
 test("writes are disabled when no token source is configured", async () => {
   const auth = await loadMcpWriteAuth({})
@@ -42,5 +42,87 @@ test("an unreadable or empty token file is a startup error", async () => {
   ).rejects.toThrow("Could not read WORKFLOWD_MCP_TOKEN_FILE")
   await expect(
     loadMcpWriteAuth({ WORKFLOWD_MCP_TOKEN_FILE: "/empty" }, () => Promise.resolve("\n")),
+  ).rejects.toThrow("must not be empty")
+})
+
+const daemonUrl = "http://127.0.0.1:8787"
+
+test("agent waits stay disabled when nothing is configured", async () => {
+  expect(await loadAgentWaitDaemon({})).toBeUndefined()
+  expect(
+    await loadAgentWaitDaemon({
+      WORKFLOWD_DAEMON_URL: "",
+      WORKFLOWD_AGENT_WAIT_TOKEN: "",
+      WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "",
+    }),
+  ).toBeUndefined()
+})
+
+test("a direct agent-wait token is paired with the daemon origin", async () => {
+  const daemon = await loadAgentWaitDaemon({
+    WORKFLOWD_DAEMON_URL: `${daemonUrl}/ignored/path`,
+    WORKFLOWD_AGENT_WAIT_TOKEN: "daemon-token",
+  })
+
+  expect(daemon).toEqual({ baseUrl: daemonUrl, token: "daemon-token" })
+})
+
+test("an agent-wait token file is read and its trailing newline stripped", async () => {
+  const daemon = await loadAgentWaitDaemon(
+    {
+      WORKFLOWD_DAEMON_URL: daemonUrl,
+      WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "/credentials/agent-wait-token",
+    },
+    () => Promise.resolve("file-token\n"),
+  )
+
+  expect(daemon).toEqual({ baseUrl: daemonUrl, token: "file-token" })
+})
+
+test("a half-configured agent-wait proxy is a startup error, not a silent disable", async () => {
+  await expect(loadAgentWaitDaemon({ WORKFLOWD_AGENT_WAIT_TOKEN: "daemon-token" })).rejects.toThrow(
+    "WORKFLOWD_DAEMON_URL is required",
+  )
+  await expect(loadAgentWaitDaemon({ WORKFLOWD_DAEMON_URL: daemonUrl })).rejects.toThrow(
+    "Set exactly one of",
+  )
+  await expect(
+    loadAgentWaitDaemon({
+      WORKFLOWD_DAEMON_URL: daemonUrl,
+      WORKFLOWD_AGENT_WAIT_TOKEN: "a",
+      WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "/credentials/agent-wait-token",
+    }),
+  ).rejects.toThrow("Set at most one of")
+})
+
+test("the daemon URL must be an absolute credential-free HTTP(S) URL", async () => {
+  for (const url of ["not-a-url", "ftp://example.com", "http://user:pass@example.com"]) {
+    await expect(
+      loadAgentWaitDaemon({
+        WORKFLOWD_DAEMON_URL: url,
+        WORKFLOWD_AGENT_WAIT_TOKEN: "daemon-token",
+      }),
+    ).rejects.toThrow(/WORKFLOWD_DAEMON_URL/)
+  }
+})
+
+test("an unreadable or empty agent-wait token file is a startup error", async () => {
+  await expect(
+    loadAgentWaitDaemon(
+      {
+        WORKFLOWD_DAEMON_URL: daemonUrl,
+        WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "/credentials/missing",
+      },
+      () => Promise.reject(new Error("nope")),
+    ),
+  ).rejects.toThrow("Could not read WORKFLOWD_AGENT_WAIT_TOKEN_FILE")
+  await expect(
+    loadAgentWaitDaemon(
+      {
+        WORKFLOWD_DAEMON_URL: daemonUrl,
+        WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "/credentials/empty",
+      },
+      () => Promise.resolve("\n"),
+    ),
   ).rejects.toThrow("must not be empty")
 })

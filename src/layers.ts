@@ -10,6 +10,12 @@ import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
 import { AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
+import {
+  AGENT_WAKE_CONTRACT,
+  AGENT_WAKE_MAX_OUTPUT_BYTES,
+  AgentWaitIngressLive,
+  AgentWakeResult,
+} from "./kernel/agent-wait-ingress"
 import { KernelJobStoreLive } from "./kernel/job-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import {
@@ -102,9 +108,31 @@ export const makeLiveLayer = (config: AppConfig) => {
     timeoutMs: config.worker.jobTimeoutMs,
   })
   const resumeProvider = new OpenCodeResumeAdapter(openCodeAdapter)
+  const completionSourceOptions = {
+    owningHostId: config.worker.hostId,
+    providerId: config.openCode.serverId,
+    serverId: config.openCode.serverId,
+    endpointAlias: config.openCode.endpointAlias,
+    endpointIdentity: config.openCode.baseUrl,
+    providerVersion: 1,
+    // Bounds one live-stream observation so a still-running child yields its
+    // completion-source slot to newer watches instead of holding it open.
+    observationTimeoutMs: 30_000,
+    now: () => new Date(),
+  }
   const resumeContracts = [
     resumeContract(definitions.review),
     resumeContract(definitions.fix),
+    // Generic wake contract for agent handoffs registered through the
+    // wait_for_agent tool and POST /workflows/agent-waits. The parent only has
+    // to acknowledge; it is not being asked to produce domain output.
+    resumeContract({
+      ref: AGENT_WAKE_CONTRACT,
+      outputSchema: AgentWakeResult,
+      model: config.openCode.model,
+      agent: config.openCode.agentWakeAgent,
+      maxOutputBytes: AGENT_WAKE_MAX_OUTPUT_BYTES,
+    }),
     stageResumeContract(builtInStageContracts[0], definitions.stage),
     stageResumeContract(builtInStageContracts[1], definitions.stage),
     stageResumeContract(builtInStageContracts[2], definitions.stage),
@@ -189,15 +217,7 @@ export const makeLiveLayer = (config: AppConfig) => {
       const sql = yield* SqlClient.SqlClient
       const signals = yield* WorkSignal
       return {
-        iteration: runOpenCodeCompletionSourceIteration({
-          owningHostId: config.worker.hostId,
-          providerId: config.openCode.serverId,
-          serverId: config.openCode.serverId,
-          endpointAlias: config.openCode.endpointAlias,
-          endpointIdentity: config.openCode.baseUrl,
-          providerVersion: 1,
-          now: () => new Date(),
-        }).pipe(
+        iteration: runOpenCodeCompletionSourceIteration(completionSourceOptions).pipe(
           Effect.provideService(OpenCodeCompletionProvider, provider),
           Effect.provideService(KernelEventStore, events),
           Effect.provideService(SqlClient.SqlClient, sql),
@@ -212,6 +232,10 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.provideMerge(workSignalLayer),
   )
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
+  const agentWaitIngressLayer = AgentWaitIngressLive(completionSourceOptions).pipe(
+    Layer.provideMerge(storeLayer),
+    Layer.provideMerge(workSignalLayer),
+  )
   const qrspiLayer =
     config.qrspi === undefined
       ? Layer.succeed(WorkflowStart, {
@@ -341,6 +365,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),
     qrspiWithStores,
     testJobCanaryLayer,
+    agentWaitIngressLayer,
     remoteCoordinatorLayer,
   )
 }
