@@ -1,5 +1,5 @@
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import { KernelSessionStoreLive, type KernelSessionStorePort } from "../../src/kernel/session-store"
 import { WorkflowStoreLive } from "../../src/store"
@@ -12,5 +12,5 @@ export const sessionKernelLayer = (filename: string) => {
 
 export const runSessionKernel = <A, E>(
   filename: string,
-  effect: Effect.Effect<A, E, KernelSessionStorePort | SqlClientService>,
+  effect: Effect.Effect<A, E, KernelSessionStorePort | SqlClient.SqlClient>,
 ) => Effect.runPromise(effect.pipe(Effect.provide(sessionKernelLayer(filename))))

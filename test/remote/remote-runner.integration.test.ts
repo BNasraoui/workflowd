@@ -18,10 +18,7 @@ const container = `workflowd-nats-runner-${process.pid}`
 const port = 46_000 + (process.pid % 500)
 const server = `nats://127.0.0.1:${port}`
 const now = new Date("2026-08-14T12:00:00.000Z")
-const SilentLogger = Logger.replace(
-  Logger.defaultLogger,
-  Logger.make(() => undefined),
-)
+const SilentLogger = Logger.layer([Logger.make(() => undefined)])
 
 const docker = async (...arguments_: ReadonlyArray<string>) => {
   const process = Bun.spawn(["docker", ...arguments_], { stdout: "pipe", stderr: "pipe" })
@@ -214,10 +211,12 @@ describe.serial("remote runner against real JetStream", () => {
           return yield* runRemoteRunnerIteration("host-restart", now, {
             afterDurableReceipt: () =>
               store.readCommand("restart-command").pipe(
-                Effect.tap((record) => {
-                  durableBeforeAck = record?.state === "received"
-                }),
-                Effect.zipRight(Effect.fail(new Error("simulated stop"))),
+                Effect.tap((record) =>
+                  Effect.sync(() => {
+                    durableBeforeAck = record?.state === "received"
+                  }),
+                ),
+                Effect.andThen(Effect.fail(new Error("simulated stop"))),
               ),
           }).pipe(Effect.exit)
         }),

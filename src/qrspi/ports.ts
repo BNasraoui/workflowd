@@ -20,7 +20,7 @@ export type TicketSourcePort = {
     reference: TicketReference,
   ) => Effect.Effect<JsonValue, TicketSourceError | TicketSourceMalformedError>
 }
-export const TicketSource = Context.GenericTag<TicketSourcePort>("workflowd/qrspi/TicketSource")
+export const TicketSource = Context.Service<TicketSourcePort>("workflowd/qrspi/TicketSource")
 
 export type RepositoryInspection = {
   readonly repository: RepositoryReference
@@ -78,6 +78,6 @@ export type QrspiRepositoryPort = {
     }
   }) => Effect.Effect<{ readonly sha: string }, QrspiRepositoryError | Error>
 }
-export const QrspiRepository = Context.GenericTag<QrspiRepositoryPort>(
+export const QrspiRepository = Context.Service<QrspiRepositoryPort>(
   "workflowd/qrspi/QrspiRepository",
 )

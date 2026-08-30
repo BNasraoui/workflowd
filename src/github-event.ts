@@ -30,7 +30,7 @@ const PullRequestPayload = Schema.Struct({
   pull_request: Schema.Struct({
     number: Schema.Number,
     draft: Schema.optional(Schema.Boolean),
-    state: Schema.Literal("open", "closed"),
+    state: Schema.Literals(["open", "closed"]),
     user: Schema.Struct({ login: Schema.String }),
     head: Schema.Struct({
       sha: Schema.String,
@@ -67,7 +67,7 @@ export function decodeGitHubEvent(
   payload: unknown,
 ): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
   if (event === "issue_comment") {
-    return Schema.decodeUnknown(IssueCommentPayload)(payload).pipe(
+    return Schema.decodeUnknownEffect(IssueCommentPayload)(payload).pipe(
       Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
       Effect.flatMap((decoded): Effect.Effect<GitHubEvent, InvalidGitHubEvent> => {
         if (decoded.installation === undefined) {
@@ -93,7 +93,7 @@ export function decodeGitHubEvent(
           })
         }
 
-        return Schema.decodeUnknown(Command)({
+        return Schema.decodeUnknownEffect(Command)({
           _tag: "Command",
           action: decoded.action,
           command: match[1]!.toLowerCase(),
@@ -116,7 +116,7 @@ export function decodeGitHubEvent(
     return Effect.succeed({ _tag: "Ignored", reason: `unsupported:${event}` })
   }
 
-  return Schema.decodeUnknown(PullRequestPayload)(payload).pipe(
+  return Schema.decodeUnknownEffect(PullRequestPayload)(payload).pipe(
     Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
     Effect.flatMap((decoded): Effect.Effect<GitHubEvent, InvalidGitHubEvent> => {
       if (decoded.installation === undefined) {
@@ -133,7 +133,7 @@ export function decodeGitHubEvent(
         )
       }
 
-      return Schema.decodeUnknown(PullRequestObservation)({
+      return Schema.decodeUnknownEffect(PullRequestObservation)({
         _tag: "PullRequest",
         action: decoded.action,
         installationId: decoded.installation.id,

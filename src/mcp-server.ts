@@ -83,7 +83,7 @@ export const startMcpServer = (
       runtime
         .runPromise(
           callTool(name, args, context).pipe(
-            Effect.catchAll((): Effect.Effect<ToolResult> =>
+            Effect.catch((): Effect.Effect<ToolResult> =>
               Effect.succeed({
                 content: [{ type: "text", text: "tool call failed: store error" }],
                 isError: true,

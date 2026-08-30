@@ -13,14 +13,16 @@ import {
 import { structurePolicyReference } from "./design"
 
 const StructureSources = ExactStageSources.pipe(
-  Schema.filter((sources) =>
-    sources.sources.filter(({ role }) => role === "Design").length === 1 &&
-    isOrderedRoleSubsequence(
-      sources.sources.map(({ role }) => role),
-      ["Design", "Research", "Questions"],
-    )
-      ? true
-      : "Structure requires exactly one Design predecessor followed by Research/Questions",
+  Schema.check(
+    Schema.makeFilter((sources) =>
+      sources.sources.filter(({ role }) => role === "Design").length === 1 &&
+      isOrderedRoleSubsequence(
+        sources.sources.map(({ role }) => role),
+        ["Design", "Research", "Questions"],
+      )
+        ? true
+        : "Structure requires exactly one Design predecessor followed by Research/Questions",
+    ),
   ),
 )
 
@@ -30,23 +32,25 @@ export const StructureRequest = Schema.Struct({
   structurePolicy: exactPolicyReference(structurePolicyReference),
   authority: StructureAuthority,
 }).pipe(
-  Schema.filter((request) => {
-    const { authority, sources } = request
-    const sameRepository =
-      authority.graph.repository.providerInstanceId ===
-        sources.target.repository.providerInstanceId &&
-      authority.graph.repository.repositoryId === sources.target.repository.repositoryId
-    const designSource = sources.sources.find(({ role }) => role === "Design")
-    return designSource !== undefined &&
-      authority.acceptancePackage.workflowId === sources.workflowId &&
-      authority.acceptancePackage.generation === sources.generation &&
-      authority.acceptancePackage.designStageRevision ===
-        designSource.acceptedPointer.acceptedStageRevision &&
-      authority.acceptancePackage.designStageRevision === designSource.artifact.stageRevision &&
-      sameRepository
-      ? true
-      : "Structure authority is outside the exact stage scope"
-  }),
+  Schema.check(
+    Schema.makeFilter((request) => {
+      const { authority, sources } = request
+      const sameRepository =
+        authority.graph.repository.providerInstanceId ===
+          sources.target.repository.providerInstanceId &&
+        authority.graph.repository.repositoryId === sources.target.repository.repositoryId
+      const designSource = sources.sources.find(({ role }) => role === "Design")
+      return designSource !== undefined &&
+        authority.acceptancePackage.workflowId === sources.workflowId &&
+        authority.acceptancePackage.generation === sources.generation &&
+        authority.acceptancePackage.designStageRevision ===
+          designSource.acceptedPointer.acceptedStageRevision &&
+        authority.acceptancePackage.designStageRevision === designSource.artifact.stageRevision &&
+        sameRepository
+        ? true
+        : "Structure authority is outside the exact stage scope"
+    }),
+  ),
 )
 
 export const StructureResult = Schema.Struct({

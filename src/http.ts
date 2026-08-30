@@ -113,15 +113,16 @@ function handleTestJobSubmit(
     if (bytes.byteLength > maxBodyBytes) {
       return Response.json({ error: "payload too large" }, { status: 413 })
     }
-    const json = yield* Schema.decodeUnknown(JsonText)(new TextDecoder().decode(bytes)).pipe(
-      Effect.catchAll(() => Effect.succeed(undefined)),
+    const json = yield* Schema.decodeUnknownEffect(JsonText)(new TextDecoder().decode(bytes)).pipe(
+      Effect.catch(() => Effect.succeed(undefined)),
     )
     if (json === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
-    const input = yield* Schema.decodeUnknown(TestJobSubmission)(json, {
+    const input = yield* Schema.decodeUnknownEffect(TestJobSubmission)(json, {
       onExcessProperty: "error",
-    }).pipe(Effect.either)
-    if (input._tag === "Left") return Response.json({ error: "invalid test job" }, { status: 400 })
-    return yield* ingress.submit(input.right, now).pipe(
+    }).pipe(Effect.result)
+    if (input._tag === "Failure")
+      return Response.json({ error: "invalid test job" }, { status: 400 })
+    return yield* ingress.submit(input.success, now).pipe(
       Effect.match({
         onFailure: (error) =>
           error instanceof TestJobCanaryConflict
@@ -131,7 +132,7 @@ function handleTestJobSubmit(
       }),
     )
   }).pipe(
-    Effect.catchAllCause((cause) =>
+    Effect.catchCause((cause) =>
       Effect.logError("Test-job ingress failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
@@ -143,7 +144,7 @@ function handleTestJobStatus(request: Request, ingress: TestJobIngress, jobId: s
   if (!authorized(request.headers.get("authorization"), ingress.token)) {
     return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
   }
-  return Schema.decodeUnknown(TestJobId)(jobId).pipe(
+  return Schema.decodeUnknownEffect(TestJobId)(jobId).pipe(
     Effect.flatMap(ingress.status),
     Effect.match({
       onFailure: testJobStatusFailure,
@@ -156,7 +157,7 @@ function testJobStatusFailure(error: TestJobCanaryError): Response {
   if (error instanceof TestJobCanaryNotFound) {
     return Response.json({ error: "not found" }, { status: 404 })
   }
-  if ("_tag" in error && error._tag === "ParseError") {
+  if ("_tag" in error && error._tag === "SchemaError") {
     return Response.json({ error: "invalid test job ID" }, { status: 400 })
   }
   return Response.json({ error: "internal server error" }, { status: 500 })
@@ -176,14 +177,14 @@ function handleAgentWaitRegister(
     if (bytes.byteLength > maxBodyBytes) {
       return Response.json({ error: "payload too large" }, { status: 413 })
     }
-    const json = yield* Schema.decodeUnknown(JsonText)(new TextDecoder().decode(bytes)).pipe(
-      Effect.catchAll(() => Effect.succeed(undefined)),
+    const json = yield* Schema.decodeUnknownEffect(JsonText)(new TextDecoder().decode(bytes)).pipe(
+      Effect.catch(() => Effect.succeed(undefined)),
     )
     if (json === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
-    const input = yield* Schema.decodeUnknown(AgentWaitSubmission)(json, {
+    const input = yield* Schema.decodeUnknownEffect(AgentWaitSubmission)(json, {
       onExcessProperty: "error",
-    }).pipe(Effect.either)
-    if (input._tag === "Left") {
+    }).pipe(Effect.result)
+    if (input._tag === "Failure") {
       return Response.json(
         {
           error:
@@ -193,14 +194,14 @@ function handleAgentWaitRegister(
         { status: 400 },
       )
     }
-    return yield* ingress.register(input.right, now).pipe(
+    return yield* ingress.register(input.success, now).pipe(
       Effect.match({
         onFailure: agentWaitFailure,
         onSuccess: (receipt) => Response.json(receipt, { status: 202 }),
       }),
     )
   }).pipe(
-    Effect.catchAllCause((cause) =>
+    Effect.catchCause((cause) =>
       Effect.logError("Agent-wait ingress failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
@@ -235,9 +236,9 @@ function handleQrspiStart(request: Request, ingress: QrspiIngress, maxBodyBytes:
     if (bytes.byteLength > maxBodyBytes) {
       return Response.json({ error: "payload too large" }, { status: 413 })
     }
-    const payload = yield* Schema.decodeUnknown(JsonText)(new TextDecoder().decode(bytes)).pipe(
-      Effect.catchAll(() => Effect.succeed(undefined)),
-    )
+    const payload = yield* Schema.decodeUnknownEffect(JsonText)(
+      new TextDecoder().decode(bytes),
+    ).pipe(Effect.catch(() => Effect.succeed(undefined)))
     if (payload === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
     return yield* ingress.start(payload).pipe(
       Effect.match({
@@ -247,7 +248,7 @@ function handleQrspiStart(request: Request, ingress: QrspiIngress, maxBodyBytes:
       }),
     )
   }).pipe(
-    Effect.catchAllCause((cause) =>
+    Effect.catchCause((cause) =>
       Effect.logError("QRSPI ingress failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
@@ -329,15 +330,13 @@ export function handleGitHubWebhook(
     }
 
     const bodyText = new TextDecoder().decode(body)
-    const payload = yield* Schema.decodeUnknown(JsonText)(bodyText).pipe(
-      Effect.catchAll(() =>
-        Effect.succeed(Response.json({ error: "invalid JSON" }, { status: 400 })),
-      ),
+    const payload = yield* Schema.decodeUnknownEffect(JsonText)(bodyText).pipe(
+      Effect.catch(() => Effect.succeed(Response.json({ error: "invalid JSON" }, { status: 400 }))),
     )
     if (payload instanceof Response) return payload
 
     const decoded = yield* decodeGitHubEvent(eventName, payload).pipe(
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         Effect.succeed(Response.json({ error: error.message }, { status: 400 })),
       ),
     )
@@ -379,7 +378,7 @@ export function handleGitHubWebhook(
       { status: 202 },
     )
   }).pipe(
-    Effect.catchAllCause((cause) =>
+    Effect.catchCause((cause) =>
       Effect.logError("Webhook ingestion failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),

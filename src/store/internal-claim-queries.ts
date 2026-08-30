@@ -1,4 +1,4 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 
 export function commandClaimCandidate(sql: SqlClient, now: string) {
   return sql`

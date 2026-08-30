@@ -30,9 +30,9 @@ function captureLogs<A, E, R>(
   logs: Array<{ readonly level: string; readonly message: unknown }>,
 ): Effect.Effect<A, E, R> {
   const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
-    logs.push({ level: logLevel.label, message })
+    logs.push({ level: logLevel, message })
   })
-  return effect.pipe(Effect.provide(Logger.replace(Logger.defaultLogger, logger)))
+  return effect.pipe(Effect.provide(Logger.layer([logger])))
 }
 
 async function git(cwd: string, ...args: ReadonlyArray<string>): Promise<string> {
@@ -288,7 +288,7 @@ describe("GitWorkspaceAdapter", () => {
               diff: await readFile(join(workspace.directory, ".workflowd/review.diff"), "utf8"),
               directory: workspace.directory,
               head: await git(workspace.directory, "rev-parse", "HEAD"),
-              review: Schema.decodeUnknownSync(Schema.parseJson(ReviewResult))(
+              review: Schema.decodeUnknownSync(Schema.fromJsonString(ReviewResult))(
                 await readFile(join(workspace.directory, ".workflowd/review.json"), "utf8"),
               ),
             })),
@@ -425,7 +425,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(await readFile(userFile, "utf8")).toBe("keep me\n")
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({
-      level: "WARN",
+      level: "Warn",
       message: [{ operation: "remove review context" }],
     })
   })
@@ -443,23 +443,23 @@ describe("GitWorkspaceAdapter", () => {
         const enteredA = yield* Deferred.make<void>()
         const enteredC = yield* Deferred.make<void>()
         const releaseC = yield* Deferred.make<void>()
-        const a = yield* Effect.fork(
+        const a = yield* Effect.forkChild(
           Effect.scoped(
             manager.prepareReview(job).pipe(
               Effect.tap(() => Deferred.succeed(enteredA, undefined)),
-              Effect.zipRight(Deferred.await(releaseA)),
+              Effect.andThen(Deferred.await(releaseA)),
             ),
           ),
         )
         yield* Deferred.await(enteredA)
-        const b = yield* Effect.fork(Effect.scoped(manager.prepareReview(job)))
+        const b = yield* Effect.forkChild(Effect.scoped(manager.prepareReview(job)))
         yield* Effect.sleep("50 millis")
         yield* Fiber.interrupt(b)
-        const c = yield* Effect.fork(
+        const c = yield* Effect.forkChild(
           Effect.scoped(
             manager.prepareReview(job).pipe(
               Effect.tap(() => Deferred.succeed(enteredC, undefined)),
-              Effect.zipRight(Deferred.await(releaseC)),
+              Effect.andThen(Deferred.await(releaseC)),
             ),
           ),
         )
@@ -608,12 +608,12 @@ describe("GitWorkspaceAdapter", () => {
     const manager = makeManager(fixture, [], registry)
     const fiber = Effect.runFork(Effect.scoped(manager.prepareReview(makeReviewJob(fixture))))
     await Bun.sleep(100)
-    const beforeUnlock = await Effect.runPromise(Fiber.poll(fiber))
+    const beforeUnlock = fiber.pollUnsafe()
     killProcessGroup(holder.pid)
     await holder.exited
     await Effect.runPromise(Fiber.join(fiber))
 
-    expect(beforeUnlock._tag).toBe("None")
+    expect(beforeUnlock).toBeUndefined()
   })
 
   test("keeps controller context out of git add -A and restores a clean worktree", async () => {
@@ -666,7 +666,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(await readFile(marker, "utf8")).toBe("workflowd:v1\n")
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({
-      level: "WARN",
+      level: "Warn",
       message: [{ operation: "remove review context" }],
     })
   })
@@ -1022,8 +1022,7 @@ describe("GitWorkspaceAdapter", () => {
     expect(exit).toMatchObject({
       _tag: "Failure",
       cause: {
-        _tag: "Fail",
-        error: { operation: "verify controller fix signature" },
+        reasons: [{ _tag: "Fail", error: { operation: "verify controller fix signature" } }],
       },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
@@ -1053,7 +1052,7 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { operation: "verify fix ancestry" } },
+      cause: { reasons: [{ _tag: "Fail", error: { operation: "verify fix ancestry" } }] },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })
@@ -1083,7 +1082,7 @@ describe("GitWorkspaceAdapter", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { operation: "verify fix commit ownership" } },
+      cause: { reasons: [{ _tag: "Fail", error: { operation: "verify fix commit ownership" } }] },
     })
     expect(await git(fixture.remote, "rev-parse", "refs/heads/feature")).toBe(fixture.headSha)
   })

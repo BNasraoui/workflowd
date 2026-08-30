@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { posix } from "node:path"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { JsonValueSchema } from "../json"
 import type {
@@ -190,7 +190,7 @@ export type KernelSessionStorePort = {
   ) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, KernelSessionStoreError>
 }
 
-export const KernelSessionStore = Context.GenericTag<KernelSessionStorePort>(
+export const KernelSessionStore = Context.Service<KernelSessionStorePort>(
   "workflowd/kernel/KernelSessionStore",
 )
 const inputError = (message: string) => new KernelSessionStoreInputError({ message })
@@ -207,7 +207,7 @@ const validDate = (value: Date) =>
 const leaseDeadline = (now: Date, durationMs: number) =>
   validDate(new Date(now.getTime() + durationMs))
 const boundedJson = (value: unknown) =>
-  Schema.decodeUnknown(JsonValueSchema)(value).pipe(
+  Schema.decodeUnknownEffect(JsonValueSchema)(value).pipe(
     Effect.mapError((error) => inputError(String(error))),
     Effect.flatMap((decoded) => {
       const json = canonical(decoded)
@@ -253,11 +253,15 @@ const validateCleanupAuthority = (input: CleanupAuthority) =>
 const dataError = (record: string, key: string) => (error: unknown) =>
   new KernelSessionStoreDataError({ record, key, message: String(error) })
 const decodeRead = (
-  schema: Schema.Schema.AnyNoContext,
+  schema: Schema.Codec<unknown, unknown>,
   record: string,
   key: string,
   row: Record<string, unknown>,
-) => Schema.decodeUnknown(schema)(row).pipe(Effect.mapError(dataError(record, key)), Effect.as(row))
+) =>
+  Schema.decodeUnknownEffect(schema)(row).pipe(
+    Effect.mapError(dataError(record, key)),
+    Effect.as(row),
+  )
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -476,15 +480,17 @@ const make = Effect.gen(function* () {
           WHERE cleanup.resource_id = resource.resource_id AND cleanup.state IN ('pending', 'leased', 'retry_scheduled', 'operator_required'))
       ORDER BY request.run_at, request.request_id`
       for (const candidate of candidates) {
-        const rowDecoded = yield* Schema.decodeUnknown(ResumeReadRow)(candidate).pipe(Effect.either)
-        const decoded = yield* Schema.decodeUnknown(Schema.parseJson(JsonValueSchema))(
+        const rowDecoded = yield* Schema.decodeUnknownEffect(ResumeReadRow)(candidate).pipe(
+          Effect.result,
+        )
+        const decoded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(JsonValueSchema))(
           candidate.prompt_json,
-        ).pipe(Effect.either)
+        ).pipe(Effect.result)
         const valid =
-          rowDecoded._tag === "Right" &&
-          rowDecoded.right.attempt < rowDecoded.right.max_attempts &&
-          decoded._tag === "Right" &&
-          canonical(decoded.right) === candidate.prompt_text &&
+          rowDecoded._tag === "Success" &&
+          rowDecoded.success.attempt < rowDecoded.success.max_attempts &&
+          decoded._tag === "Success" &&
+          canonical(decoded.success) === candidate.prompt_text &&
           createHash("sha256").update(String(candidate.prompt_text)).digest("hex") ===
             candidate.prompt_sha256
         if (!valid) {
@@ -521,7 +527,7 @@ const make = Effect.gen(function* () {
           maxAttempts: Number(row.max_attempts),
           claimToken: token,
           leaseUntil: until,
-          prompt: decoded.right,
+          prompt: decoded.success,
           promptText: String(row.prompt_text),
           outputContract: typeof row.output_contract === "string" ? row.output_contract : null,
           outputContractVersion:
@@ -812,8 +818,10 @@ const make = Effect.gen(function* () {
         WHERE owning_host_id = ${input.owningHostId} AND state IN ('pending', 'retry_scheduled')
           AND run_at <= ${nowText} ORDER BY run_at, cleanup_id`
       for (const candidate of malformed) {
-        const decoded = yield* Schema.decodeUnknown(CleanupReadRow)(candidate).pipe(Effect.either)
-        if (decoded._tag === "Left") {
+        const decoded = yield* Schema.decodeUnknownEffect(CleanupReadRow)(candidate).pipe(
+          Effect.result,
+        )
+        if (decoded._tag === "Failure") {
           yield* sql`UPDATE kernel_cleanup_requests SET state = 'data_error', updated_at = ${nowText}
             WHERE cleanup_id = ${candidate.cleanup_id}`
           yield* sql`UPDATE kernel_working_resources SET state = 'data_error',
@@ -933,7 +941,7 @@ const make = Effect.gen(function* () {
     table: string,
     key: string,
     value: string,
-    schema: Schema.Schema.AnyNoContext,
+    schema: Schema.Codec<unknown, unknown>,
     record: string,
   ) =>
     sql
@@ -983,8 +991,8 @@ const make = Effect.gen(function* () {
         Schema.Struct({
           result_id: Schema.String,
           request_id: Schema.String,
-          attempt: Schema.Int.pipe(Schema.positive()),
-          result_version: Schema.Int.pipe(Schema.positive()),
+          attempt: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+          result_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
           result_json: JsonText,
           completed_at: Timestamp,
         }),

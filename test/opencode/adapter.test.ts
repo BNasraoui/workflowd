@@ -1,328 +1,376 @@
 import { describe, expect, test } from "bun:test"
-import { SdkOpenCodeAdapter, type OpenCodeSdkClient } from "../../src/opencode/adapter"
-import type { AssistantMessage, Event } from "@opencode-ai/sdk/v2/client"
+import { Effect, Stream } from "effect"
+import {
+  SdkOpenCodeAdapter,
+  structuredExtractionPrompt,
+  toWireEvent,
+  type OpenCodeAssistantMessage,
+  type OpenCodeSdkClient,
+  type OpenCodeWireEvent,
+} from "../../src/opencode/adapter"
 
-async function collect<T>(values: AsyncIterable<T>): Promise<ReadonlyArray<T>> {
-  const collected: Array<T> = []
-  for await (const value of values) collected.push(value)
-  return collected
+function makeClient(overrides: Partial<OpenCodeSdkClient> = {}): OpenCodeSdkClient {
+  return {
+    createSession: () => Effect.succeed({ id: "ses_1" }),
+    promptSession: () => Effect.void,
+    subscribeEvents: () => Stream.empty,
+    activeSessions: () => Effect.succeed([]),
+    sessionOutcome: () => Effect.succeed({ id: "ses_1", idle: true }),
+    listMessages: () => Effect.succeed([]),
+    interruptSession: () => Effect.succeed(true),
+    generateText: () => Effect.succeed("{}"),
+    listAgents: () => Effect.succeed([]),
+    listModels: () => Effect.succeed([]),
+    ...overrides,
+  }
 }
 
-function availabilityAdapter(agents: ReadonlyArray<string>, models: ReadonlyArray<string>) {
-  const client = {
-    createSession: async () => ({ id: "unused" }),
-    promptSession: async () => undefined,
-    subscribeEvents: async () => (async function* () {})(),
-    getSessionStatuses: async () => ({}),
-    sessionExists: async () => true,
-    listSessionMessages: async () => [],
-    abortSession: async () => true,
-    listAgents: async () => agents,
-    listProviders: async () => [{ id: "anthropic", modelIDs: models }],
-  } satisfies OpenCodeSdkClient
-  return new SdkOpenCodeAdapter(client)
+const collectEvents = (adapter: SdkOpenCodeAdapter, directory: string) =>
+  Effect.runPromise(
+    Stream.runCollect(adapter.subscribeSessionEvents({ directory })).pipe(
+      Effect.map((collected) => [...collected]),
+    ),
+  )
+
+const completedMessage: OpenCodeAssistantMessage = {
+  id: "msg_1",
+  role: "assistant",
+  time: { created: 1, completed: 2 },
 }
 
-const requested = {
-  agents: ["pr-reviewer", "pr-fixer"],
-  model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-}
-
-describe("OpenCodeAdapter.subscribeSessionEvents", () => {
-  test("does not open the SDK subscription before iteration starts", async () => {
-    let subscriptionStarted = false
-    const client = {
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async () => undefined,
-      subscribeEvents: async () => {
-        subscriptionStarted = true
-        return (async function* () {})()
-      },
-      getSessionStatuses: async () => ({}),
-      sessionExists: async () => true,
-      listSessionMessages: async () => [],
-      abortSession: async () => true,
-      listAgents: async () => [],
-      listProviders: async () => [],
-    } satisfies OpenCodeSdkClient
-    const adapter = new SdkOpenCodeAdapter(client)
-
-    const events = await adapter.subscribeSessionEvents(
-      { directory: "/tmp/worktree" },
-      new AbortController().signal,
-    )
-    await events[Symbol.asyncIterator]().return?.()
-
-    expect(subscriptionStarted).toBe(false)
-  })
-
-  test("aborts and finalizes a live SDK subscription when consumption stops early", async () => {
-    let subscriptionSignal: AbortSignal | undefined
-    const lifecycle: Array<"abort" | "return"> = []
-    const client = {
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async () => undefined,
-      subscribeEvents: async (_input, signal) => {
-        subscriptionSignal = signal
-        const recordAbort = () => lifecycle.push("abort")
-        signal.addEventListener("abort", recordAbort)
-        let yielded = false
-        return {
-          [Symbol.asyncIterator]: () => ({
-            next: async () => {
-              if (yielded) return new Promise<never>(() => undefined)
-              yielded = true
-              return {
-                done: false as const,
-                value: {
-                  id: "evt_1",
-                  type: "session.idle",
-                  properties: { sessionID: "ses_1" },
-                } satisfies Event,
-              }
-            },
-            return: async () => {
-              signal.removeEventListener("abort", recordAbort)
-              lifecycle.push("return")
-              return { done: true as const, value: undefined }
-            },
-          }),
-        }
-      },
-      getSessionStatuses: async () => ({}),
-      sessionExists: async () => true,
-      listSessionMessages: async () => [],
-      abortSession: async () => true,
-      listAgents: async () => [],
-      listProviders: async () => [],
-    } satisfies OpenCodeSdkClient
-    const adapter = new SdkOpenCodeAdapter(client)
-    const caller = new AbortController()
-
-    const events = await adapter.subscribeSessionEvents(
-      { directory: "/tmp/worktree" },
-      caller.signal,
-    )
-    for await (const event of events) {
-      expect(event).toEqual({
+describe("SdkOpenCodeAdapter.subscribeSessionEvents", () => {
+  test("normalizes wire events and scopes them to the subscribed directory", async () => {
+    const wire: ReadonlyArray<OpenCodeWireEvent> = [
+      {
         type: "session.status",
         sessionID: "ses_1",
-        status: { type: "idle" },
-      })
-      break
-    }
-
-    expect(subscriptionSignal).not.toBe(caller.signal)
-    expect(subscriptionSignal?.aborted).toBe(true)
-    expect(lifecycle).toEqual(["abort", "return"])
-    expect(caller.signal.aborted).toBe(false)
-  })
-
-  test("forwards caller cancellation to the SDK subscription", async () => {
-    let subscriptionSignal: AbortSignal | undefined
-    let markSubscriptionStarted: () => void = () => undefined
-    const subscriptionStarted = new Promise<void>((resolve) => {
-      markSubscriptionStarted = resolve
-    })
-    const client = {
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async () => undefined,
-      subscribeEvents: async (_input, signal) => {
-        subscriptionSignal = signal
-        markSubscriptionStarted()
-        return {
-          [Symbol.asyncIterator]: () => ({
-            next: async () => {
-              await new Promise<void>((resolve) => {
-                if (signal.aborted) resolve()
-                else signal.addEventListener("abort", () => resolve(), { once: true })
-              })
-              return { done: true, value: undefined } as const
-            },
-          }),
-        }
+        directory: "/repo",
+        status: { type: "busy" },
       },
-      getSessionStatuses: async () => ({}),
-      sessionExists: async () => true,
-      listSessionMessages: async () => [],
-      abortSession: async () => true,
-      listAgents: async () => [],
-      listProviders: async () => [],
-    } satisfies OpenCodeSdkClient
-    const adapter = new SdkOpenCodeAdapter(client)
-    const caller = new AbortController()
-    const events = await adapter.subscribeSessionEvents(
-      { directory: "/tmp/worktree" },
-      caller.signal,
+      { type: "session.status", sessionID: "ses_2", directory: "/other", status: { type: "busy" } },
+      { type: "session.idle", sessionID: "ses_1", directory: "/repo" },
+      {
+        type: "execution.failed",
+        sessionID: "ses_1",
+        directory: "/repo",
+        error: { message: "boom" },
+      },
+      { type: "execution.succeeded", sessionID: "ses_1", directory: "/repo" },
+    ]
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        subscribeEvents: () => Stream.fromIterable(wire),
+        listMessages: () => Effect.succeed([completedMessage]),
+      }),
     )
 
-    const completion = events[Symbol.asyncIterator]().next()
-    await subscriptionStarted
-    const reason = new Error("caller cancelled")
-    caller.abort(reason)
+    expect(await collectEvents(adapter, "/repo")).toEqual([
+      { type: "session.status", sessionID: "ses_1", status: { type: "busy" } },
+      { type: "session.status", sessionID: "ses_1", status: { type: "idle" } },
+      { type: "session.error", sessionID: "ses_1", error: { message: "boom" } },
+      { type: "message.updated", sessionID: "ses_1", message: completedMessage },
+    ])
+  })
 
-    expect(await completion).toEqual({ done: true, value: undefined })
-    expect(subscriptionSignal).not.toBe(caller.signal)
-    expect(subscriptionSignal?.aborted).toBe(true)
-    expect(subscriptionSignal?.reason).toBe(reason)
+  test("falls back to an idle status when a finished session has no completed message", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        subscribeEvents: () =>
+          Stream.fromIterable<OpenCodeWireEvent>([
+            { type: "execution.succeeded", sessionID: "ses_1", directory: "/repo" },
+          ]),
+        listMessages: () => Effect.succeed([{ role: "assistant" as const, time: { created: 1 } }]),
+      }),
+    )
+
+    expect(await collectEvents(adapter, "/repo")).toEqual([
+      { type: "session.status", sessionID: "ses_1", status: { type: "idle" } },
+    ])
+  })
+
+  test("surfaces interruptions as session errors", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        subscribeEvents: () =>
+          Stream.fromIterable<OpenCodeWireEvent>([
+            { type: "execution.interrupted", sessionID: "ses_1", directory: "/repo" },
+          ]),
+      }),
+    )
+
+    const events = await collectEvents(adapter, "/repo")
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: "session.error", sessionID: "ses_1" })
   })
 })
 
-describe("OpenCodeAdapter.validateAvailability", () => {
+describe("SdkOpenCodeAdapter.getSessionStatus", () => {
+  test("reports busy while the session is active", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({ activeSessions: () => Effect.succeed(["ses_1"]) }),
+    )
+
+    expect(
+      await Effect.runPromise(adapter.getSessionStatus({ sessionID: "ses_1", directory: "/repo" })),
+    ).toEqual({ type: "busy" })
+  })
+
+  test("reports idle for an inactive session that still exists", async () => {
+    const adapter = new SdkOpenCodeAdapter(makeClient())
+
+    expect(
+      await Effect.runPromise(adapter.getSessionStatus({ sessionID: "ses_1", directory: "/repo" })),
+    ).toEqual({ type: "idle" })
+  })
+
+  test("reports undefined for a missing session", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({ sessionOutcome: () => Effect.succeed(undefined) }),
+    )
+
+    expect(
+      await Effect.runPromise(adapter.getSessionStatus({ sessionID: "ses_1", directory: "/repo" })),
+    ).toBeUndefined()
+  })
+})
+
+describe("SdkOpenCodeAdapter.validateAvailability", () => {
+  const requested = {
+    agents: ["pr-reviewer", "pr-fixer"],
+    model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+  }
+
   test("accepts configured agents and a configured provider model", async () => {
-    const adapter = availabilityAdapter(
-      ["pr-reviewer", "pr-fixer", "general"],
-      ["claude-sonnet-4-6"],
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        listAgents: () => Effect.succeed(["pr-reviewer", "pr-fixer", "general"]),
+        listModels: () => Effect.succeed([{ providerID: "anthropic", id: "claude-sonnet-4-6" }]),
+      }),
     )
 
     await expect(
-      adapter.validateAvailability(requested, new AbortController().signal),
+      Effect.runPromise(adapter.validateAvailability(requested)),
     ).resolves.toBeUndefined()
   })
 
   test("reports every unavailable configured integration", async () => {
-    const adapter = availabilityAdapter(["pr-reviewer"], ["claude-haiku-4-5"])
-
-    await expect(
-      adapter.validateAvailability(requested, new AbortController().signal),
-    ).rejects.toThrow(
-      "Unavailable OpenCode integration: agent pr-fixer, model anthropic/claude-sonnet-4-6",
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        listAgents: () => Effect.succeed(["pr-reviewer"]),
+        listModels: () => Effect.succeed([{ providerID: "anthropic", id: "claude-haiku-4-5" }]),
+      }),
     )
+
+    const result = await Effect.runPromise(Effect.result(adapter.validateAvailability(requested)))
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      expect(String(result.failure.cause)).toContain(
+        "Unavailable OpenCode integration: agent pr-fixer, model anthropic/claude-sonnet-4-6",
+      )
+    }
   })
 })
 
-test("SdkOpenCodeAdapter normalizes assistant messages and session events", async () => {
-  const assistant = {
-    id: "msg_1",
-    sessionID: "ses_1",
-    role: "assistant",
-    time: { created: 1, completed: 2 },
-    parentID: "msg_0",
-    modelID: "sonnet",
-    providerID: "anthropic",
-    mode: "review",
-    agent: "reviewer",
-    path: { cwd: "/repo", root: "/repo" },
-    cost: 0,
-    tokens: {
-      input: 1,
-      output: 1,
-      reasoning: 0,
-      cache: { read: 0, write: 0 },
-    },
-    structured: { verdict: "pass" },
-  } satisfies AssistantMessage
-  const events = [
-    {
-      id: "evt_1",
-      type: "message.updated",
-      properties: { sessionID: "ses_1", info: assistant },
-    },
-    {
-      id: "evt_2",
-      type: "session.status",
-      properties: { sessionID: "ses_1", status: { type: "busy" } },
-    },
-    { id: "evt_3", type: "session.idle", properties: { sessionID: "ses_1" } },
-    { id: "evt_4", type: "session.error", properties: { sessionID: "ses_1" } },
-  ] satisfies ReadonlyArray<Event>
-  const calls: Array<{
-    readonly operation: string
-    readonly input: object
-    readonly signal: AbortSignal
-  }> = []
-  const record = (operation: string, input: object, signal: AbortSignal) => {
-    calls.push({ operation, input, signal })
-  }
-  const client = {
-    createSession: async (input, signal) => {
-      record("create", input, signal)
-      return { id: "ses_1" }
-    },
-    promptSession: async (input, signal) => {
-      record("prompt", input, signal)
-    },
-    subscribeEvents: async (input, signal) => {
-      record("subscribe", input, signal)
-      return (async function* () {
-        yield* events
-      })()
-    },
-    getSessionStatuses: async (input, signal) => {
-      record("status", input, signal)
-      return { ses_1: { type: "busy" as const } }
-    },
-    sessionExists: async (input, signal) => {
-      record("exists", input, signal)
-      return true
-    },
-    listSessionMessages: async (input, signal) => {
-      record("messages", input, signal)
-      return [assistant]
-    },
-    abortSession: async (input, signal) => {
-      record("abort", input, signal)
-      return true
-    },
-    listAgents: async () => [],
-    listProviders: async () => [],
-  } satisfies OpenCodeSdkClient
-  const adapter = new SdkOpenCodeAdapter(client)
-  const signal = new AbortController().signal
+describe("SdkOpenCodeAdapter.generateStructured", () => {
+  test("sends the schema-bearing extraction prompt and parses the JSON reply", async () => {
+    const prompts: Array<string> = []
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        generateText: (input) => {
+          prompts.push(input.prompt)
+          return Effect.succeed('```json\n{"verdict":"pass"}\n```')
+        },
+      }),
+    )
 
-  const createInput = { directory: "/repo", title: "review" }
-  const promptInput = {
-    sessionID: "ses_1",
-    directory: "/repo",
-    agent: "reviewer",
-    model: { providerID: "anthropic", modelID: "sonnet" },
-    format: { type: "json_schema" as const, schema: { type: "object" }, retryCount: 2 },
-    parts: [{ type: "text" as const, text: "review" }],
-  }
-  const sessionInput = { sessionID: "ses_1", directory: "/repo" }
+    const output = await Effect.runPromise(
+      adapter.generateStructured({
+        sessionID: "ses_1",
+        directory: "/repo",
+        jsonSchema: { type: "object" },
+      }),
+    )
 
-  expect(await adapter.createSession(createInput, signal)).toEqual({ id: "ses_1" })
-  await adapter.promptSession(promptInput, signal)
-  expect(await adapter.getSessionStatus(sessionInput, signal)).toEqual({ type: "busy" })
-  expect(await adapter.sessionExists(sessionInput, signal)).toBe(true)
-  expect(await adapter.listSessionMessages(sessionInput, signal)).toEqual([
-    {
-      id: "msg_1",
-      role: "assistant",
-      time: { created: 1, completed: 2 },
-      structured: { verdict: "pass" },
-    },
-  ])
-  expect(
-    await collect(await adapter.subscribeSessionEvents({ directory: "/repo" }, signal)),
-  ).toEqual([
-    {
-      type: "message.updated",
-      sessionID: "ses_1",
-      message: {
-        id: "msg_1",
-        role: "assistant",
-        time: { created: 1, completed: 2 },
-        structured: { verdict: "pass" },
+    expect(output).toEqual({ verdict: "pass" })
+    expect(prompts).toEqual([structuredExtractionPrompt({ type: "object" })])
+  })
+
+  test("carries validation feedback into the extraction prompt only", async () => {
+    const prompts: Array<string> = []
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({
+        generateText: (input) => {
+          prompts.push(input.prompt)
+          return Effect.succeed("{}")
+        },
+      }),
+    )
+
+    await Effect.runPromise(
+      adapter.generateStructured({
+        sessionID: "ses_1",
+        directory: "/repo",
+        jsonSchema: { type: "object" },
+        feedback: "verdict is required",
+      }),
+    )
+
+    expect(prompts[0]).toContain("verdict is required")
+  })
+
+  test("fails when the extraction reply is not JSON", async () => {
+    const adapter = new SdkOpenCodeAdapter(
+      makeClient({ generateText: () => Effect.succeed("no json here") }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.result(
+        adapter.generateStructured({
+          sessionID: "ses_1",
+          directory: "/repo",
+          jsonSchema: { type: "object" },
+        }),
+      ),
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      expect(String(result.failure.cause)).toContain("did not return JSON")
+    }
+  })
+})
+
+test("SdkOpenCodeAdapter forwards session lifecycle calls through the seam", async () => {
+  const calls: Array<{ readonly operation: string; readonly input: unknown }> = []
+  const record = (operation: string) => (input: unknown) => {
+    calls.push({ operation, input })
+  }
+  const adapter = new SdkOpenCodeAdapter(
+    makeClient({
+      createSession: (input) => {
+        record("create")(input)
+        return Effect.succeed({ id: "ses_1" })
       },
-    },
-    { type: "session.status", sessionID: "ses_1", status: { type: "busy" } },
-    { type: "session.status", sessionID: "ses_1", status: { type: "idle" } },
-    { type: "session.error", sessionID: "ses_1" },
-  ])
-  expect(await adapter.abortSession(sessionInput, signal)).toBe(true)
-  const subscriptionSignal = calls[5]?.signal
-  expect(subscriptionSignal).toBeDefined()
-  if (subscriptionSignal === undefined) throw new Error("Subscription call was not recorded")
-  expect(subscriptionSignal).not.toBe(signal)
-  expect(subscriptionSignal?.aborted).toBe(true)
+      promptSession: (input) => {
+        record("prompt")(input)
+        return Effect.void
+      },
+      interruptSession: (input) => {
+        record("interrupt")(input)
+        return Effect.succeed(true)
+      },
+      listMessages: (input) => {
+        record("messages")(input)
+        return Effect.succeed([completedMessage])
+      },
+    }),
+  )
+
+  const model = { providerID: "anthropic", modelID: "sonnet" }
+  const created = await Effect.runPromise(
+    adapter.createSession({ directory: "/repo", title: "review", agent: "reviewer", model }),
+  )
+  expect(created).toEqual({ id: "ses_1" })
+  await Effect.runPromise(
+    adapter.promptSession({
+      sessionID: "ses_1",
+      directory: "/repo",
+      agent: "reviewer",
+      model,
+      text: "review",
+    }),
+  )
+  expect(
+    await Effect.runPromise(
+      adapter.listSessionMessages({ sessionID: "ses_1", directory: "/repo" }),
+    ),
+  ).toEqual([completedMessage])
+  expect(
+    await Effect.runPromise(adapter.abortSession({ sessionID: "ses_1", directory: "/repo" })),
+  ).toBe(true)
   expect(calls).toEqual([
-    { operation: "create", input: createInput, signal },
-    { operation: "prompt", input: promptInput, signal },
-    { operation: "status", input: { directory: "/repo" }, signal },
-    { operation: "exists", input: sessionInput, signal },
-    { operation: "messages", input: sessionInput, signal },
-    { operation: "subscribe", input: { directory: "/repo" }, signal: subscriptionSignal },
-    { operation: "abort", input: sessionInput, signal },
+    {
+      operation: "create",
+      input: { directory: "/repo", title: "review", agent: "reviewer", model },
+    },
+    {
+      operation: "prompt",
+      input: { sessionID: "ses_1", agent: "reviewer", model, text: "review" },
+    },
+    { operation: "messages", input: { sessionID: "ses_1", limit: 20 } },
+    { operation: "interrupt", input: { sessionID: "ses_1" } },
   ])
+})
+
+describe("toWireEvent", () => {
+  const located = { location: { directory: "/repo" } }
+
+  test("drops events without a session id", () => {
+    expect(toWireEvent({ type: "session.idle", data: {} })).toBeUndefined()
+    expect(toWireEvent({ type: "session.idle", data: { sessionID: 7 } })).toBeUndefined()
+  })
+
+  test("maps session.status for known status types only", () => {
+    for (const statusType of ["busy", "retry", "idle"] as const) {
+      expect(
+        toWireEvent({
+          type: "session.status",
+          data: { sessionID: "ses_1", status: { type: statusType } },
+          ...located,
+        }),
+      ).toEqual({
+        type: "session.status",
+        sessionID: "ses_1",
+        status: { type: statusType },
+        directory: "/repo",
+      })
+    }
+    expect(
+      toWireEvent({
+        type: "session.status",
+        data: { sessionID: "ses_1", status: { type: "queued" } },
+      }),
+    ).toBeUndefined()
+    expect(toWireEvent({ type: "session.status", data: { sessionID: "ses_1" } })).toBeUndefined()
+  })
+
+  test("maps idle and execution outcomes with optional location", () => {
+    expect(toWireEvent({ type: "session.idle", data: { sessionID: "ses_1" } })).toEqual({
+      type: "session.idle",
+      sessionID: "ses_1",
+    })
+    expect(
+      toWireEvent({
+        type: "session.execution.succeeded",
+        data: { sessionID: "ses_1" },
+        ...located,
+      }),
+    ).toEqual({ type: "execution.succeeded", sessionID: "ses_1", directory: "/repo" })
+    expect(
+      toWireEvent({ type: "session.execution.interrupted", data: { sessionID: "ses_1" } }),
+    ).toEqual({ type: "execution.interrupted", sessionID: "ses_1" })
+  })
+
+  test("maps execution.failed with and without an error payload", () => {
+    expect(
+      toWireEvent({
+        type: "session.execution.failed",
+        data: { sessionID: "ses_1", error: { name: "boom" } },
+        ...located,
+      }),
+    ).toEqual({
+      type: "execution.failed",
+      sessionID: "ses_1",
+      error: { name: "boom" },
+      directory: "/repo",
+    })
+    expect(toWireEvent({ type: "session.execution.failed", data: { sessionID: "ses_1" } })).toEqual(
+      { type: "execution.failed", sessionID: "ses_1" },
+    )
+  })
+
+  test("drops unrelated event types", () => {
+    expect(
+      toWireEvent({ type: "session.message.content.updated", data: { sessionID: "ses_1" } }),
+    ).toBeUndefined()
+  })
 })

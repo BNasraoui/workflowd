@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { AgentHandoffStoreLive } from "../../src/kernel/agent-handoff-store"
@@ -78,7 +78,7 @@ const submission = {
   resumePrompt: "The child finished; read its result and continue.",
 }
 
-const run = <A, E>(effect: Effect.Effect<A, E, Layer.Layer.Success<typeof layer>>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof layer>>) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer)))
 
 const custodyFailure = (error: unknown): AgentWaitCustodyError => {
@@ -193,15 +193,15 @@ describe("agent wait ingress", () => {
         yield* sql`UPDATE kernel_sessions SET revision = 2 WHERE session_id = 'child-stable'`
         const keyedRetry = yield* ingress
           .register({ ...submission, idempotencyKey: "handoff-7" }, at)
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const nextGeneration = yield* ingress.register(submission, at)
         return { keyed, unkeyed, keyedRetry, nextGeneration }
       }),
     )
 
-    expect(result.keyedRetry._tag).toBe("Left")
-    if (result.keyedRetry._tag === "Left") {
-      expect(result.keyedRetry.left).toBeInstanceOf(KernelStoreConflictError)
+    expect(result.keyedRetry._tag).toBe("Failure")
+    if (result.keyedRetry._tag === "Failure") {
+      expect(result.keyedRetry.failure).toBeInstanceOf(KernelStoreConflictError)
     }
     expect(result.nextGeneration.status).toBe("registered")
     expect(result.nextGeneration.instanceId).not.toBe(result.unkeyed.instanceId)

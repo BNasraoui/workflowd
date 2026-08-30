@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Either, Layer } from "effect"
+import { Effect, Layer, Result } from "effect"
 import { makeCurrentnessPolicy } from "../../src/store/currentness"
 import {
   commandClaimCandidate,
@@ -21,13 +21,13 @@ const fixResultJson = JSON.stringify({
   summary: "No changes were needed.",
 })
 
-type StoreServices = Layer.Layer.Success<ReturnType<typeof makeStoreLayer>>
+type StoreServices = Layer.Success<ReturnType<typeof makeStoreLayer>>
 
 const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
   Effect.runPromise(effect.pipe(Effect.provide(makeStoreLayer())))
 
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.either, Effect.map(Either.isLeft))
+  effect.pipe(Effect.result, Effect.map(Result.isFailure))
 
 const seedSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient

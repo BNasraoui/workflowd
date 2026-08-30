@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import type { SqlError } from "@effect/sql/SqlError"
+import type { SqlError } from "effect/unstable/sql"
 import { Context, Data, Effect, Exit, Layer, Schema } from "effect"
 import { AgentHarness, type AgentHarnessError } from "../agent-harness"
 import {
@@ -122,13 +122,13 @@ export type WorkflowStartError =
   | StageCatalogError
   | AgentHarnessError
   | WorkflowDefinitionValidationError
-  | SqlError
+  | SqlError.SqlError
 
 export type WorkflowStartPort = {
   readonly preflight: Effect.Effect<void, WorkflowStartError>
   readonly start: (input: unknown) => Effect.Effect<WorkflowStartResult, WorkflowStartError>
 }
-export const WorkflowStart = Context.GenericTag<WorkflowStartPort>("workflowd/qrspi/WorkflowStart")
+export const WorkflowStart = Context.Service<WorkflowStartPort>("workflowd/qrspi/WorkflowStart")
 
 export const WorkflowStartLive = (options: WorkflowStartOptions) =>
   Layer.effect(
@@ -244,7 +244,7 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
 
   return (unknownRequest: unknown) =>
     Effect.gen(function* () {
-      const request = yield* Schema.decodeUnknown(WorkflowStartRequest)(unknownRequest).pipe(
+      const request = yield* Schema.decodeUnknownEffect(WorkflowStartRequest)(unknownRequest).pipe(
         Effect.mapError(
           () => new WorkflowStartUnauthorized({ reason: "Malformed or ambiguous identity" }),
         ),
@@ -367,12 +367,12 @@ export function makeWorkflowStart(options: WorkflowStartOptions) {
           previousTrustedSha: currentCursor?.currentHeadSha ?? null,
         })
         .pipe(
-          Effect.catchAll(
+          Effect.catch(
             (
               error,
             ): Effect.Effect<
               AcceptedBranchObservation,
-              QrspiRepositoryError | SqlError | WorkflowStartNeedsOperator
+              QrspiRepositoryError | SqlError.SqlError | WorkflowStartNeedsOperator
             > =>
               isExpiredFinalAttempt(operation, now())
                 ? store
@@ -767,7 +767,7 @@ function finalRecheck(input: {
   readonly readinessJudgment: TicketReadinessJudgment
   readonly sourceResolver: SourceResolver
   readonly now: () => Date
-  readonly onChanged?: () => Effect.Effect<void, SqlError>
+  readonly onChanged?: () => Effect.Effect<void, SqlError.SqlError>
 }) {
   return Effect.gen(function* () {
     const finalTicket = yield* readTicket(input.tickets, input.request.ticket)
@@ -819,7 +819,7 @@ function readTicket(tickets: typeof TicketSource.Service, reference: typeof Tick
       Effect.fail(new TicketReadError({ reason: "Beads ticket could not be decoded" })),
     ),
     Effect.flatMap((value) =>
-      Schema.decodeUnknown(Ticket)(value).pipe(
+      Schema.decodeUnknownEffect(Ticket)(value).pipe(
         Effect.mapError(() => new TicketReadError({ reason: "Beads ticket could not be decoded" })),
       ),
     ),

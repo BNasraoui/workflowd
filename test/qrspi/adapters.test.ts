@@ -120,9 +120,9 @@ describe("QRSPI external adapters", () => {
             path: "artifacts/questions.md",
             maxBytes: 100,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    ).toMatchObject({ _tag: "Failure", failure: { _tag: "QrspiRepositoryError" } })
     expect(contentCalls).toBe(0)
   })
 
@@ -159,9 +159,9 @@ describe("QRSPI external adapters", () => {
             path: "artifacts/questions.md",
             maxBytes: 100,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    ).toMatchObject({ _tag: "Failure", failure: { _tag: "QrspiRepositoryError" } })
     expect(contentCalls).toBe(0)
   })
 
@@ -306,9 +306,9 @@ describe("QRSPI external adapters", () => {
             path: "artifacts/questions.md",
             maxBytes,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { _tag: "QrspiRepositoryError" } })
+    ).toMatchObject({ _tag: "Failure", failure: { _tag: "QrspiRepositoryError" } })
   })
 
   test("maps an exact artifact timeout through the repository error channel", async () => {
@@ -326,11 +326,11 @@ describe("QRSPI external adapters", () => {
             path: "artifacts/questions.md",
             maxBytes: 10,
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
     ).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "QrspiRepositoryError", operation: "read exact repository artifact" },
+      _tag: "Failure",
+      failure: { _tag: "QrspiRepositoryError", operation: "read exact repository artifact" },
     })
   })
 
@@ -459,7 +459,7 @@ describe("QRSPI external adapters", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "TicketSourceMalformedError" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "TicketSourceMalformedError" } }] },
     })
   })
 
@@ -651,7 +651,7 @@ describe("QRSPI external adapters", () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "QrspiRepositoryError" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "QrspiRepositoryError" } }] },
     })
     expect(Date.now() - startedAt).toBeLessThan(1_000)
   })

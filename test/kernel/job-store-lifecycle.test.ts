@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { KernelEventStore } from "../../src/kernel/event-store"
 import { KernelJobStore } from "../../src/kernel/job-store"
@@ -44,7 +44,7 @@ describe("kernel job creation", () => {
         const input = yield* arrangeDelivery("rollback")
         yield* sql`CREATE TRIGGER reject_kernel_job BEFORE INSERT ON kernel_workflow_jobs
           BEGIN SELECT RAISE(ABORT, 'injected job failure'); END`
-        const failed = yield* jobs.enqueueFromDelivery(input).pipe(Effect.either)
+        const failed = yield* jobs.enqueueFromDelivery(input).pipe(Effect.result)
         const instance = yield* sql`SELECT event_cursor FROM kernel_workflow_instances
           WHERE instance_id = ${input.instanceId}`
         const rows = yield* sql`SELECT job_id FROM kernel_workflow_jobs`
@@ -57,7 +57,7 @@ describe("kernel job creation", () => {
       }),
     )
 
-    expect(result.failed._tag).toBe("Left")
+    expect(result.failed._tag).toBe("Failure")
     expect(result.instance).toEqual([{ event_cursor: 0 }])
     expect(result.rows).toEqual([])
     expect(result.ready).toHaveLength(1)
@@ -73,15 +73,15 @@ describe("kernel job creation", () => {
         const exact = yield* jobs.enqueueFromDelivery(input)
         const conflict = yield* jobs
           .enqueueFromDelivery({ ...input, input: { task: "changed" } })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { first, exact, conflict }
       }),
     )
 
     expect([result.first.status, result.exact.status]).toEqual(["enqueued", "duplicate"])
     expect(result.conflict).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelJobStoreConflictError", record: "job", key: "replay" },
+      _tag: "Failure",
+      failure: { _tag: "KernelJobStoreConflictError", record: "job", key: "replay" },
     })
   })
 
@@ -94,13 +94,13 @@ describe("kernel job creation", () => {
         yield* jobs.enqueueFromDelivery(input)
         return yield* jobs
           .enqueueFromDelivery({ ...input, expectedCursor: input.expectedCursor + 1 })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelJobStoreConflictError", record: "job", key: "provenance" },
+      _tag: "Failure",
+      failure: { _tag: "KernelJobStoreConflictError", record: "job", key: "provenance" },
     })
   })
 })
@@ -182,17 +182,17 @@ describe("kernel job outcomes", () => {
         })
         const changed = yield* jobs
           .complete({ ...completion, result: { verdict: "fail" } })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const changedId = yield* jobs
           .complete({ ...completion, resultId: "result-2" })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { first, exact, changed, changedId }
       }),
     )
 
     expect([result.first.status, result.exact.status]).toEqual(["completed", "duplicate"])
-    expect(result.changed._tag).toBe("Left")
-    expect(result.changedId._tag).toBe("Left")
+    expect(result.changed._tag).toBe("Failure")
+    expect(result.changedId._tag).toBe("Failure")
   })
 
   test("rejects an exact result replay without the originally accepted claim authority", async () => {
@@ -210,13 +210,13 @@ describe("kernel job outcomes", () => {
         yield* jobs.complete(completion)
         return yield* jobs
           .complete({ ...completion, claimToken: "wrong-token" })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelJobStoreLeaseError", jobId: "stale-result-replay" },
+      _tag: "Failure",
+      failure: { _tag: "KernelJobStoreLeaseError", jobId: "stale-result-replay" },
     })
   })
 
@@ -240,13 +240,13 @@ describe("kernel job outcomes", () => {
             resultVersion: 1,
             result: { owner: "b" },
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelJobStoreConflictError", record: "result", key: "shared-identity" },
+      _tag: "Failure",
+      failure: { _tag: "KernelJobStoreConflictError", record: "result", key: "shared-identity" },
     })
   })
 

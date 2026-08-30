@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import {
   AgentHarness,
   AgentHarnessError,
@@ -115,7 +115,7 @@ const makeWorkerLayer = (options: {
             ? (automation?.runReview?.() ?? Effect.die("unused"))
             : (automation?.runFix?.() ?? Effect.die("unused"))
         return execution.pipe(
-          Effect.flatMap((result) => Schema.decodeUnknown(prepared.outputSchema)(result)),
+          Effect.flatMap((result) => Schema.decodeUnknownEffect(prepared.outputSchema)(result)),
           Effect.orDie,
         )
       },
@@ -532,21 +532,19 @@ describe("Review Work processing", () => {
 
     let probed = false
     const openCode: OpenCodeAdapter = {
-      createSession: async () => ({ id: "unused" }),
-      promptSession: async () => undefined,
-      subscribeSessionEvents: async () => ({
-        [Symbol.asyncIterator]: () => ({
-          next: async () => ({ done: true as const, value: undefined }),
+      createSession: () => Effect.succeed({ id: "unused" }),
+      promptSession: () => Effect.void,
+      subscribeSessionEvents: () => Stream.empty,
+      getSessionStatus: () => Effect.succeed({ type: "idle" as const }),
+      sessionExists: () =>
+        Effect.sync(() => {
+          probed = true
+          return true
         }),
-      }),
-      getSessionStatus: async () => ({ type: "idle" as const }),
-      sessionExists: async () => {
-        probed = true
-        return true
-      },
-      listSessionMessages: async () => [],
-      abortSession: async () => true,
-      validateAvailability: async () => undefined,
+      listSessionMessages: () => Effect.succeed([]),
+      abortSession: () => Effect.succeed(true),
+      validateAvailability: () => Effect.void,
+      generateStructured: () => Effect.succeed(null),
     }
     const resolver = new SessionAccessResolver(
       openCode,
@@ -654,7 +652,9 @@ describe("Review Work processing", () => {
                     findings: [],
                   }
                 }).pipe(
-                  Effect.flatMap((result) => Schema.decodeUnknown(agentWork.outputSchema)(result)),
+                  Effect.flatMap((result) =>
+                    Schema.decodeUnknownEffect(agentWork.outputSchema)(result),
+                  ),
                   Effect.orDie,
                 ),
             },
@@ -1794,7 +1794,7 @@ describe("runReconciliationIteration", () => {
           }),
         )
 
-        const workerA = yield* Effect.fork(
+        const workerA = yield* Effect.forkChild(
           runReconciliationIteration({
             workerId: "reconciler-a",
             leaseDurationMs: 1_000,

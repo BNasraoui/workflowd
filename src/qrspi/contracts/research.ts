@@ -9,12 +9,14 @@ import {
 } from "./common"
 
 const ResearchSources = ExactStageSources.pipe(
-  Schema.filter((sources) => {
-    if (sources.sources.length === 0) return true
-    return sources.sources.length === 1 && sources.sources[0]?.role === "Questions"
-      ? true
-      : "Research accepts only the Questions predecessor subsequence"
-  }),
+  Schema.check(
+    Schema.makeFilter((sources) => {
+      if (sources.sources.length === 0) return true
+      return sources.sources.length === 1 && sources.sources[0]?.role === "Questions"
+        ? true
+        : "Research accepts only the Questions predecessor subsequence"
+    }),
+  ),
 )
 
 export const ResearchRequest = Schema.Struct({

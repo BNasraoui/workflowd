@@ -24,14 +24,14 @@ describe("custody registration races", () => {
                 kind: "workspace",
                 createdAt: now,
               })
-              .pipe(Effect.either)
+              .pipe(Effect.result)
           }),
         )
       const results = await Promise.all([register("/one"), register("/two")])
-      expect(results.filter((x) => x._tag === "Right")).toHaveLength(1)
-      expect(results.filter((x) => x._tag === "Left")).toHaveLength(1)
-      expect(results.find((x) => x._tag === "Left")).toMatchObject({
-        left: { _tag: "KernelSessionStoreConflictError", record: "resource", key: "r" },
+      expect(results.filter((x) => x._tag === "Success")).toHaveLength(1)
+      expect(results.filter((x) => x._tag === "Failure")).toHaveLength(1)
+      expect(results.find((x) => x._tag === "Failure")).toMatchObject({
+        failure: { _tag: "KernelSessionStoreConflictError", record: "resource", key: "r" },
       })
     } finally {
       await removeDatabase(file)
@@ -73,13 +73,13 @@ describe("custody registration races", () => {
                 resourceId: "r",
                 createdAt: now,
               })
-              .pipe(Effect.either)
+              .pipe(Effect.result)
           }),
         )
       const results = await Promise.all([register("s1"), register("s2")])
-      expect(results.filter((x) => x._tag === "Right")).toHaveLength(1)
-      expect(results.find((x) => x._tag === "Left")).toMatchObject({
-        left: { _tag: "KernelSessionStoreConflictError", record: "session" },
+      expect(results.filter((x) => x._tag === "Success")).toHaveLength(1)
+      expect(results.find((x) => x._tag === "Failure")).toMatchObject({
+        failure: { _tag: "KernelSessionStoreConflictError", record: "session" },
       })
     } finally {
       await removeDatabase(file)
@@ -113,7 +113,7 @@ describe("custody registration races", () => {
             createdAt: now,
           })
         yield* session("s1")
-        const duplicateNative = yield* session("s2").pipe(Effect.either)
+        const duplicateNative = yield* session("s2").pipe(Effect.result)
         yield* store.requestCleanup({
           cleanupId: "c",
           resourceId: "r",
@@ -137,14 +137,14 @@ describe("custody registration races", () => {
             resourceId: "r",
             createdAt: now,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { duplicateNative, replacement }
       }),
     )
-    expect(result.duplicateNative._tag).toBe("Left")
+    expect(result.duplicateNative._tag).toBe("Failure")
     expect(result.replacement).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelSessionStoreConflictError" },
+      _tag: "Failure",
+      failure: { _tag: "KernelSessionStoreConflictError" },
     })
   })
 })

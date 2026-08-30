@@ -1,4 +1,4 @@
-import { Migrator, SqlClient } from "@effect/sql"
+import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 

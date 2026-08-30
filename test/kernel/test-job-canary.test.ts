@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Fiber } from "effect"
 import { TestJobCanary, TestJobCanaryLive } from "../../src/kernel/test-job-canary"
 import { KernelJobStore } from "../../src/kernel/job-store"
@@ -54,15 +54,15 @@ describe("test job canary", () => {
       Effect.gen(function* () {
         const canary = yield* TestJobCanary
         yield* canary.submit({ jobId: "deployment-43", value: "first" }, now)
-        return yield* Effect.either(
+        return yield* Effect.result(
           canary.submit({ jobId: "deployment-43", value: "changed" }, now),
         )
       }).pipe(Effect.provide(TestJobCanaryLive)),
     )
 
     expect(conflict).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "TestJobCanaryConflict", jobId: "deployment-43" },
+      _tag: "Failure",
+      failure: { _tag: "TestJobCanaryConflict", jobId: "deployment-43" },
     })
   })
 
@@ -73,7 +73,7 @@ describe("test job canary", () => {
         const canary = yield* TestJobCanary
         const input = { jobId: "deployment-concurrent", value: [1, true, null] } as const
         const fibers = yield* Effect.all(
-          Array.from({ length: 8 }, () => canary.submit(input, now).pipe(Effect.fork)),
+          Array.from({ length: 8 }, () => canary.submit(input, now).pipe(Effect.forkChild)),
         )
         return yield* Effect.forEach(fibers, Fiber.join)
       }).pipe(Effect.provide(TestJobCanaryLive)),
@@ -93,7 +93,7 @@ describe("test job canary", () => {
         const pending = yield* canary.status("deployment-lifecycle")
         const claim = yield* jobs.claimNext({ workerId: "worker-a", now, leaseDurationMs: 60_000 })
         const running = yield* canary.status("deployment-lifecycle")
-        if (claim === null) return yield* Effect.dieMessage("expected claim")
+        if (claim === null) return yield* Effect.die(new Error("expected claim"))
         yield* jobs.retry({
           ...claim,
           expectedLeaseUntil: claim.leaseUntil,
@@ -138,7 +138,7 @@ describe("test job canary", () => {
         const jobs = yield* KernelJobStore
         yield* canary.submit({ jobId: "deployment-failed", value: false }, now)
         const claim = yield* jobs.claimNext({ workerId: "worker-a", now, leaseDurationMs: 60_000 })
-        if (claim === null) return yield* Effect.dieMessage("expected claim")
+        if (claim === null) return yield* Effect.die(new Error("expected claim"))
         yield* jobs.fail({
           ...claim,
           expectedLeaseUntil: claim.leaseUntil,
@@ -148,15 +148,15 @@ describe("test job canary", () => {
         })
         return {
           failed: yield* canary.status("deployment-failed"),
-          unknown: yield* Effect.either(canary.status("unknown")),
+          unknown: yield* Effect.result(canary.status("unknown")),
         }
       }).pipe(Effect.provide(TestJobCanaryLive)),
     )
 
     expect(observed.failed).toEqual({ jobId: "deployment-failed", status: "failed" })
     expect(observed.unknown).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "TestJobCanaryNotFound", jobId: "unknown" },
+      _tag: "Failure",
+      failure: { _tag: "TestJobCanaryNotFound", jobId: "unknown" },
     })
   })
 
@@ -214,13 +214,13 @@ describe("test job canary", () => {
             yield* sql`UPDATE kernel_workflow_job_results
               SET result_version = ${item.resultVersion}, result_json = ${JSON.stringify(item.result)}`
           }
-          return yield* Effect.either(canary.status(`corrupt-${item.id}`))
+          return yield* Effect.result(canary.status(`corrupt-${item.id}`))
         }).pipe(Effect.provide(TestJobCanaryLive)),
       )
 
       expect(outcome).toMatchObject({
-        _tag: "Left",
-        left: { _tag: "KernelJobStoreDataError", record: "result" },
+        _tag: "Failure",
+        failure: { _tag: "KernelJobStoreDataError", record: "result" },
       })
     }
   })

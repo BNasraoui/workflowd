@@ -119,7 +119,7 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
       runnerA,
       Effect.gen(function* () {
         const transport = yield* RemoteTransport
-        const waiting = yield* transport.takeHost("host-a", 10_000).pipe(Effect.fork)
+        const waiting = yield* transport.takeHost("host-a", 10_000).pipe(Effect.forkChild)
         const deliveries = yield* Fiber.join(waiting)
         yield* deliveries[0]!.acknowledge
         yield* transport.publishResult(result("own-host", "host-a"))
@@ -146,15 +146,15 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
       runnerA,
       Effect.gen(function* () {
         const transport = yield* RemoteTransport
-        return yield* transport.publishCommand(command("cross-host", "host-b")).pipe(Effect.either)
+        return yield* transport.publishCommand(command("cross-host", "host-b")).pipe(Effect.result)
       }),
     )
 
-    expect(outcome._tag).toBe("Left")
-    if (outcome._tag !== "Left") throw new Error("expected a broker denial")
-    expect(outcome.left._tag).toBe("RemoteTransportError")
-    expect(outcome.left.operation).toBe("publish")
-    expect(String(outcome.left.cause).toLowerCase()).toContain("permissions violation")
+    expect(outcome._tag).toBe("Failure")
+    if (outcome._tag !== "Failure") throw new Error("expected a broker denial")
+    expect(outcome.failure._tag).toBe("RemoteTransportError")
+    expect(outcome.failure.operation).toBe("publish")
+    expect(String(outcome.failure.cause).toLowerCase()).toContain("permissions violation")
   }, 30_000)
 
   test("the broker denies a runner credential pulling another host's durable consumer", async () => {
@@ -162,14 +162,14 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
       runnerA,
       Effect.gen(function* () {
         const transport = yield* RemoteTransport
-        return yield* transport.takeHost("host-b", 2_000).pipe(Effect.either)
+        return yield* transport.takeHost("host-b", 2_000).pipe(Effect.result)
       }),
     )
 
-    expect(outcome._tag).toBe("Left")
-    if (outcome._tag !== "Left") throw new Error("expected a broker denial")
-    expect(outcome.left._tag).toBe("RemoteTransportError")
-    expect(outcome.left.operation).toBe("consume")
-    expect(String(outcome.left.cause).toLowerCase()).toContain("permissions violation")
+    expect(outcome._tag).toBe("Failure")
+    if (outcome._tag !== "Failure") throw new Error("expected a broker denial")
+    expect(outcome.failure._tag).toBe("RemoteTransportError")
+    expect(outcome.failure.operation).toBe("consume")
+    expect(String(outcome.failure.cause).toLowerCase()).toContain("permissions violation")
   }, 30_000)
 })

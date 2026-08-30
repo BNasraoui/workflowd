@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer } from "effect"
 import type { RemoteCommand, RemoteHostMessage, RemoteResult } from "./contract"
 import { decodeRemoteCommand, decodeRemoteResult } from "./codec"
@@ -62,7 +62,7 @@ export type RemoteRunnerStorePort = {
   >
 }
 
-export const RemoteRunnerStore = Context.GenericTag<RemoteRunnerStorePort>(
+export const RemoteRunnerStore = Context.Service<RemoteRunnerStorePort>(
   "workflowd/remote/RemoteRunnerStore",
 )
 

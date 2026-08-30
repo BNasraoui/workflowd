@@ -3,16 +3,18 @@ import { Data, Schema } from "effect"
 import { AgentHarnessRef, MAX_STAGE_REQUEST_BYTES } from "../agent-harness"
 
 export const BoundedText = (maximum: number) =>
-  Schema.String.pipe(Schema.minLength(1), Schema.maxLength(maximum))
-export const Sha256 = Schema.String.pipe(Schema.pattern(/^[0-9a-f]{64}$/))
-export const GitSha = Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/))
+  Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(maximum)))
+export const Sha256 = Schema.String.pipe(Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/)))
+export const GitSha = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+)
 
 export const RepositoryReference = Schema.Struct({
   providerInstanceId: BoundedText(128),
   repositoryId: BoundedText(128),
   repositoryFullName: Schema.String.pipe(
-    Schema.pattern(/^[^/\s]+\/[^/\s]+$/),
-    Schema.maxLength(256),
+    Schema.check(Schema.isPattern(/^[^/\s]+\/[^/\s]+$/)),
+    Schema.check(Schema.isMaxLength(256)),
   ),
 })
 export type RepositoryReference = typeof RepositoryReference.Type
@@ -20,11 +22,13 @@ export type RepositoryReference = typeof RepositoryReference.Type
 export const TicketReference = Schema.Struct({
   tracker: Schema.Literal("beads"),
   trackerInstanceId: BoundedText(128),
-  nativeTicketId: Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
+  nativeTicketId: Schema.String.pipe(
+    Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)),
+  ),
 })
 export type TicketReference = typeof TicketReference.Type
 
-const RawText = (maximum: number) => Schema.String.pipe(Schema.maxLength(maximum))
+const RawText = (maximum: number) => Schema.String.pipe(Schema.check(Schema.isMaxLength(maximum)))
 const OptionalRawText = (maximum: number) => Schema.optional(RawText(maximum))
 
 export const TicketScenario = Schema.Struct({
@@ -33,9 +37,11 @@ export const TicketScenario = Schema.Struct({
   when: OptionalRawText(2_000),
   then: OptionalRawText(2_000),
   covers: Schema.optional(
-    Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
-      Schema.maxItems(100),
-    ),
+    Schema.Array(
+      Schema.Int.pipe(
+        Schema.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(99)),
+      ),
+    ).pipe(Schema.check(Schema.isMaxLength(100))),
   ),
 })
 
@@ -49,14 +55,22 @@ const ReadyTicketScenario = Schema.Struct({
 
 export const Ticket = Schema.Struct({
   reference: TicketReference,
-  issueType: Schema.Literal("bug", "feature", "task", "epic", "chore", "decision"),
+  issueType: Schema.Literals(["bug", "feature", "task", "epic", "chore", "decision"]),
   title: OptionalRawText(500),
   userStory: OptionalRawText(4_000),
   description: OptionalRawText(20_000),
-  sources: Schema.optional(Schema.Array(RawText(2_000)).pipe(Schema.maxItems(100))),
-  outOfScope: Schema.optional(Schema.Array(RawText(4_000)).pipe(Schema.maxItems(100))),
-  acceptanceCriteria: Schema.optional(Schema.Array(RawText(4_000)).pipe(Schema.maxItems(100))),
-  scenarios: Schema.optional(Schema.Array(TicketScenario).pipe(Schema.maxItems(100))),
+  sources: Schema.optional(
+    Schema.Array(RawText(2_000)).pipe(Schema.check(Schema.isMaxLength(100))),
+  ),
+  outOfScope: Schema.optional(
+    Schema.Array(RawText(4_000)).pipe(Schema.check(Schema.isMaxLength(100))),
+  ),
+  acceptanceCriteria: Schema.optional(
+    Schema.Array(RawText(4_000)).pipe(Schema.check(Schema.isMaxLength(100))),
+  ),
+  scenarios: Schema.optional(
+    Schema.Array(TicketScenario).pipe(Schema.check(Schema.isMaxLength(100))),
+  ),
   sourceRevision: Schema.optional(BoundedText(256)),
 })
 export type Ticket = typeof Ticket.Type
@@ -65,16 +79,19 @@ export const ReadyTicket = Schema.Struct({
   ...Ticket.fields,
   title: BoundedText(500),
   description: BoundedText(20_000),
-  sources: Schema.Array(BoundedText(2_000)).pipe(Schema.minItems(1), Schema.maxItems(100)),
-  acceptanceCriteria: Schema.Array(BoundedText(4_000)).pipe(
-    Schema.minItems(1),
-    Schema.maxItems(100),
+  sources: Schema.Array(BoundedText(2_000)).pipe(
+    Schema.check(Schema.isMinLength(1), Schema.isMaxLength(100)),
   ),
-  scenarios: Schema.Array(ReadyTicketScenario).pipe(Schema.minItems(1), Schema.maxItems(100)),
+  acceptanceCriteria: Schema.Array(BoundedText(4_000)).pipe(
+    Schema.check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+  ),
+  scenarios: Schema.Array(ReadyTicketScenario).pipe(
+    Schema.check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+  ),
 })
 export type ReadyTicket = typeof ReadyTicket.Type
 
-export const TicketProblemCode = Schema.Literal(
+export const TicketProblemCode = Schema.Literals([
   "missing_title",
   "unclear_title",
   "missing_description",
@@ -88,47 +105,51 @@ export const TicketProblemCode = Schema.Literal(
   "uncovered_acceptance_criterion",
   "unresolved_source",
   "contradictory_product_direction",
-)
+])
 export const TicketProblem = Schema.Struct({ code: TicketProblemCode, message: BoundedText(1_000) })
 export type TicketProblem = typeof TicketProblem.Type
 
 export const TicketRevision = Schema.Struct({
   readyTicket: ReadyTicket,
-  scenarioCoverage: Schema.Array(Schema.Array(Schema.Int.pipe(Schema.nonNegative()))),
+  scenarioCoverage: Schema.Array(
+    Schema.Array(Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)))),
+  ),
   sourceRevision: Schema.optional(BoundedText(256)),
-  checkedAt: Schema.DateFromSelf,
+  checkedAt: Schema.Date,
   ticketRevisionSha256: Sha256,
 })
 export type TicketRevision = typeof TicketRevision.Type
 
-export const TicketCheck = Schema.Union(
+export const TicketCheck = Schema.Union([
   Schema.Struct({
     _tag: Schema.Literal("Ready"),
     readyTicket: ReadyTicket,
     ticketRevision: TicketRevision,
-    checkedAt: Schema.DateFromSelf,
+    checkedAt: Schema.Date,
   }),
   Schema.Struct({
     _tag: Schema.Literal("NeedsWork"),
     ticket: Ticket,
     problems: Schema.NonEmptyArray(TicketProblem),
-    checkedAt: Schema.DateFromSelf,
+    checkedAt: Schema.Date,
   }),
-)
+])
 export type TicketCheck = typeof TicketCheck.Type
 
 export const TicketReadinessJudgment = Schema.Struct({
-  userStory: Schema.Literal("required", "optional", "forbidden"),
-  productDirection: Schema.Literal("consistent", "contradictory"),
-  productOutcome: Schema.Literal("clear", "unclear"),
-  acceptanceCriteriaObservability: Schema.Array(Schema.Literal("observable", "unobservable")).pipe(
-    Schema.maxItems(100),
-  ),
+  userStory: Schema.Literals(["required", "optional", "forbidden"]),
+  productDirection: Schema.Literals(["consistent", "contradictory"]),
+  productOutcome: Schema.Literals(["clear", "unclear"]),
+  acceptanceCriteriaObservability: Schema.Array(
+    Schema.Literals(["observable", "unobservable"]),
+  ).pipe(Schema.check(Schema.isMaxLength(100))),
   scenarioCoverage: Schema.Array(
-    Schema.Array(Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(99))).pipe(
-      Schema.maxItems(100),
-    ),
-  ).pipe(Schema.maxItems(100)),
+    Schema.Array(
+      Schema.Int.pipe(
+        Schema.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(99)),
+      ),
+    ).pipe(Schema.check(Schema.isMaxLength(100))),
+  ).pipe(Schema.check(Schema.isMaxLength(100))),
 })
 export type TicketReadinessJudgment = typeof TicketReadinessJudgment.Type
 
@@ -152,20 +173,20 @@ export const WorkflowStartInput = Schema.Struct({
 })
 
 export const ContractIdentifier = Schema.String.pipe(
-  Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/),
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/)),
 )
 export const PositiveVersion = Schema.Int.pipe(
-  Schema.positive(),
-  Schema.lessThanOrEqualTo(1_000_000),
+  Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1_000_000)),
 )
-const BoundedMilliseconds = Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(86_400_000))
+const BoundedMilliseconds = Schema.Int.pipe(
+  Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(86_400_000)),
+)
 const DurableStagePayloadBytes = Schema.Int.pipe(
-  Schema.positive(),
-  Schema.lessThanOrEqualTo(MAX_STAGE_REQUEST_BYTES),
+  Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(MAX_STAGE_REQUEST_BYTES)),
 )
 const ProviderModel = Schema.String.pipe(
-  Schema.pattern(/^[^\s/]+\/[^\s/]+$/),
-  Schema.maxLength(256),
+  Schema.check(Schema.isPattern(/^[^\s/]+\/[^\s/]+$/)),
+  Schema.check(Schema.isMaxLength(256)),
 )
 
 export const StageContractRef = Schema.Struct({
@@ -180,7 +201,7 @@ export const PolicyReference = Schema.Struct({
 })
 export type PolicyReference = typeof PolicyReference.Type
 
-export const StageOutputPolicy = Schema.Union(
+export const StageOutputPolicy = Schema.Union([
   Schema.Struct({
     _tag: Schema.Literal("Artifact"),
     pathTemplate: BoundedText(512),
@@ -191,41 +212,49 @@ export const StageOutputPolicy = Schema.Union(
     contractId: ContractIdentifier,
     contractVersion: PositiveVersion,
   }),
-)
+])
 
-export const StageReviewPolicy = Schema.Union(
+export const StageReviewPolicy = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("none") }),
   Schema.Struct({
     mode: Schema.Literal("automated"),
-    minimumContributions: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
-    maximumContributions: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+    minimumContributions: Schema.Int.pipe(
+      Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(20)),
+    ),
+    maximumContributions: Schema.Int.pipe(
+      Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(20)),
+    ),
     deadlineMs: BoundedMilliseconds,
-    maximumRevisions: Schema.Int.pipe(Schema.nonNegative(), Schema.lessThanOrEqualTo(20)),
+    maximumRevisions: Schema.Int.pipe(
+      Schema.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(20)),
+    ),
   }),
-)
+])
 
 export const StageHumanGatePolicy = Schema.Struct({
-  mode: Schema.Literal("none", "required", "on_escalation"),
+  mode: Schema.Literals(["none", "required", "on_escalation"]),
 })
 
-export const StageActivationPolicy = Schema.Union(
-  Schema.Struct({ mode: Schema.Literal("enabled", "disabled") }),
+export const StageActivationPolicy = Schema.Union([
+  Schema.Struct({ mode: Schema.Literals(["enabled", "disabled"]) }),
   Schema.Struct({
     mode: Schema.Literal("conditional"),
     policy: PolicyReference,
-    decision: Schema.Literal("enabled", "disabled"),
+    decision: Schema.Literals(["enabled", "disabled"]),
     reason: BoundedText(1_000),
   }),
-)
+])
 
 export const StageRetryPolicy = Schema.Struct({
-  maxAttempts: Schema.Int.pipe(Schema.positive(), Schema.lessThanOrEqualTo(20)),
+  maxAttempts: Schema.Int.pipe(
+    Schema.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(20)),
+  ),
   backoffMs: BoundedMilliseconds,
 })
 
 export const StageDefinition = Schema.Struct({
-  key: Schema.String.pipe(Schema.pattern(/^[a-z][a-z0-9_-]{0,63}$/)),
-  kind: Schema.Literal("document", "implementation"),
+  key: Schema.String.pipe(Schema.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/))),
+  kind: Schema.Literals(["document", "implementation"]),
   contract: StageContractRef,
   activation: StageActivationPolicy,
   definitionVersion: PositiveVersion,
@@ -247,7 +276,7 @@ export const StageDefinition = Schema.Struct({
 export type StageDefinition = typeof StageDefinition.Type
 
 export const ExecutableStageSnapshot = Schema.Struct({
-  sequencePosition: Schema.Int.pipe(Schema.positive()),
+  sequencePosition: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   stageDefinitionSha256: Sha256,
   definition: StageDefinition,
   contractRegistrationSha256: Sha256,
@@ -258,7 +287,7 @@ export type ExecutableStageSnapshot = typeof ExecutableStageSnapshot.Type
 export const WorkflowDefinition = Schema.Struct({
   contractVersion: Schema.Literal(1),
   definitionVersion: PositiveVersion,
-  stages: Schema.Array(StageDefinition).pipe(Schema.maxItems(32)),
+  stages: Schema.Array(StageDefinition).pipe(Schema.check(Schema.isMaxLength(32))),
 })
 export type WorkflowDefinition = typeof WorkflowDefinition.Type
 export type SourceResolver = (source: string) => boolean
@@ -462,7 +491,7 @@ function isSafeArtifactPathTemplate(pathTemplate: string): boolean {
 export const WorkflowStartOutput = Schema.Struct({
   _tag: Schema.Literal("Started"),
   workflowId: BoundedText(256),
-  generation: Schema.Int.pipe(Schema.positive()),
+  generation: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   branchName: BoundedText(256),
   rootSha: GitSha,
   ticketRevisionSha256: Sha256,

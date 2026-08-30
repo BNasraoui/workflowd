@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { SqlError } from "@effect/sql/SqlError"
-import { Effect, Layer, Logger, Queue } from "effect"
+import { SqlError } from "effect/unstable/sql"
+import { Effect, Layer, Logger, PubSub } from "effect"
 import { AgentHarnessError } from "../src/agent-harness"
 import { handleGitHubWebhook, routeRequest } from "../src/http"
 import { WorkflowStoreLive } from "../src/store"
@@ -123,7 +123,7 @@ describe("handleGitHubWebhook", () => {
   test("returns 500 when the webhook body cannot be read", async () => {
     const logs: Array<{ readonly level: string; readonly message: unknown }> = []
     const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
-      logs.push({ level: logLevel.label, message })
+      logs.push({ level: logLevel, message })
     })
     class UnreadableRequest extends Request {
       override readonly arrayBuffer = (): Promise<ArrayBuffer> =>
@@ -142,17 +142,14 @@ describe("handleGitHubWebhook", () => {
       handleGitHubWebhook(request, {
         webhookSecret: "webhook-secret",
         now: new Date("2026-07-19T12:00:00.000Z"),
-      }).pipe(
-        Effect.provide(TestLayer),
-        Effect.provide(Logger.replace(Logger.defaultLogger, logger)),
-      ),
+      }).pipe(Effect.provide(TestLayer), Effect.provide(Logger.layer([logger]))),
     )
 
     expect(response.status).toBe(500)
     expect(await response.json()).toEqual({ error: "internal server error" })
     expect(logs).toEqual([
       {
-        level: "ERROR",
+        level: "Error",
         message: ["Webhook ingestion failed"],
       },
     ])
@@ -296,14 +293,14 @@ describe("handleGitHubWebhook", () => {
             now: new Date("2026-07-19T12:01:00.000Z"),
             leaseDurationMs: 60_000,
           })
-          if (first === null) return yield* Effect.dieMessage("expected reconciliation")
+          if (first === null) return yield* Effect.die(new Error("expected reconciliation"))
           const signals = yield* WorkSignal
           const wake = yield* signals.subscribe("reconciliation")
           const response = yield* handleGitHubWebhook(
             signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
             { webhookSecret: secret, now: new Date("2026-07-19T12:01:01.000Z") },
           )
-          yield* Queue.take(wake)
+          yield* PubSub.take(wake)
           const rearmed = yield* store.claimNextReconciliation({
             workerId: "second-reconciler",
             now: new Date("2026-07-19T12:01:02.000Z"),
@@ -700,7 +697,13 @@ describe("QRSPI ingress status mapping", () => {
       new WorkflowStartValidationError({ phase: "contract", reason: "unknown_contract_reference" }),
       503,
     ],
-    [new SqlError({ cause: new Error("database is locked") }), 503],
+    // TODO(effect-v4): SqlError family
+    [
+      new SqlError.SqlError({
+        reason: new SqlError.ConnectionError({ cause: new Error("database is locked") }),
+      }),
+      503,
+    ],
     [
       new QrspiStoreDataError({
         record: "workflow_definition",

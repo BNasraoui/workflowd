@@ -210,12 +210,12 @@ test("composes the explicit six-contract catalog by default", async () => {
     const preflight = await Effect.runPromise(
       Effect.gen(function* () {
         const workflowStart = yield* WorkflowStart
-        return yield* workflowStart.preflight.pipe(Effect.either)
+        return yield* workflowStart.preflight.pipe(Effect.result)
       }).pipe(Effect.provide(Live)),
     )
     expect(preflight).toMatchObject({
-      _tag: "Left",
-      left: { phase: "availability", reason: "unavailable_agent_model" },
+      _tag: "Failure",
+      failure: { phase: "availability", reason: "unavailable_agent_model" },
     })
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -251,7 +251,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
 
     expect(exit).toMatchObject({
       _tag: "Failure",
-      cause: { _tag: "Fail", error: { _tag: "WorkflowStartUnauthorized" } },
+      cause: { reasons: [{ _tag: "Fail", error: { _tag: "WorkflowStartUnauthorized" } }] },
     })
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -309,15 +309,15 @@ test("keeps unrelated services available when configured QRSPI is closed", async
             agentHarness.createSession,
             workspace.prepareReview,
           ],
-          closed: yield* Effect.either(workflowStart.start({})),
+          closed: yield* Effect.result(workflowStart.start({})),
         }
       }).pipe(Effect.provide(Live)),
     )
 
     expect(result.methods.every((method) => typeof method === "function")).toBe(true)
     expect(result.closed).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowStartValidationError",
         phase: "contract",
         reason: "unknown_contract_reference",
@@ -354,10 +354,12 @@ test("fails live composition when the configured GitHub key cannot be read", asy
 
     const exit = await Effect.runPromiseExit(Effect.scoped(Layer.build(Live)))
 
-    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
-      _tag: "Some",
-      value: expect.any(Error),
-    })
+    expect(Cause.findErrorOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject(
+      {
+        _tag: "Some",
+        value: expect.any(Error),
+      },
+    )
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

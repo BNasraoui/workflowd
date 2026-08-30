@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, PubSub, type Queue, type Scope } from "effect"
+import { Context, Effect, Layer, PubSub, type Scope } from "effect"
 
 export type WorkLane =
   | "job"
@@ -10,13 +10,15 @@ export type WorkLane =
   | "command"
 
 export type WorkSignalPort = {
-  readonly subscribe: (lane: WorkLane) => Effect.Effect<Queue.Dequeue<void>, never, Scope.Scope>
+  readonly subscribe: (
+    lane: WorkLane,
+  ) => Effect.Effect<PubSub.Subscription<void>, never, Scope.Scope>
   readonly wake: (lane: WorkLane) => Effect.Effect<void>
 }
 
-export const WorkSignal = Context.GenericTag<WorkSignalPort>("workflowd/WorkSignal")
+export const WorkSignal = Context.Service<WorkSignalPort>("workflowd/WorkSignal")
 
-export const WorkSignalLive = Layer.scoped(
+export const WorkSignalLive = Layer.effect(
   WorkSignal,
   Effect.gen(function* () {
     const lanes = {

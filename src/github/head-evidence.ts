@@ -85,7 +85,7 @@ export function collectHeadEvidence(
       policy.sonarProjectKey === undefined
         ? passingSonarEvidence(input.target.headSha)
         : yield* collectSonar(input, policy.sonarProjectKey).pipe(
-            Effect.catchAll((error) =>
+            Effect.catch((error) =>
               Effect.succeed({ state: "unavailable", reason: error.cause.message } as const),
             ),
           )
@@ -134,7 +134,7 @@ function collectChecks(
       Effect.map((collected) =>
         classifyChecks(collected, input.requiredCheckContexts ?? policyRequiredContexts),
       ),
-      Effect.catchAll((error) =>
+      Effect.catch((error) =>
         Effect.succeed({
           state: "unavailable" as const,
           reason: error.cause.message,
@@ -147,7 +147,7 @@ function collectChecks(
       return checks
     }
     const logs = yield* collectFailedJobLogs(input).pipe(
-      Effect.catchAll(() => Effect.succeed(new Map<string, string>())),
+      Effect.catch(() => Effect.succeed(new Map<string, string>())),
     )
     return {
       ...checks,
@@ -576,7 +576,7 @@ function passingSonarEvidence(headSha: string): SonarEvidence {
 function sonarJson<A, I>(
   request: SonarRequest,
   path: string,
-  schema: Schema.Schema<A, I>,
+  schema: Schema.Codec<A, I>,
 ): Effect.Effect<A, HeadEvidenceError> {
   return attempt(`read public Sonar endpoint ${path.split("?", 1)[0]}`, async (signal) => {
     const response = await request(path, signal)

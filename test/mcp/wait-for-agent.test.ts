@@ -9,7 +9,7 @@ const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
   Layer.provideMerge(kernelLayer(":memory:")),
 )
 
-const run = <A, E>(effect: Effect.Effect<A, E, Layer.Layer.Success<typeof mcpLayer>>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof mcpLayer>>) =>
   Effect.runPromise(effect.pipe(Effect.provide(mcpLayer)))
 
 const firstText = (result: { content: Array<{ type: "text"; text: string }> }) =>

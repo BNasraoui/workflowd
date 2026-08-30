@@ -1,5 +1,5 @@
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { canonicalJson } from "./session-store-support"
 import {
@@ -22,8 +22,8 @@ import {
 
 const SessionCustodyRow = Schema.Struct({
   session_id: Schema.String,
-  provider_kind: Schema.Literal("opencode", "codex", "claude"),
-  provider_version: Schema.Int.pipe(Schema.positive()),
+  provider_kind: Schema.Literals(["opencode", "codex", "claude"]),
+  provider_version: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   provider_id: Schema.String,
   server_id: Schema.String,
   owning_host_id: Schema.String,
@@ -33,7 +33,7 @@ const SessionCustodyRow = Schema.Struct({
   resource_id: Schema.String,
   resource_state: Schema.String,
   state: Schema.String,
-  revision: Schema.Int.pipe(Schema.positive()),
+  revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
 })
 
 export class AgentHandoffStoreError extends Data.TaggedError("AgentHandoffStoreError")<{
@@ -68,7 +68,7 @@ export type AgentHandoffStorePort = {
   ) => Effect.Effect<{ readonly status: "registered" | "duplicate" }, StoreError>
 }
 
-export const AgentHandoffStore = Context.GenericTag<AgentHandoffStorePort>(
+export const AgentHandoffStore = Context.Service<AgentHandoffStorePort>(
   "workflowd/kernel/AgentHandoffStore",
 )
 
@@ -76,7 +76,7 @@ const decodeError = (operation: string) => (cause: unknown) =>
   new AgentHandoffStoreError({ operation, cause })
 
 const decodeWorkflow = (value: unknown) =>
-  Schema.decodeUnknown(WaitForAgentWorkflowV1)(value, { onExcessProperty: "error" }).pipe(
+  Schema.decodeUnknownEffect(WaitForAgentWorkflowV1)(value, { onExcessProperty: "error" }).pipe(
     Effect.mapError(decodeError("decode wait-for-agent workflow")),
     Effect.flatMap((workflow) =>
       canonicalJson(workflow.resumePrompt) === workflow.resumePromptText
@@ -109,7 +109,7 @@ const make = Effect.gen(function* () {
         FROM kernel_sessions AS session
         JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
         WHERE session.session_id = ${workflow.childSessionId}`
-      const child = yield* Schema.decodeUnknown(SessionCustodyRow)(sessionRows[0]).pipe(
+      const child = yield* Schema.decodeUnknownEffect(SessionCustodyRow)(sessionRows[0]).pipe(
         Effect.mapError(decodeError("decode child session custody")),
       )
       if (
@@ -134,7 +134,7 @@ const make = Effect.gen(function* () {
         FROM kernel_sessions AS session
         JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
         WHERE session.session_id = ${workflow.parentSessionId}`
-      const parent = yield* Schema.decodeUnknown(SessionCustodyRow)(parentRows[0]).pipe(
+      const parent = yield* Schema.decodeUnknownEffect(SessionCustodyRow)(parentRows[0]).pipe(
         Effect.mapError(decodeError("decode parent session custody")),
       )
       if (
@@ -210,7 +210,7 @@ export const recordAgentSessionCompletion = (input: {
 }): Effect.Effect<RecordEventResult, EventStoreError, KernelEventStorePort> =>
   Effect.gen(function* () {
     const events = yield* KernelEventStore
-    const payload = yield* Schema.decodeUnknown(AgentSessionCompletedEventV1)(
+    const payload = yield* Schema.decodeUnknownEffect(AgentSessionCompletedEventV1)(
       {
         childSessionId: input.childSessionId,
         childSessionGeneration: input.childSessionGeneration,

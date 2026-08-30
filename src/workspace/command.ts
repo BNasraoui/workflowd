@@ -21,7 +21,7 @@ function executeWorkspaceCommand<A>(
   options: WorkspaceCommandOptions,
   readStdout: (stdout: ReadableStream<Uint8Array>) => Promise<A>,
 ): Effect.Effect<A, WorkspaceError> {
-  return Effect.async<A, WorkspaceError>((resume, signal) => {
+  return Effect.callback<A, WorkspaceError>((resume, signal) => {
     let child: Bun.ReadableSubprocess
     try {
       child = Bun.spawn([...command], {

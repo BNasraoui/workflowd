@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import type { SessionReference } from "../src/agent-harness"
-import type { OpenCodeAdapter } from "../src/opencode/adapter"
+import {
+  OpenCodeAdapterError,
+  type OpenCodeAdapter,
+  type OpenCodeSessionStatus,
+} from "../src/opencode/adapter"
 import { SessionAccessResolver } from "../src/session-access"
 
 const reference: SessionReference = {
@@ -20,22 +24,19 @@ const reference: SessionReference = {
 }
 
 function adapter(
-  status: Awaited<ReturnType<OpenCodeAdapter["getSessionStatus"]>>,
+  status: OpenCodeSessionStatus | undefined,
   sessionExists = status !== undefined,
 ): OpenCodeAdapter {
   return {
-    createSession: async () => ({ id: "unused" }),
-    promptSession: async () => undefined,
-    subscribeSessionEvents: async () => ({
-      [Symbol.asyncIterator]: () => ({
-        next: async () => ({ done: true as const, value: undefined }),
-      }),
-    }),
-    getSessionStatus: async () => status,
-    sessionExists: async () => sessionExists,
-    listSessionMessages: async () => [],
-    abortSession: async () => true,
-    validateAvailability: async () => undefined,
+    createSession: () => Effect.succeed({ id: "unused" }),
+    promptSession: () => Effect.void,
+    subscribeSessionEvents: () => Stream.empty,
+    getSessionStatus: () => Effect.succeed(status),
+    sessionExists: () => Effect.succeed(sessionExists),
+    listSessionMessages: () => Effect.succeed([]),
+    abortSession: () => Effect.succeed(true),
+    validateAvailability: () => Effect.void,
+    generateStructured: () => Effect.succeed(null),
   }
 }
 
@@ -56,8 +57,7 @@ describe("SessionAccessResolver", () => {
     expect(access).toEqual({
       _tag: "Available",
       sessionReferenceId: "session-reference-1",
-      command:
-        "opencode attach 'https://mint.tailnet.example:4096' --dir '/worktrees/issue with '\"'\"'quotes'\"'\"'' --session 'ses_exact'",
+      command: "opencode2 --server 'https://mint.tailnet.example:4096' --session 'ses_exact'",
     })
     if (access._tag !== "Available") throw new Error("expected available session")
     expect(access.command).not.toContain("password")
@@ -88,10 +88,11 @@ describe("SessionAccessResolver", () => {
     const resolver = new SessionAccessResolver(
       {
         ...openCode,
-        getSessionStatus: async (...args) => {
-          probed = true
-          return openCode.getSessionStatus(...args)
-        },
+        getSessionStatus: (...args) =>
+          Effect.suspend(() => {
+            probed = true
+            return openCode.getSessionStatus(...args)
+          }),
       },
       {
         serverId: "replacement-server",
@@ -117,10 +118,11 @@ describe("SessionAccessResolver", () => {
       const resolver = new SessionAccessResolver(
         {
           ...openCode,
-          getSessionStatus: async (...args) => {
-            probed = true
-            return openCode.getSessionStatus(...args)
-          },
+          getSessionStatus: (...args) =>
+            Effect.suspend(() => {
+              probed = true
+              return openCode.getSessionStatus(...args)
+            }),
         },
         {
           serverId: "opencode-primary",
@@ -160,7 +162,13 @@ describe("SessionAccessResolver", () => {
     const resolver = new SessionAccessResolver(
       {
         ...adapter(undefined),
-        sessionExists: async () => Promise.reject(new Error("server offline")),
+        sessionExists: () =>
+          Effect.fail(
+            new OpenCodeAdapterError({
+              operation: "session exists",
+              cause: new Error("server offline"),
+            }),
+          ),
       },
       {
         serverId: "opencode-primary",
@@ -183,10 +191,11 @@ describe("SessionAccessResolver", () => {
     const resolver = new SessionAccessResolver(
       {
         ...openCode,
-        sessionExists: async (...args) => {
-          probed = true
-          return openCode.sessionExists(...args)
-        },
+        sessionExists: (...args) =>
+          Effect.suspend(() => {
+            probed = true
+            return openCode.sessionExists(...args)
+          }),
       },
       {
         serverId: "opencode-primary",

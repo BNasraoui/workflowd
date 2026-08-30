@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
-import type { SqlClient as SqlClientService } from "@effect/sql/SqlClient"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { WorkflowStoreLive } from "../../src/store"
@@ -17,7 +16,7 @@ test("exports the current migration as the true predecessor", () => {
   expect("runStoreMigrationsThrough0011" in StoreMigrations).toBe(true)
 })
 
-const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClientService>) => {
+const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   return Effect.runPromise(effect.pipe(Effect.provide(database)))
 }

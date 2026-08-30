@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import { runSessionKernel } from "./session-store-harness"
 import { removeDatabase } from "./job-store-harness"
@@ -73,8 +73,8 @@ describe("cleanup authority", () => {
                 outcomeVersion: 1,
                 outcome: {},
               })
-              .pipe(Effect.either)
-            return result._tag === "Left" && result.left._tag
+              .pipe(Effect.result)
+            return result._tag === "Failure" && result.failure._tag
           }),
         ),
       ),

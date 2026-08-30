@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Cause, Effect, Fiber, Layer, Schema } from "effect"
 import { AgentHarness, AgentHarnessError, type AgentHarnessPort } from "../../src/agent-harness"
@@ -353,14 +353,14 @@ async function startWithOptions(
   const result = await Effect.runPromise(
     makeWorkflowStart(startOptions)(startRequest).pipe(
       Effect.provide(layer(filename, fake)),
-      Effect.either,
+      Effect.result,
     ),
   )
-  if (result._tag === "Left") {
-    if (result.left instanceof Error) throw result.left
+  if (result._tag === "Failure") {
+    if (result.failure instanceof Error) throw result.failure
     throw new Error("Unexpected non-Error workflow failure")
   }
-  return result.right
+  return result.success
 }
 
 async function counts(filename: string, fake: ReturnType<typeof fakes>) {
@@ -699,16 +699,17 @@ describe("WorkflowStart integration", () => {
     const fake = fakes({ createNever: true, onCreateEntered: entered })
     const exit = await Effect.runPromise(
       Effect.gen(function* () {
-        const fiber = yield* Effect.fork(
+        const fiber = yield* Effect.forkChild(
           makeWorkflowStart(options)(request).pipe(Effect.provide(layer(filename, fake))),
         )
         yield* Effect.promise(() => enteredPromise)
-        return yield* Fiber.interrupt(fiber)
+        yield* Fiber.interrupt(fiber)
+        return yield* Fiber.await(fiber)
       }),
     )
 
     expect(exit._tag).toBe("Failure")
-    if (exit._tag === "Failure") expect(Cause.isInterruptedOnly(exit.cause)).toBe(true)
+    if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
     const states = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -918,9 +919,9 @@ describe("WorkflowStart integration", () => {
         const rows = yield* sql<{ readonly operation_id: string; readonly input_json: string }>`
           SELECT operation_id, input_json FROM workflow_operations WHERE kind = 'WorkflowStart'
         `
-        const persisted = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
-          rows[0]!.input_json,
-        )
+        const persisted = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(WorkflowStartInput),
+        )(rows[0]!.input_json)
         yield* sql`
           CREATE TRIGGER crash_workflow_start_completion
           BEFORE INSERT ON qrspi_generations
@@ -995,9 +996,9 @@ describe("WorkflowStart integration", () => {
         const rows = yield* sql<{ readonly operation_id: string; readonly input_json: string }>`
           SELECT operation_id, input_json FROM workflow_operations WHERE kind = 'WorkflowStart'
         `
-        const persisted = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
-          rows[0]!.input_json,
-        )
+        const persisted = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(WorkflowStartInput),
+        )(rows[0]!.input_json)
         const store = yield* QrspiStore
         return yield* store
           .completeStart({
@@ -1020,13 +1021,13 @@ describe("WorkflowStart integration", () => {
             ],
             now: options.now(),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "WorkflowStartCurrentnessError" },
+      _tag: "Failure",
+      failure: { _tag: "WorkflowStartCurrentnessError" },
     })
     expect(await counts(filename, fake)).toEqual([0, 1, 1])
   })
@@ -1256,13 +1257,13 @@ describe("WorkflowStart integration", () => {
             stageSnapshots: [stageSnapshot()],
             now: new Date("2026-07-21T05:00:00.000Z"),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "WorkflowStartCurrentnessError" },
+      _tag: "Failure",
+      failure: { _tag: "WorkflowStartCurrentnessError" },
     })
   })
 
@@ -1277,9 +1278,9 @@ describe("WorkflowStart integration", () => {
           readonly operation_id: string
           readonly input_json: string
         }>`SELECT operation_id, input_json FROM workflow_operations WHERE kind = 'WorkflowStart'`
-        const persisted = yield* Schema.decodeUnknown(Schema.parseJson(WorkflowStartInput))(
-          rows[0]!.input_json,
-        )
+        const persisted = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(WorkflowStartInput),
+        )(rows[0]!.input_json)
         const store = yield* QrspiStore
         return yield* store
           .completeStart({
@@ -1296,13 +1297,13 @@ describe("WorkflowStart integration", () => {
             stageSnapshots: [stageSnapshot()],
             now: options.now(),
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "WorkflowStartCurrentnessError" },
+      _tag: "Failure",
+      failure: { _tag: "WorkflowStartCurrentnessError" },
     })
     expect(await counts(filename, fake)).toEqual([0, 1, 1])
   })
@@ -1540,11 +1541,11 @@ describe("WorkflowStart integration", () => {
         const store = yield* QrspiStore
         return yield* store
           .claimStart(rows[0]!.operation_id, crypto.randomUUID(), 100, options.now())
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(layer(filename, fake))),
     )
 
-    expect(result).toMatchObject({ _tag: "Left", left: { _tag: "QrspiStoreDataError" } })
+    expect(result).toMatchObject({ _tag: "Failure", failure: { _tag: "QrspiStoreDataError" } })
     const states = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient
@@ -1700,12 +1701,12 @@ describe("Phase 1: Trusted stage snapshots", () => {
             )
           }),
         ),
-        Effect.either,
+        Effect.result,
       ),
     )
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "availability",
         reason: "unavailable_agent_model",
@@ -1756,13 +1757,13 @@ describe("Phase 1: Trusted stage snapshots", () => {
                 )
           }),
         ),
-        Effect.either,
+        Effect.result,
       ),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "availability",
         reason: "unavailable_agent_model",
@@ -1808,12 +1809,12 @@ describe("Phase 2: Ordered workflow definition validation", () => {
           ...options.workflowDefinition,
           stages: [invalidFirst, validSecond],
         },
-      })(request).pipe(Effect.provide(layer(filename, fake)), Effect.either),
+      })(request).pipe(Effect.provide(layer(filename, fake)), Effect.result),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "contract",
         reason: "unknown_contract_reference",
@@ -2218,13 +2219,13 @@ describe("Phase 3: Persisted identity preflight", () => {
         persistedSelectionAvailable = false
         return yield* workflowStart
           .start({ ...request, ticket: nextTicketReference })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }).pipe(Effect.provide(WorkflowStartLive(nextOptions).pipe(Layer.provide(dependencies)))),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "WorkflowDefinitionValidationError",
         phase: "availability",
         reason: "unavailable_agent_model",
@@ -2254,10 +2255,12 @@ describe("Phase 3: Persisted identity preflight", () => {
       ),
     )
 
-    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
-      _tag: "Some",
-      value: { _tag: "QrspiStoreDataError", record: "workflow_definition", reason: "missing" },
-    })
+    expect(Cause.findErrorOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject(
+      {
+        _tag: "Some",
+        value: { _tag: "QrspiStoreDataError", record: "workflow_definition", reason: "missing" },
+      },
+    )
     expect(await counts(filename, fake)).toEqual(before)
     expect(fake.counts()).toMatchObject({ createCalls: 1 })
   })
@@ -2307,10 +2310,12 @@ describe("Phase 3: Persisted identity preflight", () => {
       ),
     )
 
-    expect(Cause.failureOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject({
-      _tag: "Some",
-      value: { _tag: "QrspiStoreDataError", reason },
-    })
+    expect(Cause.findErrorOption(exit._tag === "Failure" ? exit.cause : Cause.empty)).toMatchObject(
+      {
+        _tag: "Some",
+        value: { _tag: "QrspiStoreDataError", reason },
+      },
+    )
     expect(await counts(filename, fake)).toEqual(before)
     expect(fake.counts()).toMatchObject({ createCalls: 1 })
   })

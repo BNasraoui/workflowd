@@ -122,10 +122,9 @@ export type RemoteCoordinatorPort = {
   >
 }
 
-export class RemoteCoordinator extends Context.Reference<RemoteCoordinator>()(
-  "workflowd/remote/RemoteCoordinator",
-  { defaultValue: (): RemoteCoordinatorPort | null => null },
-) {}
+export const RemoteCoordinator = Context.Reference("workflowd/remote/RemoteCoordinator", {
+  defaultValue: (): RemoteCoordinatorPort | null => null,
+})
 
 export const RemoteCoordinatorLive = (config: {
   readonly workerId: string

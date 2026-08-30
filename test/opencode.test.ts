@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect, Schema, Stream } from "effect"
 import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../src/agent-harness"
 import {
   type AutomationPort,
@@ -11,22 +11,19 @@ import {
 } from "../src/opencode"
 import type { OpenCodeAdapter, OpenCodeSessionEvent } from "../src/opencode/adapter"
 
-async function* events(
-  ...values: ReadonlyArray<OpenCodeSessionEvent>
-): AsyncIterable<OpenCodeSessionEvent> {
-  yield* values
-}
+const events = (...values: ReadonlyArray<OpenCodeSessionEvent>) => Stream.fromIterable(values)
 
 function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter {
   return {
-    createSession: async () => ({ id: "ses_default" }),
-    promptSession: async () => undefined,
-    subscribeSessionEvents: async () => events(),
-    getSessionStatus: async () => ({ type: "idle" }),
-    sessionExists: async () => true,
-    listSessionMessages: async () => [],
-    abortSession: async () => true,
-    validateAvailability: async () => undefined,
+    createSession: () => Effect.succeed({ id: "ses_default" }),
+    promptSession: () => Effect.void,
+    subscribeSessionEvents: () => events(),
+    getSessionStatus: () => Effect.succeed({ type: "idle" as const }),
+    sessionExists: () => Effect.succeed(true),
+    listSessionMessages: () => Effect.succeed([]),
+    abortSession: () => Effect.succeed(true),
+    validateAvailability: () => Effect.void,
+    generateStructured: () => Effect.succeed({}),
     ...overrides,
   }
 }
@@ -87,32 +84,33 @@ describe("OpenCodeAutomationAdapter", () => {
     let statusChecks = 0
     let messageLists = 0
     const adapter = makeAdapter({
-      createSession: async () => ({ id: "ses_review_1" }),
-      promptSession: async (prompt) => {
+      createSession: () => Effect.succeed({ id: "ses_review_1" }),
+      promptSession: (prompt) => {
         prompts.push(prompt)
+        return Effect.void
       },
-      subscribeSessionEvents: async () =>
+      subscribeSessionEvents: () =>
         events({
           type: "message.updated",
           sessionID: "ses_review_1",
-          message: {
-            role: "assistant",
-            time: { created: 1, completed: 2 },
-            structured: {
-              verdict: "pass",
-              summary: "No actionable findings.",
-              findings: [],
-            },
-          },
+          message: { id: "msg_1", role: "assistant", time: { created: 1, completed: 2 } },
         }),
-      getSessionStatus: async () => {
+      getSessionStatus: () => {
         statusChecks += 1
-        return { type: "busy" }
+        return Effect.succeed({ type: "busy" as const })
       },
-      listSessionMessages: async () => {
+      listSessionMessages: () => {
         messageLists += 1
-        return []
+        return Effect.succeed([
+          { id: "msg_1", role: "assistant" as const, time: { created: 1, completed: 2 } },
+        ])
       },
+      generateStructured: () =>
+        Effect.succeed({
+          verdict: "pass",
+          summary: "No actionable findings.",
+          findings: [],
+        }),
     })
     const definitions = makePullRequestHarnessDefinitions(config)
     const harness = new OpenCodeAgentHarness(
@@ -139,34 +137,36 @@ describe("OpenCodeAutomationAdapter", () => {
     })
     expect(prompts[0]).toMatchObject({
       agent: "pr-reviewer",
-      format: { type: "json_schema", retryCount: 2 },
       model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
       sessionID: "ses_review_1",
     })
     expect(statusChecks).toBe(0)
-    expect(messageLists).toBe(0)
+    expect(messageLists).toBe(1)
   })
 
   test("runs the fixer with structured completion output", async () => {
     const prompts: Array<Parameters<OpenCodeAdapter["promptSession"]>[0]> = []
     const adapter = makeAdapter({
-      createSession: async () => ({ id: "ses_fix_1" }),
-      promptSession: async (prompt) => {
+      createSession: () => Effect.succeed({ id: "ses_fix_1" }),
+      promptSession: (prompt) => {
         prompts.push(prompt)
+        return Effect.void
       },
-      subscribeSessionEvents: async () =>
+      subscribeSessionEvents: () =>
         events({
           type: "message.updated",
           sessionID: "ses_fix_1",
-          message: {
-            role: "assistant",
-            time: { created: 1, completed: 2 },
-            structured: {
-              _tag: "CommitPrepared",
-              summary: "Prepared the fix commit.",
-              commitSha: "c".repeat(40),
-            },
-          },
+          message: { id: "msg_1", role: "assistant", time: { created: 1, completed: 2 } },
+        }),
+      listSessionMessages: () =>
+        Effect.succeed([
+          { id: "msg_1", role: "assistant" as const, time: { created: 1, completed: 2 } },
+        ]),
+      generateStructured: () =>
+        Effect.succeed({
+          _tag: "CommitPrepared",
+          summary: "Prepared the fix commit.",
+          commitSha: "c".repeat(40),
         }),
     })
     const definitions = makePullRequestHarnessDefinitions(config)
@@ -208,8 +208,9 @@ describe("OpenCodeAutomationAdapter", () => {
       readonly model: { readonly providerID: string; readonly modelID: string }
     }> = []
     const adapter = makeAdapter({
-      validateAvailability: async (request) => {
+      validateAvailability: (request) => {
         validations.push(request)
+        return Effect.void
       },
     })
     const definitions = makePullRequestHarnessDefinitions(config)

@@ -16,21 +16,23 @@ import type { WorkspaceError } from "../workspace/errors"
 
 const RawBead = Schema.Struct({
   id: Schema.String,
-  issue_type: Schema.Literal("bug", "feature", "task", "epic", "chore", "decision"),
+  issue_type: Schema.Literals(["bug", "feature", "task", "epic", "chore", "decision"]),
   title: Schema.optional(Schema.String),
   description: Schema.optional(Schema.String),
   acceptance_criteria: Schema.optional(Schema.String),
   updated_at: Schema.optional(Schema.String),
 })
-const RawBeads = Schema.Array(RawBead).pipe(Schema.itemsCount(1))
+const RawBeads = Schema.Array(RawBead).pipe(
+  Schema.check(Schema.isMinLength(1), Schema.isMaxLength(1)),
+)
 
 const RawArtifactContent = Schema.Struct({
   type: Schema.Literal("file"),
   path: Schema.String,
-  sha: Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+  sha: Schema.String.pipe(Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i))),
   encoding: Schema.Literal("base64"),
   content: Schema.String,
-  size: Schema.Int.pipe(Schema.nonNegative()),
+  size: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
 })
 
 export class BeadsCliTicketSource implements TicketSourcePort {
@@ -50,7 +52,7 @@ export class BeadsCliTicketSource implements TicketSourcePort {
   ) {}
 
   readonly read = (reference: TicketReference) =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       if (reference.trackerInstanceId !== this.trackerInstanceId) {
         return yield* Effect.fail(
           new TicketSourceError({ cause: new Error("Cross-workspace ticket rejected") }),
@@ -78,7 +80,7 @@ export class BeadsCliTicketSource implements TicketSourcePort {
         )
       }
       const stdout = new TextDecoder().decode(result.stdout)
-      const beads = yield* Schema.decodeUnknown(Schema.parseJson(RawBeads))(stdout).pipe(
+      const beads = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RawBeads))(stdout).pipe(
         Effect.mapError(
           (cause) => new TicketSourceMalformedError({ cause: normalizeError(cause) }),
         ),
@@ -241,7 +243,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         request: { signal },
       })
       const observedCommitSha = Schema.decodeUnknownSync(
-        Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+        Schema.String.pipe(Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i))),
       )(commitResponse.data.sha)
       if (observedCommitSha !== input.commitSha) {
         throw new Error("GitHub resolved the artifact reference to a different commit")
@@ -294,7 +296,7 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
         repositoryFullName: repository.data.full_name,
       })
       const sha = Schema.decodeUnknownSync(
-        Schema.String.pipe(Schema.pattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i)),
+        Schema.String.pipe(Schema.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i))),
       )(branch.data.commit.sha)
       return {
         repository: observed,
@@ -404,16 +406,17 @@ export class GitHubQrspiRepository implements QrspiRepositoryPort {
       try: run,
       catch: (cause) => new QrspiRepositoryError({ operation, cause: normalizeError(cause) }),
     }).pipe(
-      Effect.timeoutFail({
-        duration: this.config.repositoryOperationTimeoutMs,
-        onTimeout: () =>
+      Effect.timeout(this.config.repositoryOperationTimeoutMs),
+      Effect.catchTag("TimeoutError", () =>
+        Effect.fail(
           new QrspiRepositoryError({
             operation,
             cause: new Error(
               `Repository operation timed out after ${this.config.repositoryOperationTimeoutMs}ms`,
             ),
           }),
-      }),
+        ),
+      ),
     )
   }
 
@@ -478,7 +481,7 @@ const decodeRepository = Schema.decodeUnknownSync(
   Schema.Struct({
     providerInstanceId: Schema.NonEmptyString,
     repositoryId: Schema.NonEmptyString,
-    repositoryFullName: Schema.String.pipe(Schema.pattern(/^[^/\s]+\/[^/\s]+$/)),
+    repositoryFullName: Schema.String.pipe(Schema.check(Schema.isPattern(/^[^/\s]+\/[^/\s]+$/))),
   }),
 )
 

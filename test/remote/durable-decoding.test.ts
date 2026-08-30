@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import {
@@ -25,13 +25,13 @@ test("coordinator recovery reports malformed durable dispatch data as a typed er
       })
       yield* sql`UPDATE kernel_remote_dispatches SET issued_at = 'not-a-timestamp'
         WHERE command_id = 'corrupt-command'`
-      return yield* remote.pendingDispatches().pipe(Effect.either)
+      return yield* remote.pendingDispatches().pipe(Effect.result)
     }).pipe(Effect.provide(RemoteCoordinatorStoreLive)),
   )
 
   expect(result).toMatchObject({
-    _tag: "Left",
-    left: { _tag: "RemoteCoordinatorDataError", key: "corrupt-command" },
+    _tag: "Failure",
+    failure: { _tag: "RemoteCoordinatorDataError", key: "corrupt-command" },
   })
 })
 
@@ -87,7 +87,7 @@ test("runner recovery reports malformed durable envelope data as a typed error",
       )
       yield* sql`UPDATE remote_runner_inbox SET envelope_json = '{'
         WHERE command_id = 'corrupt-runner-command'`
-      return yield* store.recoverReceived().pipe(Effect.either)
+      return yield* store.recoverReceived().pipe(Effect.result)
     }).pipe(
       Effect.provide(RemoteRunnerStoreLive),
       Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
@@ -95,8 +95,8 @@ test("runner recovery reports malformed durable envelope data as a typed error",
   )
 
   expect(result).toMatchObject({
-    _tag: "Left",
-    left: { _tag: "RemoteRunnerDataError", key: "inbox" },
+    _tag: "Failure",
+    failure: { _tag: "RemoteRunnerDataError", key: "inbox" },
   })
 })
 

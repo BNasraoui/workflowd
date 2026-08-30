@@ -6,15 +6,17 @@ export const MAX_STAGE_REQUEST_BYTES = 32 * 1024
 
 export const boundedAgentPayload = (maximumBytes: number, name: string) =>
   Schema.Unknown.pipe(
-    Schema.filter((value) => {
-      try {
-        return Buffer.byteLength(JSON.stringify(value), "utf8") <= maximumBytes
-          ? true
-          : `${name} exceeds ${maximumBytes} encoded UTF-8 bytes`
-      } catch {
-        return `${name} must be JSON encodable`
-      }
-    }),
+    Schema.check(
+      Schema.makeFilter((value) => {
+        try {
+          return Buffer.byteLength(JSON.stringify(value), "utf8") <= maximumBytes
+            ? true
+            : `${name} exceeds ${maximumBytes} encoded UTF-8 bytes`
+        } catch {
+          return `${name} must be JSON encodable`
+        }
+      }),
+    ),
   )
 
 export const AgentLaunchIntentEnvelope = boundedAgentPayload(

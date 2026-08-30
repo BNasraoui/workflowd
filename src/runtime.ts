@@ -1,4 +1,4 @@
-import { Data, Effect, FiberSet, Option, Queue } from "effect"
+import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
@@ -51,10 +51,10 @@ export function superviseWorker<A extends string, E, R>(
       iteration.pipe(
         Effect.flatMap((result) =>
           result === "idle"
-            ? Effect.race(Queue.take(subscription), Effect.sleep(pollIntervalMs))
+            ? Effect.race(PubSub.take(subscription), Effect.sleep(pollIntervalMs))
             : Effect.forEach(downstream, signals.wake, { discard: true }),
         ),
-        Effect.catchAllCause((cause) =>
+        Effect.catchCause((cause) =>
           Effect.logError(`${name} iteration failed`, cause).pipe(
             Effect.andThen(Effect.sleep(pollIntervalMs)),
           ),
@@ -93,7 +93,7 @@ function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHook
                   maxBodyBytes: config.maxWebhookBytes,
                   now: new Date(),
                 }).pipe(
-                  Effect.catchAllCause(() =>
+                  Effect.catchCause(() =>
                     Effect.succeed(
                       Response.json({ error: "service shutting down" }, { status: 503 }),
                     ),
@@ -155,7 +155,7 @@ export const startRemoteCoordinatorWorkers = (
           Effect.andThen(iteration),
           Effect.tap(() => observe(name)),
           Effect.andThen(name === "remote-dispatch" ? Effect.sleep(pollIntervalMs) : Effect.void),
-          Effect.catchAllCause((cause) =>
+          Effect.catchCause((cause) =>
             Effect.logError(`${name} iteration failed`, cause).pipe(
               Effect.andThen(Effect.sleep(pollIntervalMs)),
             ),
@@ -266,7 +266,7 @@ export function startHookService(
         Effect.suspend(() => {
           const iterationAt = new Date()
           return enqueueNextAgentHandoff(iterationAt).pipe(
-            Effect.zipRight(
+            Effect.andThen(
               runKernelJobIteration({
                 workerId: `${process.pid}:kernel-job`,
                 now: () => new Date(),

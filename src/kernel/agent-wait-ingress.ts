@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto"
-import { SqlClient } from "@effect/sql"
-import type { SqlError } from "@effect/sql/SqlError"
+import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
-import type { ParseResult } from "effect"
 import {
   AgentWaitReceipt,
   AgentWaitSubmission,
@@ -31,7 +30,7 @@ export const AGENT_WAKE_CONTRACT = { name: "workflowd.agent-wake", version: 1 } 
 
 export const AgentWakeResult = Schema.Struct({
   acknowledged: Schema.Literal(true),
-  summary: Schema.String.pipe(Schema.maxLength(4_096)),
+  summary: Schema.String.pipe(Schema.check(Schema.isMaxLength(4_096))),
 })
 
 export const AGENT_WAKE_MAX_OUTPUT_BYTES = 16_384
@@ -91,7 +90,7 @@ export type AgentWaitIngressError =
   | KernelStoreDataError
   | KernelStoreInputError
   | SqlError
-  | ParseResult.ParseError
+  | Schema.SchemaError
 
 export type AgentWaitIngressPort = {
   readonly register: (
@@ -100,14 +99,14 @@ export type AgentWaitIngressPort = {
   ) => Effect.Effect<AgentWaitReceipt, AgentWaitIngressError>
 }
 
-export const AgentWaitIngress = Context.GenericTag<AgentWaitIngressPort>(
+export const AgentWaitIngress = Context.Service<AgentWaitIngressPort>(
   "workflowd/kernel/AgentWaitIngress",
 )
 
 const CustodyRow = Schema.Struct({
   session_id: Schema.String,
   state: Schema.String,
-  revision: Schema.Int.pipe(Schema.positive()),
+  revision: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
   provider_kind: Schema.String,
   resource_state: Schema.String,
 })
@@ -167,7 +166,7 @@ const readCustody = (role: "parent" | "child", sessionId: string) =>
         observed: null,
       })
     }
-    const custody = yield* Schema.decodeUnknown(CustodyRow)(rows[0])
+    const custody = yield* Schema.decodeUnknownEffect(CustodyRow)(rows[0])
     if (custody.provider_kind !== "opencode") {
       return yield* new AgentWaitCustodyError({
         role,
@@ -203,7 +202,7 @@ const make = (completionSource: AgentCompletionSourceIdentity) =>
 
     const register: AgentWaitIngressPort["register"] = (input, now) =>
       Effect.gen(function* () {
-        const submission = yield* Schema.decodeUnknown(AgentWaitSubmission)(input, {
+        const submission = yield* Schema.decodeUnknownEffect(AgentWaitSubmission)(input, {
           onExcessProperty: "error",
         })
         // Custody is validated before anything durable is written so a caller

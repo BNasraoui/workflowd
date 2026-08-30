@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Schema } from "effect"
 import { mkdtemp, rm } from "node:fs/promises"
@@ -159,7 +159,7 @@ async function readMutation(mutation: Mutation) {
           workflowId: mutation === "wrong_workflow" ? `wf_${"f".repeat(64)}` : workflowId,
           ticketRevisionSha256: original.ticketRevisionSha256,
         })
-        .pipe(Effect.either)
+        .pipe(Effect.result)
     }).pipe(Effect.provide(storeLayer)),
   )
 }
@@ -167,8 +167,8 @@ async function readMutation(mutation: Mutation) {
 describe("exact immutable ticket revision replay", () => {
   test("reads the exact workflow and ticket hash row", async () => {
     const result = await readMutation("valid")
-    expect(result._tag).toBe("Right")
-    if (result._tag === "Right") expect(result.right).toEqual(ticketRevision())
+    expect(result._tag).toBe("Success")
+    if (result._tag === "Success") expect(result.success).toEqual(ticketRevision())
   })
 
   test.each([
@@ -180,8 +180,8 @@ describe("exact immutable ticket revision replay", () => {
   ] as const)("classifies %s ticket rows as %s", async (mutation, reason) => {
     const result = await readMutation(mutation)
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "QrspiStoreDataError", record: "ticket_revision", reason },
+      _tag: "Failure",
+      failure: { _tag: "QrspiStoreDataError", record: "ticket_revision", reason },
     })
   })
 })
@@ -294,9 +294,9 @@ describe("Research request replay", () => {
             ticketRevision: ticketFromAnotherWorkflow,
             replayAuthority: replayAuthorityFor(researchStageContract, sources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
 
     const forgedIdentity = {
       ...source.acceptedPointer,
@@ -326,9 +326,9 @@ describe("Research request replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(researchStageContract, sources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
 
     expect(
       await Effect.runPromise(
@@ -343,9 +343,9 @@ describe("Research request replay", () => {
               Buffer.byteLength(JSON.stringify(persisted.request), "utf8") - 1,
             ),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "request_too_large" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "request_too_large" } })
 
     for (const substitutedContent of ["substituted questions", content.normalize("NFC")]) {
       const substitutedRequest = {
@@ -373,9 +373,9 @@ describe("Research request replay", () => {
                 substitutedRequest.sources,
               ),
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
         ),
-      ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+      ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
     }
 
     const decomposedPath = "artifacts/e\u0301.md"
@@ -411,9 +411,9 @@ describe("Research request replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(researchStageContract, pathSubstitutedSources),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 })
 
@@ -603,7 +603,7 @@ describe("complete built-in contract replay", () => {
         const before = yield* sql<Record<string, unknown>>`
           SELECT * FROM workflow_operations WHERE operation_id = ${operationId}
         `
-        const failure = yield* store.readStageProduceInput(operationId).pipe(Effect.either)
+        const failure = yield* store.readStageProduceInput(operationId).pipe(Effect.result)
         const after = yield* sql<Record<string, unknown>>`
           SELECT * FROM workflow_operations WHERE operation_id = ${operationId}
         `
@@ -612,8 +612,8 @@ describe("complete built-in contract replay", () => {
     )
 
     expect(result.failure).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "QrspiStoreDataError",
         record: "workflow_operation",
         recordId: operationId,
@@ -674,13 +674,13 @@ describe("complete built-in contract replay", () => {
           WHERE operation_id = ${operationId}
         `
 
-        return yield* store.readStageProduceInput(operationId).pipe(Effect.either)
+        return yield* store.readStageProduceInput(operationId).pipe(Effect.result)
       }).pipe(Effect.provide(storeLayer)),
     )
 
     expect(result).toMatchObject({
-      _tag: "Left",
-      left: {
+      _tag: "Failure",
+      failure: {
         _tag: "QrspiStoreDataError",
         record: "workflow_operation",
         recordId: operationId,
@@ -737,13 +737,13 @@ describe("complete built-in contract replay", () => {
           )
         `
 
-          return yield* store.readStageProduceInput(operationId).pipe(Effect.either)
+          return yield* store.readStageProduceInput(operationId).pipe(Effect.result)
         }).pipe(Effect.provide(storeLayer)),
       )
 
       expect(result).toMatchObject({
-        _tag: "Left",
-        left: {
+        _tag: "Failure",
+        failure: {
           _tag: "QrspiStoreDataError",
           record: "workflow_operation",
           recordId: operationId,
@@ -824,9 +824,9 @@ describe("complete built-in contract replay", () => {
               ticketRevision: original,
               replayAuthority: replayAuthorityFor(contract, wrongScope),
             })
-            .pipe(Effect.either),
+            .pipe(Effect.result),
         ),
-      ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+      ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
     })
 
   test.each([
@@ -852,9 +852,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, currentScope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
   })
 
   test("rejects a rehashed substituted repository target", async () => {
@@ -878,9 +878,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, currentScope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
   })
 
   test("rejects a predecessor pointer and snapshot relabeled with another built-in contract", async () => {
@@ -922,9 +922,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, substitutedScope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "identity_mismatch" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "identity_mismatch" } })
   })
 
   test("rejects unexpected durable request fields", async () => {
@@ -945,9 +945,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, scope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("rejects unexpected durable envelope fields before task construction", async () => {
@@ -970,9 +970,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, scope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("rejects unexpected nested source fields", async () => {
@@ -992,9 +992,9 @@ describe("complete built-in contract replay", () => {
             ticketRevision: original,
             replayAuthority: replayAuthorityFor(contract, scope),
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_request" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_request" } })
   })
 
   test("rejects unexpected agent result fields", async () => {
@@ -1014,8 +1014,8 @@ describe("complete built-in contract replay", () => {
             },
             context: { scope, target },
           })
-          .pipe(Effect.either),
+          .pipe(Effect.result),
       ),
-    ).toMatchObject({ _tag: "Left", left: { reason: "malformed_result" } })
+    ).toMatchObject({ _tag: "Failure", failure: { reason: "malformed_result" } })
   })
 })

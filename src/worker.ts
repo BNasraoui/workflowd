@@ -47,7 +47,7 @@ function leaseFailure<E>(cause: Cause.Cause<E>, attempt: number, now: () => Date
 }
 
 function retryableFailure<E>(cause: Cause.Cause<E>): boolean {
-  const failure = Option.getOrUndefined(Cause.failureOption(cause))
+  const failure = Option.getOrUndefined(Cause.findErrorOption(cause))
   return !(
     (failure instanceof AgentHarnessError || failure instanceof OpenCodeAutomationError) &&
     !failure.retryable
@@ -472,9 +472,9 @@ export function runJobIteration(options: JobIterationOptions) {
       interruptOnCancellation(operation, options.cancellationPollIntervalMs, () =>
         store.shouldCancelJob(work.id, options.workerId, options.now()),
       ).pipe(
-        Effect.timeoutFail({
+        Effect.timeoutOrElse({
           duration: options.timeoutMs,
-          onTimeout: () => new Error(`Job ${work.id} timed out`),
+          orElse: () => Effect.fail(new Error(`Job ${work.id} timed out`)),
         }),
       ),
     )
@@ -526,9 +526,9 @@ export function runPublicationIteration(options: {
           store.isPublicationCurrent(publication.id, options.workerId, now),
         )
         .pipe(
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: options.timeoutMs,
-            onTimeout: () => new Error(`Publication ${publication.id} timed out`),
+            orElse: () => Effect.fail(new Error(`Publication ${publication.id} timed out`)),
           }),
         ),
     )
@@ -553,7 +553,7 @@ export function runPublicationIteration(options: {
 }
 
 function evidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
-  return Option.getOrUndefined(Cause.failureOption(cause)) instanceof EvidencePending
+  return Option.getOrUndefined(Cause.findErrorOption(cause)) instanceof EvidencePending
 }
 
 function jobMaxAttempts<E>(
@@ -568,7 +568,7 @@ function jobMaxAttempts<E>(
 }
 
 function publicationEvidenceIsPending<E>(cause: Cause.Cause<E>): boolean {
-  const failure = Option.getOrUndefined(Cause.failureOption(cause))
+  const failure = Option.getOrUndefined(Cause.findErrorOption(cause))
   return (
     failure instanceof GitHubClientError &&
     failure.operation === "wait for exact-head evidence before publication"

@@ -1,4 +1,4 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { Effect } from "effect"
 import { decodeReconciliationRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
@@ -50,7 +50,7 @@ export function makeReconciliationOperations(
           snapshot: input.snapshot,
         })
         if (result.status === "reconciliation_enqueued") {
-          return yield* Effect.dieMessage("authoritative snapshot requested reconciliation")
+          return yield* Effect.die(new Error("authoritative snapshot requested reconciliation"))
         }
         const completed = yield* sql<{ readonly id: number }>`
           UPDATE reconciliations

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { WorkflowStore } from "../../src/store/contracts"
 import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./harness"

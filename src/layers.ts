@@ -1,12 +1,14 @@
 import { readFile } from "node:fs/promises"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
-import { SqlClient } from "@effect/sql"
-import { Effect, JSONSchema, Layer, Schema } from "effect"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { SqlClient } from "effect/unstable/sql"
+import { Cause, Effect, Layer, Option, Schema } from "effect"
 import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
+import { toJsonSchemaObject } from "./json"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
 import { AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
@@ -57,7 +59,7 @@ import { RemoteTransportLive } from "./remote/transport"
 
 const resumeContract = <A, I>(definition: {
   readonly ref: { readonly name: string; readonly version: number }
-  readonly outputSchema: Schema.Schema<A, I, never>
+  readonly outputSchema: Schema.Codec<A, I>
   readonly model: string
   readonly agent: string
   readonly maxOutputBytes: number
@@ -67,7 +69,7 @@ const resumeContract = <A, I>(definition: {
     name: definition.ref.name,
     version: definition.ref.version,
     schema: definition.outputSchema,
-    jsonSchema: JSONSchema.make(definition.outputSchema),
+    jsonSchema: toJsonSchemaObject(definition.outputSchema),
     agent: definition.agent,
     model: {
       providerID: definition.model.slice(0, separator),
@@ -80,7 +82,7 @@ const resumeContract = <A, I>(definition: {
 const stageResumeContract = <A, I>(
   contract: {
     readonly ref: { readonly name: string; readonly contractVersion: number }
-    readonly resultSchema: Schema.Schema<A, I, never>
+    readonly resultSchema: Schema.Codec<A, I>
     readonly maxResultBytes: number
   },
   harness: ReturnType<typeof makeOpenCodeHarnessDefinitions>["stage"],
@@ -97,12 +99,21 @@ export const makeLiveLayer = (config: AppConfig) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
-  const openCodeClient = createOpencodeClient({
-    baseUrl: config.openCode.baseUrl,
-    headers: { Authorization: `Basic ${authorization}` },
-    throwOnError: true,
-  })
-  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClient))
+  const openCodeHttpLayer = Layer.effect(
+    HttpClient.HttpClient,
+    Effect.map(HttpClient.HttpClient, (client) =>
+      HttpClient.mapRequest(
+        client,
+        HttpClientRequest.setHeader("authorization", `Basic ${authorization}`),
+      ),
+    ),
+  ).pipe(Layer.provide(FetchHttpClient.layer))
+  const openCodeClientEffect = Effect.runSync(
+    Effect.cached(
+      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+    ),
+  )
+  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
@@ -172,7 +183,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     KernelEventStoreLive,
     KernelJobStoreLive,
     KernelSessionStoreLive,
-    Layer.service(SqlClient.SqlClient),
+    Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
   const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
   const storeLayer = Layer.merge(kernelStoreLayer, agentHandoffStoreLayer)
@@ -305,16 +316,17 @@ export const makeLiveLayer = (config: AppConfig) => {
               ),
             ),
           ),
-          Layer.catchAll((error) =>
-            error instanceof WorkflowDefinitionValidationError ||
-            error instanceof QrspiStoreDataError ||
-            error instanceof StageCatalogError
+          Layer.catchCause((cause) => {
+            const error = Option.getOrUndefined(Cause.findErrorOption(cause))
+            return error instanceof WorkflowDefinitionValidationError ||
+              error instanceof QrspiStoreDataError ||
+              error instanceof StageCatalogError
               ? Layer.succeed(
                   WorkflowStart,
                   closedWorkflowStart(toWorkflowStartValidationError(error)),
                 )
-              : Layer.fail(error),
-          ),
+              : Layer.effect(WorkflowStart, Effect.failCause(cause))
+          }),
         )
   const qrspiWithStores = qrspiLayer.pipe(Layer.provideMerge(storeLayer))
   const remoteCoordinatorLayer =

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import {
   KernelJobStore,
@@ -78,12 +78,12 @@ describe("kernel job concurrency", () => {
                 resultVersion: 1,
                 result,
               })
-              .pipe(Effect.either)
+              .pipe(Effect.result)
           }),
         )
       const results = await Promise.all([complete({ value: "a" }), complete({ value: "b" })])
-      expect(results.filter(({ _tag }) => _tag === "Right")).toHaveLength(1)
-      expect(results.filter(({ _tag }) => _tag === "Left")).toHaveLength(1)
+      expect(results.filter(({ _tag }) => _tag === "Success")).toHaveLength(1)
+      expect(results.filter(({ _tag }) => _tag === "Failure")).toHaveLength(1)
     } finally {
       await removeDatabase(filename)
     }
@@ -98,17 +98,17 @@ describe("kernel job storage envelopes", () => {
       Effect.gen(function* () {
         const jobs = yield* KernelJobStore
         const exact = yield* arrangeDelivery(exactId)
-        const accepted = yield* jobs.enqueueFromDelivery(exact).pipe(Effect.either)
+        const accepted = yield* jobs.enqueueFromDelivery(exact).pipe(Effect.result)
         const oversized = yield* jobs
           .enqueueFromDelivery({ ...exact, jobId: `${exactId}a` })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return { accepted, oversized }
       }),
     )
-    expect(result.accepted._tag).toBe("Right")
+    expect(result.accepted._tag).toBe("Success")
     expect(result.oversized).toMatchObject({
-      _tag: "Left",
-      left: { _tag: "KernelJobStoreInputError" },
+      _tag: "Failure",
+      failure: { _tag: "KernelJobStoreInputError" },
     })
   })
 
@@ -120,9 +120,9 @@ describe("kernel job storage envelopes", () => {
       Effect.gen(function* () {
         const jobs = yield* KernelJobStore
         const exactInput = yield* arrangeDelivery("input-exact", exactUnicode)
-        const inputAccepted = yield* jobs.enqueueFromDelivery(exactInput).pipe(Effect.either)
+        const inputAccepted = yield* jobs.enqueueFromDelivery(exactInput).pipe(Effect.result)
         const inputOversized = yield* arrangeDelivery("input-large", `${exactUnicode}a`)
-        const inputRejected = yield* jobs.enqueueFromDelivery(inputOversized).pipe(Effect.either)
+        const inputRejected = yield* jobs.enqueueFromDelivery(inputOversized).pipe(Effect.result)
 
         const resultClaim = yield* claimJob("result-size")
         const resultAccepted = yield* jobs
@@ -132,7 +132,7 @@ describe("kernel job storage envelopes", () => {
             resultVersion: 1,
             result: exactAscii,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const oversizedResultClaim = yield* claimJob("result-large")
         const resultRejected = yield* jobs
           .complete({
@@ -141,12 +141,12 @@ describe("kernel job storage envelopes", () => {
             resultVersion: 1,
             result: `${exactAscii}a`,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
 
         const failureClaim = yield* claimJob("failure-size")
         const failureAccepted = yield* jobs
           .fail({ ...authority(failureClaim), failureVersion: 1, failure: exactUnicode })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         const oversizedFailureClaim = yield* claimJob("failure-large")
         const failureRejected = yield* jobs
           .fail({
@@ -154,7 +154,7 @@ describe("kernel job storage envelopes", () => {
             failureVersion: 1,
             failure: `${exactUnicode}a`,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
         return {
           inputAccepted,
           inputRejected,
@@ -168,10 +168,10 @@ describe("kernel job storage envelopes", () => {
 
     expect(
       [result.inputAccepted, result.resultAccepted, result.failureAccepted].map(({ _tag }) => _tag),
-    ).toEqual(["Right", "Right", "Right"])
+    ).toEqual(["Success", "Success", "Success"])
     expect(
       [result.inputRejected, result.resultRejected, result.failureRejected].map(({ _tag }) => _tag),
-    ).toEqual(["Left", "Left", "Left"])
+    ).toEqual(["Failure", "Failure", "Failure"])
   })
 
   test("isolates a poison row and still claims the next valid job", async () => {

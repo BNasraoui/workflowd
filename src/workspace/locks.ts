@@ -1,7 +1,7 @@
-import { Deferred, Effect, type Scope } from "effect"
+import { Deferred, Effect, Semaphore, type Scope } from "effect"
 
 type LockEntry = {
-  readonly semaphore: Effect.Semaphore
+  readonly semaphore: Semaphore.Semaphore
   references: number
 }
 
@@ -10,11 +10,11 @@ export class ScopedKeyedLock {
 
   acquire(key: string): Effect.Effect<void, never, Scope.Scope> {
     return Effect.uninterruptibleMask((restore) =>
-      Effect.gen(this, function* () {
+      Effect.gen({ self: this }, function* () {
         let entry = this.#entries.get(key)
         if (entry === undefined) {
           entry = {
-            semaphore: Effect.unsafeMakeSemaphore(1),
+            semaphore: yield* Semaphore.make(1),
             references: 0,
           }
           this.#entries.set(key, entry)
@@ -34,7 +34,7 @@ export class ScopedKeyedLock {
         yield* restore(
           entry.semaphore
             .withPermits(1)(
-              Deferred.succeed(acquired, undefined).pipe(Effect.zipRight(Deferred.await(released))),
+              Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(released))),
             )
             .pipe(Effect.forkScoped),
         )

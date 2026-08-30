@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Queue, Scope } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import { GitHub } from "../src/github"
@@ -66,7 +66,7 @@ describe("serveHookHttp", () => {
         const started = yield* Deferred.make<void>()
         const interrupted = yield* Deferred.make<void>()
         const scope = yield* Scope.make()
-        const server = yield* Scope.extend(
+        const server = yield* Scope.provide(
           serveHookHttp(
             {
               host: "127.0.0.1",
@@ -82,7 +82,7 @@ describe("serveHookHttp", () => {
           ),
           scope,
         )
-        const request = yield* Effect.fork(
+        const request = yield* Effect.forkChild(
           Effect.tryPromise(() => fetch(`http://${server.hostname}:${server.port}/blocked`)).pipe(
             Effect.exit,
           ),
@@ -102,14 +102,14 @@ describe("serveHookHttp", () => {
   test("fails shutdown after draining requests when stopping the listener rejects", async () => {
     const logs: Array<{ readonly level: string; readonly message: unknown }> = []
     const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
-      logs.push({ level: logLevel.label, message })
+      logs.push({ level: logLevel, message })
     })
-    const CapturingLogger = Logger.replace(Logger.defaultLogger, logger)
+    const CapturingLogger = Logger.layer([logger])
     const started = await Effect.runPromise(Deferred.make<void>())
     const interrupted = await Effect.runPromise(Deferred.make<void>())
     const scope = await Effect.runPromise(Scope.make())
     const server = await Effect.runPromise(
-      Scope.extend(
+      Scope.provide(
         serveHookHttp(
           {
             host: "127.0.0.1",
@@ -132,7 +132,7 @@ describe("serveHookHttp", () => {
     try {
       const lifecycle = await Effect.runPromise(
         Effect.gen(function* () {
-          const request = yield* Effect.fork(
+          const request = yield* Effect.forkChild(
             Effect.tryPromise(() => fetch(`http://${server.hostname}:${server.port}/blocked`)).pipe(
               Effect.exit,
             ),
@@ -147,16 +147,18 @@ describe("serveHookHttp", () => {
 
       expect(lifecycle.closeExit._tag).toBe("Failure")
       if (Exit.isFailure(lifecycle.closeExit)) {
-        expect(Array.from(Cause.defects(lifecycle.closeExit.cause))).toEqual([
-          expect.objectContaining({ _tag: "UnknownException" }),
-        ])
+        expect(
+          lifecycle.closeExit.cause.reasons
+            .filter(Cause.isDieReason)
+            .map((reason) => reason.defect),
+        ).toEqual([expect.objectContaining({ _tag: "UnknownError" })])
       }
       expect(lifecycle.interruption._tag).toBe("Some")
       expect(lifecycle.requestExit._tag).toBe("Success")
       expect(logs).toHaveLength(1)
       expect(logs[0]).toMatchObject({
-        level: "ERROR",
-        message: ["Failed to stop webhook listener", { _tag: "UnknownException" }],
+        level: "Error",
+        message: ["Failed to stop webhook listener", { _tag: "UnknownError" }],
       })
     } finally {
       await stop(true)
@@ -318,7 +320,7 @@ test("superviseWorker preserves error backoff and scoped shutdown", async () => 
         const resumed = yield* Deferred.make<void>()
         const interrupted = yield* Deferred.make<void>()
         const workerScope = yield* Scope.make()
-        yield* Scope.extend(
+        yield* Scope.provide(
           superviseWorker(
             "Test worker",
             40,
@@ -374,7 +376,7 @@ test("publication completion wakes the job lane that now exposes queued Fix Work
           now: new Date("2026-07-20T12:01:00.000Z"),
           leaseDurationMs: 60_000,
         })
-        if (review === null) return yield* Effect.dieMessage("expected review")
+        if (review === null) return yield* Effect.die(new Error("expected review"))
         yield* store.completeReviewJob({
           jobId: review.id,
           workerId: "review-worker",
@@ -400,7 +402,7 @@ test("publication completion wakes the job lane that now exposes queued Fix Work
             now: () => new Date("2026-07-20T12:02:00.000Z"),
           }),
         )
-        yield* Queue.take(jobWake)
+        yield* PubSub.take(jobWake)
         const fix = yield* store.claimNextJob({
           workerId: "fix-worker",
           now: new Date("2026-07-20T12:02:01.000Z"),
@@ -461,18 +463,15 @@ describe("runHookService startup", () => {
         Effect.gen(function* () {
           const brokerAvailable = yield* Deferred.make<void>()
           const recovered = yield* Deferred.make<void>()
-          const coordinator = RemoteCoordinator.of({
+          const coordinator = {
             ensure: Deferred.await(brokerAvailable),
             dispatchIteration: Deferred.succeed(recovered, undefined).pipe(
               Effect.as("idle" as const),
             ),
             resultIteration: Effect.succeed("idle" as const),
-          })
+          }
           const adapters = Layer.mergeAll(
-            Logger.replace(
-              Logger.defaultLogger,
-              Logger.make(() => undefined),
-            ),
+            Logger.layer([Logger.make(() => undefined)]),
             WorkSignalLive,
             Layer.succeed(GitHub, {
               fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),

@@ -1,5 +1,5 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
-import { SqlError } from "@effect/sql/SqlError"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
+import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
 import { Effect, Schema } from "effect"
 import { AgentLaunchIntentEnvelope, AgentOutputEnvelope } from "../agent-payload"
 import { AgentLaunchIntentSchema } from "../agent-harness"
@@ -35,15 +35,21 @@ type JobOperations = Pick<
 >
 
 const encodeDurablePayload = <A, I>(
-  schema: Schema.Schema<A, I, never>,
-  envelope: Schema.Schema<unknown>,
+  schema: Schema.Codec<A, I>,
+  envelope: Schema.Codec<unknown, unknown>,
   value: unknown,
 ) =>
-  Schema.decodeUnknown(envelope)(value).pipe(
-    Effect.flatMap(() => Schema.decodeUnknown(schema)(value)),
+  Schema.decodeUnknownEffect(envelope)(value).pipe(
+    Effect.flatMap(() => Schema.decodeUnknownEffect(schema)(value)),
     Effect.map((decoded) => ({ decoded, json: JSON.stringify(decoded) })),
     Effect.mapError(
-      (cause) => new SqlError({ cause, message: "Agent payload exceeds its durable envelope" }),
+      (cause) =>
+        new SqlError({
+          reason: new UnknownError({
+            cause,
+            message: "Agent payload exceeds its durable envelope",
+          }),
+        }),
     ),
   )
 
@@ -262,16 +268,16 @@ export function makeJobOperations(
           `
           const row = rows[0]
           if (row === undefined) return null
-          const decoded = yield* Effect.either(decodeAgentSessionReferenceRow(row))
+          const decoded = yield* Effect.result(decodeAgentSessionReferenceRow(row))
           const mismatch =
-            decoded._tag === "Right" &&
-            decoded.right.sessionReference.sessionReferenceId !== row.session_reference_id
-          if (decoded._tag === "Right" && !mismatch) return decoded.right.sessionReference
+            decoded._tag === "Success" &&
+            decoded.success.sessionReference.sessionReferenceId !== row.session_reference_id
+          if (decoded._tag === "Success" && !mismatch) return decoded.success.sessionReference
 
           const message =
-            decoded._tag === "Left"
-              ? decoded.left.message
-              : `Stored SessionReference identity ${decoded.right.sessionReference.sessionReferenceId} does not match ${row.session_reference_id}`
+            decoded._tag === "Failure"
+              ? decoded.failure.message
+              : `Stored SessionReference identity ${decoded.success.sessionReference.sessionReferenceId} does not match ${row.session_reference_id}`
           yield* sql`
             UPDATE agent_executions
             SET cleanup_disposition = 'data_error',

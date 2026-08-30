@@ -1,5 +1,5 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
-import type { SqlError } from "@effect/sql/SqlError"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Effect } from "effect"
 import { decideFixCandidate } from "../domain/transaction-policy"
 import { decodeCommandRow, decodePublicationReviewRow } from "./codecs"
@@ -61,7 +61,7 @@ export class SqlCommandStore implements CommandOperations {
   readonly claimNextCommand: CommandOperations["claimNextCommand"] = (input) =>
     this.#queue.claim(input)
   readonly executeCommand: CommandOperations["executeCommand"] = (input) =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       const commands = yield* this.#sql<ClaimedCommand>`
         SELECT command, repository_id, pull_request_number
         FROM commands
@@ -105,7 +105,7 @@ export class SqlCommandStore implements CommandOperations {
       return disposition
     }).pipe(this.#sql.withTransaction)
   readonly ingestCommand: CommandOperations["ingestCommand"] = (delivery, event) =>
-    Effect.gen(this, function* () {
+    Effect.gen({ self: this }, function* () {
       const insertedDeliveries = yield* this.#support.insertDelivery(delivery)
       if (insertedDeliveries.length === 0) {
         return { status: "duplicate" } as const
@@ -169,7 +169,7 @@ export class SqlCommandStore implements CommandOperations {
     command: ClaimedCommand,
     timestamp: string,
   ): Effect.Effect<"review" | "noop", SqlError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const inserted = yield* this.#sql<{ readonly id: number }>`
         INSERT INTO jobs (
           kind,
@@ -252,7 +252,7 @@ export class SqlCommandStore implements CommandOperations {
     pullRequest: CurrentPullRequest,
     timestamp: string,
   ): Effect.Effect<"fix" | "noop" | "denied", SqlError | StoreDataError> {
-    return Effect.gen(this, function* () {
+    return Effect.gen({ self: this }, function* () {
       const currentness = makeCurrentnessPolicy(this.#sql)
       const reviews = yield* this.#sql<object>`
         SELECT

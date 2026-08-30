@@ -1,36 +1,29 @@
-import { Effect, Fiber, Schema } from "effect"
+import { Effect, Filter, Option, Schema, Stream } from "effect"
 import { AgentOutputEnvelope, boundedAgentPayload } from "../agent-payload"
 import { normalizeError } from "../errors"
-import type { OpenCodeAdapter } from "./adapter"
+import type {
+  OpenCodeAdapter,
+  OpenCodeAssistantMessage,
+  OpenCodeModel,
+  OpenCodeSessionEvent,
+} from "./adapter"
 
-type SessionEvent =
-  Awaited<ReturnType<OpenCodeAdapter["subscribeSessionEvents"]>> extends AsyncIterable<infer Event>
-    ? Event
-    : never
-type AssistantMessage = Extract<SessionEvent, { readonly type: "message.updated" }>["message"]
-export type StructuredSessionReference = Parameters<OpenCodeAdapter["getSessionStatus"]>[0]
+export type StructuredSessionReference = {
+  readonly sessionID: string
+  readonly directory: string
+}
 
 type StructuredSessionRequest = {
   readonly directory: string
   readonly title: string
   readonly agent: string
-  readonly model: Parameters<OpenCodeAdapter["promptSession"]>[0]["model"]
-  readonly format: {
-    readonly type: "json_schema"
-    readonly schema: object
-    readonly retryCount: number
-  }
+  readonly model: OpenCodeModel
+  readonly outputJsonSchema: object
+  readonly retryCount: number
   readonly prompt: string
   readonly pollIntervalMs: number
   readonly maxOutputBytes: number
 }
-
-type TerminalCandidate =
-  | { readonly type: "message"; readonly message: AssistantMessage }
-  | { readonly type: "error"; readonly error: Error }
-
-type TerminalMessage<A> =
-  { readonly type: "result"; readonly value: A } | { readonly type: "error"; readonly error: Error }
 
 export class StructuredSessionError extends Error {
   readonly operation: string
@@ -44,179 +37,177 @@ export class StructuredSessionError extends Error {
   }
 }
 
-export class StructuredSession<A, I> {
-  private session: StructuredSessionReference | undefined
+type TerminalOutcome =
+  { readonly type: "completed" } | { readonly type: "error"; readonly error: Error }
 
+// Runs one working session and turns its result into schema-valid output.
+// The working session receives only the authored prompt; the output schema and
+// any validation feedback travel through the adapter's transcript-neutral
+// structured extraction, never through the working transcript.
+export class StructuredSession<A, I> {
   constructor(
     private readonly adapter: OpenCodeAdapter,
     private readonly request: StructuredSessionRequest,
-    private readonly schema: Schema.Schema<A, I>,
+    private readonly schema: Schema.Codec<A, I>,
   ) {}
 
-  async create(signal?: AbortSignal): Promise<StructuredSessionReference> {
-    const execution = this.call("create session", (operationSignal) =>
-      this.adapter.createSession(
-        {
-          directory: this.request.directory,
-          title: this.request.title,
-        },
-        operationSignal,
-      ),
-    ).pipe(
-      Effect.map((created) => ({
-        sessionID: created.id,
+  create(): Effect.Effect<StructuredSessionReference, StructuredSessionError> {
+    return this.adapter
+      .createSession({
         directory: this.request.directory,
-      })),
-    )
-
-    return this.execute(execution, signal)
+        title: this.request.title,
+        agent: this.request.agent,
+        model: this.request.model,
+      })
+      .pipe(
+        Effect.mapError((cause) => this.fail("create session", cause)),
+        Effect.map((created) => ({
+          sessionID: created.id,
+          directory: this.request.directory,
+        })),
+      )
   }
 
-  async resume(session: StructuredSessionReference, signal?: AbortSignal): Promise<A> {
-    this.session = session
-    const execution = Effect.gen(this, function* () {
-      const initialEvents = yield* Effect.fork(this.consumeEventSubscription())
-      yield* this.call("prompt session", (operationSignal) =>
-        this.adapter.promptSession(
-          {
-            ...this.session!,
-            agent: this.request.agent,
-            model: this.request.model,
-            format: this.request.format,
-            parts: [{ type: "text", text: this.request.prompt }],
-          },
-          operationSignal,
-        ),
+  resume(session: StructuredSessionReference): Effect.Effect<A, StructuredSessionError> {
+    return Effect.gen({ self: this }, function* () {
+      yield* this.adapter
+        .promptSession({
+          sessionID: session.sessionID,
+          directory: session.directory,
+          agent: this.request.agent,
+          model: this.request.model,
+          text: this.request.prompt,
+        })
+        .pipe(Effect.mapError((cause) => this.fail("prompt session", cause)))
+      const terminal = yield* Effect.raceFirst(
+        this.waitForEvents(session),
+        this.pollForCompletion(session),
       )
-
-      return yield* Effect.raceFirst(
-        this.waitForEvents(Fiber.join(initialEvents)),
-        this.pollForCompletion(),
-      )
+      if (terminal.type === "error") {
+        return yield* waitFailure(terminal.error)
+      }
+      yield* this.requireCompletedAnswer(session)
+      return yield* this.extractStructuredOutput(session)
     })
-
-    return this.execute(execution, signal)
   }
 
-  async run(signal?: AbortSignal): Promise<A> {
-    const session = await this.create(signal)
-    return this.resume(session, signal)
-  }
-
-  private async execute<A>(
-    execution: Effect.Effect<A, StructuredSessionError>,
-    signal?: AbortSignal,
-  ): Promise<A> {
-    try {
-      return await Effect.runPromise(execution, { signal })
-    } catch (cause) {
-      if (cause instanceof StructuredSessionError) throw cause
-      throw new StructuredSessionError(
-        "wait for structured session",
-        normalizeError(signal?.aborted === true ? signal.reason : cause),
-      )
-    }
+  run(): Effect.Effect<A, StructuredSessionError> {
+    return Effect.flatMap(this.create(), (session) => this.resume(session))
   }
 
   private waitForEvents(
-    initial: Effect.Effect<TerminalMessage<A> | undefined, StructuredSessionError>,
-  ): Effect.Effect<A, StructuredSessionError> {
-    return Effect.gen(this, function* () {
-      let terminal = yield* initial
-      while (terminal === undefined) {
+    session: StructuredSessionReference,
+  ): Effect.Effect<TerminalOutcome, StructuredSessionError> {
+    return Effect.gen({ self: this }, function* () {
+      while (true) {
+        const terminal = yield* this.consumeEventSubscription(session)
+        if (terminal !== undefined) return terminal
         yield* Effect.sleep(this.request.pollIntervalMs)
-        terminal = yield* this.consumeEventSubscription()
       }
-      return yield* settle(terminal)
     })
   }
 
-  private pollForCompletion(): Effect.Effect<A, StructuredSessionError> {
-    return Effect.gen(this, function* () {
+  private consumeEventSubscription(
+    session: StructuredSessionReference,
+  ): Effect.Effect<TerminalOutcome | undefined, never> {
+    return this.adapter.subscribeSessionEvents({ directory: session.directory }).pipe(
+      Stream.filterMap(
+        Filter.fromPredicateOption((event: OpenCodeSessionEvent) =>
+          Option.fromUndefinedOr(eventTerminal(event, session.sessionID)),
+        ),
+      ),
+      Stream.runHead,
+      Effect.map(Option.getOrUndefined),
+      Effect.catch(() => Effect.succeed(undefined)),
+    )
+  }
+
+  private pollForCompletion(
+    session: StructuredSessionReference,
+  ): Effect.Effect<TerminalOutcome, StructuredSessionError> {
+    return Effect.gen({ self: this }, function* () {
       let inactivePolls = 0
       while (true) {
         yield* Effect.sleep(this.request.pollIntervalMs)
-        const completion = yield* this.pollOnce()
-        if (completion?.terminal !== undefined) {
-          return yield* settle(completion.terminal)
-        }
-        if (completion?.active === true) {
+        const status = yield* this.adapter
+          .getSessionStatus(session)
+          .pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (status?.type === "busy" || status?.type === "retry") {
           inactivePolls = 0
-        } else if (completion !== undefined && ++inactivePolls >= 2) {
-          return yield* waitFailure(
-            new Error("OpenCode session remained idle without structured output"),
-          )
+          continue
+        }
+        if (status?.type === "idle") {
+          return { type: "completed" as const }
+        }
+        if (++inactivePolls >= 2) {
+          return {
+            type: "error" as const,
+            error: new Error("OpenCode session remained unobservable without structured output"),
+          }
         }
       }
     })
   }
 
-  private pollOnce(): Effect.Effect<
-    { readonly active: boolean; readonly terminal?: TerminalMessage<A> } | undefined,
-    StructuredSessionError
-  > {
-    return Effect.gen(this, function* () {
-      const status = yield* this.call("get session status", (signal) =>
-        this.adapter.getSessionStatus(this.session!, signal),
-      ).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-      if (status === undefined) return undefined
-      if (status?.type === "busy" || status?.type === "retry") {
-        return { active: true }
-      }
-      const messages = yield* this.call("list session messages", (signal) =>
-        this.adapter.listSessionMessages(this.session!, signal),
-      ).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-      if (messages === undefined) return undefined
-      const candidate = findTerminalCandidate(messages)
-      const terminal = candidate === undefined ? undefined : yield* this.decode(candidate)
-      return terminal === undefined ? { active: false } : { active: false, terminal }
-    })
+  private requireCompletedAnswer(
+    session: StructuredSessionReference,
+  ): Effect.Effect<OpenCodeAssistantMessage, StructuredSessionError> {
+    return this.adapter.listSessionMessages(session).pipe(
+      Effect.mapError((cause) => this.fail("list session messages", cause)),
+      Effect.flatMap((messages) => {
+        const completed = [...messages]
+          .filter((message) => message.time.completed !== undefined)
+          .sort((left, right) => right.time.created - left.time.created)[0]
+        if (completed === undefined) {
+          return waitFailure(new Error("OpenCode session became idle without structured output"))
+        }
+        if (completed.error !== undefined) {
+          return waitFailure(normalizeError(completed.error))
+        }
+        return Effect.succeed(completed)
+      }),
+    )
   }
 
-  private consumeEventSubscription(): Effect.Effect<
-    TerminalMessage<A> | undefined,
-    StructuredSessionError
-  > {
-    return Effect.gen(this, function* () {
-      const candidate = yield* this.call("subscribe to session events", async (signal) => {
-        const events = await this.adapter.subscribeSessionEvents(
-          { directory: this.request.directory },
-          signal,
-        )
-        for await (const event of events) {
-          const terminal = yieldEventTerminal(event, this.session!.sessionID)
-          if (terminal !== undefined) return terminal
+  private extractStructuredOutput(
+    session: StructuredSessionReference,
+  ): Effect.Effect<A, StructuredSessionError> {
+    return Effect.gen({ self: this }, function* () {
+      let feedback: string | undefined
+      let lastFailure: Error = new Error("Structured extraction did not run")
+      for (let attempt = 0; attempt <= this.request.retryCount; attempt += 1) {
+        const extracted = yield* this.adapter
+          .generateStructured({
+            sessionID: session.sessionID,
+            directory: session.directory,
+            jsonSchema: this.request.outputJsonSchema,
+            ...(feedback === undefined ? {} : { feedback }),
+          })
+          .pipe(Effect.result)
+        if (extracted._tag === "Failure") {
+          return yield* Effect.fail(this.fail("generate structured output", extracted.failure))
         }
-        return undefined
-      }).pipe(Effect.catchAll(() => Effect.succeed(undefined)))
-      if (candidate === undefined) return undefined
-      if (candidate.type !== "idle") return yield* this.decode(candidate)
-
-      const messages = yield* this.call("list session messages", (signal) =>
-        this.adapter.listSessionMessages(this.session!, signal),
-      ).pipe(Effect.catchAll(() => Effect.succeed([])))
-      const message = findTerminalCandidate(messages)
-      return yield* this.decode(
-        message ?? {
-          type: "error",
-          error: new Error("OpenCode session became idle without structured output"),
-        },
+        const decoded = yield* this.decode(extracted.success).pipe(Effect.result)
+        if (decoded._tag === "Success") {
+          return decoded.success
+        }
+        lastFailure = decoded.failure.cause
+        feedback = decoded.failure.cause.message
+      }
+      return yield* Effect.fail(
+        new StructuredSessionError("decode structured session output", lastFailure),
       )
     })
   }
 
-  private decode(
-    candidate: TerminalCandidate,
-  ): Effect.Effect<TerminalMessage<A>, StructuredSessionError> {
-    if (candidate.type === "error") return Effect.succeed(candidate)
-    return Schema.decodeUnknown(AgentOutputEnvelope)(candidate.message.structured).pipe(
+  private decode(value: unknown): Effect.Effect<A, StructuredSessionError> {
+    return Schema.decodeUnknownEffect(AgentOutputEnvelope)(value).pipe(
       Effect.flatMap((encoded) =>
-        Schema.decodeUnknown(
+        Schema.decodeUnknownEffect(
           boundedAgentPayload(this.request.maxOutputBytes, "Agent harness output"),
         )(encoded),
       ),
-      Effect.flatMap((encoded) => Schema.decodeUnknown(this.schema)(encoded)),
-      Effect.map((value) => ({ type: "result", value }) as const),
+      Effect.flatMap((encoded) => Schema.decodeUnknownEffect(this.schema)(encoded)),
       Effect.mapError(
         (cause) =>
           new StructuredSessionError("decode structured session output", normalizeError(cause)),
@@ -224,61 +215,37 @@ export class StructuredSession<A, I> {
     )
   }
 
-  private call<A>(
-    operation: string,
-    run: (signal: AbortSignal) => Promise<A>,
-  ): Effect.Effect<A, StructuredSessionError> {
-    return Effect.tryPromise({
-      try: run,
-      catch: (cause) => new StructuredSessionError(operation, normalizeError(cause)),
-    })
+  private fail(operation: string, cause: unknown): StructuredSessionError {
+    return cause instanceof StructuredSessionError
+      ? cause
+      : new StructuredSessionError(operation, normalizeError(cause))
   }
 }
 
-function yieldEventTerminal(
-  event: SessionEvent,
+function eventTerminal(
+  event: OpenCodeSessionEvent,
   sessionID: string,
-): TerminalCandidate | { readonly type: "idle" } | undefined {
+): TerminalOutcome | undefined {
   if (event.type === "message.updated" && event.sessionID === sessionID) {
-    return findTerminalCandidate([event.message])
+    if (event.message.time.completed === undefined) return undefined
+    return event.message.error !== undefined
+      ? { type: "error", error: normalizeError(event.message.error) }
+      : { type: "completed" }
   }
   if (
     event.type === "session.error" &&
     (event.sessionID === undefined || event.sessionID === sessionID)
   ) {
-    return {
-      type: "error",
-      error: normalizeError(event.error ?? "OpenCode session failed"),
-    }
+    return { type: "error", error: normalizeError(event.error ?? "OpenCode session failed") }
   }
   if (
     event.type === "session.status" &&
     event.sessionID === sessionID &&
     event.status.type === "idle"
   ) {
-    return { type: "idle" }
+    return { type: "completed" }
   }
   return undefined
-}
-
-function findTerminalCandidate(
-  messages: ReadonlyArray<AssistantMessage>,
-): TerminalCandidate | undefined {
-  const completed = [...messages]
-    .filter(
-      (message) =>
-        message.time.completed !== undefined &&
-        (message.structured !== undefined || message.error !== undefined),
-    )
-    .sort((left, right) => right.time.created - left.time.created)[0]
-  if (completed?.error !== undefined) {
-    return { type: "error", error: normalizeError(completed.error) }
-  }
-  return completed === undefined ? undefined : { type: "message", message: completed }
-}
-
-function settle<A>(terminal: TerminalMessage<A>): Effect.Effect<A, StructuredSessionError> {
-  return terminal.type === "result" ? Effect.succeed(terminal.value) : waitFailure(terminal.error)
 }
 
 function waitFailure(cause: Error): Effect.Effect<never, StructuredSessionError> {

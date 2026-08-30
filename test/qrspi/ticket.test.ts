@@ -67,14 +67,14 @@ describe("QRSPI ticket boundary", () => {
 
   test("rejects malformed bounded ticket fields before readiness", async () => {
     const result = await Effect.runPromise(
-      Schema.decodeUnknown(Ticket)({
+      Schema.decodeUnknownEffect(Ticket)({
         reference,
         issueType: "feature",
         title: "x".repeat(501),
-      }).pipe(Effect.either),
+      }).pipe(Effect.result),
     )
 
-    expect(result._tag).toBe("Left")
+    expect(result._tag).toBe("Failure")
   })
 
   test("decodes a partially written scenario and reports it as a readiness problem", () => {

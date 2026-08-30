@@ -1,4 +1,4 @@
-import type { SqlClient } from "@effect/sql/SqlClient"
+import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { Effect } from "effect"
 import type { ReviewResult } from "../domain/review-result"
 import { decideFixCandidate } from "../domain/transaction-policy"

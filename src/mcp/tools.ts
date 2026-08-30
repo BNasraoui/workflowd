@@ -208,14 +208,16 @@ export type ToolCallContext = {
 
 const JobStatusArguments = Schema.Struct({ job_id: Schema.NonEmptyString })
 const ListRecentJobsArguments = Schema.Struct({
-  limit: Schema.optional(Schema.Int.pipe(Schema.between(1, MAX_RECENT_JOBS))),
+  limit: Schema.optional(
+    Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_RECENT_JOBS }))),
+  ),
 })
 const EnqueueProbeArguments = Schema.Struct({
   host: RemoteHostId,
   probe_id: Schema.optional(
     Schema.NonEmptyString.pipe(
-      Schema.maxLength(128),
-      Schema.pattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/),
+      Schema.check(Schema.isMaxLength(128)),
+      Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/)),
     ),
   ),
 })
@@ -244,8 +246,8 @@ const generatedProbeId = (now: Date) => {
   return `mcp-${stamp}-${suffix}`
 }
 
-const decodeArguments = <A, I>(schema: Schema.Schema<A, I>, value: unknown) =>
-  Schema.decodeUnknown(schema)(value ?? {}, { onExcessProperty: "error" })
+const decodeArguments = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
+  Schema.decodeUnknownEffect(schema)(value ?? {}, { onExcessProperty: "error" })
 
 /**
  * Executes one tool call. Every failure is reported as an in-band tool
@@ -257,22 +259,23 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
     switch (name) {
       case "job_status": {
         const queries = yield* McpQueries
-        const input = yield* decodeArguments(JobStatusArguments, args).pipe(Effect.either)
-        if (input._tag === "Left") return failure("invalid arguments: job_id (string) is required")
+        const input = yield* decodeArguments(JobStatusArguments, args).pipe(Effect.result)
+        if (input._tag === "Failure")
+          return failure("invalid arguments: job_id (string) is required")
         const status = yield* queries
-          .jobStatus(input.right.job_id)
-          .pipe(Effect.catchAll(() => Effect.succeed(null)))
+          .jobStatus(input.success.job_id)
+          .pipe(Effect.catch(() => Effect.succeed(null)))
         return status === null
-          ? failure(`no job found with id ${input.right.job_id}`)
+          ? failure(`no job found with id ${input.success.job_id}`)
           : json(status)
       }
       case "list_recent_jobs": {
         const queries = yield* McpQueries
-        const input = yield* decodeArguments(ListRecentJobsArguments, args).pipe(Effect.either)
-        if (input._tag === "Left") {
+        const input = yield* decodeArguments(ListRecentJobsArguments, args).pipe(Effect.result)
+        if (input._tag === "Failure") {
           return failure(`invalid arguments: limit must be an integer 1-${MAX_RECENT_JOBS}`)
         }
-        const rows = yield* queries.listRecentJobs(input.right.limit ?? 20)
+        const rows = yield* queries.listRecentJobs(input.success.limit ?? 20)
         return json({ jobs: rows })
       }
       case "host_health": {
@@ -300,39 +303,39 @@ const enqueueProbe = (args: unknown, context: ToolCallContext) =>
     if (!context.writesAuthorized) {
       return failure("unauthorized: enqueue_probe requires a valid bearer token")
     }
-    const input = yield* decodeArguments(EnqueueProbeArguments, args).pipe(Effect.either)
-    if (input._tag === "Left") {
+    const input = yield* decodeArguments(EnqueueProbeArguments, args).pipe(Effect.result)
+    if (input._tag === "Failure") {
       return failure(
         "invalid arguments: host must match a workflowd host id and probe_id, when " +
           "given, must start with an alphanumeric and use only [A-Za-z0-9_.-]",
       )
     }
     const now = context.now()
-    const probeId = input.right.probe_id ?? generatedProbeId(now)
+    const probeId = input.success.probe_id ?? generatedProbeId(now)
     const producer = yield* RemoteProbeProducer
     const enqueued = yield* producer
-      .enqueue({ probeId, hostId: input.right.host }, now)
-      .pipe(Effect.either)
-    if (enqueued._tag === "Left") {
+      .enqueue({ probeId, hostId: input.success.host }, now)
+      .pipe(Effect.result)
+    if (enqueued._tag === "Failure") {
       return failure(
-        `enqueue failed for probe ${probeId} on host ${input.right.host}: the probe ` +
+        `enqueue failed for probe ${probeId} on host ${input.success.host}: the probe ` +
           "identity may already exist for a different host, or the store rejected the input",
       )
     }
     const received =
-      enqueued.right.status === "duplicate"
-        ? `Already received: probe ${probeId} was previously accepted as job ${enqueued.right.jobId}.`
-        : `Received: probe ${probeId} accepted as durable job ${enqueued.right.jobId} for host ${input.right.host}.`
+      enqueued.success.status === "duplicate"
+        ? `Already received: probe ${probeId} was previously accepted as job ${enqueued.success.jobId}.`
+        : `Received: probe ${probeId} accepted as durable job ${enqueued.success.jobId} for host ${input.success.host}.`
     return structured(
       {
         probe_id: probeId,
-        job_id: enqueued.right.jobId,
-        host: input.right.host,
-        status: enqueued.right.status === "duplicate" ? "duplicate" : "enqueued",
+        job_id: enqueued.success.jobId,
+        host: input.success.host,
+        status: enqueued.success.status === "duplicate" ? "duplicate" : "enqueued",
       },
       `${received} This is a fire-and-ack receipt — the job runs asynchronously and ` +
         "no blocking wait exists. End your turn now. Use job_status " +
-        `("${enqueued.right.jobId}") in a later turn to read the outcome.`,
+        `("${enqueued.success.jobId}") in a later turn to read the outcome.`,
     )
   })
 
@@ -355,8 +358,8 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
           "so wait_for_agent can reach the workflowd daemon's /workflows/agent-waits ingress",
       )
     }
-    const input = yield* decodeArguments(WaitForAgentArguments, args).pipe(Effect.either)
-    if (input._tag === "Left") {
+    const input = yield* decodeArguments(WaitForAgentArguments, args).pipe(Effect.result)
+    if (input._tag === "Failure") {
       return failure(
         "invalid arguments: parent_session_id, child_session_id and resume_prompt must be " +
           `non-empty strings (resume_prompt at most ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes), ` +
@@ -364,12 +367,12 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
       )
     }
     const body = JSON.stringify({
-      parentSessionId: input.right.parent_session_id,
-      childSessionId: input.right.child_session_id,
-      resumePrompt: input.right.resume_prompt,
-      ...(input.right.idempotency_key === undefined
+      parentSessionId: input.success.parent_session_id,
+      childSessionId: input.success.child_session_id,
+      resumePrompt: input.success.resume_prompt,
+      ...(input.success.idempotency_key === undefined
         ? {}
-        : { idempotencyKey: input.right.idempotency_key }),
+        : { idempotencyKey: input.success.idempotency_key }),
     })
     const send = daemon.send ?? ((input: URL, init: RequestInit) => fetch(input, init))
     const response = yield* Effect.tryPromise(() =>
@@ -382,44 +385,44 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
         signal: AbortSignal.timeout(10_000),
         body,
       }),
-    ).pipe(Effect.timeout("10 seconds"), Effect.either)
-    if (response._tag === "Left") {
+    ).pipe(Effect.timeout("10 seconds"), Effect.result)
+    if (response._tag === "Failure") {
       return failure(
         "could not reach the workflowd daemon to register the wait; the daemon may be " +
           "down or WORKFLOWD_DAEMON_URL may be wrong",
       )
     }
-    const payload = yield* Effect.tryPromise(() => response.right.json()).pipe(Effect.either)
-    if (payload._tag === "Left") {
+    const payload = yield* Effect.tryPromise(() => response.success.json()).pipe(Effect.result)
+    if (payload._tag === "Failure") {
       return failure(
-        `the workflowd daemon returned a non-JSON response (HTTP ${response.right.status})`,
+        `the workflowd daemon returned a non-JSON response (HTTP ${response.success.status})`,
       )
     }
-    if (!response.right.ok) {
-      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.right).pipe(Effect.either)
+    if (!response.success.ok) {
+      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.success).pipe(Effect.result)
       const detail =
-        refusal._tag === "Right"
-          ? (refusal.right.detail ?? refusal.right.reason ?? refusal.right.error)
-          : `HTTP ${response.right.status}`
+        refusal._tag === "Success"
+          ? (refusal.success.detail ?? refusal.success.reason ?? refusal.success.error)
+          : `HTTP ${response.success.status}`
       return failure(
         `the wait was refused: ${detail}`,
-        refusal._tag === "Right" ? { ...refusal.right } : undefined,
+        refusal._tag === "Success" ? { ...refusal.success } : undefined,
       )
     }
-    const receipt = yield* decodeArguments(AgentWaitReceipt, payload.right).pipe(Effect.either)
-    if (receipt._tag === "Left") {
+    const receipt = yield* decodeArguments(AgentWaitReceipt, payload.success).pipe(Effect.result)
+    if (receipt._tag === "Failure") {
       return failure("the workflowd daemon returned an unrecognized agent-wait receipt")
     }
     const received =
-      receipt.right.status === "duplicate"
-        ? `Already registered: this wait already exists as ${receipt.right.waitId}.`
-        : `Received: watching ${input.right.child_session_id} on behalf of ` +
-          `${input.right.parent_session_id} as wait ${receipt.right.waitId}.`
+      receipt.success.status === "duplicate"
+        ? `Already registered: this wait already exists as ${receipt.success.waitId}.`
+        : `Received: watching ${input.success.child_session_id} on behalf of ` +
+          `${input.success.parent_session_id} as wait ${receipt.success.waitId}.`
     return structured(
       {
-        wait_id: receipt.right.waitId,
-        instance_id: receipt.right.instanceId,
-        status: receipt.right.status,
+        wait_id: receipt.success.waitId,
+        instance_id: receipt.success.instanceId,
+        status: receipt.success.status,
       },
       `${received} This is a fire-and-ack receipt — no blocking wait exists. End your turn ` +
         "now. workflowd will prompt the parent session when the child completes, or mark " +

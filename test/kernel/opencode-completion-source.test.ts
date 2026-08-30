@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Schema } from "effect"
 import { AgentHandoffStore, AgentHandoffStoreLive } from "../../src/kernel/agent-handoff-store"
@@ -619,10 +619,10 @@ describe("OpenCode agent completion source", () => {
               id: "parent-result",
               role: "assistant" as const,
               time: { created: at.getTime() + 2_000, completed: at.getTime() + 3_000 },
-              structured: { answer: "continued" },
             },
           }
         })(),
+      generate: async () => ({ answer: "continued" }),
     }
     const signals: WorkSignalPort = {
       subscribe: () => Effect.die(new Error("unused")),

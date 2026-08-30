@@ -47,9 +47,9 @@ describe("custody canonical JSON", () => {
             runAt: now,
             createdAt: now,
           })
-          .pipe(Effect.either)
+          .pipe(Effect.result)
       }),
     )
-    expect(result._tag).toBe("Right")
+    expect(result._tag).toBe("Success")
   })
 })

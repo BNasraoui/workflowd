@@ -10,13 +10,15 @@ import {
 } from "./common"
 
 const PlanSources = ExactStageSources.pipe(
-  Schema.filter((sources) =>
-    isOrderedRoleSubsequence(
-      sources.sources.map(({ role }) => role),
-      ["Structure", "Design", "Research", "Questions"],
-    )
-      ? true
-      : "Plan accepts only the Structure/Design/Research/Questions predecessor subsequence",
+  Schema.check(
+    Schema.makeFilter((sources) =>
+      isOrderedRoleSubsequence(
+        sources.sources.map(({ role }) => role),
+        ["Structure", "Design", "Research", "Questions"],
+      )
+        ? true
+        : "Plan accepts only the Structure/Design/Research/Questions predecessor subsequence",
+    ),
   ),
 )
 

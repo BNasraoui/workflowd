@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { SqlClient } from "@effect/sql"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer, Schema } from "effect"
 import { KernelJobStore } from "../../src/kernel/job-store"
 import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
@@ -11,7 +11,7 @@ const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
   Layer.provideMerge(kernelLayer(":memory:")),
 )
 
-const run = <A, E>(effect: Effect.Effect<A, E, Layer.Layer.Success<typeof mcpLayer>>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof mcpLayer>>) =>
   Effect.runPromise(effect.pipe(Effect.provide(mcpLayer)))
 
 const authorized: ToolCallContext = {
@@ -23,8 +23,8 @@ const authorized: ToolCallContext = {
 const firstText = (result: { content: Array<{ type: "text"; text: string }> }) =>
   result.content[0]!.text
 
-const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A =>
-  Schema.decodeUnknownSync(Schema.parseJson(schema))(text)
+const decodeJson = <A>(schema: Schema.Codec<A>, text: string): A =>
+  Schema.decodeUnknownSync(Schema.fromJsonString(schema))(text)
 
 const JobStatusJson = Schema.Struct({
   jobId: Schema.String,
