@@ -3,6 +3,8 @@ import { dirname } from "node:path"
 import { BunRuntime } from "@effect/platform-bun"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
+import { makeClaudeCli } from "./kernel/claude-session"
+import { ClaudeResumeExecutor, makeClaudeResumeExecutor } from "./remote/claude-resume-executor"
 import { loadRemoteProcessConfig } from "./remote/config"
 import { runRemoteRunnerLoop } from "./remote/runner"
 import { RemoteRunnerStoreLive } from "./remote/runner-store"
@@ -24,7 +26,14 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
       catch: (cause) => new Error(`Could not create remote state directory: ${String(cause)}`),
     })
     const database = SqliteClient.layer({ filename: config.databasePath })
-    const runner = RemoteRunnerStoreLive.pipe(Layer.provide(database))
+    const executor = Layer.succeed(
+      ClaudeResumeExecutor,
+      makeClaudeResumeExecutor({
+        cli: makeClaudeCli({ binary: config.claudeBinary }),
+        allowedDirectories: config.claudeDirectories,
+      }),
+    )
+    const runner = RemoteRunnerStoreLive.pipe(Layer.provide(database), Layer.provide(executor))
     const transport = RemoteTransportLive({ servers: config.servers, auth: config.auth })
     return yield* runRemoteRunnerLoop(config.hostId).pipe(
       Effect.provide(Layer.merge(runner, transport)),

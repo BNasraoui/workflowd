@@ -17,6 +17,8 @@ test("runner config is explicit and reads its NATS token from a credential file"
     auth: { mode: "token", token: "secret-token" },
     hostId: "gpu-host",
     databasePath: "/var/lib/workflowd/runner.db",
+    claudeDirectories: [],
+    claudeBinary: "claude",
   })
 })
 

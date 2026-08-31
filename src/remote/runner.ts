@@ -59,7 +59,13 @@ const executeReceivedAndDrainResults = (at: Date, drainResults = true) =>
   Effect.gen(function* () {
     const store = yield* RemoteRunnerStore
     const recoverable = yield* store.recoverReceived()
-    for (const command of recoverable) yield* store.executeProbe(command, at)
+    for (const command of recoverable) {
+      if (command.kind === "claude_resume") {
+        yield* store.executeClaudeResume(command, at)
+      } else {
+        yield* store.executeProbe(command, at)
+      }
+    }
     if (drainResults) yield* drainPendingResults(at)
     return recoverable
   })

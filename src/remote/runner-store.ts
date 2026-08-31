@@ -3,6 +3,7 @@ import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer } from "effect"
 import type { RemoteCommand, RemoteHostMessage, RemoteResult } from "./contract"
+import { ClaudeResumeExecutor, type ClaudeResumeOutcome } from "./claude-resume-executor"
 import { decodeRemoteCommand, decodeRemoteResult } from "./codec"
 
 export type RunnerDeliveryInput = {
@@ -48,6 +49,10 @@ export type RemoteRunnerStorePort = {
     command: RemoteCommand,
     at: Date,
   ) => Effect.Effect<RemoteResult, RemoteRunnerStoreError>
+  readonly executeClaudeResume: (
+    command: RemoteCommand,
+    at: Date,
+  ) => Effect.Effect<RemoteResult, RemoteRunnerStoreError>
   readonly pendingResults: () => Effect.Effect<ReadonlyArray<RemoteResult>, RemoteRunnerStoreError>
   readonly markResultPublished: (
     resultId: string,
@@ -68,6 +73,7 @@ export const RemoteRunnerStore = Context.Service<RemoteRunnerStorePort>(
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const claudeExecutor = yield* ClaudeResumeExecutor
   yield* sql`PRAGMA foreign_keys = ON`
   yield* sql`PRAGMA busy_timeout = 5000`
   yield* sql`CREATE TABLE IF NOT EXISTS remote_runner_current (
@@ -345,6 +351,78 @@ const make = Effect.gen(function* () {
       return result
     }).pipe(sql.withTransaction)
 
+  const claudeResult = (
+    command: RemoteCommand,
+    outcome: ClaudeResumeOutcome,
+    at: Date,
+  ): RemoteResult => ({
+    version: 1,
+    resultId: `result-${command.commandId}`,
+    commandId: command.commandId,
+    jobId: command.jobId,
+    attempt: command.attempt,
+    generation: command.generation,
+    hostId: command.hostId,
+    kind: "claude_resume",
+    status: outcome.status,
+    ...(outcome.status === "succeeded"
+      ? { output: outcome.output }
+      : { failureReason: outcome.failureReason }),
+    observedAt: at.toISOString(),
+  })
+
+  const storeClaudeResult = (command: RemoteCommand, result: RemoteResult, at: Date) =>
+    Effect.gen(function* () {
+      yield* sql`INSERT INTO remote_runner_outbox (
+        result_id, command_id, envelope_json, created_at
+      ) VALUES (
+        ${result.resultId}, ${command.commandId}, ${JSON.stringify(result)}, ${at.toISOString()}
+      ) ON CONFLICT (command_id) DO NOTHING`
+      yield* sql`UPDATE remote_runner_inbox SET state = 'result_ready'
+        WHERE command_id = ${command.commandId} AND state = 'received'`
+      return result
+    }).pipe(sql.withTransaction)
+
+  /**
+   * At-most-once around a real side effect: one transaction claims the
+   * execution, the CLI turns run OUTSIDE any transaction, and a second
+   * transaction records the result. A redelivery finds the claim spent and
+   * replays the stored result; a claim spent with no stored result means a
+   * previous execution was interrupted mid-flight — its effects on the
+   * session are unknowable, so the runner reports execution_interrupted
+   * rather than ever running the wake a second time.
+   */
+  const executeClaudeResume: RemoteRunnerStorePort["executeClaudeResume"] = (command, at) =>
+    Effect.gen(function* () {
+      if (command.kind !== "claude_resume") {
+        return yield* new RemoteRunnerDataError({
+          key: command.commandId,
+          message: "executeClaudeResume requires a claude_resume command",
+        })
+      }
+      const claimed = yield* sql`UPDATE remote_runner_inbox SET execution_count = 1
+        WHERE command_id = ${command.commandId} AND state = 'received'
+          AND execution_count = 0 RETURNING command_id`
+      if (claimed.length === 0) {
+        const stored = yield* sql<{ readonly envelope_json: string }>`SELECT envelope_json
+          FROM remote_runner_outbox WHERE command_id = ${command.commandId}`
+        if (stored.length > 0) {
+          return yield* decodeRemoteResult(new TextEncoder().encode(stored[0]!.envelope_json)).pipe(
+            Effect.mapError(
+              (error) => new RemoteRunnerDataError({ key: "outbox", message: error.reason }),
+            ),
+          )
+        }
+        return yield* storeClaudeResult(
+          command,
+          claudeResult(command, { status: "failed", failureReason: "execution_interrupted" }, at),
+          at,
+        )
+      }
+      const outcome = yield* claudeExecutor.execute(command.payload)
+      return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
+    })
+
   const pendingResults: RemoteRunnerStorePort["pendingResults"] = () =>
     Effect.gen(function* () {
       const rows = yield* sql<{ readonly envelope_json: string }>`SELECT envelope_json
@@ -394,6 +472,7 @@ const make = Effect.gen(function* () {
     recordBatch,
     recoverReceived,
     executeProbe,
+    executeClaudeResume,
     pendingResults,
     markResultPublished,
     readCommand,
