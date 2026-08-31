@@ -98,11 +98,12 @@ async function loadDaemonBinding(
     throw new Error(`Set at most one of ${directName} or ${fileName}`)
   }
   const parsed = parseDaemonBaseUrl(env)
-  const token = hasDirect
-    ? direct
-    : hasFile
-      ? await readDaemonTokenFile(fileName, file, read)
-      : undefined
+  let token: string | undefined
+  if (hasDirect) {
+    token = direct
+  } else if (hasFile) {
+    token = await readDaemonTokenFile(fileName, file, read)
+  }
   if (token === undefined) return undefined
   if (parsed === undefined) {
     throw new Error(`WORKFLOWD_DAEMON_URL is required when an ${purpose} token is configured`)

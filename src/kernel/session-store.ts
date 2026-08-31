@@ -238,6 +238,14 @@ const observationState = (
   if (disposition === "operator_required") return "operator_required" as const
   return "failed" as const
 }
+const sessionStateForObservation = (
+  disposition: "completed" | "missing" | "failed" | "operator_required",
+  attemptState: string,
+) => {
+  if (disposition === "missing") return "missing"
+  if (disposition === "completed") return "ready"
+  return attemptState
+}
 const effectiveCleanupDisposition = (
   input: CleanupDisposition,
   attempt: number,
@@ -752,14 +760,9 @@ const make = Effect.gen(function* () {
         AND attempt = ${input.attempt} AND state = 'observation_required'`
       yield* sql`UPDATE kernel_resume_requests SET state = ${state}, updated_at = ${input.observedAt.toISOString()}
       WHERE request_id = ${input.requestId} AND state = 'observation_required'`
-      const sessionState =
-        input.disposition === "missing"
-          ? "missing"
-          : input.disposition === "completed"
-            ? // Same as completeResume: a delivered wake leaves the parent
-              // held and wakeable under its next generation.
-              "ready"
-            : state
+      // A delivered wake (completed) leaves the parent held and wakeable
+      // under its next generation, exactly as completeResume does.
+      const sessionState = sessionStateForObservation(input.disposition, state)
       yield* sql`UPDATE kernel_sessions SET state = ${sessionState}, revision = revision + 1,
         updated_at = ${input.observedAt.toISOString()} WHERE session_id = (
           SELECT session_id FROM kernel_resume_requests WHERE request_id = ${input.requestId})`

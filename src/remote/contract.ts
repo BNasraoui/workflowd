@@ -132,15 +132,16 @@ export const RemoteClaudeResumeResult = Schema.Struct({
   failureReason: Schema.optional(ClaudeResumeFailureReason),
 }).pipe(
   Schema.check(
-    Schema.makeFilter((value) =>
-      value.status === "succeeded"
-        ? value.output !== undefined && value.failureReason === undefined
+    Schema.makeFilter((value) => {
+      if (value.status === "succeeded") {
+        return value.output !== undefined && value.failureReason === undefined
           ? true
           : "a succeeded claude_resume result carries output and no failureReason"
-        : value.failureReason !== undefined && value.output === undefined
-          ? true
-          : "a failed claude_resume result carries failureReason and no output",
-    ),
+      }
+      return value.failureReason !== undefined && value.output === undefined
+        ? true
+        : "a failed claude_resume result carries failureReason and no output"
+    }),
   ),
 )
 export const RemoteResult = Schema.Union([RemoteProbeResult, RemoteClaudeResumeResult])

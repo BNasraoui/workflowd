@@ -329,26 +329,28 @@ const recordObservation = (
     return { status: disposition, requestId: request.request_id }
   })
 
-const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
+/** Selects the first observation_required row this (opencode) worker owns.
+ * Each provider's observer must only touch its own sessions: a claude row
+ * escalated here would race the claude observer and kill a settling wake. */
+const findOwnObservationRow = (options: OpenCodeResumeWorkerOptions) =>
   Effect.gen(function* () {
     const store = yield* KernelSessionStore
-    const sql = yield* SqlClient.SqlClient
-    const provider = yield* OpenCodeResumeProvider
     const recoverable = yield* store.readRecoverableResume(options.owningHostId)
-    // Each provider's observer must only touch its own sessions: a claude
-    // observation row escalated here would race the claude worker's own
-    // observer and kill a wake that was still settling.
-    let candidate: Record<string, unknown> | undefined
     for (const row of recoverable) {
       if (row.state !== "observation_required") continue
       const sessionId = typeof row.session_id === "string" ? row.session_id : ""
       if (sessionId.length === 0) continue
       const sessionUnknown = yield* store.readSession(sessionId)
-      if (sessionUnknown !== null && sessionUnknown.provider_kind === "opencode") {
-        candidate = row
-        break
-      }
+      if (sessionUnknown?.provider_kind === "opencode") return row
     }
+    return undefined
+  })
+
+const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    const provider = yield* OpenCodeResumeProvider
+    const candidate = yield* findOwnObservationRow(options)
     if (candidate === undefined) return null
     const request = yield* Schema.decodeUnknownEffect(ObservationRequestRow)(candidate).pipe(
       Effect.mapError(

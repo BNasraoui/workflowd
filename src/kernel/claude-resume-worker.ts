@@ -288,11 +288,107 @@ const validateRemoteOutput = (output: string, contract: ClaudeResumeContract) =>
  * fence — unattributable from a CLI transcript that no longer exists —
  * and escalates, exactly as before remote delivery existed.
  */
+/** A parked claude wake whose remote job has not finished; observe again
+ * on a later tick. Distinct from a terminal observation result. */
+const REMOTE_STILL_IN_FLIGHT = Symbol("remote-still-in-flight")
+
+/** Reads one claude wake's remote job to its terminal state and records the
+ * matching observation. Flat early-returns; the caller loops. */
+const observeRemoteRow = (
+  request: typeof RecoverableRow.Type,
+  options: ClaudeResumeWorkerOptions,
+) =>
+  Effect.gen(function* () {
+    const jobs = yield* KernelJobStore
+    const sql = yield* SqlClient.SqlClient
+    const checkpointRows = yield* sql<{ readonly checkpoint_json: string }>`
+      SELECT checkpoint_json FROM kernel_resume_checkpoints
+      WHERE request_id = ${request.request_id} AND attempt = ${request.attempt}
+        AND checkpoint_version = 2
+      ORDER BY created_at DESC LIMIT 1`
+    if (checkpointRows.length === 0) {
+      const at = options.now()
+      yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
+        updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
+        AND state = 'observation_required'`
+      yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
+        updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
+        AND state = 'observation_required'`
+      return {
+        status: "operator_required" as const,
+        requestId: request.request_id,
+        reason: "restart_unattributable",
+      }
+    }
+    const checkpoint = yield* Schema.decodeUnknownEffect(
+      Schema.fromJsonString(RemoteJobCheckpoint),
+    )(checkpointRows[0]!.checkpoint_json).pipe(Effect.result)
+    if (checkpoint._tag === "Failure") {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "corrupt_remote_checkpoint",
+      })
+    }
+    const job = yield* jobs.readJob(checkpoint.success.remoteJobId)
+    if (job === null) {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "remote_job_missing",
+      })
+    }
+    if (job.state === "ready" || job.state === "leased" || job.state === "retry_scheduled") {
+      return REMOTE_STILL_IN_FLIGHT
+    }
+    if (job.state !== "succeeded") {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "remote_job_failed",
+        jobState: job.state,
+      })
+    }
+    const jobResult = yield* jobs.readResult(checkpoint.success.remoteJobId)
+    const document = yield* Schema.decodeUnknownEffect(RemoteJobResultDocument)(
+      jobResult?.result ?? {},
+    ).pipe(Effect.result)
+    if (document._tag === "Failure") {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "remote_result_malformed",
+      })
+    }
+    if (document.success.status === "failed" || document.success.output === undefined) {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "remote_delivery_failed",
+        failureReason: document.success.failureReason ?? "unknown",
+      })
+    }
+    const contract = options.contracts.find(
+      (candidate) =>
+        candidate.name === request.output_contract &&
+        candidate.version === request.output_contract_version,
+    )
+    if (contract === undefined) {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "unsupported_output_contract",
+      })
+    }
+    const validated = yield* validateRemoteOutput(document.success.output, contract).pipe(
+      Effect.result,
+    )
+    if (validated._tag === "Failure") {
+      return yield* recordClaudeObservation(request, options, "operator_required", {
+        reason: "remote_output_invalid",
+      })
+    }
+    yield* recordClaudeObservation(
+      request,
+      options,
+      "completed",
+      { reason: "remote_delivered", result: validated.success },
+      contract.version,
+    )
+    return { status: "completed" as const, requestId: request.request_id }
+  })
+
 const observeClaudeResume = (options: ClaudeResumeWorkerOptions) =>
   Effect.gen(function* () {
     const store = yield* KernelSessionStore
-    const jobs = yield* KernelJobStore
-    const sql = yield* SqlClient.SqlClient
     const recoverable = yield* store.readRecoverableResume(options.owningHostId)
     for (const row of recoverable) {
       if (row.state !== "observation_required") continue
@@ -300,94 +396,10 @@ const observeClaudeResume = (options: ClaudeResumeWorkerOptions) =>
       if (decoded._tag === "Failure") continue
       const request = decoded.success
       const sessionUnknown = yield* store.readSession(request.session_id)
-      const kind =
-        sessionUnknown !== null && typeof sessionUnknown.provider_kind === "string"
-          ? sessionUnknown.provider_kind
-          : ""
-      if (kind !== "claude") continue
-      const checkpointRows = yield* sql<{ readonly checkpoint_json: string }>`
-        SELECT checkpoint_json FROM kernel_resume_checkpoints
-        WHERE request_id = ${request.request_id} AND attempt = ${request.attempt}
-          AND checkpoint_version = 2
-        ORDER BY created_at DESC LIMIT 1`
-      if (checkpointRows.length === 0) {
-        const at = options.now()
-        yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
-          updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
-          AND state = 'observation_required'`
-        yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
-          updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
-          AND state = 'observation_required'`
-        return {
-          status: "operator_required" as const,
-          requestId: request.request_id,
-          reason: "restart_unattributable",
-        }
-      }
-      const checkpoint = yield* Schema.decodeUnknownEffect(
-        Schema.fromJsonString(RemoteJobCheckpoint),
-      )(checkpointRows[0]!.checkpoint_json).pipe(Effect.result)
-      if (checkpoint._tag === "Failure") {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "corrupt_remote_checkpoint",
-        })
-      }
-      const job = yield* jobs.readJob(checkpoint.success.remoteJobId)
-      if (job === null) {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "remote_job_missing",
-        })
-      }
-      if (job.state === "ready" || job.state === "leased" || job.state === "retry_scheduled") {
-        continue // still in flight; observe again on a later tick
-      }
-      if (job.state !== "succeeded") {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "remote_job_failed",
-          jobState: job.state,
-        })
-      }
-      const jobResult = yield* jobs.readResult(checkpoint.success.remoteJobId)
-      const document = yield* Schema.decodeUnknownEffect(RemoteJobResultDocument)(
-        jobResult?.result ?? {},
-      ).pipe(Effect.result)
-      if (document._tag === "Failure") {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "remote_result_malformed",
-        })
-      }
-      if (document.success.status === "failed" || document.success.output === undefined) {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "remote_delivery_failed",
-          failureReason: document.success.failureReason ?? "unknown",
-        })
-      }
-      const contract = options.contracts.find(
-        (candidate) =>
-          candidate.name === request.output_contract &&
-          candidate.version === request.output_contract_version,
-      )
-      if (contract === undefined) {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "unsupported_output_contract",
-        })
-      }
-      const validated = yield* validateRemoteOutput(document.success.output, contract).pipe(
-        Effect.result,
-      )
-      if (validated._tag === "Failure") {
-        return yield* recordClaudeObservation(request, options, "operator_required", {
-          reason: "remote_output_invalid",
-        })
-      }
-      yield* recordClaudeObservation(
-        request,
-        options,
-        "completed",
-        { reason: "remote_delivered", result: validated.success },
-        contract.version,
-      )
-      return { status: "completed" as const, requestId: request.request_id }
+      if (sessionUnknown?.provider_kind !== "claude") continue
+      const outcome = yield* observeRemoteRow(request, options)
+      if (outcome === REMOTE_STILL_IN_FLIGHT) continue
+      return outcome
     }
     return null
   })
@@ -447,13 +459,12 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
         )
         .pipe(Effect.result)
       if (enqueued._tag === "Failure") {
-        const reason =
-          enqueued.failure._tag === "ClaudeResumePromptTooLarge"
-            ? "prompt_exceeds_remote_budget"
-            : enqueued.failure._tag === "SchemaError"
-              ? "remote_payload_invalid"
-              : null
-        if (reason !== null) return yield* operatorRequired(claim, options, reason)
+        if (enqueued.failure._tag === "ClaudeResumePromptTooLarge") {
+          return yield* operatorRequired(claim, options, "prompt_exceeds_remote_budget")
+        }
+        if (enqueued.failure._tag === "SchemaError") {
+          return yield* operatorRequired(claim, options, "remote_payload_invalid")
+        }
         return yield* Effect.fail(
           new ClaudeResumeWorkerError({
             operation: "enqueue remote claude wake",

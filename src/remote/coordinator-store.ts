@@ -145,6 +145,20 @@ const make = Effect.gen(function* () {
       ),
     )
 
+  const decodeJobInputJson = (inputJson: unknown, key: string) =>
+    Schema.decodeUnknownEffect(Schema.fromJsonString(RemoteJobInput))(inputJson).pipe(
+      Effect.mapError(
+        (error) => new KernelJobStoreDataError({ record: "job", key, message: String(error) }),
+      ),
+    )
+
+  const pendingDispatch = (row: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const dispatch = yield* decodeDispatch(row, dispatchKey(row))
+      const job = yield* decodeJobInputJson(row.input_json, dispatch.job_id)
+      return toDispatch(dispatch, job)
+    })
+
   const prepareNext: RemoteCoordinatorStorePort["prepareNext"] = (input) =>
     Effect.gen(function* () {
       const claim = yield* jobs.claimRemote(input)
@@ -175,24 +189,7 @@ const make = Effect.gen(function* () {
         JOIN kernel_workflow_jobs AS job ON job.job_id = dispatch.job_id
         WHERE dispatch.state IN ('prepared', 'publishing')
         ORDER BY dispatch.issued_at, dispatch.command_id`
-      return yield* Effect.forEach(rows, (row) =>
-        Effect.gen(function* () {
-          const dispatch = yield* decodeDispatch(row, dispatchKey(row))
-          const job = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RemoteJobInput))(
-            row.input_json,
-          ).pipe(
-            Effect.mapError(
-              (error) =>
-                new KernelJobStoreDataError({
-                  record: "job",
-                  key: dispatch.job_id,
-                  message: String(error),
-                }),
-            ),
-          )
-          return toDispatch(dispatch, job)
-        }),
-      )
+      return yield* Effect.forEach(rows, (row) => pendingDispatch(row))
     })
 
   const markPublishing: RemoteCoordinatorStorePort["markPublishing"] = (commandId, at) =>

@@ -131,6 +131,62 @@ const replayDelivery = (
     return yield* new RemoteCoordinatorConflict({ key: deliveryId })
   })
 
+/** The canonical stored result document for a job, by kind. Same JSON the
+ * daemon observers read back, so it doubles as the duplicate/conflict key. */
+const storedResultJson = (result: RemoteResult, hostId: string): string =>
+  JSON.stringify(
+    result.kind === "claude_resume"
+      ? {
+          kind: "claude_resume",
+          hostId,
+          status: result.status,
+          ...(result.output === undefined ? {} : { output: result.output }),
+          ...(result.failureReason === undefined ? {} : { failureReason: result.failureReason }),
+        }
+      : { kind: "remote_probe", hostId, status: result.status },
+  )
+
+/** Classifies a result against its dispatch row: either a rejection
+ * disposition or "accept". Flat guards; the caller does the acceptance
+ * writes. `sql` runs inside the caller's transaction. */
+const classifyRemoteDelivery = (
+  sql: SqlClient.SqlClient,
+  dispatch: DispatchRow,
+  result: RemoteResult,
+  resultJson: string,
+  at: Date,
+) =>
+  Effect.gen(function* () {
+    const verdict = (d: RemoteResultDisposition | "accept") => d
+    if (dispatch.host_id !== result.hostId) return verdict("wrong_host")
+    if (
+      dispatch.job_id !== result.jobId ||
+      dispatch.attempt !== result.attempt ||
+      dispatch.generation !== result.generation
+    ) {
+      return verdict("stale")
+    }
+    const observedAt = Date.parse(result.observedAt)
+    const expiresAt = Date.parse(dispatch.expires_at)
+    if (Number.isNaN(observedAt) || observedAt > expiresAt || at.getTime() > expiresAt) {
+      return verdict("expired")
+    }
+    const stored = yield* sql<{ readonly result_id: string; readonly result_json: string }>`
+      SELECT result_id, result_json FROM kernel_workflow_job_results
+      WHERE job_id = ${dispatch.job_id}`
+    if (stored.length > 0) {
+      const row = stored[0]!
+      const exact = row.result_id === result.resultId && row.result_json === resultJson
+      return verdict(exact ? "duplicate" : "conflict")
+    }
+    const resultOwner = yield* sql<{ readonly job_id: string }>`SELECT job_id
+      FROM kernel_workflow_job_results WHERE result_id = ${result.resultId}`
+    if (resultOwner.length > 0 && resultOwner[0]!.job_id !== dispatch.job_id)
+      return verdict("conflict")
+    if (dispatch.state !== "publishing" && dispatch.state !== "published") return verdict("stale")
+    return verdict("accept")
+  })
+
 export const acceptRemoteDelivery = (deliveryId: string, result: RemoteResult, at: Date) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
@@ -157,51 +213,9 @@ export const acceptRemoteDelivery = (deliveryId: string, result: RemoteResult, a
         FROM kernel_remote_dispatches WHERE command_id = ${result.commandId}`
       if (rows.length === 0) return yield* record("stale")
       const dispatch = yield* decodeDispatch(rows[0], result.commandId)
-      if (dispatch.host_id !== result.hostId) return yield* record("wrong_host")
-      if (
-        dispatch.job_id !== result.jobId ||
-        dispatch.attempt !== result.attempt ||
-        dispatch.generation !== result.generation
-      ) {
-        return yield* record("stale")
-      }
-      const observedAt = Date.parse(result.observedAt)
-      const expiresAt = Date.parse(dispatch.expires_at)
-      if (Number.isNaN(observedAt) || observedAt > expiresAt || at.getTime() > expiresAt) {
-        return yield* record("expired")
-      }
-      const stored = yield* sql<{ readonly result_id: string; readonly result_json: string }>`
-        SELECT result_id, result_json FROM kernel_workflow_job_results
-        WHERE job_id = ${dispatch.job_id}`
-      const resultJson = JSON.stringify(
-        result.kind === "claude_resume"
-          ? {
-              kind: "claude_resume",
-              hostId: dispatch.host_id,
-              status: result.status,
-              ...(result.output === undefined ? {} : { output: result.output }),
-              ...(result.failureReason === undefined
-                ? {}
-                : { failureReason: result.failureReason }),
-            }
-          : { kind: "remote_probe", hostId: dispatch.host_id, status: result.status },
-      )
-      if (stored.length > 0) {
-        const row = stored[0]!
-        return yield* record(
-          row.result_id === result.resultId && row.result_json === resultJson
-            ? "duplicate"
-            : "conflict",
-        )
-      }
-      const resultOwner = yield* sql<{ readonly job_id: string }>`SELECT job_id
-        FROM kernel_workflow_job_results WHERE result_id = ${result.resultId}`
-      if (resultOwner.length > 0 && resultOwner[0]!.job_id !== dispatch.job_id) {
-        return yield* record("conflict")
-      }
-      if (dispatch.state !== "publishing" && dispatch.state !== "published") {
-        return yield* record("stale")
-      }
+      const resultJson = storedResultJson(result, dispatch.host_id)
+      const classification = yield* classifyRemoteDelivery(sql, dispatch, result, resultJson, at)
+      if (classification !== "accept") return yield* record(classification)
       const updated = yield* sql`UPDATE kernel_workflow_jobs SET state = 'succeeded',
         lease_worker_id = NULL, claim_token = NULL, lease_until = NULL,
         updated_at = ${at.toISOString()}

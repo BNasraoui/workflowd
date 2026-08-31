@@ -72,6 +72,18 @@ const parseJsonValue = (text: string): string | null => {
   }
 }
 
+/** The extraction schema must be a JSON object; anything else is a payload
+ * the daemon should never have sent, reported as cli_failed. */
+const parseSchemaObject = (json: string): object | null => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return null
+  }
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null
+}
+
 export const makeClaudeResumeExecutor = (options: {
   readonly cli: ClaudeCliPort
   /** Absolute directory prefixes this runner has opted in; empty refuses
@@ -115,25 +127,25 @@ export const makeClaudeResumeExecutor = (options: {
         .pipe(Effect.catch(() => Effect.succeed(false)))
       if (!exists) return failed("transcript_missing")
 
-      let parsedSchema: unknown
-      try {
-        parsedSchema = JSON.parse(payload.extractionSchemaJson)
-      } catch {
-        return failed("cli_failed")
-      }
-      if (
-        typeof parsedSchema !== "object" ||
-        parsedSchema === null ||
-        Array.isArray(parsedSchema)
-      ) {
-        return failed("cli_failed")
-      }
-      const schemaObject: object = parsedSchema
+      const schemaObject = parseSchemaObject(payload.extractionSchemaJson)
+      if (schemaObject === null) return failed("cli_failed")
 
       const wake = yield* turn(payload, payload.prompt)
       if (!wake.ok) return failed(wake.timedOut ? "cli_timeout" : "cli_failed")
       if ((yield* parseEnvelope(wake.stdout))._tag === "None") return failed("cli_failed")
 
+      const extracted = yield* extractOutput(payload, schemaObject)
+      if ("outcome" in extracted) return extracted.outcome
+      if (new TextEncoder().encode(extracted.json).byteLength > MAX_CLAUDE_RESUME_OUTPUT_BYTES) {
+        return failed("output_oversized")
+      }
+      return { status: "succeeded", output: extracted.json }
+    })
+
+  /** One extraction turn plus a single feedback retry; the wake is never
+   * re-sent. Returns the JSON answer or a terminal failure outcome. */
+  const extractOutput = (payload: ClaudeResumeJobV1, schemaObject: object) =>
+    Effect.gen(function* () {
       const extractOnce = (feedback?: string) =>
         Effect.gen(function* () {
           const extraction = yield* turn(
@@ -148,23 +160,14 @@ export const makeClaudeResumeExecutor = (options: {
           const json = parseJsonValue(answer.value)
           return json === null ? { retryable: true as const } : { json }
         })
-
-      let extracted: string
       const first = yield* extractOnce()
-      if ("outcome" in first) return first.outcome
-      if ("json" in first) {
-        extracted = first.json
-      } else {
-        // One retry with feedback; the wake itself is never re-sent.
-        const second = yield* extractOnce(EXTRACTION_FEEDBACK)
-        if ("outcome" in second) return second.outcome
-        if (!("json" in second)) return failed("output_unparseable")
-        extracted = second.json
-      }
-      if (new TextEncoder().encode(extracted).byteLength > MAX_CLAUDE_RESUME_OUTPUT_BYTES) {
-        return failed("output_oversized")
-      }
-      return { status: "succeeded", output: extracted }
+      if ("outcome" in first) return { outcome: first.outcome }
+      if ("json" in first) return { json: first.json }
+      // One retry with feedback; the wake itself is never re-sent.
+      const second = yield* extractOnce(EXTRACTION_FEEDBACK)
+      if ("outcome" in second) return { outcome: second.outcome }
+      if ("json" in second) return { json: second.json }
+      return { outcome: failed("output_unparseable") }
     })
 
   return { execute }

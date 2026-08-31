@@ -135,6 +135,19 @@ const promptSha256 = (prompt: string) => createHash("sha256").update(prompt, "ut
 const refuse = (reason: AgentRunRefusalReason, detail: string) =>
   new AgentRunRefusalError({ reason, detail })
 
+const routeRefusalDetail = (
+  route: string,
+  reason: "provider_prefixed_route" | "unknown_route" | "ambiguous_route",
+) => {
+  if (reason === "provider_prefixed_route") {
+    return `route "${route}" is provider-prefixed; pass a configured route name or bare model id`
+  }
+  if (reason === "ambiguous_route") {
+    return `route "${route}" matches more than one configured route; pass the route name`
+  }
+  return `route "${route}" matches no configured route or model`
+}
+
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
@@ -188,22 +201,23 @@ const make = (options: AgentRunIngressOptions) =>
           ? claudeSessionCustodyId(input.nativeSessionId)
           : opencodeSessionCustodyId(input.nativeSessionId)
         const existing = yield* sessions.readSession(sessionId)
-        if (existing !== null) return sessionId
-        yield* sessions.registerSession({
-          sessionId,
-          providerKind: claude ? "claude" : "opencode",
-          providerVersion: options.identity.providerVersion,
-          providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
-          serverId: claude ? claudeHost : options.identity.serverId,
-          owningHostId: options.identity.owningHostId,
-          endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
-          endpointIdentity: claude
-            ? claudeEndpointIdentity(claudeHost)
-            : options.identity.endpointIdentity,
-          nativeSessionId: input.nativeSessionId,
-          resourceId: input.resourceId,
-          createdAt: input.createdAt,
-        })
+        if (existing === null) {
+          yield* sessions.registerSession({
+            sessionId,
+            providerKind: claude ? "claude" : "opencode",
+            providerVersion: options.identity.providerVersion,
+            providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
+            serverId: claude ? claudeHost : options.identity.serverId,
+            owningHostId: options.identity.owningHostId,
+            endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
+            endpointIdentity: claude
+              ? claudeEndpointIdentity(claudeHost)
+              : options.identity.endpointIdentity,
+            nativeSessionId: input.nativeSessionId,
+            resourceId: input.resourceId,
+            createdAt: input.createdAt,
+          })
+        }
         return sessionId
       })
 
@@ -431,6 +445,51 @@ const make = (options: AgentRunIngressOptions) =>
         return { nativeSessionId, outputTokens }
       })
 
+    const registerWaitIfPaired = (input: {
+      readonly submission: AgentRunSubmissionType
+      readonly parentKind: "opencode" | "claude"
+      readonly parentHost: string
+      readonly parentDirectory: string | undefined
+      readonly runId: string
+      readonly childSessionId: string
+      readonly createdAt: Date
+      readonly now: Date
+    }) => {
+      const { submission, parentDirectory } = input
+      if (
+        submission.parentSessionId === undefined ||
+        submission.resumePrompt === undefined ||
+        parentDirectory === undefined
+      ) {
+        return Effect.succeed(undefined)
+      }
+      return registerWait({
+        runId: input.runId,
+        parentNativeSessionId: submission.parentSessionId,
+        parentKind: input.parentKind,
+        parentHost: input.parentHost,
+        parentDirectory,
+        childSessionId: input.childSessionId,
+        resumePrompt: submission.resumePrompt,
+        createdAt: input.createdAt,
+        now: input.now,
+      })
+    }
+
+    const resolveWaitParentDirectory = (
+      submission: AgentRunSubmissionType,
+      parentKind: "opencode" | "claude",
+      parentHost: string,
+    ) =>
+      submission.parentSessionId === undefined
+        ? Effect.succeed(undefined)
+        : resolveParentDirectory({
+            nativeSessionId: submission.parentSessionId,
+            kind: parentKind,
+            host: parentHost,
+            directory: submission.parentDirectory,
+          })
+
     const register: AgentRunIngressPort["register"] = (input, now) =>
       Effect.gen(function* () {
         const submission = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(input, {
@@ -449,13 +508,7 @@ const make = (options: AgentRunIngressOptions) =>
         if (resolution.outcome === "refused") {
           return yield* refuse(
             resolution.reason,
-            `route "${submission.route}" ${
-              resolution.reason === "provider_prefixed_route"
-                ? "is provider-prefixed; pass a configured route name or bare model id"
-                : resolution.reason === "ambiguous_route"
-                  ? "matches more than one configured route; pass the route name"
-                  : "matches no configured route or model"
-            }`,
+            routeRefusalDetail(submission.route, resolution.reason),
           )
         }
         const repository = options.repositories.find(
@@ -472,15 +525,11 @@ const make = (options: AgentRunIngressOptions) =>
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
         // caller naming a dead parent gets a refusal, not an orphaned child.
-        const parentDirectory =
-          submission.parentSessionId === undefined
-            ? undefined
-            : yield* resolveParentDirectory({
-                nativeSessionId: submission.parentSessionId,
-                kind: parentKind,
-                host: parentHost,
-                directory: submission.parentDirectory,
-              })
+        const parentDirectory = yield* resolveWaitParentDirectory(
+          submission,
+          parentKind,
+          parentHost,
+        )
         const identifiers = agentRunIdentifiers({
           route: resolution.route.name,
           repository: submission.repository,
@@ -535,22 +584,16 @@ const make = (options: AgentRunIngressOptions) =>
                 now,
               )
         const childSessionId = opencodeSessionCustodyId(dispatched.nativeSessionId)
-        const wait =
-          submission.parentSessionId === undefined ||
-          submission.resumePrompt === undefined ||
-          parentDirectory === undefined
-            ? undefined
-            : yield* registerWait({
-                runId: identifiers.runId,
-                parentNativeSessionId: submission.parentSessionId,
-                parentKind,
-                parentHost,
-                parentDirectory,
-                childSessionId,
-                resumePrompt: submission.resumePrompt,
-                createdAt: run.createdAt,
-                now,
-              })
+        const wait = yield* registerWaitIfPaired({
+          submission,
+          parentKind,
+          parentHost,
+          parentDirectory,
+          runId: identifiers.runId,
+          childSessionId,
+          createdAt: run.createdAt,
+          now,
+        })
         return {
           runId: identifiers.runId,
           sessionId: childSessionId,

@@ -39,13 +39,25 @@ describe("gitAgentRunWorktrees", () => {
     try {
       const directory = join(root, "existing")
       await mkdir(directory)
-      await Effect.runPromise(
-        gitAgentRunWorktrees.create({
-          repository: join(root, "missing-repo"),
-          directory,
-          branch: "agent/run-2",
-        }),
+      // A pre-existing directory short-circuits before git runs, so a
+      // missing repository must not fail: the call succeeds and leaves the
+      // directory an empty non-worktree.
+      const outcome = await Effect.runPromise(
+        gitAgentRunWorktrees
+          .create({
+            repository: join(root, "missing-repo"),
+            directory,
+            branch: "agent/run-2",
+          })
+          .pipe(Effect.result),
       )
+      expect(outcome._tag).toBe("Success")
+      expect(
+        await stat(join(directory, ".git")).then(
+          () => true,
+          () => false,
+        ),
+      ).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
