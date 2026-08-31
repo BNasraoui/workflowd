@@ -127,7 +127,7 @@ const make = Effect.gen(function* () {
 
   const prepareNext: RemoteCoordinatorStorePort["prepareNext"] = (input) =>
     Effect.gen(function* () {
-      const claim = yield* jobs.claimRemoteProbe(input)
+      const claim = yield* jobs.claimRemote(input)
       if (claim === null) return null
       const probe = yield* Schema.decodeUnknownEffect(RemoteProbeJobV1)(claim.input).pipe(
         Effect.mapError(

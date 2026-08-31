@@ -151,7 +151,7 @@ test("job_status reports the durable job state and its result once completed", a
         authorized,
       )
       const jobs = yield* KernelJobStore
-      const claim = yield* jobs.claimRemoteProbe({
+      const claim = yield* jobs.claimRemote({
         workerId: "coordinator",
         now,
         leaseDurationMs: 60_000,
