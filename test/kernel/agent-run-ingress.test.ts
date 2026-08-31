@@ -111,10 +111,8 @@ const signals: WorkSignalPort = {
 }
 
 const claudeCli: ClaudeCliPort = {
-  sessionExists: (input) =>
-    Effect.succeed(input.nativeSessionId === "claude-parent-1" && input.host === "mint"),
+  sessionExists: (input) => Effect.succeed(input.nativeSessionId === "claude-parent-1"),
   resume: () => Effect.die(new Error("unused in ingress tests")),
-  hosts: ["mint"],
 }
 
 const makeLayer = (provider: AgentRunProviderPort, trees: AgentRunWorktreesPort) => {

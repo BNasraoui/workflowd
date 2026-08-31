@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
-  parseAgentRunClaudeHosts,
   parseAgentRunRepositories,
   parseAgentRunRoutes,
   type AgentRunRepository,
@@ -89,7 +88,6 @@ export interface QrspiConfig {
 export interface AgentRunConfig {
   readonly token: string
   readonly claudeBinary: string
-  readonly claudeHosts: ReadonlyArray<{ readonly host: string; readonly destination: string }>
   readonly routes: ReadonlyArray<AgentRunRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
@@ -353,10 +351,6 @@ function loadAgentRunConfig(
   return {
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
-    claudeHosts:
-      env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS === undefined
-        ? []
-        : parseAgentRunClaudeHosts(env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS),
     routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
     repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),

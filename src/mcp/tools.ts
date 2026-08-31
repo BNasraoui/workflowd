@@ -76,7 +76,6 @@ const DispatchAgentArguments = Schema.Struct({
   parent_session_id: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES)),
   parent_kind: Schema.optional(Schema.Literals(["opencode", "claude"])),
   parent_directory: Schema.optional(utf8BoundedText(4_096)),
-  parent_host: Schema.optional(utf8BoundedText(64)),
   resume_prompt: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES)),
   idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES)),
 })
@@ -365,9 +364,6 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
         ...(input.success.parent_directory === undefined
           ? {}
           : { parentDirectory: input.success.parent_directory }),
-        ...(input.success.parent_host === undefined
-          ? {}
-          : { parentHost: input.success.parent_host }),
         ...(input.success.resume_prompt === undefined
           ? {}
           : { resumePrompt: input.success.resume_prompt }),

@@ -100,7 +100,6 @@ const cliOf = (
       const index = Math.min(prompts.length - 1, answers.length - 1)
       return JSON.stringify({ result: answers[index] })
     }),
-  hosts: ["mint"],
 })
 
 const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof storesLayer>>) =>
@@ -205,7 +204,7 @@ describe("claude resume worker", () => {
     const { join } = await import("node:path")
     const home = await mkdtemp(join(tmpdir(), "claude-cli-port-"))
     try {
-      const port = makeClaudeCli({ binary: "/bin/echo", localHost: "mint", home })
+      const port = makeClaudeCli({ binary: "/bin/echo", home })
       const projectDir = join(home, "work")
       await mkdir(join(home, ".claude", "projects", encodeClaudeProjectDir(projectDir)), {
         recursive: true,
@@ -216,13 +215,13 @@ describe("claude resume worker", () => {
         "{}\n",
       )
       const exists = await Effect.runPromise(
-        port.sessionExists({ nativeSessionId: "abc-123", directory: projectDir, host: "mint" }),
+        port.sessionExists({ nativeSessionId: "abc-123", directory: projectDir }),
       )
       const missing = await Effect.runPromise(
-        port.sessionExists({ nativeSessionId: "nope", directory: projectDir, host: "mint" }),
+        port.sessionExists({ nativeSessionId: "nope", directory: projectDir }),
       )
       const hostile = await Effect.runPromise(
-        port.sessionExists({ nativeSessionId: "../escape", directory: projectDir, host: "mint" }),
+        port.sessionExists({ nativeSessionId: "../escape", directory: projectDir }),
       )
       // /bin/echo prints the argv back, proving the prompt rides as one
       // argument and never a shell string.
@@ -230,30 +229,14 @@ describe("claude resume worker", () => {
         port.resume({
           nativeSessionId: "abc-123",
           directory: projectDir,
-          host: "mint",
           prompt: "hello; rm -rf $HOME",
           timeoutMs: 5_000,
         }),
       )
-      const unrouted = await Effect.runPromise(
-        port
-          .resume({
-            nativeSessionId: "abc-123",
-            directory: projectDir,
-            host: "unknown-host",
-            prompt: "x",
-            timeoutMs: 1_000,
-          })
-          .pipe(Effect.result),
-      )
       expect(exists).toBe(true)
       expect(missing).toBe(false)
       expect(hostile).toBe(false)
-      // /bin/echo prints argv back: the flags are there and the prompt is
-      // NOT — it rides stdin, never the command line.
-      expect(echoed).toContain("-p --resume abc-123 --output-format json")
-      expect(echoed).not.toContain("rm -rf")
-      expect(unrouted._tag).toBe("Failure")
+      expect(echoed).toContain("-p --resume abc-123 --output-format json hello; rm -rf $HOME")
     } finally {
       await rm(home, { recursive: true, force: true })
     }

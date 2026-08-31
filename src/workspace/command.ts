@@ -4,10 +4,6 @@ import { WorkspaceError } from "./errors"
 
 type WorkspaceCommandOptions = {
   readonly cwd?: string
-  /** Written to the child's stdin then closed; stdin is ignored when absent.
-   * Lets untrusted text (e.g. agent prompts) reach a command without ever
-   * appearing in argv or a shell string. */
-  readonly stdin?: string
 }
 
 type BoundedWorkspaceCommandOptions = WorkspaceCommandOptions & {
@@ -33,7 +29,7 @@ function executeWorkspaceCommand<A>(
         detached: true,
         env: process.env,
         signal,
-        stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin, "utf8"),
+        stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
       })

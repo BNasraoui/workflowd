@@ -259,11 +259,7 @@ export const makeLiveLayer = (config: AppConfig) => {
   )
   const claudeCliLayer = Layer.succeed(
     ClaudeCli,
-    makeClaudeCli({
-      binary: config.agentRuns?.claudeBinary ?? "claude",
-      localHost: config.worker.hostId,
-      remoteHosts: config.agentRuns?.claudeHosts ?? [],
-    }),
+    makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
   )
   const claudeResumeWorkerLayer =
     config.agentRuns === undefined

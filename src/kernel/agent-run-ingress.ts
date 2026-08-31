@@ -214,11 +214,9 @@ const make = (options: AgentRunIngressOptions) =>
       readonly resourceId: string
       readonly createdAt: Date
       readonly kind?: "opencode" | "claude"
-      readonly host?: string
     }) =>
       Effect.gen(function* () {
         const claude = input.kind === "claude"
-        const claudeHost = input.host ?? options.identity.owningHostId
         const sessionId = claude
           ? claudeSessionCustodyId(input.nativeSessionId)
           : opencodeSessionCustodyId(input.nativeSessionId)
@@ -229,11 +227,11 @@ const make = (options: AgentRunIngressOptions) =>
           providerKind: claude ? "claude" : "opencode",
           providerVersion: options.identity.providerVersion,
           providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
-          serverId: claude ? claudeHost : options.identity.serverId,
+          serverId: claude ? options.identity.owningHostId : options.identity.serverId,
           owningHostId: options.identity.owningHostId,
           endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
           endpointIdentity: claude
-            ? claudeEndpointIdentity(claudeHost)
+            ? claudeEndpointIdentity(options.identity.owningHostId)
             : options.identity.endpointIdentity,
           nativeSessionId: input.nativeSessionId,
           resourceId: input.resourceId,
@@ -288,7 +286,6 @@ const make = (options: AgentRunIngressOptions) =>
     const resolveParentDirectory = (parent: {
       readonly nativeSessionId: string
       readonly kind: "opencode" | "claude"
-      readonly host: string
       readonly directory: string | undefined
     }) =>
       Effect.gen(function* () {
@@ -299,22 +296,15 @@ const make = (options: AgentRunIngressOptions) =>
               "parentDirectory is required when parentKind is claude",
             )
           }
-          if (!claude.hosts.includes(parent.host)) {
-            return yield* refuse(
-              "missing_parent_session",
-              `no claude delivery route is configured for host ${parent.host}`,
-            )
-          }
           const exists = yield* claude.sessionExists({
             nativeSessionId: parent.nativeSessionId,
             directory: parent.directory,
-            host: parent.host,
           })
           if (!exists) {
             return yield* refuse(
               "missing_parent_session",
               `claude session ${parent.nativeSessionId} has no transcript for ` +
-                `directory ${parent.directory} on host ${parent.host} (or the host is unreachable)`,
+                `directory ${parent.directory} on this host`,
             )
           }
           return parent.directory
@@ -333,7 +323,6 @@ const make = (options: AgentRunIngressOptions) =>
       readonly runId: string
       readonly parentNativeSessionId: string
       readonly parentKind: "opencode" | "claude"
-      readonly parentHost: string
       readonly parentDirectory: string
       readonly childSessionId: string
       readonly resumePrompt: string
@@ -352,7 +341,6 @@ const make = (options: AgentRunIngressOptions) =>
           resourceId: parentResourceId,
           createdAt: run.createdAt,
           kind: run.parentKind,
-          host: run.parentHost,
         })
         // The wait's registration boundary is anchored at run creation, not
         // the request clock: a retry after a transient wait failure must not
@@ -496,7 +484,6 @@ const make = (options: AgentRunIngressOptions) =>
         }
         yield* preflightRoute(resolution.route)
         const parentKind = submission.parentKind ?? "opencode"
-        const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
         // caller naming a dead parent gets a refusal, not an orphaned child.
         const parentDirectory =
@@ -505,7 +492,6 @@ const make = (options: AgentRunIngressOptions) =>
             : yield* resolveParentDirectory({
                 nativeSessionId: submission.parentSessionId,
                 kind: parentKind,
-                host: parentHost,
                 directory: submission.parentDirectory,
               })
         const identifiers = agentRunIdentifiers({
@@ -515,7 +501,7 @@ const make = (options: AgentRunIngressOptions) =>
           parentSessionId:
             submission.parentSessionId === undefined
               ? null
-              : `${parentKind}@${parentHost}:${submission.parentSessionId}`,
+              : `${parentKind}:${submission.parentSessionId}`,
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
         })
@@ -571,7 +557,6 @@ const make = (options: AgentRunIngressOptions) =>
                 runId: identifiers.runId,
                 parentNativeSessionId: submission.parentSessionId,
                 parentKind,
-                parentHost,
                 parentDirectory,
                 childSessionId,
                 resumePrompt: submission.resumePrompt,
