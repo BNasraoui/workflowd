@@ -335,7 +335,20 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
     const sql = yield* SqlClient.SqlClient
     const provider = yield* OpenCodeResumeProvider
     const recoverable = yield* store.readRecoverableResume(options.owningHostId)
-    const candidate = recoverable.find((row) => row.state === "observation_required")
+    // Each provider's observer must only touch its own sessions: a claude
+    // observation row escalated here would race the claude worker's own
+    // observer and kill a wake that was still settling.
+    let candidate: Record<string, unknown> | undefined
+    for (const row of recoverable) {
+      if (row.state !== "observation_required") continue
+      const sessionId = typeof row.session_id === "string" ? row.session_id : ""
+      if (sessionId.length === 0) continue
+      const sessionUnknown = yield* store.readSession(sessionId)
+      if (sessionUnknown !== null && sessionUnknown.provider_kind === "opencode") {
+        candidate = row
+        break
+      }
+    }
     if (candidate === undefined) return null
     const request = yield* Schema.decodeUnknownEffect(ObservationRequestRow)(candidate).pipe(
       Effect.mapError(
