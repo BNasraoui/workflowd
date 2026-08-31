@@ -113,6 +113,28 @@ export function resolveAgentRunRoute(
   }
 }
 
+const CLAUDE_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+
+/**
+ * Parses the comma-separated host allow-list from
+ * WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS. Entries are plain host ids only —
+ * routing is the remote command plane's job, so no destinations or
+ * credentials belong here. Throws on malformed input like the other
+ * config-load parsers.
+ */
+export function parseAgentRunClaudeHosts(value: string): ReadonlyArray<string> {
+  const hosts = value.split(",").map((entry) => entry.trim())
+  for (const host of hosts) {
+    if (!CLAUDE_HOST_PATTERN.test(host)) {
+      throw new Error(`WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS has an invalid host id "${host}"`)
+    }
+  }
+  if (new Set(hosts).size !== hosts.length) {
+    throw new Error("WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS host ids must be unique")
+  }
+  return hosts
+}
+
 export const AgentRunSubmission = Schema.Struct({
   route: utf8BoundedText(MAX_AGENT_RUN_ROUTE_BYTES),
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
@@ -122,6 +144,10 @@ export const AgentRunSubmission = Schema.Struct({
    * server (default), or a Claude Code session woken through the claude
    * CLI. Children are always opencode. */
   parentKind: Schema.optional(Schema.Literals(["opencode", "claude"])),
+  /** Host owning the Claude parent session. Defaults to the daemon host;
+   * other hosts must be on the server's claude-hosts allow-list, where the
+   * wake is delivered by that host's workflowd runner. */
+  parentHost: Schema.optional(utf8BoundedText(64)),
   /** The Claude parent's working directory — the cwd its session was
    * created in. Required with parentKind "claude"; ignored otherwise. */
   parentDirectory: Schema.optional(utf8BoundedText(4_096)),

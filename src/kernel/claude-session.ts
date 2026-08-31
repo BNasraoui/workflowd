@@ -21,6 +21,13 @@ export const claudeSessionCustodyId = (nativeSessionId: string) =>
 
 export const claudeEndpointIdentity = (owningHostId: string) => `claude-cli://${owningHostId}`
 
+/** Extracts the owning host from a claude custody endpoint identity; null
+ * for anything that is not a well-formed claude-cli:// identity. */
+export const claudeHostFromEndpointIdentity = (identity: string): string | null => {
+  const match = /^claude-cli:\/\/([A-Za-z0-9][A-Za-z0-9_-]{0,63})$/.exec(identity)
+  return match === null ? null : match[1]!
+}
+
 /** Claude Code's project-directory encoding: every path separator (and any
  * other non [A-Za-z0-9-] character) becomes a dash. */
 export const encodeClaudeProjectDir = (directory: string) =>

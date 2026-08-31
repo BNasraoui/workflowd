@@ -18,17 +18,17 @@ import {
   AgentWaitIngressLive,
   AgentWakeResult,
 } from "./kernel/agent-wait-ingress"
-import { KernelJobStoreLive } from "./kernel/job-store"
-import {
-  AgentRunIngressLive,
-  AgentRunProvider,
-  AgentRunWorktrees,
-  gitAgentRunWorktrees,
-} from "./kernel/agent-run-ingress"
+import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
+import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
+import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
+import {
+  ClaudeResumeRemoteProducer,
+  ClaudeResumeRemoteProducerLive,
+} from "./remote/claude-resume-producer"
 import { KernelSessionStore, KernelSessionStoreLive } from "./kernel/session-store"
 import {
   OpenCodeResumeAdapter,
@@ -268,8 +268,11 @@ export const makeLiveLayer = (config: AppConfig) => {
           ClaudeResumeWorker,
           Effect.gen(function* () {
             const sessions = yield* KernelSessionStore
+            const jobs = yield* KernelJobStore
             const sql = yield* SqlClient.SqlClient
             const cli = yield* ClaudeCli
+            const remoteProducer = yield* ClaudeResumeRemoteProducer
+            const agentRuns = config.agentRuns!
             return {
               iteration: runClaudeResumeIteration({
                 owningHostId: config.worker.hostId,
@@ -281,17 +284,27 @@ export const makeLiveLayer = (config: AppConfig) => {
                 ),
                 resumeTimeoutMs: 5 * 60_000,
                 retryDelayMs: 30_000,
+                claudeHosts: agentRuns.claudeHosts,
+                remoteTurnTimeoutMs: agentRuns.remoteTurnTimeoutMs,
                 now: () => new Date(),
                 contracts: resumeContracts,
               }).pipe(
                 Effect.provideService(KernelSessionStore, sessions),
+                Effect.provideService(KernelJobStore, jobs),
                 Effect.provideService(SqlClient.SqlClient, sql),
                 Effect.provideService(ClaudeCli, cli),
+                Effect.provideService(ClaudeResumeRemoteProducer, remoteProducer),
                 Effect.map((result) => result.status),
               ),
             }
           }),
-        ).pipe(Layer.provideMerge(kernelStoreLayer), Layer.provideMerge(claudeCliLayer))
+        ).pipe(
+          Layer.provideMerge(
+            ClaudeResumeRemoteProducerLive.pipe(Layer.provideMerge(kernelStoreLayer)),
+          ),
+          Layer.provideMerge(kernelStoreLayer),
+          Layer.provideMerge(claudeCliLayer),
+        )
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -304,6 +317,7 @@ export const makeLiveLayer = (config: AppConfig) => {
             verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,
             verifyPollIntervalMs: config.agentRuns.verifyPollIntervalMs,
             maxAttempts: config.agentRuns.maxAttempts,
+            claudeHosts: config.agentRuns.claudeHosts,
             identity: completionSourceOptions,
           }),
           AgentRunWatchdogLive({
