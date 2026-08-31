@@ -222,6 +222,12 @@ export const TOOL_DEFINITIONS = [
             "Working directory the Claude parent session was created in (its cwd). " +
             "Required with parent_kind 'claude'.",
         },
+        parent_host: {
+          type: "string",
+          description:
+            "Host owning the Claude parent session. Defaults to the daemon host; other " +
+            "hosts need a configured SSH delivery route on the server.",
+        },
         resume_prompt: {
           type: "string",
           description: "Optional text delivered to the parent session when the child completes.",

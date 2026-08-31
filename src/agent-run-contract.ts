@@ -59,6 +59,35 @@ export function parseAgentRunRoutes(value: string): ReadonlyArray<AgentRunRoute>
  * dispatchable — this is the allow-list that keeps arbitrary prompt
  * execution off arbitrary directories.
  */
+/**
+ * Parses `host=sshdestination` pairs from WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS:
+ * Claude parents on these hosts are woken over SSH. Destinations are plain
+ * user@host tokens; anything shell-active is refused at config load.
+ */
+export function parseAgentRunClaudeHosts(
+  value: string,
+): ReadonlyArray<{ readonly host: string; readonly destination: string }> {
+  const hosts = value.split(",").map((entry) => {
+    const separator = entry.indexOf("=")
+    const host = separator === -1 ? "" : entry.slice(0, separator).trim()
+    const destination = separator === -1 ? "" : entry.slice(separator + 1).trim()
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(host)) {
+      throw new Error(`WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS has an invalid host in "${entry.trim()}"`)
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._@-]*$/.test(destination)) {
+      throw new Error(
+        `WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS host "${host}" must map to a plain user@host destination`,
+      )
+    }
+    return { host, destination }
+  })
+  const names = new Set(hosts.map((entry) => entry.host))
+  if (names.size !== hosts.length) {
+    throw new Error("WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS hosts must be unique")
+  }
+  return hosts
+}
+
 export function parseAgentRunRepositories(value: string): ReadonlyArray<AgentRunRepository> {
   const repositories = value.split(",").map((entry) => {
     const separator = entry.indexOf("=")
@@ -122,6 +151,9 @@ export const AgentRunSubmission = Schema.Struct({
    * server (default), or a Claude Code session woken through the claude
    * CLI. Children are always opencode. */
   parentKind: Schema.optional(Schema.Literals(["opencode", "claude"])),
+  /** Host owning the Claude parent session. Defaults to the daemon host;
+   * other hosts need a configured delivery route. */
+  parentHost: Schema.optional(utf8BoundedText(64)),
   /** The Claude parent's working directory — the cwd its session was
    * created in. Required with parentKind "claude"; ignored otherwise. */
   parentDirectory: Schema.optional(utf8BoundedText(4_096)),

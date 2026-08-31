@@ -4,7 +4,7 @@ import { Context, Data, Effect, Schema } from "effect"
 import { boundedAgentPayload } from "../agent-payload"
 import { JsonValueSchema } from "../json"
 import { structuredExtractionPrompt } from "../opencode/adapter"
-import { ClaudeCli, claudeEndpointIdentity } from "./claude-session"
+import { ClaudeCli, claudeHostFromEndpointIdentity } from "./claude-session"
 import { KernelSessionStore, type KernelSessionStoreError, type ResumeClaim } from "./session-store"
 
 /**
@@ -105,15 +105,19 @@ const validateCustody = (sessionId: string, options: ClaudeResumeWorkerOptions) 
     const cli = yield* ClaudeCli
     const sessionUnknown = yield* store.readSession(sessionId)
     const session = yield* Schema.decodeUnknownEffect(SessionRow)(sessionUnknown ?? {})
+    // The endpoint identity names the host the transcript lives on; the
+    // daemon still owns the resume lifecycle, delivery just routes there.
+    const deliveryHost = claudeHostFromEndpointIdentity(session.endpoint_identity)
     if (
       session.provider_kind !== "claude" ||
       session.owning_host_id !== options.owningHostId ||
-      session.endpoint_identity !== claudeEndpointIdentity(options.owningHostId)
+      deliveryHost === null ||
+      !cli.hosts.includes(deliveryHost)
     ) {
       return yield* Effect.fail(
         new ClaudeResumeWorkerError({
           operation: "validate saved claude session custody",
-          cause: new Error("saved session is not a claude session owned by this worker"),
+          cause: new Error("saved session is not a claude session this worker can deliver to"),
         }),
       )
     }
@@ -131,6 +135,7 @@ const validateCustody = (sessionId: string, options: ClaudeResumeWorkerOptions) 
       .sessionExists({
         nativeSessionId: session.native_session_id,
         directory: resource.absolute_path,
+        host: deliveryHost,
       })
       .pipe(
         Effect.mapError(
@@ -145,7 +150,11 @@ const validateCustody = (sessionId: string, options: ClaudeResumeWorkerOptions) 
         }),
       )
     }
-    return { directory: resource.absolute_path, nativeSessionId: session.native_session_id }
+    return {
+      directory: resource.absolute_path,
+      nativeSessionId: session.native_session_id,
+      host: deliveryHost,
+    }
   })
 
 const operatorRequired = (claim: ResumeClaim, options: ClaudeResumeWorkerOptions, reason: string) =>
@@ -239,6 +248,7 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
         .resume({
           nativeSessionId: reference.nativeSessionId,
           directory: reference.directory,
+          host: reference.host,
           prompt,
           timeoutMs: options.resumeTimeoutMs,
         })
