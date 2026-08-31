@@ -15,6 +15,10 @@ Environment=WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token
 # lines (and WORKFLOWD_DAEMON_URL from mcp.env) to keep the tool disabled.
 LoadCredential=agent-wait-token:%h/.config/workflowd/agent-wait-token
 Environment=WORKFLOWD_AGENT_WAIT_TOKEN_FILE=%d/agent-wait-token
+# Lets dispatch_agent proxy to the daemon's agent-run ingress. Drop both
+# lines to keep the tool disabled.
+LoadCredential=agent-run-token:%h/.config/workflowd/agent-run-token
+Environment=WORKFLOWD_AGENT_RUN_TOKEN_FILE=%d/agent-run-token
 ExecStart=%h/.bun/bin/bun run mcp
 Restart=on-failure
 RestartSec=5

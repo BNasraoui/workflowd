@@ -33,7 +33,7 @@ test("remote dispatch takes durable custody of a real kernel job and completes i
             workerId: "remote-coordinator",
             now,
             leaseDurationMs: 1_000,
-            expiresAt: new Date(now.getTime() + 60_000),
+            ttlMsForKind: () => 60_000,
           })
           return { ordinary, dispatch }
         }),
@@ -120,7 +120,7 @@ test("remote result fencing rejects a distinct command identity without completi
           workerId: "remote-coordinator",
           now,
           leaseDurationMs: 1_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         if (dispatch === null) return yield* Effect.die(new Error("expected dispatch"))
         yield* remote.markPublishing(dispatch.commandId, now)
@@ -167,7 +167,7 @@ test("dispatch insertion failure rolls back the remote kernel claim without losi
             workerId: "coordinator",
             now,
             leaseDurationMs: 60_000,
-            expiresAt: new Date(now.getTime() + 60_000),
+            ttlMsForKind: () => 60_000,
           })
           .pipe(Effect.result)
         const afterFailure = yield* jobs.readJob("atomic-remote-claim")
@@ -177,7 +177,7 @@ test("dispatch insertion failure rolls back the remote kernel claim without losi
           workerId: "coordinator",
           now,
           leaseDurationMs: 60_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         return { failed, afterFailure, retry }
       }),
@@ -203,7 +203,7 @@ test("duplicate command identity rolls back the second job claim", async () => {
           workerId: "coordinator",
           now,
           leaseDurationMs: 60_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         const conflict = yield* remote
           .prepareNext({
@@ -211,7 +211,7 @@ test("duplicate command identity rolls back the second job claim", async () => {
             workerId: "coordinator",
             now,
             leaseDurationMs: 60_000,
-            expiresAt: new Date(now.getTime() + 60_000),
+            ttlMsForKind: () => 60_000,
           })
           .pipe(Effect.result)
         const afterConflict = yield* jobs.readJob("command-owner-b")
@@ -220,7 +220,7 @@ test("duplicate command identity rolls back the second job claim", async () => {
           workerId: "coordinator",
           now,
           leaseDurationMs: 60_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         return { conflict, afterConflict, retry }
       }),

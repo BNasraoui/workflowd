@@ -19,7 +19,7 @@ test("probe producer creates a legitimate versioned kernel job through event and
         now,
         leaseDurationMs: 60_000,
       })
-      const remote = yield* jobs.claimRemoteProbe({
+      const remote = yield* jobs.claimRemote({
         workerId: "remote-coordinator",
         now,
         leaseDurationMs: 60_000,

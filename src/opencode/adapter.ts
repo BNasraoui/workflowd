@@ -101,7 +101,21 @@ type OpenCodeAvailabilityInput = {
   readonly model: OpenCodeModel
 }
 
-type OpenCodeModelAvailability = {
+/**
+ * One live observation of a session's generation progress, read from
+ * `session.get`. The token counters are the managed runner's progress
+ * signal: first-token verification and no-progress wedge detection both
+ * compare successive observations of `outputTokens`.
+ */
+export type OpenCodeSessionTelemetry = {
+  readonly directory: string
+  readonly outputTokens: number
+  readonly updatedAtMs: number
+  readonly idle: boolean
+  readonly outcome?: "succeeded" | "failed" | "interrupted"
+}
+
+export type OpenCodeModelAvailability = {
   readonly providerID: string
   readonly id: string
 }
@@ -133,6 +147,11 @@ export type OpenCodeSdkClient = {
   readonly generateText: SdkCall<{ readonly sessionID: string; readonly prompt: string }, string>
   readonly listAgents: SdkCall<OpenCodeSdkDirectoryInput, ReadonlyArray<string>>
   readonly listModels: SdkCall<OpenCodeSdkDirectoryInput, ReadonlyArray<OpenCodeModelAvailability>>
+  readonly listProviders: SdkCall<OpenCodeSdkDirectoryInput, ReadonlyArray<string>>
+  readonly sessionTelemetry: SdkCall<
+    { readonly sessionID: string },
+    OpenCodeSessionTelemetry | undefined
+  >
 }
 
 export class OpenCodeAdapterError extends Data.TaggedError("OpenCodeAdapterError")<{
@@ -161,6 +180,15 @@ export type OpenCodeAdapter = {
   readonly abortSession: AdapterCall<OpenCodeSessionInput, boolean>
   readonly validateAvailability: AdapterCall<OpenCodeAvailabilityInput, void>
   readonly generateStructured: AdapterCall<OpenCodeGenerateStructuredInput, JsonValue>
+  readonly listProviders: AdapterCall<OpenCodeSdkDirectoryInput, ReadonlyArray<string>>
+  readonly listModels: AdapterCall<
+    OpenCodeSdkDirectoryInput,
+    ReadonlyArray<OpenCodeModelAvailability>
+  >
+  readonly sessionTelemetry: AdapterCall<
+    { readonly sessionID: string },
+    OpenCodeSessionTelemetry | undefined
+  >
 }
 
 const MESSAGE_LOOKUP_LIMIT = 20
@@ -313,6 +341,15 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
       ),
     )
   }
+
+  readonly listProviders: OpenCodeAdapter["listProviders"] = (input) =>
+    this.call("list providers", this.client.listProviders(input))
+
+  readonly listModels: OpenCodeAdapter["listModels"] = (input) =>
+    this.call("list models", this.client.listModels(input))
+
+  readonly sessionTelemetry: OpenCodeAdapter["sessionTelemetry"] = (input) =>
+    this.call("read session telemetry", this.client.sessionTelemetry(input))
 
   readonly generateStructured: OpenCodeAdapter["generateStructured"] = (input) =>
     this.call(
@@ -586,6 +623,31 @@ export function makeOpenCodeSdkClient(
               models.data.map((model) => ({ providerID: model.providerID, id: model.id })),
             ),
           ),
+      ),
+    // `provider.list` returns only providers the server has configured with
+    // credentials, so membership here is the authentication pre-flight; the
+    // model catalog alone cannot distinguish an authenticated route from a
+    // catalogued one.
+    listProviders: (input) =>
+      withClient((client) =>
+        client.provider
+          .list(toLocationFilter(input.directory))
+          .pipe(Effect.map((providers) => providers.data.map((provider) => String(provider.id)))),
+      ),
+    sessionTelemetry: (input) =>
+      withClient((client) =>
+        client.session.get({ sessionID: toSessionID(input.sessionID) }).pipe(
+          Effect.map((session): OpenCodeSessionTelemetry | undefined => ({
+            directory: session.location.directory,
+            outputTokens: session.tokens.output + session.tokens.reasoning,
+            updatedAtMs: toEpochMillis(session.time.updated) ?? 0,
+            idle: toEpochMillis(session.time.idle) !== undefined,
+            ...(session.outcome === undefined ? {} : { outcome: session.outcome }),
+          })),
+          Effect.catch((cause) =>
+            isNotFound(cause) ? Effect.succeed(undefined) : Effect.fail(cause),
+          ),
+        ),
       ),
   }
 }

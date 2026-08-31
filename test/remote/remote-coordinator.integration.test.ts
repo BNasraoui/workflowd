@@ -246,7 +246,7 @@ describe.serial("kernel-backed coordinator against real JetStream", () => {
             workerId: "coordinator-before-downtime",
             now,
             leaseDurationMs: 100,
-            expiresAt: new Date(now.getTime() + 100),
+            ttlMsForKind: () => 100,
           })
           const iteration = yield* runRemoteDispatchIteration({
             commandId: () => "replacement-command",
@@ -403,7 +403,7 @@ describe.serial("kernel-backed coordinator against real JetStream", () => {
             workerId: "coordinator-before-restart",
             now,
             leaseDurationMs: 1_000,
-            expiresAt: new Date(now.getTime() + 60_000),
+            ttlMsForKind: () => 60_000,
           })
         }),
       )

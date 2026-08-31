@@ -22,7 +22,7 @@ test("coordinator durably records every result disposition without poison unique
           workerId: "coordinator",
           now,
           leaseDurationMs: 1_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         if (dispatch === null) return yield* Effect.die(new Error("expected dispatch"))
         yield* remote.markPublishing(dispatch.commandId, now)
@@ -140,7 +140,7 @@ test("global result identity collision across jobs is durably classified conflic
           workerId: "coordinator",
           now,
           leaseDurationMs: 1_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         if (first === null) return yield* Effect.die(new Error("expected first dispatch"))
         yield* remote.markPublishing(first.commandId, now)
@@ -169,7 +169,7 @@ test("global result identity collision across jobs is durably classified conflic
           workerId: "coordinator",
           now,
           leaseDurationMs: 1_000,
-          expiresAt: new Date(now.getTime() + 60_000),
+          ttlMsForKind: () => 60_000,
         })
         if (second === null) return yield* Effect.die(new Error("expected second dispatch"))
         yield* remote.markPublishing(second.commandId, now)

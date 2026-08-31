@@ -8,6 +8,9 @@ import { OpenCodeCompletionSource } from "./kernel/opencode-completion-source"
 import { OpenCodeResumeWorker } from "./kernel/opencode-resume-worker"
 import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
+import { AgentRunIngress } from "./kernel/agent-run-ingress"
+import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
+import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
@@ -129,6 +132,7 @@ export function serveHookHttp<R>(
 export type RuntimeWorkerName =
   | "job"
   | "agent-completion"
+  | "agent-run"
   | "kernel-job"
   | "session-resume"
   | "publication"
@@ -173,6 +177,8 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
       return ["publication"]
     case "agent-completion":
       return ["kernel-job"]
+    case "agent-run":
+      return ["agent-completion"]
     case "kernel-job":
     case "session-resume":
       return []
@@ -181,6 +187,40 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
     case "reconciliation":
       return ["job"]
   }
+}
+
+/** Each optional feature must have its service(s) in the layer when its
+ * config block is present; returns the first mismatch's message, or null. */
+function firstMissingService(
+  config: AppConfig,
+  services: {
+    readonly workflowStart: Option.Option<unknown>
+    readonly testJobCanary: Option.Option<unknown>
+    readonly agentWaits: Option.Option<unknown>
+    readonly agentRuns: Option.Option<unknown>
+    readonly agentRunWatchdog: Option.Option<unknown>
+    readonly remoteCoordinator: unknown
+  },
+): string | null {
+  if (config.qrspi !== undefined && Option.isNone(services.workflowStart)) {
+    return "QRSPI is configured without a WorkflowStart service"
+  }
+  if (config.testJobCanary !== undefined && Option.isNone(services.testJobCanary)) {
+    return "Test-job canary is configured without its service"
+  }
+  if (config.agentWaits !== undefined && Option.isNone(services.agentWaits)) {
+    return "Agent waits are configured without their service"
+  }
+  if (
+    config.agentRuns !== undefined &&
+    (Option.isNone(services.agentRuns) || Option.isNone(services.agentRunWatchdog))
+  ) {
+    return "Agent runs are configured without their services"
+  }
+  if (config.remoteCoordinator !== undefined && services.remoteCoordinator === null) {
+    return "Remote coordinator is configured without its service"
+  }
+  return null
 }
 
 export function startHookService(
@@ -198,21 +238,21 @@ export function startHookService(
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
     const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
+    const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
+    const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
     const remoteCoordinator = yield* RemoteCoordinator
-    if (config.qrspi !== undefined && Option.isNone(workflowStart)) {
-      return yield* Effect.die(new Error("QRSPI is configured without a WorkflowStart service"))
-    }
-    if (config.testJobCanary !== undefined && Option.isNone(testJobCanary)) {
-      return yield* Effect.die(new Error("Test-job canary is configured without its service"))
-    }
-    if (config.agentWaits !== undefined && Option.isNone(agentWaits)) {
-      return yield* Effect.die(new Error("Agent waits are configured without their service"))
-    }
-    if (config.remoteCoordinator !== undefined && remoteCoordinator === null) {
-      return yield* Effect.die(new Error("Remote coordinator is configured without its service"))
-    }
+    const missingService = firstMissingService(config, {
+      workflowStart,
+      testJobCanary,
+      agentWaits,
+      agentRuns,
+      agentRunWatchdog,
+      remoteCoordinator,
+    })
+    if (missingService !== null) return yield* Effect.die(new Error(missingService))
 
     yield* automation
       .validateAvailability({
@@ -295,6 +335,24 @@ export function startHookService(
         60_000,
         "session-resume",
         observed("session-resume", resumeWorker.value.iteration),
+      )
+    }
+
+    if (Option.isSome(agentRunWatchdog)) {
+      yield* superviseWorker(
+        "Agent-run watchdog",
+        60_000,
+        "agent-run",
+        observed("agent-run", agentRunWatchdog.value.iteration),
+      )
+    }
+
+    if (Option.isSome(claudeResumeWorker)) {
+      yield* superviseWorker(
+        "Claude resume worker",
+        60_000,
+        "session-resume",
+        observed("session-resume", claudeResumeWorker.value.iteration),
       )
     }
 
@@ -386,6 +444,14 @@ export function startHookService(
                 agentWaits: {
                   token: config.agentWaits.token,
                   register: Option.getOrThrow(agentWaits).register,
+                },
+              }),
+          ...(config.agentRuns === undefined
+            ? {}
+            : {
+                agentRuns: {
+                  token: config.agentRuns.token,
+                  register: Option.getOrThrow(agentRuns).register,
                 },
               }),
         }),

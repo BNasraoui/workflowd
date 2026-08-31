@@ -545,6 +545,9 @@ describe("Review Work processing", () => {
       abortSession: () => Effect.succeed(true),
       validateAvailability: () => Effect.void,
       generateStructured: () => Effect.succeed(null),
+      listProviders: () => Effect.succeed([]),
+      listModels: () => Effect.succeed([]),
+      sessionTelemetry: () => Effect.succeed(undefined),
     }
     const resolver = new SessionAccessResolver(
       openCode,

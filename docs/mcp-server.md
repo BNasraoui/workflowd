@@ -7,11 +7,11 @@ runs on mint beside the coordinator, listens on loopback
 no workflow state of its own — every tool call reads or writes the same
 database the coordinator and the remote-enqueue CLI use.
 
-The server targets MCP revision **2025-11-25** using SDK 1.30.0. All five
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All six
 tools advertise an `outputSchema` and return the corresponding
 `structuredContent` in addition to a human-readable text rendering. Tool
 names use the SEP-986 canonical character set. The three query tools carry
-`readOnlyHint`; the two receipt tools carry non-destructive and idempotency
+`readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
 A tool's declared `outputSchema` describes its **success** payload only. On
@@ -41,6 +41,7 @@ contract so agents learn it from the schema itself.
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
+| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
 
 `enqueue_probe` with an explicit `probe_id` is idempotent (the same identity
 maps to the same job); omitting it generates a fresh probe identity per call.
@@ -113,6 +114,74 @@ the existing receipt plus `job_status` polling.
 Only the `opencode` provider is supported in this slice; the underlying store
 already allows `codex` and `claude` for later.
 
+## `dispatch_agent`
+
+This replaces the manual `mint-job` dispatch-then-verify workflow. Callers
+dispatch by **intent** and never touch models, auth, or wedge recovery:
+
+```
+dispatch_agent(
+  route             = "implement",            # configured route name or bare model id
+  repository        = "workflowd",            # logical name from the server allow-list
+  prompt            = "Fix the flaky retry test and push the branch.",
+  parent_session_id = "ses_...",              # optional: your native OpenCode session id
+  resume_prompt     = "Child finished; review its branch.",  # required with parent_session_id
+  idempotency_key   = "optional-stable-identity",
+)
+```
+
+What the runner owns, in order:
+
+1. **Route resolution.** `route` is a configured intent name (`implement`,
+   `review`, `hard`, …) or a bare model id that exactly one route serves.
+   Provider-prefixed ids (`zai-coding-plan/glm-5.3-flash`) are refused with
+   `provider_prefixed_route` — no caller path carries provider dialects.
+2. **Pre-flight.** The resolved provider must appear in the OpenCode server's
+   `provider.list` (which lists only providers with credentials, so this is
+   an authentication check, not a catalog check) and the exact provider/model
+   pair must exist in `model.list`. A dead route is refused at dispatch with
+   `provider_not_authenticated` or `model_not_available` — never a silent
+   hang.
+3. **Spawn.** A fresh git worktree of the allow-listed repository is created
+   under the daemon's worktree root, a session is created there with the
+   configured agent, and the session plus its worktree are registered into
+   kernel custody (`kernel_sessions` / `kernel_working_resources`) under the
+   custody id `opencode-session-<native id>` — so `wait_for_agent` works
+   against runner-spawned children with no shim.
+4. **First-token verification.** The receipt is returned only after the
+   runner observes the session's token counters move (bounded wait,
+   `WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS`, default 120s). A session that
+   never generates is aborted and the dispatch refused with
+   `no_first_token`. A quota-dead route can no longer report "dispatched".
+5. **Supervision.** After the receipt, the daemon's watchdog polls the run's
+   token counters. No progress within `WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS`
+   (default 20 minutes) → the session is interrupted and re-prompted in place
+   with a continuation prompt (bounded by
+   `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS`), then escalated to
+   `operator_required` with the diagnostic trail. The caller never babysits.
+
+With `parent_session_id` + `resume_prompt`, the runner also registers the
+parent's custody (idempotently) and an agent wait in the same dispatch, so
+one call means "run this and wake me when it finishes". Without them the
+receipt carries the child's custody id for a later `wait_for_agent` call.
+
+Parents come in two kinds (`parent_kind`, default `opencode`):
+
+- `opencode` — a session on the managed OpenCode server, woken via the
+  server API by the OpenCode resume worker.
+- `claude` — a Claude Code session on the daemon's host, woken by the
+  Claude resume worker through two `claude -p --resume` turns (the wake
+  document, then the structured-ack extraction). Requires
+  `parent_directory`, the cwd the session was created in; the session
+  transcript must exist under `~/.claude/projects/` for that directory.
+  Waking Claude sessions on *other* hosts is the cross-machine routing
+  slice (workflowd-b3b.23) and is not supported yet; Codex parents are
+  workflowd-b3b.21.
+
+The dispatch call holds its HTTP request open through verification, so it is
+the one write tool that can take a couple of minutes to ack. It is still a
+receipt: end the turn after it arrives.
+
 ## Authorization
 
 Reads need no credential beyond reaching the transport (loopback or your
@@ -136,10 +205,16 @@ which carries its own token:
   daemon's `WORKFLOWD_AGENT_WAIT_TOKEN`, supplied the same way as the MCP
   token. Set exactly one source.
 
-Omit all three and `wait_for_agent` stays disabled, refusing calls with a
-message naming the missing settings. Setting a token without
-`WORKFLOWD_DAEMON_URL` (or vice versa) is a startup error rather than a
-silently half-configured tool.
+`dispatch_agent` reaches the daemon's agent-run ingress the same way:
+
+- `WORKFLOWD_AGENT_RUN_TOKEN` / `WORKFLOWD_AGENT_RUN_TOKEN_FILE` — the
+  daemon's `WORKFLOWD_AGENT_RUN_TOKEN`, supplied the same way. Set exactly
+  one source.
+
+A tool whose token is missing stays disabled and refuses calls with a
+message naming the missing settings. A daemon token without
+`WORKFLOWD_DAEMON_URL`, or a daemon URL with no daemon token at all, is a
+startup error rather than a silently half-configured tool.
 
 ## Server install (mint)
 
@@ -227,3 +302,54 @@ Responses:
 | 409 | Custody or immutable idempotency conflict. Custody bodies carry a precise reason and detail; immutable replay conflicts carry `reason: "idempotency_conflict"` without internal detail. |
 | 413 | Body exceeds `WORKFLOWD_MAX_WEBHOOK_BYTES`. |
 | 500 | Store fault; details stay server-side. |
+
+## HTTP surface: `POST /workflows/agent-runs`
+
+`dispatch_agent` is a thin proxy over this endpoint; both surfaces share the
+`AgentRunIngress` handler in `src/kernel/agent-run-ingress.ts`. The route is
+registered only when the daemon is configured for agent runs; without that
+the path 404s.
+
+Daemon configuration (all under the same optional section — the token
+enables it, the routes and repositories are then required):
+
+- `WORKFLOWD_AGENT_RUN_TOKEN` / `WORKFLOWD_AGENT_RUN_TOKEN_FILE` — bearer
+  token for the endpoint; at least 8 characters. Set exactly one source.
+- `WORKFLOWD_AGENT_RUN_ROUTES` — comma-separated `name=provider/model`
+  pairs, e.g. `implement=zai-coding-plan/glm-5.3-flash,hard=anthropic/claude-fable-5`.
+  The only place provider-prefixed model ids are ever written.
+- `WORKFLOWD_AGENT_RUN_REPOSITORIES` — comma-separated `name=/absolute/path`
+  pairs naming the dispatchable repositories. This is a security allow-list:
+  dispatch is arbitrary prompt execution in the named directory's worktrees.
+- `WORKFLOWD_AGENT_RUN_AGENT` — opencode agent for spawned sessions
+  (default `build`; deployments use `remote-worker`).
+- `WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS` (120000),
+  `WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS` (2000),
+  `WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS` (1200000),
+  `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS` (3).
+
+```http
+POST /workflows/agent-runs
+Authorization: Bearer <WORKFLOWD_AGENT_RUN_TOKEN>
+Content-Type: application/json
+
+{
+  "route": "implement",
+  "repository": "workflowd",
+  "prompt": "Fix the flaky retry test and push the branch.",
+  "parentSessionId": "ses_parent",
+  "resumePrompt": "Child finished; review its branch.",
+  "idempotencyKey": "optional-stable-identity"
+}
+```
+
+Responses:
+
+| Status | Meaning |
+| --- | --- |
+| 202 | Dispatched and first-token-verified. Body is `{ runId, sessionId, nativeSessionId, providerId, modelId, outputTokens, status, wait? }` with `status` either `dispatched` or `duplicate`. |
+| 400 | Malformed JSON or payload. |
+| 401 | Missing or wrong bearer token. |
+| 409 | Refused with a machine-readable reason: `provider_prefixed_route`, `unknown_route`, `ambiguous_route`, `unknown_repository`, `provider_not_authenticated`, `model_not_available`, `invalid_wait_pairing`, `missing_parent_session`, `no_first_token`, `run_conflict` — or an idempotency/custody conflict. |
+| 413 | Body exceeds `WORKFLOWD_MAX_WEBHOOK_BYTES`. |
+| 500 | Store or provider fault; details stay server-side. |

@@ -24,6 +24,9 @@ function makeAdapter(overrides: Partial<OpenCodeAdapter> = {}): OpenCodeAdapter 
     abortSession: () => Effect.succeed(true),
     validateAvailability: () => Effect.void,
     generateStructured: () => Effect.succeed({}),
+    listProviders: () => Effect.succeed([]),
+    listModels: () => Effect.succeed([]),
+    sessionTelemetry: () => Effect.succeed(undefined),
     ...overrides,
   }
 }

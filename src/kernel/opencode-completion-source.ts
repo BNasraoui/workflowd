@@ -24,6 +24,16 @@ export type OpenCodeCompletionProviderPort = {
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
   ) => Promise<boolean>
+  /**
+   * Whether the session's run has actually ended (idle with a recorded
+   * outcome). OpenCode 2 completes an assistant message per tool step, so a
+   * completed message in history proves nothing about the run being over;
+   * this probe is the terminal signal.
+   */
+  readonly sessionFinished: (
+    input: { readonly sessionID: string; readonly directory: string },
+    signal: AbortSignal,
+  ) => Promise<boolean>
   readonly listMessages: (
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
@@ -213,6 +223,16 @@ const observeCompletion = (
           controller.signal,
         )
         void live.catch(() => undefined)
+        // History is only meaningful once the run has ended: OpenCode 2
+        // completes an assistant message per tool step, so a still-running
+        // session accumulates completed messages that are not answers. The
+        // finished probe comes after the subscription opens, so a run that
+        // ends right after a negative probe still surfaces on the live
+        // stream's execution-succeeded event.
+        const finished = await provider.sessionFinished(reference, controller.signal)
+        if (!finished) {
+          return { _tag: "Completed" as const, ...(await live) }
+        }
         const history = await provider.listMessages(reference, controller.signal)
         if (history.length > MAX_AGENT_COMPLETION_CATCHUP_MESSAGES) {
           return { _tag: "OperatorRequired" as const, reason: "history_exceeds_bound" }
@@ -223,17 +243,24 @@ const observeCompletion = (
             ? [{ message, completedTimestamp: message.time.completed }]
             : [],
         )
-        if (candidates.length > 1) {
-          return { _tag: "OperatorRequired" as const, reason: "ambiguous_new_answers" }
-        }
-        const fresh = candidates[0]
+        // A finished multi-step run leaves several completed messages; the
+        // final one is the answer. Freshness still fences replays of runs
+        // that ended before this watch existed.
+        const fresh = candidates.reduce<ObservedCompletion | undefined>(
+          (latest, candidate) =>
+            latest === undefined || candidate.completedTimestamp >= latest.completedTimestamp
+              ? candidate
+              : latest,
+          undefined,
+        )
         if (fresh !== undefined) {
           return { _tag: "Completed" as const, ...fresh }
         }
-        // An unrecorded terminal answer older than the durable registration
-        // boundary means the child may have finished inside the registration
-        // round-trip. The live stream never replays it, so awaiting the stream
-        // would park the watch silently forever; hand it to an operator instead.
+        // The run is over but every terminal answer predates the durable
+        // registration boundary: the child finished inside the registration
+        // round-trip. The live stream never replays it, so awaiting the
+        // stream would park the watch silently forever; hand it to an
+        // operator instead.
         if (terminal.some((message) => !isConsumed(message))) {
           return { _tag: "OperatorRequired" as const, reason: "stale_completion" }
         }

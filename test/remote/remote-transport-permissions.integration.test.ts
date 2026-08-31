@@ -104,6 +104,44 @@ const result = (commandId: string, hostId: string) => ({
   observedAt: "2026-08-14T12:00:30.000Z",
 })
 
+/** A claude_resume command and its result ride the same subjects and grants
+ * as the probe; this proves the broker needs no new permissions for the
+ * kind. */
+const claudeCommand = (id: string, hostId: string) => ({
+  version: 1 as const,
+  commandId: id,
+  jobId: `job-${id}`,
+  attempt: 1,
+  generation: 1,
+  hostId,
+  kind: "claude_resume" as const,
+  payload: {
+    kind: "claude_resume" as const,
+    hostId,
+    nativeSessionId: "0c0ffee0-cafe-4dad-b0ba-000000000001",
+    directory: "/home/example/repos/workflowd",
+    prompt: '{"task":"WAKE"}',
+    extractionSchemaJson: '{"type":"object"}',
+    turnTimeoutMs: 120_000,
+  },
+  issuedAt: "2026-08-14T12:00:00.000Z",
+  expiresAt: "2026-08-14T12:10:00.000Z",
+})
+
+const claudeResult = (commandId: string, hostId: string) => ({
+  version: 1 as const,
+  resultId: `result-${commandId}`,
+  commandId,
+  jobId: `job-${commandId}`,
+  attempt: 1,
+  generation: 1,
+  hostId,
+  kind: "claude_resume" as const,
+  status: "succeeded" as const,
+  output: '{"acknowledged":true,"summary":"woken"}',
+  observedAt: "2026-08-14T12:00:30.000Z",
+})
+
 describe.serial("permissioned NATS broker with per-identity creds", () => {
   test("coordinator creds administer JetStream and a runner works its own host end to end", async () => {
     await runAs(
@@ -129,6 +167,39 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
     expect(deliveries).toHaveLength(1)
     expect(deliveries[0]?.deliveryId).toMatch(/^WORKFLOWD_COMMANDS_V1:/)
 
+    const results = await runAs(
+      coordinator,
+      Effect.gen(function* () {
+        const transport = yield* RemoteTransport
+        const collected = yield* transport.takeResults(10_000)
+        yield* collected[0]!.acknowledge
+        return collected
+      }),
+    )
+    expect(results).toHaveLength(1)
+  }, 30_000)
+
+  test("a claude_resume command and result flow under the existing grants", async () => {
+    await runAs(
+      coordinator,
+      Effect.gen(function* () {
+        const transport = yield* RemoteTransport
+        yield* transport.ensureInfrastructure()
+        yield* transport.publishCommand(claudeCommand("claude-1", "host-a"))
+      }),
+    )
+    const deliveries = await runAs(
+      runnerA,
+      Effect.gen(function* () {
+        const transport = yield* RemoteTransport
+        const waiting = yield* transport.takeHost("host-a", 10_000).pipe(Effect.forkChild)
+        const deliveries = yield* Fiber.join(waiting)
+        yield* deliveries[0]!.acknowledge
+        yield* transport.publishResult(claudeResult("claude-1", "host-a"))
+        return deliveries
+      }),
+    )
+    expect(deliveries).toHaveLength(1)
     const results = await runAs(
       coordinator,
       Effect.gen(function* () {

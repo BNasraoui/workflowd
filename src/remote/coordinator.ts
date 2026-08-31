@@ -14,6 +14,9 @@ export type RemoteDispatchIterationOptions = {
   readonly now: () => Date
   readonly leaseDurationMs: number
   readonly commandTtlMs: number
+  /** TTL for claude_resume commands, which span two CLI inference turns;
+   * defaults to commandTtlMs when absent. */
+  readonly claudeCommandTtlMs?: number
   readonly afterBrokerPublish?: (
     dispatch: import("./coordinator-store").RemoteDispatch,
   ) => Effect.Effect<
@@ -34,7 +37,10 @@ export const runRemoteDispatchIteration = (options: RemoteDispatchIterationOptio
       workerId: options.workerId,
       now: preparedAt,
       leaseDurationMs: options.leaseDurationMs,
-      expiresAt: new Date(preparedAt.getTime() + options.commandTtlMs),
+      ttlMsForKind: (kind) =>
+        kind === "claude_resume"
+          ? (options.claudeCommandTtlMs ?? options.commandTtlMs)
+          : options.commandTtlMs,
     })
     const pending = yield* store.pendingDispatches()
     for (const item of pending) {
@@ -48,17 +54,21 @@ export const runRemoteDispatchIteration = (options: RemoteDispatchIterationOptio
         disposition: "current",
         issuedAt: item.issuedAt.toISOString(),
       })
-      yield* transport.publishCommand({
-        version: 1,
+      const base = {
+        version: 1 as const,
         commandId: item.commandId,
         jobId: item.jobId,
         attempt: item.attempt,
         generation: item.generation,
         hostId: item.hostId,
-        kind: "probe",
         issuedAt: item.issuedAt.toISOString(),
         expiresAt: item.expiresAt.toISOString(),
-      })
+      }
+      yield* transport.publishCommand(
+        item.kind === "claude_resume" && item.payload !== undefined
+          ? { ...base, kind: "claude_resume", payload: item.payload }
+          : { ...base, kind: "probe" },
+      )
       if (options.afterBrokerPublish !== undefined) {
         yield* options.afterBrokerPublish(item)
       }
@@ -130,6 +140,7 @@ export const RemoteCoordinatorLive = (config: {
   readonly workerId: string
   readonly leaseDurationMs: number
   readonly commandTtlMs: number
+  readonly claudeCommandTtlMs?: number
 }) =>
   Layer.effect(
     RemoteCoordinator,
@@ -152,6 +163,9 @@ export const RemoteCoordinatorLive = (config: {
             now: () => new Date(),
             leaseDurationMs: config.leaseDurationMs,
             commandTtlMs: config.commandTtlMs,
+            ...(config.claudeCommandTtlMs === undefined
+              ? {}
+              : { claudeCommandTtlMs: config.claudeCommandTtlMs }),
           }),
         ).pipe(Effect.map((result) => (result.published > 0 ? "published" : "idle"))),
         resultIteration: Effect.suspend(() => provide(runRemoteResultIteration(new Date()))).pipe(

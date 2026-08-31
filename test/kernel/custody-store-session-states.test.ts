@@ -7,7 +7,7 @@ import { runSessionKernel } from "./session-store-harness"
 const now = new Date("2026-08-12T10:00:00.000Z")
 
 describe("custody session states", () => {
-  test("moves ready session through active to completed", async () => {
+  test("returns a woken session to ready under its next generation", async () => {
     const states = await runSessionKernel(
       ":memory:",
       Effect.gen(function* () {
@@ -70,9 +70,11 @@ describe("custody session states", () => {
         return { active, completed: yield* store.readSession("s"), ready }
       }),
     )
-    expect(states.ready).toMatchObject({ state: "ready" })
+    expect(states.ready).toMatchObject({ state: "ready", revision: 1 })
     expect(states.active).toMatchObject({ state: "active" })
-    expect(states.completed).toMatchObject({ state: "completed" })
+    // A delivered wake advances the custody generation but leaves the
+    // session held and wakeable: a parent can be woken again and again.
+    expect(states.completed).toMatchObject({ state: "ready", revision: 3 })
   })
 
   test("normalizes session after release, fail, cancel, and final exhaustion", async () => {

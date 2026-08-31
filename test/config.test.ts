@@ -40,6 +40,85 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("loads the optional agent-run section with routes and repositories", async () => {
+    const config = await loadConfig(
+      {
+        ...requiredEnvironment,
+        WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+        WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+        WORKFLOWD_AGENT_RUN_AGENT: "remote-worker",
+      },
+      { home: "/home/test" },
+    )
+
+    expect(config.agentRuns).toEqual({
+      token: "agent-run-secret",
+      claudeBinary: "claude",
+      claudeHosts: [],
+      remoteTurnTimeoutMs: 120_000,
+      routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],
+      repositories: [{ name: "workflowd", directory: "/home/test/repos/workflowd" }],
+      agent: "remote-worker",
+      verifyTimeoutMs: 120_000,
+      verifyPollIntervalMs: 2_000,
+      progressWindowMs: 20 * 60_000,
+      maxAttempts: 3,
+    })
+  })
+
+  test("parses the claude host allow-list and rejects malformed hosts and timeouts", async () => {
+    const base = {
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+      WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+    }
+    const config = await loadConfig(
+      { ...base, WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS: "ben-arch, gpu-box" },
+      { home: "/home/test" },
+    )
+    expect(config.agentRuns?.claudeHosts).toEqual(["ben-arch", "gpu-box"])
+    await expect(
+      loadConfig(
+        { ...base, WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS: "ben-arch,bad host" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("invalid host id")
+    await expect(
+      loadConfig(
+        { ...base, WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS: "ben-arch,ben-arch" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("unique")
+    await expect(
+      loadConfig(
+        { ...base, WORKFLOWD_AGENT_RUN_REMOTE_TURN_TIMEOUT_MS: "5000" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("between 10000 and 600000")
+  })
+
+  test("agent runs stay disabled without a token, and settings without one are an error", async () => {
+    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    expect(disabled.agentRuns).toBeUndefined()
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_TOKEN is required")
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_ROUTES")
+  })
+
   test("loads an optional central remote coordinator with token-file credentials", async () => {
     const config = await loadConfig(
       {
@@ -61,6 +140,7 @@ describe("loadConfig", () => {
       workerId: "mint:remote-coordinator",
       leaseDurationMs: 60_000,
       commandTtlMs: 300_000,
+      claudeCommandTtlMs: 600_000,
     })
   })
 

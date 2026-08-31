@@ -21,6 +21,14 @@ import {
   type AgentWaitIngressError,
   type AgentWaitIngressPort,
 } from "./kernel/agent-wait-ingress"
+import {
+  AgentRunRefusalError,
+  type AgentRunIngressError,
+  type AgentRunIngressPort,
+} from "./kernel/agent-run-ingress"
+import { AgentRunSubmission } from "./agent-run-contract"
+import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
+import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
 
 type QrspiIngress = {
@@ -36,6 +44,10 @@ type AgentWaitIngressBinding = Pick<AgentWaitIngressPort, "register"> & {
   readonly token: string
 }
 
+type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register"> & {
+  readonly token: string
+}
+
 export type WebhookHandlerOptions = {
   readonly webhookSecret: string
   readonly now: Date
@@ -43,6 +55,7 @@ export type WebhookHandlerOptions = {
   readonly qrspi?: QrspiIngress
   readonly testJobs?: TestJobIngress
   readonly agentWaits?: AgentWaitIngressBinding
+  readonly agentRuns?: AgentRunIngressBinding
 }
 
 export function routeRequest(
@@ -67,6 +80,18 @@ export function routeRequest(
     return handleAgentWaitRegister(
       request,
       options.agentWaits,
+      options.now,
+      options.maxBodyBytes ?? 1_048_576,
+    )
+  }
+  if (
+    pathname === "/workflows/agent-runs" &&
+    request.method === "POST" &&
+    options.agentRuns !== undefined
+  ) {
+    return handleAgentRunRegister(
+      request,
+      options.agentRuns,
       options.now,
       options.maxBodyBytes ?? 1_048_576,
     )
@@ -207,6 +232,87 @@ function handleAgentWaitRegister(
       ),
     ),
   )
+}
+
+function handleAgentRunRegister(
+  request: Request,
+  ingress: AgentRunIngressBinding,
+  now: Date,
+  maxBodyBytes: number,
+) {
+  return Effect.gen(function* () {
+    if (!authorized(request.headers.get("authorization"), ingress.token)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 })
+    }
+    const bytes = new Uint8Array(yield* Effect.tryPromise(() => request.arrayBuffer()))
+    if (bytes.byteLength > maxBodyBytes) {
+      return Response.json({ error: "payload too large" }, { status: 413 })
+    }
+    const json = yield* Schema.decodeUnknownEffect(JsonText)(new TextDecoder().decode(bytes)).pipe(
+      Effect.catch(() => Effect.succeed(undefined)),
+    )
+    if (json === undefined) return Response.json({ error: "invalid JSON" }, { status: 400 })
+    const input = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(json, {
+      onExcessProperty: "error",
+    }).pipe(Effect.result)
+    if (input._tag === "Failure") {
+      return Response.json(
+        {
+          error:
+            "invalid agent run: route, repository and prompt are required non-empty " +
+            "strings, with optional parentSessionId, resumePrompt and idempotencyKey",
+        },
+        { status: 400 },
+      )
+    }
+    return yield* ingress.register(input.success, now).pipe(
+      Effect.matchEffect({
+        onFailure: (error) => {
+          const response = agentRunFailure(error)
+          // Opaque failures still need an operator trail; refusals and
+          // conflicts are the caller's to read.
+          return response.status === 500
+            ? Effect.logError("Agent-run ingress failed", error).pipe(Effect.as(response))
+            : Effect.succeed(response)
+        },
+        onSuccess: (receipt) => Effect.succeed(Response.json(receipt, { status: 202 })),
+      }),
+    )
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logError("Agent-run ingress failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
+}
+
+/**
+ * Refusals carry the machine-readable reason a dead or misnamed route was
+ * rejected; every other failure is a store or provider fault and stays
+ * opaque.
+ */
+function agentRunFailure(error: AgentRunIngressError): Response {
+  if (error instanceof AgentRunRefusalError) {
+    return Response.json(
+      { error: "refused", reason: error.reason, detail: error.detail },
+      { status: 409 },
+    )
+  }
+  if (
+    error instanceof AgentRunStoreConflictError ||
+    error instanceof KernelStoreConflictError ||
+    error instanceof KernelSessionStoreConflictError
+  ) {
+    return Response.json({ error: "conflict", reason: "idempotency_conflict" }, { status: 409 })
+  }
+  if (error instanceof AgentWaitCustodyError) {
+    return Response.json(
+      { error: "custody", reason: error.reason, detail: error.explanation },
+      { status: 409 },
+    )
+  }
+  return Response.json({ error: "internal server error" }, { status: 500 })
 }
 
 /**

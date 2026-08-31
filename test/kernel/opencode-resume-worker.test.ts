@@ -92,6 +92,9 @@ describe("OpenCode local resume worker", () => {
       abortSession: () => Effect.succeed(true),
       validateAvailability: () => Effect.void,
       generateStructured: () => Effect.succeed(null),
+      listProviders: () => Effect.succeed([]),
+      listModels: () => Effect.succeed([]),
+      sessionTelemetry: () => Effect.succeed(undefined),
     })
 
     await adapter.promptAsync(
@@ -117,6 +120,7 @@ describe("OpenCode local resume worker", () => {
     let baselineReads = 0
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => {
         baselineReads += 1
         if (baselineReads === 1) throw new Error("simulated crash before sent")
@@ -166,10 +170,106 @@ describe("OpenCode local resume worker", () => {
     expect(prompts).toBe(1)
   })
 
+  test("leaves another provider's observation rows to that provider's observer", async () => {
+    // Cross-worker race caught live: a claude wake parked in
+    // observation_required (remote job still settling) must never be
+    // escalated by the opencode observer — that killed a wake that the
+    // claude observer would have completed one tick later.
+    const clock = new Date(startedAt.getTime() + 120_000)
+    const provider: OpenCodeResumeProviderPort = {
+      sessionExists: async () => false,
+      sessionFinished: async () => false,
+      listMessages: async () => [],
+      promptAsync: async () => undefined,
+      subscribeEvents: async () => (async function* () {})(),
+      generate: async () => ({}),
+    }
+    const outcome = await runSessionKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const store = yield* KernelSessionStore
+        const sql = yield* SqlClient.SqlClient
+        yield* store.registerResource({
+          resourceId: "claude-res",
+          owningHostId: "mint",
+          absolutePath: directory,
+          kind: "checkout",
+          createdAt: startedAt,
+        })
+        yield* store.registerSession({
+          sessionId: "claude-session-x",
+          providerKind: "claude",
+          providerVersion: 1,
+          providerId: "claude-cli",
+          serverId: "ben-arch",
+          owningHostId: "mint",
+          endpointAlias: "local-cli",
+          endpointIdentity: "claude-cli://ben-arch",
+          nativeSessionId: "0c0ffee0-cafe-4dad-b0ba-00000000000b",
+          resourceId: "claude-res",
+          createdAt: startedAt,
+        })
+        const promptText = '{"task":"wake"}'
+        yield* store.registerResumeRequest({
+          requestId: "claude-wake-1",
+          sessionId: "claude-session-x",
+          owningHostId: "mint",
+          prompt: { task: "wake" },
+          promptText,
+          promptSha256: createHash("sha256").update(promptText).digest("hex"),
+          outputContract: "test.answer",
+          outputContractVersion: 1,
+          maxAttempts: 3,
+          runAt: startedAt,
+          createdAt: startedAt,
+        })
+        // Drive the request into observation_required the way the claude
+        // worker does: claim, sent-fence, checkpoint, release.
+        const claim = yield* store.claimResume({
+          owningHostId: "mint",
+          workerId: "claude-worker",
+          now: startedAt,
+          leaseDurationMs: 60_000,
+          providerKind: "claude",
+        })
+        if (!claim) return yield* Effect.die(new Error("claim"))
+        const authority = {
+          requestId: claim.requestId,
+          attempt: claim.attempt,
+          owningHostId: "mint",
+          workerId: "claude-worker",
+          claimToken: claim.claimToken,
+          expectedLeaseUntil: claim.leaseUntil,
+          now: startedAt,
+        }
+        yield* store.markResumeSent(authority)
+        yield* store.checkpointResume({
+          ...authority,
+          checkpointId: `${claim.requestId}:${claim.attempt}:remote-job`,
+          checkpointVersion: 2,
+          checkpoint: { remoteJobId: "claude-resume-remote-x" },
+        })
+        yield* store.releaseResume({ ...authority, runAt: startedAt })
+        const iteration = yield* runOpenCodeResumeIteration({
+          ...options,
+          now: () => clock,
+        }).pipe(Effect.provide(Layer.succeed(OpenCodeResumeProvider, provider)))
+        const rows = yield* sql<{
+          readonly state: string
+        }>`SELECT state FROM kernel_resume_requests WHERE request_id = 'claude-wake-1'`
+        return { iteration, state: rows[0]!.state }
+      }),
+    )
+    expect(outcome.iteration).toMatchObject({ status: "idle" })
+    // The claude wake is untouched, still awaiting its own observer.
+    expect(outcome.state).toBe("observation_required")
+  })
+
   test("observes without resending after durable sent but before provider acceptance", async () => {
     let prompts = 0
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => {
         prompts += 1
@@ -223,6 +323,7 @@ describe("OpenCode local resume worker", () => {
     }
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => (accepted ? [answer] : []),
       promptAsync: async () => {
         prompts += 1
@@ -275,11 +376,78 @@ describe("OpenCode local resume worker", () => {
     expect(prompts).toBe(1)
   })
 
+  test("keeps a restart observation pending while the parent still runs, then attributes the multi-step answer", async () => {
+    // workflowd-hcq: OpenCode 2 completes an assistant message per tool step.
+    // A restarted observer must not attribute mid-turn step messages of a
+    // busy parent, and once the run ends, several new completed messages are
+    // one answer (the run's), not ambiguity.
+    let accepted = false
+    let finished = false
+    let clock = startedAt
+    const steps = [
+      { role: "assistant" as const, time: { created: 10, completed: 20 } },
+      { role: "assistant" as const, time: { created: 30, completed: 40 } },
+    ]
+    const provider: OpenCodeResumeProviderPort = {
+      sessionExists: async () => true,
+      sessionFinished: async () => finished,
+      listMessages: async () => (accepted ? steps : []),
+      promptAsync: async () => {
+        accepted = true
+      },
+      subscribeEvents: async () =>
+        (async function* () {
+          clock = new Date(startedAt.getTime() + 60_000)
+          yield { type: "message.updated" as const, sessionID: "ses_exact", message: steps[0]! }
+        })(),
+      generate: async () => ({ answer: "multi-step" }),
+    }
+    const Provider = Layer.succeed(OpenCodeResumeProvider, provider)
+
+    const outcome = await runSessionKernel(
+      ":memory:",
+      Effect.gen(function* () {
+        const store = yield* KernelSessionStore
+        yield* registerRequest
+        const first = yield* runOpenCodeResumeIteration({ ...options, now: () => clock }).pipe(
+          Effect.provide(Provider),
+          Effect.result,
+        )
+        const whileRunning = yield* runOpenCodeResumeIteration({
+          ...options,
+          workerId: "replacement-worker",
+          now: () => clock,
+        }).pipe(Effect.provide(Provider))
+        const pending = yield* store.readResumeRequest("resume-1")
+        finished = true
+        const afterFinish = yield* runOpenCodeResumeIteration({
+          ...options,
+          workerId: "replacement-worker",
+          now: () => clock,
+        }).pipe(Effect.provide(Provider))
+        return {
+          first,
+          whileRunning,
+          pending,
+          afterFinish,
+          result: yield* store.readResumeResult("resume-1"),
+        }
+      }),
+    )
+
+    expect(outcome.first._tag).toBe("Failure")
+    expect(outcome.whileRunning).toMatchObject({ status: "idle" })
+    expect(outcome.pending).toMatchObject({ state: "observation_required" })
+    expect(outcome.afterFinish).toMatchObject({ status: "completed", requestId: "resume-1" })
+    expect(outcome.result).toMatchObject({ result_json: '{"answer":"multi-step"}' })
+  })
+
   test("heartbeats its exact claim while waiting on provider events", async () => {
     const wallStart = Date.now()
     const clock = () => new Date(startedAt.getTime() + (Date.now() - wallStart))
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => undefined,
       subscribeEvents: async () =>
@@ -321,6 +489,7 @@ describe("OpenCode local resume worker", () => {
     }
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: touched,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => undefined,
       subscribeEvents: async () => (async function* () {})(),
@@ -349,6 +518,7 @@ describe("OpenCode local resume worker", () => {
     let prompts = 0
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => false,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => {
         prompts += 1
@@ -383,6 +553,7 @@ describe("OpenCode local resume worker", () => {
     const actions: Array<string> = []
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => {
         actions.push("prompt")
@@ -420,6 +591,7 @@ describe("OpenCode local resume worker", () => {
     let prompts = 0
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => {
         prompts += 1
@@ -460,6 +632,10 @@ describe("OpenCode local resume worker", () => {
     let providerCalls = 0
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => {
+        providerCalls += 1
+        return true
+      },
+      sessionFinished: async () => {
         providerCalls += 1
         return true
       },
@@ -508,6 +684,7 @@ describe("OpenCode local resume worker", () => {
     let observationAborted = false
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => undefined,
       generate: async () => null,
@@ -555,6 +732,7 @@ describe("OpenCode local resume worker", () => {
     const wallStart = Date.now()
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
+      sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
       promptAsync: async () => prompted.resolve(),
       generate: async () => null,

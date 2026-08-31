@@ -64,6 +64,9 @@ type ClaimInput = {
   readonly workerId: string
   readonly now: Date
   readonly leaseDurationMs: number
+  /** Restricts the claim to sessions held by one provider kind, so each
+   * provider's resume worker only ever claims wakes it can deliver. */
+  readonly providerKind?: "opencode" | "codex" | "claude"
 }
 type Replay = Effect.Effect<{ readonly status: "created" | "duplicate" }, KernelSessionStoreError>
 
@@ -170,6 +173,13 @@ export type KernelSessionStorePort = {
   readonly readResource: (
     id: string,
   ) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
+  /** A directory has at most one custody resource per host
+   * (UNIQUE(owning_host_id, absolute_path)); this resolves it so sessions
+   * arriving later share the row instead of colliding on the path. */
+  readonly readResourceByPath: (input: {
+    readonly owningHostId: string
+    readonly absolutePath: string
+  }) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
   readonly readSession: (
     id: string,
   ) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
@@ -227,6 +237,14 @@ const observationState = (
   if (disposition === "completed") return "completed" as const
   if (disposition === "operator_required") return "operator_required" as const
   return "failed" as const
+}
+const sessionStateForObservation = (
+  disposition: "completed" | "missing" | "failed" | "operator_required",
+  attemptState: string,
+) => {
+  if (disposition === "missing") return "missing"
+  if (disposition === "completed") return "ready"
+  return attemptState
 }
 const effectiveCleanupDisposition = (
   input: CleanupDisposition,
@@ -472,6 +490,7 @@ const make = Effect.gen(function* () {
       JOIN kernel_sessions AS session ON session.session_id = request.session_id
       JOIN kernel_working_resources AS resource ON resource.resource_id = session.resource_id
       WHERE request.owning_host_id = ${input.owningHostId} AND session.owning_host_id = ${input.owningHostId}
+        AND (${input.providerKind ?? null} IS NULL OR session.provider_kind = ${input.providerKind ?? null})
         AND ((request.state = 'ready' AND request.run_at <= ${nowText}) OR
           (request.state = 'leased' AND EXISTS (SELECT 1 FROM kernel_resume_attempts AS attempt_row
             WHERE attempt_row.request_id = request.request_id AND attempt_row.attempt = request.attempt
@@ -688,7 +707,11 @@ const make = Effect.gen(function* () {
       ${version}, ${payload.json}, ${input.now.toISOString()})`
       yield* sql`UPDATE kernel_resume_requests SET state = 'completed', updated_at = ${input.now.toISOString()}
       WHERE request_id = ${input.requestId}`
-      yield* sql`UPDATE kernel_sessions SET state = 'completed', revision = revision + 1,
+      // A delivered wake concludes this resume, not the session: the parent
+      // remains held and wakeable, so it returns to 'ready' under the next
+      // custody generation. Leaving it terminal would make every parent
+      // one-shot — its second dispatch could never register a wait.
+      yield* sql`UPDATE kernel_sessions SET state = 'ready', revision = revision + 1,
         updated_at = ${input.now.toISOString()} WHERE session_id = (
           SELECT session_id FROM kernel_resume_requests WHERE request_id = ${input.requestId})`
       return { status: "completed" as const }
@@ -737,7 +760,9 @@ const make = Effect.gen(function* () {
         AND attempt = ${input.attempt} AND state = 'observation_required'`
       yield* sql`UPDATE kernel_resume_requests SET state = ${state}, updated_at = ${input.observedAt.toISOString()}
       WHERE request_id = ${input.requestId} AND state = 'observation_required'`
-      const sessionState = input.disposition === "missing" ? "missing" : state
+      // A delivered wake (completed) leaves the parent held and wakeable
+      // under its next generation, exactly as completeResume does.
+      const sessionState = sessionStateForObservation(input.disposition, state)
       yield* sql`UPDATE kernel_sessions SET state = ${sessionState}, revision = revision + 1,
         updated_at = ${input.observedAt.toISOString()} WHERE session_id = (
           SELECT session_id FROM kernel_resume_requests WHERE request_id = ${input.requestId})`
@@ -971,6 +996,15 @@ const make = Effect.gen(function* () {
     completeCleanup,
     readResource: (id) =>
       readOne("kernel_working_resources", "resource_id", id, ResourceReadRow, "resource"),
+    readResourceByPath: (input) =>
+      sql`SELECT * FROM kernel_working_resources WHERE owning_host_id = ${input.owningHostId}
+      AND absolute_path = ${input.absolutePath}`.pipe(
+        Effect.flatMap((rows) =>
+          rows[0] === undefined
+            ? Effect.succeed(null)
+            : decodeRead(ResourceReadRow, "resource", input.absolutePath, rows[0]),
+        ),
+      ),
     readSession: (id) => readOne("kernel_sessions", "session_id", id, SessionReadRow, "session"),
     readResumeRequest: (id) =>
       readOne("kernel_resume_requests", "request_id", id, ResumeReadRow, "resume_request"),

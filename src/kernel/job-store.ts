@@ -65,9 +65,7 @@ export type KernelJobStorePort = {
     KernelJobStoreError
   >
   readonly claimNext: (input: ClaimInput) => Effect.Effect<JobClaim | null, KernelJobStoreError>
-  readonly claimRemoteProbe: (
-    input: ClaimInput,
-  ) => Effect.Effect<JobClaim | null, KernelJobStoreError>
+  readonly claimRemote: (input: ClaimInput) => Effect.Effect<JobClaim | null, KernelJobStoreError>
   readonly heartbeat: (
     input: ClaimAuthority & { readonly leaseDurationMs: number },
   ) => Effect.Effect<{ readonly leaseUntil: Date }, KernelJobStoreError>
@@ -257,7 +255,7 @@ const make = Effect.gen(function* () {
       failure_version = 1, failure_json = ${canonicalJson({ message })}, updated_at = ${now}
       WHERE job_id = ${jobId}`
 
-  const claimMatching = (remoteProbe: boolean, input: ClaimInput) =>
+  const claimMatching = (remoteLane: boolean, input: ClaimInput) =>
     Effect.gen(function* () {
       const workerId = yield* Schema.decodeUnknownEffect(JobIdentifier)(input.workerId).pipe(
         Effect.mapError(inputError),
@@ -269,11 +267,11 @@ const make = Effect.gen(function* () {
         WHERE ((state IN ('ready', 'retry_scheduled') AND run_at <= ${nowText})
           OR (state = 'leased' AND lease_until <= ${nowText}))
         AND (
-          (${remoteProbe ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
-            THEN json_extract(input_json, '$.kind') ELSE NULL END = 'remote_probe')
-          OR (${remoteProbe ? 1 : 0} = 0
+          (${remoteLane ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
+            THEN json_extract(input_json, '$.kind') ELSE NULL END IN ('remote_probe', 'claude_resume'))
+          OR (${remoteLane ? 1 : 0} = 0
             AND CASE WHEN json_valid(input_json)
-              THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END <> 'remote_probe')
+              THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END NOT IN ('remote_probe', 'claude_resume'))
         )
         AND NOT EXISTS (
           SELECT 1 FROM kernel_remote_dispatches AS dispatch
@@ -299,11 +297,11 @@ const make = Effect.gen(function* () {
           WHERE job_id = ${candidate.job_id}
             AND attempt < max_attempts
             AND (
-              (${remoteProbe ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
-                THEN json_extract(input_json, '$.kind') ELSE NULL END = 'remote_probe')
-              OR (${remoteProbe ? 1 : 0} = 0
+              (${remoteLane ? 1 : 0} = 1 AND CASE WHEN json_valid(input_json)
+                THEN json_extract(input_json, '$.kind') ELSE NULL END IN ('remote_probe', 'claude_resume'))
+              OR (${remoteLane ? 1 : 0} = 0
                 AND CASE WHEN json_valid(input_json)
-                  THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END <> 'remote_probe')
+                  THEN COALESCE(json_extract(input_json, '$.kind'), '') ELSE '' END NOT IN ('remote_probe', 'claude_resume'))
             )
             AND NOT EXISTS (
               SELECT 1 FROM kernel_remote_dispatches AS dispatch
@@ -338,8 +336,7 @@ const make = Effect.gen(function* () {
     }).pipe(sql.withTransaction)
 
   const claimNext: KernelJobStorePort["claimNext"] = (input) => claimMatching(false, input)
-  const claimRemoteProbe: KernelJobStorePort["claimRemoteProbe"] = (input) =>
-    claimMatching(true, input)
+  const claimRemote: KernelJobStorePort["claimRemote"] = (input) => claimMatching(true, input)
 
   const authorityWhere = (input: ClaimAuthority) => sql`
     job_id = ${input.jobId} AND state = 'leased' AND attempt = ${input.attempt}
@@ -499,7 +496,7 @@ const make = Effect.gen(function* () {
   return KernelJobStore.of({
     enqueueFromDelivery,
     claimNext,
-    claimRemoteProbe,
+    claimRemote,
     heartbeat,
     complete,
     fail,

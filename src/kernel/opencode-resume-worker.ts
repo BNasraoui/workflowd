@@ -18,6 +18,12 @@ export type OpenCodeResumeProviderPort = {
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
   ) => Promise<boolean>
+  /** Whether the session's run has ended (idle with a recorded outcome); see
+   * the completion provider's probe for why completed messages cannot serve. */
+  readonly sessionFinished: (
+    input: { readonly sessionID: string; readonly directory: string },
+    signal: AbortSignal,
+  ) => Promise<boolean>
   readonly listMessages: (
     input: { readonly sessionID: string; readonly directory: string },
     signal: AbortSignal,
@@ -55,6 +61,14 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
 
   readonly sessionExists: OpenCodeResumeProviderPort["sessionExists"] = (input, signal) =>
     Effect.runPromise(this.adapter.sessionExists(input), { signal })
+
+  readonly sessionFinished: OpenCodeResumeProviderPort["sessionFinished"] = (input, signal) =>
+    Effect.runPromise(
+      this.adapter
+        .sessionTelemetry({ sessionID: input.sessionID })
+        .pipe(Effect.map((telemetry) => telemetry !== undefined && telemetry.idle)),
+      { signal },
+    )
 
   readonly listMessages: OpenCodeResumeProviderPort["listMessages"] = (input, signal) =>
     Effect.runPromise(this.adapter.listSessionMessages(input), { signal })
@@ -315,13 +329,28 @@ const recordObservation = (
     return { status: disposition, requestId: request.request_id }
   })
 
-const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
+/** Selects the first observation_required row this (opencode) worker owns.
+ * Each provider's observer must only touch its own sessions: a claude row
+ * escalated here would race the claude observer and kill a settling wake. */
+const findOwnObservationRow = (options: OpenCodeResumeWorkerOptions) =>
   Effect.gen(function* () {
     const store = yield* KernelSessionStore
+    const recoverable = yield* store.readRecoverableResume(options.owningHostId)
+    for (const row of recoverable) {
+      if (row.state !== "observation_required") continue
+      const sessionId = typeof row.session_id === "string" ? row.session_id : ""
+      if (sessionId.length === 0) continue
+      const sessionUnknown = yield* store.readSession(sessionId)
+      if (sessionUnknown?.provider_kind === "opencode") return row
+    }
+    return undefined
+  })
+
+const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
+  Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
     const provider = yield* OpenCodeResumeProvider
-    const recoverable = yield* store.readRecoverableResume(options.owningHostId)
-    const candidate = recoverable.find((row) => row.state === "observation_required")
+    const candidate = yield* findOwnObservationRow(options)
     if (candidate === undefined) return null
     const request = yield* Schema.decodeUnknownEffect(ObservationRequestRow)(candidate).pipe(
       Effect.mapError(
@@ -370,6 +399,14 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         reason: "provider_session_missing",
       })
     }
+    // The parent may still be generating its answer to the pre-crash prompt.
+    // OpenCode 2 completes an assistant message per tool step, so history is
+    // only attributable once the run has ended; until then the observation
+    // stays pending for a later iteration.
+    const finished = yield* providerCall("probe OpenCode session after restart", (signal) =>
+      provider.sessionFinished(reference, signal),
+    )
+    if (!finished) return null
     const messages = yield* providerCall("inspect OpenCode history after restart", (signal) =>
       provider.listMessages(reference, signal),
     )
@@ -385,10 +422,13 @@ const observeRestartedResume = (options: OpenCodeResumeWorkerOptions) =>
         message.error === undefined &&
         !baseline.has(fingerprint(message)),
     )
-    if (answers.length !== 1) {
+    // A finished multi-step answer leaves several completed messages beyond
+    // the baseline; the run being over makes the set attributable as one
+    // answer, extracted from the session's own context by `generate`.
+    if (answers.length === 0) {
       return yield* recordObservation(request, options, "operator_required", {
-        reason: answers.length === 0 ? "no_attributable_answer" : "ambiguous_answers",
-        candidateCount: answers.length,
+        reason: "no_attributable_answer",
+        candidateCount: 0,
       })
     }
     const decoded = yield* providerCall("extract OpenCode resume output after restart", (signal) =>
@@ -431,6 +471,7 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
       workerId: options.workerId,
       now: options.now(),
       leaseDurationMs: options.leaseDurationMs,
+      providerKind: "opencode",
     })
     if (claim === null) {
       return (yield* observeRestartedResume(options)) ?? { status: "idle" as const }

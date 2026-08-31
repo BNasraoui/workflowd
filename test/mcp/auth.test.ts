@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test"
-import { authorizedForWrites, loadAgentWaitDaemon, loadMcpWriteAuth } from "../../src/mcp/auth"
+import {
+  authorizedForWrites,
+  loadAgentRunDaemon,
+  loadAgentWaitDaemon,
+  loadMcpWriteAuth,
+  requireDaemonTokenWithUrl,
+} from "../../src/mcp/auth"
 
 test("writes are disabled when no token source is configured", async () => {
   const auth = await loadMcpWriteAuth({})
@@ -83,14 +89,45 @@ test("a half-configured agent-wait proxy is a startup error, not a silent disabl
   await expect(loadAgentWaitDaemon({ WORKFLOWD_AGENT_WAIT_TOKEN: "daemon-token" })).rejects.toThrow(
     "WORKFLOWD_DAEMON_URL is required",
   )
-  await expect(loadAgentWaitDaemon({ WORKFLOWD_DAEMON_URL: daemonUrl })).rejects.toThrow(
-    "Set exactly one of",
-  )
   await expect(
     loadAgentWaitDaemon({
       WORKFLOWD_DAEMON_URL: daemonUrl,
       WORKFLOWD_AGENT_WAIT_TOKEN: "a",
       WORKFLOWD_AGENT_WAIT_TOKEN_FILE: "/credentials/agent-wait-token",
+    }),
+  ).rejects.toThrow("Set at most one of")
+})
+
+test("a daemon URL with no daemon token at all is a startup error", async () => {
+  const env = { WORKFLOWD_DAEMON_URL: daemonUrl }
+  expect(await loadAgentWaitDaemon(env)).toBeUndefined()
+  expect(await loadAgentRunDaemon(env)).toBeUndefined()
+  expect(() => requireDaemonTokenWithUrl(env, [undefined, undefined])).toThrow(
+    "Set an agent-wait or agent-run daemon token",
+  )
+  expect(() =>
+    requireDaemonTokenWithUrl(env, [undefined, { baseUrl: daemonUrl, token: "t" }]),
+  ).not.toThrow()
+})
+
+test("the agent-run daemon binding mirrors the agent-wait pattern", async () => {
+  expect(await loadAgentRunDaemon({})).toBeUndefined()
+  await expect(loadAgentRunDaemon({ WORKFLOWD_AGENT_RUN_TOKEN: "run-token" })).rejects.toThrow(
+    "WORKFLOWD_DAEMON_URL is required",
+  )
+  const daemon = await loadAgentRunDaemon(
+    {
+      WORKFLOWD_DAEMON_URL: `${daemonUrl}/ignored`,
+      WORKFLOWD_AGENT_RUN_TOKEN_FILE: "/credentials/agent-run-token",
+    },
+    () => Promise.resolve("run-file-token\n"),
+  )
+  expect(daemon).toEqual({ baseUrl: daemonUrl, token: "run-file-token" })
+  await expect(
+    loadAgentRunDaemon({
+      WORKFLOWD_DAEMON_URL: daemonUrl,
+      WORKFLOWD_AGENT_RUN_TOKEN: "a",
+      WORKFLOWD_AGENT_RUN_TOKEN_FILE: "/b",
     }),
   ).rejects.toThrow("Set at most one of")
 })

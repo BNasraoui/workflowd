@@ -21,7 +21,7 @@ test("coordinator recovery reports malformed durable dispatch data as a typed er
         workerId: "coordinator",
         now,
         leaseDurationMs: 60_000,
-        expiresAt: new Date(now.getTime() + 60_000),
+        ttlMsForKind: () => 60_000,
       })
       yield* sql`UPDATE kernel_remote_dispatches SET issued_at = 'not-a-timestamp'
         WHERE command_id = 'corrupt-command'`
