@@ -28,6 +28,7 @@ import {
 } from "./kernel/agent-run-ingress"
 import { AgentRunSubmission } from "./agent-run-contract"
 import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
+import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
 
 type QrspiIngress = {
@@ -265,9 +266,16 @@ function handleAgentRunRegister(
       )
     }
     return yield* ingress.register(input.success, now).pipe(
-      Effect.match({
-        onFailure: agentRunFailure,
-        onSuccess: (receipt) => Response.json(receipt, { status: 202 }),
+      Effect.matchEffect({
+        onFailure: (error) => {
+          const response = agentRunFailure(error)
+          // Opaque failures still need an operator trail; refusals and
+          // conflicts are the caller's to read.
+          return response.status === 500
+            ? Effect.logError("Agent-run ingress failed", error).pipe(Effect.as(response))
+            : Effect.succeed(response)
+        },
+        onSuccess: (receipt) => Effect.succeed(Response.json(receipt, { status: 202 })),
       }),
     )
   }).pipe(
@@ -291,7 +299,11 @@ function agentRunFailure(error: AgentRunIngressError): Response {
       { status: 409 },
     )
   }
-  if (error instanceof AgentRunStoreConflictError || error instanceof KernelStoreConflictError) {
+  if (
+    error instanceof AgentRunStoreConflictError ||
+    error instanceof KernelStoreConflictError ||
+    error instanceof KernelSessionStoreConflictError
+  ) {
     return Response.json({ error: "conflict", reason: "idempotency_conflict" }, { status: 409 })
   }
   if (error instanceof AgentWaitCustodyError) {

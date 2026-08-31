@@ -359,6 +359,53 @@ describe("agent-run ingress", () => {
     expect(result.watches[0]!.state).toBe("watching")
   })
 
+  test("parents of both kinds share one custody resource per directory", async () => {
+    // The production collision: a directory already held by an opencode
+    // parent's resource must be reused, not fought over, when a claude
+    // parent in the same directory registers later.
+    const state = defaultState()
+    state.telemetry.set("ses_parent", {
+      directory: "/home/ben/repos/workflowd",
+      outputTokens: 5,
+      updatedAtMs: at.getTime(),
+      idle: false,
+    })
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const first = yield* register({
+          ...submission,
+          parentSessionId: "ses_parent",
+          resumePrompt: "wake the opencode parent",
+        })
+        const second = yield* register({
+          ...submission,
+          prompt: "A second task for the same directory's claude coordinator.",
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude",
+          parentDirectory: "/home/ben/repos/workflowd",
+          resumePrompt: "wake the claude parent",
+        })
+        const sql = yield* SqlClient.SqlClient
+        const resources = yield* sql<{
+          readonly resource_id: string
+        }>`SELECT resource_id FROM kernel_working_resources
+          WHERE absolute_path = '/home/ben/repos/workflowd'`
+        const parents = yield* sql<{
+          readonly provider_kind: string
+          readonly resource_id: string
+        }>`SELECT provider_kind, resource_id FROM kernel_sessions
+          WHERE session_id IN ('opencode-session-ses_parent', 'claude-session-claude-parent-1')`
+        return { first, second, resources, parents }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.first.wait?.status).toBe("registered")
+    expect(result.second.wait?.status).toBe("registered")
+    expect(result.resources).toHaveLength(1)
+    expect(result.parents).toHaveLength(2)
+    expect(new Set(result.parents.map((parent) => parent.resource_id)).size).toBe(1)
+  })
+
   test("a claude parent without a directory or transcript is refused before spawning", async () => {
     const state = defaultState()
     const layer = makeLayer(makeProvider(state), worktrees([]))

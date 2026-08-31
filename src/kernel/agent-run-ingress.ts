@@ -181,7 +181,10 @@ const make = (options: AgentRunIngressOptions) =>
     const signals = yield* WorkSignal
 
     /** Registers custody rows read-first so replays and shared parents are
-     * duplicates rather than conflicts (createdAt differs across runs). */
+     * duplicates rather than conflicts (createdAt differs across runs).
+     * Resolution is by PATH first: a directory has one custody resource per
+     * host, shared by every session working in it, whatever id first named
+     * it. Returns the resource id actually holding the path. */
     const ensureResource = (input: {
       readonly resourceId: string
       readonly absolutePath: string
@@ -189,8 +192,13 @@ const make = (options: AgentRunIngressOptions) =>
       readonly createdAt: Date
     }) =>
       Effect.gen(function* () {
-        const existing = yield* sessions.readResource(input.resourceId)
-        if (existing !== null) return
+        const held = yield* sessions.readResourceByPath({
+          owningHostId: options.identity.owningHostId,
+          absolutePath: input.absolutePath,
+        })
+        if (held !== null && typeof held.resource_id === "string") {
+          return held.resource_id
+        }
         yield* sessions.registerResource({
           resourceId: input.resourceId,
           owningHostId: options.identity.owningHostId,
@@ -198,6 +206,7 @@ const make = (options: AgentRunIngressOptions) =>
           kind: input.kind,
           createdAt: input.createdAt,
         })
+        return input.resourceId
       })
 
     const ensureSession = (input: {
@@ -321,9 +330,8 @@ const make = (options: AgentRunIngressOptions) =>
       readonly now: Date
     }) =>
       Effect.gen(function* () {
-        const parentResourceId = `${run.parentKind}-session-resource-${run.parentNativeSessionId}`
-        yield* ensureResource({
-          resourceId: parentResourceId,
+        const parentResourceId = yield* ensureResource({
+          resourceId: `${run.parentKind}-session-resource-${run.parentNativeSessionId}`,
           absolutePath: run.parentDirectory,
           kind: "checkout",
           createdAt: run.createdAt,
@@ -384,7 +392,7 @@ const make = (options: AgentRunIngressOptions) =>
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
           // unrecorded state as possible.
-          yield* ensureResource({
+          const resourceId = yield* ensureResource({
             resourceId: target.resourceId,
             absolutePath: run.directory,
             kind: "worktree",
@@ -399,12 +407,12 @@ const make = (options: AgentRunIngressOptions) =>
           nativeSessionId = session.id
           const sessionId = yield* ensureSession({
             nativeSessionId,
-            resourceId: target.resourceId,
+            resourceId,
             createdAt: run.createdAt,
           })
           yield* store.markSpawned({
             runId: run.runId,
-            resourceId: target.resourceId,
+            resourceId,
             sessionId,
             nativeSessionId,
             now,

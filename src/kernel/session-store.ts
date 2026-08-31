@@ -173,6 +173,13 @@ export type KernelSessionStorePort = {
   readonly readResource: (
     id: string,
   ) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
+  /** A directory has at most one custody resource per host
+   * (UNIQUE(owning_host_id, absolute_path)); this resolves it so sessions
+   * arriving later share the row instead of colliding on the path. */
+  readonly readResourceByPath: (input: {
+    readonly owningHostId: string
+    readonly absolutePath: string
+  }) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
   readonly readSession: (
     id: string,
   ) => Effect.Effect<Record<string, unknown> | null, KernelSessionStoreError>
@@ -986,6 +993,15 @@ const make = Effect.gen(function* () {
     completeCleanup,
     readResource: (id) =>
       readOne("kernel_working_resources", "resource_id", id, ResourceReadRow, "resource"),
+    readResourceByPath: (input) =>
+      sql`SELECT * FROM kernel_working_resources WHERE owning_host_id = ${input.owningHostId}
+      AND absolute_path = ${input.absolutePath}`.pipe(
+        Effect.flatMap((rows) =>
+          rows[0] === undefined
+            ? Effect.succeed(null)
+            : decodeRead(ResourceReadRow, "resource", input.absolutePath, rows[0]),
+        ),
+      ),
     readSession: (id) => readOne("kernel_sessions", "session_id", id, SessionReadRow, "session"),
     readResumeRequest: (id) =>
       readOne("kernel_resume_requests", "request_id", id, ResumeReadRow, "resume_request"),
