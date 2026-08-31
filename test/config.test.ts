@@ -106,6 +106,7 @@ describe("loadConfig", () => {
       workerId: "mint:remote-coordinator",
       leaseDurationMs: 60_000,
       commandTtlMs: 300_000,
+      claudeCommandTtlMs: 600_000,
     })
   })
 

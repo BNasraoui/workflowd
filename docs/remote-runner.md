@@ -1,6 +1,17 @@
 # Remote Probe Runner
 
-This slice transports only the built-in harmless probe. SQLite on the coordinator is the workflow authority. JetStream provides bounded, durable, at-least-once transport; runner inbox/outbox tables fence duplicate execution and coordinator result acceptance.
+This plane transports two command kinds: the built-in harmless probe, and `claude_resume` — a request to wake a Claude Code session that lives on the runner's host. SQLite on the coordinator is the workflow authority. JetStream provides bounded, durable, at-least-once transport; runner inbox/outbox tables fence duplicate execution and coordinator result acceptance.
+
+### `claude_resume` threat model
+
+A `claude_resume` command is no longer harmless: it makes the runner execute `claude -p --resume <session>` in a working directory, with a caller-supplied prompt. The daemon owns the whole resume lifecycle; the runner is a narrow, vetted effector, and the trust is deliberately constrained on the runner's own side, not the sender's:
+
+- **Runner-local opt-in.** A runner executes a `claude_resume` command only for a directory under one of its `WORKFLOWD_RUNNER_CLAUDE_DIRS` prefixes. Unset (the default) refuses every claude wake. The daemon cannot widen this; only the host operator can, on the host.
+- **No shell, ever.** The prompt and the extraction schema ride as data — the prompt is written to the CLI's stdin, never argv or a shell string. The session id and directory are pattern-validated to shell-inert character sets in the wire contract before they can appear in any command.
+- **At most once.** The runner claims execution in one transaction, runs the CLI outside any transaction, and records the result in a second; a spent claim with no stored result reports `execution_interrupted` rather than re-running a wake whose effect on the session is unknown. The command's `maxAttempts` is 1, so an at-least-once redelivery never produces a second wake turn.
+- **Unchanged broker grants.** `claude_resume` rides the same `workflowd.v1.commands.<host>` / `workflowd.v1.results` subjects as the probe; no new per-identity grants are needed, so a compromised runner's blast radius is exactly what it was for probes. The permissions integration test exercises a `claude_resume` command under the existing grants.
+
+Compared to reaching the host over SSH — which would hand the daemon an arbitrary remote shell authenticated by the daemon's key — the trust boundary here is "the host will run one fixed, argv-vector command shape for a directory it opted into, when its own broker identity receives a well-formed command," with the daemon holding no credential on the host at all.
 
 ## NATS over Tailscale
 

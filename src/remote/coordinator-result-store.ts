@@ -173,11 +173,19 @@ export const acceptRemoteDelivery = (deliveryId: string, result: RemoteResult, a
       const stored = yield* sql<{ readonly result_id: string; readonly result_json: string }>`
         SELECT result_id, result_json FROM kernel_workflow_job_results
         WHERE job_id = ${dispatch.job_id}`
-      const resultJson = JSON.stringify({
-        kind: "remote_probe",
-        hostId: dispatch.host_id,
-        status: result.status,
-      })
+      const resultJson = JSON.stringify(
+        result.kind === "claude_resume"
+          ? {
+              kind: "claude_resume",
+              hostId: dispatch.host_id,
+              status: result.status,
+              ...(result.output === undefined ? {} : { output: result.output }),
+              ...(result.failureReason === undefined
+                ? {}
+                : { failureReason: result.failureReason }),
+            }
+          : { kind: "remote_probe", hostId: dispatch.host_id, status: result.status },
+      )
       if (stored.length > 0) {
         const row = stored[0]!
         return yield* record(

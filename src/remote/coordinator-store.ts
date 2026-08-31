@@ -6,7 +6,12 @@ import {
   KernelJobStoreDataError,
   type KernelJobStoreError,
 } from "../kernel/job-store"
-import { RemoteProbeJobV1, type RemoteFence, type RemoteResult } from "./contract"
+import {
+  ClaudeResumeJobV1,
+  RemoteProbeJobV1,
+  type RemoteFence,
+  type RemoteResult,
+} from "./contract"
 import {
   acceptRemoteDelivery,
   acceptRemoteResult,
@@ -42,6 +47,8 @@ export type RemoteDispatch = {
   readonly issuedAt: Date
   readonly expiresAt: Date
   readonly state: "prepared" | "publishing" | "published"
+  readonly kind: "probe" | "claude_resume"
+  readonly payload?: ClaudeResumeJobV1
 }
 
 export type RemoteCoordinatorError =
@@ -53,7 +60,9 @@ export type RemoteCoordinatorStorePort = {
     readonly workerId: string
     readonly now: Date
     readonly leaseDurationMs: number
-    readonly expiresAt: Date
+    /** TTLs differ by kind: probes are quick; a claude wake spans two CLI
+     * inference turns, so its command must outlive them. */
+    readonly ttlMsForKind: (kind: "remote_probe" | "claude_resume") => number
   }) => Effect.Effect<RemoteDispatch | null, RemoteCoordinatorError>
   readonly pendingDispatches: () => Effect.Effect<
     ReadonlyArray<RemoteDispatch>,
@@ -107,7 +116,9 @@ export const RemoteCoordinatorStore = Context.Service<RemoteCoordinatorStorePort
   "workflowd/remote/RemoteCoordinatorStore",
 )
 
-const toDispatch = (row: DispatchRow): RemoteDispatch => ({
+const RemoteJobInput = Schema.Union([RemoteProbeJobV1, ClaudeResumeJobV1])
+
+const toDispatch = (row: DispatchRow, job: typeof RemoteJobInput.Type): RemoteDispatch => ({
   commandId: row.command_id,
   jobId: row.job_id,
   attempt: row.attempt,
@@ -119,46 +130,68 @@ const toDispatch = (row: DispatchRow): RemoteDispatch => ({
   issuedAt: new Date(row.issued_at),
   expiresAt: new Date(row.expires_at),
   state: row.state === "prepared" || row.state === "publishing" ? row.state : "published",
+  kind: job.kind === "remote_probe" ? "probe" : "claude_resume",
+  ...(job.kind === "claude_resume" ? { payload: job } : {}),
 })
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   const jobs = yield* KernelJobStore
 
+  const decodeJobInput = (input: unknown, key: string) =>
+    Schema.decodeUnknownEffect(RemoteJobInput)(input).pipe(
+      Effect.mapError(
+        (error) => new KernelJobStoreDataError({ record: "job", key, message: String(error) }),
+      ),
+    )
+
   const prepareNext: RemoteCoordinatorStorePort["prepareNext"] = (input) =>
     Effect.gen(function* () {
       const claim = yield* jobs.claimRemote(input)
       if (claim === null) return null
-      const probe = yield* Schema.decodeUnknownEffect(RemoteProbeJobV1)(claim.input).pipe(
-        Effect.mapError(
-          (error) =>
-            new KernelJobStoreDataError({
-              record: "job",
-              key: claim.jobId,
-              message: String(error),
-            }),
-        ),
-      )
+      const job = yield* decodeJobInput(claim.input, claim.jobId)
+      const expiresAt = new Date(input.now.getTime() + input.ttlMsForKind(job.kind))
       const inserted = yield* sql`INSERT INTO kernel_remote_dispatches (
         command_id, job_id, attempt, generation, host_id, worker_id, claim_token,
         lease_until, state, issued_at, expires_at
       ) VALUES (
-        ${input.commandId}, ${claim.jobId}, ${claim.attempt}, ${claim.attempt}, ${probe.hostId},
+        ${input.commandId}, ${claim.jobId}, ${claim.attempt}, ${claim.attempt}, ${job.hostId},
         ${claim.workerId}, ${claim.claimToken}, ${claim.leaseUntil.toISOString()}, 'prepared',
-        ${input.now.toISOString()}, ${input.expiresAt.toISOString()}
+        ${input.now.toISOString()}, ${expiresAt.toISOString()}
       ) RETURNING command_id, job_id, attempt, generation, host_id, worker_id,
         claim_token, lease_until, issued_at, expires_at, state`
-      return toDispatch(yield* decodeDispatch(inserted[0], input.commandId))
+      return toDispatch(yield* decodeDispatch(inserted[0], input.commandId), job)
     }).pipe(sql.withTransaction)
 
   const pendingDispatches: RemoteCoordinatorStorePort["pendingDispatches"] = () =>
     Effect.gen(function* () {
-      const rows = yield* sql`SELECT command_id, job_id, attempt, generation, host_id, worker_id,
-        claim_token, lease_until, issued_at, expires_at, state
-        FROM kernel_remote_dispatches WHERE state IN ('prepared', 'publishing')
-        ORDER BY issued_at, command_id`
+      // The immutable job input rides along so a republish after restart can
+      // rebuild the full command, payload included.
+      const rows = yield* sql<Record<string, unknown> & { readonly input_json: string }>`
+        SELECT dispatch.command_id, dispatch.job_id, dispatch.attempt, dispatch.generation,
+          dispatch.host_id, dispatch.worker_id, dispatch.claim_token, dispatch.lease_until,
+          dispatch.issued_at, dispatch.expires_at, dispatch.state, job.input_json
+        FROM kernel_remote_dispatches AS dispatch
+        JOIN kernel_workflow_jobs AS job ON job.job_id = dispatch.job_id
+        WHERE dispatch.state IN ('prepared', 'publishing')
+        ORDER BY dispatch.issued_at, dispatch.command_id`
       return yield* Effect.forEach(rows, (row) =>
-        decodeDispatch(row, dispatchKey(row)).pipe(Effect.map(toDispatch)),
+        Effect.gen(function* () {
+          const dispatch = yield* decodeDispatch(row, dispatchKey(row))
+          const job = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RemoteJobInput))(
+            row.input_json,
+          ).pipe(
+            Effect.mapError(
+              (error) =>
+                new KernelJobStoreDataError({
+                  record: "job",
+                  key: dispatch.job_id,
+                  message: String(error),
+                }),
+            ),
+          )
+          return toDispatch(dispatch, job)
+        }),
       )
     })
 

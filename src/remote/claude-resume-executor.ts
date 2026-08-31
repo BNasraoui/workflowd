@@ -121,7 +121,11 @@ export const makeClaudeResumeExecutor = (options: {
       } catch {
         return failed("cli_failed")
       }
-      if (typeof parsedSchema !== "object" || parsedSchema === null || Array.isArray(parsedSchema)) {
+      if (
+        typeof parsedSchema !== "object" ||
+        parsedSchema === null ||
+        Array.isArray(parsedSchema)
+      ) {
         return failed("cli_failed")
       }
       const schemaObject: object = parsedSchema

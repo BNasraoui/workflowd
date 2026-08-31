@@ -118,6 +118,9 @@ export interface RemoteCoordinatorConfig {
   readonly workerId: string
   readonly leaseDurationMs: number
   readonly commandTtlMs: number
+  /** claude_resume commands span two CLI inference turns, so their TTL is
+   * separately configurable and defaults much higher than probes. */
+  readonly claudeCommandTtlMs: number
 }
 
 export interface ConfigLoadOptions {
@@ -644,6 +647,11 @@ async function loadRemoteCoordinatorConfig(
       env.WORKFLOWD_REMOTE_COMMAND_TTL_MS,
       5 * 60_000,
       "WORKFLOWD_REMOTE_COMMAND_TTL_MS",
+    ),
+    claudeCommandTtlMs: positiveInteger(
+      env.WORKFLOWD_REMOTE_CLAUDE_TTL_MS,
+      10 * 60_000,
+      "WORKFLOWD_REMOTE_CLAUDE_TTL_MS",
     ),
   }
 }
