@@ -10,11 +10,10 @@ import {
   type AgentRunSubmission as AgentRunSubmissionType,
 } from "../agent-run-contract"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
-import { runWorkspaceCommand } from "../workspace/command"
 import type { WorkspaceError } from "../workspace/errors"
-import { pathExists } from "../workspace/filesystem"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
+import { AgentRunWorktrees } from "./agent-run-worktrees"
 import {
   CLAUDE_ENDPOINT_ALIAS,
   CLAUDE_PROVIDER_ID,
@@ -87,43 +86,6 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
   "workflowd/kernel/AgentRunProvider",
 )
 
-export type AgentRunWorktreesPort = {
-  readonly create: (input: {
-    readonly repository: string
-    readonly directory: string
-    readonly branch: string
-  }) => Effect.Effect<void, WorkspaceError>
-}
-
-export const AgentRunWorktrees = Context.Service<AgentRunWorktreesPort>(
-  "workflowd/kernel/AgentRunWorktrees",
-)
-
-/**
- * Creates the run's git worktree inside the allow-listed repository. Hooks
- * are disabled the same way the managed PR workspace does it, and an
- * existing directory short-circuits so a crashed dispatch can be retried.
- */
-export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
-  create: (input) =>
-    Effect.gen(function* () {
-      if (yield* pathExists(input.directory)) return
-      yield* runWorkspaceCommand("create agent-run worktree", [
-        "git",
-        "-C",
-        input.repository,
-        "-c",
-        "core.hooksPath=/dev/null",
-        "worktree",
-        "add",
-        "-B",
-        input.branch,
-        input.directory,
-        "HEAD",
-      ])
-    }),
-}
-
 export type AgentRunIngressOptions = {
   readonly routes: ReadonlyArray<AgentRunRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
@@ -132,6 +94,9 @@ export type AgentRunIngressOptions = {
   readonly verifyTimeoutMs: number
   readonly verifyPollIntervalMs: number
   readonly maxAttempts: number
+  /** Hosts (besides the daemon host) whose Claude sessions may be named as
+   * parents; their wakes are delivered by that host's workflowd runner. */
+  readonly claudeHosts: ReadonlyArray<string>
   readonly identity: AgentCompletionSourceIdentity
 }
 
@@ -214,9 +179,11 @@ const make = (options: AgentRunIngressOptions) =>
       readonly resourceId: string
       readonly createdAt: Date
       readonly kind?: "opencode" | "claude"
+      readonly host?: string
     }) =>
       Effect.gen(function* () {
         const claude = input.kind === "claude"
+        const claudeHost = input.host ?? options.identity.owningHostId
         const sessionId = claude
           ? claudeSessionCustodyId(input.nativeSessionId)
           : opencodeSessionCustodyId(input.nativeSessionId)
@@ -227,11 +194,11 @@ const make = (options: AgentRunIngressOptions) =>
           providerKind: claude ? "claude" : "opencode",
           providerVersion: options.identity.providerVersion,
           providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
-          serverId: claude ? options.identity.owningHostId : options.identity.serverId,
+          serverId: claude ? claudeHost : options.identity.serverId,
           owningHostId: options.identity.owningHostId,
           endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
           endpointIdentity: claude
-            ? claudeEndpointIdentity(options.identity.owningHostId)
+            ? claudeEndpointIdentity(claudeHost)
             : options.identity.endpointIdentity,
           nativeSessionId: input.nativeSessionId,
           resourceId: input.resourceId,
@@ -282,10 +249,15 @@ const make = (options: AgentRunIngressOptions) =>
 
     /** Resolves the parent's working directory in its own harness: the
      * opencode server for opencode parents, the local session transcript
-     * for claude parents. Refusal happens before anything is spawned. */
+     * for same-host claude parents. Cross-host claude parents register
+     * optimistically — the transcript can only be probed on the owning
+     * host, so a missing one surfaces loudly at wake delivery instead of
+     * doubling remote round trips here. Refusal happens before anything is
+     * spawned. */
     const resolveParentDirectory = (parent: {
       readonly nativeSessionId: string
       readonly kind: "opencode" | "claude"
+      readonly host: string
       readonly directory: string | undefined
     }) =>
       Effect.gen(function* () {
@@ -295,6 +267,17 @@ const make = (options: AgentRunIngressOptions) =>
               "invalid_wait_pairing",
               "parentDirectory is required when parentKind is claude",
             )
+          }
+          const known = [options.identity.owningHostId, ...options.claudeHosts]
+          if (!known.includes(parent.host)) {
+            return yield* refuse(
+              "missing_parent_session",
+              `host ${parent.host} is not on the claude-hosts allow-list; ` +
+                "its sessions cannot be woken",
+            )
+          }
+          if (parent.host !== options.identity.owningHostId) {
+            return parent.directory
           }
           const exists = yield* claude.sessionExists({
             nativeSessionId: parent.nativeSessionId,
@@ -323,6 +306,7 @@ const make = (options: AgentRunIngressOptions) =>
       readonly runId: string
       readonly parentNativeSessionId: string
       readonly parentKind: "opencode" | "claude"
+      readonly parentHost: string
       readonly parentDirectory: string
       readonly childSessionId: string
       readonly resumePrompt: string
@@ -341,6 +325,7 @@ const make = (options: AgentRunIngressOptions) =>
           resourceId: parentResourceId,
           createdAt: run.createdAt,
           kind: run.parentKind,
+          host: run.parentHost,
         })
         // The wait's registration boundary is anchored at run creation, not
         // the request clock: a retry after a transient wait failure must not
@@ -484,6 +469,7 @@ const make = (options: AgentRunIngressOptions) =>
         }
         yield* preflightRoute(resolution.route)
         const parentKind = submission.parentKind ?? "opencode"
+        const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
         // caller naming a dead parent gets a refusal, not an orphaned child.
         const parentDirectory =
@@ -492,6 +478,7 @@ const make = (options: AgentRunIngressOptions) =>
             : yield* resolveParentDirectory({
                 nativeSessionId: submission.parentSessionId,
                 kind: parentKind,
+                host: parentHost,
                 directory: submission.parentDirectory,
               })
         const identifiers = agentRunIdentifiers({
@@ -501,7 +488,7 @@ const make = (options: AgentRunIngressOptions) =>
           parentSessionId:
             submission.parentSessionId === undefined
               ? null
-              : `${parentKind}:${submission.parentSessionId}`,
+              : `${parentKind}@${parentHost}:${submission.parentSessionId}`,
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
         })
@@ -557,6 +544,7 @@ const make = (options: AgentRunIngressOptions) =>
                 runId: identifiers.runId,
                 parentNativeSessionId: submission.parentSessionId,
                 parentKind,
+                parentHost,
                 parentDirectory,
                 childSessionId,
                 resumePrompt: submission.resumePrompt,

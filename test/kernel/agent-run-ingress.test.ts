@@ -9,10 +9,9 @@ import {
   AgentRunIngressLive,
   AgentRunProvider,
   AgentRunRefusalError,
-  AgentRunWorktrees,
   type AgentRunProviderPort,
-  type AgentRunWorktreesPort,
 } from "../../src/kernel/agent-run-ingress"
+import { AgentRunWorktrees, type AgentRunWorktreesPort } from "../../src/kernel/agent-run-worktrees"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { ClaudeCli, type ClaudeCliPort } from "../../src/kernel/claude-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
@@ -43,6 +42,7 @@ const options = {
   verifyTimeoutMs: 50,
   verifyPollIntervalMs: 10,
   maxAttempts: 3,
+  claudeHosts: ["ben-arch"],
   identity,
 }
 
@@ -404,6 +404,58 @@ describe("agent-run ingress", () => {
     expect(result.resources).toHaveLength(1)
     expect(result.parents).toHaveLength(2)
     expect(new Set(result.parents.map((parent) => parent.resource_id)).size).toBe(1)
+  })
+
+  test("a cross-host claude parent registers optimistically without a local probe", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        // "claude-parent-unknown" has no local transcript (the fake probe
+        // only knows claude-parent-1 on mint); a ben-arch parent must be
+        // accepted anyway — its transcript can only be checked by ben-arch's
+        // runner at delivery time.
+        const receipt = yield* register({
+          ...submission,
+          parentSessionId: "claude-parent-unknown",
+          parentKind: "claude",
+          parentHost: "ben-arch",
+          parentDirectory: "/home/ben/repos/workflowd",
+          resumePrompt: "Child finished; review its branch.",
+        })
+        const sql = yield* SqlClient.SqlClient
+        const parent = yield* sql<{
+          readonly server_id: string
+          readonly endpoint_identity: string
+        }>`SELECT server_id, endpoint_identity FROM kernel_sessions
+          WHERE session_id = 'claude-session-claude-parent-unknown'`
+        return { receipt, parent }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.receipt.wait?.status).toBe("registered")
+    expect(result.parent).toHaveLength(1)
+    expect(result.parent[0]!.server_id).toBe("ben-arch")
+    expect(result.parent[0]!.endpoint_identity).toBe("claude-cli://ben-arch")
+  })
+
+  test("a claude parent on an unlisted host is refused before spawning", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({
+          ...submission,
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude",
+          parentHost: "some-laptop",
+          parentDirectory: "/home/ben/repos/workflowd",
+          resumePrompt: "wake me",
+        }).pipe(Effect.provide(layer)),
+      ),
+    )
+    expect(refusal.reason).toBe("missing_parent_session")
+    expect(refusal.detail).toContain("some-laptop")
+    expect(state.created).toHaveLength(0)
   })
 
   test("a claude parent without a directory or transcript is refused before spawning", async () => {

@@ -110,6 +110,9 @@ describe("dispatch_agent", () => {
         {
           ...args,
           parent_session_id: "ses_parent",
+          parent_kind: "claude",
+          parent_directory: "/home/ben/repos/workflowd",
+          parent_host: "ben-arch",
           resume_prompt: "Child finished; review its branch.",
           idempotency_key: "dispatch-7",
         },
@@ -130,6 +133,9 @@ describe("dispatch_agent", () => {
 
     expect(JSON.parse(calls[0]!.body)).toMatchObject({
       parentSessionId: "ses_parent",
+      parentKind: "claude",
+      parentDirectory: "/home/ben/repos/workflowd",
+      parentHost: "ben-arch",
       resumePrompt: "Child finished; review its branch.",
       idempotencyKey: "dispatch-7",
     })
