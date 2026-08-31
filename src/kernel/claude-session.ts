@@ -67,20 +67,12 @@ export const makeClaudeCli = (options: {
     )
   },
   resume: (input) =>
-    // Argument-vector spawn only: the prompt is untrusted text and never
-    // passes through a shell string.
+    // Argument-vector spawn, and the prompt rides stdin: untrusted session
+    // content never appears in argv or a shell string.
     runWorkspaceCommandBytes(
       "wake claude session",
-      [
-        options.binary,
-        "-p",
-        "--resume",
-        input.nativeSessionId,
-        "--output-format",
-        "json",
-        input.prompt,
-      ],
-      { cwd: input.directory, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
+      [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
+      { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
     ).pipe(
       Effect.timeoutOrElse({
         duration: input.timeoutMs,

@@ -223,8 +223,8 @@ describe("claude resume worker", () => {
       const hostile = await Effect.runPromise(
         port.sessionExists({ nativeSessionId: "../escape", directory: projectDir }),
       )
-      // /bin/echo prints the argv back, proving the prompt rides as one
-      // argument and never a shell string.
+      // /bin/echo prints the argv back: the flags are present and the
+      // prompt is ABSENT — it rides stdin, never the command line.
       const echoed = await Effect.runPromise(
         port.resume({
           nativeSessionId: "abc-123",
@@ -236,7 +236,8 @@ describe("claude resume worker", () => {
       expect(exists).toBe(true)
       expect(missing).toBe(false)
       expect(hostile).toBe(false)
-      expect(echoed).toContain("-p --resume abc-123 --output-format json hello; rm -rf $HOME")
+      expect(echoed).toContain("-p --resume abc-123 --output-format json")
+      expect(echoed).not.toContain("rm -rf")
     } finally {
       await rm(home, { recursive: true, force: true })
     }
