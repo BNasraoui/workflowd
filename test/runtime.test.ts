@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
+import {
+  DOGFOOD_ENRICHMENT_CONTRACT,
+  DogfoodStore,
+  type DogfoodEnrichmentDocument,
+} from "../src/kernel/dogfood-store"
 import { GitHub } from "../src/github"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
@@ -58,6 +63,41 @@ const qrspiDefinition = {
     },
   ],
 }
+
+/**
+ * Every runtime adapter stubbed to die on use. Wiring tests merge extra
+ * layers (logger, coordinator, stores) on top; pass an Automation stub to
+ * observe availability validation instead of ignoring it.
+ */
+const automationStub = (validateAvailability: () => Effect.Effect<void> = () => Effect.void) => ({
+  validateAvailability,
+  prepareReview: () => Effect.die("unexpected review"),
+  prepareFix: () => Effect.die("unexpected fix"),
+})
+
+const stubAdapters = (automation = automationStub()) =>
+  Layer.mergeAll(
+    WorkSignalLive,
+    Layer.succeed(GitHub, {
+      fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+      publishReview: () => Effect.die("unexpected publish"),
+      collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+    }),
+    Layer.succeed(Automation, automation),
+    Layer.succeed(AgentHarness, {
+      describe: () => Effect.die("unexpected harness description"),
+      validateAvailability: () => Effect.die("unexpected harness validation"),
+      prepare: () => Effect.die("unexpected harness preparation"),
+      createSession: () => Effect.die("unexpected session creation"),
+      resumeSession: () => Effect.die("unexpected session resume"),
+      abortSession: () => Effect.die("unexpected session abort"),
+    }),
+    Layer.succeed(Workspace, {
+      prepareReview: () => Effect.die("unexpected review workspace"),
+      prepareFix: () => Effect.die("unexpected fix workspace"),
+      publishFix: () => Effect.die("unexpected fix publication"),
+    }),
+  )
 
 describe("serveHookHttp", () => {
   test("stops the listener and joins interrupted in-flight request effects", async () => {
@@ -472,30 +512,7 @@ describe("runHookService startup", () => {
           }
           const adapters = Layer.mergeAll(
             Logger.layer([Logger.make(() => undefined)]),
-            WorkSignalLive,
-            Layer.succeed(GitHub, {
-              fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-              publishReview: () => Effect.die("unexpected publish"),
-              collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-            }),
-            Layer.succeed(Automation, {
-              validateAvailability: () => Effect.void,
-              prepareReview: () => Effect.die("unexpected review"),
-              prepareFix: () => Effect.die("unexpected fix"),
-            }),
-            Layer.succeed(AgentHarness, {
-              describe: () => Effect.die("unexpected harness description"),
-              validateAvailability: () => Effect.die("unexpected harness validation"),
-              prepare: () => Effect.die("unexpected harness preparation"),
-              createSession: () => Effect.die("unexpected session creation"),
-              resumeSession: () => Effect.die("unexpected session resume"),
-              abortSession: () => Effect.die("unexpected session abort"),
-            }),
-            Layer.succeed(Workspace, {
-              prepareReview: () => Effect.die("unexpected review workspace"),
-              prepareFix: () => Effect.die("unexpected fix workspace"),
-              publishFix: () => Effect.die("unexpected fix publication"),
-            }),
+            stubAdapters(),
             Layer.succeed(RemoteCoordinator, coordinator),
           )
           const started = yield* Effect.race(
@@ -538,32 +555,7 @@ describe("runHookService startup", () => {
       http: { ...loaded.http, port: 0 },
       worker: { ...loaded.worker, concurrency: 3, pollIntervalMs: 60_000 },
     }
-    const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected harness preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
-    )
+    const TestAdapters = stubAdapters()
 
     const result = await Effect.runPromise(
       Effect.scoped(
@@ -607,32 +599,7 @@ describe("runHookService startup", () => {
       http: { ...loaded.http, port: 0 },
       worker: { ...loaded.worker, concurrency: 1, pollIntervalMs: 10 },
     }
-    const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected harness preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
-    )
+    const TestAdapters = stubAdapters()
 
     const outcome = await Effect.runPromise(
       Effect.scoped(
@@ -777,33 +744,13 @@ describe("runHookService startup", () => {
       worker: { ...loaded.worker, pollIntervalMs: 60_000 },
     }
     const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () =>
+      stubAdapters(
+        automationStub(() =>
           Effect.sync(() => {
             validations += 1
           }),
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected harness preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
+        ),
+      ),
       Layer.succeed(
         WorkflowStart,
         closedWorkflowStart(
@@ -877,5 +824,82 @@ describe("runHookService startup", () => {
       qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
       testJob: { status: 202, body: { jobId: "runtime-canary", status: "pending" } },
     })
+  })
+})
+
+describe("dogfood enrichment wiring", () => {
+  const dogfoodDocument: DogfoodEnrichmentDocument = {
+    contract: DOGFOOD_ENRICHMENT_CONTRACT,
+    sessions: {
+      ses_idle: { harness: "opencode", harness_version: 1, machine: "mint" },
+    },
+  }
+
+  /** Shared across both wiring tests so the stub block exists exactly once. */
+  const loadDogfoodConfig = () =>
+    loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret",
+      },
+      { home: "/tmp" },
+    )
+
+  test("serves the configured route from the wired dogfood store", async () => {
+    const loaded = await loadDogfoodConfig()
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+    }
+    const adapters = Layer.merge(
+      stubAdapters(),
+      Layer.succeed(DogfoodStore, { sessions: () => Effect.succeed(dogfoodDocument) }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* startHookService(config)
+          const base = `http://${server.hostname}:${server.port}/workflows/dogfood/sessions`
+          const authorized = yield* Effect.tryPromise(() =>
+            fetch(base, { headers: { authorization: "Bearer dogfood-secret" } }),
+          )
+          const unauthorized = yield* Effect.tryPromise(() => fetch(base))
+          return {
+            authorized: {
+              status: authorized.status,
+              body: yield* Effect.promise(() => authorized.json()),
+            },
+            unauthorized: unauthorized.status,
+          }
+        }),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters))),
+    )
+
+    expect(result.authorized).toEqual({ status: 200, body: dogfoodDocument })
+    expect(result.unauthorized).toBe(401)
+  })
+
+  test("refuses to start when dogfood is configured without its store", async () => {
+    const loaded = await loadDogfoodConfig()
+    const config = { ...loaded, worker: { ...loaded.worker, concurrency: 0 } }
+
+    const exit = await Effect.runPromise(
+      Effect.exit(
+        Effect.scoped(startHookService(config)).pipe(
+          Effect.provide(Layer.merge(kernelLayer(":memory:"), stubAdapters())),
+        ),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
+    expect(Cause.pretty(exit._tag === "Failure" ? exit.cause : Cause.empty)).toContain(
+      "Dogfood enrichment is configured without its store",
+    )
   })
 })

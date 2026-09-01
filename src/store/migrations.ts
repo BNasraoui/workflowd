@@ -1317,10 +1317,22 @@ export const runStoreMigrationsThrough0016 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0016),
 })
 
+/**
+ * The dogfood enrichment join resolves each session's latest run; without an
+ * index on session_id that correlated subquery is a full ledger scan per
+ * session on a synchronous driver — one request could stall the daemon.
+ */
+const kernelAgentRunsSessionIndex = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE INDEX kernel_agent_runs_session
+    ON kernel_agent_runs (session_id, updated_at, created_at, run_id)`
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0016,
     "0017_remove_agent_completion_baseline": removeAgentCompletionBaseline,
     "0018_kernel_agent_runs": kernelAgentRuns,
+    "0019_kernel_agent_runs_session_index": kernelAgentRunsSessionIndex,
   }),
 })
