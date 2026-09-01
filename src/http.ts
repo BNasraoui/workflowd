@@ -28,6 +28,7 @@ import {
 } from "./kernel/agent-run-ingress"
 import { AgentRunSubmission } from "./agent-run-contract"
 import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
+import type { DogfoodStorePort } from "./kernel/dogfood-store"
 import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
 
@@ -48,6 +49,10 @@ type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register"> & {
   readonly token: string
 }
 
+type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
+  readonly token: string
+}
+
 export type WebhookHandlerOptions = {
   readonly webhookSecret: string
   readonly now: Date
@@ -56,6 +61,7 @@ export type WebhookHandlerOptions = {
   readonly testJobs?: TestJobIngress
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
+  readonly dogfood?: DogfoodBinding
 }
 
 export function routeRequest(
@@ -95,6 +101,13 @@ export function routeRequest(
       options.now,
       options.maxBodyBytes ?? 1_048_576,
     )
+  }
+  if (
+    pathname === "/workflows/dogfood/sessions" &&
+    request.method === "GET" &&
+    options.dogfood !== undefined
+  ) {
+    return handleDogfoodSessions(request, options.dogfood)
   }
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
@@ -281,6 +294,25 @@ function handleAgentRunRegister(
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logError("Agent-run ingress failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
+}
+
+/**
+ * Read-only provenance ground truth: bearer-token guarded like the other
+ * token-bearing surfaces, then a single store query shaped as the
+ * `provenance-dogfood-enrichment/v1` document.
+ */
+function handleDogfoodSessions(request: Request, dogfood: DogfoodBinding) {
+  if (!authorized(request.headers.get("authorization"), dogfood.token)) {
+    return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+  }
+  return dogfood.sessions().pipe(
+    Effect.map((enrichment) => Response.json(enrichment)),
+    Effect.catchCause((cause) =>
+      Effect.logError("Dogfood enrichment failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
     ),

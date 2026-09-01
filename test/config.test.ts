@@ -357,6 +357,41 @@ describe("loadConfig", () => {
     ).rejects.toThrow("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
   })
 
+  test("optionally loads the dogfood token from exactly one direct or file source", async () => {
+    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    const direct = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret" },
+      { home: "/home/test" },
+    )
+    const fromFile = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_DOGFOOD_TOKEN_FILE: "/run/dogfood-token" },
+      { home: "/home/test", readFile: async () => "file-dogfood-secret\n" },
+    )
+
+    expect(disabled.dogfood).toBeUndefined()
+    expect(direct.dogfood).toEqual({ token: "dogfood-secret" })
+    expect(fromFile.dogfood).toEqual({ token: "file-dogfood-secret" })
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret",
+          WORKFLOWD_DOGFOOD_TOKEN_FILE: "/run/dogfood-token",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_DOGFOOD_TOKEN and WORKFLOWD_DOGFOOD_TOKEN_FILE cannot both be set")
+  })
+
+  test("requires a sensible dogfood token length", async () => {
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_DOGFOOD_TOKEN: "short" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_DOGFOOD_TOKEN must contain at least 8 characters")
+  })
+
   test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
     "requires the QRSPI token when %s is present",
     async (name) => {
