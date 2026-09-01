@@ -893,8 +893,9 @@ describe("dogfood enrichment wiring", () => {
     },
   }
 
-  test("serves the configured route from the wired dogfood store", async () => {
-    const loaded = await loadConfig(
+  /** Shared across both wiring tests so the stub block exists exactly once. */
+  const loadDogfoodConfig = () =>
+    loadConfig(
       {
         GITHUB_APP_ID: "123",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
@@ -905,36 +906,43 @@ describe("dogfood enrichment wiring", () => {
       },
       { home: "/tmp" },
     )
+
+  const stubAdapters = Layer.mergeAll(
+    WorkSignalLive,
+    Layer.succeed(GitHub, {
+      fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+      publishReview: () => Effect.die("unexpected publish"),
+      collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+    }),
+    Layer.succeed(Automation, {
+      validateAvailability: () => Effect.void,
+      prepareReview: () => Effect.die("unexpected review"),
+      prepareFix: () => Effect.die("unexpected fix"),
+    }),
+    Layer.succeed(AgentHarness, {
+      describe: () => Effect.die("unexpected harness description"),
+      validateAvailability: () => Effect.die("unexpected harness validation"),
+      prepare: () => Effect.die("unexpected preparation"),
+      createSession: () => Effect.die("unexpected session creation"),
+      resumeSession: () => Effect.die("unexpected session resume"),
+      abortSession: () => Effect.die("unexpected session abort"),
+    }),
+    Layer.succeed(Workspace, {
+      prepareReview: () => Effect.die("unexpected review workspace"),
+      prepareFix: () => Effect.die("unexpected fix workspace"),
+      publishFix: () => Effect.die("unexpected fix publication"),
+    }),
+  )
+
+  test("serves the configured route from the wired dogfood store", async () => {
+    const loaded = await loadDogfoodConfig()
     const config = {
       ...loaded,
       http: { ...loaded.http, port: 0 },
       worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
     }
-    const adapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
+    const adapters = Layer.merge(
+      stubAdapters,
       Layer.succeed(DogfoodStore, { sessions: () => Effect.succeed(dogfoodDocument) }),
     )
 
@@ -963,49 +971,13 @@ describe("dogfood enrichment wiring", () => {
   })
 
   test("refuses to start when dogfood is configured without its store", async () => {
-    const loaded = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret",
-      },
-      { home: "/tmp" },
-    )
+    const loaded = await loadDogfoodConfig()
     const config = { ...loaded, worker: { ...loaded.worker, concurrency: 0 } }
-    const adapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
-    )
 
     const exit = await Effect.runPromise(
       Effect.exit(
         Effect.scoped(startHookService(config)).pipe(
-          Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)),
+          Effect.provide(Layer.merge(kernelLayer(":memory:"), stubAdapters)),
         ),
       ),
     )
