@@ -29,6 +29,7 @@ import {
 import { AgentRunSubmission } from "./agent-run-contract"
 import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
 import type { DogfoodStorePort } from "./kernel/dogfood-store"
+import type { AgentRunsEnrichmentStorePort } from "./kernel/agent-runs-enrichment-store"
 import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
 
@@ -53,6 +54,10 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
   readonly token: string
 }
 
+type AgentRunsEnrichmentBinding = Pick<AgentRunsEnrichmentStorePort, "sessions"> & {
+  readonly token: string
+}
+
 export type WebhookHandlerOptions = {
   readonly webhookSecret: string
   readonly now: Date
@@ -62,6 +67,7 @@ export type WebhookHandlerOptions = {
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
+  readonly agentRunsEnrichment?: AgentRunsEnrichmentBinding
 }
 
 export function routeRequest(
@@ -108,6 +114,13 @@ export function routeRequest(
     options.dogfood !== undefined
   ) {
     return handleDogfoodSessions(request, options.dogfood)
+  }
+  if (
+    pathname === "/workflows/agent-runs" &&
+    request.method === "GET" &&
+    options.agentRunsEnrichment !== undefined
+  ) {
+    return handleAgentRunsEnrichment(request, options.agentRunsEnrichment)
   }
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
@@ -313,6 +326,25 @@ function handleDogfoodSessions(request: Request, dogfood: DogfoodBinding) {
     Effect.map((enrichment) => Response.json(enrichment)),
     Effect.catchCause((cause) =>
       Effect.logError("Dogfood enrichment failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
+}
+
+/**
+ * Read-only OpenMob enrichment: bearer-token guarded like the other
+ * token-bearing surfaces, then a single store query shaped as the
+ * `agent-runs-enrichment/v1` document.
+ */
+function handleAgentRunsEnrichment(request: Request, enrichment: AgentRunsEnrichmentBinding) {
+  if (!authorized(request.headers.get("authorization"), enrichment.token)) {
+    return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+  }
+  return enrichment.sessions().pipe(
+    Effect.map((document) => Response.json(document)),
+    Effect.catchCause((cause) =>
+      Effect.logError("Agent-runs enrichment failed", cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
     ),

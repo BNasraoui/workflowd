@@ -7,7 +7,11 @@ import {
   commandClaimCandidate,
   reconciliationClaimCandidate,
 } from "../../src/store/internal-claim-queries"
-import { reconciliationObservationSequence } from "../../src/store/migrations"
+import {
+  reconciliationObservationSequence,
+  runStoreMigrations,
+  runStoreMigrationsThrough0018,
+} from "../../src/store/migrations"
 import { makeStoreLayer } from "./harness"
 
 const timestamp = "2026-07-19T12:00:00.000Z"
@@ -163,6 +167,7 @@ describe("strict initial store schema", () => {
       { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
       { migration_id: 17, name: "remove_agent_completion_baseline" },
       { migration_id: 18, name: "kernel_agent_runs" },
+      { migration_id: 19, name: "kernel_agent_runs_worktree_branch" },
     ])
     expect(result.tables).toHaveLength(32)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
@@ -848,5 +853,59 @@ describe("migration 9: qrspi_stage_definitions strict table", () => {
     )
 
     expect(wasRejected).toBe(true)
+  })
+})
+
+describe("migration 19: kernel_agent_runs worktree_branch", () => {
+  test("adds worktree_branch and backfills the dispatch branch from each row's directory", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* runStoreMigrationsThrough0018
+        const columnBefore = yield* sql`
+          SELECT name FROM pragma_table_info('kernel_agent_runs')
+          WHERE name = 'worktree_branch'
+        `
+        // Two live shapes: a pre-dispatch accepted row and a terminal row.
+        // Both directories follow the agent-runs/<short> convention, so the
+        // backfill reconstructs the exact agent-run/<short> branch literal.
+        yield* sql`
+          INSERT INTO kernel_agent_runs (
+            run_id, route, provider_id, model_id, agent, repository, directory, prompt,
+            prompt_sha256, parent_session_id, resume_prompt, state, attempt, max_attempts,
+            created_at, updated_at
+          ) VALUES (
+            'run-accepted', 'implement', 'zai-coding-plan', 'zai-coding-plan/glm-5.3-flash',
+            'remote-worker', 'workflowd', '/tmp/worktrees/agent-runs/abc0123456789abcd',
+            'Fix the flaky retry test.', ${"a".repeat(64)}, NULL, NULL, 'accepted', 1, 3,
+            '2026-08-30T09:00:00.000Z', '2026-08-30T09:00:00.000Z'
+          )
+        `
+        yield* sql`
+          INSERT INTO kernel_agent_runs (
+            run_id, route, provider_id, model_id, agent, repository, directory, prompt,
+            prompt_sha256, parent_session_id, resume_prompt, state, attempt, max_attempts,
+            created_at, updated_at
+          ) VALUES (
+            'run-completed', 'implement', 'zai-coding-plan', 'zai-coding-plan/glm-5.3-flash',
+            'remote-worker', 'workflowd', '/home/ben/.cache/worktrees/agent-runs/ffff0123456789abcd',
+            'Fix the flaky retry test.', ${"b".repeat(64)}, NULL, NULL, 'completed', 1, 3,
+            '2026-08-30T09:00:00.000Z', '2026-08-30T09:10:00.000Z'
+          )
+        `
+        yield* runStoreMigrations
+        const rows = yield* sql<{
+          readonly run_id: string
+          readonly worktree_branch: string | null
+        }>`SELECT run_id, worktree_branch FROM kernel_agent_runs ORDER BY run_id`
+        return { columnBefore, rows }
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+
+    expect(result.columnBefore).toEqual([])
+    expect(result.rows).toEqual([
+      { run_id: "run-accepted", worktree_branch: "agent-run/abc0123456789abcd" },
+      { run_id: "run-completed", worktree_branch: "agent-run/ffff0123456789abcd" },
+    ])
   })
 })

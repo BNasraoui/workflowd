@@ -7,6 +7,11 @@ import {
   DogfoodStore,
   type DogfoodEnrichmentDocument,
 } from "../src/kernel/dogfood-store"
+import {
+  AGENT_RUNS_ENRICHMENT_CONTRACT,
+  AgentRunsEnrichmentStore,
+  type AgentRunsEnrichmentDocument,
+} from "../src/kernel/agent-runs-enrichment-store"
 import { GitHub } from "../src/github"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
@@ -1013,6 +1018,138 @@ describe("dogfood enrichment wiring", () => {
     expect(exit._tag).toBe("Failure")
     expect(Cause.pretty(exit._tag === "Failure" ? exit.cause : Cause.empty)).toContain(
       "Dogfood enrichment is configured without its store",
+    )
+  })
+})
+
+describe("agent-runs enrichment wiring", () => {
+  const enrichmentDocument: AgentRunsEnrichmentDocument = {
+    contract: AGENT_RUNS_ENRICHMENT_CONTRACT,
+    sessions: { ses_idle: {} },
+  }
+
+  test("serves the configured route from the wired enrichment store", async () => {
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, port: 0 },
+      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+    }
+    const adapters = Layer.mergeAll(
+      WorkSignalLive,
+      Layer.succeed(GitHub, {
+        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+        publishReview: () => Effect.die("unexpected publish"),
+        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+      }),
+      Layer.succeed(Automation, {
+        validateAvailability: () => Effect.void,
+        prepareReview: () => Effect.die("unexpected review"),
+        prepareFix: () => Effect.die("unexpected fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("unexpected harness description"),
+        validateAvailability: () => Effect.die("unexpected harness validation"),
+        prepare: () => Effect.die("unexpected preparation"),
+        createSession: () => Effect.die("unexpected session creation"),
+        resumeSession: () => Effect.die("unexpected session resume"),
+        abortSession: () => Effect.die("unexpected session abort"),
+      }),
+      Layer.succeed(Workspace, {
+        prepareReview: () => Effect.die("unexpected review workspace"),
+        prepareFix: () => Effect.die("unexpected fix workspace"),
+        publishFix: () => Effect.die("unexpected fix publication"),
+      }),
+      Layer.succeed(AgentRunsEnrichmentStore, {
+        sessions: () => Effect.succeed(enrichmentDocument),
+      }),
+    )
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* startHookService(config)
+          const base = `http://${server.hostname}:${server.port}/workflows/agent-runs`
+          const authorized = yield* Effect.tryPromise(() =>
+            fetch(base, { headers: { authorization: "Bearer agent-runs-secret" } }),
+          )
+          const unauthorized = yield* Effect.tryPromise(() => fetch(base))
+          return {
+            authorized: {
+              status: authorized.status,
+              body: yield* Effect.promise(() => authorized.json()),
+            },
+            unauthorized: unauthorized.status,
+          }
+        }),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters))),
+    )
+
+    expect(result.authorized).toEqual({ status: 200, body: enrichmentDocument })
+    expect(result.unauthorized).toBe(401)
+  })
+
+  test("refuses to start when agent-runs enrichment is configured without its store", async () => {
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret",
+      },
+      { home: "/tmp" },
+    )
+    const config = { ...loaded, worker: { ...loaded.worker, concurrency: 0 } }
+    const adapters = Layer.mergeAll(
+      WorkSignalLive,
+      Layer.succeed(GitHub, {
+        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+        publishReview: () => Effect.die("unexpected publish"),
+        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+      }),
+      Layer.succeed(Automation, {
+        validateAvailability: () => Effect.void,
+        prepareReview: () => Effect.die("unexpected review"),
+        prepareFix: () => Effect.die("unexpected fix"),
+      }),
+      Layer.succeed(AgentHarness, {
+        describe: () => Effect.die("unexpected harness description"),
+        validateAvailability: () => Effect.die("unexpected harness validation"),
+        prepare: () => Effect.die("unexpected preparation"),
+        createSession: () => Effect.die("unexpected session creation"),
+        resumeSession: () => Effect.die("unexpected session resume"),
+        abortSession: () => Effect.die("unexpected session abort"),
+      }),
+      Layer.succeed(Workspace, {
+        prepareReview: () => Effect.die("unexpected review workspace"),
+        prepareFix: () => Effect.die("unexpected fix workspace"),
+        publishFix: () => Effect.die("unexpected fix publication"),
+      }),
+    )
+
+    const exit = await Effect.runPromise(
+      Effect.exit(
+        Effect.scoped(startHookService(config)).pipe(
+          Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)),
+        ),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
+    expect(Cause.pretty(exit._tag === "Failure" ? exit.cause : Cause.empty)).toContain(
+      "Agent-runs enrichment is configured without its store",
     )
   })
 })

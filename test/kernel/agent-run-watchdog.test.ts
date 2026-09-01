@@ -96,6 +96,7 @@ const seedVerifiedRun = Effect.gen(function* () {
     resourceId: "run-resource",
     sessionId: "opencode-session-ses_child",
     nativeSessionId: "ses_child",
+    worktreeBranch: "agent-run/x",
     now: at,
   })
   yield* store.markVerified({ runId: "agent-run-x", outputTokens: 7, now: at })

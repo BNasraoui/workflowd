@@ -383,10 +383,14 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (run.state === "accepted" || nativeSessionId === null) {
           yield* store.claimSpawn({ runId: run.runId, now })
+          // The branch is named once here and persisted verbatim at
+          // markSpawned, so the read model never re-derives it from the
+          // directory and the two can never drift.
+          const worktreeBranch = `agent-run/${target.short}`
           yield* worktrees.create({
             repository: target.repositoryDirectory,
             directory: run.directory,
-            branch: `agent-run/${target.short}`,
+            branch: worktreeBranch,
           })
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
@@ -414,6 +418,7 @@ const make = (options: AgentRunIngressOptions) =>
             resourceId,
             sessionId,
             nativeSessionId,
+            worktreeBranch,
             now,
           })
           yield* provider.promptSession({

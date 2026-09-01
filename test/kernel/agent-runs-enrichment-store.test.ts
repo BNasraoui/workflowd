@@ -8,17 +8,21 @@ import {
   type AgentRunCreateInput,
 } from "../../src/kernel/agent-run-store"
 import {
-  DOGFOOD_ENRICHMENT_CONTRACT,
-  DogfoodStore,
-  DogfoodStoreLive,
-} from "../../src/kernel/dogfood-store"
+  AGENT_RUNS_ENRICHMENT_CONTRACT,
+  AgentRunsEnrichmentStore,
+  AgentRunsEnrichmentStoreLive,
+} from "../../src/kernel/agent-runs-enrichment-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { WorkflowStoreLive } from "../../src/store"
 
 const at = new Date("2026-08-30T09:00:00.000Z")
 const later = new Date("2026-08-30T09:05:00.000Z")
 
-const layer = Layer.mergeAll(AgentRunStoreLive, KernelSessionStoreLive, DogfoodStoreLive).pipe(
+const layer = Layer.mergeAll(
+  AgentRunStoreLive,
+  KernelSessionStoreLive,
+  AgentRunsEnrichmentStoreLive,
+).pipe(
   Layer.provideMerge(
     WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" }))),
   ),
@@ -27,14 +31,14 @@ const layer = Layer.mergeAll(AgentRunStoreLive, KernelSessionStoreLive, DogfoodS
 const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof layer>>) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer)))
 
-const runInput = (runId: string, createdAt: Date): AgentRunCreateInput => ({
+const runInput = (runId: string, directory: string, createdAt: Date): AgentRunCreateInput => ({
   runId,
   route: "implement",
   providerId: "zai-coding-plan",
   modelId: "zai-coding-plan/glm-5.3-flash",
   agent: "remote-worker",
   repository: "workflowd",
-  directory: "/tmp/worktrees/agent-runs/child",
+  directory,
   prompt: "Fix the flaky retry test.",
   promptSha256: "a".repeat(64),
   parentSessionId: null,
@@ -88,43 +92,61 @@ const registerCustody = Effect.gen(function* () {
   })
 })
 
-const dispatchRun = (runId: string, modelId: string, agent: string, spawnedAt: Date) =>
+const dispatchRun = (input: {
+  readonly runId: string
+  readonly directory: string
+  readonly branch: string
+  readonly sessionId?: string
+  readonly spawnedAt: Date
+}) =>
   Effect.gen(function* () {
     const runs = yield* AgentRunStore
-    yield* runs.create({ ...runInput(runId, at), modelId, agent })
-    yield* runs.claimSpawn({ runId, now: at })
+    yield* runs.create(runInput(input.runId, input.directory, at))
+    yield* runs.claimSpawn({ runId: input.runId, now: at })
     yield* runs.markSpawned({
-      runId,
+      runId: input.runId,
       resourceId: "resource-gpu",
-      sessionId: "session-dispatched",
+      sessionId: input.sessionId ?? "session-dispatched",
       nativeSessionId: "ses_dispatched",
-      worktreeBranch: "agent-run/child",
-      now: spawnedAt,
+      worktreeBranch: input.branch,
+      now: input.spawnedAt,
     })
   })
 
-describe("dogfood store", () => {
-  test("keys every custody session by native id under the enrichment contract", async () => {
+const completeRun = (runId: string, now: Date) =>
+  Effect.gen(function* () {
+    const runs = yield* AgentRunStore
+    yield* runs.markVerified({ runId, outputTokens: 5, now })
+    yield* runs.complete({ runId, now })
+  })
+
+describe("agent-runs enrichment store", () => {
+  test("keys every custody session by native id with its run ground truth", async () => {
     const document = await run(
       Effect.gen(function* () {
         yield* registerCustody
-        yield* dispatchRun("run-1", "zai-coding-plan/glm-5.3-flash", "remote-worker", at)
-        const store = yield* DogfoodStore
+        yield* dispatchRun({
+          runId: "run-1",
+          directory: "/tmp/worktrees/agent-runs/child",
+          branch: "agent-run/child",
+          spawnedAt: at,
+        })
+        yield* completeRun("run-1", at)
+        const store = yield* AgentRunsEnrichmentStore
         return yield* store.sessions()
       }),
     )
 
-    expect(document.contract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
+    expect(document.contract).toBe(AGENT_RUNS_ENRICHMENT_CONTRACT)
     expect(document.sessions).toEqual({
       // A session with no agent run omits the run fields instead of nulling them.
-      ses_idle: { harness: "opencode", harness_version: 3, machine: "mint" },
+      ses_idle: {},
       ses_dispatched: {
-        harness: "claude",
-        harness_version: 1,
-        machine: "gpu-box",
-        model: "zai-coding-plan/glm-5.3-flash",
-        agent: "remote-worker",
         repository: "workflowd",
+        worktree_branch: "agent-run/child",
+        state: "completed",
+        created_at: at.toISOString(),
+        updated_at: at.toISOString(),
       },
     })
   })
@@ -133,24 +155,33 @@ describe("dogfood store", () => {
     const document = await run(
       Effect.gen(function* () {
         yield* registerCustody
-        yield* dispatchRun("run-old", "old-provider/old-model", "build", at)
-        yield* dispatchRun("run-new", "new-provider/new-model", "review", later)
-        const store = yield* DogfoodStore
+        yield* dispatchRun({
+          runId: "run-old",
+          directory: "/tmp/worktrees/agent-runs/older",
+          branch: "agent-run/older",
+          spawnedAt: at,
+        })
+        yield* dispatchRun({
+          runId: "run-new",
+          directory: "/tmp/worktrees/agent-runs/newer",
+          branch: "agent-run/newer",
+          spawnedAt: later,
+        })
+        const store = yield* AgentRunsEnrichmentStore
         return yield* store.sessions()
       }),
     )
 
     expect(document.sessions.ses_dispatched).toEqual({
-      harness: "claude",
-      harness_version: 1,
-      machine: "gpu-box",
-      model: "new-provider/new-model",
-      agent: "review",
       repository: "workflowd",
+      worktree_branch: "agent-run/newer",
+      state: "spawned",
+      created_at: at.toISOString(),
+      updated_at: later.toISOString(),
     })
   })
 
-  test("skips sessions whose native session id is empty", async () => {
+  test("skips sessions whose native session id is null or empty", async () => {
     const document = await run(
       Effect.gen(function* () {
         yield* registerCustody
@@ -167,7 +198,7 @@ describe("dogfood store", () => {
           'resource-mint', 'ready', 1, ${at.toISOString()}, ${at.toISOString()}
         )`
         yield* sql`PRAGMA ignore_check_constraints = OFF`
-        const store = yield* DogfoodStore
+        const store = yield* AgentRunsEnrichmentStore
         return yield* store.sessions()
       }),
     )
