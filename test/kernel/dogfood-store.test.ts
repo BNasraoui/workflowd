@@ -11,6 +11,7 @@ import {
   DOGFOOD_ENRICHMENT_CONTRACT,
   DogfoodStore,
   DogfoodStoreLive,
+  enrichmentDocumentFromRows,
 } from "../../src/kernel/dogfood-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { WorkflowStoreLive } from "../../src/store"
@@ -172,5 +173,130 @@ describe("dogfood store", () => {
     )
 
     expect(Object.keys(document.sessions).sort()).toEqual(["ses_dispatched", "ses_idle"])
+  })
+
+  test("a run-bearing session is never shadowed by a run-less duplicate of its native id", async () => {
+    const document = await run(
+      Effect.gen(function* () {
+        yield* registerCustody
+        yield* dispatchRun("run-1", "zai-coding-plan/glm-5.3-flash", "remote-worker", at)
+        const sql = yield* SqlClient.SqlClient
+        // Complete the run-bearing custody row, then re-register the same
+        // native id (a harness resume): legal because the active-native
+        // unique index only covers ready/active rows. The rejoined row is
+        // newer and run-less — it must not shadow the run-bearing history.
+        yield* sql`UPDATE kernel_sessions SET state = 'completed', updated_at = ${later.toISOString()}
+          WHERE session_id = 'session-dispatched'`
+        const sessions = yield* KernelSessionStore
+        yield* sessions.registerSession({
+          sessionId: "session-rejoin",
+          providerKind: "claude",
+          providerVersion: 1,
+          providerId: "claude-primary",
+          serverId: "claude-primary",
+          owningHostId: "gpu-box",
+          endpointAlias: "local",
+          endpointIdentity: "http://127.0.0.1:4097",
+          nativeSessionId: "ses_dispatched",
+          resourceId: "resource-gpu",
+          createdAt: later,
+        })
+        const store = yield* DogfoodStore
+        return yield* store.sessions()
+      }),
+    )
+
+    expect(document.sessions.ses_dispatched).toEqual({
+      harness: "claude",
+      harness_version: 1,
+      machine: "gpu-box",
+      model: "zai-coding-plan/glm-5.3-flash",
+      agent: "remote-worker",
+      repository: "workflowd",
+    })
+  })
+
+  test("equal-updated_at runs tiebreak on created_at, not run id order", async () => {
+    const tie = new Date("2026-08-30T09:10:00.000Z")
+    const document = await run(
+      Effect.gen(function* () {
+        yield* registerCustody
+        const runs = yield* AgentRunStore
+        // run ids chosen so the old hash-order tiebreak (run_id DESC) would
+        // pick the earlier-created run; created_at must decide instead.
+        yield* runs.create({ ...runInput("run-z-early", at), modelId: "old-provider/old-model" })
+        yield* runs.claimSpawn({ runId: "run-z-early", now: at })
+        yield* runs.markSpawned({
+          runId: "run-z-early",
+          resourceId: "resource-gpu",
+          sessionId: "session-dispatched",
+          nativeSessionId: "ses_dispatched",
+          now: tie,
+        })
+        yield* runs.create({ ...runInput("run-a-late", later), modelId: "new-provider/new-model" })
+        yield* runs.claimSpawn({ runId: "run-a-late", now: later })
+        yield* runs.markSpawned({
+          runId: "run-a-late",
+          resourceId: "resource-gpu",
+          sessionId: "session-dispatched",
+          nativeSessionId: "ses_dispatched",
+          now: tie,
+        })
+        const store = yield* DogfoodStore
+        return yield* store.sessions()
+      }),
+    )
+
+    expect(document.sessions.ses_dispatched?.model).toBe("new-provider/new-model")
+  })
+
+  test("skips rows the enrichment schema cannot decode instead of failing the document", async () => {
+    const document = await Effect.runPromise(
+      enrichmentDocumentFromRows([
+        {
+          native_session_id: "ses_good",
+          harness: "opencode",
+          harness_version: 3,
+          machine: "mint",
+          model: null,
+          agent: null,
+          repository: null,
+        },
+        {
+          native_session_id: "ses_bad",
+          harness: "opencode",
+          harness_version: "not-an-int",
+          machine: "mint",
+          model: null,
+          agent: null,
+          repository: null,
+        },
+      ]),
+    )
+
+    expect(Object.keys(document.sessions)).toEqual(["ses_good"])
+  })
+
+  test("the latest-run subquery is index-backed, never a full ledger scan", async () => {
+    const plan = await run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        const index = yield* sql`
+          SELECT name FROM sqlite_master
+          WHERE type = 'index' AND name = 'kernel_agent_runs_session'
+        `
+        const plan = yield* sql`EXPLAIN QUERY PLAN
+          SELECT r2.run_id FROM kernel_agent_runs r2
+          WHERE r2.session_id = 'session-dispatched'
+          ORDER BY r2.updated_at DESC, r2.created_at DESC, r2.run_id DESC
+          LIMIT 1`
+        return { index, plan }
+      }),
+    )
+
+    expect(plan.index).toHaveLength(1)
+    const detail = plan.plan.map((row) => String(row.detail)).join(" | ")
+    expect(detail).toContain("kernel_agent_runs_session")
+    expect(detail).not.toContain("SCAN r2")
   })
 })

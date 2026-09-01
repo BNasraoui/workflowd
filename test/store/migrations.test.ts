@@ -163,6 +163,7 @@ describe("strict initial store schema", () => {
       { migration_id: 16, name: "kernel_remote_cancellation_outbox" },
       { migration_id: 17, name: "remove_agent_completion_baseline" },
       { migration_id: 18, name: "kernel_agent_runs" },
+      { migration_id: 19, name: "kernel_agent_runs_session_index" },
     ])
     expect(result.tables).toHaveLength(32)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

@@ -1,6 +1,6 @@
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
-import { Context, Data, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema } from "effect"
 
 /**
  * Read-only provenance dogfood enrichment.
@@ -30,11 +30,7 @@ export type DogfoodEnrichmentDocument = {
   readonly sessions: Readonly<Record<string, DogfoodSessionEnrichment>>
 }
 
-export class DogfoodStoreDataError extends Data.TaggedError("DogfoodStoreDataError")<{
-  readonly message: string
-}> {}
-
-export type DogfoodStoreError = SqlError | DogfoodStoreDataError
+export type DogfoodStoreError = SqlError
 
 export type DogfoodStorePort = {
   /** A fresh read-only snapshot; the query never writes to the store. */
@@ -53,9 +49,35 @@ const EnrichmentRow = Schema.Struct({
   repository: Schema.NullOr(Schema.String),
 })
 
-const decodeRow = (row: Record<string, unknown>) =>
-  Schema.decodeUnknownEffect(EnrichmentRow)(row).pipe(
-    Effect.mapError((error) => new DogfoodStoreDataError({ message: String(error) })),
+/**
+ * Assembles the contract document from raw joined rows.
+ *
+ * Rows arrive ordered by native id with the preferred session first (see the
+ * query's ORDER BY); the first row per native id wins, so a run-bearing or
+ * live session is never shadowed by a stale duplicate. A row the schema
+ * cannot decode (legacy schema drift) is skipped with a warning rather than
+ * failing the whole document — this is a report join, not a ledger.
+ */
+export const enrichmentDocumentFromRows = (
+  rows: ReadonlyArray<Record<string, unknown>>,
+): Effect.Effect<DogfoodEnrichmentDocument> =>
+  Effect.forEach(rows, (row) =>
+    Schema.decodeUnknownEffect(EnrichmentRow)(row).pipe(
+      Effect.map((decoded) => [decoded] as const),
+      Effect.catch((error) =>
+        Effect.logWarning("Skipping undecodable dogfood enrichment row", error).pipe(
+          Effect.as([] as const),
+        ),
+      ),
+    ),
+  ).pipe(
+    Effect.map((decoded) => {
+      const sessions: Record<string, DogfoodSessionEnrichment> = {}
+      for (const row of decoded.flat()) {
+        sessions[row.native_session_id] ??= toEnrichment(row)
+      }
+      return { contract: DOGFOOD_ENRICHMENT_CONTRACT, sessions }
+    }),
   )
 
 /** A session with no agent run omits the run fields — never emits nulls. */
@@ -84,18 +106,16 @@ const make = Effect.gen(function* () {
       LEFT JOIN kernel_agent_runs r ON r.run_id = (
         SELECT r2.run_id FROM kernel_agent_runs r2
         WHERE r2.session_id = s.session_id
-        ORDER BY r2.updated_at DESC, r2.run_id DESC
+        ORDER BY r2.updated_at DESC, r2.created_at DESC, r2.run_id DESC
         LIMIT 1
       )
       WHERE s.native_session_id IS NOT NULL AND s.native_session_id <> ''
-      ORDER BY s.native_session_id
-    `.pipe(
-      Effect.flatMap((rows) => Effect.forEach(rows, decodeRow)),
-      Effect.map((rows) => ({
-        contract: DOGFOOD_ENRICHMENT_CONTRACT,
-        sessions: Object.fromEntries(rows.map((row) => [row.native_session_id, toEnrichment(row)])),
-      })),
-    )
+      ORDER BY s.native_session_id,
+        (r.run_id IS NOT NULL) DESC,
+        (s.state IN ('ready', 'active')) DESC,
+        s.updated_at DESC,
+        s.session_id DESC
+    `.pipe(Effect.flatMap(enrichmentDocumentFromRows))
 
   return DogfoodStore.of({ sessions })
 })
