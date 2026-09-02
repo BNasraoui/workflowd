@@ -897,7 +897,7 @@ describe("runHookService startup", () => {
  */
 const probeEnvironment = (surfaceEnv: Record<string, string>) => ({
   GITHUB_APP_ID: "123",
-  GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+  GITHUB_PRIVATE_KEY_PATH: "/srv/secrets/github-app-key",
   GITHUB_WEBHOOK_SECRET: "secret",
   OPENCODE_SERVER_PASSWORD: "password",
   WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",

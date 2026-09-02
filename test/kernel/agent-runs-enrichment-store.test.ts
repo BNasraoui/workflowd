@@ -67,7 +67,7 @@ describe("agent-runs enrichment store", () => {
         yield* registerCustody
         yield* dispatchRun({
           runId: "run-1",
-          directory: "/tmp/worktrees/agent-runs/child",
+          directory: "/srv/worktrees/agent-runs/child",
           branch: "agent-run/child",
           spawnedAt: at,
         })
@@ -97,13 +97,13 @@ describe("agent-runs enrichment store", () => {
         yield* registerCustody
         yield* dispatchRun({
           runId: "run-old",
-          directory: "/tmp/worktrees/agent-runs/older",
+          directory: "/srv/worktrees/agent-runs/older",
           branch: "agent-run/older",
           spawnedAt: at,
         })
         yield* dispatchRun({
           runId: "run-new",
-          directory: "/tmp/worktrees/agent-runs/newer",
+          directory: "/srv/worktrees/agent-runs/newer",
           branch: "agent-run/newer",
           spawnedAt: later,
         })
