@@ -1,28 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
-import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
-import { McpQueriesLive } from "../../src/mcp/queries"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
-import { kernelLayer, now } from "../kernel/job-store-harness"
-
-/** The exact check an MCP SDK 1.30 client applies to structuredContent. */
-const clientValidator = (toolName: string) => {
-  const definition = TOOL_DEFINITIONS.find((tool) => tool.name === toolName)
-  expect(definition?.outputSchema).toBeDefined()
-  return new AjvJsonSchemaValidator().getValidator(definition!.outputSchema)
-}
-
-const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
-  Layer.provideMerge(kernelLayer(":memory:")),
-)
-
-const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof mcpLayer>>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(mcpLayer)))
-
-const firstText = (result: { content: Array<{ type: "text"; text: string }> }) =>
-  result.content[0]!.text
+import { now } from "../kernel/job-store-harness"
+import { clientValidator, firstText, json, run } from "./harness"
 
 type Call = {
   readonly url: string
@@ -50,12 +30,6 @@ const daemon = (respond: () => Response, calls: Array<Call> = []): ToolCallConte
 }
 
 const sentBody = (call: Call): unknown => JSON.parse(call.body)
-
-const json = (value: unknown, status = 202) =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" },
-  })
 
 const args = {
   parent_session_id: "parent-stable",
