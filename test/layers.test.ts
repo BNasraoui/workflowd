@@ -13,6 +13,7 @@ import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
 import { ClaudeResumeWorker } from "../src/kernel/claude-resume-worker"
 import { KernelEventStore } from "../src/kernel/event-store"
 import { KernelJobStore } from "../src/kernel/job-store"
+import { DOGFOOD_ENRICHMENT_CONTRACT, DogfoodStore } from "../src/kernel/dogfood-store"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
 import { makeLiveLayer } from "../src/layers"
 import { Automation } from "../src/opencode"
@@ -121,6 +122,7 @@ test("starts and restarts the full live layer with both kernel stores", async ()
           const agentRuns = yield* AgentRunIngress
           const watchdog = yield* AgentRunWatchdog
           const claudeResume = yield* ClaudeResumeWorker
+          const dogfood = yield* DogfoodStore
           // Both supervised iterations run once against the empty store so
           // the composed worker pipelines execute, not just resolve.
           const watchdogStatus = yield* watchdog.iteration
@@ -128,12 +130,17 @@ test("starts and restarts the full live layer with both kernel stores", async ()
           if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
             return yield* Effect.die(new Error("expected idle iterations on an empty store"))
           }
-          return [
-            events.readReadyDeliveries,
-            jobs.readRecoverable,
-            testJobs.submit,
-            agentRuns.register,
-          ]
+          const dogfoodContract = (yield* dogfood.sessions()).contract
+          return {
+            methods: [
+              events.readReadyDeliveries,
+              jobs.readRecoverable,
+              testJobs.submit,
+              agentRuns.register,
+              dogfood.sessions,
+            ],
+            dogfoodContract,
+          }
         }).pipe(
           Effect.provide(
             makeLiveLayer(config).pipe(
@@ -143,8 +150,10 @@ test("starts and restarts the full live layer with both kernel stores", async ()
         ),
       )
 
-    expect((await start()).every((method) => typeof method === "function")).toBe(true)
-    expect((await start()).every((method) => typeof method === "function")).toBe(true)
+    const first = await start()
+    expect(first.methods.every((method) => typeof method === "function")).toBe(true)
+    expect(first.dogfoodContract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
+    expect((await start()).methods.every((method) => typeof method === "function")).toBe(true)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

@@ -10,6 +10,7 @@ import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
+import { DogfoodStore } from "./kernel/dogfood-store"
 import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
@@ -199,6 +200,7 @@ function firstMissingService(
     readonly agentWaits: Option.Option<unknown>
     readonly agentRuns: Option.Option<unknown>
     readonly agentRunWatchdog: Option.Option<unknown>
+    readonly dogfood: Option.Option<unknown>
     readonly remoteCoordinator: unknown
   },
 ): string | null {
@@ -216,6 +218,9 @@ function firstMissingService(
     (Option.isNone(services.agentRuns) || Option.isNone(services.agentRunWatchdog))
   ) {
     return "Agent runs are configured without their services"
+  }
+  if (config.dogfood !== undefined && Option.isNone(services.dogfood)) {
+    return "Dogfood enrichment is configured without its store"
   }
   if (config.remoteCoordinator !== undefined && services.remoteCoordinator === null) {
     return "Remote coordinator is configured without its service"
@@ -240,6 +245,7 @@ export function startHookService(
     const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
     const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const dogfood = yield* Effect.serviceOption(DogfoodStore)
     const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
@@ -250,6 +256,7 @@ export function startHookService(
       agentWaits,
       agentRuns,
       agentRunWatchdog,
+      dogfood,
       remoteCoordinator,
     })
     if (missingService !== null) return yield* Effect.die(new Error(missingService))
@@ -452,6 +459,14 @@ export function startHookService(
                 agentRuns: {
                   token: config.agentRuns.token,
                   register: Option.getOrThrow(agentRuns).register,
+                },
+              }),
+          ...(config.dogfood === undefined
+            ? {}
+            : {
+                dogfood: {
+                  token: config.dogfood.token,
+                  sessions: Option.getOrThrow(dogfood).sessions,
                 },
               }),
         }),

@@ -112,6 +112,7 @@ export interface AppConfig {
   readonly testJobCanary?: { readonly token: string }
   readonly agentWaits?: { readonly token: string }
   readonly agentRuns?: AgentRunConfig
+  readonly dogfood?: { readonly token: string }
   readonly remoteCoordinator?: RemoteCoordinatorConfig
 }
 
@@ -296,6 +297,7 @@ interface ResolvedSecrets {
   readonly testJobToken: string | undefined
   readonly agentWaitToken: string | undefined
   readonly agentRunToken: string | undefined
+  readonly dogfoodToken: string | undefined
 }
 
 async function loadSecrets(
@@ -341,7 +343,23 @@ async function loadSecrets(
   if (agentRunToken !== undefined && agentRunToken.length < 8) {
     throw new Error("WORKFLOWD_AGENT_RUN_TOKEN must contain at least 8 characters")
   }
-  return { webhookSecret, openCodePassword, testJobToken, agentWaitToken, agentRunToken }
+  const dogfoodToken = await optionalSecret(
+    env,
+    "WORKFLOWD_DOGFOOD_TOKEN",
+    "WORKFLOWD_DOGFOOD_TOKEN_FILE",
+    read,
+  )
+  if (dogfoodToken !== undefined && dogfoodToken.length < 8) {
+    throw new Error("WORKFLOWD_DOGFOOD_TOKEN must contain at least 8 characters")
+  }
+  return {
+    webhookSecret,
+    openCodePassword,
+    testJobToken,
+    agentWaitToken,
+    agentRunToken,
+    dogfoodToken,
+  }
 }
 
 function loadAgentRunConfig(
@@ -633,6 +651,7 @@ export async function loadConfig(
       ? {}
       : { agentWaits: { token: secrets.agentWaitToken } }),
     ...(agentRuns === undefined ? {} : { agentRuns }),
+    ...(secrets.dogfoodToken === undefined ? {} : { dogfood: { token: secrets.dogfoodToken } }),
     ...(remoteCoordinator === undefined ? {} : { remoteCoordinator }),
   }
 }

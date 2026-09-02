@@ -23,6 +23,7 @@ import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingres
 import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
+import { DogfoodStoreLive } from "./kernel/dogfood-store"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import {
@@ -193,6 +194,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     KernelEventStoreLive,
     KernelJobStoreLive,
     KernelSessionStoreLive,
+    DogfoodStoreLive,
     Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
   const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
