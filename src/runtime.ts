@@ -191,6 +191,19 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   }
 }
 
+/**
+ * Wires one token-guarded GET-enrichment route (dogfood, agent-runs) to its
+ * store; callers gate on the config block, and the configured-feature check
+ * above has already established the store service is present.
+ */
+const sessionsBinding = <Document, E>(
+  token: string,
+  store: Option.Option<{ readonly sessions: () => Effect.Effect<Document, E> }>,
+): { readonly token: string; readonly sessions: () => Effect.Effect<Document, E> } => ({
+  token,
+  sessions: Option.getOrThrow(store).sessions,
+})
+
 /** Each optional feature must have its service(s) in the layer when its
  * config block is present; returns the first mismatch's message, or null. */
 function firstMissingService(
@@ -470,19 +483,14 @@ export function startHookService(
               }),
           ...(config.dogfood === undefined
             ? {}
-            : {
-                dogfood: {
-                  token: config.dogfood.token,
-                  sessions: Option.getOrThrow(dogfood).sessions,
-                },
-              }),
+            : { dogfood: sessionsBinding(config.dogfood.token, dogfood) }),
           ...(config.agentRunsEnrichment === undefined
             ? {}
             : {
-                agentRunsEnrichment: {
-                  token: config.agentRunsEnrichment.token,
-                  sessions: Option.getOrThrow(agentRunsEnrichment).sessions,
-                },
+                agentRunsEnrichment: sessionsBinding(
+                  config.agentRunsEnrichment.token,
+                  agentRunsEnrichment,
+                ),
               }),
         }),
     )

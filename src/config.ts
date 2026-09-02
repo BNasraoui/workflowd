@@ -282,6 +282,19 @@ async function optionalSecret(
   return secret(env, directName, fileName, read)
 }
 
+/** One optional bearer-token source: direct env or `_FILE`, at least 8 characters. */
+async function optionalToken(
+  env: Record<string, string | undefined>,
+  name: string,
+  read: (path: string) => Promise<string>,
+): Promise<string | undefined> {
+  const token = await optionalSecret(env, name, `${name}_FILE`, read)
+  if (token !== undefined && token.length < 8) {
+    throw new Error(`${name} must contain at least 8 characters`)
+  }
+  return token
+}
+
 interface JobTiming {
   readonly jobTimeoutMs: number
   readonly jobLeaseDurationMs: number
@@ -318,51 +331,11 @@ async function loadSecrets(
     "OPENCODE_SERVER_PASSWORD_FILE",
     read,
   )
-  const testJobToken = await optionalSecret(
-    env,
-    "WORKFLOWD_TEST_JOB_TOKEN",
-    "WORKFLOWD_TEST_JOB_TOKEN_FILE",
-    read,
-  )
-  if (testJobToken !== undefined && testJobToken.length < 8) {
-    throw new Error("WORKFLOWD_TEST_JOB_TOKEN must contain at least 8 characters")
-  }
-  const agentWaitToken = await optionalSecret(
-    env,
-    "WORKFLOWD_AGENT_WAIT_TOKEN",
-    "WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
-    read,
-  )
-  if (agentWaitToken !== undefined && agentWaitToken.length < 8) {
-    throw new Error("WORKFLOWD_AGENT_WAIT_TOKEN must contain at least 8 characters")
-  }
-  const agentRunToken = await optionalSecret(
-    env,
-    "WORKFLOWD_AGENT_RUN_TOKEN",
-    "WORKFLOWD_AGENT_RUN_TOKEN_FILE",
-    read,
-  )
-  if (agentRunToken !== undefined && agentRunToken.length < 8) {
-    throw new Error("WORKFLOWD_AGENT_RUN_TOKEN must contain at least 8 characters")
-  }
-  const dogfoodToken = await optionalSecret(
-    env,
-    "WORKFLOWD_DOGFOOD_TOKEN",
-    "WORKFLOWD_DOGFOOD_TOKEN_FILE",
-    read,
-  )
-  if (dogfoodToken !== undefined && dogfoodToken.length < 8) {
-    throw new Error("WORKFLOWD_DOGFOOD_TOKEN must contain at least 8 characters")
-  }
-  const agentRunsEnrichmentToken = await optionalSecret(
-    env,
-    "WORKFLOWD_AGENT_RUNS_TOKEN",
-    "WORKFLOWD_AGENT_RUNS_TOKEN_FILE",
-    read,
-  )
-  if (agentRunsEnrichmentToken !== undefined && agentRunsEnrichmentToken.length < 8) {
-    throw new Error("WORKFLOWD_AGENT_RUNS_TOKEN must contain at least 8 characters")
-  }
+  const testJobToken = await optionalToken(env, "WORKFLOWD_TEST_JOB_TOKEN", read)
+  const agentWaitToken = await optionalToken(env, "WORKFLOWD_AGENT_WAIT_TOKEN", read)
+  const agentRunToken = await optionalToken(env, "WORKFLOWD_AGENT_RUN_TOKEN", read)
+  const dogfoodToken = await optionalToken(env, "WORKFLOWD_DOGFOOD_TOKEN", read)
+  const agentRunsEnrichmentToken = await optionalToken(env, "WORKFLOWD_AGENT_RUNS_TOKEN", read)
   return {
     webhookSecret,
     openCodePassword,

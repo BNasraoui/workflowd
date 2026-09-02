@@ -1,6 +1,7 @@
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
+import { enrichmentDocument, omitNull, type EnrichmentDocument } from "./enrichment-read-model"
 
 /**
  * Read-only agent-run enrichment for OpenMob.
@@ -25,10 +26,10 @@ export type AgentRunEnrichment = {
   readonly updated_at?: string
 }
 
-export type AgentRunsEnrichmentDocument = {
-  readonly contract: typeof AGENT_RUNS_ENRICHMENT_CONTRACT
-  readonly sessions: Readonly<Record<string, AgentRunEnrichment>>
-}
+export type AgentRunsEnrichmentDocument = EnrichmentDocument<
+  AgentRunEnrichment,
+  typeof AGENT_RUNS_ENRICHMENT_CONTRACT
+>
 
 export class AgentRunsEnrichmentStoreDataError extends Data.TaggedError(
   "AgentRunsEnrichmentStoreDataError",
@@ -66,25 +67,25 @@ const EnrichmentRow = Schema.Struct({
   updated_at: Schema.NullOr(Schema.String),
 })
 
-const decodeRow = (row: Record<string, unknown>) =>
-  Schema.decodeUnknownEffect(EnrichmentRow)(row).pipe(
-    Effect.mapError((error) => new AgentRunsEnrichmentStoreDataError({ message: String(error) })),
-  )
-
 /** A session with no agent run omits the run fields — never emits nulls. */
 const toEnrichment = (row: Schema.Schema.Type<typeof EnrichmentRow>): AgentRunEnrichment => ({
-  ...(row.repository === null ? {} : { repository: row.repository }),
-  ...(row.worktree_branch === null ? {} : { worktree_branch: row.worktree_branch }),
-  ...(row.state === null ? {} : { state: row.state }),
-  ...(row.created_at === null ? {} : { created_at: row.created_at }),
-  ...(row.updated_at === null ? {} : { updated_at: row.updated_at }),
+  ...omitNull("repository", row.repository),
+  ...omitNull("worktree_branch", row.worktree_branch),
+  ...omitNull("state", row.state),
+  ...omitNull("created_at", row.created_at),
+  ...omitNull("updated_at", row.updated_at),
 })
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
 
   const sessions: AgentRunsEnrichmentStorePort["sessions"] = () =>
-    sql`
+    enrichmentDocument({
+      contract: AGENT_RUNS_ENRICHMENT_CONTRACT,
+      row: EnrichmentRow,
+      toEnrichment,
+      dataError: (message) => new AgentRunsEnrichmentStoreDataError({ message }),
+    })(sql`
       SELECT s.native_session_id,
         r.repository AS repository,
         r.worktree_branch AS worktree_branch,
@@ -100,13 +101,7 @@ const make = Effect.gen(function* () {
       )
       WHERE s.native_session_id IS NOT NULL AND s.native_session_id <> ''
       ORDER BY s.native_session_id
-    `.pipe(
-      Effect.flatMap((rows) => Effect.forEach(rows, decodeRow)),
-      Effect.map((rows) => ({
-        contract: AGENT_RUNS_ENRICHMENT_CONTRACT,
-        sessions: Object.fromEntries(rows.map((row) => [row.native_session_id, toEnrichment(row)])),
-      })),
-    )
+    `)
 
   return AgentRunsEnrichmentStore.of({ sessions })
 })
