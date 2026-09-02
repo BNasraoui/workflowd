@@ -8,7 +8,7 @@ export const at = new Date("2026-08-30T09:00:00.000Z")
 export const later = new Date("2026-08-30T09:05:00.000Z")
 
 /** The custody worktree directory dispatches land in. */
-export const dispatchDirectory = "/tmp/worktrees/agent-runs/child"
+export const dispatchDirectory = "/srv/worktrees/agent-runs/child"
 
 /** One agent-run create row destined for a dispatchable worktree directory. */
 export const agentRunInput = (input: {
@@ -37,14 +37,14 @@ export const registerCustody = Effect.gen(function* () {
   yield* sessions.registerResource({
     resourceId: "resource-mint",
     owningHostId: "mint",
-    absolutePath: "/tmp/worktrees/agent-runs/idle",
+    absolutePath: "/srv/worktrees/agent-runs/idle",
     kind: "worktree",
     createdAt: at,
   })
   yield* sessions.registerResource({
     resourceId: "resource-gpu",
     owningHostId: "gpu-box",
-    absolutePath: "/tmp/worktrees/agent-runs/child",
+    absolutePath: "/srv/worktrees/agent-runs/child",
     kind: "worktree",
     createdAt: at,
   })
