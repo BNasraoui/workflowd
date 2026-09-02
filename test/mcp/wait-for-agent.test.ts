@@ -1,20 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
-import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
-import { McpQueriesLive } from "../../src/mcp/queries"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
-import { kernelLayer, now } from "../kernel/job-store-harness"
-
-const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
-  Layer.provideMerge(kernelLayer(":memory:")),
-)
-
-const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof mcpLayer>>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(mcpLayer)))
-
-const firstText = (result: { content: Array<{ type: "text"; text: string }> }) =>
-  result.content[0]!.text
+import { now } from "../kernel/job-store-harness"
+import { clientValidator, firstText, json, run } from "./harness"
 
 type Call = {
   readonly url: string
@@ -43,12 +31,6 @@ const daemon = (respond: () => Response, calls: Array<Call> = []): ToolCallConte
 
 const sentBody = (call: Call): unknown => JSON.parse(call.body)
 
-const json = (value: unknown, status = 202) =>
-  new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" },
-  })
-
 const args = {
   parent_session_id: "parent-stable",
   child_session_id: "child-stable",
@@ -69,7 +51,19 @@ describe("wait_for_agent", () => {
       "child_session_id",
       "resume_prompt",
     ])
-    expect(definition!.outputSchema.required).toEqual(["wait_id", "instance_id", "status"])
+    const schema: {
+      anyOf: Array<{
+        type: string
+        required?: Array<string>
+        properties?: Record<string, { enum?: Array<string> }>
+      }>
+    } = JSON.parse(JSON.stringify(definition!.outputSchema))
+    const receiptBranch = schema.anyOf.find((branch) => branch.required?.includes("wait_id"))
+    expect(receiptBranch?.required).toEqual(["wait_id", "instance_id", "status"])
+    const refusedBranch = schema.anyOf.find(
+      (branch) => branch.properties?.status?.enum?.[0] === "refused",
+    )
+    expect(refusedBranch?.required).toEqual(["status", "reason"])
     expect(definition!.annotations).toMatchObject({
       destructiveHint: false,
       idempotentHint: true,
@@ -200,6 +194,15 @@ describe("wait_for_agent", () => {
 
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain("child session child-stable is not in kernel custody")
+    expect(result.structuredContent).toEqual({
+      status: "refused",
+      reason: "not_in_kernel_custody",
+      detail: "child session child-stable is not in kernel custody",
+      error: "custody",
+    })
+    // The client-side check that a schema-foreign refusal would fail as -32602.
+    const validation = clientValidator("wait_for_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
   })
 
   test("relays idempotency conflicts as a structured refusal", async () => {
@@ -213,9 +216,15 @@ describe("wait_for_agent", () => {
 
     expect(result).toMatchObject({
       isError: true,
-      structuredContent: { error: "conflict", reason: "idempotency_conflict" },
+      structuredContent: {
+        status: "refused",
+        reason: "idempotency_conflict",
+        error: "conflict",
+      },
     })
     expect(firstText(result)).toContain("idempotency_conflict")
+    const validation = clientValidator("wait_for_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
   })
 
   test("rejects a multibyte prompt that exceeds the daemon byte bound", async () => {

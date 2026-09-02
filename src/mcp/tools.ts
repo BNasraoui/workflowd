@@ -245,15 +245,23 @@ const postToDaemon = (
     }
     if (!response.success.ok) {
       const refusal = yield* decodeArguments(AgentWaitRefusal, payload.success).pipe(Effect.result)
-      const detail =
-        refusal._tag === "Success"
-          ? (refusal.success.detail ?? refusal.success.reason ?? refusal.success.error)
-          : `HTTP ${response.success.status}`
+      if (refusal._tag === "Failure") {
+        return {
+          failure: failure(`${request.subject} was refused: HTTP ${response.success.status}`),
+        }
+      }
+      const detail = refusal.success.detail ?? refusal.success.reason ?? refusal.success.error
+      // SDK 1.30 clients validate structuredContent against the tool's
+      // advertised outputSchema even on isError results, so the raw daemon
+      // refusal shape surfaced as a -32602 schema violation that masked the
+      // real reason. The refusal rides the schema's refused variant instead.
       return {
-        failure: failure(
-          `${request.subject} was refused: ${detail}`,
-          refusal._tag === "Success" ? { ...refusal.success } : undefined,
-        ),
+        failure: failure(`${request.subject} was refused: ${detail}`, {
+          status: "refused" as const,
+          reason: refusal.success.reason ?? refusal.success.error,
+          ...(refusal.success.detail === undefined ? {} : { detail: refusal.success.detail }),
+          error: refusal.success.error,
+        }),
       }
     }
     return { payload: payload.success }

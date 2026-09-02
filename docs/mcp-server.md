@@ -14,14 +14,17 @@ names use the SEP-986 canonical character set. The three query tools carry
 `readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
-A tool's declared `outputSchema` describes its **success** payload only. On
-`isError: true` results the tools deliberately deviate from it: refusals with
-a machine-readable cause (for example `wait_for_agent`'s
-`idempotency_conflict`) carry the daemon's refusal object
-(`{error, reason?, detail?}`) as `structuredContent`, and other failures carry
-text only. The MCP spec does not pin down `structuredContent` conformance for
-error results and the SDK does not validate it, so clients should only match
-error payloads against the refusal shape, never the success schema.
+**Refusals ride the advertised schema.** SDK 1.30 clients validate a tool
+result's `structuredContent` against the tool's advertised `outputSchema`
+even when `isError: true` — a payload outside the schema surfaces to the
+agent as a -32602 `Structured content does not match the tool output schema`
+protocol error that masks the real reason entirely (this exact masking once
+made an external orchestrator abandon `dispatch_agent` after a single
+refused parent wake). Every write tool's `outputSchema` therefore admits two
+shapes: its receipt, and the refused variant `{"status": "refused",
+"reason": "<machine-readable reason>", "detail": "...", "error":
+"<category>"}` with at least `status` and `reason`. Other failures carry
+text only. Agents should match refusal payloads against the refused shape.
 
 ## The fire-and-ack contract
 
@@ -50,6 +53,34 @@ Resuming an OpenCode session when the probe completes is designed but not
 wired in this slice: the kernel does not yet record a typed event at job
 completion, so there is no condition a durable wait could match. The
 parameter will return once that surface exists.
+
+## Dispatch-first: for orchestrator agents with zero workflowd context
+
+If you are an orchestrator that needs a coding agent to work on a repository
+on a remote host, **`dispatch_agent` is the dispatch path.** It replaces
+hand-rolled `ssh <host> 'nohup ...'` agent spawning: worktree creation,
+kernel custody, first-token verification, stall recovery, and watchdog
+supervision are all owned by the one call, and the receipt is verified — a
+session that generated nothing is refused, never reported as dispatched.
+Shelling into a runner host to spawn an agent yourself bypasses every one of
+those guarantees and leaves state the kernel cannot see.
+
+- **Parent wakes.** Pass `parent_session_id` + `resume_prompt` and workflowd
+  prompts your session when the child finishes. The parent must be in kernel
+  custody: sessions spawned through `dispatch_agent` always are. A foreign
+  session id the kernel does not hold is refused with the machine-readable
+  reason `missing_parent_session` *before* anything is spawned — that is a
+  typed refusal (`status: "refused"`), not a malfunction; drop the parent
+  fields and re-dispatch, then read the outcome later with `job_status`.
+- **Caller is an external session** (your id is not held by workflowd, e.g.
+  you live on a different host or harness): omit `parent_session_id`. You
+  still get the first-token-verified receipt and can poll `job_status`, or
+  have a workflowd-hosted session register the `wait_for_agent` watch on
+  your behalf.
+- **One failure is not a broken tool.** Every refusal comes back in-band
+  with a reason you can act on (`unknown_route`, `unknown_repository`,
+  `provider_not_authenticated`, `model_not_available`,
+  `missing_parent_session`, …). Read the reason, fix the call, re-dispatch.
 
 ## `wait_for_agent`
 

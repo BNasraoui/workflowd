@@ -18,6 +18,35 @@ const RECEIPT_CONTRACT =
   "If a completion prompt is configured you will be prompted when the job " +
   "finishes; otherwise check job_status in a later turn."
 
+const REFUSAL_CONTRACT =
+  "Refusals come back in-band as a structured result with status 'refused', " +
+  "a machine-readable reason, and a detail — never as a protocol error."
+
+/**
+ * The refused variant every write tool's output schema admits. MCP SDK 1.30
+ * clients validate structuredContent against the advertised outputSchema even
+ * on isError results, so a refusal payload outside the schema is reported to
+ * the agent as a -32602 protocol error that masks the actual reason (this is
+ * exactly how an orchestrator once lost a missing_parent_session refusal).
+ * Refusals therefore ride this variant instead.
+ */
+const REFUSED_OUTPUT = {
+  type: "object" as const,
+  properties: {
+    status: { type: "string" as const, enum: ["refused"] },
+    reason: { type: "string" as const, description: "Machine-readable refusal reason." },
+    detail: { type: "string" as const, description: "Human-readable refusal detail." },
+    error: { type: "string" as const, description: "The daemon's refusal category." },
+  },
+  required: ["status", "reason"],
+  additionalProperties: false,
+} as const
+
+type SuccessOutput = ReturnType<typeof objectSchema>
+
+/** Success or refused: the two shapes a write tool's structured output takes. */
+const withRefusal = (success: SuccessOutput) => ({ anyOf: [success, REFUSED_OUTPUT] })
+
 export const TOOL_DEFINITIONS = [
   {
     name: "job_status",
@@ -120,8 +149,12 @@ export const TOOL_DEFINITIONS = [
       "agent session finishes. Requires bearer-token authorization; without it " +
       "this tool refuses. Both sessions must already be in workflowd kernel " +
       "custody and in a ready or active state; if either is not, the call is " +
-      "refused and names the missing custody. " +
+      "refused and names the missing custody — a session spawned through " +
+      "dispatch_agent is always in custody, an arbitrary external session id " +
+      "usually is not. " +
       RECEIPT_CONTRACT +
+      " " +
+      REFUSAL_CONTRACT +
       " Specifically: the returned wait_id is NOT a result and this tool does " +
       "NOT block. The workflowd resume worker prompts the parent session with " +
       "your resume_prompt when the child completes, or flips the watch to " +
@@ -153,13 +186,15 @@ export const TOOL_DEFINITIONS = [
       required: ["parent_session_id", "child_session_id", "resume_prompt"],
       additionalProperties: false,
     },
-    outputSchema: objectSchema(
-      {
-        wait_id: { type: "string" },
-        instance_id: { type: "string" },
-        status: { type: "string", enum: ["registered", "duplicate"] },
-      },
-      ["wait_id", "instance_id", "status"],
+    outputSchema: withRefusal(
+      objectSchema(
+        {
+          wait_id: { type: "string" },
+          instance_id: { type: "string" },
+          status: { type: "string", enum: ["registered", "duplicate"] },
+        },
+        ["wait_id", "instance_id", "status"],
+      ),
     ),
     annotations: {
       readOnlyHint: false,
@@ -171,20 +206,34 @@ export const TOOL_DEFINITIONS = [
   {
     name: "dispatch_agent",
     description:
-      "Dispatch a coding-agent run by intent. Pass a configured route name " +
-      "(e.g. 'implement', 'review') or a bare model id — never a " +
-      "provider-prefixed id; the workflowd runner resolves the route, " +
-      "pre-flights that the provider is authenticated and the model exists, " +
-      "creates a fresh worktree of the named repository, spawns the session, " +
-      "registers it into kernel custody, and only returns a receipt after " +
-      "observing the session's first generated token (bounded wait). A dead " +
-      "route is refused loudly at dispatch with a machine-readable reason — " +
-      "no silent hangs. Requires bearer-token authorization. Optionally pass " +
-      "parent_session_id (your own native OpenCode session id) plus " +
-      "resume_prompt to also register a durable wait: workflowd prompts your " +
-      "session when the child finishes. After the receipt, END YOUR TURN — " +
-      "the runner's watchdog supervises progress, auto-recovers stalls, and " +
-      "escalates to operator_required; do not poll.",
+      "Dispatch a coding-agent run by intent. This is workflowd's durable " +
+      "replacement for hand-rolled ssh/nohup dispatch of coding agents to " +
+      "another host: the worktree, kernel custody, first-token verification, " +
+      "and watchdog supervision described below are all handled by this one " +
+      "call — never shell into a runner host to spawn an agent yourself. " +
+      "Pass a configured route name (e.g. 'implement', 'review') or a bare " +
+      "model id — never a provider-prefixed id; the workflowd runner resolves " +
+      "the route, pre-flights that the provider is authenticated and the model " +
+      "exists, creates a fresh worktree of the named repository, spawns the " +
+      "session, registers it into kernel custody, and only returns a receipt " +
+      "after observing the session's first generated token (bounded wait). A " +
+      "dead route is refused loudly at dispatch with a machine-readable " +
+      "reason — no silent hangs. Requires bearer-token authorization. " +
+      "PARENT WAKES: optionally pass parent_session_id plus resume_prompt to " +
+      "also register a durable wait, and workflowd prompts your session when " +
+      "the child finishes. The parent must be in kernel custody: sessions " +
+      "spawned through this tool always are; a foreign session id the kernel " +
+      "does not hold is refused with reason missing_parent_session BEFORE " +
+      "anything is spawned, so pass your own native OpenCode session id (or a " +
+      "Claude Code session UUID with parent_kind 'claude' plus " +
+      "parent_directory) only when workflowd actually hosts your session. " +
+      "When you are an external session the kernel does not hold, omit " +
+      "parent_session_id: you still get the first-token-verified receipt and " +
+      "can read the outcome later with job_status. " +
+      REFUSAL_CONTRACT +
+      " After the receipt, END YOUR TURN — the runner's watchdog supervises " +
+      "progress, auto-recovers stalls, and escalates to operator_required; do " +
+      "not poll.",
     inputSchema: {
       type: "object",
       properties: {
@@ -241,26 +290,28 @@ export const TOOL_DEFINITIONS = [
       required: ["route", "repository", "prompt"],
       additionalProperties: false,
     },
-    outputSchema: objectSchema(
-      {
-        run_id: { type: "string" },
-        session_id: { type: "string" },
-        native_session_id: { type: "string" },
-        provider_id: { type: "string" },
-        model_id: { type: "string" },
-        output_tokens: { type: "integer" },
-        status: { type: "string", enum: ["dispatched", "duplicate"] },
-        wait: { type: ["object", "null"] },
-      },
-      [
-        "run_id",
-        "session_id",
-        "native_session_id",
-        "provider_id",
-        "model_id",
-        "output_tokens",
-        "status",
-      ],
+    outputSchema: withRefusal(
+      objectSchema(
+        {
+          run_id: { type: "string" },
+          session_id: { type: "string" },
+          native_session_id: { type: "string" },
+          provider_id: { type: "string" },
+          model_id: { type: "string" },
+          output_tokens: { type: "integer" },
+          status: { type: "string", enum: ["dispatched", "duplicate"] },
+          wait: { type: ["object", "null"] },
+        },
+        [
+          "run_id",
+          "session_id",
+          "native_session_id",
+          "provider_id",
+          "model_id",
+          "output_tokens",
+          "status",
+        ],
+      ),
     ),
     annotations: {
       readOnlyHint: false,

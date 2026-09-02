@@ -51,7 +51,13 @@ const HostHealthJson = Schema.Struct({
 })
 
 test("all tools advertise structured outputs and semantic annotations", () => {
-  for (const tool of TOOL_DEFINITIONS) expect(tool.outputSchema.type).toBe("object")
+  for (const tool of TOOL_DEFINITIONS) {
+    for (const branch of "anyOf" in tool.outputSchema
+      ? tool.outputSchema.anyOf
+      : [tool.outputSchema]) {
+      expect(branch.type).toBe("object")
+    }
+  }
   for (const name of ["job_status", "list_recent_jobs", "host_health"]) {
     expect(TOOL_DEFINITIONS.find((tool) => tool.name === name)?.annotations).toMatchObject({
       readOnlyHint: true,
