@@ -1,10 +1,23 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer } from "effect"
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
 import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
 import { McpQueriesLive } from "../../src/mcp/queries"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
 import { kernelLayer, now } from "../kernel/job-store-harness"
+
+/**
+ * The exact validation an MCP SDK 1.30 client applies to every tool result's
+ * structuredContent — isError or not. A structured refusal that fails this
+ * check surfaces to the caller as a -32602 protocol error that masks the
+ * refusal entirely.
+ */
+const clientValidator = (toolName: string) => {
+  const definition = TOOL_DEFINITIONS.find((tool) => tool.name === toolName)
+  expect(definition?.outputSchema).toBeDefined()
+  return new AjvJsonSchemaValidator().getValidator(definition!.outputSchema)
+}
 
 const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
   Layer.provideMerge(kernelLayer(":memory:")),
@@ -69,6 +82,20 @@ describe("dispatch_agent", () => {
     expect(definition?.description).toContain("first generated token")
     expect(definition?.description).toContain("refused loudly")
     expect(definition?.description).toContain("END YOUR TURN")
+  })
+
+  test("advertises itself as the dispatch path over raw ssh, with parent custody semantics", () => {
+    const description = TOOL_DEFINITIONS.find((tool) => tool.name === "dispatch_agent")?.description
+    // An orchestrator with zero workflowd context must see that this tool
+    // replaces hand-rolled ssh/nohup agent dispatch.
+    expect(description).toContain("replacement for hand-rolled ssh/nohup dispatch")
+    expect(description).toContain("never shell into a runner host")
+    // What custody means for parents, and what an external caller should do.
+    expect(description).toContain("must be in kernel custody")
+    expect(description).toContain("missing_parent_session")
+    expect(description).toContain("When you are an external session")
+    // Refusals are typed, never protocol errors.
+    expect(description).toContain("status 'refused'")
   })
 
   test("proxies to the daemon ingress and reports the verified receipt", async () => {
@@ -190,6 +217,46 @@ describe("dispatch_agent", () => {
     expect(firstText(result)).toContain("the dispatch was refused")
     expect(firstText(result)).toContain("zai-coding-plan")
     expect(result.structuredContent).toMatchObject({ reason: "provider_not_authenticated" })
+    const validation = clientValidator("dispatch_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
+  })
+
+  test("a parent wake the kernel cannot honor is a typed refusal, not a schema violation", async () => {
+    // The OpenMob coordinator bug: an external session id not in kernel
+    // custody is refused by the ingress with reason missing_parent_session,
+    // but that refusal used to ride a structured payload outside the tool's
+    // outputSchema, so SDK 1.30 clients masked it as -32602 "Structured
+    // content does not match the tool output schema".
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        { ...args, parent_session_id: "ses_external", resume_prompt: "Child finished; wake me." },
+        daemon(() =>
+          json(
+            {
+              error: "refused",
+              reason: "missing_parent_session",
+              detail: "parent session ses_external does not exist on the OpenCode server",
+            },
+            409,
+          ),
+        ),
+      ),
+    )
+
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain("the dispatch was refused")
+    expect(firstText(result)).toContain("ses_external")
+    expect(result.structuredContent).toEqual({
+      status: "refused",
+      reason: "missing_parent_session",
+      detail: "parent session ses_external does not exist on the OpenCode server",
+      error: "refused",
+    })
+    // The client-side check that used to fail and mask the refusal.
+    const validation = clientValidator("dispatch_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
+    expect(validation.data).toMatchObject({ status: "refused", reason: "missing_parent_session" })
   })
 
   test("rejects malformed arguments before contacting the daemon", async () => {
@@ -205,11 +272,8 @@ describe("dispatch_agent", () => {
     expect(calls).toHaveLength(0)
   })
 
-  test("its structured output schema matches the receipt it returns", async () => {
-    const definition = TOOL_DEFINITIONS.find((tool) => tool.name === "dispatch_agent")
-    const outputSchema = Schema.decodeUnknownSync(
-      Schema.Struct({ required: Schema.Array(Schema.String) }),
-    )(definition?.outputSchema)
+  test("its structured output schema admits the receipt and the refused variant", async () => {
+    const validate = clientValidator("dispatch_agent")
     const result = await run(
       callTool(
         "dispatch_agent",
@@ -217,8 +281,15 @@ describe("dispatch_agent", () => {
         daemon(() => json(receipt)),
       ),
     )
-    for (const key of outputSchema.required) {
-      expect(Object.keys(result.structuredContent ?? {})).toContain(key)
-    }
+    const receiptValidation = validate(result.structuredContent)
+    expect(receiptValidation.valid).toBe(true)
+
+    const refusalValidation = validate({
+      status: "refused",
+      reason: "missing_parent_session",
+      detail: "parent session ses_external does not exist on the OpenCode server",
+      error: "refused",
+    })
+    expect(refusalValidation.valid).toBe(true)
   })
 })

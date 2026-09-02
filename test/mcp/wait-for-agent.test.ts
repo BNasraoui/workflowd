@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
 import { RemoteProbeProducerLive } from "../../src/remote/probe-producer"
 import { McpQueriesLive } from "../../src/mcp/queries"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
 import { kernelLayer, now } from "../kernel/job-store-harness"
+
+/** The exact check an MCP SDK 1.30 client applies to structuredContent. */
+const clientValidator = (toolName: string) => {
+  const definition = TOOL_DEFINITIONS.find((tool) => tool.name === toolName)
+  expect(definition?.outputSchema).toBeDefined()
+  return new AjvJsonSchemaValidator().getValidator(definition!.outputSchema)
+}
 
 const mcpLayer = Layer.merge(RemoteProbeProducerLive, McpQueriesLive).pipe(
   Layer.provideMerge(kernelLayer(":memory:")),
@@ -69,7 +77,19 @@ describe("wait_for_agent", () => {
       "child_session_id",
       "resume_prompt",
     ])
-    expect(definition!.outputSchema.required).toEqual(["wait_id", "instance_id", "status"])
+    const schema: {
+      anyOf: Array<{
+        type: string
+        required?: Array<string>
+        properties?: Record<string, { enum?: Array<string> }>
+      }>
+    } = JSON.parse(JSON.stringify(definition!.outputSchema))
+    const receiptBranch = schema.anyOf.find((branch) => branch.required?.includes("wait_id"))
+    expect(receiptBranch?.required).toEqual(["wait_id", "instance_id", "status"])
+    const refusedBranch = schema.anyOf.find(
+      (branch) => branch.properties?.status?.enum?.[0] === "refused",
+    )
+    expect(refusedBranch?.required).toEqual(["status", "reason"])
     expect(definition!.annotations).toMatchObject({
       destructiveHint: false,
       idempotentHint: true,
@@ -200,6 +220,15 @@ describe("wait_for_agent", () => {
 
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain("child session child-stable is not in kernel custody")
+    expect(result.structuredContent).toEqual({
+      status: "refused",
+      reason: "not_in_kernel_custody",
+      detail: "child session child-stable is not in kernel custody",
+      error: "custody",
+    })
+    // The client-side check that a schema-foreign refusal would fail as -32602.
+    const validation = clientValidator("wait_for_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
   })
 
   test("relays idempotency conflicts as a structured refusal", async () => {
@@ -213,9 +242,15 @@ describe("wait_for_agent", () => {
 
     expect(result).toMatchObject({
       isError: true,
-      structuredContent: { error: "conflict", reason: "idempotency_conflict" },
+      structuredContent: {
+        status: "refused",
+        reason: "idempotency_conflict",
+        error: "conflict",
+      },
     })
     expect(firstText(result)).toContain("idempotency_conflict")
+    const validation = clientValidator("wait_for_agent")(result.structuredContent)
+    expect(validation.valid).toBe(true)
   })
 
   test("rejects a multibyte prompt that exceeds the daemon byte bound", async () => {
