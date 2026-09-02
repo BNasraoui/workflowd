@@ -1,22 +1,21 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
-import {
-  AgentRunStore,
-  AgentRunStoreLive,
-  type AgentRunCreateInput,
-} from "../../src/kernel/agent-run-store"
+import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import {
   AGENT_RUNS_ENRICHMENT_CONTRACT,
   AgentRunsEnrichmentStore,
   AgentRunsEnrichmentStoreLive,
 } from "../../src/kernel/agent-runs-enrichment-store"
-import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
+import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { WorkflowStoreLive } from "../../src/store"
-
-const at = new Date("2026-08-30T09:00:00.000Z")
-const later = new Date("2026-08-30T09:05:00.000Z")
+import {
+  agentRunInput,
+  at,
+  insertBlankNativeSession,
+  later,
+  registerCustody,
+} from "./enrichment-fixtures"
 
 const layer = Layer.mergeAll(
   AgentRunStoreLive,
@@ -31,67 +30,6 @@ const layer = Layer.mergeAll(
 const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof layer>>) =>
   Effect.runPromise(effect.pipe(Effect.provide(layer)))
 
-const runInput = (runId: string, directory: string, createdAt: Date): AgentRunCreateInput => ({
-  runId,
-  route: "implement",
-  providerId: "zai-coding-plan",
-  modelId: "zai-coding-plan/glm-5.3-flash",
-  agent: "remote-worker",
-  repository: "workflowd",
-  directory,
-  prompt: "Fix the flaky retry test.",
-  promptSha256: "a".repeat(64),
-  parentSessionId: null,
-  resumePrompt: null,
-  maxAttempts: 3,
-  createdAt,
-})
-
-/** One custody session with no agent run, one with dispatches to follow. */
-const registerCustody = Effect.gen(function* () {
-  const sessions = yield* KernelSessionStore
-  yield* sessions.registerResource({
-    resourceId: "resource-mint",
-    owningHostId: "mint",
-    absolutePath: "/tmp/worktrees/agent-runs/idle",
-    kind: "worktree",
-    createdAt: at,
-  })
-  yield* sessions.registerResource({
-    resourceId: "resource-gpu",
-    owningHostId: "gpu-box",
-    absolutePath: "/tmp/worktrees/agent-runs/child",
-    kind: "worktree",
-    createdAt: at,
-  })
-  yield* sessions.registerSession({
-    sessionId: "session-idle",
-    providerKind: "opencode",
-    providerVersion: 3,
-    providerId: "opencode-primary",
-    serverId: "opencode-primary",
-    owningHostId: "mint",
-    endpointAlias: "local",
-    endpointIdentity: "http://127.0.0.1:4096",
-    nativeSessionId: "ses_idle",
-    resourceId: "resource-mint",
-    createdAt: at,
-  })
-  yield* sessions.registerSession({
-    sessionId: "session-dispatched",
-    providerKind: "claude",
-    providerVersion: 1,
-    providerId: "claude-primary",
-    serverId: "claude-primary",
-    owningHostId: "gpu-box",
-    endpointAlias: "local",
-    endpointIdentity: "http://127.0.0.1:4097",
-    nativeSessionId: "ses_dispatched",
-    resourceId: "resource-gpu",
-    createdAt: at,
-  })
-})
-
 const dispatchRun = (input: {
   readonly runId: string
   readonly directory: string
@@ -101,7 +39,9 @@ const dispatchRun = (input: {
 }) =>
   Effect.gen(function* () {
     const runs = yield* AgentRunStore
-    yield* runs.create(runInput(input.runId, input.directory, at))
+    yield* runs.create(
+      agentRunInput({ runId: input.runId, directory: input.directory, createdAt: at }),
+    )
     yield* runs.claimSpawn({ runId: input.runId, now: at })
     yield* runs.markSpawned({
       runId: input.runId,
@@ -185,19 +125,7 @@ describe("agent-runs enrichment store", () => {
     const document = await run(
       Effect.gen(function* () {
         yield* registerCustody
-        const sql = yield* SqlClient.SqlClient
-        // Custody guarantees a non-empty native id today; the read model still
-        // owes the contract the skip, so it fences the row out at the query.
-        yield* sql`PRAGMA ignore_check_constraints = ON`
-        yield* sql`INSERT INTO kernel_sessions (
-          session_id, provider_kind, provider_version, provider_id, server_id,
-          owning_host_id, endpoint_alias, endpoint_identity, native_session_id,
-          resource_id, state, revision, created_at, updated_at
-        ) VALUES (
-          'session-blank', 'opencode', 1, 'p', 's', 'mint', 'a', 'i', '',
-          'resource-mint', 'ready', 1, ${at.toISOString()}, ${at.toISOString()}
-        )`
-        yield* sql`PRAGMA ignore_check_constraints = OFF`
+        yield* insertBlankNativeSession
         const store = yield* AgentRunsEnrichmentStore
         return yield* store.sessions()
       }),

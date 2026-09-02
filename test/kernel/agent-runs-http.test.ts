@@ -1,4 +1,3 @@
-import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlError } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
@@ -11,6 +10,7 @@ import {
 } from "../../src/kernel/agent-runs-enrichment-store"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignalLive } from "../../src/work-signal"
+import { enrichmentHttpSuite } from "./enrichment-http-suite"
 
 const token = "agent-runs-secret"
 const now = new Date("2026-08-30T09:00:00.000Z")
@@ -40,54 +40,25 @@ const route = (request: Request, sessions: AgentRunsEnrichmentStorePort["session
     }).pipe(Effect.provide(ambient)),
   )
 
-describe("GET /workflows/agent-runs", () => {
-  test("serves the enrichment document to an authorized reader", async () => {
-    let called = 0
-    const response = await route(get({ authorization: `Bearer ${token}` }), () => {
-      called += 1
-      return Effect.succeed(document)
-    })
+const routeWithoutBinding = (request: Request) =>
+  Effect.runPromise(
+    routeRequest(request, { webhookSecret: "unused", now }).pipe(Effect.provide(ambient)),
+  )
 
-    expect(response.status).toBe(200)
-    expect(await response.json()).toEqual(document)
-    expect(called).toBe(1)
-  })
+// Store faults reach the route as the plain SQL failure the store surfaces.
+const storeFailure: AgentRunsEnrichmentStorePort["sessions"] = () =>
+  Effect.fail(
+    new SqlError.SqlError({
+      reason: new SqlError.ConnectionError({ cause: new Error("database is locked") }),
+    }),
+  )
 
-  test("rejects a missing or wrong bearer token without consulting the store", async () => {
-    let called = 0
-    const sessions: AgentRunsEnrichmentStorePort["sessions"] = () => {
-      called += 1
-      return Effect.succeed(document)
-    }
-    const missing = await route(get(), sessions)
-    const wrong = await route(get({ authorization: "Bearer nope" }), sessions)
-
-    expect(missing.status).toBe(401)
-    expect(wrong.status).toBe(401)
-    expect(called).toBe(0)
-  })
-
-  test("keeps the route absent when agent-runs enrichment is not configured", async () => {
-    const response = await Effect.runPromise(
-      routeRequest(get({ authorization: `Bearer ${token}` }), {
-        webhookSecret: "unused",
-        now,
-      }).pipe(Effect.provide(ambient)),
-    )
-
-    expect(response.status).toBe(404)
-  })
-
-  test("surfaces store failures as an opaque 500", async () => {
-    const response = await route(get({ authorization: `Bearer ${token}` }), () =>
-      Effect.fail(
-        new SqlError.SqlError({
-          reason: new SqlError.ConnectionError({ cause: new Error("database is locked") }),
-        }),
-      ),
-    )
-
-    expect(response.status).toBe(500)
-    expect(await response.json()).toEqual({ error: "internal server error" })
-  })
+enrichmentHttpSuite({
+  title: "GET /workflows/agent-runs",
+  token,
+  document,
+  get,
+  route,
+  routeWithoutBinding,
+  storeFailure,
 })
