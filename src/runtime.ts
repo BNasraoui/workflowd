@@ -11,6 +11,7 @@ import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
 import { DogfoodStore } from "./kernel/dogfood-store"
+import { AgentRunsEnrichmentStore } from "./kernel/agent-runs-enrichment-store"
 import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
@@ -190,6 +191,19 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
   }
 }
 
+/**
+ * Wires one token-guarded GET-enrichment route (dogfood, agent-runs) to its
+ * store; callers gate on the config block, and the configured-feature check
+ * above has already established the store service is present.
+ */
+const sessionsBinding = <Document, E>(
+  token: string,
+  store: Option.Option<{ readonly sessions: () => Effect.Effect<Document, E> }>,
+): { readonly token: string; readonly sessions: () => Effect.Effect<Document, E> } => ({
+  token,
+  sessions: Option.getOrThrow(store).sessions,
+})
+
 /** Each optional feature must have its service(s) in the layer when its
  * config block is present; returns the first mismatch's message, or null. */
 function firstMissingService(
@@ -201,6 +215,7 @@ function firstMissingService(
     readonly agentRuns: Option.Option<unknown>
     readonly agentRunWatchdog: Option.Option<unknown>
     readonly dogfood: Option.Option<unknown>
+    readonly agentRunsEnrichment: Option.Option<unknown>
     readonly remoteCoordinator: unknown
   },
 ): string | null {
@@ -221,6 +236,9 @@ function firstMissingService(
   }
   if (config.dogfood !== undefined && Option.isNone(services.dogfood)) {
     return "Dogfood enrichment is configured without its store"
+  }
+  if (config.agentRunsEnrichment !== undefined && Option.isNone(services.agentRunsEnrichment)) {
+    return "Agent-runs enrichment is configured without its store"
   }
   if (config.remoteCoordinator !== undefined && services.remoteCoordinator === null) {
     return "Remote coordinator is configured without its service"
@@ -246,6 +264,7 @@ export function startHookService(
     const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
     const dogfood = yield* Effect.serviceOption(DogfoodStore)
+    const agentRunsEnrichment = yield* Effect.serviceOption(AgentRunsEnrichmentStore)
     const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
     const completionSource = yield* Effect.serviceOption(OpenCodeCompletionSource)
@@ -257,6 +276,7 @@ export function startHookService(
       agentRuns,
       agentRunWatchdog,
       dogfood,
+      agentRunsEnrichment,
       remoteCoordinator,
     })
     if (missingService !== null) return yield* Effect.die(new Error(missingService))
@@ -463,11 +483,14 @@ export function startHookService(
               }),
           ...(config.dogfood === undefined
             ? {}
+            : { dogfood: sessionsBinding(config.dogfood.token, dogfood) }),
+          ...(config.agentRunsEnrichment === undefined
+            ? {}
             : {
-                dogfood: {
-                  token: config.dogfood.token,
-                  sessions: Option.getOrThrow(dogfood).sessions,
-                },
+                agentRunsEnrichment: sessionsBinding(
+                  config.agentRunsEnrichment.token,
+                  agentRunsEnrichment,
+                ),
               }),
         }),
     )

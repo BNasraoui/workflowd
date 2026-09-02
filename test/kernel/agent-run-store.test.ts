@@ -67,6 +67,7 @@ const spawn = (store: typeof AgentRunStore.Service) =>
       resourceId: "resource-1",
       sessionId: "opencode-session-ses_1",
       nativeSessionId: "ses_1",
+      worktreeBranch: "agent-run/abc",
       now: at,
     })
   })
@@ -139,6 +140,22 @@ describe("agent-run store", () => {
     expect(result.record?.state).toBe("completed")
     expect(result.record?.attempt).toBe(2)
     expect(result.record?.lastOutputTokens).toBe(9)
+    expect(result.record?.worktreeBranch).toBe("agent-run/abc")
+  })
+
+  test("markSpawned persists the dispatch-time worktree branch literal", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create(input)
+        const before = yield* store.read(input.runId)
+        yield* spawn(store)
+        const record = yield* store.read(input.runId)
+        return { before, record }
+      }),
+    )
+    expect(result.before?.worktreeBranch).toBeNull()
+    expect(result.record?.worktreeBranch).toBe("agent-run/abc")
   })
 
   test("beginAttempt refuses to exceed max_attempts", async () => {

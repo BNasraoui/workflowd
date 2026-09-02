@@ -28,7 +28,11 @@ import {
 } from "./kernel/agent-run-ingress"
 import { AgentRunSubmission } from "./agent-run-contract"
 import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
-import type { DogfoodStorePort } from "./kernel/dogfood-store"
+import type { DogfoodEnrichmentDocument, DogfoodStoreError } from "./kernel/dogfood-store"
+import type {
+  AgentRunsEnrichmentDocument,
+  AgentRunsEnrichmentStoreError,
+} from "./kernel/agent-runs-enrichment-store"
 import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
 
@@ -49,9 +53,18 @@ type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register"> & {
   readonly token: string
 }
 
-type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
+/** One token-guarded GET-enrichment route: a token plus the store's snapshot. */
+type EnrichmentBinding<Document, Error> = {
   readonly token: string
+  readonly sessions: () => Effect.Effect<Document, Error>
 }
+
+type DogfoodBinding = EnrichmentBinding<DogfoodEnrichmentDocument, DogfoodStoreError>
+
+type AgentRunsEnrichmentBinding = EnrichmentBinding<
+  AgentRunsEnrichmentDocument,
+  AgentRunsEnrichmentStoreError
+>
 
 export type WebhookHandlerOptions = {
   readonly webhookSecret: string
@@ -62,6 +75,7 @@ export type WebhookHandlerOptions = {
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
+  readonly agentRunsEnrichment?: AgentRunsEnrichmentBinding
 }
 
 export function routeRequest(
@@ -107,7 +121,14 @@ export function routeRequest(
     request.method === "GET" &&
     options.dogfood !== undefined
   ) {
-    return handleDogfoodSessions(request, options.dogfood)
+    return handleEnrichment(request, options.dogfood, "Dogfood enrichment")
+  }
+  if (
+    pathname === "/workflows/agent-runs" &&
+    request.method === "GET" &&
+    options.agentRunsEnrichment !== undefined
+  ) {
+    return handleEnrichment(request, options.agentRunsEnrichment, "Agent-runs enrichment")
   }
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
@@ -301,18 +322,22 @@ function handleAgentRunRegister(
 }
 
 /**
- * Read-only provenance ground truth: bearer-token guarded like the other
- * token-bearing surfaces, then a single store query shaped as the
- * `provenance-dogfood-enrichment/v1` document.
+ * Read-only enrichment surfaces (dogfood, agent-runs): bearer-token guarded
+ * like the other token-bearing surfaces, then a single store query served as
+ * its contract's JSON document; store faults stay an opaque 500.
  */
-function handleDogfoodSessions(request: Request, dogfood: DogfoodBinding) {
-  if (!authorized(request.headers.get("authorization"), dogfood.token)) {
+function handleEnrichment<Document, Error>(
+  request: Request,
+  enrichment: EnrichmentBinding<Document, Error>,
+  label: string,
+) {
+  if (!authorized(request.headers.get("authorization"), enrichment.token)) {
     return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
   }
-  return dogfood.sessions().pipe(
-    Effect.map((enrichment) => Response.json(enrichment)),
+  return enrichment.sessions().pipe(
+    Effect.map((document) => Response.json(document)),
     Effect.catchCause((cause) =>
-      Effect.logError("Dogfood enrichment failed", cause).pipe(
+      Effect.logError(`${label} failed`, cause).pipe(
         Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
       ),
     ),

@@ -199,6 +199,10 @@ describe("agent-run ingress", () => {
     expect(result.run?.state).toBe("verified")
     expect(trees).toHaveLength(1)
     expect(trees[0]!.repository).toBe("/home/ben/repos/workflowd")
+    // The persisted branch is the exact literal handed to worktrees.create,
+    // and it follows the agent-run/<basename(directory)> convention.
+    expect(result.run?.worktreeBranch).toBe(trees[0]!.branch)
+    expect(result.run?.worktreeBranch).toBe(`agent-run/${result.run!.directory.split("/").pop()}`)
     expect(state.created[0]!.agent).toBe("remote-worker")
     expect(state.prompted[0]!.text).toBe(submission.prompt)
   })

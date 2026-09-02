@@ -1262,6 +1262,26 @@ const kernelAgentRuns = Effect.gen(function* () {
     WHERE state IN ('accepted', 'spawning', 'spawned', 'verified')`
 })
 
+/**
+ * Every dispatched run's worktree lives at agent-runs/<short> under the
+ * worktree root and its branch is agent-run/<short>, so the column is
+ * nullable (pre-dispatch rows never named a branch) and the backfill
+ * reconstructs the dispatch literal from the directory the row already
+ * carries. SQLite builds without basename() (including Bun's), so the
+ * basename is derived by stripping the prefix through the last '/'.
+ */
+const kernelAgentRunsWorktreeBranch = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN worktree_branch TEXT`
+  yield* sql`UPDATE kernel_agent_runs
+    SET worktree_branch = 'agent-run/' || replace(
+      directory,
+      rtrim(directory, replace(directory, '/', '')),
+      ''
+    )
+    WHERE worktree_branch IS NULL`
+})
+
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
   "0002_agent_harness": agentHarnessSchema,
@@ -1318,6 +1338,15 @@ export const runStoreMigrationsThrough0016 = Migrator.make({})({
 })
 
 export const runStoreMigrations = Migrator.make({})({
+  loader: Migrator.fromRecord({
+    ...migrationsThrough0016,
+    "0017_remove_agent_completion_baseline": removeAgentCompletionBaseline,
+    "0018_kernel_agent_runs": kernelAgentRuns,
+    "0019_kernel_agent_runs_worktree_branch": kernelAgentRunsWorktreeBranch,
+  }),
+})
+
+export const runStoreMigrationsThrough0018 = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0016,
     "0017_remove_agent_completion_baseline": removeAgentCompletionBaseline,

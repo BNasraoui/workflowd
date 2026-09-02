@@ -1,6 +1,7 @@
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Context, Data, Effect, Layer, Schema } from "effect"
+import { enrichmentDocument, omitNull, type EnrichmentDocument } from "./enrichment-read-model"
 
 /**
  * Read-only provenance dogfood enrichment.
@@ -25,10 +26,10 @@ export type DogfoodSessionEnrichment = {
   readonly repository?: string
 }
 
-export type DogfoodEnrichmentDocument = {
-  readonly contract: typeof DOGFOOD_ENRICHMENT_CONTRACT
-  readonly sessions: Readonly<Record<string, DogfoodSessionEnrichment>>
-}
+export type DogfoodEnrichmentDocument = EnrichmentDocument<
+  DogfoodSessionEnrichment,
+  typeof DOGFOOD_ENRICHMENT_CONTRACT
+>
 
 export class DogfoodStoreDataError extends Data.TaggedError("DogfoodStoreDataError")<{
   readonly message: string
@@ -53,26 +54,26 @@ const EnrichmentRow = Schema.Struct({
   repository: Schema.NullOr(Schema.String),
 })
 
-const decodeRow = (row: Record<string, unknown>) =>
-  Schema.decodeUnknownEffect(EnrichmentRow)(row).pipe(
-    Effect.mapError((error) => new DogfoodStoreDataError({ message: String(error) })),
-  )
-
 /** A session with no agent run omits the run fields — never emits nulls. */
 const toEnrichment = (row: Schema.Schema.Type<typeof EnrichmentRow>): DogfoodSessionEnrichment => ({
   harness: row.harness,
   harness_version: row.harness_version,
   machine: row.machine,
-  ...(row.model === null ? {} : { model: row.model }),
-  ...(row.agent === null ? {} : { agent: row.agent }),
-  ...(row.repository === null ? {} : { repository: row.repository }),
+  ...omitNull("model", row.model),
+  ...omitNull("agent", row.agent),
+  ...omitNull("repository", row.repository),
 })
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
 
   const sessions: DogfoodStorePort["sessions"] = () =>
-    sql`
+    enrichmentDocument({
+      contract: DOGFOOD_ENRICHMENT_CONTRACT,
+      row: EnrichmentRow,
+      toEnrichment,
+      dataError: (message) => new DogfoodStoreDataError({ message }),
+    })(sql`
       SELECT s.native_session_id,
         s.provider_kind AS harness,
         s.provider_version AS harness_version,
@@ -89,13 +90,7 @@ const make = Effect.gen(function* () {
       )
       WHERE s.native_session_id IS NOT NULL AND s.native_session_id <> ''
       ORDER BY s.native_session_id
-    `.pipe(
-      Effect.flatMap((rows) => Effect.forEach(rows, decodeRow)),
-      Effect.map((rows) => ({
-        contract: DOGFOOD_ENRICHMENT_CONTRACT,
-        sessions: Object.fromEntries(rows.map((row) => [row.native_session_id, toEnrichment(row)])),
-      })),
-    )
+    `)
 
   return DogfoodStore.of({ sessions })
 })

@@ -30,6 +30,7 @@ const AgentRunRow = Schema.Struct({
   resource_id: Schema.NullOr(Schema.String),
   session_id: Schema.NullOr(Schema.String),
   native_session_id: Schema.NullOr(Schema.String),
+  worktree_branch: Schema.NullOr(Schema.String),
   state: Schema.Literals([
     "accepted",
     "spawning",
@@ -62,6 +63,7 @@ export type AgentRunRecord = {
   readonly resourceId: string | null
   readonly sessionId: string | null
   readonly nativeSessionId: string | null
+  readonly worktreeBranch: string | null
   readonly state: AgentRunState
   readonly attempt: number
   readonly maxAttempts: number
@@ -116,6 +118,7 @@ export type AgentRunStorePort = {
       readonly resourceId: string
       readonly sessionId: string
       readonly nativeSessionId: string
+      readonly worktreeBranch: string
     },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly markVerified: (
@@ -162,6 +165,7 @@ const toRecord = (row: Record<string, unknown>) =>
       resourceId: decoded.resource_id,
       sessionId: decoded.session_id,
       nativeSessionId: decoded.native_session_id,
+      worktreeBranch: decoded.worktree_branch,
       state: decoded.state,
       attempt: decoded.attempt,
       maxAttempts: decoded.max_attempts,
@@ -249,7 +253,8 @@ const make = Effect.gen(function* () {
         existing.state !== "accepted" &&
         existing.state !== "spawning" &&
         existing.sessionId === input.sessionId &&
-        existing.nativeSessionId === input.nativeSessionId
+        existing.nativeSessionId === input.nativeSessionId &&
+        existing.worktreeBranch === input.worktreeBranch
       ) {
         return
       }
@@ -258,6 +263,7 @@ const make = Effect.gen(function* () {
         "run is not in spawning state",
         sql`UPDATE kernel_agent_runs SET state = 'spawned', resource_id = ${input.resourceId},
           session_id = ${input.sessionId}, native_session_id = ${input.nativeSessionId},
+          worktree_branch = ${input.worktreeBranch},
           updated_at = ${input.now.toISOString()}
           WHERE run_id = ${input.runId} AND state = 'spawning' RETURNING run_id`,
       )

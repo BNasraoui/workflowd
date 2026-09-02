@@ -392,6 +392,43 @@ describe("loadConfig", () => {
     ).rejects.toThrow("WORKFLOWD_DOGFOOD_TOKEN must contain at least 8 characters")
   })
 
+  test("optionally loads the agent-runs enrichment token from exactly one source", async () => {
+    const disabled = await loadConfig(requiredEnvironment, { home: "/home/test" })
+    const direct = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret" },
+      { home: "/home/test" },
+    )
+    const fromFile = await loadConfig(
+      { ...requiredEnvironment, WORKFLOWD_AGENT_RUNS_TOKEN_FILE: "/run/agent-runs-token" },
+      { home: "/home/test", readFile: async () => "file-agent-runs-secret\n" },
+    )
+
+    expect(disabled.agentRunsEnrichment).toBeUndefined()
+    expect(direct.agentRunsEnrichment).toEqual({ token: "agent-runs-secret" })
+    expect(fromFile.agentRunsEnrichment).toEqual({ token: "file-agent-runs-secret" })
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret",
+          WORKFLOWD_AGENT_RUNS_TOKEN_FILE: "/run/agent-runs-token",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow(
+      "WORKFLOWD_AGENT_RUNS_TOKEN and WORKFLOWD_AGENT_RUNS_TOKEN_FILE cannot both be set",
+    )
+  })
+
+  test("requires a sensible agent-runs enrichment token length", async () => {
+    await expect(
+      loadConfig(
+        { ...requiredEnvironment, WORKFLOWD_AGENT_RUNS_TOKEN: "short" },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUNS_TOKEN must contain at least 8 characters")
+  })
+
   test.each(["WORKFLOWD_QRSPI_PROVIDER_INSTANCE_ID", "WORKFLOWD_QRSPI_BASE_REF"])(
     "requires the QRSPI token when %s is present",
     async (name) => {

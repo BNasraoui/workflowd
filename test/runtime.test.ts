@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
 import { AgentHarness } from "../src/agent-harness"
-import { loadConfig } from "../src/config"
+import { loadConfig, type AppConfig } from "../src/config"
 import {
   DOGFOOD_ENRICHMENT_CONTRACT,
   DogfoodStore,
   type DogfoodEnrichmentDocument,
 } from "../src/kernel/dogfood-store"
+import {
+  AGENT_RUNS_ENRICHMENT_CONTRACT,
+  AgentRunsEnrichmentStore,
+  type AgentRunsEnrichmentDocument,
+} from "../src/kernel/agent-runs-enrichment-store"
 import { GitHub } from "../src/github"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
@@ -885,6 +890,85 @@ describe("runHookService startup", () => {
   })
 })
 
+/**
+ * Wiring-probe scaffolding shared by the enrichment surfaces: a base env
+ * plus one surface's token env, adapter stubs that die on first use, and
+ * the two boot probes (serve one route / fail startup with a named cause).
+ */
+const probeEnvironment = (surfaceEnv: Record<string, string>) => ({
+  GITHUB_APP_ID: "123",
+  GITHUB_PRIVATE_KEY_PATH: "/srv/secrets/github-app-key",
+  GITHUB_WEBHOOK_SECRET: "secret",
+  OPENCODE_SERVER_PASSWORD: "password",
+  WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+  ...surfaceEnv,
+})
+
+const probeConfig = (loaded: AppConfig) => ({
+  ...loaded,
+  http: { ...loaded.http, port: 0 },
+  worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+})
+
+const UnreachableGitHub = Layer.succeed(GitHub, {
+  fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
+  publishReview: () => Effect.die("unexpected publish"),
+  collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+})
+const UnreachableAutomation = Layer.succeed(Automation, {
+  validateAvailability: () => Effect.void,
+  prepareReview: () => Effect.die("unexpected review"),
+  prepareFix: () => Effect.die("unexpected fix"),
+})
+const UnreachableAgentHarness = Layer.succeed(AgentHarness, {
+  describe: () => Effect.die("unexpected harness description"),
+  validateAvailability: () => Effect.die("unexpected harness validation"),
+  prepare: () => Effect.die("unexpected preparation"),
+  createSession: () => Effect.die("unexpected session creation"),
+  resumeSession: () => Effect.die("unexpected session resume"),
+  abortSession: () => Effect.die("unexpected session abort"),
+})
+const UnreachableWorkspace = Layer.succeed(Workspace, {
+  prepareReview: () => Effect.die("unexpected review workspace"),
+  prepareFix: () => Effect.die("unexpected fix workspace"),
+  publishFix: () => Effect.die("unexpected fix publication"),
+})
+const probeAdapters = Layer.mergeAll(
+  WorkSignalLive,
+  UnreachableGitHub,
+  UnreachableAutomation,
+  UnreachableAgentHarness,
+  UnreachableWorkspace,
+)
+
+/** Boots the runtime once and probes one enrichment route with/without its token. */
+const probeEnrichmentRoute = (input: {
+  readonly config: AppConfig
+  readonly path: string
+  readonly token: string
+}) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* startHookService(input.config)
+      const base = `http://${server.hostname}:${server.port}${input.path}`
+      const authorized = yield* Effect.tryPromise(() =>
+        fetch(base, { headers: { authorization: `Bearer ${input.token}` } }),
+      )
+      const unauthorized = yield* Effect.tryPromise(() => fetch(base))
+      return {
+        authorized: {
+          status: authorized.status,
+          body: yield* Effect.promise(() => authorized.json()),
+        },
+        unauthorized: unauthorized.status,
+      }
+    }),
+  )
+
+/** Boots the runtime expecting startup to fail; returns the exit for assertions. */
+const probeStartFailure = (config: AppConfig) =>
+  Effect.exit(Effect.scoped(startHookService(config)))
+
 describe("dogfood enrichment wiring", () => {
   const dogfoodDocument: DogfoodEnrichmentDocument = {
     contract: DOGFOOD_ENRICHMENT_CONTRACT,
@@ -895,67 +979,19 @@ describe("dogfood enrichment wiring", () => {
 
   test("serves the configured route from the wired dogfood store", async () => {
     const loaded = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret",
-      },
+      probeEnvironment({ WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret" }),
       { home: "/tmp" },
     )
-    const config = {
-      ...loaded,
-      http: { ...loaded.http, port: 0 },
-      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
-    }
-    const adapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
+    const adapters = Layer.merge(
+      probeAdapters,
       Layer.succeed(DogfoodStore, { sessions: () => Effect.succeed(dogfoodDocument) }),
     )
-
     const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const server = yield* startHookService(config)
-          const base = `http://${server.hostname}:${server.port}/workflows/dogfood/sessions`
-          const authorized = yield* Effect.tryPromise(() =>
-            fetch(base, { headers: { authorization: "Bearer dogfood-secret" } }),
-          )
-          const unauthorized = yield* Effect.tryPromise(() => fetch(base))
-          return {
-            authorized: {
-              status: authorized.status,
-              body: yield* Effect.promise(() => authorized.json()),
-            },
-            unauthorized: unauthorized.status,
-          }
-        }),
-      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters))),
+      probeEnrichmentRoute({
+        config: probeConfig(loaded),
+        path: "/workflows/dogfood/sessions",
+        token: "dogfood-secret",
+      }).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters))),
     )
 
     expect(result.authorized).toEqual({ status: 200, body: dogfoodDocument })
@@ -964,55 +1000,67 @@ describe("dogfood enrichment wiring", () => {
 
   test("refuses to start when dogfood is configured without its store", async () => {
     const loaded = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret",
-      },
+      probeEnvironment({ WORKFLOWD_DOGFOOD_TOKEN: "dogfood-secret" }),
       { home: "/tmp" },
     )
     const config = { ...loaded, worker: { ...loaded.worker, concurrency: 0 } }
-    const adapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-        publishReview: () => Effect.die("unexpected publish"),
-        collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () => Effect.void,
-        prepareReview: () => Effect.die("unexpected review"),
-        prepareFix: () => Effect.die("unexpected fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("unexpected harness description"),
-        validateAvailability: () => Effect.die("unexpected harness validation"),
-        prepare: () => Effect.die("unexpected preparation"),
-        createSession: () => Effect.die("unexpected session creation"),
-        resumeSession: () => Effect.die("unexpected session resume"),
-        abortSession: () => Effect.die("unexpected session abort"),
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("unexpected review workspace"),
-        prepareFix: () => Effect.die("unexpected fix workspace"),
-        publishFix: () => Effect.die("unexpected fix publication"),
-      }),
-    )
-
     const exit = await Effect.runPromise(
-      Effect.exit(
-        Effect.scoped(startHookService(config)).pipe(
-          Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)),
-        ),
+      probeStartFailure(config).pipe(
+        Effect.provide(Layer.merge(kernelLayer(":memory:"), probeAdapters)),
       ),
     )
 
     expect(exit._tag).toBe("Failure")
     expect(Cause.pretty(exit._tag === "Failure" ? exit.cause : Cause.empty)).toContain(
       "Dogfood enrichment is configured without its store",
+    )
+  })
+})
+
+describe("agent-runs enrichment wiring", () => {
+  const enrichmentDocument: AgentRunsEnrichmentDocument = {
+    contract: AGENT_RUNS_ENRICHMENT_CONTRACT,
+    sessions: { ses_idle: {} },
+  }
+
+  test("serves the configured route from the wired enrichment store", async () => {
+    const loaded = await loadConfig(
+      probeEnvironment({ WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret" }),
+      { home: "/tmp" },
+    )
+    const adapters = Layer.merge(
+      probeAdapters,
+      Layer.succeed(AgentRunsEnrichmentStore, {
+        sessions: () => Effect.succeed(enrichmentDocument),
+      }),
+    )
+    const result = await Effect.runPromise(
+      probeEnrichmentRoute({
+        config: probeConfig(loaded),
+        path: "/workflows/agent-runs",
+        token: "agent-runs-secret",
+      }).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters))),
+    )
+
+    expect(result.authorized).toEqual({ status: 200, body: enrichmentDocument })
+    expect(result.unauthorized).toBe(401)
+  })
+
+  test("refuses to start when agent-runs enrichment is configured without its store", async () => {
+    const loaded = await loadConfig(
+      probeEnvironment({ WORKFLOWD_AGENT_RUNS_TOKEN: "agent-runs-secret" }),
+      { home: "/tmp" },
+    )
+    const config = { ...loaded, worker: { ...loaded.worker, concurrency: 0 } }
+    const exit = await Effect.runPromise(
+      probeStartFailure(config).pipe(
+        Effect.provide(Layer.merge(kernelLayer(":memory:"), probeAdapters)),
+      ),
+    )
+
+    expect(exit._tag).toBe("Failure")
+    expect(Cause.pretty(exit._tag === "Failure" ? exit.cause : Cause.empty)).toContain(
+      "Agent-runs enrichment is configured without its store",
     )
   })
 })
