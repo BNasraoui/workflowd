@@ -1,8 +1,91 @@
 # Workflowd
 
-Local GitHub pull-request automation backed by OpenCode, Bun, Effect, and SQLite.
+A durable agent-operations daemon. Workflowd dispatches coding agents into git
+worktrees and supervises them, wakes parent agents when child work finishes,
+runs a remote command plane over NATS JetStream, drives bead-native QRSPI
+design workflows, and automates GitHub pull-request review — all against one
+SQLite authority. Built on Bun, Effect, SQLite, and OpenCode.
 
-## Flow
+## Planes
+
+Four cooperating processes make up an installation. The daemon is the core;
+the others attach to it.
+
+| Plane | Process | Default port | Purpose |
+| --- | --- | --- | --- |
+| Daemon | `workflowd.service` (`bun src/main.ts`) | 8787 | Webhook listener, kernel workers, HTTP ingresses, remote coordinator |
+| MCP server | `workflowd-mcp.service` (`bun src/mcp-server.ts`) | 8791 | Six MCP tools over the same store; the agent-facing front door |
+| Remote runner | `workflowd-runner.service` (`bun src/remote-runner.ts`) | — | Per-host execution of probe and `claude_resume` commands |
+| OpenCode server | `opencode-server.service` (external, v2 CLI) | 4096 | Agent sessions the daemon creates, prompts, and resumes |
+
+The daemon's SQLite database is the workflow authority: jobs, workflow
+instances, waits, events, leases, and deliveries all live there. Workers are
+supervised Effect fibers woken by work signals; a worker may mutate leased
+work only while its operation time is strictly before lease expiry. The MCP
+server and the remote-enqueue CLI read and write that same database and hold
+no state of their own. JetStream is bounded, durable, at-least-once
+transport; runner inbox/outbox tables fence duplicate execution.
+
+## Agent dispatch and waits
+
+`dispatch_agent` is the dispatch path for orchestrator agents. One call
+resolves a configured route (never a provider-prefixed model id), pre-flights
+provider authentication and model availability, creates a fresh worktree of
+an allow-listed repository, spawns the session, registers it into kernel
+custody, and returns a receipt only after the session's first generated
+token. A session that generates nothing is aborted and the dispatch is
+refused — a quota-dead route can no longer report "dispatched". After the
+receipt, a watchdog polls token counters, re-prompts stalled runs in place,
+and escalates exhausted runs to `operator_required`.
+
+`wait_for_agent` registers a durable wait so a parent session is woken when
+a child session finishes. Both sessions must already be in kernel custody.
+Parents come in two kinds: OpenCode sessions on the managed server, and
+Claude Code sessions on the daemon's host (woken through two
+`claude -p --resume` turns).
+
+Both tools follow a fire-and-ack contract: every write returns a receipt,
+never a result, and there is deliberately no blocking wait tool. Read the
+outcome with `job_status` in a later turn. Refusals ride the advertised
+output schema with a machine-readable reason. See
+[docs/mcp-server.md](docs/mcp-server.md) for the full tool, authorization,
+and HTTP-ingress documentation.
+
+## Remote plane
+
+The coordinator (inside the daemon) publishes commands to
+`workflowd.v1.commands.<host>`; each runner host pulls its own filtered
+JetStream durable consumer and publishes results. Two command kinds ride the
+plane: a built-in harmless probe, and `claude_resume` — a request to wake a
+Claude Code session on the runner's host. The wake is constrained on the
+runner's own side: it runs only for directories under runner-local
+`WORKFLOWD_RUNNER_CLAUDE_DIRS` prefixes, never through a shell, and at most
+once per claim. Per-identity NATS credentials (decentralized JWTs) scope
+each identity to its own subjects.
+
+A deterministic simulation harness runs the real coordinator, runner,
+stores, and transport port against seeded failure schedules; the short
+corpus runs in CI and a soak entrypoint drives longer runs. See
+[docs/remote-runner.md](docs/remote-runner.md) and
+[docs/remote-simulation.md](docs/remote-simulation.md).
+
+## QRSPI design workflows
+
+QRSPI is a bead-native staged design discipline: Question, Research, Design,
+Structure, Plan, then Implementation. Stage artifacts are committed to one
+deterministic ticket branch and reviewed by immutable git identity; a pull
+request is created only after required stages, implementation, verification,
+and human gates are complete. Beads owns product intent, git owns artifact
+bytes, Workflowd owns operational state, and each stage resolves against a
+trusted, server-owned stage catalog.
+
+`POST /workflows/qrspi` starts a workflow. The canonical contract lives in
+[docs/qrspi-contract.md](docs/qrspi-contract.md), with stage-runtime and
+stage-catalog design in
+[docs/qrspi-stage-runtime-design.md](docs/qrspi-stage-runtime-design.md) and
+[docs/qrspi-trusted-stage-catalog-design.md](docs/qrspi-trusted-stage-catalog-design.md).
+
+## Pull-request automation
 
 ```text
 GitHub App webhook
@@ -17,7 +100,7 @@ GitHub App webhook
 
 Pull-request events are deduplicated by `X-GitHub-Delivery`. Any exact Review Target change advances the PR Generation and supersedes older queued work. A newly accepted webhook also revokes and re-arms active reconciliation for that pull request so a response fetched before the webhook cannot overwrite it. SQLite leases recover work after process restarts; an owner may mutate leased work only while the operation time is strictly before lease expiry.
 
-## Worktrees
+### Worktrees
 
 The controller first checks the OpenCode worktree registry at `~/.local/share/opencode/worktree-jobs`, then configured local repository roots and their registered Git worktrees.
 
@@ -35,7 +118,7 @@ A managed checkout and temporary worktree are used only when no matching local w
 
 Managed review worktree paths include the immutable job generation and attempt. Managed Fix Work paths remain stable across attempts so retries can recover retained edits. Cleanup can make an old session directory unavailable, but a later job generation never reuses that path for unrelated contents.
 
-## Resumable OpenCode sessions
+### Resumable OpenCode sessions
 
 Workflowd checkpoints the configured OpenCode server identity and exact native session ID before prompting an agent. Applicable review publications resolve that durable, generation-bound reference and include a copy-pastable command of the form:
 
@@ -47,7 +130,7 @@ Set `WORKFLOWD_OPENCODE_ATTACH_URL` to a credential-free URL reachable only thro
 
 Session-reference metadata is retained with its execution. Workflowd does not copy or delete OpenCode transcripts. Superseded, failed, aborted, expired, endpoint-mismatched, and missing native sessions are reported explicitly and are never redirected to a newer generation or guessed by title. Worktree cleanup does not change the stored directory; if either the directory or server session is gone, the retained reference remains audit metadata rather than silently targeting replacement contents.
 
-## Policies
+### Policies
 
 - Reviews run through the read-only `pr-reviewer` agent.
 - Fix Work is disabled by default. Reviews and `/agent fix` cannot enqueue or execute fixes unless `WORKFLOWD_FIX_WORK_ENABLED=true` is explicitly configured.
@@ -58,6 +141,25 @@ Session-reference metadata is retained with its execution. Workflowd does not co
 - A subsequent `pull_request.synchronize` webhook queues the follow-up review.
 - Authorized users may leave `/agent review`, `/agent fix`, or `/agent status` comments. Configure them with `WORKFLOWD_COMMAND_USERS`.
 - The OpenCode server must set `OPENCODE_DISABLE_PROJECT_CONFIG=1`, so an untrusted PR cannot replace the automation agents or permissions. The shipped systemd drop-in enforces this.
+
+## HTTP surface
+
+The daemon serves, on one listener:
+
+| Route | Method | Enabled when | Purpose |
+| --- | --- | --- | --- |
+| `/health` | GET | always | Liveness; responds `{"status":"ok"}` |
+| `/hooks/github` | POST | always | GitHub App webhook receiver |
+| `/workflows/qrspi` | POST | token configured | Start a QRSPI workflow |
+| `/workflows/agent-waits` | POST | token configured | Register a durable agent wait (proxied by `wait_for_agent`) |
+| `/workflows/agent-runs` | POST | token configured | Dispatch an agent run (proxied by `dispatch_agent`) |
+| `/workflows/test-jobs` | POST | token configured | Authenticated test-job canary |
+| `/workflows/dogfood/sessions` | GET | token configured | Read-only dogfood session enrichment |
+
+Every `/workflows/*` route is token-gated and registered only when its
+feature is configured; without its token the path 404s. Route-specific
+request and response contracts are documented in [docs/mcp-server.md](docs/mcp-server.md)
+(agent waits and runs).
 
 ## GitHub App
 
@@ -149,7 +251,7 @@ The required installed values are:
 
 Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 
-All optional environment names, defaults, separators, timeout/lease settings, and development secret alternatives are documented in `deploy/workflowd.env.example`. Startup rejects invalid ports, URLs, model/agent identifiers, branch prefixes, GitHub users, and leases that do not outlast their timeout.
+Each optional feature — the test-job canary, the agent-wait ingress, the agent-run ingress, dogfood enrichment, the QRSPI ingress, and the remote coordinator — stays disabled until its token (and, where required, its routes and repositories) is configured. See `deploy/workflowd.env.example` and [docs/mcp-server.md](docs/mcp-server.md). All optional environment names, defaults, separators, timeout/lease settings, and development secret alternatives are documented there. Startup rejects invalid ports, URLs, model/agent identifiers, branch prefixes, GitHub users, and leases that do not outlast their timeout.
 
 ### Credentials
 
@@ -177,67 +279,23 @@ install -Dm0644 deploy/systemd/opencode-server.service.d/10-disable-project-conf
 
 OpenCode loads agents and configuration only at startup. Restart `opencode-server.service` after independent verification to apply these files. `systemctl --user cat opencode-server.service` must show `Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1` before processing untrusted repositories.
 
-## Ticket Writing Skill
+## Skills
 
-Install the bundled `ticket-writing` skill for OpenCode through skills.sh:
-
-```bash
-npx skills add BNasraoui/workflowd --skill ticket-writing --agent opencode -y
-```
-
-Confirm that OpenCode discovers the installed skill:
+Five model-invoked skills ship in `skills/`. Install any of them through skills.sh:
 
 ```bash
-opencode debug skill
+npx skills add BNasraoui/workflowd --skill <skill-name> --agent opencode -y
 ```
 
-The skill is model-invoked. Ask OpenCode to draft, refine, translate, or review a ticket
-for QRSPI readiness. For example:
+Confirm discovery with `opencode debug skill`.
 
-```text
-Refine workflowd-123 and update the Bead once it is ready for QRSPI.
-```
+- `ticket-writing` — draft, refine, translate, or review a ticket for QRSPI readiness. The canonical template lives at `skills/ticket-writing/references/ticket-template.md`; do not copy it into OpenCode configuration.
+- `qrspi-design-structure` — produce or review QRSPI Design or Structure artifacts against the normative contract bundled at `skills/qrspi-design-structure/references/qrspi-design-structure-contract.md`. In this repository, `docs/qrspi-contract.md` remains canonical. Maintainers must run `bun run skill:sync` and commit the generated reference, and review the operational checklist, with every contract change; `bun run skill:check` verifies the bundle's source hash and exact content.
+- `design-boundary-reviewer` — trace every material capability in a draft Design to the current ticket and its issue graph before human Design approval. Returns `ScopeClean`, `ReviseDesign`, or `NeedsClarification`; does not replace the post-Structure size and decomposition review.
+- `impact-risk-reviewer` — evidence-backed hazard trace (impact, control, verification, residual risk) for a boundary-clean Design revision, before human Design approval. Read-only; requires Bun for the bundled 5x5 risk calculator.
+- `structure-scope-reviewer` — independent post-Structure size and decomposition review; decides `FeatureFit`, `SplitFeature`, `PromoteToEpic`, `KeepLarge`, or `NeedsResearch`. Read-only.
 
-The canonical ticket template lives in
-`skills/ticket-writing/references/ticket-template.md`; do not copy it into
-OpenCode configuration.
-
-## QRSPI Design and Structure Skill
-
-Install the bundled process skill when an agent will produce or review QRSPI Design or
-Structure artifacts:
-
-```bash
-npx skills add BNasraoui/workflowd --skill qrspi-design-structure --agent opencode -y
-```
-
-The installed skill is self-contained: the complete normative contract is bundled at
-`skills/qrspi-design-structure/references/qrspi-design-structure-contract.md`, so using it
-does not require repository access or a network request. In this repository,
-`docs/qrspi-contract.md` remains canonical. Maintainers must run `bun run skill:sync` and
-commit the generated reference, and review the operational checklist, with every contract
-change; `bun run skill:check` verifies the bundle's source hash and exact content.
-
-## Design Boundary Reviewer Skill
-
-Install the model-invoked `design-boundary-reviewer` skill through skills.sh:
-
-```bash
-npx skills add BNasraoui/workflowd --skill design-boundary-reviewer --agent opencode -y
-```
-
-Run `opencode debug skill` and verify that `design-boundary-reviewer` appears in the
-discovered skill list.
-
-Use it to trace every material capability in a draft Design to the current ticket and
-its issue graph before human Design approval. It returns `ScopeClean`, `ReviseDesign`, or
-`NeedsClarification` and does not replace the post-Structure size and decomposition
-review.
-
-The canonical skill, authority model, output contract, fixtures, and recorded evaluation
-results live under `skills/design-boundary-reviewer/`.
-
-## Workflowd Unit
+## Units
 
 Install, but do not enable or start, the Workflowd unit:
 
@@ -247,6 +305,11 @@ systemctl --user daemon-reload
 ```
 
 The unit requires `opencode-server.service`, loads both credentials into a protected runtime directory, starts only after OpenCode startup validation succeeds, and uses `UMask=0077`. Fix Work remains disabled by default and is enabled through `WORKFLOWD_FIX_WORK_ENABLED=true` for trusted agent-owned pull requests.
+
+Two optional units ship beside it:
+
+- `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Without `WORKFLOWD_MCP_TOKEN` it starts read-only; write tools refuse every call. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
+- `workflowd-runner.service` — a host-specific remote runner. It needs a NATS credential and `deploy/runner.env.example` copied to `~/.config/workflowd/runner.env`; install steps, credential minting, and the `claude_resume` threat model are in [docs/remote-runner.md](docs/remote-runner.md).
 
 ## Verification
 
@@ -290,6 +353,8 @@ bun install --frozen-lockfile
 bun run check
 ```
 
+`bun run check` runs typecheck, Effect diagnostics, the skill-bundle hash check, Knip, ESLint, Prettier, tests with coverage thresholds, and a CRAP-based check. The remote plane adds two entrypoints: `bun run simulate:remote` runs the deterministic simulation corpus, and `bun run soak:remote` drives longer seeded runs outside the test timeout.
+
 The pre-commit hook blocks commits containing a staged file over 600 lines and requires
 the file to be restructured into smaller modules. It checks the staged content, including
 partially staged files, rather than the working-tree copy.
@@ -302,4 +367,4 @@ with the matching type. The installer changes only this repository's local
 `core.hooksPath`. Git's `--no-verify` option bypasses the check, so the hook is
 local feedback rather than a security boundary.
 
-The tested runtime baseline is Bun `1.3.14`, Effect `3.22.0`, and OpenCode/SDK `1.18.3`.
+The tested runtime baseline is Bun `1.3.14` (pinned in CI), Effect `4.0.0-rc.112`, OpenCode SDK `0.0.0-beta-18684`, MCP SDK `1.30.0`, and NATS clients `3.4.0`.
