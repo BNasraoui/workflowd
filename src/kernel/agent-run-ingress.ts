@@ -512,7 +512,13 @@ const make = (options: AgentRunIngressOptions) =>
     const observeCodexFirstToken = (process: CodexRunProcess, firstTokenTimeoutMs: number) =>
       Effect.gen(function* () {
         const iterator = process.events[Symbol.asyncIterator]()
-        const exited = yield* Effect.forkChild(process.exited)
+        // The process fiber must outlive the dispatching HTTP request: the
+        // receipt returns while codex is still streaming, and a scoped child
+        // fiber dies with the request scope — taking the process group with
+        // it (observed as `codex_failed: exit -1` the moment a client
+        // disconnected after the receipt). Detach so only the drain fiber's
+        // explicit interrupt or codex's own exit ends the process.
+        const exited = yield* Effect.forkDetach(process.exited)
         let threadId: string | null = null
         let firstMessage: string | null = null
         const errors: string[] = []
