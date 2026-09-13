@@ -25,6 +25,7 @@ import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
+import { CODEX_PROVIDER_ID, CodexCli, makeCodexCli } from "./kernel/codex-session"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import {
   ClaudeResumeRemoteProducer,
@@ -263,6 +264,10 @@ export const makeLiveLayer = (config: AppConfig) => {
     ClaudeCli,
     makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
   )
+  const codexCliLayer = Layer.succeed(
+    CodexCli,
+    makeCodexCli({ binary: config.agentRuns?.codexBinary ?? "codex" }),
+  )
   const claudeResumeWorkerLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -313,11 +318,13 @@ export const makeLiveLayer = (config: AppConfig) => {
       : Layer.merge(
           AgentRunIngressLive({
             routes: config.agentRuns.routes,
+            codexRoutes: config.agentRuns.codexRoutes,
             repositories: config.agentRuns.repositories,
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
             verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,
             verifyPollIntervalMs: config.agentRuns.verifyPollIntervalMs,
+            progressWindowMs: config.agentRuns.progressWindowMs,
             maxAttempts: config.agentRuns.maxAttempts,
             claudeHosts: config.agentRuns.claudeHosts,
             identity: completionSourceOptions,
@@ -327,6 +334,9 @@ export const makeLiveLayer = (config: AppConfig) => {
             // A run stuck before verification for ten verify windows was
             // abandoned by its dispatching request; the watchdog fails it.
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
+            // Codex runs complete inline in the dispatching request; their
+            // verified rows are invisible to the watchdog.
+            unsupervisedProviderIds: [CODEX_PROVIDER_ID],
             now: () => new Date(),
           }),
         ).pipe(
@@ -335,6 +345,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
+          Layer.provideMerge(codexCliLayer),
           Layer.provideMerge(workSignalLayer),
         )
   const qrspiLayer =

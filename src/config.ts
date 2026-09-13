@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import {
+  type AgentRunCodexRoute,
   parseAgentRunClaudeHosts,
+  parseAgentRunCodexRoutes,
   parseAgentRunRepositories,
   parseAgentRunRoutes,
   type AgentRunRepository,
@@ -90,8 +92,10 @@ export interface AgentRunConfig {
   readonly token: string
   readonly claudeBinary: string
   readonly claudeHosts: ReadonlyArray<string>
+  readonly codexBinary: string
   readonly remoteTurnTimeoutMs: number
   readonly routes: ReadonlyArray<AgentRunRoute>
+  readonly codexRoutes: ReadonlyArray<AgentRunCodexRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
   readonly verifyTimeoutMs: number
@@ -367,7 +371,10 @@ function loadAgentRunConfig(
   token: string | undefined,
 ): AgentRunConfig | undefined {
   if (token === undefined) {
-    if (env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined) {
+    if (
+      env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined
+    ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
     return undefined
@@ -387,8 +394,13 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS === undefined
         ? []
         : parseAgentRunClaudeHosts(env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS),
+    codexBinary: env.WORKFLOWD_AGENT_RUN_CODEX_BIN ?? "codex",
     remoteTurnTimeoutMs,
     routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
+    codexRoutes:
+      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES === undefined
+        ? []
+        : parseAgentRunCodexRoutes(env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES),
     repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
     verifyTimeoutMs: positiveInteger(

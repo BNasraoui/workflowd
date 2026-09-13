@@ -142,8 +142,10 @@ A follow-up can expose durable workflow jobs through `tasks/get` and
 `execution.taskSupport: "optional"`. Until then their documented contract is
 the existing receipt plus `job_status` polling.
 
-Only the `opencode` provider is supported in this slice; the underlying store
-already allows `codex` and `claude` for later.
+Two dispatch providers are supported. `opencode` routes run as OpenCode
+server sessions; `codex` routes run the Codex CLI (`codex exec`) directly on
+the daemon host. The store's `claude` provider kind is reserved for the Claude
+wake path and is not dispatchable.
 
 ## `dispatch_agent`
 
@@ -165,36 +167,57 @@ What the runner owns, in order:
 
 1. **Route resolution.** `route` is a configured intent name (`implement`,
    `review`, `hard`, …) or a bare model id that exactly one route serves.
+   OpenCode routes are consulted first, then codex routes; a name or bare
+   model id served by both providers is refused `ambiguous_route`.
    Provider-prefixed ids (`zai-coding-plan/glm-5.3-flash`) are refused with
    `provider_prefixed_route` — no caller path carries provider dialects.
-2. **Pre-flight.** The resolved provider must appear in the OpenCode server's
-   `provider.list` (which lists only providers with credentials, so this is
-   an authentication check, not a catalog check) and the exact provider/model
-   pair must exist in `model.list`. A dead route is refused at dispatch with
-   `provider_not_authenticated` or `model_not_available` — never a silent
-   hang.
+2. **Pre-flight.** For an opencode route, the resolved provider must appear
+   in the OpenCode server's `provider.list` (which lists only providers with
+   credentials, so this is an authentication check, not a catalog check) and
+   the exact provider/model pair must exist in `model.list`. For a codex
+   route, the daemon host must answer a `codex --version` check and
+   `codex login status` must report credentials. A dead route is refused at
+   dispatch with `provider_not_authenticated` or `model_not_available` —
+   never a silent hang.
 3. **Spawn.** A fresh git worktree of the allow-listed repository is created
    under the daemon's worktree root, a session is created there with the
    configured agent, and the session plus its worktree are registered into
    kernel custody (`kernel_sessions` / `kernel_working_resources`) under the
    custody id `opencode-session-<native id>` — so `wait_for_agent` works
-   against runner-spawned children with no shim.
+   against runner-spawned children with no shim. Codex routes skip the
+   session creation and instead spawn `codex exec --json` inside the prepared
+   worktree (prompt via stdin, `--cd` the worktree, `-m` only when the route
+   pins a model) and register the thread under `codex-session-<thread id>`
+   once the event stream announces it.
 4. **First-token verification.** The receipt is returned only after the
    runner observes the session's token counters move (bounded wait,
    `WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS`, default 120s). A session that
    never generates is aborted and the dispatch refused with
    `no_first_token`. A quota-dead route can no longer report "dispatched".
+   For codex the same budget bounds the first `agent_message` event; a
+   process that exits first is refused `no_first_token` or — when its error
+   text shows a 401/login failure — `provider_not_authenticated`.
 5. **Supervision.** After the receipt, the daemon's watchdog polls the run's
    token counters. No progress within `WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS`
    (default 20 minutes) → the session is interrupted and re-prompted in place
    with a continuation prompt (bounded by
    `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS`), then escalated to
    `operator_required` with the diagnostic trail. The caller never babysits.
+   Codex runs complete differently: the codex process runs to exit inside
+   the daemon, its final `agent_message` is the run output and
+   `turn.completed` usage the token count, and the run is completed (or
+   escalated to `operator_required` with the failure trail) inline after
+   exit. The watchdog deliberately never observes a verified codex run; a
+   daemon crash mid-run leaves the run row `verified` and the worktree in
+   place for manual inspection (codex session resume is a deferred slice).
 
 With `parent_session_id` + `resume_prompt`, the runner also registers the
 parent's custody (idempotently) and an agent wait in the same dispatch, so
 one call means "run this and wake me when it finishes". Without them the
 receipt carries the child's custody id for a later `wait_for_agent` call.
+Parent pairing is an opencode-child feature: a codex dispatch names no
+parent and is refused `invalid_wait_pairing` when given one, because the
+completion machinery only observes opencode children.
 
 Parents come in two kinds (`parent_kind`, default `opencode`):
 
@@ -349,6 +372,16 @@ enables it, the routes and repositories are then required):
 - `WORKFLOWD_AGENT_RUN_ROUTES` — comma-separated `name=provider/model`
   pairs, e.g. `implement=zai-coding-plan/glm-5.3-flash,hard=anthropic/claude-fable-5`.
   The only place provider-prefixed model ids are ever written.
+- `WORKFLOWD_AGENT_RUN_CODEX_ROUTES` — optional comma-separated
+  `name=model` pairs naming Codex CLI routes, e.g.
+  `scan=gpt-5.1-codex,quick=`. The model is a codex model id; an empty value
+  after `=` or a bare name means the codex CLI's configured default model
+  (receipts then carry `model_id: ""`). Names and bare model ids may not
+  collide with `WORKFLOWD_AGENT_RUN_ROUTES` — a collision is refused
+  `ambiguous_route` at dispatch. `WORKFLOWD_AGENT_RUN_REPOSITORIES` and the
+  worktree/allow-list rules apply unchanged; the CLI must be installed and
+  logged in on the daemon host.
+- `WORKFLOWD_AGENT_RUN_CODEX_BIN` — codex binary to spawn (default `codex`).
 - `WORKFLOWD_AGENT_RUN_REPOSITORIES` — comma-separated `name=/absolute/path`
   pairs naming the dispatchable repositories. This is a security allow-list:
   dispatch is arbitrary prompt execution in the named directory's worktrees.

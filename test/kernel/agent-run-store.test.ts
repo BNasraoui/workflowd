@@ -163,16 +163,29 @@ describe("agent-run store", () => {
         const store = yield* AgentRunStore
         yield* store.create(input)
         // A fresh accepted run is not watchable: its dispatching request owns it.
-        const fresh = yield* store.nextWatchable({ now: at, staleAfterMs: 60_000 })
+        const fresh = yield* store.nextWatchable({
+          now: at,
+          staleAfterMs: 60_000,
+          unsupervisedProviderIds: [],
+        })
         const stale = yield* store.nextWatchable({
           now: new Date(at.getTime() + 120_000),
           staleAfterMs: 60_000,
+          unsupervisedProviderIds: [],
         })
         yield* spawn(store)
         yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
-        const verified = yield* store.nextWatchable({ now: at, staleAfterMs: 60_000 })
+        const verified = yield* store.nextWatchable({
+          now: at,
+          staleAfterMs: 60_000,
+          unsupervisedProviderIds: [],
+        })
         yield* store.operatorRequired({ runId: input.runId, diagnostic: "done", now: at })
-        const terminal = yield* store.nextWatchable({ now: at, staleAfterMs: 60_000 })
+        const terminal = yield* store.nextWatchable({
+          now: at,
+          staleAfterMs: 60_000,
+          unsupervisedProviderIds: [],
+        })
         return { fresh, stale, verified, terminal }
       }),
     )
@@ -180,5 +193,42 @@ describe("agent-run store", () => {
     expect(result.stale?.runId).toBe(input.runId)
     expect(result.verified?.state).toBe("verified")
     expect(result.terminal).toBeNull()
+  })
+
+  test("nextWatchable skips verified runs of unsupervised providers but still fails their stale dispatches", async () => {
+    // A codex run completes inline in the dispatching daemon process; the
+    // watchdog must never observe its verified window (the OpenCode server
+    // does not know the session and would escalate to operator_required).
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create({ ...input, providerId: "codex-cli" })
+        yield* spawn(store)
+        yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        const supervisedWindow = yield* store.nextWatchable({
+          now: at,
+          staleAfterMs: 60_000,
+          unsupervisedProviderIds: ["codex-cli"],
+        })
+        yield* store.complete({ runId: input.runId, now: at })
+        // Same provider, but the dispatching request died before verification:
+        // the stale row must still surface for the dispatch-incomplete cleanup.
+        yield* store.create({
+          ...input,
+          runId: "agent-run-stale-codex",
+          prompt: "a second task",
+          promptSha256: "b".repeat(64),
+          providerId: "codex-cli",
+        })
+        const stale = yield* store.nextWatchable({
+          now: new Date(at.getTime() + 120_000),
+          staleAfterMs: 60_000,
+          unsupervisedProviderIds: ["codex-cli"],
+        })
+        return { supervisedWindow, stale }
+      }),
+    )
+    expect(result.supervisedWindow).toBeNull()
+    expect(result.stale?.runId).toBe("agent-run-stale-codex")
   })
 })

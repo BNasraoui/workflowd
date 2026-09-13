@@ -46,6 +46,7 @@ describe("loadConfig", () => {
         ...requiredEnvironment,
         WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
         WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        WORKFLOWD_AGENT_RUN_CODEX_ROUTES: "scan=gpt-5.1-codex,quick=",
         WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
         WORKFLOWD_AGENT_RUN_AGENT: "remote-worker",
       },
@@ -56,8 +57,13 @@ describe("loadConfig", () => {
       token: "agent-run-secret",
       claudeBinary: "claude",
       claudeHosts: [],
+      codexBinary: "codex",
       remoteTurnTimeoutMs: 120_000,
       routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],
+      codexRoutes: [
+        { name: "scan", modelID: "gpt-5.1-codex" },
+        { name: "quick", modelID: null },
+      ],
       repositories: [{ name: "workflowd", directory: "/home/test/repos/workflowd" }],
       agent: "remote-worker",
       verifyTimeoutMs: 120_000,
@@ -107,6 +113,15 @@ describe("loadConfig", () => {
         {
           ...requiredEnvironment,
           WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        },
+        { home: "/home/test" },
+      ),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_TOKEN is required")
+    await expect(
+      loadConfig(
+        {
+          ...requiredEnvironment,
+          WORKFLOWD_AGENT_RUN_CODEX_ROUTES: "scan=gpt-5.1-codex",
         },
         { home: "/home/test" },
       ),

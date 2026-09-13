@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto"
 import { join } from "node:path"
-import { Context, Data, Effect, Layer, Schema } from "effect"
+import { Context, Data, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
 import {
   AgentRunSubmission,
-  resolveAgentRunRoute,
+  resolveAgentRunRouteChoice,
+  type AgentRunCodexRoute,
   type AgentRunReceipt,
   type AgentRunRepository,
   type AgentRunRoute,
@@ -21,6 +22,17 @@ import {
   claudeEndpointIdentity,
   claudeSessionCustodyId,
 } from "./claude-session"
+import {
+  CODEX_ENDPOINT_ALIAS,
+  CODEX_PROVIDER_ID,
+  CodexCli,
+  codexEndpointIdentity,
+  codexFailureLooksUnauthenticated,
+  codexSessionCustodyId,
+  type CodexExecEvent,
+  type CodexExit,
+  type CodexRunProcess,
+} from "./codex-session"
 import type { AgentCompletionSourceIdentity } from "./agent-handoff-store"
 import { AgentRunStore, type AgentRunRecord, type AgentRunStoreError } from "./agent-run-store"
 import { KernelSessionStore, type KernelSessionStoreError } from "./session-store"
@@ -88,11 +100,18 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 
 export type AgentRunIngressOptions = {
   readonly routes: ReadonlyArray<AgentRunRoute>
+  /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
+   * name or bare model id is served by both providers. */
+  readonly codexRoutes: ReadonlyArray<AgentRunCodexRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
   readonly worktreeRoot: string
   readonly verifyTimeoutMs: number
   readonly verifyPollIntervalMs: number
+  /** Bounds how long a codex run may stream no events before its inline
+   * completion terminates the process and escalates (same knob as the
+   * opencode stall window). */
+  readonly progressWindowMs: number
   readonly maxAttempts: number
   /** Hosts (besides the daemon host) whose Claude sessions may be named as
    * parents; their wakes are delivered by that host's workflowd runner. */
@@ -156,6 +175,7 @@ const make = (options: AgentRunIngressOptions) =>
     const worktrees = yield* AgentRunWorktrees
     const waits = yield* AgentWaitIngress
     const claude = yield* ClaudeCli
+    const codex = yield* CodexCli
     const signals = yield* WorkSignal
 
     /** Registers custody rows read-first so replays and shared parents are
@@ -191,28 +211,44 @@ const make = (options: AgentRunIngressOptions) =>
       readonly nativeSessionId: string
       readonly resourceId: string
       readonly createdAt: Date
-      readonly kind?: "opencode" | "claude"
+      readonly kind?: "opencode" | "claude" | "codex"
       readonly host?: string
     }) =>
       Effect.gen(function* () {
-        const claude = input.kind === "claude"
+        const kind = input.kind ?? "opencode"
         const claudeHost = input.host ?? options.identity.owningHostId
-        const sessionId = claude
-          ? claudeSessionCustodyId(input.nativeSessionId)
-          : opencodeSessionCustodyId(input.nativeSessionId)
+        const sessionId =
+          kind === "claude"
+            ? claudeSessionCustodyId(input.nativeSessionId)
+            : kind === "codex"
+              ? codexSessionCustodyId(input.nativeSessionId)
+              : opencodeSessionCustodyId(input.nativeSessionId)
         const existing = yield* sessions.readSession(sessionId)
         if (existing === null) {
           yield* sessions.registerSession({
             sessionId,
-            providerKind: claude ? "claude" : "opencode",
+            providerKind: kind,
             providerVersion: options.identity.providerVersion,
-            providerId: claude ? CLAUDE_PROVIDER_ID : options.identity.providerId,
-            serverId: claude ? claudeHost : options.identity.serverId,
+            providerId:
+              kind === "claude"
+                ? CLAUDE_PROVIDER_ID
+                : kind === "codex"
+                  ? CODEX_PROVIDER_ID
+                  : options.identity.providerId,
+            serverId: kind === "claude" ? claudeHost : options.identity.serverId,
             owningHostId: options.identity.owningHostId,
-            endpointAlias: claude ? CLAUDE_ENDPOINT_ALIAS : options.identity.endpointAlias,
-            endpointIdentity: claude
-              ? claudeEndpointIdentity(claudeHost)
-              : options.identity.endpointIdentity,
+            endpointAlias:
+              kind === "claude"
+                ? CLAUDE_ENDPOINT_ALIAS
+                : kind === "codex"
+                  ? CODEX_ENDPOINT_ALIAS
+                  : options.identity.endpointAlias,
+            endpointIdentity:
+              kind === "claude"
+                ? claudeEndpointIdentity(claudeHost)
+                : kind === "codex"
+                  ? codexEndpointIdentity(options.identity.owningHostId)
+                  : options.identity.endpointIdentity,
             nativeSessionId: input.nativeSessionId,
             resourceId: input.resourceId,
             createdAt: input.createdAt,
@@ -442,7 +478,276 @@ const make = (options: AgentRunIngressOptions) =>
         }
         yield* store.markVerified({ runId: run.runId, outputTokens, now })
         yield* signals.wake("agent-run")
-        return { nativeSessionId, outputTokens }
+        return { nativeSessionId, outputTokens, kind: "opencode" as const }
+      })
+
+    /**
+     * Codex runs execute as one synchronous `codex exec --json` subprocess
+     * in the prepared worktree: the thread id arrives with the first event,
+     * custody is registered, and the receipt returns at the first
+     * model-output event (bounded by verifyTimeoutMs, like the opencode
+     * first-token wait). Process exit is completion: a detached continuation
+     * drains the rest of the event stream and completes or escalates the run
+     * inline — there is deliberately no completion watch for codex, because
+     * the completion source only observes opencode sessions.
+     */
+    type CodexFirstToken =
+      | {
+          readonly outcome: "generating"
+          readonly threadId: string
+          readonly firstMessage: string
+        }
+      | {
+          readonly outcome: "refused"
+          readonly reason: "provider_not_authenticated" | "no_first_token"
+          readonly detail: string
+        }
+
+    type CodexObservation = {
+      readonly result: CodexFirstToken
+      readonly iterator: AsyncIterator<CodexExecEvent>
+      readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
+    }
+
+    const observeCodexFirstToken = (process: CodexRunProcess, firstTokenTimeoutMs: number) =>
+      Effect.gen(function* () {
+        const iterator = process.events[Symbol.asyncIterator]()
+        const exited = yield* Effect.forkChild(process.exited)
+        let threadId: string | null = null
+        let firstMessage: string | null = null
+        const errors: string[] = []
+        const streamed: Effect.Effect<CodexFirstToken> = Effect.gen(function* () {
+          const pull = Effect.promise(() =>
+            iterator.next().then(
+              (next) => (next.done ? "closed" : next.value),
+              () => "closed" as const,
+            ),
+          )
+          for (;;) {
+            const step = yield* pull
+            if (step === "closed") {
+              return {
+                outcome: "refused" as const,
+                reason: "no_first_token" as const,
+                detail:
+                  firstMessage !== null
+                    ? "codex produced model output but never announced a thread id; the runner cannot custody it"
+                    : "codex exited before producing model output",
+              }
+            }
+            if (step.type === "thread.started") {
+              threadId = step.threadId
+            } else if (step.type === "agent_message") {
+              if (firstMessage === null) firstMessage = step.text
+              if (threadId !== null) {
+                return { outcome: "generating" as const, threadId, firstMessage }
+              }
+            } else if (step.type === "error" || step.type === "turn.failed") {
+              errors.push(step.message)
+            }
+          }
+        })
+        const timedOut: Effect.Effect<CodexFirstToken> = Effect.as(
+          Effect.sleep(firstTokenTimeoutMs),
+          {
+            outcome: "refused" as const,
+            reason: "no_first_token" as const,
+            detail: `codex produced no model output within ${firstTokenTimeoutMs}ms of spawn`,
+          },
+        )
+        const result = yield* Effect.race(streamed, timedOut)
+        if (result.outcome === "generating") {
+          return { result, iterator, exited } satisfies CodexObservation
+        }
+        // Refused. Give a process that is already dying a short grace period
+        // to deliver its exit facts, then terminate whatever remains — a
+        // refusal never leaves codex burning.
+        const graceExit: CodexExit | null = yield* Effect.race(
+          Fiber.join(exited),
+          Effect.as(Effect.sleep(500), null),
+        )
+        if (graceExit === null) yield* Fiber.interrupt(exited).pipe(Effect.ignore)
+        const authFailed =
+          codexFailureLooksUnauthenticated(errors) ||
+          (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
+        const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
+        const detail = authFailed
+          ? `${result.detail}: the codex CLI reported an authentication failure`
+          : result.detail +
+            (errors.length === 0 ? "" : `; last error: ${errors.at(-1)}`) +
+            (graceExit !== null && graceExit.stderr !== ""
+              ? `; stderr: ${graceExit.stderr.slice(0, 300)}`
+              : "")
+        return {
+          result: { outcome: "refused" as const, reason, detail },
+          iterator,
+          exited,
+        } satisfies CodexObservation
+      })
+
+    const dispatchCodex = (
+      run: AgentRunRecord,
+      route: AgentRunCodexRoute,
+      target: {
+        readonly repositoryDirectory: string
+        readonly resourceId: string
+        readonly short: string
+      },
+      now: Date,
+    ) =>
+      Effect.gen(function* () {
+        if (run.state === "spawning") {
+          return yield* refuse(
+            "run_conflict",
+            "an identical dispatch is already spawning this run; retry after it settles",
+          )
+        }
+        if (run.state === "accepted" || run.nativeSessionId === null) {
+          yield* store.claimSpawn({ runId: run.runId, now })
+          yield* worktrees.create({
+            repository: target.repositoryDirectory,
+            directory: run.directory,
+            branch: `agent-run/${target.short}`,
+          })
+          const resourceId = yield* ensureResource({
+            resourceId: target.resourceId,
+            absolutePath: run.directory,
+            kind: "worktree",
+            createdAt: run.createdAt,
+          })
+          const process = yield* codex.spawn({
+            directory: run.directory,
+            prompt: run.prompt,
+            model: route.modelID,
+          })
+          const observed = yield* observeCodexFirstToken(process, options.verifyTimeoutMs)
+          if (observed.result.outcome === "refused") {
+            yield* store
+              .fail({
+                runId: run.runId,
+                diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
+                now,
+              })
+              .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+            return yield* refuse(observed.result.reason, observed.result.detail)
+          }
+          const threadId = observed.result.threadId
+          yield* ensureSession({
+            nativeSessionId: threadId,
+            resourceId,
+            createdAt: run.createdAt,
+            kind: "codex",
+          })
+          yield* store.markSpawned({
+            runId: run.runId,
+            resourceId,
+            sessionId: codexSessionCustodyId(threadId),
+            nativeSessionId: threadId,
+            now,
+          })
+          yield* store.markVerified({
+            runId: run.runId,
+            // The receipt needs a positive count before usage exists; the
+            // inline completion records the real turn.completed tokens.
+            outputTokens: 1,
+            now,
+          })
+          yield* Effect.forkDetach(
+            completeCodexInline({
+              runId: run.runId,
+              iterator: observed.iterator,
+              exited: observed.exited,
+              initialFinalMessage: observed.result.firstMessage,
+              stallWindowMs: options.progressWindowMs,
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError("codex inline completion failed", { runId: run.runId, cause }),
+              ),
+            ),
+          )
+          yield* signals.wake("agent-run")
+          return { nativeSessionId: threadId, outputTokens: 1, kind: "codex" as const }
+        }
+        if (run.state === "verified" && run.nativeSessionId !== null) {
+          // A prior request verified this run and its inline completion is
+          // still draining; the row carries the receipt facts.
+          return {
+            nativeSessionId: run.nativeSessionId,
+            outputTokens: run.lastOutputTokens,
+            kind: "codex" as const,
+          }
+        }
+        return yield* refuse(
+          "run_conflict",
+          `a previous dispatch left this run ${run.state}; codex processes cannot be re-observed`,
+        )
+      })
+
+    const completeCodexInline = (input: {
+      readonly runId: string
+      readonly iterator: AsyncIterator<CodexExecEvent>
+      readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
+      /** The first-token message the dispatch already consumed; the final
+       * agent_message of the run is the latest one seen across both phases. */
+      readonly initialFinalMessage: string
+      readonly stallWindowMs: number
+    }) =>
+      Effect.gen(function* () {
+        let finalMessage: string | null = input.initialFinalMessage
+        let outputTokens: number | null = null
+        let turnFailed: string | null = null
+        let stalled = false
+        for (;;) {
+          const next = yield* Effect.promise(() =>
+            input.iterator.next().then(
+              (result) => (result.done ? "closed" : result.value),
+              () => "closed" as const,
+            ),
+          ).pipe(Effect.timeoutOption(input.stallWindowMs))
+          if (Option.isNone(next)) {
+            stalled = true
+            break
+          }
+          if (next.value === "closed") break
+          const event = next.value
+          if (event.type === "agent_message") {
+            finalMessage = event.text
+          } else if (event.type === "turn.completed") {
+            outputTokens = event.outputTokens
+          } else if (event.type === "turn.failed") {
+            turnFailed = event.message
+          } else if (event.type === "error") {
+            turnFailed = turnFailed ?? event.message
+          }
+        }
+        const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
+          Fiber.join(input.exited),
+        )
+        if (stalled) {
+          yield* Fiber.interrupt(input.exited).pipe(Effect.ignore)
+        }
+        const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
+        if (!stalled && exitCode === 0 && finalMessage !== null) {
+          if (outputTokens !== null) {
+            yield* store
+              .recordProgress({ runId: input.runId, outputTokens, now: new Date() })
+              .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+          }
+          yield* store
+            .complete({ runId: input.runId, now: new Date() })
+            .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+          return
+        }
+        const diagnostic = stalled
+          ? `codex_stalled: no codex event for ${input.stallWindowMs}ms; the process group was terminated`
+          : `codex_failed: exit ${exitCode}` +
+            (turnFailed === null ? "" : `; ${turnFailed}`) +
+            (Exit.isSuccess(exit) && exit.value.stderr !== ""
+              ? `; stderr: ${exit.value.stderr.slice(0, 500)}`
+              : "")
+        yield* store
+          .operatorRequired({ runId: input.runId, diagnostic, now: new Date() })
+          .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
       })
 
     const registerWaitIfPaired = (input: {
@@ -504,7 +809,11 @@ const make = (options: AgentRunIngressOptions) =>
             "parentSessionId and resumePrompt must be provided together or not at all",
           )
         }
-        const resolution = resolveAgentRunRoute(options.routes, submission.route)
+        const resolution = resolveAgentRunRouteChoice(
+          options.routes,
+          options.codexRoutes,
+          submission.route,
+        )
         if (resolution.outcome === "refused") {
           return yield* refuse(
             resolution.reason,
@@ -520,7 +829,29 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
-        yield* preflightRoute(resolution.route)
+        if (resolution.provider === "codex" && submission.parentSessionId !== undefined) {
+          // The completion source only observes opencode children, so a codex
+          // child could never deliver a parent wake; refusing loudly beats
+          // registering a watch that can never complete.
+          return yield* refuse(
+            "invalid_wait_pairing",
+            "codex routes complete inline and support no parent wake yet; " +
+              "dispatch without parentSessionId/resumePrompt and read the outcome later",
+          )
+        }
+        if (resolution.provider === "opencode") {
+          yield* preflightRoute(resolution.route)
+        } else {
+          yield* codex.preflight.pipe(
+            Effect.mapError(
+              (issue) =>
+                new AgentRunRefusalError({
+                  reason: "provider_not_authenticated",
+                  detail: issue.detail,
+                }),
+            ),
+          )
+        }
         const parentKind = submission.parentKind ?? "opencode"
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
@@ -544,8 +875,12 @@ const make = (options: AgentRunIngressOptions) =>
         const created = yield* store.create({
           runId: identifiers.runId,
           route: resolution.route.name,
-          providerId: resolution.route.providerID,
-          modelId: resolution.route.modelID,
+          providerId:
+            resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
+          modelId:
+            resolution.provider === "codex"
+              ? (resolution.route.modelID ?? "")
+              : resolution.route.modelID,
           agent: options.agent,
           repository: repository.name,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
@@ -572,18 +907,34 @@ const make = (options: AgentRunIngressOptions) =>
             ? {
                 nativeSessionId: run.nativeSessionId ?? "",
                 outputTokens: run.lastOutputTokens,
+                kind:
+                  run.providerId === CODEX_PROVIDER_ID ? ("codex" as const) : ("opencode" as const),
               }
-            : yield* dispatch(
-                run,
-                resolution.route,
-                {
-                  repositoryDirectory: repository.directory,
-                  resourceId: identifiers.resourceId,
-                  short: identifiers.short,
-                },
-                now,
-              )
-        const childSessionId = opencodeSessionCustodyId(dispatched.nativeSessionId)
+            : resolution.provider === "codex"
+              ? yield* dispatchCodex(
+                  run,
+                  resolution.route,
+                  {
+                    repositoryDirectory: repository.directory,
+                    resourceId: identifiers.resourceId,
+                    short: identifiers.short,
+                  },
+                  now,
+                )
+              : yield* dispatch(
+                  run,
+                  resolution.route,
+                  {
+                    repositoryDirectory: repository.directory,
+                    resourceId: identifiers.resourceId,
+                    short: identifiers.short,
+                  },
+                  now,
+                )
+        const childSessionId =
+          dispatched.kind === "codex"
+            ? codexSessionCustodyId(dispatched.nativeSessionId)
+            : opencodeSessionCustodyId(dispatched.nativeSessionId)
         const wait = yield* registerWaitIfPaired({
           submission,
           parentKind,
@@ -598,8 +949,12 @@ const make = (options: AgentRunIngressOptions) =>
           runId: identifiers.runId,
           sessionId: childSessionId,
           nativeSessionId: dispatched.nativeSessionId,
-          providerId: resolution.route.providerID,
-          modelId: resolution.route.modelID,
+          providerId:
+            resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
+          modelId:
+            resolution.provider === "codex"
+              ? (resolution.route.modelID ?? "")
+              : resolution.route.modelID,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),
           ...(wait === undefined ? {} : { wait }),

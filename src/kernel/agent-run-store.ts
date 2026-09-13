@@ -138,6 +138,11 @@ export type AgentRunStorePort = {
   readonly nextWatchable: (input: {
     readonly now: Date
     readonly staleAfterMs: number
+    /** Providers whose verified runs complete outside the watchdog (inline
+     * subprocess execution like codex-cli). Verified rows of these providers
+     * are invisible to the watchdog; their stale pre-verification rows are
+     * still cleaned up through the dispatch-incomplete path. */
+    readonly unsupervisedProviderIds: ReadonlyArray<string>
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
 }
 
@@ -333,8 +338,13 @@ const make = Effect.gen(function* () {
   const nextWatchable: AgentRunStorePort["nextWatchable"] = (input) =>
     Effect.gen(function* () {
       const staleBefore = new Date(input.now.getTime() - input.staleAfterMs).toISOString()
+      const verified =
+        input.unsupervisedProviderIds.length === 0
+          ? sql`state = 'verified'`
+          : sql`state = 'verified'
+        AND provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
-        WHERE state = 'verified'
+        WHERE ${verified}
         OR (state IN ('accepted', 'spawning', 'spawned') AND updated_at < ${staleBefore})
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)

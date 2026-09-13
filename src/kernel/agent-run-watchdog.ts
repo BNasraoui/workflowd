@@ -22,6 +22,9 @@ import { AgentRunStore, type AgentRunRecord } from "./agent-run-store"
 export type AgentRunWatchdogOptions = {
   readonly progressWindowMs: number
   readonly staleAfterMs: number
+  /** Providers whose verified runs complete outside the watchdog (inline
+   * subprocess execution like codex-cli); those rows are never watchable. */
+  readonly unsupervisedProviderIds: ReadonlyArray<string>
   readonly now: () => Date
 }
 
@@ -45,7 +48,11 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
     const provider = yield* AgentRunProvider
     const signals = yield* WorkSignal
     const now = options.now()
-    const run = yield* store.nextWatchable({ now, staleAfterMs: options.staleAfterMs })
+    const run = yield* store.nextWatchable({
+      now,
+      staleAfterMs: options.staleAfterMs,
+      unsupervisedProviderIds: options.unsupervisedProviderIds,
+    })
     if (run === null) return "idle" as const
 
     if (run.state !== "verified" || run.nativeSessionId === null) {

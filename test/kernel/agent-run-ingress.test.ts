@@ -14,6 +14,7 @@ import {
 import { AgentRunWorktrees, type AgentRunWorktreesPort } from "../../src/kernel/agent-run-worktrees"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { ClaudeCli, type ClaudeCliPort } from "../../src/kernel/claude-session"
+import { CodexCli } from "../../src/kernel/codex-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { OpenCodeSessionTelemetry } from "../../src/opencode/adapter"
@@ -36,11 +37,13 @@ const options = {
     { name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" },
     { name: "hard", providerID: "anthropic", modelID: "claude-fable-5" },
   ],
+  codexRoutes: [{ name: "scan", modelID: "gpt-5.1-codex" }],
   repositories: [{ name: "workflowd", directory: "/home/ben/repos/workflowd" }],
   agent: "remote-worker",
   worktreeRoot: "/tmp/worktrees",
   verifyTimeoutMs: 50,
   verifyPollIntervalMs: 10,
+  progressWindowMs: 10 * 60_000,
   maxAttempts: 3,
   claudeHosts: ["ben-arch"],
   identity,
@@ -115,7 +118,126 @@ const claudeCli: ClaudeCliPort = {
   resume: () => Effect.die(new Error("unused in ingress tests")),
 }
 
-const makeLayer = (provider: AgentRunProviderPort, trees: AgentRunWorktreesPort) => {
+/** Scripted codex CLI: `threadId`, the events to stream, the resulting exit,
+ * and a `preflight` outcome; spawn/preflight calls are recorded. */
+type CodexState = {
+  spawned: Array<{ directory: string; prompt: string; model: string | null }>
+  killed: boolean
+}
+
+const makeCodexCli = (
+  events: ReadonlyArray<import("../../src/kernel/codex-session").CodexExecEvent>,
+  exitCode = 0,
+  preflightError?: import("../../src/kernel/codex-session").CodexPreflightError,
+  threadId = "01a09976-e799-7c52-9759-8b76d692b755",
+) => {
+  const state: CodexState = { spawned: [], killed: false }
+  const port: import("../../src/kernel/codex-session").CodexCliPort = {
+    preflight: preflightError === undefined ? Effect.void : Effect.fail(preflightError),
+    spawn: (input) =>
+      Effect.sync(() => {
+        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        const queue: {
+          push: (event: import("../../src/kernel/codex-session").CodexExecEvent) => void
+          close: () => void
+          items: import("../../src/kernel/codex-session").CodexExecEvent[]
+          waiter: (() => void) | null
+          closed: boolean
+        } = {
+          items: [],
+          waiter: null,
+          closed: false,
+          push(event) {
+            this.items.push(event)
+            const wake = this.waiter
+            this.waiter = null
+            wake?.()
+          },
+          close() {
+            this.closed = true
+            const wake = this.waiter
+            this.waiter = null
+            wake?.()
+          },
+        }
+        const iterator: AsyncIterator<import("../../src/kernel/codex-session").CodexExecEvent> = {
+          next: async () => {
+            for (;;) {
+              if (queue.items.length > 0) {
+                return { value: queue.items.shift()!, done: false }
+              }
+              if (queue.closed) return { value: undefined, done: true }
+              await new Promise<void>((resolve) => {
+                queue.waiter = resolve
+              })
+            }
+          },
+        }
+        // Drain the scripted events onto the queue asynchronously so the
+        // ingress observes a real stream, then close it with the exit.
+        void (async () => {
+          for (const event of [{ type: "thread.started", threadId } as const, ...events]) {
+            await Bun.sleep(5)
+            queue.push(event)
+          }
+          queue.close()
+        })()
+        return {
+          events: { [Symbol.asyncIterator]: () => iterator },
+          exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr: "" })),
+        }
+      }),
+  }
+  return { state, port }
+}
+
+const codexNeverStreams = () => {
+  // A codex process that never emits and never exits: exercises the
+  // first-token timeout and the process-group kill.
+  const state: CodexState = { spawned: [], killed: false }
+  const port: import("../../src/kernel/codex-session").CodexCliPort = {
+    preflight: Effect.void,
+    spawn: (input) =>
+      Effect.sync(() => {
+        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        const never: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
+          [Symbol.asyncIterator]: () => ({
+            next: () =>
+              new Promise<IteratorResult<import("../../src/kernel/codex-session").CodexExecEvent>>(
+                () => {},
+              ),
+          }),
+        }
+        return {
+          events: never,
+          exited: Effect.callback<
+            { exitCode: number; stderr: string },
+            import("../../src/workspace/errors").WorkspaceError
+          >((resume, signal) => {
+            // Interruption is the process-group kill; mirror that here.
+            signal.addEventListener(
+              "abort",
+              () => {
+                state.killed = true
+                resume(Effect.succeed({ exitCode: -1, stderr: "" }))
+              },
+              { once: true },
+            )
+          }),
+        }
+      }),
+  }
+  return { state, port }
+}
+
+const makeLayer = (
+  provider: AgentRunProviderPort,
+  trees: AgentRunWorktreesPort,
+  codex: import("../../src/kernel/codex-session").CodexCliPort = defaultCodex.port,
+  optionOverrides: Partial<
+    import("../../src/kernel/agent-run-ingress").AgentRunIngressOptions
+  > = {},
+) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
@@ -129,14 +251,23 @@ const makeLayer = (provider: AgentRunProviderPort, trees: AgentRunWorktreesPort)
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
   const runs = AgentRunStoreLive.pipe(Layer.provideMerge(bootstrap))
-  return AgentRunIngressLive(options).pipe(
+  return AgentRunIngressLive({ ...options, ...optionOverrides }).pipe(
     Layer.provideMerge(Layer.mergeAll(runs, sessions, waits)),
     Layer.provideMerge(Layer.succeed(AgentRunProvider, provider)),
     Layer.provideMerge(Layer.succeed(AgentRunWorktrees, trees)),
     Layer.provideMerge(Layer.succeed(ClaudeCli, claudeCli)),
+    Layer.provideMerge(Layer.succeed(CodexCli, codex)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 }
+
+// Success-turn codex by default: preflight passes, a thread starts, one
+// message lands, the turn completes, exit 0.
+const defaultCodex = makeCodexCli([
+  { type: "turn.started" },
+  { type: "agent_message", text: "done" },
+  { type: "turn.completed", outputTokens: 42 },
+])
 
 const submission = {
   route: "implement",
@@ -497,4 +628,189 @@ describe("agent-run ingress", () => {
     )
     expect(refusal.reason).toBe("invalid_wait_pairing")
   })
+
+  test("a codex route dispatches synchronously, registers codex custody, and completes inline", async () => {
+    const state = defaultState()
+    const trees: Array<{ repository: string; directory: string; branch: string }> = []
+    const codex = makeCodexCli(
+      [
+        { type: "turn.started" },
+        { type: "agent_message", text: "done" },
+        { type: "turn.completed", outputTokens: 42 },
+      ],
+      0,
+      undefined,
+      "01thread-codex",
+    )
+    const layer = makeLayer(makeProvider(state), worktrees(trees), codex.port)
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({
+          route: "scan",
+          repository: "workflowd",
+          prompt: "Scan the fixtures.",
+        })
+        const sql = yield* SqlClient.SqlClient
+        const custody = yield* sql<{
+          readonly session_id: string
+          readonly provider_kind: string
+          readonly endpoint_identity: string
+        }>`SELECT session_id, provider_kind, endpoint_identity
+          FROM kernel_sessions WHERE provider_kind = 'codex'`
+        const run = yield* waitForRunState(receipt.runId, ["completed"])
+        return { receipt, custody, run }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.receipt.status).toBe("dispatched")
+    expect(result.receipt.nativeSessionId).toBe("01thread-codex")
+    expect(result.receipt.sessionId).toBe("codex-session-01thread-codex")
+    expect(result.receipt.providerId).toBe("codex-cli")
+    expect(result.receipt.modelId).toBe("gpt-5.1-codex")
+    expect(result.receipt.outputTokens).toBe(1)
+    expect(result.custody).toHaveLength(1)
+    expect(result.custody[0]!.endpoint_identity).toBe("codex-cli://mint")
+    // The detached continuation recorded the real usage and completed the run.
+    expect(result.run?.state).toBe("completed")
+    expect(result.run?.lastOutputTokens).toBe(42)
+    // Codex never touched the OpenCode adapter.
+    expect(state.created).toHaveLength(0)
+    expect(codex.state.spawned).toHaveLength(1)
+    expect(codex.state.spawned[0]!.model).toBe("gpt-5.1-codex")
+    expect(codex.state.spawned[0]!.prompt).toBe("Scan the fixtures.")
+  })
+
+  test("a codex run with no model output inside the budget is refused and killed", async () => {
+    const state = defaultState()
+    const codex = codexNeverStreams()
+    const layer = makeLayer(makeProvider(state), worktrees([]), codex.port, {
+      verifyTimeoutMs: 80,
+    })
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "hang" }).pipe(
+          Effect.provide(layer),
+        ),
+      ),
+    )
+    expect(refusal.reason).toBe("no_first_token")
+    expect(refusal.detail).toContain("80ms")
+    expect(codex.state.spawned).toHaveLength(1)
+    // The refusal terminated the process group instead of leaving it running.
+    expect(codex.state.killed).toBe(true)
+  })
+
+  test("a codex exit before output maps onto the refusal vocabulary", async () => {
+    const state = defaultState()
+    const unauthenticated = makeCodexCli([
+      {
+        type: "error",
+        message:
+          "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
+      },
+      { type: "turn.failed", message: "unexpected status 401 Unauthorized" },
+    ])
+    const layer = makeLayer(makeProvider(state), worktrees([]), unauthenticated.port)
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "x" }).pipe(
+          Effect.provide(layer),
+        ),
+      ),
+    )
+    expect(refusal.reason).toBe("provider_not_authenticated")
+
+    // A non-zero exit with no authentication flavor stays no_first_token.
+    const broken = makeCodexCli([{ type: "error", message: "model overloaded" }], 1)
+    const layer2 = makeLayer(makeProvider(state), worktrees([]), broken.port)
+    const refusal2 = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "x" }).pipe(
+          Effect.provide(layer2),
+        ),
+      ),
+    )
+    expect(refusal2.reason).toBe("no_first_token")
+    expect(refusal2.detail).toContain("model overloaded")
+  })
+
+  test("a codex dispatch with a parent pairing is refused before anything spawns", async () => {
+    const state = defaultState()
+    const codex = makeCodexCli([{ type: "agent_message", text: "done" }])
+    const layer = makeLayer(makeProvider(state), worktrees([]), codex.port)
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({
+          route: "scan",
+          repository: "workflowd",
+          prompt: "x",
+          parentSessionId: "ses_parent",
+          resumePrompt: "wake me",
+        }).pipe(Effect.provide(layer)),
+      ),
+    )
+    expect(refusal.reason).toBe("invalid_wait_pairing")
+    expect(codex.state.spawned).toHaveLength(0)
+  })
+
+  test("a codex route whose CLI is unusable or unauthenticated is refused at preflight", async () => {
+    const state = defaultState()
+    const unusable = makeCodexCli([], 0, {
+      kind: "cli_unusable",
+      detail: "no codex binary",
+    })
+    const layer = makeLayer(makeProvider(state), worktrees([]), unusable.port)
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "x" }).pipe(
+          Effect.provide(layer),
+        ),
+      ),
+    )
+    expect(refusal.reason).toBe("provider_not_authenticated")
+    expect(unusable.state.spawned).toHaveLength(0)
+
+    const unauthenticated = makeCodexCli([], 0, {
+      kind: "not_authenticated",
+      detail: "codex login status failed",
+    })
+    const layer2 = makeLayer(makeProvider(state), worktrees([]), unauthenticated.port)
+    const refusal2 = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "x" }).pipe(
+          Effect.provide(layer2),
+        ),
+      ),
+    )
+    expect(refusal2.reason).toBe("provider_not_authenticated")
+    expect(unauthenticated.state.spawned).toHaveLength(0)
+    expect(state.created).toHaveLength(0)
+  })
+
+  test("a name served by both providers is refused ambiguous and never spawns", async () => {
+    const state = defaultState()
+    const codex = makeCodexCli([{ type: "agent_message", text: "done" }])
+    const layer = makeLayer(makeProvider(state), worktrees([]), codex.port, {
+      codexRoutes: [{ name: "implement", modelID: null }],
+    })
+    const refusal = await refusalOf(
+      Effect.runPromise(register(submission).pipe(Effect.provide(layer))),
+    )
+    expect(refusal.reason).toBe("ambiguous_route")
+    expect(codex.state.spawned).toHaveLength(0)
+    expect(state.created).toHaveLength(0)
+  })
 })
+
+/** Polls the agent-run row until it reaches one of the given states; the
+ * codex completion runs on a detached fiber, so its terminal state lands a
+ * few scheduler ticks after the receipt. */
+const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const store = yield* AgentRunStore
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const run = yield* store.read(runId)
+      if (run !== null && states.includes(run.state)) return run
+      yield* Effect.sleep(5)
+    }
+    return yield* store.read(runId)
+  })
