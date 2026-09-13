@@ -24,8 +24,19 @@ export type AgentRunRepository = {
   readonly directory: string
 }
 
+/**
+ * One dispatchable Codex CLI route: a caller-facing name bound to a codex
+ * model id. `modelID === null` means the codex CLI's own default model, so a
+ * deployment can expose codex without pinning a model.
+ */
+export type AgentRunCodexRoute = {
+  readonly name: string
+  readonly modelID: string | null
+}
+
 const ROUTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const MODEL_PAIR_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[^\s/]\S*$/
+const CODEX_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
 /**
  * Parses `name=provider/model` pairs separated by commas, as configured in
@@ -49,6 +60,42 @@ export function parseAgentRunRoutes(value: string): ReadonlyArray<AgentRunRoute>
   const names = new Set(routes.map((route) => route.name))
   if (names.size !== routes.length) {
     throw new Error("WORKFLOWD_AGENT_RUN_ROUTES route names must be unique")
+  }
+  return routes
+}
+
+/**
+ * Parses `name=model` pairs separated by commas, as configured in
+ * WORKFLOWD_AGENT_RUN_CODEX_ROUTES. The model is a codex model id
+ * (e.g. `gpt-5.1-codex`); an empty value after `=` or a bare name maps the
+ * route to the codex CLI's default model. Throws on malformed input because
+ * it runs at config load, where every other validation failure is also a
+ * thrown Error.
+ */
+export function parseAgentRunCodexRoutes(value: string): ReadonlyArray<AgentRunCodexRoute> {
+  const routes = value.split(",").map((entry) => {
+    const separator = entry.indexOf("=")
+    const name = separator === -1 ? entry.trim() : entry.slice(0, separator).trim()
+    const model = separator === -1 ? "" : entry.slice(separator + 1).trim()
+    if (!ROUTE_NAME_PATTERN.test(name) || name.length > MAX_AGENT_RUN_ROUTE_BYTES) {
+      throw new Error(
+        `WORKFLOWD_AGENT_RUN_CODEX_ROUTES has an invalid route name in "${entry.trim()}"`,
+      )
+    }
+    if (
+      model !== "" &&
+      (!CODEX_MODEL_PATTERN.test(model) || model.length > MAX_AGENT_RUN_ROUTE_BYTES)
+    ) {
+      throw new Error(
+        `WORKFLOWD_AGENT_RUN_CODEX_ROUTES route "${name}" must map to a codex model id ` +
+          "or nothing for the CLI default",
+      )
+    }
+    return { name, modelID: model === "" ? null : model }
+  })
+  const names = new Set(routes.map((route) => route.name))
+  if (names.size !== routes.length) {
+    throw new Error("WORKFLOWD_AGENT_RUN_CODEX_ROUTES route names must be unique")
   }
   return routes
 }
@@ -111,6 +158,60 @@ export function resolveAgentRunRoute(
     outcome: "refused",
     reason: byModel.length === 0 ? "unknown_route" : "ambiguous_route",
   }
+}
+
+/**
+ * Which provider a resolved dispatch runs on: the OpenCode server or the
+ * Codex CLI on the daemon host. Claude remains a wake path only, not a
+ * dispatch route.
+ */
+export type AgentRunRouteProvider = "opencode" | "codex"
+
+export type AgentRunRouteChoice =
+  | { readonly outcome: "resolved"; readonly provider: "opencode"; readonly route: AgentRunRoute }
+  | { readonly outcome: "resolved"; readonly provider: "codex"; readonly route: AgentRunCodexRoute }
+  | {
+      readonly outcome: "refused"
+      readonly reason: "provider_prefixed_route" | "unknown_route" | "ambiguous_route"
+    }
+
+/**
+ * Resolves a caller-supplied route across both dispatch providers:
+ * OpenCode routes first, then codex routes. A name or bare model id served
+ * by both providers cannot pick one and is refused `ambiguous_route`; a
+ * provider-prefixed id is refused outright so no caller path ever carries
+ * provider dialects.
+ */
+export function resolveAgentRunRouteChoice(
+  routes: ReadonlyArray<AgentRunRoute>,
+  codexRoutes: ReadonlyArray<AgentRunCodexRoute>,
+  requested: string,
+): AgentRunRouteChoice {
+  if (requested.includes("/")) {
+    return { outcome: "refused", reason: "provider_prefixed_route" }
+  }
+  const namedOpenCode = routes.find((route) => route.name === requested)
+  const namedCodex = codexRoutes.find((route) => route.name === requested)
+  if (namedOpenCode !== undefined && namedCodex !== undefined) {
+    return { outcome: "refused", reason: "ambiguous_route" }
+  }
+  if (namedOpenCode !== undefined) {
+    return { outcome: "resolved", provider: "opencode", route: namedOpenCode }
+  }
+  if (namedCodex !== undefined) {
+    return { outcome: "resolved", provider: "codex", route: namedCodex }
+  }
+  const byOpenCodeModel = routes.filter((route) => route.modelID === requested)
+  const byCodexModel = codexRoutes.filter(
+    (route) => route.modelID !== null && route.modelID === requested,
+  )
+  const matches = byOpenCodeModel.length + byCodexModel.length
+  if (matches === 1) {
+    return byOpenCodeModel.length === 1
+      ? { outcome: "resolved", provider: "opencode", route: byOpenCodeModel[0]! }
+      : { outcome: "resolved", provider: "codex", route: byCodexModel[0]! }
+  }
+  return { outcome: "refused", reason: matches === 0 ? "unknown_route" : "ambiguous_route" }
 }
 
 const CLAUDE_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
