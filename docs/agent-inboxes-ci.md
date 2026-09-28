@@ -43,26 +43,6 @@ Reruns are selected by newest run ID and attempt. Reconciliation can change a
 previous terminal result; callers must wait on the intended SHA after starting
 its workflows, not assume a past result predicts future reruns.
 
-Run the repository CLI using:
-
-```sh
-WORKFLOWD_URL=http://127.0.0.1:8787 \
-WORKFLOWD_CI_TOKEN_FILE=/path/to/ci-token \
-bun run workflowd wait ci --repo BNasraoui/workflowd --sha "$HEAD_SHA" --timeout 3600
-```
-
-The CLI reads durable state, then subscribes by bounded HTTP long-poll with the
-last SQLite event sequence. This replay survives process/server restarts and
-NATS retention expiry. It does not poll GitHub. Heartbeats go to stderr every
-60 seconds; the final JSON includes conclusion and failing job names. Exit codes:
-0 success, 1 failing CI, 2 timeout/transport/configuration failure. The maximum
-wait is 24 hours. HTTPS is required except on loopback. The CI bearer grants read
-and watch access only to configured repositories; do not distribute a broader
-workflow ingress token.
-
-The external cargo shim can replace its `sleep 2`/GitHub checks loop with this
-single command, preserving its exit status. No shim file is changed by this PR.
-
 ## Rollout boundary
 
 These settings are absent by default. Enabling them requires an owner-planned

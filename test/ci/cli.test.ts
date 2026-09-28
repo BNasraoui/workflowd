@@ -1,56 +1,10 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { serveRunSocket } from "../../src/worker-identity/peer"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
-import { runWaitCommand } from "../../src/cli"
-import { registerResidentWait } from "../../src/resident/wait"
 import { runWorkerCommand, spawnWorkerCommand } from "../../src/worker-identity/command"
-test("CLI wait commands enforce arguments, credentials, and bounded registration", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "workflowd-wait-cli-"))
-  const secret = join(directory, "token")
-  await writeFile(secret, "test-token")
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: (request) =>
-      request.method === "POST"
-        ? Response.json({ status: "waiting" }, { status: 202 })
-        : Response.json({
-            repository: "o/r",
-            sha: "a".repeat(40),
-            sequence: 1,
-            conclusion: "success",
-            failingJobs: [],
-          }),
-  })
-  const resident = await serveRunSocket(join(directory, "wait.sock"), async () =>
-    Response.json({ status: "waiting" }, { status: 202 }),
-  )
-  try {
-    const io = { fetch, log: () => {}, heartbeat: () => {} }
-    const args = ["wait", "ci", "--repo", "o/r", "--sha", "a".repeat(40)]
-    expect(
-      await runWaitCommand(
-        args,
-        { WORKFLOWD_URL: server.url.toString(), WORKFLOWD_CI_TOKEN_FILE: secret },
-        io,
-      ),
-    ).toBe(0)
-    await expect(runWaitCommand([], {}, io)).rejects.toThrow("Usage")
-    await expect(runWaitCommand(args, {}, io)).rejects.toThrow("TOKEN")
-    await registerResidentWait(["--thread", "thread", "--repo", "o/r", "--sha", "a".repeat(40)], {
-      WORKFLOWD_URL: server.url.toString(),
-      WORKFLOWD_CODEX_RESIDENT_SOCKET: join(directory, "wait.sock"),
-    })
-    await expect(registerResidentWait([], {})).rejects.toThrow("requires")
-  } finally {
-    await resident.close()
-    await server.stop(true)
-    await rm(directory, { recursive: true, force: true })
-  }
-})
 test("worker command acquires an App token for each invocation without argv secrets", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-worker-command-"))
   const path = join(directory, "broker.sock")
