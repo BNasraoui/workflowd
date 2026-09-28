@@ -1,6 +1,5 @@
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import type { CiTarget } from "../ci/event"
 export const ResidentThread = Schema.Struct({
   run_id: Schema.String,
   thread_id: Schema.String,
@@ -41,16 +40,6 @@ export const makeResidentStore = Effect.gen(function* () {
   const started = Effect.fn("Resident.started")(function* (threadId: string, turnId: string) {
     yield* sql`UPDATE resident_threads SET current_turn = ${turnId}, state = 'active' WHERE thread_id = ${threadId} AND state IN ('active','waiting')`
   })
-  const wait = Effect.fn("Resident.wait")(function* (
-    threadId: string,
-    target: CiTarget,
-    deadline: number,
-  ) {
-    const rows = yield* sql`UPDATE resident_threads SET state = 'waiting', wait_turn = current_turn,
-      wait_repo = ${target.repository}, wait_sha = ${target.sha}, wait_deadline = ${deadline}
-      WHERE thread_id = ${threadId} AND state = 'active' AND current_turn IS NOT NULL RETURNING thread_id`
-    if (rows.length !== 1) return yield* Effect.fail(new Error("Resident thread is not active"))
-  })
   const park = Effect.fn("Resident.park")(function* (threadId: string) {
     const rows = yield* sql`UPDATE resident_threads SET state = 'waiting', wait_turn = current_turn
       WHERE thread_id = ${threadId} AND state IN ('active','waiting') AND current_turn IS NOT NULL RETURNING thread_id`
@@ -61,6 +50,14 @@ export const makeResidentStore = Effect.gen(function* () {
     if (row === null) return "unknown" as const
     if (row.wait_turn === turnId) return "waiting" as const
     if (row.current_turn !== turnId) return "stale" as const
+    const outstanding = yield* sql`SELECT w.wait_id FROM kernel_waits w
+      JOIN kernel_workflow_instances i ON i.instance_id = w.instance_id
+      WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = ${threadId}
+        AND w.state IN ('pending','matched') LIMIT 1`
+    if (outstanding.length > 0) {
+      yield* park(threadId)
+      return "waiting" as const
+    }
     yield* sql`UPDATE resident_threads SET state = 'finished' WHERE thread_id = ${threadId}`
     return "finished" as const
   })
@@ -96,7 +93,6 @@ export const makeResidentStore = Effect.gen(function* () {
     threads,
     read,
     started,
-    wait,
     completed,
     enqueue,
     pending,

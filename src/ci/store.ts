@@ -12,11 +12,11 @@ export const CiRun = Schema.Struct({
 })
 export type CiRun = typeof CiRun.Type
 export const CiState = Schema.Struct({
-  runLinks: Schema.optional(Schema.Array(Schema.String)),
   ...CiTarget.fields,
   sequence: Schema.Int,
   conclusion: Schema.Literals(["pending", "success", "failure"]),
   failingJobs: Schema.Array(Schema.String),
+  runLinks: Schema.optional(Schema.Array(Schema.String)),
 })
 export type CiState = typeof CiState.Type
 const TargetRow = Schema.Struct({

@@ -76,6 +76,13 @@ export const makeSubscriptions = Effect.gen(function* () {
               threadId,
               `workflowd completion: ${JSON.stringify(delivery.event.payload)}. Continue the task from this result.`,
             )
+            const thread = yield* inbox.read(threadId)
+            if (
+              thread === null ||
+              thread.state === "finished" ||
+              thread.state === "operator_required"
+            )
+              yield* inbox.uncertain(id, threadId)
             yield* events.consumeDelivery({
               instanceId: id,
               waitId: id,

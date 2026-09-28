@@ -10,7 +10,7 @@ test("durable inbox separates waiting turn completion from wake turn completion"
       const store = yield* makeResidentStore
       yield* store.attach("run1", "thread1", "/work/a", null)
       yield* store.started("thread1", "turn1")
-      yield* store.wait("thread1", { repository: "o/r", sha: "a".repeat(40) }, 1000)
+      yield* store.park("thread1")
       expect(yield* store.completed("thread1", "turn1")).toBe("waiting")
       yield* store.enqueue("event1", "thread1", "CI completed")
       yield* store.enqueue("event1", "thread1", "CI completed")

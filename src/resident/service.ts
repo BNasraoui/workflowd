@@ -213,8 +213,10 @@ export const ResidentCodexLive = (
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
         for (const message of yield* store.pending()) {
           const row = yield* store.read(message.thread_id)
-          if (row === null || row.state === "operator_required" || row.state === "finished")
+          if (row === null || row.state === "operator_required" || row.state === "finished") {
+            yield* store.uncertain(message.id, message.thread_id)
             continue
+          }
           if (!message.id.startsWith("dispatch:") && !(yield* hasCustody(message.thread_id))) {
             yield* store.uncertain(message.id, message.thread_id)
             yield* finish(message.thread_id, true)

@@ -58,6 +58,16 @@ for (const alreadyFinished of [false, true]) {
         expect(messages).toHaveLength(1)
         expect(messages[0]?.prompt).toContain('"failingJobs":["lint"]')
         expect(messages[0]?.prompt).toContain("https://github.com/o/r/actions/runs/42")
+        const webhook = {
+          _tag: "CiCompletion" as const,
+          ...target,
+          installationId: 1,
+          source: "workflow_run" as const,
+          sourceId: 42,
+          conclusion: "failure",
+        }
+        expect(yield* ci.ingest("delivery", webhook, "{}", Date.now())).toBe("accepted")
+        expect(yield* ci.ingest("delivery", webhook, "{}", Date.now())).toBe("duplicate")
         yield* store.delivered(receipt.id)
         yield* complete
         yield* subscriptions.reconcile()
@@ -106,6 +116,55 @@ test("agent run final state produces one mailbox message with a summary pointer"
       yield* store.uncertain(messages[0]!.id, "thread")
       expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
       yield* subscriptions.reconcile()
+      expect(yield* store.pending()).toHaveLength(0)
+    }).pipe(Effect.provide(layer)),
+  ))
+
+test("a wake turn cannot finish a worker with another outstanding subscription", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      yield* subscriptions.register("thread", { kind: "ci", ...target })
+      yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
+      expect(yield* store.completed("thread", "turn")).toBe("waiting")
+      yield* store.started("thread", "wake-turn")
+      expect(yield* store.completed("thread", "wake-turn")).toBe("waiting")
+      expect((yield* store.read("thread"))?.state).toBe("waiting")
+    }).pipe(Effect.provide(layer)),
+  ))
+
+test("terminal result for a gone mailbox requires an operator and never queues a retry", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      const ci = yield* CiService
+      const sql = yield* SqlClient.SqlClient
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      yield* ci.watch(target, 1, ["CI"], Date.now())
+      yield* subscriptions.register("thread", { kind: "ci", ...target })
+      yield* sql`UPDATE resident_threads SET state = 'finished' WHERE thread_id = 'thread'`
+      yield* ci.snapshot(
+        target,
+        [
+          {
+            id: 42,
+            name: "CI",
+            attempt: 1,
+            status: "completed",
+            conclusion: "success",
+            failingJobs: [],
+          },
+        ],
+        null,
+        Date.now(),
+      )
+      yield* subscriptions.reconcile()
+      expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
       expect(yield* store.pending()).toHaveLength(0)
     }).pipe(Effect.provide(layer)),
   ))

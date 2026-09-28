@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { expect, test } from "bun:test"
 import { Effect, Layer, Schema } from "effect"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { ResidentCodex, ResidentCodexLive } from "../../src/resident/service"
 import { RpcClient } from "../../src/resident/rpc"
@@ -466,3 +467,75 @@ test("completed resident runs release their owned app-server", async () => {
     }).pipe(Effect.provide(layer(fake.factory))),
   )
 })
+
+for (const kind of ["ci", "agent_run"] as const) {
+  for (const reject of [false, true]) {
+    test(`${kind} already finished delivers immediately, queue failure=${reject}`, async () => {
+      const fake = fixture()
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const resident = yield* ResidentCodex
+          const store = yield* makeResidentStore
+          const ci = yield* CiService
+          const runs = yield* AgentRunStore
+          const now = new Date()
+          yield* prepareRun(now)
+          const process = yield* resident.cli.spawn({
+            runId: "a",
+            directory: "/work/a",
+            prompt: "hold",
+            model: null,
+          })
+          const iterator = process.events[Symbol.asyncIterator]()
+          for (;;) {
+            const event = yield* Effect.promise(() => iterator.next())
+            if (event.value?.type === "agent_message") break
+          }
+          yield* verifyRun(now)
+          const target = { repository: "o/r", sha: "a".repeat(40) }
+          if (kind === "ci") {
+            yield* ci.watch(target, 1, ["CI"], Date.now())
+            yield* ci.snapshot(
+              target,
+              [
+                {
+                  id: 7,
+                  name: "CI",
+                  attempt: 1,
+                  status: "completed",
+                  conclusion: "success",
+                  failingJobs: [],
+                },
+              ],
+              null,
+              Date.now(),
+            )
+          } else {
+            yield* prepareRun(now, "child")
+            yield* runs.fail({ runId: "child", diagnostic: "spawn failed", now })
+          }
+          if (reject) fake.reject("thread/queue/add")
+          const selector = kind === "ci" ? { kind, ...target } : { kind, run_id: "child" }
+          const response = yield* resident.route(
+            new Request("http://localhost/subscriptions", {
+              method: "POST",
+              body: JSON.stringify({ runId: "a", selector }),
+            }),
+            fake.pids.get("thread-1"),
+          )
+          expect(response?.status).toBe(202)
+          expect((yield* process.exited).exitCode).toBe(reject ? 1 : 0)
+          expect(fake.calls.filter((c) => c.method === "thread/queue/add")).toHaveLength(2)
+          expect((yield* store.read("thread-1"))?.state).toBe(
+            reject ? "operator_required" : "finished",
+          )
+          const sql = yield* SqlClient.SqlClient
+          const messages =
+            yield* sql`SELECT state FROM resident_inbox WHERE id LIKE 'subscription-%'`
+          expect(messages).toHaveLength(1)
+          expect(messages[0]?.state).toBe(reject ? "operator_required" : "delivered")
+        }).pipe(Effect.provide(layer(fake.factory))),
+      )
+    })
+  }
+}
