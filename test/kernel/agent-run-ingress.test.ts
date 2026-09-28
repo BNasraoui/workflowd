@@ -814,3 +814,39 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
     }
     return yield* store.read(runId)
   })
+
+test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
+  let interrupted = false
+  const events: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
+    async *[Symbol.asyncIterator]() {
+      yield { type: "thread.started", threadId: "stalled-thread" }
+      yield { type: "agent_message", text: "started" }
+      await new Promise(() => {})
+    },
+  }
+  const layer = makeLayer(
+    makeProvider(defaultState()),
+    worktrees([]),
+    {
+      preflight: Effect.void,
+      spawn: () =>
+        Effect.succeed({
+          events,
+          exited: Effect.callback(() =>
+            Effect.sync(() => {
+              interrupted = true
+            }),
+          ),
+        }),
+    },
+    { progressWindowMs: 10 },
+  )
+  const run = await Effect.runPromise(
+    Effect.gen(function* () {
+      const receipt = yield* register({ ...submission, route: "scan" })
+      return yield* waitForRunState(receipt.runId, ["operator_required"])
+    }).pipe(Effect.provide(layer)),
+  )
+  expect(interrupted).toBe(true)
+  expect(run?.state).toBe("operator_required")
+})
