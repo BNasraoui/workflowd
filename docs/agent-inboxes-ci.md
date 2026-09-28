@@ -8,7 +8,7 @@ passing a SHA because one of several workflows finished first. Missing workflows
 remain pending. This policy covers Actions workflows; external check providers
 and legacy commit statuses are not required-check policy inputs.
 
-## CI ingress and waits (off by default)
+## CI ingress (off by default)
 
 Set `WORKFLOWD_CI_ENABLED=true`, `WORKFLOWD_CI_TOKEN_FILE` to a dedicated bearer
 secret file, and `WORKFLOWD_CI_REPOSITORIES` to JSON such as:
@@ -37,11 +37,53 @@ The shared reconciliation worker examines at most one watched repository/SHA per
 minute, using an installation client and ETags. Each pass allows one inventory
 request and up to ten failed-workflow job requests, each bounded to 100 records.
 Larger inventories fail closed; they never silently become successful. Failures
-back off five minutes. Targets expire after 24 hours without a waiter. The wait
-API registers targets, so an entirely missed webhook can still be recovered.
+back off five minutes. Targets expire after 24 hours without renewed registration. Subscription registration
+starts reconciliation, so an entirely missed webhook can still be recovered.
 Reruns are selected by newest run ID and attempt. Reconciliation can change a
 previous terminal result; callers must wait on the intended SHA after starting
 its workflows, not assume a past result predicts future reruns.
+
+## Agent pattern: push, subscribe, end the turn
+
+Push the intended head, then call the resident workflowd MCP tool
+`subscribe_to_event` with `{"kind":"ci","repository":"owner/repo","sha":"HEAD_SHA"}`.
+For another managed run, use `{"kind":"agent_run","run_id":"RUN_ID"}`.
+Wait only for the registration receipt, then **end the turn**. Continue when the
+single completion message arrives. The equivalent run-bound shell call is
+`bun /path/to/workflowd/src/resident/subscribe.ts --repo owner/repo --sha HEAD_SHA`
+(or `--agent-run RUN_ID`). Registration does not block or emit heartbeats.
+The external cargo shim stops polling: its resident worker pushes and subscribes,
+then workflowd wakes that worker through its mailbox. The shim is not edited here.
+
+The tool runs in a per-run stdio MCP process configured on workflowd's owned
+app-server child. The daemon verifies the socket peer's ancestry and resolves
+that run's custodied thread; tool arguments cannot supply a subscriber identity.
+CI selectors are restricted to the caller's configured repository; agent-run
+selectors must name another managed run in the same repository. Shared HTTP MCP
+bearers and shared OpenCode process roots do not grant this subscription authority.
+Resident Codex is the supported subscriber in this release.
+
+Subscription identity is the subscriber plus normalized selector. Repeating it,
+including after delivery, never creates another message. Already-final jobs enqueue
+immediately. Each subscription captures one final observation; later reruns of the
+same SHA do not rearm it. CI results include conclusion, failing job names, and
+Actions run links. Agent results include final status and a native-session summary
+pointer (or the durable run ID if the run never acquired a session).
+
+Subscriptions reuse `kernel_workflow_instances`, `kernel_waits`, and
+`kernel_wait_event_deliveries`. Consuming a matched wait and inserting its resident
+inbox message is one transaction. The inbox uses the subscription ID as its stable
+queue message ID. Its `prepared`/`sending`/`delivered`/`operator_required` state is
+the subscription's delivery state; before an inbox row exists the kernel wait is
+pending. Queue failures or a gone mailbox require operator attention, with no blind
+retry. Inspect these records by subscription ID from the receipt.
+
+Existing `wait_for_agent` and dispatch parent wakes keep their durable wait and
+wake-by-resume paths for one-shot workers: OpenCode uses `prompt_async`, and Claude
+uses its resume worker. They retain their existing provider and custody rules.
+Mailbox subscriptions reuse the durable wait core but reduce to resident inboxes
+instead of scheduling a one-shot resume. They require resident workers; a completed
+`codex exec` process cannot receive a mailbox message.
 
 ## Rollout boundary
 
@@ -127,24 +169,23 @@ workflowd owns one `codex app-server --listen stdio://` child per live run using
 that private home. Distinct process trees let the Unix socket authenticate the
 calling run with the same peer-credential/ancestry boundary as token brokerage.
 The socket path and run identity are passed only through each child environment.
-No service-wide bearer file authorizes waits. It neither uses systemd to manage that child nor connects to
+No service-wide bearer file authorizes subscriptions. It neither uses systemd to manage that child nor connects to
 an existing managed Codex daemon. Each dispatch gets its own thread, cwd, model,
 `approvalPolicy: never`, and `sandbox: danger-full-access`, preserving the trusted
 worker posture of the existing exec path. The experimental API capability is
 explicitly negotiated. Tested against the installed Codex 0.156 protocol.
 
-Dispatch instructions give the worker a resident wait helper. After it registers
-an authenticated wait for its custodied thread and configured repository, it
-ends its turn with “waiting for CI”. The service stores the waiting turn ID and
-deadline. Its completion does not finish the agent run. A terminal CI state or
-wait timeout creates a durable inbox entry and calls `thread/queue/add`; an idle
+Dispatch instructions give the worker the subscription pattern above. A registered
+subscription keeps its original turn from finishing the agent run. The daemon
+observes persisted job state and queues one result with `thread/queue/add`; an idle
 thread starts a turn, while an active thread receives it after its current turn.
-No shell sleep or finished `codex exec` resume is involved.
+There is no agent-side polling. Multiple outstanding subscriptions retain the
+resident worker until their results have arrived.
 
 After app-server restart, workflowd reloads persisted thread IDs with
 `thread/resume` (the app-server reload operation), restores their cwd/model/policy,
 and checks history. Interrupted active work gets a queued recovery event. Waiting
-threads retain their waits. Lost queue acknowledgements are reconciled against
+threads retain their subscriptions. Lost queue acknowledgements are reconciled against
 queued submission IDs and persisted user-message client IDs. If neither proves
 acceptance, the inbox and run require operator attention instead of blind replay.
 The automatic app-server restart budget is three per run per workflowd lifetime.
@@ -166,3 +207,12 @@ and [conditional requests](https://docs.github.com/en/rest/using-the-rest-api/be
 The Codex wire shapes were checked against locally generated experimental types
 from Codex 0.156 in an isolated scratch home, in addition to the prior
 `explore/agent-inboxes` probes.
+
+This rework adds no migration beyond 0020/0021. The old single-target resident wait
+columns remain unused for schema compatibility. Drain any earlier experimental
+resident waits before cutover; they are not converted into new subscriptions.
+Dispatch changes in PR #58 and `fix/credential-rotation-keeps-runs` are separate:
+this rework leaves `agent-run-ingress.ts`, `runtime.ts`, and the legacy parent-wake
+workers untouched. Credential rotation must preserve the resident process root
+(or re-register the new owned root) so socket authentication and mailbox custody
+remain valid.
