@@ -223,5 +223,8 @@ type StoredCi = Effect.Success<typeof makeCiStore>
 export type CiStore = Omit<StoredCi, "ingest"> & {
   readonly ingest: (
     ...args: Parameters<StoredCi["ingest"]>
-  ) => Effect.Effect<"accepted" | "duplicate", Effect.Error<ReturnType<StoredCi["watch"]>>>
+  ) => Effect.Effect<
+    "accepted" | "duplicate" | "ignored",
+    Effect.Error<ReturnType<StoredCi["watch"]>>
+  >
 }

@@ -17,8 +17,8 @@ export const makeCiWorkers = (repositories: CiConfig["repositories"]) =>
           const policy = repositories.find(
             (r) => r.repository === event.repository && r.installationId === event.installationId,
           )
-          if (policy !== undefined)
-            yield* store.watch(event, policy.installationId, policy.workflows, now)
+          if (policy === undefined) return "ignored" as const
+          yield* store.watch(event, policy.installationId, policy.workflows, now)
           return yield* store.ingest(deliveryId, event, payload, now)
         }),
       )

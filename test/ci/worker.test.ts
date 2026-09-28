@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
+import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { makeCiWorkers } from "../../src/ci/service"
 import { CiProvider } from "../../src/ci/provider"
@@ -73,3 +74,47 @@ test("ingress registers reconciliation and outbox retries retain durable observa
     ),
   )
 })
+
+for (const mismatch of [
+  { repository: "other/repo", installationId: 1 },
+  { repository: "o/r", installationId: 2 },
+]) {
+  test(`ignores CI outside policy: ${JSON.stringify(mismatch)}`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        yield* runStoreMigrations
+        const sql = yield* SqlClient.SqlClient
+        const publications: string[] = []
+        const { port, publish } = yield* makeCiWorkers(repositories).pipe(
+          Effect.provideService(CiProvider, {
+            publish: (subject) =>
+              Effect.sync(() => {
+                publications.push(subject)
+              }),
+            request: () => Effect.fail(new Error("unexpected reconciliation")),
+          }),
+        )
+        expect(
+          yield* port.ingest(
+            "ignored",
+            {
+              _tag: "CiCompletion",
+              ...mismatch,
+              sha: "a".repeat(40),
+              source: "workflow_run",
+              sourceId: 1,
+              conclusion: "success",
+            },
+            "{}",
+            Date.now(),
+          ),
+        ).toBe("ignored")
+        expect(yield* sql`SELECT * FROM ci_deliveries`).toHaveLength(0)
+        expect(yield* port.deliveryOutbox()).toHaveLength(0)
+        expect(yield* port.outbox()).toHaveLength(0)
+        expect(yield* port.due(Date.now())).toHaveLength(0)
+        yield* publish
+        expect(publications).toEqual([])
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    ))
+}
