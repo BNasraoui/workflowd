@@ -551,14 +551,15 @@ test("a Codex stall interrupts its owned execution before waiting for exit", asy
     worktrees([]),
     {
       preflight: Effect.void,
+      attach: () => Effect.succeed(null),
       spawn: () =>
         Effect.succeed({
+          executionId: "test-stalled.service",
           events,
-          exited: Effect.callback(() =>
-            Effect.sync(() => {
-              interrupted = true
-            }),
-          ),
+          exited: Effect.succeed({ exitCode: -1, stderr: "" }),
+          cancel: Effect.sync(() => {
+            interrupted = true
+          }),
         }),
     },
     { progressWindowMs: 10 },

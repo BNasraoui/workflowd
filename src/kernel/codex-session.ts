@@ -1,4 +1,8 @@
-import { Context, Effect } from "effect"
+import { createHash } from "node:crypto"
+import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { Context, Effect, Schema } from "effect"
 import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
@@ -125,242 +129,293 @@ export type CodexExit = {
  * drains it to the first-token receipt and the completion continuation
  * drains the rest. */
 export type CodexRunProcess = {
+  readonly executionId: string
   readonly events: AsyncIterable<CodexExecEvent>
-  /** Resolves on process exit with the exit code and bounded stderr.
-   * Interrupting this effect terminates the process group (SIGTERM, then
-   * SIGKILL), so a no-first-token refusal never leaves codex burning. */
+  /** Observation is independent of the transient service; interruption does
+   * not signal the worker. */
   readonly exited: Effect.Effect<CodexExit, WorkspaceError>
+  /** Explicit cancellation is the only operation that signals the unit. */
+  readonly cancel: Effect.Effect<void, WorkspaceError>
 }
 
 export type CodexSpawnInput = {
-  /** Absolute path of the prepared git worktree codex works in (--cd). */
+  readonly runId: string
   readonly directory: string
-  /** The task prompt; rides stdin, never argv. */
   readonly prompt: string
-  /** Codex model id (-m), or null for the CLI's configured default. */
   readonly model: string | null
 }
 
 export type CodexCliPort = {
-  /** Checks the CLI answers a version call and reports credentials on the
-   * daemon host. Both failures refuse the dispatch before anything spawns. */
   readonly preflight: Effect.Effect<void, CodexPreflightError>
-  /** Spawns `codex exec --json` in the given directory. Fails only when the
-   * process cannot be started; the run's outcome arrives via events+exit. */
   readonly spawn: (input: CodexSpawnInput) => Effect.Effect<CodexRunProcess, WorkspaceError>
+  readonly attach: (input: {
+    readonly runId: string
+  }) => Effect.Effect<CodexRunProcess | null, WorkspaceError>
 }
 
 export const CodexCli = Context.Service<CodexCliPort>("workflowd/kernel/CodexCli")
 
 const MAX_CODEX_STDERR_BYTES = 16_384
+type CommandResult = { readonly exitCode: number; readonly stderr: string }
+type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
-export const makeCodexCli = (options: { readonly binary: string }): CodexCliPort => ({
-  preflight: Effect.gen(function* () {
-    yield* runWorkspaceCommand("check codex cli", [options.binary, "--version"]).pipe(
-      Effect.mapError((cause): CodexPreflightError => ({
-        kind: "cli_unusable",
-        detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
-      })),
-    )
-    yield* runWorkspaceCommand("check codex auth", [options.binary, "login", "status"]).pipe(
-      Effect.mapError((cause): CodexPreflightError => ({
-        kind: "not_authenticated",
-        detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
-      })),
-    )
-  }),
-  spawn: (input) =>
-    Effect.callback<CodexRunProcess, WorkspaceError>((resume) => {
-      // Argument-vector spawn, prompt on stdin: untrusted task text never
-      // appears in argv or a shell string. Bypassing the sandbox is
-      // deliberate, matching the opencode YOLO posture: runs happen in
-      // dedicated git worktrees on a trusted host and must push over the
-      // network.
-      const argv = [
-        options.binary,
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--cd",
-        input.directory,
-        ...(input.model === null ? [] : ["-m", input.model]),
-        "-",
-      ]
-      let child: Bun.ReadableSubprocess
-      try {
-        child = Bun.spawn(argv, {
-          cwd: input.directory,
-          detached: true,
-          env: process.env,
-          stdin: Buffer.from(input.prompt, "utf8"),
-          stdout: "pipe",
-          stderr: "pipe",
-        })
-      } catch (cause) {
-        resume(
-          Effect.fail(
-            new WorkspaceError({ operation: "spawn codex exec", cause: normalizeError(cause) }),
-          ),
-        )
-        return
-      }
+export type CodexCliOptions = {
+  readonly binary: string
+  readonly custodyRoot: string
+  readonly pollIntervalMs?: number
+  readonly runCommand?: RunCommand
+}
 
-      const queue = makeEventQueue()
-      const stdoutClosed = readLines(child.stdout, (line) => queue.push(parseCodexExecEvent(line)))
-      const stderrText = readBoundedText(child.stderr, MAX_CODEX_STDERR_BYTES)
-      void Promise.all([child.exited, stdoutClosed]).then(() => queue.close())
+const Manifest = Schema.Struct({
+  version: Schema.Literal(1),
+  runId: Schema.String,
+  executionId: Schema.String,
+  eventsPath: Schema.String,
+  stderrPath: Schema.String,
+  resultPath: Schema.String,
+  cancelledPath: Schema.String,
+})
+type Manifest = typeof Manifest.Type
 
-      const terminateGroup = (signalName: "SIGTERM" | "SIGKILL") => {
-        try {
-          process.kill(-child.pid, signalName)
-        } catch {
-          try {
-            child.kill(signalName)
-          } catch {
-            // Already gone.
-          }
-        }
-      }
-      const groupIsAlive = () => {
-        try {
-          process.kill(-child.pid, 0)
-          return true
-        } catch {
-          return false
-        }
-      }
-
-      // The exit lands whenever the process dies, but `exited` may only be
-      // evaluated later (or never); cache the result so a late evaluation
-      // still resumes immediately.
-      let awaitExit: ((effect: Effect.Effect<CodexExit, WorkspaceError>) => void) | null = null
-      let exitResult: CodexExit | null = null
-      void child.exited.then((code) =>
-        stderrText.then((stderr) => {
-          exitResult = { exitCode: typeof code === "number" ? code : -1, stderr }
-          const pending = awaitExit
-          awaitExit = null
-          pending?.(Effect.succeed(exitResult))
-        }),
-      )
-
-      resume(
-        Effect.succeed({
-          events: queue.iterable,
-          exited: Effect.callback<CodexExit, WorkspaceError>((resumeDone, exitSignal) => {
-            if (exitResult !== null) {
-              resumeDone(Effect.succeed(exitResult))
-              return
-            }
-            awaitExit = resumeDone
-            // Interruption (no-first-token timeout, daemon shutdown) is the
-            // process-group kill, awaited to completion like workspace
-            // commands so a refused dispatch never leaves codex burning.
-            exitSignal.addEventListener("abort", () => terminateGroup("SIGTERM"), {
-              once: true,
-            })
-            return Effect.tryPromise({
-              try: async () => {
-                terminateGroup("SIGTERM")
-                const completed = await Promise.race([
-                  child.exited.then(() => true),
-                  Bun.sleep(500).then(() => false),
-                ])
-                if (!completed || groupIsAlive()) terminateGroup("SIGKILL")
-                await child.exited
-                for (let attempt = 0; attempt < 50 && groupIsAlive(); attempt += 1) {
-                  await Bun.sleep(10)
-                }
-                if (groupIsAlive()) {
-                  throw new Error(`codex process group ${child.pid} remained alive after cleanup`)
-                }
-              },
-              catch: normalizeError,
-            }).pipe(
-              Effect.tapError((cause) => Effect.logWarning("codex exec cleanup failed", { cause })),
-              Effect.orDie,
-            )
-          }),
-        }),
-      )
-    }),
+const ResultRecord = Schema.Struct({
+  version: Schema.Literal(1),
+  exitCode: Schema.Int,
 })
 
-/** Single-consumer push queue turning stdout lines into an async iterable. */
-const makeEventQueue = () => {
-  const pending: CodexExecEvent[] = []
-  let closed = false
-  let waiter: (() => void) | null = null
-  const wake = () => {
-    const ready = waiter
-    waiter = null
-    ready?.()
+const safeRunId = (runId: string) => {
+  if (!/^agent-run-[a-zA-Z0-9_-]+$/.test(runId)) {
+    throw new Error("run id is not safe for durable custody")
   }
-  const next = async (): Promise<IteratorResult<CodexExecEvent>> => {
-    for (;;) {
-      if (pending.length > 0) return { value: pending.shift()!, done: false }
-      if (closed) return { value: undefined, done: true }
-      await new Promise<void>((resolve) => {
-        waiter = resolve
-      })
-    }
+  return runId
+}
+
+const executionIdFor = (runId: string) =>
+  `workflowd-agent-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}.service`
+
+const defaultRunCommand: RunCommand = async (command) => {
+  const child = Bun.spawn([...command], { stdin: "ignore", stdout: "ignore", stderr: "pipe" })
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  return { exitCode: typeof exitCode === "number" ? exitCode : -1, stderr }
+}
+
+const fileExists = (path: string) =>
+  stat(path).then(
+    () => true,
+    () => false,
+  )
+
+const writeJsonAtomic = async (path: string, value: unknown) => {
+  const temporary = `${path}.tmp-${process.pid}-${crypto.randomUUID()}`
+  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: "wx" })
+  await rename(temporary, path)
+}
+
+const readJson = async <S extends Schema.ConstraintDecoder<unknown>>(path: string, schema: S) =>
+  Schema.decodeUnknownSync(schema)(JSON.parse(await readFile(path, "utf8")))
+
+const boundedText = async (path: string) => {
+  try {
+    const value = await readFile(path)
+    return new TextDecoder().decode(value.subarray(0, MAX_CODEX_STDERR_BYTES))
+  } catch {
+    return ""
   }
-  const iterator: AsyncIterator<CodexExecEvent> = { next }
+}
+
+const commandFailure = (operation: string, result: CommandResult) =>
+  new WorkspaceError({
+    operation,
+    cause: new Error(`${operation} exited ${result.exitCode}: ${result.stderr.trim()}`),
+  })
+
+export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
+  const pollIntervalMs = options.pollIntervalMs ?? 100
+  const runCommand = options.runCommand ?? defaultRunCommand
+  const workerPath = fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
+  const manifestPath = (runId: string) =>
+    join(options.custodyRoot, safeRunId(runId), "manifest.json")
+
+  const attach: CodexCliPort["attach"] = (input) =>
+    Effect.tryPromise({
+      try: async () => {
+        const path = manifestPath(input.runId)
+        if (!(await fileExists(path))) return null
+        const manifest = await readJson(path, Manifest)
+        if (manifest.runId !== input.runId) throw new Error("codex custody run id mismatch")
+
+        const terminal = async (): Promise<CodexExit | null> => {
+          if (await fileExists(manifest.resultPath)) {
+            const result = await readJson(manifest.resultPath, ResultRecord)
+            return { exitCode: result.exitCode, stderr: await boundedText(manifest.stderrPath) }
+          }
+          if (await fileExists(manifest.cancelledPath)) {
+            return { exitCode: -1, stderr: await boundedText(manifest.stderrPath) }
+          }
+          return null
+        }
+
+        const events: AsyncIterable<CodexExecEvent> = {
+          async *[Symbol.asyncIterator]() {
+            let emitted = 0
+            for (;;) {
+              let lines: string[] = []
+              try {
+                const text = await readFile(manifest.eventsPath, "utf8")
+                lines = text.split("\n")
+                if (lines.at(-1) === "") lines.pop()
+              } catch {
+                // The service may not have opened stdout yet.
+              }
+              while (emitted < lines.length) yield parseCodexExecEvent(lines[emitted++]!)
+              if ((await terminal()) !== null) return
+              await Bun.sleep(pollIntervalMs)
+            }
+          },
+        }
+
+        const exited = Effect.tryPromise({
+          try: async () => {
+            for (;;) {
+              const exit = await terminal()
+              if (exit !== null) return exit
+              await Bun.sleep(pollIntervalMs)
+            }
+          },
+          catch: (cause) =>
+            new WorkspaceError({
+              operation: "observe codex transient unit",
+              cause: normalizeError(cause),
+            }),
+        })
+
+        const cancel = Effect.tryPromise({
+          try: async () => {
+            if ((await terminal()) !== null) return
+            const result = await runCommand([
+              "systemctl",
+              "--user",
+              "kill",
+              "--kill-whom=all",
+              "--signal=SIGTERM",
+              manifest.executionId,
+            ])
+            if (result.exitCode !== 0 && (await terminal()) === null) {
+              throw commandFailure("cancel codex transient unit", result)
+            }
+            await writeJsonAtomic(manifest.cancelledPath, { version: 1 })
+          },
+          catch: (cause) =>
+            cause instanceof WorkspaceError
+              ? cause
+              : new WorkspaceError({
+                  operation: "cancel codex transient unit",
+                  cause: normalizeError(cause),
+                }),
+        })
+
+        return { executionId: manifest.executionId, events, exited, cancel }
+      },
+      catch: (cause) =>
+        new WorkspaceError({
+          operation: "attach codex transient unit",
+          cause: normalizeError(cause),
+        }),
+    })
+
   return {
-    push: (event: CodexExecEvent) => {
-      if (closed) return
-      pending.push(event)
-      wake()
-    },
-    close: () => {
-      closed = true
-      wake()
-    },
-    iterable: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<CodexExecEvent>,
-  }
-}
+    preflight: Effect.gen(function* () {
+      yield* runWorkspaceCommand("check codex cli", [options.binary, "--version"]).pipe(
+        Effect.mapError((cause): CodexPreflightError => ({
+          kind: "cli_unusable",
+          detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
+        })),
+      )
+      yield* runWorkspaceCommand("check codex auth", [options.binary, "login", "status"]).pipe(
+        Effect.mapError((cause): CodexPreflightError => ({
+          kind: "not_authenticated",
+          detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
+        })),
+      )
+    }),
+    spawn: (input) =>
+      Effect.tryPromise({
+        try: async () => {
+          safeRunId(input.runId)
+          const directory = join(options.custodyRoot, input.runId)
+          const executionId = executionIdFor(input.runId)
+          const promptPath = join(directory, "prompt")
+          const eventsPath = join(directory, "events.jsonl")
+          const stderrPath = join(directory, "stderr.log")
+          const resultPath = join(directory, "result.json")
+          const cancelledPath = join(directory, "cancelled.json")
+          await mkdir(directory, { recursive: true, mode: 0o700 })
+          await chmod(directory, 0o700)
+          await writeFile(promptPath, input.prompt, { mode: 0o600, flag: "wx" })
+          await writeFile(eventsPath, "", { mode: 0o600, flag: "wx" })
+          await writeFile(stderrPath, "", { mode: 0o600, flag: "wx" })
+          const manifest: Manifest = {
+            version: 1,
+            runId: input.runId,
+            executionId,
+            eventsPath,
+            stderrPath,
+            resultPath,
+            cancelledPath,
+          }
+          await writeJsonAtomic(manifestPath(input.runId), manifest)
 
-const readLines = async (stream: ReadableStream<Uint8Array>, onLine: (line: string) => void) => {
-  const decoder = new TextDecoder()
-  const reader = stream.getReader()
-  let buffer = ""
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    let index: number
-    while ((index = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, index)
-      buffer = buffer.slice(index + 1)
-      if (line.trim() !== "") onLine(line)
-    }
+          const forwardedEnvironment = [
+            "HOME",
+            "PATH",
+            "CODEX_HOME",
+            "SSH_AUTH_SOCK",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_SSH_COMMAND",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+          ].flatMap((name) => {
+            const value = process.env[name]
+            return value === undefined ? [] : [`--setenv=${name}=${value}`]
+          })
+          const command = [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--service-type=exec",
+            `--unit=${executionId}`,
+            `--working-directory=${input.directory}`,
+            "--property=KillMode=control-group",
+            `--property=StandardOutput=append:${eventsPath}`,
+            `--property=StandardError=append:${stderrPath}`,
+            ...forwardedEnvironment,
+            process.execPath,
+            workerPath,
+            "--binary",
+            options.binary,
+            "--directory",
+            input.directory,
+            "--prompt-file",
+            promptPath,
+            "--result-file",
+            resultPath,
+            ...(input.model === null ? [] : ["--model", input.model]),
+          ]
+          const launched = await runCommand(command)
+          if (launched.exitCode !== 0) throw commandFailure("launch codex transient unit", launched)
+          const process_ = await Effect.runPromise(attach({ runId: input.runId }))
+          if (process_ === null) throw new Error("codex custody vanished after launch")
+          return process_
+        },
+        catch: (cause) =>
+          cause instanceof WorkspaceError
+            ? cause
+            : new WorkspaceError({
+                operation: "launch codex transient unit",
+                cause: normalizeError(cause),
+              }),
+      }),
+    attach,
   }
-  buffer += decoder.decode()
-  if (buffer.trim() !== "") onLine(buffer)
-}
-
-const readBoundedText = async (stream: ReadableStream<Uint8Array>, maxBytes: number) => {
-  const reader = stream.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    chunks.push(value)
-    total += value.byteLength
-    if (total >= maxBytes) {
-      await reader.cancel().catch(() => undefined)
-      break
-    }
-  }
-  const merged = new Uint8Array(Math.min(total, maxBytes))
-  let offset = 0
-  for (const chunk of chunks) {
-    const room = merged.byteLength - offset
-    if (room <= 0) break
-    const copied = Math.min(room, chunk.byteLength)
-    merged.set(chunk.subarray(0, copied), offset)
-    offset += copied
-  }
-  return new TextDecoder().decode(merged)
 }

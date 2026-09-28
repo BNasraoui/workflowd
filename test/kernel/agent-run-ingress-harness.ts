@@ -132,6 +132,7 @@ export const makeCodexCli = (
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
     preflight: preflightError === undefined ? Effect.void : Effect.fail(preflightError),
+    attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
         state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
@@ -179,8 +180,12 @@ export const makeCodexCli = (
           queue.close()
         })()
         return {
+          executionId: `test-${input.runId}.service`,
           events: { [Symbol.asyncIterator]: () => iterator },
           exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr: "" })),
+          cancel: Effect.sync(() => {
+            state.killed = true
+          }),
         }
       }),
   }
@@ -191,6 +196,7 @@ export const codexNeverStreams = () => {
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
     preflight: Effect.void,
+    attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
         state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
@@ -203,6 +209,7 @@ export const codexNeverStreams = () => {
           }),
         }
         return {
+          executionId: `test-${input.runId}.service`,
           events: never,
           exited: Effect.callback<
             { exitCode: number; stderr: string },
@@ -216,6 +223,9 @@ export const codexNeverStreams = () => {
               },
               { once: true },
             )
+          }),
+          cancel: Effect.sync(() => {
+            state.killed = true
           }),
         }
       }),

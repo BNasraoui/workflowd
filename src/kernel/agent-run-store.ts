@@ -144,6 +144,11 @@ export type AgentRunStorePort = {
      * still cleaned up through the dispatch-incomplete path. */
     readonly unsupervisedProviderIds: ReadonlyArray<string>
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
+  /** Startup recovery surface for providers whose execution lives outside
+   * the daemon and can be reattached after a restart. */
+  readonly listVerifiedByProvider: (
+    providerId: string,
+  ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
 }
 
 export const AgentRunStore = Context.Service<AgentRunStorePort>("workflowd/kernel/AgentRunStore")
@@ -350,6 +355,14 @@ const make = Effect.gen(function* () {
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
     })
 
+  const listVerifiedByProvider: AgentRunStorePort["listVerifiedByProvider"] = (providerId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql`SELECT * FROM kernel_agent_runs
+        WHERE provider_id = ${providerId} AND state = 'verified'
+        ORDER BY created_at, run_id`
+      return yield* Effect.forEach(rows, toRecord)
+    })
+
   return AgentRunStore.of({
     create,
     claimSpawn,
@@ -363,6 +376,7 @@ const make = Effect.gen(function* () {
     fail,
     operatorRequired,
     nextWatchable,
+    listVerifiedByProvider,
   })
 })
 

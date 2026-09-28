@@ -231,4 +231,20 @@ describe("agent-run store", () => {
     expect(result.supervisedWindow).toBeNull()
     expect(result.stale?.runId).toBe("agent-run-stale-codex")
   })
+
+  test("lists every verified run for one provider so startup can recover custody", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create({ ...input, providerId: "codex-cli" })
+        yield* spawn(store)
+        yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        const codex = yield* store.listVerifiedByProvider("codex-cli")
+        const other = yield* store.listVerifiedByProvider("opencode-primary")
+        return { codex, other }
+      }),
+    )
+    expect(result.codex.map((record) => record.runId)).toEqual([input.runId])
+    expect(result.other).toEqual([])
+  })
 })

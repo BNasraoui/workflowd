@@ -17,6 +17,17 @@ import type { AgentRunWorktreesPort } from "./agent-run-worktrees"
 
 type RefusalReason = "provider_not_authenticated" | "no_first_token" | "run_conflict"
 type Custody = ReturnType<typeof makeAgentRunCustody>
+export type AgentRunCodexStore = Pick<
+  AgentRunStorePort,
+  | "claimSpawn"
+  | "markSpawned"
+  | "markVerified"
+  | "fail"
+  | "recordProgress"
+  | "complete"
+  | "operatorRequired"
+  | "listVerifiedByProvider"
+>
 
 const pullEvent = (iterator: AsyncIterator<CodexExecEvent>) =>
   Effect.promise(() =>
@@ -53,6 +64,7 @@ type Observation = {
   readonly result: FirstToken
   readonly iterator: AsyncIterator<CodexExecEvent>
   readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
+  readonly cancel: Effect.Effect<void, WorkspaceError>
 }
 
 const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
@@ -89,12 +101,14 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
       detail: `codex produced no model output within ${timeoutMs}ms of spawn`,
     })
     const result = yield* Effect.race(streamed, timedOut)
-    if (result.outcome === "generating") return { result, iterator, exited } satisfies Observation
+    if (result.outcome === "generating") {
+      return { result, iterator, exited, cancel: process.cancel } satisfies Observation
+    }
     const graceExit: CodexExit | null = yield* Effect.race(
       Fiber.join(exited),
       Effect.as(Effect.sleep(500), null),
     )
-    if (graceExit === null) yield* Fiber.interrupt(exited).pipe(Effect.ignore)
+    if (graceExit === null) yield* process.cancel.pipe(Effect.ignore)
     const authFailed =
       codexFailureLooksUnauthenticated(errors) ||
       (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
@@ -110,12 +124,13 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
       result: { outcome: "refused" as const, reason, detail },
       iterator,
       exited,
+      cancel: process.cancel,
     } satisfies Observation
   })
 
 export const makeAgentRunCodexDispatcher = (dependencies: {
   readonly codex: CodexCliPort
-  readonly store: AgentRunStorePort
+  readonly store: AgentRunCodexStore
   readonly worktrees: AgentRunWorktreesPort
   readonly signals: WorkSignalPort
   readonly ensureResource: Custody["ensureResource"]
@@ -130,7 +145,8 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
     readonly runId: string
     readonly iterator: AsyncIterator<CodexExecEvent>
     readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
-    readonly initialFinalMessage: string
+    readonly cancel: Effect.Effect<void, WorkspaceError>
+    readonly initialFinalMessage: string | null
     readonly stallWindowMs: number
   }) =>
     Effect.gen(function* () {
@@ -153,7 +169,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
         else if (event.type === "turn.failed") turnFailed = event.message
         else if (event.type === "error") turnFailed ??= event.message
       }
-      if (stalled) yield* Fiber.interrupt(input.exited).pipe(Effect.ignore)
+      if (stalled) yield* input.cancel.pipe(Effect.ignore)
       const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
         Fiber.join(input.exited),
       )
@@ -177,7 +193,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
         .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
     })
 
-  return (
+  const dispatch = (
     run: AgentRunRecord,
     route: AgentRunCodexRoute,
     target: {
@@ -208,6 +224,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           createdAt: run.createdAt,
         })
         const process = yield* codex.spawn({
+          runId: run.runId,
           directory: run.directory,
           prompt: run.prompt,
           model: route.modelID,
@@ -243,6 +260,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
             runId: run.runId,
             iterator: observed.iterator,
             exited: observed.exited,
+            cancel: observed.cancel,
             initialFinalMessage: observed.result.firstMessage,
             stallWindowMs: dependencies.progressWindowMs,
           }).pipe(
@@ -266,4 +284,41 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
         `a previous dispatch left this run ${run.state}; codex processes cannot be re-observed`,
       )
     })
+
+  const recover = Effect.gen(function* () {
+    const runs = yield* store.listVerifiedByProvider("codex-cli")
+    let attached = 0
+    for (const run of runs) {
+      const process = yield* codex.attach({ runId: run.runId })
+      if (process === null) {
+        yield* store.operatorRequired({
+          runId: run.runId,
+          diagnostic: "codex_recovery_failed: durable process custody is missing",
+          now: new Date(),
+        })
+        continue
+      }
+      yield* Effect.forkDetach(
+        Effect.gen(function* () {
+          const exited = yield* Effect.forkDetach(process.exited)
+          yield* complete({
+            runId: run.runId,
+            iterator: process.events[Symbol.asyncIterator](),
+            exited,
+            cancel: process.cancel,
+            initialFinalMessage: null,
+            stallWindowMs: dependencies.progressWindowMs,
+          })
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("recovered codex completion failed", { runId: run.runId, cause }),
+          ),
+        ),
+      )
+      attached += 1
+    }
+    return attached
+  })
+
+  return { dispatch, recover }
 }

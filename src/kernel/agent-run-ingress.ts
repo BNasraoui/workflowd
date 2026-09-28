@@ -15,13 +15,7 @@ import type { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
 import { AgentRunWorktrees } from "./agent-run-worktrees"
-import {
-  CLAUDE_ENDPOINT_ALIAS,
-  CLAUDE_PROVIDER_ID,
-  ClaudeCli,
-  claudeEndpointIdentity,
-  claudeSessionCustodyId,
-} from "./claude-session"
+import { ClaudeCli } from "./claude-session"
 import { makeAgentRunCodexDispatcher } from "./agent-run-codex"
 import { makeAgentRunCustody } from "./agent-run-custody"
 import { CODEX_PROVIDER_ID, CodexCli, codexSessionCustodyId } from "./codex-session"
@@ -297,7 +291,7 @@ const make = (options: AgentRunIngressOptions) =>
         return { nativeSessionId, outputTokens, kind: "opencode" as const }
       })
 
-    const dispatchCodex = makeAgentRunCodexDispatcher({
+    const codexRuns = makeAgentRunCodexDispatcher({
       codex,
       store,
       worktrees,
@@ -308,6 +302,7 @@ const make = (options: AgentRunIngressOptions) =>
       verifyTimeoutMs: options.verifyTimeoutMs,
       progressWindowMs: options.progressWindowMs,
     })
+    yield* codexRuns.recover
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
@@ -476,7 +471,7 @@ const make = (options: AgentRunIngressOptions) =>
                   run.providerId === CODEX_PROVIDER_ID ? ("codex" as const) : ("opencode" as const),
               }
             : resolution.provider === "codex"
-              ? yield* dispatchCodex(
+              ? yield* codexRuns.dispatch(
                   run,
                   resolution.route,
                   {
