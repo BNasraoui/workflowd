@@ -101,6 +101,59 @@ const layer = (factory: typeof startAppServer) =>
     Layer.provideMerge(WorkflowStoreLive),
     Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
   )
+const prepareRun = (now: Date) =>
+  Effect.gen(function* () {
+    const runs = yield* AgentRunStore
+    yield* runs.create({
+      runId: "a",
+      route: "test",
+      providerId: "codex-cli",
+      modelId: "test-model",
+      agent: "build",
+      repository: "o/r",
+      directory: "/work/a",
+      prompt: "hold",
+      promptSha256: "a".repeat(64),
+      parentSessionId: null,
+      resumePrompt: null,
+      maxAttempts: 3,
+      createdAt: now,
+    })
+    yield* runs.claimSpawn({ runId: "a", now })
+  })
+const verifyRun = (now: Date) =>
+  Effect.gen(function* () {
+    const runs = yield* AgentRunStore
+    const sessions = yield* KernelSessionStore
+    yield* sessions.registerResource({
+      resourceId: "r",
+      owningHostId: "h",
+      absolutePath: "/work/a",
+      kind: "worktree",
+      createdAt: now,
+    })
+    yield* sessions.registerSession({
+      sessionId: "s",
+      providerKind: "codex",
+      providerVersion: 1,
+      providerId: "codex-cli",
+      serverId: "h",
+      owningHostId: "h",
+      endpointAlias: "local-cli",
+      endpointIdentity: "codex-cli://h",
+      nativeSessionId: "thread-1",
+      resourceId: "r",
+      createdAt: now,
+    })
+    yield* runs.markSpawned({
+      runId: "a",
+      nativeSessionId: "thread-1",
+      sessionId: "s",
+      resourceId: "r",
+      now,
+    })
+    yield* runs.markVerified({ runId: "a", outputTokens: 1, now })
+  })
 test("dispatches concurrent threads with independent directories and completes their event streams", async () => {
   const fake = fixture()
   await Effect.runPromise(
@@ -138,25 +191,9 @@ test("a registered CI wait ends the old turn and queues a new one", async () => 
     Effect.gen(function* () {
       const resident = yield* ResidentCodex
       const runs = yield* AgentRunStore
-      const sessions = yield* KernelSessionStore
       const ci = yield* CiService
       const now = new Date()
-      yield* runs.create({
-        runId: "a",
-        route: "test",
-        providerId: "codex-cli",
-        modelId: "test-model",
-        agent: "build",
-        repository: "o/r",
-        directory: "/work/a",
-        prompt: "hold",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 3,
-        createdAt: now,
-      })
-      yield* runs.claimSpawn({ runId: "a", now })
+      yield* prepareRun(now)
       const process = yield* resident.cli.spawn({
         runId: "a",
         directory: "/work/a",
@@ -168,34 +205,7 @@ test("a registered CI wait ends the old turn and queues a new one", async () => 
         const next = yield* Effect.promise(() => events.next())
         if (next.value?.type === "agent_message") break
       }
-      yield* sessions.registerResource({
-        resourceId: "r",
-        owningHostId: "h",
-        absolutePath: "/work/a",
-        kind: "worktree",
-        createdAt: now,
-      })
-      yield* sessions.registerSession({
-        sessionId: "s",
-        providerKind: "codex",
-        providerVersion: 1,
-        providerId: "codex-cli",
-        serverId: "h",
-        owningHostId: "h",
-        endpointAlias: "local-cli",
-        endpointIdentity: "codex-cli://h",
-        nativeSessionId: "thread-1",
-        resourceId: "r",
-        createdAt: now,
-      })
-      yield* runs.markSpawned({
-        runId: "a",
-        nativeSessionId: "thread-1",
-        sessionId: "s",
-        resourceId: "r",
-        now,
-      })
-      yield* runs.markVerified({ runId: "a", outputTokens: 1, now })
+      yield* verifyRun(now)
       const target = { repository: "o/r", sha: "a".repeat(40) }
       const response = yield* resident.route(
         new Request("http://localhost/ci/resident-waits", {
@@ -233,25 +243,8 @@ test("daemon restart reloads the same thread and queues interrupted work", async
   await Effect.runPromise(
     Effect.gen(function* () {
       const resident = yield* ResidentCodex
-      const runs = yield* AgentRunStore
-      const sessions = yield* KernelSessionStore
       const now = new Date()
-      yield* runs.create({
-        runId: "a",
-        route: "test",
-        providerId: "codex-cli",
-        modelId: "test-model",
-        agent: "build",
-        repository: "o/r",
-        directory: "/work/a",
-        prompt: "hold",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 3,
-        createdAt: now,
-      })
-      yield* runs.claimSpawn({ runId: "a", now })
+      yield* prepareRun(now)
       const process = yield* resident.cli.spawn({
         runId: "a",
         directory: "/work/a",
@@ -263,34 +256,7 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         const event = yield* Effect.promise(() => iterator.next())
         if (event.value?.type === "agent_message") break
       }
-      yield* sessions.registerResource({
-        resourceId: "r",
-        owningHostId: "h",
-        absolutePath: "/work/a",
-        kind: "worktree",
-        createdAt: now,
-      })
-      yield* sessions.registerSession({
-        sessionId: "s",
-        providerKind: "codex",
-        providerVersion: 1,
-        providerId: "codex-cli",
-        serverId: "h",
-        owningHostId: "h",
-        endpointAlias: "local-cli",
-        endpointIdentity: "codex-cli://h",
-        nativeSessionId: "thread-1",
-        resourceId: "r",
-        createdAt: now,
-      })
-      yield* runs.markSpawned({
-        runId: "a",
-        nativeSessionId: "thread-1",
-        sessionId: "s",
-        resourceId: "r",
-        now,
-      })
-      yield* runs.markVerified({ runId: "a", outputTokens: 1, now })
+      yield* verifyRun(now)
       fake.disconnect()
       expect((yield* process.exited).exitCode).toBe(0)
       const resumes = fake.calls.filter((c) => c.method === "thread/resume")
