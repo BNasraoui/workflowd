@@ -51,6 +51,11 @@ export const makeResidentStore = Effect.gen(function* () {
       WHERE thread_id = ${threadId} AND state = 'active' AND current_turn IS NOT NULL RETURNING thread_id`
     if (rows.length !== 1) return yield* Effect.fail(new Error("Resident thread is not active"))
   })
+  const park = Effect.fn("Resident.park")(function* (threadId: string) {
+    const rows = yield* sql`UPDATE resident_threads SET state = 'waiting', wait_turn = current_turn
+      WHERE thread_id = ${threadId} AND state IN ('active','waiting') AND current_turn IS NOT NULL RETURNING thread_id`
+    if (rows.length !== 1) return yield* Effect.fail(new Error("Resident thread is not active"))
+  })
   const completed = Effect.fn("Resident.completed")(function* (threadId: string, turnId: string) {
     const row = yield* read(threadId)
     if (row === null) return "unknown" as const
@@ -86,6 +91,7 @@ export const makeResidentStore = Effect.gen(function* () {
     )
   })
   return {
+    park,
     attach,
     threads,
     read,

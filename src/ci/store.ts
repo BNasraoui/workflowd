@@ -12,6 +12,7 @@ export const CiRun = Schema.Struct({
 })
 export type CiRun = typeof CiRun.Type
 export const CiState = Schema.Struct({
+  runLinks: Schema.optional(Schema.Array(Schema.String)),
   ...CiTarget.fields,
   sequence: Schema.Int,
   conclusion: Schema.Literals(["pending", "success", "failure"]),
@@ -149,6 +150,9 @@ export const makeCiStore = Effect.gen(function* () {
           sha: target.sha,
           sequence: 0,
           ...aggregate(required, runs),
+          runLinks: runs
+            .filter((run) => required.includes(run.name))
+            .map((run) => `https://github.com/${target.repository}/actions/runs/${run.id}`),
         }
         const previous = yield* read(target)
         if (
