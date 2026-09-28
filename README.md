@@ -373,3 +373,5 @@ with the matching type. The installer changes only this repository's local
 local feedback rather than a security boundary.
 
 The tested runtime baseline is Bun `1.3.14` (pinned in CI), Effect `4.0.0-rc.112`, OpenCode SDK `0.0.0-beta-18684`, MCP SDK `1.30.0`, and NATS clients `3.4.0`.
+
+See [agent inbox and CI rollout](docs/agent-inboxes-ci.md) for the opt-in durable CI ingress and wait CLI.

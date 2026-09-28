@@ -1,3 +1,4 @@
+import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
@@ -54,6 +55,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
   readonly maxBodyBytes?: number
@@ -525,6 +527,10 @@ export function handleGitHubWebhook(
       payload: bodyText,
       receivedAt: options.now,
     }
+    if (decoded._tag === "CiCompletion" && options.ci !== undefined) {
+      const status = yield* options.ci.ingest(deliveryId, decoded, bodyText, options.now.getTime())
+      return Response.json({ status }, { status: 202 })
+    }
     const store = yield* WorkflowStore
     const signals = yield* WorkSignal
 
@@ -543,7 +549,10 @@ export function handleGitHubWebhook(
     return Response.json(
       result === "duplicate"
         ? { status: "duplicate" }
-        : { status: "ignored", reason: decoded.reason },
+        : {
+            status: "ignored",
+            reason: decoded._tag === "CiCompletion" ? "ci-disabled" : decoded.reason,
+          },
       { status: 202 },
     )
   }).pipe(

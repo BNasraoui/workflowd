@@ -1,3 +1,4 @@
+import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { App } from "@octokit/app"
@@ -450,6 +451,9 @@ export const makeLiveLayer = (config: AppConfig) => {
           ),
         )
   return Layer.mergeAll(
+    config.ci === undefined
+      ? Layer.empty
+      : CiServiceLive(config.ci, config.github).pipe(Layer.provide(storeLayer)),
     workSignalLayer,
     providerLayer,
     resumeWorkerLayer,

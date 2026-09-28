@@ -1353,9 +1353,31 @@ const kernelAgentRunCancellation = Effect.gen(function* () {
   yield* kernelAgentRunsSessionIndex
 })
 
+const ciCompletionStore = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE ci_targets (
+    repository TEXT NOT NULL, sha TEXT NOT NULL, installation_id INTEGER NOT NULL,
+    required_json TEXT NOT NULL, etag TEXT, next_poll INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+    PRIMARY KEY(repository, sha)
+  ) STRICT`
+  yield* sql`CREATE TABLE ci_deliveries (
+    delivery_id TEXT PRIMARY KEY REFERENCES webhook_deliveries(delivery_id),
+    repository TEXT NOT NULL, sha TEXT NOT NULL, event_json TEXT NOT NULL,
+    published INTEGER NOT NULL DEFAULT 0 CHECK(published IN (0,1))
+  ) STRICT`
+  yield* sql`CREATE TABLE ci_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT, repository TEXT NOT NULL, sha TEXT NOT NULL,
+    state_json TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0 CHECK(published IN (0,1))
+  ) STRICT`
+  yield* sql`CREATE INDEX ci_events_target ON ci_events(repository, sha, sequence)`
+  yield* sql`CREATE INDEX ci_events_outbox ON ci_events(published, sequence)`
+  yield* sql`CREATE INDEX ci_targets_due ON ci_targets(next_poll)`
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0019,
     "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
+    "0021_ci_completion_store": ciCompletionStore,
   }),
 })

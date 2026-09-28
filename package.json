@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "workflowd": "bun src/cli.ts",
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
     "runner": "bun src/remote-runner.ts",

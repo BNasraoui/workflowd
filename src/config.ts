@@ -1,3 +1,4 @@
+import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -106,6 +107,7 @@ export interface AgentRunConfig {
 }
 
 export interface AppConfig {
+  readonly ci?: CiConfig
   readonly http: HttpConfig
   readonly github: GitHubConfig
   readonly storage: StorageConfig
@@ -646,10 +648,12 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
+  const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
+    ...(ci === undefined ? {} : { ci }),
     http: httpSection(env),
     github: githubSection(env, secrets.webhookSecret),
     storage: storageSection(env, home),
