@@ -25,6 +25,9 @@ test("CLI wait commands enforce arguments, credentials, and bounded registration
             failingJobs: [],
           }),
   })
+  const resident = await serveRunSocket(join(directory, "wait.sock"), async () =>
+    Response.json({ status: "waiting" }, { status: 202 }),
+  )
   try {
     const io = { fetch, log: () => {}, heartbeat: () => {} }
     const args = ["wait", "ci", "--repo", "o/r", "--sha", "a".repeat(40)]
@@ -39,10 +42,11 @@ test("CLI wait commands enforce arguments, credentials, and bounded registration
     await expect(runWaitCommand(args, {}, io)).rejects.toThrow("TOKEN")
     await registerResidentWait(["--thread", "thread", "--repo", "o/r", "--sha", "a".repeat(40)], {
       WORKFLOWD_URL: server.url.toString(),
-      WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE: secret,
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: join(directory, "wait.sock"),
     })
     await expect(registerResidentWait([], {})).rejects.toThrow("requires")
   } finally {
+    await resident.close()
     await server.stop(true)
     await rm(directory, { recursive: true, force: true })
   }

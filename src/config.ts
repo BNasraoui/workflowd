@@ -653,7 +653,7 @@ export async function loadConfig(
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
   const workerIdentity = await loadWorkerIdentityConfig(env)
-  const residentCodex = await loadResidentConfig(env, read)
+  const residentCodex = await loadResidentConfig(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)

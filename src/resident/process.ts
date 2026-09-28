@@ -5,11 +5,16 @@ import { RpcClient } from "./rpc"
 
 /** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
 export function startAppServer(
-  options: { readonly binary: string; readonly home: string },
+  options: {
+    readonly binary: string
+    readonly home: string
+    readonly env?: Readonly<Record<string, string>>
+  },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) {
   const env: Record<string, string | undefined> = {
     ...process.env,
+    ...options.env,
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),
   }
@@ -42,6 +47,7 @@ export function startAppServer(
     notify({ method: "workflowd/disconnected", params: null })
   })
   return {
+    pid: child.pid,
     rpc,
     initialize: async () => {
       await rpc.request("initialize", {

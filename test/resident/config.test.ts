@@ -1,22 +1,19 @@
 import { expect, test } from "bun:test"
 import { loadResidentConfig } from "../../src/resident/config"
 test("resident dispatch defaults off and needs isolated state and CI", async () => {
-  expect(await loadResidentConfig({}, async () => "")).toBeUndefined()
+  expect(await loadResidentConfig({})).toBeUndefined()
   await expect(
-    loadResidentConfig(
-      { WORKFLOWD_CODEX_RESIDENT_ENABLED: "true", WORKFLOWD_CODEX_RESIDENT_HOME: "relative" },
-      async () => "",
-    ),
+    loadResidentConfig({
+      WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+      WORKFLOWD_CODEX_RESIDENT_HOME: "relative",
+    }),
   ).rejects.toThrow("absolute")
   expect(
-    await loadResidentConfig(
-      {
-        WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
-        WORKFLOWD_CODEX_RESIDENT_HOME: "/scratch/codex",
-        WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE: "/secret",
-        WORKFLOWD_CI_ENABLED: "true",
-      },
-      async () => "x".repeat(32),
-    ),
-  ).toEqual({ home: "/scratch/codex", token: "x".repeat(32) })
+    await loadResidentConfig({
+      WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+      WORKFLOWD_CODEX_RESIDENT_HOME: "/scratch/codex",
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: "/scratch/wait.sock",
+      WORKFLOWD_CI_ENABLED: "true",
+    }),
+  ).toEqual({ home: "/scratch/codex", socket: "/scratch/wait.sock" })
 })

@@ -137,15 +137,17 @@ retrofitted or interrupted.
 
 Set `WORKFLOWD_CODEX_RESIDENT_ENABLED=true`,
 `WORKFLOWD_CODEX_RESIDENT_HOME` to a dedicated absolute Codex data directory, and
-`WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE` to a separate random secret of at least 32
-characters. The resident home must differ from `~/.codex`; the owner must arrange
-Codex authentication there before cutover. Set `WORKFLOWD_URL` to the workflowd
-endpoint reachable by worker commands. Enable CI as above and configure the
+`WORKFLOWD_CODEX_RESIDENT_SOCKET` to an absolute Unix socket path with an existing
+parent directory. The resident home must differ from `~/.codex`; the owner must arrange
+Codex authentication there before cutover. Enable CI as above and configure the
 existing agent-run Codex routes. Where the dispatch repository name differs from
 GitHub's full name, add `"dispatchRepository":"workflowd"` to its CI policy.
 
-workflowd owns one long-lived `codex app-server --listen stdio://` child using
-that private home. It neither uses systemd to manage that child nor connects to
+workflowd owns one `codex app-server --listen stdio://` child per live run using
+that private home. Distinct process trees let the Unix socket authenticate the
+calling run with the same peer-credential/ancestry boundary as token brokerage.
+The socket path and run identity are passed only through each child environment.
+No service-wide bearer file authorizes waits. It neither uses systemd to manage that child nor connects to
 an existing managed Codex daemon. Each dispatch gets its own thread, cwd, model,
 `approvalPolicy: never`, and `sandbox: danger-full-access`, preserving the trusted
 worker posture of the existing exec path. The experimental API capability is
@@ -165,7 +167,7 @@ and checks history. Interrupted active work gets a queued recovery event. Waitin
 threads retain their waits. Lost queue acknowledgements are reconciled against
 queued submission IDs and persisted user-message client IDs. If neither proves
 acceptance, the inbox and run require operator attention instead of blind replay.
-The automatic app-server restart budget is three per workflowd lifetime.
+The automatic app-server restart budget is three per run per workflowd lifetime.
 
 All threads retain existing kernel session and worktree custody; CI ingress does
 not grant cleanup or publication authority. Current Codex parent/child wait

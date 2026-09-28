@@ -1,5 +1,6 @@
-import { createHash, timingSafeEqual } from "node:crypto"
-import { Context, Effect, Layer, Queue, Schedule, Schema, Semaphore } from "effect"
+import { RunPeers, serveRunSocket } from "../worker-identity/peer"
+import { WorkerIdentity } from "../worker-identity/service"
+import { Context, Effect, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
 import { CiTarget } from "../ci/event"
@@ -33,7 +34,7 @@ const History = Schema.Struct({
 })
 type ResidentPort = {
   readonly cli: CodexCliPort
-  readonly route: (request: Request) => Effect.Effect<Response | undefined>
+  readonly route: (request: Request, peerPid?: number) => Effect.Effect<Response | undefined>
 }
 export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCodex")
 
@@ -54,22 +55,56 @@ export const ResidentCodexLive = (
         readonly method: string
         readonly params: unknown
       }>()
-      let disconnected = false
-      const launch = () =>
-        start({ binary, home: config.home }, (frame) => {
-          if (frame.method === "workflowd/disconnected") disconnected = true
-          Queue.offerUnsafe(notifications, frame)
-        })
-      let server: ReturnType<typeof startAppServer> = yield* Effect.acquireRelease(
-        Effect.try(launch),
-        () => Effect.tryPromise(() => server.close()).pipe(Effect.ignore),
+      const identity = yield* Effect.serviceOption(WorkerIdentity)
+      const peers = new RunPeers()
+      const servers = new Map<
+        string,
+        {
+          process: ReturnType<typeof startAppServer>
+          disconnected: boolean
+          attempts: number
+        }
+      >()
+      const threadRuns = new Map<string, string>()
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(async () => {
+          await Promise.all([...servers.values()].map((entry) => entry.process.close()))
+        }),
       )
-      yield* Effect.tryPromise(() => server.initialize())
+      const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts = 0) {
+        const env = {
+          ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
+          WORKFLOWD_RUN_ID: runId,
+          WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
+        }
+        const process = yield* Effect.try(() =>
+          start({ binary, home: config.home, env }, (frame) => {
+            if (frame.method === "workflowd/disconnected") {
+              const entry = servers.get(runId)
+              if (entry !== undefined) entry.disconnected = true
+            }
+            Queue.offerUnsafe(notifications, frame)
+          }),
+        )
+        servers.set(runId, { process, disconnected: false, attempts })
+        yield* Effect.try(() => {
+          peers.register(runId, process.pid)
+          if (Option.isSome(identity)) identity.value.register(runId, process.pid)
+        })
+        yield* Effect.tryPromise(() => process.initialize())
+        return process
+      })
       const listeners = new Map<
         string,
         { queue: ReturnType<typeof makeEventQueue>; finish: (exit: CodexExit) => void }
       >()
-      const request = (method: string, params: unknown) => server.rpc.request(method, params)
+      const request = (method: string, params: { threadId: string; [key: string]: unknown }) => {
+        const runId = threadRuns.get(params.threadId)
+        const entry = runId === undefined ? undefined : servers.get(runId)
+        if (entry === undefined)
+          return Promise.reject(new Error("Resident run process unavailable"))
+        return entry.process.rpc.request(method, params)
+      }
       const finish = Effect.fn("Resident.finish")(function* (threadId: string, failed: boolean) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
@@ -77,6 +112,7 @@ export const ResidentCodexLive = (
         listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
         listeners.delete(threadId)
         if (row !== null) {
+          peers.revoke(row.run_id)
           const run = yield* runs.read(row.run_id)
           if (run?.state === "verified") {
             yield* failed
@@ -126,8 +162,10 @@ export const ResidentCodexLive = (
             AND s.state IN ('ready','active') AND r.state = 'reserved'`
         return rows.length === 1
       })
-      const restore = Effect.fn("Resident.restore")(function* () {
+      const restore = Effect.fn("Resident.restore")(function* (onlyThread?: string) {
         for (const row of yield* store.threads()) {
+          if (onlyThread !== undefined && row.thread_id !== onlyThread) continue
+          threadRuns.set(row.thread_id, row.run_id)
           const run = yield* runs.read(row.run_id)
           if (!(yield* hasCustody(row.thread_id))) {
             yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
@@ -140,6 +178,7 @@ export const ResidentCodexLive = (
               })
             continue
           }
+          if (!servers.has(row.run_id)) yield* launch(row.run_id)
           yield* Effect.tryPromise(() =>
             request("thread/resume", {
               threadId: row.thread_id,
@@ -181,7 +220,13 @@ export const ResidentCodexLive = (
             continue
           }
           yield* store.sending(message.id)
-          const outcome = yield* deliverResident(request, message)
+          const outcome = yield* deliverResident((method, params) => {
+            const decoded = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
+              params,
+            )
+            const threadId = Schema.decodeUnknownSync(Schema.String)(decoded.threadId)
+            return request(method, { ...decoded, threadId })
+          }, message)
           if (outcome === "delivered") yield* store.delivered(message.id)
           else {
             yield* store.uncertain(message.id, message.thread_id)
@@ -190,19 +235,20 @@ export const ResidentCodexLive = (
         }
       })
       const flush = () => Semaphore.withPermits(deliveryLock, 1)(flushUnlocked())
-      let restartAttempts = 0
       const tick = Effect.gen(function* () {
-        if (disconnected) {
-          if (restartAttempts >= 3)
-            return yield* Effect.fail(new Error("Resident restart budget exhausted"))
-          restartAttempts++
-          yield* Effect.tryPromise(() => server.close())
-          server = yield* Effect.try(launch)
-          yield* Effect.tryPromise(() => server.initialize())
-          disconnected = false
-          yield* restore()
-        }
         for (const row of yield* store.threads()) {
+          const entry = servers.get(row.run_id)
+          if (entry?.disconnected) {
+            if (entry.attempts >= 3) {
+              yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)
+              yield* finish(row.thread_id, true)
+              continue
+            }
+            peers.revoke(row.run_id)
+            yield* Effect.tryPromise(() => entry.process.close())
+            yield* launch(row.run_id, entry.attempts + 1)
+            yield* restore(row.thread_id)
+          }
           // Local liveness events keep the legacy first-token drain from treating
           // a registered CI wait as a silent stalled model turn.
           if (row.state === "waiting") listeners.get(row.thread_id)?.queue.push({ type: "other" })
@@ -233,19 +279,28 @@ export const ResidentCodexLive = (
       )
 
       const cli: CodexCliPort = {
-        preflight: Effect.tryPromise({
-          try: () => request("thread/list", { limit: 1 }),
-          catch: () => ({
+        preflight: Effect.acquireUseRelease(
+          Effect.try(() => start({ binary, home: config.home }, () => {})),
+          (process) =>
+            Effect.tryPromise(async () => {
+              await process.initialize()
+              await process.rpc.request("thread/list", { limit: 1 })
+            }),
+          (process) => Effect.promise(() => process.close()),
+        ).pipe(
+          Effect.mapError(() => ({
             kind: "cli_unusable" as const,
             detail: "resident Codex app-server unavailable",
-          }),
-        }).pipe(Effect.asVoid),
+          })),
+        ),
         spawn: (input) =>
           Effect.gen(function* () {
             if (input.runId === undefined)
               return yield* Effect.fail(new Error("Resident dispatch requires a durable run ID"))
+            const server = yield* launch(input.runId)
+            input.onSpawn?.(server.pid)
             const thread = yield* Effect.tryPromise(() =>
-              request("thread/start", {
+              server.rpc.request("thread/start", {
                 cwd: input.directory,
                 model: input.model,
                 approvalPolicy: "never",
@@ -253,6 +308,7 @@ export const ResidentCodexLive = (
               }),
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
             const threadId = thread.thread.id
+            threadRuns.set(threadId, input.runId)
             yield* store.attach(input.runId, threadId, input.directory, input.model)
             const queue = makeEventQueue()
             let resolveExit: (exit: CodexExit) => void = () => {}
@@ -298,23 +354,17 @@ export const ResidentCodexLive = (
             ),
           ),
       }
-      const route: ResidentPort["route"] = (request) =>
+      const route: ResidentPort["route"] = (request, peerPid) =>
         Effect.gen(function* () {
           if (new URL(request.url).pathname !== "/ci/resident-waits") return undefined
           if (request.method !== "POST") return new Response(null, { status: 405 })
-          const hash = (text: string) => createHash("sha256").update(text).digest()
-          if (
-            !timingSafeEqual(
-              hash(request.headers.get("authorization") ?? ""),
-              hash(`Bearer ${config.token}`),
-            )
-          )
-            return new Response(null, { status: 401 })
+          if (peerPid === undefined) return new Response(null, { status: 403 })
           const input = yield* Effect.tryPromise(() => request.json()).pipe(
             Effect.flatMap(Schema.decodeUnknownEffect(Wait)),
           )
           const row = yield* store.read(input.threadId)
-          if (row === null) return new Response(null, { status: 404 })
+          if (row === null || !peers.allows(row.run_id, peerPid))
+            return new Response(null, { status: 403 })
           const run = yield* runs.read(row.run_id)
           const repository = ciConfig.repositories.find(
             (r) =>
@@ -336,6 +386,12 @@ export const ResidentCodexLive = (
             { status: 202 },
           )
         }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 409 }))))
+      yield* Effect.acquireRelease(
+        Effect.tryPromise(() =>
+          serveRunSocket(config.socket, (request, pid) => Effect.runPromise(route(request, pid))),
+        ),
+        (server) => Effect.promise(() => server.close()),
+      )
       return { cli, route }
     }),
   )

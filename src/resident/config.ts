@@ -1,9 +1,8 @@
 import { isAbsolute, resolve } from "node:path"
 import { homedir } from "node:os"
-export type ResidentConfig = { readonly home: string; readonly token: string }
+export type ResidentConfig = { readonly home: string; readonly socket: string }
 export async function loadResidentConfig(
   env: Record<string, string | undefined>,
-  read: (path: string) => Promise<string>,
 ): Promise<ResidentConfig | undefined> {
   if (
     env.WORKFLOWD_CODEX_RESIDENT_ENABLED === undefined ||
@@ -15,13 +14,9 @@ export async function loadResidentConfig(
   const home = env.WORKFLOWD_CODEX_RESIDENT_HOME ?? ""
   if (!isAbsolute(home) || resolve(home) === resolve(homedir(), ".codex"))
     throw new Error("WORKFLOWD_CODEX_RESIDENT_HOME must be a dedicated absolute directory")
-  const token =
-    env.WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE === undefined
-      ? ""
-      : (await read(env.WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE)).trim()
-  if (token.length < 32)
-    throw new Error("WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE must contain at least 32 characters")
+  const socket = env.WORKFLOWD_CODEX_RESIDENT_SOCKET ?? ""
+  if (!isAbsolute(socket)) throw new Error("WORKFLOWD_CODEX_RESIDENT_SOCKET must be absolute")
   if (env.WORKFLOWD_CI_ENABLED !== "true")
     throw new Error("Resident CI inboxes require WORKFLOWD_CI_ENABLED=true")
-  return { home, token }
+  return { home, socket }
 }

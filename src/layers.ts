@@ -288,6 +288,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           config.ci,
         ).pipe(
           Layer.provide(ciLive),
+          Layer.provide(workerIdentityLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
           Layer.provide(storeLayer),
         )
