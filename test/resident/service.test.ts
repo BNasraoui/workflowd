@@ -623,15 +623,13 @@ test("restart delivers both CI subscribers once after prepared inbox rows are co
             }),
             Effect.timeout("3 seconds"),
           )
-          yield* store
-            .threads()
-            .pipe(
-              Effect.repeat({
-                while: (threads) => threads.length > 0,
-                schedule: Schedule.spaced("10 millis"),
-              }),
-              Effect.timeout("3 seconds"),
-            )
+          yield* store.threads().pipe(
+            Effect.repeat({
+              while: (threads) => threads.length > 0,
+              schedule: Schedule.spaced("10 millis"),
+            }),
+            Effect.timeout("3 seconds"),
+          )
           const sql = yield* SqlClient.SqlClient
           expect(
             yield* sql`SELECT thread_id, state FROM resident_inbox ORDER BY thread_id`,
