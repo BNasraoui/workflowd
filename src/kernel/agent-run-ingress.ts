@@ -167,6 +167,30 @@ const routeRefusalDetail = (
   return `route "${route}" matches no configured route or model`
 }
 
+const pullCodexEvent = (iterator: AsyncIterator<CodexExecEvent>) =>
+  Effect.promise(() =>
+    iterator.next().then(
+      (next) => (next.done ? ("closed" as const) : next.value),
+      () => "closed" as const,
+    ),
+  )
+
+const codexCompletionDiagnostic = (
+  stalled: boolean,
+  stallWindowMs: number,
+  exit: Exit.Exit<CodexExit, WorkspaceError>,
+  turnFailed: string | null,
+) => {
+  if (stalled)
+    return `codex_stalled: no codex event for ${stallWindowMs}ms; the process group was terminated`
+  const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
+  let diagnostic = `codex_failed: exit ${exitCode}`
+  if (turnFailed !== null) diagnostic += `; ${turnFailed}`
+  if (Exit.isSuccess(exit) && exit.value.stderr !== "")
+    diagnostic += `; stderr: ${exit.value.stderr.slice(0, 500)}`
+  return diagnostic
+}
+
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
@@ -217,38 +241,37 @@ const make = (options: AgentRunIngressOptions) =>
       Effect.gen(function* () {
         const kind = input.kind ?? "opencode"
         const claudeHost = input.host ?? options.identity.owningHostId
-        const sessionId =
-          kind === "claude"
-            ? claudeSessionCustodyId(input.nativeSessionId)
-            : kind === "codex"
-              ? codexSessionCustodyId(input.nativeSessionId)
-              : opencodeSessionCustodyId(input.nativeSessionId)
+        const providerConfig = {
+          claude: {
+            sessionId: claudeSessionCustodyId(input.nativeSessionId),
+            providerId: CLAUDE_PROVIDER_ID,
+            serverId: claudeHost,
+            endpointAlias: CLAUDE_ENDPOINT_ALIAS,
+            endpointIdentity: claudeEndpointIdentity(claudeHost),
+          },
+          codex: {
+            sessionId: codexSessionCustodyId(input.nativeSessionId),
+            providerId: CODEX_PROVIDER_ID,
+            serverId: options.identity.serverId,
+            endpointAlias: CODEX_ENDPOINT_ALIAS,
+            endpointIdentity: codexEndpointIdentity(options.identity.owningHostId),
+          },
+          opencode: {
+            sessionId: opencodeSessionCustodyId(input.nativeSessionId),
+            providerId: options.identity.providerId,
+            serverId: options.identity.serverId,
+            endpointAlias: options.identity.endpointAlias,
+            endpointIdentity: options.identity.endpointIdentity,
+          },
+        }[kind]
+        const { sessionId } = providerConfig
         const existing = yield* sessions.readSession(sessionId)
         if (existing === null) {
           yield* sessions.registerSession({
-            sessionId,
             providerKind: kind,
             providerVersion: options.identity.providerVersion,
-            providerId:
-              kind === "claude"
-                ? CLAUDE_PROVIDER_ID
-                : kind === "codex"
-                  ? CODEX_PROVIDER_ID
-                  : options.identity.providerId,
-            serverId: kind === "claude" ? claudeHost : options.identity.serverId,
+            ...providerConfig,
             owningHostId: options.identity.owningHostId,
-            endpointAlias:
-              kind === "claude"
-                ? CLAUDE_ENDPOINT_ALIAS
-                : kind === "codex"
-                  ? CODEX_ENDPOINT_ALIAS
-                  : options.identity.endpointAlias,
-            endpointIdentity:
-              kind === "claude"
-                ? claudeEndpointIdentity(claudeHost)
-                : kind === "codex"
-                  ? codexEndpointIdentity(options.identity.owningHostId)
-                  : options.identity.endpointIdentity,
             nativeSessionId: input.nativeSessionId,
             resourceId: input.resourceId,
             createdAt: input.createdAt,
@@ -523,12 +546,7 @@ const make = (options: AgentRunIngressOptions) =>
         let firstMessage: string | null = null
         const errors: string[] = []
         const streamed: Effect.Effect<CodexFirstToken> = Effect.gen(function* () {
-          const pull = Effect.promise(() =>
-            iterator.next().then(
-              (next) => (next.done ? "closed" : next.value),
-              () => "closed" as const,
-            ),
-          )
+          const pull = pullCodexEvent(iterator)
           for (;;) {
             const step = yield* pull
             if (step === "closed") {
@@ -544,7 +562,7 @@ const make = (options: AgentRunIngressOptions) =>
             if (step.type === "thread.started") {
               threadId = step.threadId
             } else if (step.type === "agent_message") {
-              if (firstMessage === null) firstMessage = step.text
+              firstMessage ??= step.text
               if (threadId !== null) {
                 return { outcome: "generating" as const, threadId, firstMessage }
               }
@@ -577,13 +595,13 @@ const make = (options: AgentRunIngressOptions) =>
           codexFailureLooksUnauthenticated(errors) ||
           (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
         const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
-        const detail = authFailed
-          ? `${result.detail}: the codex CLI reported an authentication failure`
-          : result.detail +
-            (errors.length === 0 ? "" : `; last error: ${errors.at(-1)}`) +
-            (graceExit !== null && graceExit.stderr !== ""
-              ? `; stderr: ${graceExit.stderr.slice(0, 300)}`
-              : "")
+        let detail = result.detail
+        if (authFailed) detail += ": the codex CLI reported an authentication failure"
+        else {
+          if (errors.length > 0) detail += `; last error: ${errors.at(-1)}`
+          if (graceExit !== null && graceExit.stderr !== "")
+            detail += `; stderr: ${graceExit.stderr.slice(0, 300)}`
+        }
         return {
           result: { outcome: "refused" as const, reason, detail },
           iterator,
@@ -704,12 +722,9 @@ const make = (options: AgentRunIngressOptions) =>
         let turnFailed: string | null = null
         let stalled = false
         for (;;) {
-          const next = yield* Effect.promise(() =>
-            input.iterator.next().then(
-              (result) => (result.done ? "closed" : result.value),
-              () => "closed" as const,
-            ),
-          ).pipe(Effect.timeoutOption(input.stallWindowMs))
+          const next = yield* pullCodexEvent(input.iterator).pipe(
+            Effect.timeoutOption(input.stallWindowMs),
+          )
           if (Option.isNone(next)) {
             stalled = true
             break
@@ -723,7 +738,7 @@ const make = (options: AgentRunIngressOptions) =>
           } else if (event.type === "turn.failed") {
             turnFailed = event.message
           } else if (event.type === "error") {
-            turnFailed = turnFailed ?? event.message
+            turnFailed ??= event.message
           }
         }
         if (stalled) {
@@ -744,13 +759,7 @@ const make = (options: AgentRunIngressOptions) =>
             .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
           return
         }
-        const diagnostic = stalled
-          ? `codex_stalled: no codex event for ${input.stallWindowMs}ms; the process group was terminated`
-          : `codex_failed: exit ${exitCode}` +
-            (turnFailed === null ? "" : `; ${turnFailed}`) +
-            (Exit.isSuccess(exit) && exit.value.stderr !== ""
-              ? `; stderr: ${exit.value.stderr.slice(0, 500)}`
-              : "")
+        const diagnostic = codexCompletionDiagnostic(stalled, input.stallWindowMs, exit, turnFailed)
         yield* store
           .operatorRequired({ runId: input.runId, diagnostic, now: new Date() })
           .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
@@ -801,7 +810,7 @@ const make = (options: AgentRunIngressOptions) =>
             directory: submission.parentDirectory,
           })
 
-    const register: AgentRunIngressPort["register"] = (input, now) =>
+    const prepareRegistration = (input: Parameters<AgentRunIngressPort["register"]>[0]) =>
       Effect.gen(function* () {
         const submission = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(input, {
           onExcessProperty: "error",
@@ -858,6 +867,12 @@ const make = (options: AgentRunIngressOptions) =>
             ),
           )
         }
+        return { submission, resolution, repository }
+      })
+
+    const register: AgentRunIngressPort["register"] = (input, now) =>
+      Effect.gen(function* () {
+        const { submission, resolution, repository } = yield* prepareRegistration(input)
         const parentKind = submission.parentKind ?? "opencode"
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
