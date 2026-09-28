@@ -73,6 +73,12 @@ export const makeResidentStore = Effect.gen(function* () {
       yield* sql`SELECT * FROM resident_inbox WHERE state IN ('prepared','sending') ORDER BY rowid LIMIT 100`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(Inbox)(row))
   })
+  const deliveryState = Effect.fn("Resident.deliveryState")(function* (id: string) {
+    const rows = yield* sql`SELECT state FROM resident_inbox WHERE id = ${id}`
+    return rows.length === 0
+      ? ("pending" as const)
+      : yield* Schema.decodeUnknownEffect(Inbox.fields.state)(rows[0]?.state)
+  })
   const sending = Effect.fn("Resident.sending")(function* (id: string) {
     yield* sql`UPDATE resident_inbox SET state = 'sending' WHERE id = ${id} AND state = 'prepared'`
   })
@@ -96,6 +102,7 @@ export const makeResidentStore = Effect.gen(function* () {
     completed,
     enqueue,
     pending,
+    deliveryState,
     sending,
     delivered,
     uncertain,

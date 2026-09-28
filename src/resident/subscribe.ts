@@ -7,6 +7,9 @@ const Receipt = Schema.Struct({
   id: Schema.String,
   status: Schema.Literals(["registered", "duplicate"]),
   instruction: Schema.optional(Schema.String),
+  deliveryState: Schema.optional(
+    Schema.Literals(["pending", "prepared", "sending", "delivered", "operator_required"]),
+  ),
 })
 
 export async function subscribeToEvent(

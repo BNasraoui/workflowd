@@ -105,7 +105,7 @@ export const makeSubscriptions = Effect.gen(function* () {
             repository: input.repository.toLowerCase(),
             sha: input.sha.toLowerCase(),
           }
-        : input
+        : { kind: input.kind, run_id: input.run_id }
     const payload = { threadId, selector }
     const id = `subscription-${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`
     const status = yield* sql.withTransaction(

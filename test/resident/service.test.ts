@@ -524,6 +524,14 @@ for (const kind of ["ci", "agent_run"] as const) {
             fake.pids.get("thread-1"),
           )
           expect(response?.status).toBe(202)
+          const receipt = yield* Effect.promise(() => response!.json())
+          expect(receipt).toMatchObject({
+            deliveryState: reject ? "operator_required" : "delivered",
+          })
+          if (reject)
+            expect(receipt).toMatchObject({
+              instruction: expect.stringContaining("operator attention"),
+            })
           expect((yield* process.exited).exitCode).toBe(reject ? 1 : 0)
           expect(fake.calls.filter((c) => c.method === "thread/queue/add")).toHaveLength(2)
           expect((yield* store.read("thread-1"))?.state).toBe(

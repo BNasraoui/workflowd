@@ -382,10 +382,15 @@ export const ResidentCodexLive = (
           }
           const receipt = yield* subscriptions.register(run.nativeSessionId, selector)
           yield* flush()
+          const deliveryState = yield* store.deliveryState(receipt.id)
           return Response.json(
             {
               ...receipt,
-              instruction: "End this turn; workflowd will queue one completion message.",
+              deliveryState,
+              instruction:
+                deliveryState === "operator_required"
+                  ? "Mailbox delivery requires operator attention; report the subscription ID."
+                  : "End this turn; workflowd will queue one completion message.",
             },
             { status: 202 },
           )
