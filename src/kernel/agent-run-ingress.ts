@@ -726,12 +726,12 @@ const make = (options: AgentRunIngressOptions) =>
             turnFailed = turnFailed ?? event.message
           }
         }
-        const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
-          Fiber.join(input.exited),
-        )
         if (stalled) {
           yield* Fiber.interrupt(input.exited).pipe(Effect.ignore)
         }
+        const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
+          Fiber.join(input.exited),
+        )
         const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
         if (!stalled && exitCode === 0 && finalMessage !== null) {
           if (outputTokens !== null) {
