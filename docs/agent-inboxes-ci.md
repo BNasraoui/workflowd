@@ -88,10 +88,9 @@ does not perform any rollback or service operation.
 ## Worker GitHub identity (off by default)
 
 Set `WORKFLOWD_WORKER_GITHUB_ENABLED=true`,
-`WORKFLOWD_WORKER_GITHUB_SECRET_FILE` (a dedicated random secret of at least 32
-characters), `WORKFLOWD_WORKER_GITHUB_DIRECTORY` (an absolute private directory
-for per-run capability files), and `WORKFLOWD_WORKER_GITHUB_ENDPOINT` (the
-workflowd HTTPS URL or loopback HTTP URL). Set
+`WORKFLOWD_WORKER_GITHUB_DIRECTORY` (an absolute empty gh configuration directory),
+and `WORKFLOWD_WORKER_GITHUB_SOCKET` (an absolute Unix socket path with an existing
+parent directory). Set
 `WORKFLOWD_WORKER_GITHUB_REPOSITORIES` to explicit dispatch-name policies:
 
 ```json
@@ -102,16 +101,30 @@ workflowd HTTPS URL or loopback HTTP URL). Set
 request a different repository or elevate permissions. Installation tokens are
 cached with concurrent lookup deduplication and refreshed five minutes before
 expiry. Tokens remain redacted in the service; only the authenticated, no-store
-HTTP response unwraps them. Each capability is bound to one live dispatch and
+socket response unwraps them. Access is bound to one live dispatch and
 expires after 24 hours. Completed/failed runs immediately lose broker access.
 
-Dispatch prompts include an absolute command-wrapper path and a mode-0600
-capability file path. The wrapper obtains the current App token for every `gh`
-command, overrides inherited personal tokens, disables credential debug tracing,
-and fails closed if the broker refuses it. `--git` supports HTTPS Git using a
-credential helper restricted to github.com. SSH Git authentication is outside
-this broker. Workers must use the supplied wrapper; it does not alter a shared
-OpenCode server's global environment or the user's saved gh credentials.
+The workflowd-owned Unix socket obtains Linux peer PID/UID using
+`getsockopt(SOL_SOCKET, SO_PEERCRED)`. At dispatch workflowd records the owned
+root PID and its /proc birth time; each request must descend from that root.
+The run ID and socket path enter only that run's environment. No shared
+capability directory, bearer file, or prompt credential grants access. Prompts
+contain only wrapper instructions. Tokens reach commands through their own
+environment, never command lines or logs. Shared OpenCode dispatch cannot supply
+an independent process root and fails closed when worker identity is enabled.
+
+This prevents accidental or prompt-injected use of another run's identity. It
+does **not** protect against a deliberate same-UID attacker, who can inspect or
+modify other same-user processes. That requires separate OS users or containers.
+Linux is required by this implementation. On macOS the equivalent PID check
+would use `getsockopt(SOL_LOCAL, LOCAL_PEERPID)` plus `getpeereid` and validated
+process ancestry; UID-only `getpeereid` is insufficient. Unsupported hosts fail
+closed rather than falling back to a bearer file.
+
+The wrapper obtains the current App token for every `gh` command, overrides
+inherited personal tokens, disables credential debug tracing, and fails closed
+if the broker refuses it. `--git` supports HTTPS Git using a credential helper
+restricted to github.com. SSH Git authentication is outside this broker.
 
 Approve **Actions: read**, **Checks: read**, and the explicit Contents/Pull
 requests/Issues permission levels in each policy on the GitHub App installation.

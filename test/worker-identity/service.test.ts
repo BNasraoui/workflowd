@@ -1,20 +1,18 @@
 import { expect, test } from "bun:test"
-import { readFile, stat } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { join } from "node:path"
-import { createHash } from "node:crypto"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { WorkerIdentity, WorkerIdentityLive } from "../../src/worker-identity/service"
-import { workerCapability } from "../../src/worker-identity/access"
+import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { WorkflowStoreLive } from "../../src/store"
 import { githubFixture } from "../ci/github-fixture"
-test("provisions private run capabilities and brokers tokens only while the run is live", async () => {
+test("brokers by process ancestry and never writes shared capabilities", async () => {
   const fixture = await githubFixture()
   const config = {
-    secret: "x".repeat(32),
     directory: join(fixture.directory, "identities"),
-    endpoint: "http://127.0.0.1:8787",
+    socket: join(fixture.directory, "broker.sock"),
     policies: [
       {
         name: "repo",
@@ -35,51 +33,72 @@ test("provisions private run capabilities and brokers tokens only while the run 
         const service = yield* WorkerIdentity
         const runs = yield* AgentRunStore
         const now = new Date()
-        yield* runs.create({
-          runId: "run",
-          route: "r",
-          providerId: "codex-cli",
-          modelId: "model",
-          agent: "build",
-          repository: "repo",
-          directory: fixture.directory,
-          prompt: "task",
-          promptSha256: "a".repeat(64),
-          parentSessionId: null,
-          resumePrompt: null,
-          maxAttempts: 3,
-          createdAt: now,
-        })
-        yield* runs.claimSpawn({ runId: "run", now })
+        for (const runId of ["run", "other"]) {
+          yield* runs.create({
+            runId,
+            route: "r",
+            providerId: "codex-cli",
+            modelId: "model",
+            agent: "build",
+            repository: "repo",
+            directory: fixture.directory,
+            prompt: "task",
+            promptSha256: "a".repeat(64),
+            parentSessionId: null,
+            resumePrompt: null,
+            maxAttempts: 3,
+            createdAt: now,
+          })
+          yield* runs.claimSpawn({ runId, now })
+        }
         const run = yield* runs.read("run")
         expect(run).not.toBeNull()
         const instruction = yield* service.provision(run!)
-        const path = join(
-          config.directory,
-          `${createHash("sha256").update("run").digest("hex")}.json`,
+        expect(instruction).not.toContain("--identity")
+        expect(yield* Effect.promise(() => readdir(config.directory))).toEqual([])
+        const children = ["run", "other"].map(() =>
+          Bun.spawn(
+            [
+              process.execPath,
+              "-e",
+              `
+          const { requestRunSocket } = await import(process.env.TEST_CLIENT);
+          await Bun.stdin.text();
+          const statuses = [];
+          for (const run of ["run", "other"]) statuses.push((await requestRunSocket(process.env.TEST_SOCKET, "/workers/github/" + run + "/token")).status);
+          console.log(statuses.join(","));
+        `,
+            ],
+            {
+              env: {
+                ...process.env,
+                TEST_SOCKET: config.socket,
+                TEST_CLIENT: join(import.meta.dir, "../../src/worker-identity/socket-client.ts"),
+              },
+              stdin: "pipe",
+              stdout: "pipe",
+            },
+          ),
         )
-        expect(instruction).toContain(path)
-        expect(instruction).not.toContain(workerCapability(config.secret, "run"))
-        expect((yield* Effect.promise(() => stat(path))).mode & 0o777).toBe(0o600)
-        expect(yield* Effect.promise(() => readFile(path, "utf8"))).toContain(
-          workerCapability(config.secret, "run"),
-        )
-        const request = (cap: string) =>
-          new Request("http://localhost/workers/github/run/token", {
-            method: "POST",
-            headers: { authorization: `Bearer ${cap}` },
-          })
-        expect((yield* service.route(request("wrong")))?.status).toBe(403)
-        const response = yield* service.route(request(workerCapability(config.secret, "run")))
-        expect(response?.headers.get("cache-control")).toBe("no-store")
-        expect(yield* Effect.promise(() => response!.json())).toMatchObject({
-          token: "test-installation-token",
+        yield* Effect.try(() => {
+          children.forEach((child, i) => service.register(i === 0 ? "run" : "other", child.pid))
         })
+        for (const child of children) child.stdin.end()
+        expect((yield* Effect.promise(() => new Response(children[0]!.stdout).text())).trim()).toBe(
+          "200,403",
+        )
+        expect((yield* Effect.promise(() => new Response(children[1]!.stdout).text())).trim()).toBe(
+          "403,200",
+        )
+        yield* Effect.promise(() => Promise.all(children.map((child) => child.exited)))
+
+        expect(
+          (yield* Effect.promise(() =>
+            requestRunSocket(config.socket, "/workers/github/run/token"),
+          )).status,
+        ).toBe(403)
         expect(fixture.bodies).toEqual([{ repositories: ["r"], permissions: { actions: "read" } }])
         yield* runs.fail({ runId: "run", diagnostic: "done", now })
-        expect(
-          (yield* service.route(request(workerCapability(config.secret, "run"))))?.status,
-        ).toBe(403)
       }).pipe(Effect.provide(live)),
     )
   } finally {

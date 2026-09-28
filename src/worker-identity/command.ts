@@ -1,49 +1,26 @@
-import { dirname } from "node:path"
-import { readFile } from "node:fs/promises"
 import { Schema } from "effect"
 import { workerCommandEnvironment } from "./command-env"
-const Identity = Schema.Struct({
-  endpoint: Schema.String,
-  runId: Schema.String,
-  capability: Schema.String,
-})
+import { requestRunSocket } from "./socket-client"
 const Token = Schema.Struct({ token: Schema.String, expiresAt: Schema.Number })
 export async function runWorkerCommand(
   args: string[],
   env: Record<string, string | undefined>,
   io: {
-    request: typeof fetch
+    request: typeof requestRunSocket
     run: (argv: string[], env: Record<string, string | undefined>) => Promise<number>
   },
 ) {
-  if (args[0] !== "--identity" || args[1] === undefined)
-    throw new Error("Expected --identity FILE [--git] -- arguments")
-  const identity = Schema.decodeUnknownSync(Identity)(JSON.parse(await readFile(args[1], "utf8")))
+  const socket = env.WORKFLOWD_WORKER_GITHUB_SOCKET
+  const runId = env.WORKFLOWD_RUN_ID
+  if (socket === undefined || runId === undefined) throw new Error("Worker run environment missing")
   const separator = args.indexOf("--")
   if (separator < 0) throw new Error("Expected -- before command arguments")
-  const endpoint = new URL(identity.endpoint)
-  if (
-    endpoint.protocol !== "https:" &&
-    !(
-      endpoint.protocol === "http:" &&
-      ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname)
-    )
-  )
-    throw new Error("Worker broker requires HTTPS or loopback")
-  const response = await io.request(
-    new URL(`/workers/github/${encodeURIComponent(identity.runId)}/token`, endpoint),
-    {
-      method: "POST",
-      headers: { authorization: `Bearer ${identity.capability}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(15000),
-    },
-  )
+  const response = await io.request(socket, `/workers/github/${encodeURIComponent(runId)}/token`)
   if (!response.ok)
     throw new Error(`Worker identity unavailable (${response.status}); no personal-token fallback`)
   const issued = Schema.decodeUnknownSync(Token)(await response.json())
   if (issued.expiresAt < Date.now() + 60000) throw new Error("Worker identity expires too soon")
-  const git = args.slice(2, separator).includes("--git")
+  const git = args.slice(0, separator).includes("--git")
   // A helper only answers github.com; it never puts credential material in argv.
   const helper =
     '!f() { host=; while IFS= read -r line; do case "$line" in host=*) host=${line#host=};; esac; done; if [ "$host" = github.com ]; then printf "username=x-access-token\\npassword=%s\\n" "$GH_TOKEN"; fi; }; f'
@@ -57,10 +34,7 @@ export async function runWorkerCommand(
         ...args.slice(separator + 1),
       ]
     : ["gh", ...args.slice(separator + 1)]
-  return io.run(
-    argv,
-    workerCommandEnvironment({ ...env, GH_CONFIG_DIR: dirname(args[1]) }, issued.token),
-  )
+  return io.run(argv, workerCommandEnvironment(env, issued.token))
 }
 export async function spawnWorkerCommand(argv: string[], env: Record<string, string | undefined>) {
   return await Bun.spawn(argv, { env, stdin: "inherit", stdout: "inherit", stderr: "inherit" })
@@ -69,7 +43,7 @@ export async function spawnWorkerCommand(argv: string[], env: Record<string, str
 if (import.meta.main) {
   try {
     process.exitCode = await runWorkerCommand(process.argv.slice(2), process.env, {
-      request: fetch,
+      request: requestRunSocket,
       run: spawnWorkerCommand,
     })
   } catch {

@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { serveRunSocket } from "../../src/worker-identity/peer"
+import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { runWaitCommand } from "../../src/cli"
 import { registerResidentWait } from "../../src/resident/wait"
 import { runWorkerCommand, spawnWorkerCommand } from "../../src/worker-identity/command"
@@ -47,19 +49,14 @@ test("CLI wait commands enforce arguments, credentials, and bounded registration
 })
 test("worker command acquires an App token for each invocation without argv secrets", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-worker-command-"))
-  const path = join(directory, "identity.json")
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: () => Response.json({ token: "app-token", expiresAt: Date.now() + 3600000 }),
-  })
-  await writeFile(
-    path,
-    JSON.stringify({ endpoint: server.url.toString(), runId: "run", capability: "cap" }),
+  const path = join(directory, "broker.sock")
+  const server = await serveRunSocket(path, async () =>
+    Response.json({ token: "app-token", expiresAt: Date.now() + 3600000 }),
   )
+  const env = { WORKFLOWD_WORKER_GITHUB_SOCKET: path, WORKFLOWD_RUN_ID: "run" }
   const calls: string[][] = []
   const io = {
-    request: fetch,
+    request: requestRunSocket,
     run: async (argv: string[], env: Record<string, string | undefined>) => {
       calls.push(argv)
       expect(env.GH_TOKEN).toBe("app-token")
@@ -68,20 +65,16 @@ test("worker command acquires an App token for each invocation without argv secr
     },
   }
   try {
-    expect(
-      await runWorkerCommand(
-        ["--identity", path, "--", "pr", "view"],
-        { GH_TOKEN: "personal" },
-        io,
-      ),
-    ).toBe(7)
-    expect(await runWorkerCommand(["--identity", path, "--git", "--", "fetch"], {}, io)).toBe(7)
+    expect(await runWorkerCommand(["--", "pr", "view"], { ...env, GH_TOKEN: "personal" }, io)).toBe(
+      7,
+    )
+    expect(await runWorkerCommand(["--git", "--", "fetch"], env, io)).toBe(7)
     expect(calls[0]).toEqual(["gh", "pr", "view"])
     expect(calls[1]?.[0]).toBe("git")
-    await expect(runWorkerCommand([], {}, io)).rejects.toThrow("identity")
-    await expect(runWorkerCommand(["--identity", path], {}, io)).rejects.toThrow("before")
+    await expect(runWorkerCommand([], {}, io)).rejects.toThrow("environment")
+    await expect(runWorkerCommand([], env, io)).rejects.toThrow("before")
   } finally {
-    await server.stop(true)
+    await server.close()
     await rm(directory, { recursive: true, force: true })
   }
 })

@@ -652,7 +652,7 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
-  const workerIdentity = await loadWorkerIdentityConfig(env, read)
+  const workerIdentity = await loadWorkerIdentityConfig(env)
   const residentCodex = await loadResidentConfig(env, read)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
