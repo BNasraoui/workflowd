@@ -21,9 +21,14 @@ test("cancellation migration preserves existing runs and indexes and widens stat
       expect(yield* sql`SELECT * FROM kernel_agent_runs`).toEqual(before)
       yield* sql`UPDATE kernel_agent_runs SET state = 'cancelled'`
       expect(yield* sql`SELECT state FROM kernel_agent_runs`).toEqual([{ state: "cancelled" }])
+      expect(
+        (yield* sql`UPDATE kernel_agent_runs SET state = 'invalid'`.pipe(Effect.result))._tag,
+      ).toBe("Failure")
       expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
       const indexes = yield* sql`PRAGMA index_list(kernel_agent_runs)`
       expect(indexes.map((row) => row.name)).toContain("kernel_agent_runs_watchable")
       expect(indexes.map((row) => row.name)).toContain("kernel_agent_runs_session")
+      yield* runStoreMigrations
+      expect(yield* sql`SELECT state FROM kernel_agent_runs`).toEqual([{ state: "cancelled" }])
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
   ))

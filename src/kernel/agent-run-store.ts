@@ -11,7 +11,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
  * one dispatching request holds the spawn; concurrent duplicates conflict
  * before any external side effect) → spawned (worktree, session and custody
  * exist, prompt sent) → verified (first generated token observed; the
- * receipt has been issued) → completed | failed | operator_required.
+ * receipt has been issued) → completed | failed | cancelled | operator_required.
  */
 export type AgentRunState =
   | "accepted"
@@ -140,6 +140,9 @@ export type AgentRunStorePort = {
   readonly complete: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly cancel: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
+    input: Authority & { readonly diagnostic: string },
+  ) => Effect.Effect<void, AgentRunStoreError>
+  readonly cancel: (
     input: Authority & { readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly operatorRequired: (
@@ -357,6 +360,16 @@ const make = Effect.gen(function* () {
       sql`UPDATE kernel_agent_runs SET state = 'failed', diagnostic = ${input.diagnostic},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned') RETURNING run_id`,
+    )
+
+  const cancel: AgentRunStorePort["cancel"] = (input) =>
+    transition(
+      input.runId,
+      "run is not active",
+      sql`UPDATE kernel_agent_runs SET state = 'cancelled',
+        diagnostic = ${input.diagnostic}, updated_at = ${input.now.toISOString()}
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified')
+        RETURNING run_id`,
     )
 
   const operatorRequired: AgentRunStorePort["operatorRequired"] = (input) =>

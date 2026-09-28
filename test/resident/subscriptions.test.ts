@@ -80,45 +80,47 @@ for (const alreadyFinished of [false, true]) {
     ))
 }
 
-test("agent run final state produces one mailbox message with a summary pointer", () =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const store = yield* makeResidentStore
-      const subscriptions = yield* makeSubscriptions
-      const sql = yield* SqlClient.SqlClient
-      yield* store.attach("parent", "thread", "/work", null)
-      yield* store.started("thread", "turn")
-      const runs = yield* AgentRunStore
-      yield* runs.create({
-        runId: "child",
-        route: "test",
-        providerId: "codex-cli",
-        modelId: "m",
-        agent: "build",
-        repository: "o/r",
-        directory: "/child",
-        prompt: "task",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 1,
-        createdAt: new Date(),
-      })
-      yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
-      expect(yield* store.pending()).toHaveLength(0)
-      yield* sql`UPDATE kernel_agent_runs SET state = 'completed', native_session_id = 'child-thread' WHERE run_id = 'child'`
-      yield* subscriptions.reconcile()
-      yield* subscriptions.reconcile()
-      const messages = yield* store.pending()
-      expect(messages).toHaveLength(1)
-      expect(messages[0]?.prompt).toContain('"status":"completed"')
-      expect(messages[0]?.prompt).toContain('"summaryPointer":"child-thread"')
-      yield* store.uncertain(messages[0]!.id, "thread")
-      expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
-      yield* subscriptions.reconcile()
-      expect(yield* store.pending()).toHaveLength(0)
-    }).pipe(Effect.provide(layer)),
-  ))
+for (const state of ["completed", "failed", "cancelled", "operator_required"] as const) {
+  test(`agent run ${state} produces one mailbox message with a summary pointer`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const subscriptions = yield* makeSubscriptions
+        const sql = yield* SqlClient.SqlClient
+        yield* store.attach("parent", "thread", "/work", null)
+        yield* store.started("thread", "turn")
+        const runs = yield* AgentRunStore
+        yield* runs.create({
+          runId: "child",
+          route: "test",
+          providerId: "codex-cli",
+          modelId: "m",
+          agent: "build",
+          repository: "o/r",
+          directory: "/child",
+          prompt: "task",
+          promptSha256: "a".repeat(64),
+          parentSessionId: null,
+          resumePrompt: null,
+          maxAttempts: 1,
+          createdAt: new Date(),
+        })
+        yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
+        expect(yield* store.pending()).toHaveLength(0)
+        yield* sql`UPDATE kernel_agent_runs SET state = ${state}, native_session_id = 'child-thread' WHERE run_id = 'child'`
+        yield* subscriptions.reconcile()
+        yield* subscriptions.reconcile()
+        const messages = yield* store.pending()
+        expect(messages).toHaveLength(1)
+        expect(messages[0]?.prompt).toContain(`"status":"${state}"`)
+        expect(messages[0]?.prompt).toContain('"summaryPointer":"child-thread"')
+        yield* store.uncertain(messages[0]!.id, "thread")
+        expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
+        yield* subscriptions.reconcile()
+        expect(yield* store.pending()).toHaveLength(0)
+      }).pipe(Effect.provide(layer)),
+    ))
+}
 
 test("a wake turn cannot finish a worker with another outstanding subscription", () =>
   Effect.runPromise(
@@ -165,6 +167,46 @@ test("terminal result for a gone mailbox requires an operator and never queues a
       )
       yield* subscriptions.reconcile()
       expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
+      expect(yield* store.pending()).toHaveLength(0)
+    }).pipe(Effect.provide(layer)),
+  ))
+
+test("a never-final run keeps its subscription visible and pending without delivery", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      const sql = yield* SqlClient.SqlClient
+      const runs = yield* AgentRunStore
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      yield* runs.create({
+        runId: "child",
+        route: "test",
+        providerId: "codex-cli",
+        modelId: "m",
+        agent: "build",
+        repository: "o/r",
+        directory: "/child",
+        prompt: "task",
+        promptSha256: "a".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 1,
+        createdAt: new Date(),
+      })
+      const receipt = yield* subscriptions.register("thread", {
+        kind: "agent_run",
+        run_id: "child",
+      })
+      expect(yield* store.completed("thread", "turn")).toBe("waiting")
+      for (let pass = 0; pass < 3; pass++) yield* subscriptions.reconcile()
+      expect(yield* store.deliveryState(receipt.id)).toBe("pending")
+      expect(yield* store.threads()).toMatchObject([{ thread_id: "thread", state: "waiting" }])
+      expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${receipt.id}`).toEqual([
+        { state: "pending" },
+      ])
+      expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(0)
       expect(yield* store.pending()).toHaveLength(0)
     }).pipe(Effect.provide(layer)),
   ))

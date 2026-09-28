@@ -41,7 +41,10 @@ export const makeSubscriptions = Effect.gen(function* () {
       }
       if (selector.kind === "agent_run") {
         const run = yield* runs.read(selector.run_id)
-        if (run !== null && ["completed", "failed", "operator_required"].includes(run.state))
+        if (
+          run !== null &&
+          ["completed", "failed", "cancelled", "operator_required"].includes(run.state)
+        )
           result = {
             kind: "agent_run",
             runId: run.runId,

@@ -297,3 +297,31 @@ test("confirmed Codex cancellation wins when its exit observer escalated first",
   expect(result.row?.diagnostic).toBeNull()
   expect(result.staleObserver._tag).toBe("Failure")
 })
+for (const state of ["accepted", "spawning", "spawned", "verified"] as const) {
+  test(`cancels a ${state} run durably and refuses subsequent transitions`, () =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create(input)
+        if (state === "spawning") yield* store.claimSpawn({ runId: input.runId, now: at })
+        if (state === "spawned" || state === "verified") yield* spawn(store)
+        if (state === "verified")
+          yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        yield* store.cancel({ runId: input.runId, diagnostic: "user_cancelled", now: later })
+        expect(yield* store.read(input.runId)).toMatchObject({
+          state: "cancelled",
+          diagnostic: "user_cancelled",
+          updatedAt: later,
+        })
+        expect(
+          yield* store.nextWatchable({ now: later, staleAfterMs: 0, unsupervisedProviderIds: [] }),
+        ).toBeNull()
+        for (const transition of [
+          store.cancel({ runId: input.runId, diagnostic: "again", now: later }),
+          store.complete({ runId: input.runId, now: later }),
+          store.operatorRequired({ runId: input.runId, diagnostic: "again", now: later }),
+        ])
+          expect((yield* transition.pipe(Effect.result))._tag).toBe("Failure")
+      }),
+    ))
+}
