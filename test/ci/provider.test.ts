@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import { connect } from "@nats-io/transport-node"
-import { jetstreamManager } from "@nats-io/jetstream"
+import { jetstreamManager, StorageType, RetentionPolicy, DiscardPolicy } from "@nats-io/jetstream"
 import { CiProvider, CiProviderLive } from "../../src/ci/provider"
 import { githubFixture } from "./github-fixture"
 const docker = async (...args: string[]) => {
@@ -72,6 +72,34 @@ test("live CI provider persists NATS publications and uses conditional installat
         yield* CiProvider
       }).pipe(Effect.provide(live)),
     )
+
+    const admin = await connect({ servers, token: "test-token" })
+    try {
+      const manager = await jetstreamManager(admin)
+      const original = (await manager.streams.info("WORKFLOWD_CI_V1")).config
+      for (const mismatch of [
+        { storage: StorageType.Memory },
+        { discard: DiscardPolicy.New },
+        { max_age: 100000000, duplicate_window: 100000000 },
+        { max_bytes: 1 },
+        { retention: RetentionPolicy.Interest },
+        { subjects: ["workflowd.other.>"] },
+      ]) {
+        await manager.streams.delete("WORKFLOWD_CI_V1")
+        await manager.streams.add({ ...original, ...mismatch })
+        const result = await Effect.runPromise(
+          Effect.gen(function* () {
+            yield* CiProvider
+          }).pipe(Effect.provide(live), Effect.result),
+        )
+        expect(result._tag).toBe("Failure")
+        expect(String(result)).toContain("Incompatible CI stream")
+        const current = (await manager.streams.info("WORKFLOWD_CI_V1")).config
+        expect(current).toMatchObject(mismatch)
+      }
+    } finally {
+      await admin.drain()
+    }
   } finally {
     await docker("rm", "-f", name)
     await fixture.close()

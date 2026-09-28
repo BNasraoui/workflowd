@@ -9,6 +9,8 @@ import {
   StorageType,
   RetentionPolicy,
   DiscardPolicy,
+  JetStreamApiError,
+  JetStreamApiCodes,
 } from "@nats-io/jetstream"
 import type { AppConfig } from "../config"
 import { natsAuthOptions } from "../remote/auth"
@@ -42,24 +44,31 @@ export const CiProviderLive = (
       )
       const manager = yield* Effect.tryPromise(() => jetstreamManager(connection))
       yield* Effect.tryPromise(async () => {
-        const exists = await manager.streams.find("workflowd.v1.ci.>").catch(() => undefined)
-        if (exists === undefined)
-          await manager.streams.add({
-            name: STREAM,
-            subjects: ["workflowd.v1.ci.>"],
-            storage: StorageType.File,
-            retention: RetentionPolicy.Limits,
-            discard: DiscardPolicy.Old,
-            max_age: 86400 * 1e9,
-            max_bytes: 64 * 1024 * 1024,
-          })
-        const info = await manager.streams.info(STREAM)
-        if (
-          info.config.storage !== StorageType.File ||
-          info.config.retention !== RetentionPolicy.Limits ||
-          info.config.subjects.join() !== "workflowd.v1.ci.>"
+        const expected = {
+          name: STREAM,
+          subjects: ["workflowd.v1.ci.>"],
+          storage: StorageType.File,
+          retention: RetentionPolicy.Limits,
+          discard: DiscardPolicy.Old,
+          max_age: 86400 * 1e9,
+          max_bytes: 64 * 1024 * 1024,
+        }
+        const info = await manager.streams.info(STREAM).catch((error: unknown) => {
+          if (error instanceof JetStreamApiError && error.code === JetStreamApiCodes.StreamNotFound)
+            return undefined
+          throw error
+        })
+        if (info === undefined) {
+          await manager.streams.add(expected)
+          return
+        }
+        const mismatches = (Object.keys(expected) as Array<keyof typeof expected>).filter(
+          (key) => JSON.stringify(info.config[key]) !== JSON.stringify(expected[key]),
         )
-          throw new Error("Incompatible CI stream")
+        if (mismatches.length > 0)
+          throw new Error(
+            `Incompatible CI stream ${STREAM}: ${mismatches.join(", ")}; refusing to reconfigure existing stream`,
+          )
       })
       return {
         request: (installationId: number) =>
