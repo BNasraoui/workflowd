@@ -70,3 +70,38 @@ workflowd restart after existing work has drained, plus App permission approval
 and NATS provisioning. Implementation and tests do not restart or reconfigure
 any host service. Roll back by removing the feature settings at the next planned
 restart; durable CI history remains in SQLite.
+
+## Worker GitHub identity (off by default)
+
+Set `WORKFLOWD_WORKER_GITHUB_ENABLED=true`,
+`WORKFLOWD_WORKER_GITHUB_SECRET_FILE` (a dedicated random secret of at least 32
+characters), `WORKFLOWD_WORKER_GITHUB_DIRECTORY` (an absolute private directory
+for per-run capability files), and `WORKFLOWD_WORKER_GITHUB_ENDPOINT` (the
+workflowd HTTPS URL or loopback HTTP URL). Set
+`WORKFLOWD_WORKER_GITHUB_REPOSITORIES` to explicit dispatch-name policies:
+
+```json
+[{"name":"workflowd","repository":"BNasraoui/workflowd","installationId":123,"permissions":{"actions":"read","checks":"read","contents":"write","pull_requests":"write"}}]
+```
+
+`name` must match the existing agent-run repository allow-list. No caller can
+request a different repository or elevate permissions. Installation tokens are
+cached with concurrent lookup deduplication and refreshed five minutes before
+expiry. Tokens remain redacted in the service; only the authenticated, no-store
+HTTP response unwraps them. Each capability is bound to one live dispatch and
+expires after 24 hours. Completed/failed runs immediately lose broker access.
+
+Dispatch prompts include an absolute command-wrapper path and a mode-0600
+capability file path. The wrapper obtains the current App token for every `gh`
+command, overrides inherited personal tokens, disables credential debug tracing,
+and fails closed if the broker refuses it. `--git` supports HTTPS Git using a
+credential helper restricted to github.com. SSH Git authentication is outside
+this broker. Workers must use the supplied wrapper; it does not alter a shared
+OpenCode server's global environment or the user's saved gh credentials.
+
+Approve **Actions: read**, **Checks: read**, and the explicit Contents/Pull
+requests/Issues permission levels in each policy on the GitHub App installation.
+Token creation fails closed when a requested permission is unavailable. The
+App private key never leaves workflowd. Permission and identity changes take
+effect on the owner's planned restart; existing dispatched workers are not
+retrofitted or interrupted.

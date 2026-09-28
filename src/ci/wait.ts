@@ -47,11 +47,13 @@ export async function waitCi(
     return state
   }
   try {
-    let state = validate(Schema.decodeUnknownSync(CiState)(await request(`/ci/state?${query}`)))
+    let state = validate(
+      Schema.decodeUnknownSync(CiState)(await request(`/ci/state?${query.toString()}`)),
+    )
     while (state.conclusion === "pending") {
       query.set("after", String(state.sequence))
       const events = Schema.decodeUnknownSync(Schema.Array(CiState))(
-        await request(`/ci/events?${query}`),
+        await request(`/ci/events?${query.toString()}`),
       )
       for (const event of events) {
         validate(event)

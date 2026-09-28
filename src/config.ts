@@ -1,3 +1,4 @@
+import { loadWorkerIdentityConfig, type WorkerIdentityConfig } from "./worker-identity/config"
 import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -108,6 +109,7 @@ export interface AgentRunConfig {
 
 export interface AppConfig {
   readonly ci?: CiConfig
+  readonly workerIdentity?: WorkerIdentityConfig
   readonly http: HttpConfig
   readonly github: GitHubConfig
   readonly storage: StorageConfig
@@ -648,11 +650,13 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
+  const workerIdentity = await loadWorkerIdentityConfig(env, read)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
+    ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(ci === undefined ? {} : { ci }),
     http: httpSection(env),
     github: githubSection(env, secrets.webhookSecret),

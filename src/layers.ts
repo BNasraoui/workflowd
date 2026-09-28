@@ -1,3 +1,4 @@
+import { WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -266,6 +267,12 @@ export const makeLiveLayer = (config: AppConfig) => {
     ClaudeCli,
     makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
   )
+  const workerIdentityLayer =
+    config.workerIdentity === undefined
+      ? Layer.empty
+      : WorkerIdentityLive(config.workerIdentity, config.github).pipe(
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+        )
   const codexCliLayer = Layer.succeed(
     CodexCli,
     makeCodexCli({
@@ -354,6 +361,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
+          Layer.provideMerge(workerIdentityLayer),
           Layer.provideMerge(workSignalLayer),
         )
   const qrspiLayer =
@@ -454,6 +462,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     config.ci === undefined
       ? Layer.empty
       : CiServiceLive(config.ci, config.github).pipe(Layer.provide(storeLayer)),
+    workerIdentityLayer,
     workSignalLayer,
     providerLayer,
     resumeWorkerLayer,

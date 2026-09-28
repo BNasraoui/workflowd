@@ -1,3 +1,4 @@
+import { WorkerIdentity } from "./worker-identity/service"
 import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
@@ -240,6 +241,7 @@ export function startHookService(
   ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
   return Effect.gen(function* () {
+    const workerIdentity = yield* Effect.serviceOption(WorkerIdentity)
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Automation
     const signals = yield* WorkSignal
@@ -423,6 +425,10 @@ export function startHookService(
       },
       (request, options) =>
         Effect.gen(function* () {
+          if (Option.isSome(workerIdentity)) {
+            const response = yield* workerIdentity.value.route(request)
+            if (response !== undefined) return response
+          }
           if (config.ci !== undefined) {
             const response = yield* routeCi(request, config.ci, Option.getOrThrow(ci)).pipe(
               Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))),

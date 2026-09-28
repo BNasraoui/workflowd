@@ -1,3 +1,4 @@
+import { WorkerIdentity } from "../worker-identity/service"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { Context, Data, Effect, Layer, Schema } from "effect"
@@ -163,6 +164,13 @@ const make = (options: AgentRunIngressOptions) =>
     const worktrees = yield* AgentRunWorktrees
     const waits = yield* AgentWaitIngress
     const claude = yield* ClaudeCli
+    const identity = yield* Effect.serviceOption(WorkerIdentity)
+    const workerPrompt = (run: AgentRunRecord) =>
+      Option.isSome(identity)
+        ? identity.value
+            .provision(run)
+            .pipe(Effect.map((instruction) => `${instruction}\n\n${run.prompt}`))
+        : Effect.succeed(run.prompt)
     const codex = yield* CodexCli
     const signals = yield* WorkSignal
     const codexReadiness = yield* codex.preflight.pipe(Effect.result)
@@ -273,7 +281,7 @@ const make = (options: AgentRunIngressOptions) =>
             directory: run.directory,
             agent: run.agent,
             model: { providerID: route.providerID, modelID: route.modelID },
-            text: run.prompt,
+            text: yield* workerPrompt(run),
           })
         }
         const outputTokens = yield* verifyFirstToken(nativeSessionId)
@@ -309,6 +317,7 @@ const make = (options: AgentRunIngressOptions) =>
       progressWindowMs: options.progressWindowMs,
     })
     yield* codexRuns.recover
+
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
