@@ -122,7 +122,7 @@ describe("agent-run ingress", () => {
   test("a session that never generates is aborted, failed, and refused", async () => {
     const state = defaultState()
     state.telemetry.set("ses_child", {
-      directory: "/tmp/worktrees/agent-runs/x",
+      directory: "/var/lib/workflowd-test/worktrees/agent-runs/x",
       outputTokens: 0,
       updatedAtMs: at.getTime(),
       idle: false,

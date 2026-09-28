@@ -38,7 +38,7 @@ const options = {
   codexRoutes: [{ name: "scan", modelID: "gpt-5.1-codex" }],
   repositories: [{ name: "workflowd", directory: "/home/ben/repos/workflowd" }],
   agent: "remote-worker",
-  worktreeRoot: "/tmp/worktrees",
+  worktreeRoot: "/var/lib/workflowd-test/worktrees",
   verifyTimeoutMs: 50,
   verifyPollIntervalMs: 10,
   progressWindowMs: 10 * 60_000,
@@ -64,7 +64,7 @@ export const defaultState = (): ProviderState => ({
     [
       "ses_child",
       {
-        directory: "/tmp/worktrees/agent-runs/x",
+        directory: "/var/lib/workflowd-test/worktrees/agent-runs/x",
         outputTokens: 7,
         updatedAtMs: at.getTime(),
         idle: false,
@@ -122,6 +122,9 @@ export type CodexState = {
   spawned: Array<{ directory: string; prompt: string; model: string | null }>
   killed: boolean
 }
+
+const neverCodexEvent = () =>
+  new Promise<IteratorResult<import("../../src/kernel/codex-session").CodexExecEvent>>(() => {})
 
 export const makeCodexCli = (
   events: ReadonlyArray<import("../../src/kernel/codex-session").CodexExecEvent>,
@@ -202,10 +205,7 @@ export const codexNeverStreams = () => {
         state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
         const never: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
           [Symbol.asyncIterator]: () => ({
-            next: () =>
-              new Promise<IteratorResult<import("../../src/kernel/codex-session").CodexExecEvent>>(
-                () => {},
-              ),
+            next: neverCodexEvent,
           }),
         }
         return {
