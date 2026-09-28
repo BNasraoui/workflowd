@@ -62,9 +62,9 @@ export const CiProviderLive = (
           await manager.streams.add(expected)
           return
         }
-        const mismatches = (Object.keys(expected) as Array<keyof typeof expected>).filter(
-          (key) => JSON.stringify(info.config[key]) !== JSON.stringify(expected[key]),
-        )
+        const mismatches = (
+          ["name", "subjects", "storage", "retention", "discard", "max_age", "max_bytes"] as const
+        ).filter((key) => JSON.stringify(info.config[key]) !== JSON.stringify(expected[key]))
         if (mismatches.length > 0)
           throw new Error(
             `Incompatible CI stream ${STREAM}: ${mismatches.join(", ")}; refusing to reconfigure existing stream`,

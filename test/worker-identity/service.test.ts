@@ -83,7 +83,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
         yield* Effect.try(() => {
           children.forEach((child, i) => service.register(i === 0 ? "run" : "other", child.pid))
         })
-        for (const child of children) child.stdin.end()
+        for (const child of children) void child.stdin.end()
         expect((yield* Effect.promise(() => new Response(children[0]!.stdout).text())).trim()).toBe(
           "200,403",
         )

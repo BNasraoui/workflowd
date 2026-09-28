@@ -9,9 +9,9 @@ export type WorkerIdentityConfig = {
   readonly socket: string
   readonly policies: typeof Policies.Type
 }
-export async function loadWorkerIdentityConfig(
+export function loadWorkerIdentityConfig(
   env: Record<string, string | undefined>,
-): Promise<WorkerIdentityConfig | undefined> {
+): WorkerIdentityConfig | undefined {
   if (
     env.WORKFLOWD_WORKER_GITHUB_ENABLED === undefined ||
     env.WORKFLOWD_WORKER_GITHUB_ENABLED === "false"

@@ -21,6 +21,6 @@ test("identity is opt-in and validates its boundary without exposing secrets", a
       ]),
     },
   ]) {
-    await expect(loadWorkerIdentityConfig({ ...env, ...override })).rejects.toThrow()
+    expect(() => loadWorkerIdentityConfig({ ...env, ...override })).toThrow()
   }
 })

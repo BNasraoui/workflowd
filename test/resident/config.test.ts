@@ -2,12 +2,12 @@ import { expect, test } from "bun:test"
 import { loadResidentConfig } from "../../src/resident/config"
 test("resident dispatch defaults off and needs isolated state and CI", async () => {
   expect(await loadResidentConfig({})).toBeUndefined()
-  await expect(
+  expect(() =>
     loadResidentConfig({
       WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
       WORKFLOWD_CODEX_RESIDENT_HOME: "relative",
     }),
-  ).rejects.toThrow("absolute")
+  ).toThrow("absolute")
   expect(
     await loadResidentConfig({
       WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",

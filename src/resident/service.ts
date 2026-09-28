@@ -67,11 +67,11 @@ export const ResidentCodexLive = (
       >()
       const threadRuns = new Map<string, string>()
       yield* Effect.addFinalizer(() =>
-        Effect.promise(async () => {
+        Effect.tryPromise(async () => {
           await Promise.all([...servers.values()].map((entry) => entry.process.close()))
-        }),
+        }).pipe(Effect.orDie),
       )
-      const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts = 0) {
+      const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts: number = 0) {
         const env = {
           ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
           WORKFLOWD_RUN_ID: runId,
@@ -108,11 +108,12 @@ export const ResidentCodexLive = (
       const finish = Effect.fn("Resident.finish")(function* (threadId: string, failed: boolean) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
-        listener?.queue.close()
-        listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
-        listeners.delete(threadId)
         if (row !== null) {
           peers.revoke(row.run_id)
+          const entry = servers.get(row.run_id)
+          servers.delete(row.run_id)
+          threadRuns.delete(threadId)
+          if (entry !== undefined) yield* Effect.tryPromise(() => entry.process.close())
           const run = yield* runs.read(row.run_id)
           if (run?.state === "verified") {
             yield* failed
@@ -124,6 +125,9 @@ export const ResidentCodexLive = (
               : runs.complete({ runId: row.run_id, now: new Date() })
           }
         }
+        listener?.queue.close()
+        listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
+        listeners.delete(threadId)
       })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string
@@ -286,7 +290,7 @@ export const ResidentCodexLive = (
               await process.initialize()
               await process.rpc.request("thread/list", { limit: 1 })
             }),
-          (process) => Effect.promise(() => process.close()),
+          (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
         ).pipe(
           Effect.mapError(() => ({
             kind: "cli_unusable" as const,
@@ -390,7 +394,7 @@ export const ResidentCodexLive = (
         Effect.tryPromise(() =>
           serveRunSocket(config.socket, (request, pid) => Effect.runPromise(route(request, pid))),
         ),
-        (server) => Effect.promise(() => server.close()),
+        (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )
       return { cli, route }
     }),

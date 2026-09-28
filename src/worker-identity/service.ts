@@ -75,7 +75,7 @@ export const WorkerIdentityLive = (
         Effect.tryPromise(() =>
           serveRunSocket(config.socket, (request, pid) => Effect.runPromise(route(request, pid))),
         ),
-        (server) => Effect.promise(() => server.close()),
+        (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )
       return {
         provision,

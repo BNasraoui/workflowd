@@ -27,7 +27,7 @@ export function requestRunSocket(
         )(JSON.parse(data))
         resolve(new Response(result.body, { status: result.status }))
       } catch (error) {
-        reject(error)
+        reject(new Error("Invalid run socket response", { cause: error }))
       }
     })
   })

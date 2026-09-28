@@ -1,9 +1,9 @@
 import { isAbsolute, resolve } from "node:path"
 import { homedir } from "node:os"
 export type ResidentConfig = { readonly home: string; readonly socket: string }
-export async function loadResidentConfig(
+export function loadResidentConfig(
   env: Record<string, string | undefined>,
-): Promise<ResidentConfig | undefined> {
+): ResidentConfig | undefined {
   if (
     env.WORKFLOWD_CODEX_RESIDENT_ENABLED === undefined ||
     env.WORKFLOWD_CODEX_RESIDENT_ENABLED === "false"

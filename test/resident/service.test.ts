@@ -1,3 +1,4 @@
+import { makeResidentStore } from "../../src/resident/store"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { expect, test } from "bun:test"
@@ -13,6 +14,8 @@ import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/ses
 import type { startAppServer } from "../../src/resident/process"
 
 function fixture() {
+  let rejectedMethod: string | undefined
+  const closed: number[] = []
   const pids = new Map<string, number>()
   const probes = new Map<number, (socket: string, targets: string[]) => Promise<string>>()
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
@@ -53,7 +56,7 @@ function fixture() {
     )
     probes.set(child.pid, async (socket, targets) => {
       child.stdin.write(JSON.stringify({ socket, targets }))
-      child.stdin.end()
+      void child.stdin.end()
       const output = await new Response(child.stdout).text()
       await child.exited
       return output.trim()
@@ -67,6 +70,12 @@ function fixture() {
         }),
       )(JSON.parse(line))
       calls.push(frame)
+      if (frame.method === rejectedMethod) {
+        rpc.receive(
+          JSON.stringify({ id: frame.id, error: { code: -32601, message: "method not found" } }),
+        )
+        return
+      }
       let result: unknown = {}
       if (frame.method === "thread/start") {
         const id = `thread-${++counter}`
@@ -109,14 +118,19 @@ function fixture() {
       rpc,
       initialize: async () => {},
       close: async () => {
+        closed.push(child.pid)
         rpc.close()
-        child.stdin.end()
+        void child.stdin.end()
         await child.exited
       },
     }
   }
   return {
     factory,
+    closed,
+    reject: (method: string) => {
+      rejectedMethod = method
+    },
     pids,
     probe: (thread: string, targets: string[]) =>
       probes.get(pids.get(thread)!)!(config.socket, targets),
@@ -149,7 +163,7 @@ const layer = (factory: typeof startAppServer) =>
       ),
     ),
     Layer.provideMerge(WorkflowStoreLive),
-    Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
   )
 const prepareRun = (now: Date, runId = "a") =>
   Effect.gen(function* () {
@@ -270,7 +284,7 @@ test("a registered CI wait ends the old turn and queues a new one", async () => 
           body: JSON.stringify({ ...target, threadId: "thread-1", timeoutMs: 60000 }),
         })
       expect((yield* resident.route(wait(), fake.pids.get("thread-2")))?.status).toBe(403)
-      expect((yield* resident.route(wait(), process.pid))?.status).toBe(403)
+      expect((yield* resident.route(wait(), globalThis.process.pid))?.status).toBe(403)
       const response = yield* resident.route(
         new Request("http://localhost/ci/resident-waits", {
           method: "POST",
@@ -401,6 +415,57 @@ test("two resident roots cannot register each other's thread waits over the sock
         ]),
       )
       expect(statuses).toEqual(["403,202", "403,202"])
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+for (const method of ["thread/queue/add", "thread/queue/list", "thread/read"]) {
+  test(`resident persists operator-required after rejected ${method}`, async () => {
+    const fake = fixture()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const store = yield* makeResidentStore
+        const runs = yield* AgentRunStore
+        const now = new Date()
+        yield* prepareRun(now)
+        if (method === "thread/queue/add") fake.reject(method)
+        const process = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        if (method !== "thread/queue/add") {
+          yield* verifyRun(now)
+          yield* store.enqueue("lost", "thread-1", "wake")
+          yield* store.sending("lost")
+          fake.reject(method)
+        }
+        expect((yield* process.exited).exitCode).toBe(1)
+        expect((yield* store.read("thread-1"))?.state).toBe("operator_required")
+        expect(yield* store.pending()).toHaveLength(0)
+        if (method !== "thread/queue/add")
+          expect((yield* runs.read("a"))?.state).toBe("operator_required")
+      }).pipe(Effect.provide(layer(fake.factory))),
+    )
+  })
+}
+
+test("completed resident runs release their owned app-server", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const process = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "done",
+        model: null,
+      })
+      yield* process.exited
+      yield* Effect.sleep(30)
+      expect(fake.closed).toContain(fake.pids.get("thread-1")!)
     }).pipe(Effect.provide(layer(fake.factory))),
   )
 })

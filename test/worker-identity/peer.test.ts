@@ -13,7 +13,7 @@ test("socket authenticates two concurrent process trees and denies outsiders", a
     const run = new URL(request.url).pathname.slice(1)
     return new Response(null, { status: peers.allows(run, pid) ? 200 : 403 })
   })
-  const children = ["a", "b"].map((run) =>
+  const children = ["a", "b"].map(() =>
     Bun.spawn(
       [
         process.execPath,
@@ -40,7 +40,9 @@ test("socket authenticates two concurrent process trees and denies outsiders", a
   )
   try {
     children.forEach((child, i) => peers.register(i === 0 ? "a" : "b", child.pid))
-    children.forEach((child) => child.stdin.end())
+    children.forEach((child) => {
+      void child.stdin.end()
+    })
     expect(await new Response(children[0]!.stdout).text()).toBe("[200,403]\n")
     expect(await new Response(children[1]!.stdout).text()).toBe("[403,200]\n")
     expect((await requestRunSocket(socket, "/a")).status).toBe(403)

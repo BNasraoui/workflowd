@@ -52,7 +52,7 @@ export async function serveRunSocket(
     },
   })
   const peerPid = (socket: Socket) => {
-    // node:http on Bun exposes the accepted native descriptor through _handle.
+    // node:net on Bun exposes the accepted native descriptor through _handle.
     const handle: unknown = Reflect.get(socket, "_handle")
     const fd: unknown =
       typeof handle === "object" && handle !== null ? Reflect.get(handle, "fd") : undefined
