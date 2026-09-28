@@ -3,7 +3,7 @@ import { makeResidentStore } from "../../src/resident/store"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { expect, test } from "bun:test"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { ResidentCodex, ResidentCodexLive } from "../../src/resident/service"
@@ -547,3 +547,115 @@ for (const kind of ["ci", "agent_run"] as const) {
     })
   }
 }
+
+test("restart delivers both CI subscribers once after prepared inbox rows are committed", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const { makeSubscriptions } = await import("../../src/resident/subscriptions")
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-prepared-restart-"))
+  const persistence = Layer.mergeAll(
+    Layer.effect(CiService, makeCiStore),
+    AgentRunStoreLive,
+    KernelEventStoreLive,
+    KernelSessionStoreLive,
+  ).pipe(
+    Layer.provideMerge(WorkflowStoreLive),
+    Layer.provideMerge(SqliteClient.layer({ filename: join(directory, "store.sqlite") })),
+  )
+  const fake = fixture()
+  const target = { repository: "o/r", sha: "a".repeat(40) }
+  try {
+    const receipts = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const subscriptions = yield* makeSubscriptions
+        const ci = yield* CiService
+        const ids: string[] = []
+        const now = new Date()
+        yield* ci.watch(target, 1, ["CI"], Date.now())
+        for (const [runId, threadId] of [
+          ["a", "thread-1"],
+          ["b", "thread-2"],
+        ] as const) {
+          yield* prepareRun(now, runId)
+          yield* verifyRun(now, runId, threadId)
+          yield* store.attach(runId, threadId, `/work/${runId}`, null)
+          yield* store.started(threadId, `dispatch:${runId}`)
+          ids.push((yield* subscriptions.register(threadId, { kind: "ci", ...target })).id)
+          expect(yield* store.completed(threadId, `dispatch:${runId}`)).toBe("waiting")
+        }
+        yield* ci.snapshot(
+          target,
+          [
+            {
+              id: 42,
+              name: "CI",
+              attempt: 1,
+              status: "completed",
+              conclusion: "success",
+              failingJobs: [],
+            },
+          ],
+          null,
+          Date.now(),
+        )
+        yield* subscriptions.reconcile()
+        expect((yield* store.pending()).map((message) => message.state)).toEqual([
+          "prepared",
+          "prepared",
+        ])
+        expect(fake.calls).toEqual([])
+        return ids
+      }).pipe(Effect.provide(persistence)),
+    )
+
+    // The first scope closed its SQLite connection before any app-server existed.
+    // Reopen the file and let the real resident restore and flush both mailboxes.
+    for (let restart = 0; restart < 2; restart++) {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* ResidentCodex
+          const store = yield* makeResidentStore
+          yield* store.pending().pipe(
+            Effect.repeat({
+              while: (messages) => messages.length > 0,
+              schedule: Schedule.spaced("10 millis"),
+            }),
+            Effect.timeout("3 seconds"),
+          )
+          yield* store
+            .threads()
+            .pipe(
+              Effect.repeat({
+                while: (threads) => threads.length > 0,
+                schedule: Schedule.spaced("10 millis"),
+              }),
+              Effect.timeout("3 seconds"),
+            )
+          const sql = yield* SqlClient.SqlClient
+          expect(
+            yield* sql`SELECT thread_id, state FROM resident_inbox ORDER BY thread_id`,
+          ).toEqual([
+            { thread_id: "thread-1", state: "delivered" },
+            { thread_id: "thread-2", state: "delivered" },
+          ])
+        }).pipe(
+          Effect.provide(
+            ResidentCodexLive(
+              { socket: join(directory, "resident.sock"), home: directory },
+              "unused",
+              ciConfig,
+              fake.factory,
+            ).pipe(Layer.provideMerge(persistence)),
+          ),
+        ),
+      )
+    }
+    const queued = fake.calls.filter((call) => call.method === "thread/queue/add")
+    expect(queued).toHaveLength(2)
+    expect(queued.map((call) => call.params.threadId).sort()).toEqual(["thread-1", "thread-2"])
+    expect(queued.map((call) => call.params.clientUserMessageId).sort()).toEqual(receipts.sort())
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})

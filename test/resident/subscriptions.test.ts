@@ -45,9 +45,15 @@ for (const alreadyFinished of [false, true]) {
           Date.now(),
         )
         if (alreadyFinished) yield* complete
+        yield* store.attach("other-run", "other-thread", "/other-work", null)
+        yield* store.started("other-thread", "other-turn")
         const selector = { kind: "ci" as const, ...target }
         const receipt = yield* subscriptions.register("thread", selector)
         expect((yield* subscriptions.register("thread", selector)).id).toBe(receipt.id)
+        const otherReceipt = yield* subscriptions.register("other-thread", selector)
+        expect(otherReceipt.id).not.toBe(receipt.id)
+        expect((yield* subscriptions.register("other-thread", selector)).id).toBe(otherReceipt.id)
+        expect(yield* store.completed("other-thread", "other-turn")).toBe("waiting")
         expect(yield* store.completed("thread", "turn")).toBe("waiting")
         if (!alreadyFinished) {
           expect(yield* store.pending()).toHaveLength(0)
@@ -55,7 +61,11 @@ for (const alreadyFinished of [false, true]) {
         }
         yield* subscriptions.reconcile()
         const messages = yield* store.pending()
-        expect(messages).toHaveLength(1)
+        expect(messages).toHaveLength(2)
+        expect(messages.map((message) => message.thread_id).sort()).toEqual([
+          "other-thread",
+          "thread",
+        ])
         expect(messages[0]?.prompt).toContain('"failingJobs":["lint"]')
         expect(messages[0]?.prompt).toContain("https://github.com/o/r/actions/runs/42")
         const webhook = {
@@ -69,13 +79,18 @@ for (const alreadyFinished of [false, true]) {
         expect(yield* ci.ingest("delivery", webhook, "{}", Date.now())).toBe("accepted")
         expect(yield* ci.ingest("delivery", webhook, "{}", Date.now())).toBe("duplicate")
         yield* store.delivered(receipt.id)
+        yield* store.delivered(otherReceipt.id)
         yield* complete
         yield* subscriptions.reconcile()
         yield* subscriptions.register("thread", selector)
+        yield* subscriptions.register("other-thread", selector)
         expect(yield* store.pending()).toHaveLength(0)
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(1)
-        expect((yield* sql`SELECT state FROM kernel_waits`)[0]?.state).toBe("consumed")
+        expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(2)
+        expect(yield* sql`SELECT state FROM kernel_waits`).toEqual([
+          { state: "consumed" },
+          { state: "consumed" },
+        ])
       }).pipe(Effect.provide(layer)),
     ))
 }
