@@ -71,6 +71,20 @@ and NATS provisioning. Implementation and tests do not restart or reconfigure
 any host service. Roll back by removing the feature settings at the next planned
 restart; durable CI history remains in SQLite.
 
+Migrations always apply on startup, even with every feature flag absent.
+Migration 0020 adds `ci_targets`, `ci_deliveries`, and `ci_events` plus their
+target/outbox/due indexes. Migration 0021 adds `resident_threads` and
+`resident_inbox` plus the pending-inbox index. They are additive: existing
+dispatch tables and rows are unchanged. They also add migration-ledger entries.
+
+For rollback, drain resident work and disable the flags at an owner-planned
+restart. Older code can leave these unused tables in place. Do not delete the
+tables alone while retaining their migration-ledger entries. If schema removal
+is required, stop writes during an owner-controlled maintenance window and
+restore a full pre-upgrade SQLite backup (including its migration ledger);
+that discards all post-backup writes. Preserve a current backup first. This PR
+does not perform any rollback or service operation.
+
 ## Worker GitHub identity (off by default)
 
 Set `WORKFLOWD_WORKER_GITHUB_ENABLED=true`,
