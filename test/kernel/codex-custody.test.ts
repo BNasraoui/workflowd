@@ -4,7 +4,32 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
-import { runCodexWorker } from "../../src/kernel/codex-worker"
+import { parseCodexWorkerArguments, runCodexWorker } from "../../src/kernel/codex-worker"
+
+test("the worker command parser accepts exact pairs and rejects malformed arguments", () => {
+  expect(
+    parseCodexWorkerArguments([
+      "--binary",
+      "codex",
+      "--directory",
+      "/work",
+      "--prompt-file",
+      "/state/prompt",
+      "--result-file",
+      "/state/result",
+      "--model",
+      "gpt-5.1-codex",
+    ]),
+  ).toEqual({
+    binary: "codex",
+    directory: "/work",
+    promptFile: "/state/prompt",
+    resultFile: "/state/result",
+    model: "gpt-5.1-codex",
+  })
+  expect(() => parseCodexWorkerArguments(["binary", "codex"])).toThrow("--name value pairs")
+  expect(() => parseCodexWorkerArguments(["--binary", "codex"])).toThrow("missing --directory")
+})
 
 test("the transient worker feeds the prompt on stdin and records its exit durably", async () => {
   const root = await mkdtemp(join(tmpdir(), "codex-worker-"))

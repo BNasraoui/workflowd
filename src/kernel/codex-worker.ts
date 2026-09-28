@@ -43,7 +43,9 @@ export async function runCodexWorker(options: CodexWorkerOptions): Promise<numbe
   return exitCode
 }
 
-const parseArguments = (arguments_: ReadonlyArray<string>): CodexWorkerOptions => {
+export const parseCodexWorkerArguments = (
+  arguments_: ReadonlyArray<string>,
+): CodexWorkerOptions => {
   const values = new Map<string, string>()
   for (let index = 0; index < arguments_.length; index += 2) {
     const name = arguments_[index]
@@ -69,7 +71,7 @@ const parseArguments = (arguments_: ReadonlyArray<string>): CodexWorkerOptions =
 
 if (import.meta.main) {
   try {
-    const exitCode = await runCodexWorker(parseArguments(process.argv.slice(2)))
+    const exitCode = await runCodexWorker(parseCodexWorkerArguments(process.argv.slice(2)))
     process.exitCode = exitCode < 0 ? 1 : exitCode
   } catch (cause) {
     console.error(cause instanceof Error ? cause.message : String(cause))
