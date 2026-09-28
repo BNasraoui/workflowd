@@ -43,3 +43,21 @@ test("restart reconciles a lost ack from queue/history; uncertain delivery never
     expect(methods).not.toContain("thread/queue/add")
   }
 })
+
+for (const method of ["thread/queue/add", "thread/queue/list", "thread/read"]) {
+  test(`rejected ${method} requires operator reconciliation`, async () => {
+    const calls: string[] = []
+    const outcome = await Effect.runPromise(
+      deliverResident(
+        async (called) => {
+          calls.push(called)
+          if (called === method) throw new Error("method not found")
+          return { data: [], nextCursor: null }
+        },
+        { ...message, state: method === "thread/queue/add" ? "prepared" : "sending" },
+      ),
+    )
+    expect(outcome).toBe("uncertain")
+    expect(calls.filter((c) => c === method)).toHaveLength(1)
+  })
+}
