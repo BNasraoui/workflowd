@@ -570,3 +570,28 @@ test("a Codex stall interrupts its owned execution before waiting for exit", asy
   expect(interrupted).toBe(true)
   expect(run?.state).toBe("operator_required")
 })
+for (const detail of [null, "turn.failed", "error"] as const) {
+  test(`a failed Codex run persists its exit diagnostic after first output (${detail})`, async () => {
+    const stderr = "x".repeat(600)
+    const codex = makeCodexCli(
+      [
+        { type: "agent_message", text: "started" },
+        ...(detail === null ? [] : [{ type: detail, message: "provider rejected turn" }]),
+      ],
+      2,
+      undefined,
+      "failed-thread",
+      stderr,
+    )
+    const run = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ route: "scan", repository: "workflowd", prompt: "task" })
+        return yield* waitForRunState(receipt.runId, ["operator_required"])
+      }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
+    )
+    expect(run?.state).toBe("operator_required")
+    expect(run?.diagnostic).toBe(
+      `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: ${stderr.slice(0, 500)}`,
+    )
+  })
+}
