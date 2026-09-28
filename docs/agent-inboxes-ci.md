@@ -150,3 +150,10 @@ Cutover requires an owner-planned workflowd restart after active workers have
 finished, staging private Codex auth, and confirming the experimental protocol
 on the deployed Codex version. This PR does not modify units, managed daemon
 configuration, external shims, or live workers.
+
+Protocol references: [GitHub installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app),
+[workflow-run API permissions](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository),
+and [conditional requests](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests-if-appropriate).
+The Codex wire shapes were checked against locally generated experimental types
+from Codex 0.156 in an isolated scratch home, in addition to the prior
+`explore/agent-inboxes` probes.

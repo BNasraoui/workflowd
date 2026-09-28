@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { createInterface } from "node:readline"
 import { Readable } from "node:stream"
 import { RpcClient } from "./rpc"
@@ -7,7 +8,11 @@ export function startAppServer(
   options: { readonly binary: string; readonly home: string },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) {
-  const env: Record<string, string | undefined> = { ...process.env, CODEX_HOME: options.home }
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    CODEX_HOME: options.home,
+    GH_CONFIG_DIR: join(options.home, "worker-gh"),
+  }
   delete env.GH_TOKEN
   delete env.GITHUB_TOKEN
   delete env.GH_ENTERPRISE_TOKEN

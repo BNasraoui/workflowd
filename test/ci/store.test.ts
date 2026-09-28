@@ -42,6 +42,13 @@ test("persists deduplicated ingress and replayable aggregate; missing workflows 
       expect(failed?.conclusion).toBe("failure")
       expect(failed?.failingJobs).toEqual(["unit tests"])
       expect((yield* store.events(target, pending!.sequence)).length).toBe(1)
+      const reconcilerRow = { ...target, installation_id: 2, etag: "etag2" }
+      yield* store.snapshot(
+        reconcilerRow,
+        [run("CI", "success"), run("Build", "failure", 2)],
+        "etag2",
+        1003,
+      )
       expect((yield* store.outbox()).length).toBe(2)
       expect((yield* store.deliveryOutbox()).length).toBe(1)
       yield* store.deliveryPublished("delivery-1")
@@ -52,6 +59,20 @@ test("persists deduplicated ingress and replayable aggregate; missing workflows 
       yield* store.published(failed!.sequence)
       expect((yield* store.outbox()).length).toBe(1)
       yield* store.snapshot(target, [run("CI", "success"), run("Build", null, 2, 2)], "etag3", 1004)
+      expect((yield* store.read(target))?.conclusion).toBe("pending")
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  ))
+
+test("changing required workflows invalidates a previously terminal target", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      yield* runStoreMigrations
+      const store = yield* makeCiStore
+      yield* store.watch(target, 2, ["CI"], 1000)
+      yield* store.snapshot(target, [run("CI", "success")], "etag", 1001)
+      yield* store.watch(target, 2, ["CI", "Build"], 1002)
+      expect((yield* store.read(target))?.conclusion).toBe("pending")
+      yield* store.snapshot(target, [run("CI", "success")], null, 1003)
       expect((yield* store.read(target))?.conclusion).toBe("pending")
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
   ))

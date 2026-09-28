@@ -67,9 +67,28 @@ export const makeCiStore = Effect.gen(function* () {
     yield* Schema.decodeUnknownEffect(CiTarget)(target)
     if (required.length === 0)
       return yield* Effect.fail(new Error("CI requires at least one workflow name"))
-    yield* sql`INSERT INTO ci_targets (repository, sha, installation_id, required_json, next_poll, expires_at)
-      VALUES (${target.repository}, ${target.sha}, ${installationId}, ${JSON.stringify(required)}, ${now}, ${now + 86400000})
-      ON CONFLICT(repository, sha) DO UPDATE SET expires_at = excluded.expires_at`
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const requiredJson = JSON.stringify(required)
+        const changed =
+          yield* sql`UPDATE ci_targets SET required_json = ${requiredJson}, installation_id = ${installationId}, etag = NULL, next_poll = ${now}
+        WHERE repository = ${target.repository} AND sha = ${target.sha}
+          AND (required_json != ${requiredJson} OR installation_id != ${installationId}) RETURNING sha`
+        if (changed.length > 0) {
+          const pending = {
+            repository: target.repository,
+            sha: target.sha,
+            sequence: 0,
+            conclusion: "pending",
+            failingJobs: [],
+          }
+          yield* sql`INSERT INTO ci_events(repository,sha,state_json) VALUES(${target.repository},${target.sha},${JSON.stringify(pending)})`
+        }
+        yield* sql`INSERT INTO ci_targets (repository, sha, installation_id, required_json, next_poll, expires_at)
+        VALUES (${target.repository}, ${target.sha}, ${installationId}, ${requiredJson}, ${now}, ${now + 86400000})
+        ON CONFLICT(repository, sha) DO UPDATE SET expires_at = excluded.expires_at`
+      }),
+    )
   })
   const ingest = Effect.fn("CiStore.ingest")(function* (
     deliveryId: string,
@@ -125,7 +144,12 @@ export const makeCiStore = Effect.gen(function* () {
           yield* sql`SELECT * FROM ci_targets WHERE repository = ${target.repository} AND sha = ${target.sha}`
         const row = yield* Schema.decodeUnknownEffect(TargetRow)(rows[0])
         const required = yield* decodeJson(Schema.Array(Schema.String), row.required_json)
-        const result = { ...target, sequence: 0, ...aggregate(required, runs) }
+        const result = {
+          repository: target.repository,
+          sha: target.sha,
+          sequence: 0,
+          ...aggregate(required, runs),
+        }
         const previous = yield* read(target)
         if (
           previous === null ||
@@ -195,4 +219,9 @@ export const makeCiStore = Effect.gen(function* () {
     deliveryPublished,
   }
 })
-export type CiStore = Effect.Success<typeof makeCiStore>
+type StoredCi = Effect.Success<typeof makeCiStore>
+export type CiStore = Omit<StoredCi, "ingest"> & {
+  readonly ingest: (
+    ...args: Parameters<StoredCi["ingest"]>
+  ) => Effect.Effect<"accepted" | "duplicate", Effect.Error<ReturnType<StoredCi["watch"]>>>
+}

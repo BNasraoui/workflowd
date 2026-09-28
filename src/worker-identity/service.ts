@@ -12,17 +12,22 @@ import { authorizeWorker, workerCapability } from "./access"
 import type { WorkerIdentityConfig } from "./config"
 
 type WorkerIdentityPort = {
+  readonly environment: Readonly<Record<string, string>>
   readonly provision: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
   readonly route: (request: Request) => Effect.Effect<Response | undefined>
 }
 export const WorkerIdentity = Context.Service<WorkerIdentityPort>("workflowd/WorkerIdentity")
-export const WorkerIdentityLive = (config: WorkerIdentityConfig, github: AppConfig["github"]) =>
+export const WorkerIdentityLive = (
+  config: WorkerIdentityConfig,
+  github: AppConfig["github"],
+  OctokitClass: typeof Octokit = Octokit,
+) =>
   Layer.effect(
     WorkerIdentity,
     Effect.gen(function* () {
       const store = yield* AgentRunStore
       const key = yield* Effect.tryPromise(() => readFile(github.privateKeyPath, "utf8"))
-      const app = new App({ appId: github.appId, privateKey: key, Octokit })
+      const app = new App({ appId: github.appId, privateKey: key, Octokit: OctokitClass })
       const token = yield* makeTokenBroker(
         async (input) =>
           (
@@ -78,6 +83,16 @@ export const WorkerIdentityLive = (config: WorkerIdentityConfig, github: AppConf
             { headers: { "cache-control": "no-store" } },
           )
         }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))))
-      return { provision, route }
+      return {
+        provision,
+        route,
+        environment: {
+          GH_CONFIG_DIR: config.directory,
+          GH_TOKEN: "",
+          GITHUB_TOKEN: "",
+          GH_ENTERPRISE_TOKEN: "",
+          GITHUB_ENTERPRISE_TOKEN: "",
+        },
+      }
     }),
   )

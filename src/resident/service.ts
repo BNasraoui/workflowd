@@ -117,8 +117,29 @@ export const ResidentCodexLive = (
         ),
       ).pipe(Effect.forkScoped)
 
+      const hasCustody = Effect.fn("Resident.hasCustody")(function* (threadId: string) {
+        const rows = yield* sql`SELECT s.session_id FROM resident_threads t
+          JOIN kernel_agent_runs a ON a.run_id = t.run_id AND a.native_session_id = t.thread_id AND a.directory = t.directory
+          JOIN kernel_sessions s ON s.session_id = a.session_id AND s.native_session_id = t.thread_id
+          JOIN kernel_working_resources r ON r.resource_id = s.resource_id AND r.absolute_path = t.directory
+          WHERE t.thread_id = ${threadId} AND a.state = 'verified' AND s.provider_kind = 'codex'
+            AND s.state IN ('ready','active') AND r.state = 'reserved'`
+        return rows.length === 1
+      })
       const restore = Effect.fn("Resident.restore")(function* () {
         for (const row of yield* store.threads()) {
+          const run = yield* runs.read(row.run_id)
+          if (!(yield* hasCustody(row.thread_id))) {
+            yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
+            yield* finish(row.thread_id, true)
+            if (run !== null && ["accepted", "spawning", "spawned"].includes(run.state))
+              yield* runs.operatorRequired({
+                runId: row.run_id,
+                diagnostic: "resident_dispatch_incomplete",
+                now: new Date(),
+              })
+            continue
+          }
           yield* Effect.tryPromise(() =>
             request("thread/resume", {
               threadId: row.thread_id,
@@ -154,6 +175,11 @@ export const ResidentCodexLive = (
           const row = yield* store.read(message.thread_id)
           if (row === null || row.state === "operator_required" || row.state === "finished")
             continue
+          if (!message.id.startsWith("dispatch:") && !(yield* hasCustody(message.thread_id))) {
+            yield* store.uncertain(message.id, message.thread_id)
+            yield* finish(message.thread_id, true)
+            continue
+          }
           yield* store.sending(message.id)
           const outcome = yield* deliverResident(request, message)
           if (outcome === "delivered") yield* store.delivered(message.id)
@@ -170,6 +196,7 @@ export const ResidentCodexLive = (
           if (restartAttempts >= 3)
             return yield* Effect.fail(new Error("Resident restart budget exhausted"))
           restartAttempts++
+          yield* Effect.tryPromise(() => server.close())
           server = yield* Effect.try(launch)
           yield* Effect.tryPromise(() => server.initialize())
           disconnected = false
@@ -178,7 +205,7 @@ export const ResidentCodexLive = (
         for (const row of yield* store.threads()) {
           // Local liveness events keep the legacy first-token drain from treating
           // a registered CI wait as a silent stalled model turn.
-          listeners.get(row.thread_id)?.queue.push({ type: "other" })
+          if (row.state === "waiting") listeners.get(row.thread_id)?.queue.push({ type: "other" })
           if (row.state !== "waiting" || row.wait_repo === null || row.wait_sha === null) continue
           const state = yield* ci.read({ repository: row.wait_repo, sha: row.wait_sha })
           if (state !== null && state.conclusion !== "pending") {
@@ -294,13 +321,12 @@ export const ResidentCodexLive = (
               r.repository === input.repository &&
               (r.dispatchRepository ?? r.repository) === run?.repository,
           )
-          const custody =
-            yield* sql`SELECT session_id FROM kernel_sessions WHERE native_session_id = ${input.threadId} AND provider_kind = 'codex' AND state IN ('ready','active')`
+          const custody = yield* hasCustody(input.threadId)
           if (
             repository === undefined ||
             run?.state !== "verified" ||
             run.nativeSessionId !== input.threadId ||
-            custody.length !== 1
+            !custody
           )
             return new Response(null, { status: 403 })
           yield* ci.watch(input, repository.installationId, repository.workflows, Date.now())

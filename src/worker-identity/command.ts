@@ -1,3 +1,4 @@
+import { dirname } from "node:path"
 import { readFile } from "node:fs/promises"
 import { Schema } from "effect"
 import { workerCommandEnvironment } from "./command-env"
@@ -7,8 +8,14 @@ const Identity = Schema.Struct({
   capability: Schema.String,
 })
 const Token = Schema.Struct({ token: Schema.String, expiresAt: Schema.Number })
-async function main() {
-  const args = process.argv.slice(2)
+export async function runWorkerCommand(
+  args: string[],
+  env: Record<string, string | undefined>,
+  io: {
+    request: typeof fetch
+    run: (argv: string[], env: Record<string, string | undefined>) => Promise<number>
+  },
+) {
   if (args[0] !== "--identity" || args[1] === undefined)
     throw new Error("Expected --identity FILE [--git] -- arguments")
   const identity = Schema.decodeUnknownSync(Identity)(JSON.parse(await readFile(args[1], "utf8")))
@@ -23,7 +30,7 @@ async function main() {
     )
   )
     throw new Error("Worker broker requires HTTPS or loopback")
-  const response = await fetch(
+  const response = await io.request(
     new URL(`/workers/github/${encodeURIComponent(identity.runId)}/token`, endpoint),
     {
       method: "POST",
@@ -50,17 +57,25 @@ async function main() {
         ...args.slice(separator + 1),
       ]
     : ["gh", ...args.slice(separator + 1)]
-  const child = Bun.spawn(argv, {
-    env: workerCommandEnvironment(process.env, issued.token),
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  })
-  process.exitCode = await child.exited
-}
-void main().catch(() => {
-  console.error(
-    "Worker GitHub command failed; check broker availability, permissions, and run custody",
+  return io.run(
+    argv,
+    workerCommandEnvironment({ ...env, GH_CONFIG_DIR: dirname(args[1]) }, issued.token),
   )
-  process.exitCode = 2
-})
+}
+export async function spawnWorkerCommand(argv: string[], env: Record<string, string | undefined>) {
+  return await Bun.spawn(argv, { env, stdin: "inherit", stdout: "inherit", stderr: "inherit" })
+    .exited
+}
+if (import.meta.main) {
+  try {
+    process.exitCode = await runWorkerCommand(process.argv.slice(2), process.env, {
+      request: fetch,
+      run: spawnWorkerCommand,
+    })
+  } catch {
+    console.error(
+      "Worker GitHub command failed; check broker availability, permissions, and run custody",
+    )
+    process.exitCode = 2
+  }
+}

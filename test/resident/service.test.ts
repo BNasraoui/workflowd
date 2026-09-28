@@ -233,6 +233,25 @@ test("daemon restart reloads the same thread and queues interrupted work", async
   await Effect.runPromise(
     Effect.gen(function* () {
       const resident = yield* ResidentCodex
+      const runs = yield* AgentRunStore
+      const sessions = yield* KernelSessionStore
+      const now = new Date()
+      yield* runs.create({
+        runId: "a",
+        route: "test",
+        providerId: "codex-cli",
+        modelId: "test-model",
+        agent: "build",
+        repository: "o/r",
+        directory: "/work/a",
+        prompt: "hold",
+        promptSha256: "a".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 3,
+        createdAt: now,
+      })
+      yield* runs.claimSpawn({ runId: "a", now })
       const process = yield* resident.cli.spawn({
         runId: "a",
         directory: "/work/a",
@@ -244,6 +263,34 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         const event = yield* Effect.promise(() => iterator.next())
         if (event.value?.type === "agent_message") break
       }
+      yield* sessions.registerResource({
+        resourceId: "r",
+        owningHostId: "h",
+        absolutePath: "/work/a",
+        kind: "worktree",
+        createdAt: now,
+      })
+      yield* sessions.registerSession({
+        sessionId: "s",
+        providerKind: "codex",
+        providerVersion: 1,
+        providerId: "codex-cli",
+        serverId: "h",
+        owningHostId: "h",
+        endpointAlias: "local-cli",
+        endpointIdentity: "codex-cli://h",
+        nativeSessionId: "thread-1",
+        resourceId: "r",
+        createdAt: now,
+      })
+      yield* runs.markSpawned({
+        runId: "a",
+        nativeSessionId: "thread-1",
+        sessionId: "s",
+        resourceId: "r",
+        now,
+      })
+      yield* runs.markVerified({ runId: "a", outputTokens: 1, now })
       fake.disconnect()
       expect((yield* process.exited).exitCode).toBe(0)
       const resumes = fake.calls.filter((c) => c.method === "thread/resume")
@@ -256,6 +303,29 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         sandbox: "danger-full-access",
       })
       expect(fake.calls.filter((c) => c.method === "thread/start")).toHaveLength(1)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("restart cannot wake a thread without verified dispatch custody", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const process = yield* resident.cli.spawn({
+        runId: "orphan",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      const iterator = process.events[Symbol.asyncIterator]()
+      for (;;) {
+        const event = yield* Effect.promise(() => iterator.next())
+        if (event.value?.type === "agent_message") break
+      }
+      fake.disconnect()
+      expect((yield* process.exited).exitCode).toBe(1)
+      expect(fake.calls.filter((c) => c.method === "thread/resume")).toHaveLength(0)
     }).pipe(Effect.provide(layer(fake.factory))),
   )
 })

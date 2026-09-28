@@ -51,3 +51,17 @@ test("rejects malformed completion SHA", async () => {
   )
   expect(result._tag).toBe("Failure")
 })
+
+test("CI SHA accepts only complete object IDs", async () => {
+  const result = await Effect.runPromise(
+    Effect.result(
+      decodeGitHubEvent("check_suite", {
+        action: "completed",
+        installation: { id: 1 },
+        repository,
+        check_suite: { id: 1, head_sha: "a".repeat(41), conclusion: "success" },
+      }),
+    ),
+  )
+  expect(result._tag).toBe("Failure")
+})

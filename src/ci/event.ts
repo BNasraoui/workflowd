@@ -2,7 +2,7 @@ import { Effect, Schema } from "effect"
 
 export const CiTarget = Schema.Struct({
   repository: Schema.String.check(Schema.isPattern(/^[\w.-]+\/[\w.-]+$/)),
-  sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40,64}$/i)),
+  sha: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)),
 })
 export type CiTarget = typeof CiTarget.Type
 

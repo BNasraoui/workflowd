@@ -539,13 +539,9 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
 
 test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
   let interrupted = false
-  const events: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
-    async *[Symbol.asyncIterator]() {
-      yield { type: "thread.started", threadId: "stalled-thread" }
-      yield { type: "agent_message", text: "started" }
-      await new Promise(() => {})
-    },
-  }
+  const queue = makeEventQueue()
+  queue.push({ type: "thread.started", threadId: "stalled-thread" })
+  queue.push({ type: "agent_message", text: "started" })
   const layer = makeLayer(
     makeProvider(defaultState()),
     worktrees([]),
