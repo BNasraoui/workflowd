@@ -43,3 +43,58 @@ test("MCP exposes subscribe_to_event and fails closed without a run identity", a
     await server.close()
   }
 })
+
+test("stdio MCP registers through its owned socket and returns the durable receipt", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises")
+  const { join } = await import("node:path")
+  const { tmpdir } = await import("node:os")
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js")
+  const { serveRunSocket } = await import("../../src/worker-identity/peer")
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-subscribe-mcp-"))
+  const socket = join(directory, "subscribe.sock")
+  const requests: unknown[] = []
+  const server = await serveRunSocket(socket, async (request, pid) => {
+    expect(pid).not.toBe(process.pid)
+    requests.push(await request.json())
+    return Response.json(
+      {
+        id: "subscription-1",
+        status: "registered",
+        deliveryState: "pending",
+        instruction: "End this turn",
+      },
+      { status: 202 },
+    )
+  })
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(import.meta.dir, "../../src/resident/mcp.ts")],
+    env: {
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: socket,
+      WORKFLOWD_RUN_ID: "caller",
+      CODEX_HOME: directory,
+    },
+  })
+  const client = new Client({ name: "test", version: "1" })
+  try {
+    await client.connect(transport)
+    const result = await client.callTool({
+      name: "subscribe_to_event",
+      arguments: { kind: "ci", repository: "o/r", sha: "a".repeat(40) },
+    })
+    expect(result.isError).not.toBe(true)
+    expect(result.structuredContent).toMatchObject({
+      id: "subscription-1",
+      status: "registered",
+      deliveryState: "pending",
+    })
+    expect(requests).toEqual([
+      { runId: "caller", selector: { kind: "ci", repository: "o/r", sha: "a".repeat(40) } },
+    ])
+  } finally {
+    await client.close()
+    await server.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
