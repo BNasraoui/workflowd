@@ -5,6 +5,7 @@ import { parseNatsServers } from "../remote/nats-url"
 const Repositories = Schema.Array(
   Schema.Struct({
     repository: CiTarget.fields.repository,
+    dispatchRepository: Schema.optionalKey(Schema.NonEmptyString),
     installationId: Schema.Int.check(Schema.isGreaterThan(0)),
     workflows: Schema.Array(Schema.NonEmptyString).check(Schema.isMinLength(1)),
   }),

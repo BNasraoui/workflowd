@@ -1,3 +1,4 @@
+import { ResidentCodex } from "./resident/service"
 import { WorkerIdentity } from "./worker-identity/service"
 import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
@@ -241,6 +242,7 @@ export function startHookService(
   ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
   return Effect.gen(function* () {
+    const resident = yield* Effect.serviceOption(ResidentCodex)
     const workerIdentity = yield* Effect.serviceOption(WorkerIdentity)
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Automation
@@ -425,6 +427,10 @@ export function startHookService(
       },
       (request, options) =>
         Effect.gen(function* () {
+          if (Option.isSome(resident)) {
+            const response = yield* resident.value.route(request)
+            if (response !== undefined) return response
+          }
           if (Option.isSome(workerIdentity)) {
             const response = yield* workerIdentity.value.route(request)
             if (response !== undefined) return response

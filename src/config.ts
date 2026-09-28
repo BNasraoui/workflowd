@@ -1,3 +1,4 @@
+import { loadResidentConfig, type ResidentConfig } from "./resident/config"
 import { loadWorkerIdentityConfig, type WorkerIdentityConfig } from "./worker-identity/config"
 import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
@@ -108,6 +109,7 @@ export interface AgentRunConfig {
 }
 
 export interface AppConfig {
+  readonly residentCodex?: ResidentConfig
   readonly ci?: CiConfig
   readonly workerIdentity?: WorkerIdentityConfig
   readonly http: HttpConfig
@@ -651,12 +653,14 @@ export async function loadConfig(
   const baseUrl = openCodeBaseUrl(env)
   const hostId = workerHostId(env)
   const workerIdentity = await loadWorkerIdentityConfig(env, read)
+  const residentCodex = await loadResidentConfig(env, read)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
+    ...(residentCodex === undefined ? {} : { residentCodex }),
     ...(ci === undefined ? {} : { ci }),
     http: httpSection(env),
     github: githubSection(env, secrets.webhookSecret),

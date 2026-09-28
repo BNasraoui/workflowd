@@ -506,7 +506,11 @@ export function handleGitHubWebhook(
     )
     if (payload instanceof Response) return payload
 
-    const decoded = yield* decodeGitHubEvent(eventName, payload).pipe(
+    const decode =
+      options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
+        ? Effect.succeed({ _tag: "Ignored" as const, reason: `unsupported:${eventName}` })
+        : decodeGitHubEvent(eventName, payload)
+    const decoded = yield* decode.pipe(
       Effect.catch((error) =>
         Effect.succeed(Response.json({ error: error.message }, { status: 400 })),
       ),

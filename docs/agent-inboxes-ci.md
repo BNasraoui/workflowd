@@ -105,3 +105,48 @@ Token creation fails closed when a requested permission is unavailable. The
 App private key never leaves workflowd. Permission and identity changes take
 effect on the owner's planned restart; existing dispatched workers are not
 retrofitted or interrupted.
+
+## Resident Codex dispatch (off by default)
+
+Set `WORKFLOWD_CODEX_RESIDENT_ENABLED=true`,
+`WORKFLOWD_CODEX_RESIDENT_HOME` to a dedicated absolute Codex data directory, and
+`WORKFLOWD_CODEX_RESIDENT_TOKEN_FILE` to a separate random secret of at least 32
+characters. The resident home must differ from `~/.codex`; the owner must arrange
+Codex authentication there before cutover. Set `WORKFLOWD_URL` to the workflowd
+endpoint reachable by worker commands. Enable CI as above and configure the
+existing agent-run Codex routes. Where the dispatch repository name differs from
+GitHub's full name, add `"dispatchRepository":"workflowd"` to its CI policy.
+
+workflowd owns one long-lived `codex app-server --listen stdio://` child using
+that private home. It neither uses systemd to manage that child nor connects to
+an existing managed Codex daemon. Each dispatch gets its own thread, cwd, model,
+`approvalPolicy: never`, and `sandbox: danger-full-access`, preserving the trusted
+worker posture of the existing exec path. The experimental API capability is
+explicitly negotiated. Tested against the installed Codex 0.156 protocol.
+
+Dispatch instructions give the worker a resident wait helper. After it registers
+an authenticated wait for its custodied thread and configured repository, it
+ends its turn with “waiting for CI”. The service stores the waiting turn ID and
+deadline. Its completion does not finish the agent run. A terminal CI state or
+wait timeout creates a durable inbox entry and calls `thread/queue/add`; an idle
+thread starts a turn, while an active thread receives it after its current turn.
+No shell sleep or finished `codex exec` resume is involved.
+
+After app-server restart, workflowd reloads persisted thread IDs with
+`thread/resume` (the app-server reload operation), restores their cwd/model/policy,
+and checks history. Interrupted active work gets a queued recovery event. Waiting
+threads retain their waits. Lost queue acknowledgements are reconciled against
+queued submission IDs and persisted user-message client IDs. If neither proves
+acceptance, the inbox and run require operator attention instead of blind replay.
+The automatic app-server restart budget is three per workflowd lifetime.
+
+All threads retain existing kernel session and worktree custody; CI ingress does
+not grant cleanup or publication authority. Current Codex parent/child wait
+pairing restrictions remain in force. The default remains `codex exec` when the
+resident flag is absent. Disable the flag only after resident work has drained;
+exec cannot take over an in-flight resident inbox.
+
+Cutover requires an owner-planned workflowd restart after active workers have
+finished, staging private Codex auth, and confirming the experimental protocol
+on the deployed Codex version. This PR does not modify units, managed daemon
+configuration, external shims, or live workers.

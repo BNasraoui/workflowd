@@ -3,6 +3,7 @@
   "entry": [
     "test/**/*.test.ts",
     "src/worker-identity/command.ts",
+    "src/resident/wait.ts",
     "test/kernel/register-wait-process.ts",
     "scripts/**/*.{mjs,ts}",
     "skills/**/scripts/**/*.{mjs,ts}",

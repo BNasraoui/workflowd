@@ -95,6 +95,8 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 18, name: "kernel_agent_runs" },
       { migration_id: 19, name: "kernel_agent_runs_session_index" },
       { migration_id: 20, name: "kernel_agent_run_cancellation" },
+      { migration_id: 21, name: "ci_completion_store" },
+      { migration_id: 22, name: "resident_inbox_store" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(10)

@@ -1,3 +1,4 @@
+import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
@@ -273,7 +274,27 @@ export const makeLiveLayer = (config: AppConfig) => {
       : WorkerIdentityLive(config.workerIdentity, config.github).pipe(
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
         )
-  const codexCliLayer = Layer.succeed(
+  const ciLive =
+    config.ci === undefined
+      ? undefined
+      : CiServiceLive(config.ci, config.github).pipe(Layer.provide(storeLayer))
+  const ciLayer = ciLive ?? Layer.empty
+  const residentLive =
+    config.residentCodex === undefined || config.ci === undefined || ciLive === undefined
+      ? undefined
+      : ResidentCodexLive(
+          config.residentCodex,
+          config.agentRuns?.codexBinary ?? "codex",
+          config.ci,
+        ).pipe(
+          Layer.provide(ciLive),
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+          Layer.provide(storeLayer),
+        )
+  const residentLayer = residentLive ?? Layer.empty
+  const codexCliLayer =
+    residentLive === undefined
+      ? Layer.succeed(
     CodexCli,
     makeCodexCli({
       binary: config.agentRuns?.codexBinary ?? "codex",
@@ -283,6 +304,11 @@ export const makeLiveLayer = (config: AppConfig) => {
       custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
     }),
   )
+      : Layer.effect(
+          CodexCli,
+          Effect.map(ResidentCodex, (resident) => resident.cli),
+        ).pipe(Layer.provideMerge(residentLive))
+
   const claudeResumeWorkerLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -459,9 +485,8 @@ export const makeLiveLayer = (config: AppConfig) => {
           ),
         )
   return Layer.mergeAll(
-    config.ci === undefined
-      ? Layer.empty
-      : CiServiceLive(config.ci, config.github).pipe(Layer.provide(storeLayer)),
+    ciLayer,
+    residentLayer,
     workerIdentityLayer,
     workSignalLayer,
     providerLayer,

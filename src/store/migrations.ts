@@ -1374,10 +1374,25 @@ const ciCompletionStore = Effect.gen(function* () {
   yield* sql`CREATE INDEX ci_targets_due ON ci_targets(next_poll)`
 })
 
+const residentInboxStore = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE resident_threads (
+    run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL UNIQUE, directory TEXT NOT NULL, model TEXT,
+    state TEXT NOT NULL CHECK(state IN ('active','waiting','finished','operator_required')),
+    current_turn TEXT, wait_turn TEXT, wait_repo TEXT, wait_sha TEXT, wait_deadline INTEGER
+  ) STRICT`
+  yield* sql`CREATE TABLE resident_inbox (
+    id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES resident_threads(thread_id), prompt TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('prepared','sending','delivered','operator_required'))
+  ) STRICT`
+  yield* sql`CREATE INDEX resident_inbox_pending ON resident_inbox(state)`
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0019,
     "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
     "0021_ci_completion_store": ciCompletionStore,
+    "0022_resident_inbox_store": residentInboxStore,
   }),
 })

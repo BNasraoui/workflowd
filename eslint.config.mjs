@@ -16,6 +16,7 @@ const typeChecked = tseslint.configs.recommendedTypeChecked.map((config) => ({
 }))
 
 export default tseslint.config(
+  { ignores: [".scratch/**"] },
   eslint.configs.recommended,
   {
     files: ["**/*.mjs"],
