@@ -3,7 +3,7 @@ import { WorkerIdentity } from "../worker-identity/service"
 import { Context, Effect, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
-import { CiTarget } from "../ci/event"
+import { EventSelector, makeSubscriptions } from "./subscriptions"
 import type { CiConfig } from "../ci/config"
 import { AgentRunStore } from "../kernel/agent-run-store"
 import { makeEventQueue, type CodexCliPort, type CodexExit } from "../kernel/codex-session"
@@ -22,11 +22,7 @@ const ItemEvent = Schema.Struct({
   threadId: Schema.String,
   item: Schema.Struct({ type: Schema.String, text: Schema.optional(Schema.String) }),
 })
-const Wait = Schema.Struct({
-  threadId: Schema.NonEmptyString,
-  ...CiTarget.fields,
-  timeoutMs: Schema.Int.check(Schema.isBetween({ minimum: 1000, maximum: 86400000 })),
-})
+const Subscribe = Schema.Struct({ runId: Schema.NonEmptyString, selector: EventSelector })
 const History = Schema.Struct({
   thread: Schema.Struct({
     turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
@@ -48,6 +44,7 @@ export const ResidentCodexLive = (
     ResidentCodex,
     Effect.gen(function* () {
       const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
       const runs = yield* AgentRunStore
       const ci = yield* CiService
       const sql = yield* SqlClient.SqlClient
@@ -256,22 +253,8 @@ export const ResidentCodexLive = (
           // Local liveness events keep the legacy first-token drain from treating
           // a registered CI wait as a silent stalled model turn.
           if (row.state === "waiting") listeners.get(row.thread_id)?.queue.push({ type: "other" })
-          if (row.state !== "waiting" || row.wait_repo === null || row.wait_sha === null) continue
-          const state = yield* ci.read({ repository: row.wait_repo, sha: row.wait_sha })
-          if (state !== null && state.conclusion !== "pending") {
-            yield* store.enqueue(
-              `ci:${row.thread_id}:${row.wait_turn}:${state.sequence}`,
-              row.thread_id,
-              `CI completion event: ${JSON.stringify(state)}. Continue the task; do not poll GitHub.`,
-            )
-          } else if (row.wait_deadline !== null && Date.now() >= row.wait_deadline) {
-            yield* store.enqueue(
-              `ci-timeout:${row.thread_id}:${row.wait_turn}`,
-              row.thread_id,
-              "CI wait timed out. Report the timeout or register a new bounded wait; do not poll GitHub.",
-            )
-          }
         }
+        yield* subscriptions.reconcile()
         yield* flush()
       })
       yield* tick.pipe(
@@ -321,7 +304,7 @@ export const ResidentCodexLive = (
             })
             listeners.set(threadId, { queue, finish: resolveExit })
             queue.push({ type: "thread.started", threadId })
-            const instructions = `You are a resident workflowd worker. When waiting for CI, run bun ${JSON.stringify(`${import.meta.dir}/wait.ts`)} --thread ${JSON.stringify(threadId)} --repo OWNER/NAME --sha HEAD_SHA. After registration succeeds, say "waiting for CI" and END YOUR TURN. A CI event will start a new turn. Do not sleep or run gh pr checks --watch.\n\n`
+            const instructions = `You are a resident workflowd worker. After pushing, use subscribe_to_event with {"kind":"ci","repository":"OWNER/NAME","sha":"HEAD_SHA"}, or {"kind":"agent_run","run_id":"RUN_ID"}. Equivalent shell call: bun ${JSON.stringify(`${import.meta.dir}/subscribe.ts`)} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). After registration succeeds, END YOUR TURN. workflowd will queue one completion message. Do not sleep or poll.\n\n`
             yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
             yield* flush()
             return {
@@ -360,33 +343,48 @@ export const ResidentCodexLive = (
       }
       const route: ResidentPort["route"] = (request, peerPid) =>
         Effect.gen(function* () {
-          if (new URL(request.url).pathname !== "/ci/resident-waits") return undefined
+          if (new URL(request.url).pathname !== "/subscriptions") return undefined
           if (request.method !== "POST") return new Response(null, { status: 405 })
           if (peerPid === undefined) return new Response(null, { status: 403 })
           const input = yield* Effect.tryPromise(() => request.json()).pipe(
-            Effect.flatMap(Schema.decodeUnknownEffect(Wait)),
+            Effect.flatMap((value) =>
+              Schema.decodeUnknownEffect(Subscribe)(value, { onExcessProperty: "error" }),
+            ),
           )
-          const row = yield* store.read(input.threadId)
-          if (row === null || !peers.allows(row.run_id, peerPid))
-            return new Response(null, { status: 403 })
-          const run = yield* runs.read(row.run_id)
-          const repository = ciConfig.repositories.find(
-            (r) =>
-              r.repository === input.repository &&
-              (r.dispatchRepository ?? r.repository) === run?.repository,
-          )
-          const custody = yield* hasCustody(input.threadId)
+          if (!peers.allows(input.runId, peerPid)) return new Response(null, { status: 403 })
+          const run = yield* runs.read(input.runId)
           if (
-            repository === undefined ||
             run?.state !== "verified" ||
-            run.nativeSessionId !== input.threadId ||
-            !custody
+            run.nativeSessionId === null ||
+            !(yield* hasCustody(run.nativeSessionId))
           )
             return new Response(null, { status: 403 })
-          yield* ci.watch(input, repository.installationId, repository.workflows, Date.now())
-          yield* store.wait(input.threadId, input, Date.now() + input.timeoutMs)
+          const selector = input.selector
+          if (selector.kind === "ci") {
+            const repository = ciConfig.repositories.find(
+              (r) =>
+                r.repository === selector.repository.toLowerCase() &&
+                (r.dispatchRepository ?? r.repository) === run.repository,
+            )
+            if (repository === undefined) return new Response(null, { status: 403 })
+            yield* ci.watch(
+              { repository: selector.repository.toLowerCase(), sha: selector.sha.toLowerCase() },
+              repository.installationId,
+              repository.workflows,
+              Date.now(),
+            )
+          } else {
+            const child = yield* runs.read(selector.run_id)
+            if (child === null || child.runId === run.runId || child.repository !== run.repository)
+              return new Response(null, { status: 403 })
+          }
+          const receipt = yield* subscriptions.register(run.nativeSessionId, selector)
+          yield* flush()
           return Response.json(
-            { status: "waiting", instruction: "End this turn; workflowd will queue the CI event." },
+            {
+              ...receipt,
+              instruction: "End this turn; workflowd will queue one completion message.",
+            },
             { status: 202 },
           )
         }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 409 }))))

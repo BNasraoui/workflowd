@@ -1,3 +1,4 @@
+import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { makeResidentStore } from "../../src/resident/store"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
@@ -38,8 +39,8 @@ function fixture() {
       if (text) {
         const input = JSON.parse(text);
         const statuses = [];
-        for (const threadId of input.targets) statuses.push((await requestRunSocket(input.socket, "/ci/resident-waits", JSON.stringify({
-          threadId, repository: "o/r", sha: "a".repeat(40), timeoutMs: 60000,
+        for (const runId of input.targets) statuses.push((await requestRunSocket(input.socket, "/subscriptions", JSON.stringify({
+          runId, selector: {kind: "ci", repository: "o/r", sha: "a".repeat(40)},
         }))).status);
         console.log(statuses.join(","));
       }
@@ -159,6 +160,7 @@ const layer = (factory: typeof startAppServer) =>
       Layer.mergeAll(
         Layer.effect(CiService, makeCiStore),
         AgentRunStoreLive,
+        KernelEventStoreLive,
         KernelSessionStoreLive,
       ),
     ),
@@ -242,9 +244,8 @@ test("dispatches concurrent threads with independent directories and completes t
       expect(fake.calls.some((c) => c.method === "turn/start")).toBe(false)
       expect(yield* resident.route(new Request("http://localhost/unrelated"))).toBeUndefined()
       expect(
-        (yield* resident.route(
-          new Request("http://localhost/ci/resident-waits", { method: "POST" }),
-        ))?.status,
+        (yield* resident.route(new Request("http://localhost/subscriptions", { method: "POST" })))
+          ?.status,
       ).toBe(403)
     }).pipe(Effect.provide(layer(fake.factory))),
   )
@@ -279,21 +280,22 @@ test("a registered CI wait ends the old turn and queues a new one", async () => 
       })
       expect(other).toBeDefined()
       const wait = () =>
-        new Request("http://localhost/ci/resident-waits", {
+        new Request("http://localhost/subscriptions", {
           method: "POST",
-          body: JSON.stringify({ ...target, threadId: "thread-1", timeoutMs: 60000 }),
+          body: JSON.stringify({ runId: "a", selector: { kind: "ci", ...target } }),
         })
       expect((yield* resident.route(wait(), fake.pids.get("thread-2")))?.status).toBe(403)
       expect((yield* resident.route(wait(), globalThis.process.pid))?.status).toBe(403)
       const response = yield* resident.route(
-        new Request("http://localhost/ci/resident-waits", {
+        new Request("http://localhost/subscriptions", {
           method: "POST",
           headers: { authorization: "Bearer secret", "content-type": "application/json" },
-          body: JSON.stringify({ ...target, threadId: "thread-1", timeoutMs: 60000 }),
+          body: JSON.stringify({ runId: "a", selector: { kind: "ci", ...target } }),
         }),
         fake.pids.get("thread-1"),
       )
       expect(response?.status).toBe(202)
+      expect((yield* resident.route(wait(), fake.pids.get("thread-1")))?.status).toBe(202)
       fake.complete("thread-1", "dispatch:a")
       yield* ci.snapshot(
         target,
@@ -398,21 +400,16 @@ test("two resident roots cannot register each other's thread waits over the sock
         (yield* Effect.promise(() =>
           requestRunSocket(
             config.socket,
-            "/ci/resident-waits",
+            "/subscriptions",
             JSON.stringify({
-              threadId: "thread-1",
-              repository: "o/r",
-              sha: "a".repeat(40),
-              timeoutMs: 60000,
+              runId: "a",
+              selector: { kind: "ci", repository: "o/r", sha: "a".repeat(40) },
             }),
           ),
         )).status,
       ).toBe(403)
       const statuses = yield* Effect.promise(() =>
-        Promise.all([
-          fake.probe("thread-1", ["thread-2", "thread-1"]),
-          fake.probe("thread-2", ["thread-1", "thread-2"]),
-        ]),
+        Promise.all([fake.probe("thread-1", ["b", "a"]), fake.probe("thread-2", ["a", "b"])]),
       )
       expect(statuses).toEqual(["403,202", "403,202"])
     }).pipe(Effect.provide(layer(fake.factory))),

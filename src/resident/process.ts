@@ -22,12 +22,16 @@ export function startAppServer(
   delete env.GITHUB_TOKEN
   delete env.GH_ENTERPRISE_TOKEN
   delete env.GITHUB_ENTERPRISE_TOKEN
-  const child = Bun.spawn([options.binary, "app-server", "--listen", "stdio://"], {
-    env,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "ignore",
-  })
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const child = Bun.spawn(
+    [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
+    {
+      env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+    },
+  )
   const rpc = new RpcClient((line) => {
     child.stdin.write(line)
     void child.stdin.flush()
