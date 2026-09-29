@@ -134,6 +134,7 @@ export const makeCodexCli = (
 ) => {
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
+    ownership: "transient-exec",
     preflight: preflightError === undefined ? Effect.void : Effect.fail(preflightError),
     attach: () => Effect.succeed(null),
     spawn: (input) =>
@@ -198,6 +199,7 @@ export const makeCodexCli = (
 export const codexNeverStreams = () => {
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
+    ownership: "transient-exec",
     preflight: Effect.void,
     attach: () => Effect.succeed(null),
     spawn: (input) =>

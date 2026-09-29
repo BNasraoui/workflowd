@@ -94,10 +94,13 @@ describe("codex exec JSONL parsing", () => {
 })
 
 describe("codex cli port", () => {
+  const managerReady = async () => ({ exitCode: 0, stdout: "", stderr: "" })
+
   test("preflight maps a missing binary and a failed login check to distinct kinds", async () => {
     const absent = makeCodexCli({
       binary: join(tmpdir(), "codex-does-not-exist"),
       custodyRoot: join(tmpdir(), "unused-codex-custody"),
+      runCommand: managerReady,
     })
     const unusable = await Effect.runPromise(absent.preflight.pipe(Effect.result))
     expect(unusable._tag).toBe("Failure")
@@ -113,7 +116,11 @@ describe("codex cli port", () => {
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 0.153.4';;\n  login) case \"$2\" in status) echo 'Not logged in'; exit 1;; esac;;\nesac\n",
         { mode: 0o755 },
       )
-      const cli = makeCodexCli({ binary: unauthenticated, custodyRoot: join(root, "custody") })
+      const cli = makeCodexCli({
+        binary: unauthenticated,
+        custodyRoot: join(root, "custody"),
+        runCommand: managerReady,
+      })
       const result = await Effect.runPromise(cli.preflight.pipe(Effect.result))
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
@@ -133,7 +140,11 @@ describe("codex cli port", () => {
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 0.153.4';;\n  login) echo 'Logged in using ChatGPT';;\nesac\n",
         { mode: 0o755 },
       )
-      const cli = makeCodexCli({ binary: authenticated, custodyRoot: join(root, "custody") })
+      const cli = makeCodexCli({
+        binary: authenticated,
+        custodyRoot: join(root, "custody"),
+        runCommand: managerReady,
+      })
       const result = await Effect.runPromise(cli.preflight.pipe(Effect.result))
       expect(result._tag).toBe("Success")
     } finally {

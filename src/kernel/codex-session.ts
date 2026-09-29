@@ -6,7 +6,15 @@ import { Context, Effect, Schema } from "effect"
 import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
+import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
 import { cleanupFinishedCustody, incrementalLines } from "./codex-output"
+export type {
+  CodexCliPort,
+  CodexExit,
+  CodexPreflightError,
+  CodexRunProcess,
+  CodexSpawnInput,
+} from "./codex-cli-port"
 
 /**
  * Codex CLI sessions are threads under the daemon host's `~/.codex`
@@ -115,48 +123,6 @@ const AUTH_FAILURE_PATTERN = /401|unauthorized|not logged in|missing bearer/i
 export const codexFailureLooksUnauthenticated = (messages: ReadonlyArray<string>) =>
   messages.some((message) => AUTH_FAILURE_PATTERN.test(message))
 
-export type CodexPreflightError = {
-  readonly kind: "cli_unusable" | "not_authenticated" | "systemd_unavailable"
-  readonly detail: string
-}
-
-export type CodexExit = {
-  /** Signal death (null) maps to -1 so every caller treats only 0 as success. */
-  readonly exitCode: number
-  readonly stderr: string
-}
-
-/** One live codex exec process. `events` is single-consumer: the dispatch
- * drains it to the first-token receipt and the completion continuation
- * drains the rest. */
-export type CodexRunProcess = {
-  readonly executionId: string
-  readonly events: AsyncIterable<CodexExecEvent>
-  /** Observation is independent of the transient service; interruption does
-   * not signal the worker. */
-  readonly exited: Effect.Effect<CodexExit, WorkspaceError>
-  /** Explicit cancellation is the only operation that signals the unit. */
-  readonly cancel: Effect.Effect<void, WorkspaceError>
-}
-
-export type CodexSpawnInput = {
-  readonly runId: string
-  readonly directory: string
-  readonly prompt: string
-  readonly model: string | null
-}
-
-export type CodexCliPort = {
-  readonly preflight: Effect.Effect<void, CodexPreflightError>
-  readonly spawn: (input: CodexSpawnInput) => Effect.Effect<CodexRunProcess, WorkspaceError>
-  readonly attach: (input: {
-    readonly runId: string
-  }) => Effect.Effect<CodexRunProcess | null, WorkspaceError>
-  readonly cleanup?: (
-    protectedRunIds: ReadonlyArray<string>,
-  ) => Effect.Effect<number, WorkspaceError>
-}
-
 export const CodexCli = Context.Service<CodexCliPort>("workflowd/kernel/CodexCli")
 
 const MAX_CODEX_STDERR_BYTES = 16_384
@@ -248,7 +214,9 @@ const commandFailure = (operation: string, result: CommandResult) =>
     cause: new Error(`${operation} exited ${result.exitCode}: ${result.stderr.trim()}`),
   })
 
-export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
+export const makeCodexCli = (
+  options: CodexCliOptions,
+): Extract<CodexCliPort, { readonly ownership: "transient-exec" }> => {
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const maxOutputBytes = options.maxOutputBytes ?? 10 * 1024 * 1024
   const observationTimeoutMs = options.observationTimeoutMs ?? 24 * 60 * 60_000
@@ -334,7 +302,7 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
     return { manifest, unit }
   }
 
-  const attach: CodexCliPort["attach"] = (input) =>
+  const attach = (input: { readonly runId: string }) =>
     Effect.tryPromise({
       try: async () => {
         const path = manifestPath(input.runId)
@@ -458,6 +426,7 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
     })
 
   return {
+    ownership: "transient-exec",
     cleanup: (protectedRunIds) =>
       Effect.tryPromise({
         try: async () => {

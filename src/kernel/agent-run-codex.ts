@@ -302,6 +302,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
     })
 
   const recover = Effect.gen(function* () {
+    if (codex.ownership === "resident-thread") return 0
     const runs = yield* store.listActiveByProvider("codex-cli")
     yield* codex.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
@@ -388,6 +389,11 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
 
   const cancel = (run: AgentRunRecord, now: Date) =>
     Effect.gen(function* () {
+      if (codex.ownership === "resident-thread") {
+        yield* codex.cancelRun(run.runId)
+        yield* store.cancel({ runId: run.runId, now })
+        return
+      }
       const attachment = yield* codex.attach({ runId: run.runId })
       if (attachment === null) {
         yield* store.operatorRequired({

@@ -82,6 +82,8 @@ test("startup recovery owns spawning, spawned, and verified Codex transition bou
     operatorRequired: () => Effect.void,
   }
   const codex: CodexCliPort = {
+    ownership: "transient-exec",
+    cleanup: () => Effect.succeed(0),
     preflight: Effect.void,
     spawn: () => Effect.die("unused"),
     attach: () =>
@@ -118,4 +120,55 @@ test("startup recovery owns spawning, spawned, and verified Codex transition bou
   expect([...completed].sort()).toEqual(records.map(({ runId }) => runId).sort())
   expect(records.every(({ state }) => state === "verified")).toBe(true)
   expect(outputTokens).toBe(73)
+})
+
+test("resident mode leaves recovery and cancellation to the resident supervisor", async () => {
+  let listed = false
+  let supervisorCancellations = 0
+  let recordedCancellations = 0
+  const store: AgentRunCodexStore = {
+    claimSpawn: () => Effect.void,
+    abandonLaunch: () => Effect.void,
+    markSpawned: () => Effect.void,
+    markVerified: () => Effect.void,
+    fail: () => Effect.void,
+    recordProgress: () => Effect.void,
+    complete: () => Effect.void,
+    operatorRequired: () => Effect.void,
+    listActiveByProvider: () =>
+      Effect.sync(() => {
+        listed = true
+        return [record]
+      }),
+    cancel: () =>
+      Effect.sync(() => {
+        recordedCancellations += 1
+      }),
+  }
+  const codex: CodexCliPort = {
+    ownership: "resident-thread",
+    preflight: Effect.void,
+    spawn: () => Effect.die("unused"),
+    cancelRun: () =>
+      Effect.sync(() => {
+        supervisorCancellations += 1
+      }),
+  }
+  const runtime = makeAgentRunCodexDispatcher({
+    codex,
+    store,
+    worktrees: { create: () => Effect.void },
+    signals: { subscribe: () => Effect.die("unused"), wake: () => Effect.void },
+    ensureResource: () => Effect.succeed("resource-1"),
+    ensureSession: () => Effect.succeed("codex-session-thread-1"),
+    refuse: (reason, detail) => new AgentRunRefusalError({ reason, detail }),
+    verifyTimeoutMs: 50,
+    progressWindowMs: 1_000,
+  })
+
+  expect(await Effect.runPromise(runtime.recover)).toBe(0)
+  await Effect.runPromise(runtime.cancel(record, new Date()))
+  expect(listed).toBe(false)
+  expect(supervisorCancellations).toBe(1)
+  expect(recordedCancellations).toBe(1)
 })
