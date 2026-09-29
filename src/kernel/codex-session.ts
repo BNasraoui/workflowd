@@ -377,16 +377,16 @@ export const makeCodexCli = (
             manifest.executionId,
           ])
           if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)
-          const waitInactive = async (
-            durationMs: number,
-            deadline = Date.now() + durationMs,
-          ): Promise<boolean> => {
-            const observed = await reconcile(path, manifest)
+          const waitInactive = async (durationMs: number): Promise<boolean> => {
+            const deadline = Date.now() + durationMs
+            let observed = await reconcile(path, manifest)
             manifest = observed.manifest
-            if (!observed.unit.present || !observed.unit.active) return true
-            if (Date.now() >= deadline) return false
-            await Bun.sleep(pollIntervalMs)
-            return waitInactive(durationMs, deadline)
+            while (observed.unit.present && observed.unit.active && Date.now() < deadline) {
+              await Bun.sleep(pollIntervalMs)
+              observed = await reconcile(path, manifest)
+              manifest = observed.manifest
+            }
+            return !observed.unit.present || !observed.unit.active
           }
           if (!(await waitInactive(cancellationGraceMs))) {
             const killed = await runBoundedCommand([
@@ -408,17 +408,17 @@ export const makeCodexCli = (
         }
 
         const observeExit = async (): Promise<CodexExit> => {
-          const exit = await terminal()
-          if (exit !== null) return exit
-          if (Date.now() - attachedAt >= observationTimeoutMs) {
-            await cancelUnit()
-            return {
-              exitCode: -1,
-              stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
-            }
+          let exit = await terminal()
+          while (exit === null && Date.now() - attachedAt < observationTimeoutMs) {
+            await Bun.sleep(pollIntervalMs)
+            exit = await terminal()
           }
-          await Bun.sleep(pollIntervalMs)
-          return observeExit()
+          if (exit !== null) return exit
+          await cancelUnit()
+          return {
+            exitCode: -1,
+            stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
+          }
         }
         const exited = Effect.tryPromise({
           try: observeExit,

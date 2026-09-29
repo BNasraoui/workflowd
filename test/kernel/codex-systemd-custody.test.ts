@@ -377,3 +377,20 @@ test("worker identity is restored only under verified transient custody", async 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+for (const mode of ["exit", "cancel"]) {
+  test(`${mode} polling retains a bounded number of promises`, async () => {
+    // A separate heap keeps this measurement independent of the rest of the test suite.
+    const probe = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "fixtures/codex-poll-retention.ts"), mode],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    const [exitCode, stdout, stderr] = await Promise.all([
+      probe.exited,
+      new Response(probe.stdout).text(),
+      new Response(probe.stderr).text(),
+    ])
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(JSON.parse(stdout).polls).toBe(1200)
+  })
+}
