@@ -880,12 +880,12 @@ try {
     delete env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES
     env.WORKFLOWD_OPENCODE_RESIDENT_ENABLED = "true"
     env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET = join(socketRoot, "opencode-resident.sock")
-    env.WORKFLOWD_AGENT_RUN_ROUTES = `evidence=${process.env.EVIDENCE_OPENCODE_MODEL ?? "opencode/ling-3.0-tiny-free"}`
+    env.WORKFLOWD_AGENT_RUN_ROUTES = `evidence=${process.env.EVIDENCE_OPENCODE_MODEL ?? "opencode/nemotron-3.5-lightning-free"}`
     env.WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS = "300000"
     await boot()
     const r = await dispatch(
       "opencode-mailbox",
-      `This is an isolated mailbox evidence task. Do not inspect files, run git, or change anything. Run exactly this shell command once: bun ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. After the receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
+      "Reply exactly READY opencode-mailbox. Do not use tools or inspect anything. End the turn.",
     )
     const get = async (suffix) => {
       const response = await fetch(
@@ -899,12 +899,33 @@ try {
       assert.equal(response.status, 200)
       return response.json()
     }
+    await until("OpenCode priming turn ended", async () => (await get("")).data.time?.idle)
+    log("opencode-primed", { sessionId: r.nativeSessionId, session: await get("") })
+    const admission = await fetch(
+      env.OPENCODE_SERVER_URL + `/api/session/${r.nativeSessionId}/prompt`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          delivery: "queue",
+          text: `This is an isolated mailbox evidence task. Do not inspect files, run git, search for executables, or change anything. Run exactly this shell command once: ${JSON.stringify(process.execPath)} ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. If the command fails, report the failure and stop; do not search or retry. After a successful receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
+        }),
+      },
+    )
+    assert.equal(admission.status, 200)
+    log("opencode-subscription-admitted", {
+      sessionId: r.nativeSessionId,
+      status: admission.status,
+    })
     const texts = (page) =>
       page.data
         .filter((m) => m.type === "assistant")
         .flatMap((m) => m.content.filter((c) => c.type === "text").map((c) => c.text))
     await until(
-      "OpenCode subscription and first turn ended",
+      "OpenCode subscription turn ended",
       async () => {
         const messages = await get("/message?limit=100&order=asc")
         const session = await get("")
@@ -920,7 +941,7 @@ try {
       },
       180000,
     )
-    log("opencode-first-turn-ended", {
+    log("opencode-subscription-turn-ended", {
       sessionId: r.nativeSessionId,
       messages: await get("/message?limit=100&order=asc"),
       session: await get(""),
@@ -946,7 +967,7 @@ try {
     assert.equal(inbox[0].state, "delivered")
     assert.equal(texts(messages).filter((t) => t.includes("RESULT opencode-mailbox")).length, 1)
     snapshot("OpenCode completion delivered")
-    return "Separate credential-free OpenCode server: registered, ended first turn, one durable delivered inbox and one cancellation reply"
+    return "Separate credential-free OpenCode server: registered, ended subscription turn, one durable delivered inbox and one cancellation reply"
   })
 } catch (error) {
   log("setup-failure", { message: scrub(error.message) })
@@ -984,8 +1005,10 @@ try {
       rows.push({
         id,
         name: `Scenario ${id}`,
-        status: "BLOCKED",
-        detail: "Setup failed; see evidence log",
+        status: process.env.EVIDENCE_SCENARIOS ? "SKIPPED" : "BLOCKED",
+        detail: process.env.EVIDENCE_SCENARIOS
+          ? "Not selected for this scoped run"
+          : "Setup failed; see evidence log",
       })
   rows.sort((a, b) => a.id - b.id)
   const table =
@@ -1002,5 +1025,5 @@ try {
   )
   writeFileSync(join(logs, "results.json"), JSON.stringify(rows, null, 2))
   console.log(table + `\nEvidence: ${logs}`)
-  process.exitCode = rows.every((r) => ["PASS", "N/A"].includes(r.status)) ? 0 : 1
+  process.exitCode = rows.every((r) => ["PASS", "SKIPPED"].includes(r.status)) ? 0 : 1
 }

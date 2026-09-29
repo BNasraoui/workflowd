@@ -56,10 +56,16 @@ real store, captures the persisted state and absent mailbox message, crashes the
 scratch daemon, then restarts the same branch and database.
 
 Scenario 12 uses the separate scratch OpenCode server with a credential-free
-catalog model. It registers an agent-run subscription through the session-bound
-socket command, ends its first turn, then receives one cancellation completion
+catalog model. After a short priming turn establishes verified custody, it registers an
+agent-run subscription through the session-bound socket command using the absolute
+Bun executable, ends that turn, then receives one cancellation completion
 and replies. The harness checks the durable inbox and actual session history.
 No OpenCode credentials or production server are used.
+`EVIDENCE_OPENCODE_MODEL` can select another available credential-free model.
+OpenCode dispatch has a five-minute first-token limit for cold startup.
+`EVIDENCE_SCENARIOS=7,12` runs the peer-bound prerequisite and OpenCode case only;
+unselected rows are explicitly skipped. A listed model may still be unavailable
+at dispatch, and a successful catalog lookup is not evidence of a model turn.
 
 `logs/results.md` contains the result table. `logs/evidence.jsonl` contains
 timestamped HTTP observations, SQLite snapshots, JetStream sequences/bodies and
