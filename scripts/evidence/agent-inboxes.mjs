@@ -201,6 +201,11 @@ async function cancel(r) {
 }
 class Blocked extends Error {}
 async function scenario(id, name, run) {
+  if (
+    process.env.EVIDENCE_SCENARIOS &&
+    !process.env.EVIDENCE_SCENARIOS.split(",").includes(String(id))
+  )
+    return
   if (interrupted) throw new Error("Evidence run interrupted; cleaning up owned processes")
   log("scenario-start", { id, name })
   const started = new Date().toISOString()
@@ -259,7 +264,7 @@ async function dispatch(name, prompt) {
       prompt,
       idempotencyKey: name,
     }),
-    signal: AbortSignal.timeout(180000),
+    signal: AbortSignal.timeout(360000),
   })
   const body = await response.json()
   log("dispatch", { name, status: response.status, body })
@@ -875,7 +880,8 @@ try {
     delete env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES
     env.WORKFLOWD_OPENCODE_RESIDENT_ENABLED = "true"
     env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET = join(socketRoot, "opencode-resident.sock")
-    env.WORKFLOWD_AGENT_RUN_ROUTES = "evidence=opencode/nemotron-3.5-lightning-free"
+    env.WORKFLOWD_AGENT_RUN_ROUTES = `evidence=${process.env.EVIDENCE_OPENCODE_MODEL ?? "opencode/ling-3.0-tiny-free"}`
+    env.WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS = "300000"
     await boot()
     const r = await dispatch(
       "opencode-mailbox",
