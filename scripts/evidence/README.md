@@ -25,6 +25,19 @@ signalling a recorded PID.
 For scenarios 1–5, supply **separate test GitHub App credentials**, with Actions
 read access to a repository containing successful and failing runs:
 
+An existing App may be reused only with explicit owner authorization. Before
+starting any services or CI runs, use read-only App API requests to verify an
+unsuspended installation, Actions read permission, and `workflow_run` event
+subscription. `check_suite` is also supported by workflowd. Do not change App
+settings as part of the harness. If the owner requires stopping on missing App
+settings, stop the evidence run and report those prerequisites.
+
+The authorized existing-App preflight on 2026-09-29 failed these prerequisites;
+see [the recorded result](./ci-opencode-preflight.md). No new scenarios were run.
+The fixture mode below signs constructed payloads with a scratch secret; it does
+**not** replay GitHub's original payload bytes and signature. A follow-up run
+requiring real delivery replay must add that input path before claiming success.
+
 ```sh
 EVIDENCE_GITHUB_APP_ID=12345 \
 EVIDENCE_GITHUB_INSTALLATION_ID=67890 \
