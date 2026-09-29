@@ -155,7 +155,8 @@ const complete = async (runId) => {
   )
   const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
   log("worker-output", output)
-  assert.ok(output.includes("full-final-output"))
+  assert.equal(output.split("full-final-output").length - 1, 1)
+  assert.equal(r.last_output_tokens, 42)
 }
 const scenario = async (name, fn) => {
   if (interrupted) throw Error("evidence run interrupted")
