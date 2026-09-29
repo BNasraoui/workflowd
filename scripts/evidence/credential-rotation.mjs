@@ -146,6 +146,7 @@ const terminal = (runId) =>
 const complete = async (runId) => {
   const r = await terminal(runId)
   log("terminal", r)
+  await snapshot(runId, "terminal-custody")
   assert.equal(r.state, "completed")
   assert.equal(
     db
@@ -335,6 +336,7 @@ try {
       ),
     )
     assert.equal(row(runId).state, "spawning")
+    await snapshot(runId, "partial-line-pending")
     log("half-line", await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8"))
     log("dispatch", await pending)
     await complete(runId)
@@ -366,6 +368,7 @@ try {
     const runId = id(s)
     await post(s)
     await terminal(runId)
+    await snapshot(runId, "before-retention-cleanup")
     const path = join(root, "agent-processes", runId)
     const bytes = (await stat(join(path, "events.jsonl"))).size
     log("bounded-bytes", bytes)
@@ -376,7 +379,7 @@ try {
     await Bun.sleep(1200)
     await start()
     assert.equal(await exists(path), false)
-    log("retention-cleanup", { runId, removed: true })
+    log("retention-cleanup", { runId, removed: true, row: row(runId) })
   })
   await scenario("8. Manager unavailable, identical retry", async () => {
     await start({ EVIDENCE_UNAVAILABLE: "1" })
@@ -399,6 +402,7 @@ try {
     assert.equal(receipt._tag, "Success")
     assert.equal(row(id(s)).state, "verified")
     assert.equal((await owned()).length, count)
+    log("non-codex-row", { row: row(id(s)), newUnits: 0 })
     const source = await readFile(resolve("src/kernel/codex-session.ts"), "utf8")
     assert.ok(source.includes('options.unitPrefix ?? "workflowd-agent-"'))
     log("defaults", {
