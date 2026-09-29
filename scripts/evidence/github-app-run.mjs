@@ -124,7 +124,7 @@ try {
   }
   writeFileSync(join(root, "fixtures.json"), JSON.stringify(fixtures), { mode: 0o600 })
   stage = "isolated harness"
-  const child = spawn("bun", [join(repo, "scripts/evidence/agent-inboxes.mjs")], {
+  const child = spawn(process.execPath, [join(repo, "scripts/evidence/agent-inboxes.mjs")], {
     cwd: repo,
     stdio: "inherit",
     env: {
