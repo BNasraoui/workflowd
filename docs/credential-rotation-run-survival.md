@@ -120,3 +120,38 @@ gates the fixer through `WORKFLOWD_FIX_WORK_ENABLED`; the reviewer is always a
 configured core capability. Making only model absence non-fatal requires a
 separate readiness state and job-level retry policy, not a small safe change
 behind an existing setting.
+
+### Full-daemon manual evidence
+
+The manual runner can boot `src/main.ts` with isolated configuration, SQLite,
+repository/worktrees, loopback listeners and a scratch unit namespace:
+
+```sh
+EVIDENCE_COPY_AUTH=1 EVIDENCE_REAL_CODEX_BINARY=/absolute/path/to/codex \
+  bun scripts/evidence/credential-rotation.mjs --full
+```
+
+`EVIDENCE_COPY_AUTH=1` requires the owner's explicit permission: it copies only
+`~/.codex/auth.json` into a fresh scratch `CODEX_HOME` and removes that copy in
+`finally`. The scratch directory is ignored by git. Never publish auth files.
+The real prompt requests a twelve-second sleep followed by `EVIDENCE59_REAL_OK`,
+allowing the daemon to restart while the model's command is running. Assertions
+check active custody during downtime, unchanged launch nonce and InvocationID,
+exactly one completed transition, and the real final response/token usage.
+
+The OpenCode startup availability gate and non-Codex route use an isolated HTTP
+protocol fixture. GitHub uses a generated scratch key and no queued GitHub jobs;
+remote coordination is disabled, so no NATS connection is made. Scenarios 1–8
+use controlled executable workers for repeatable timing, signal trapping,
+partial JSON writes and oversized output. Scenario 9 uses the OpenCode fixture.
+The full daemon uses the production 10 MiB limit and seven-day retention;
+scenario 7 ages only its scratch result timestamp by eight days. The full daemon
+has no parser instrumentation, so scenario 6 asserts the persisted output and
+single verification transition; the focused host additionally counts parsed events.
+
+`WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX` optionally configures the existing
+transient-unit namespace; its default remains `workflowd-agent-`. The manual
+runner supplies a unique `workflowd-evidence59-<timestamp>-` prefix. Its PATH
+shim launches real systemd units, enforces that prefix, clears ambient manager
+environment for workers and optionally delays the launch acknowledgement for
+scenario 2. No application services are replaced in the full daemon.

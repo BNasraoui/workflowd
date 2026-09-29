@@ -2,11 +2,23 @@
 /* global Bun */
 // Explicit manual invocation only; never imported by CI or the test suite.
 import assert from "node:assert/strict"
-import { mkdir, readFile, writeFile, readdir, rm, stat } from "node:fs/promises"
+import {
+  mkdir,
+  readFile,
+  writeFile,
+  readdir,
+  rm,
+  stat,
+  copyFile,
+  chmod,
+  utimes,
+} from "node:fs/promises"
 import { resolve, join } from "node:path"
+import { fullDaemonEnvironment } from "./credential-rotation-full.mjs"
 import { Database } from "bun:sqlite"
 import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress.ts"
 if (process.env.CI) throw Error("This manual evidence runner must not run in CI")
+const full = process.argv.includes("--full")
 const base = resolve(".scratch/evidence59")
 const root = join(base, `run-${Date.now()}`)
 await mkdir(root, { recursive: true, mode: 0o700 })
@@ -14,7 +26,7 @@ const prefix = `workflowd-evidence59-${Date.now()}-`
 const env = {
   PATH: process.env.PATH,
   HOME: join(root, "home"),
-  CODEX_HOME: join(base, "codex-home"),
+  CODEX_HOME: join(root, "codex-home"),
   XDG_CONFIG_HOME: join(root, "config"),
   XDG_DATA_HOME: join(root, "data"),
   XDG_STATE_HOME: join(root, "state"),
@@ -37,6 +49,7 @@ for (const path of [
   await mkdir(path, { recursive: true, mode: 0o700 })
 const entries = []
 const results = []
+let fullSetup = null
 let host = null,
   port = null,
   db = null
@@ -75,9 +88,9 @@ const exists = (path) =>
     () => true,
     () => false,
   )
-const stop = async () => {
+const stop = async (signal = "SIGKILL") => {
   if (host) {
-    host.kill("SIGKILL")
+    host.kill(signal)
     await host.exited
     host = null
   }
@@ -86,16 +99,36 @@ const stop = async () => {
 const start = async (extra = {}) => {
   await stop()
   const index = (await readdir(root)).filter((x) => x.startsWith("host-")).length
-  host = Bun.spawn([process.execPath, resolve("scripts/evidence/credential-rotation-host.mjs")], {
-    env: { ...env, ...extra },
-    stdout: Bun.file(join(root, `host-${index}.log`)),
-    stderr: Bun.file(join(root, `host-${index}.stderr.log`)),
-  })
+  host = Bun.spawn(
+    [
+      process.execPath,
+      resolve(full ? "src/main.ts" : "scripts/evidence/credential-rotation-host.mjs"),
+    ],
+    {
+      env: full
+        ? {
+            ...fullSetup.env,
+            ...extra,
+            WORKFLOWD_AGENT_RUN_CODEX_BIN: extra.EVIDENCE_BINARY ?? env.EVIDENCE_BINARY,
+            ...(extra.EVIDENCE_UNAVAILABLE === "1"
+              ? { DBUS_SESSION_BUS_ADDRESS: `unix:path=${root}/missing-bus`, XDG_RUNTIME_DIR: root }
+              : {}),
+          }
+        : { ...env, ...extra },
+      stdout: Bun.file(join(root, `host-${index}.log`)),
+      stderr: Bun.file(join(root, `host-${index}.stderr.log`)),
+    },
+  )
   await wait(async () => {
     if (host.exitCode !== null) throw Error(`scratch host exited ${host.exitCode}`)
+    if (full)
+      return fetch(`http://127.0.0.1:${fullSetup.port}/health`).then(
+        () => true,
+        () => false,
+      )
     return exists(join(root, "ready.json"))
   }, 70000)
-  port = JSON.parse(await readFile(join(root, "ready.json"), "utf8")).port
+  port = full ? fullSetup.port : JSON.parse(await readFile(join(root, "ready.json"), "utf8")).port
   log("host-start", { pid: host.pid, port, extra: Object.keys(extra) })
 }
 const post = async (input) => {
@@ -142,7 +175,7 @@ const terminal = (runId) =>
   wait(() => {
     const r = row(runId)
     return ["completed", "failed", "operator_required", "cancelled"].includes(r?.state) && r
-  }, 20000)
+  }, 120000)
 const complete = async (runId) => {
   const r = await terminal(runId)
   log("terminal", r)
@@ -212,6 +245,16 @@ try {
     ).code,
     0,
   )
+  if (process.env.EVIDENCE_COPY_AUTH === "1") {
+    await copyFile(join(process.env.HOME, ".codex/auth.json"), join(env.CODEX_HOME, "auth.json"))
+    await chmod(join(env.CODEX_HOME, "auth.json"), 0o600)
+  }
+  if (full) fullSetup = await fullDaemonEnvironment(root, prefix, env, log)
+  log("scope", {
+    entrypoint: full ? "src/main.ts" : "focused host",
+    nats: "disabled",
+    openCode: "isolated HTTP fixture",
+  })
   await start()
   db = new Database(join(root, "state.db"))
   db.exec(
@@ -353,8 +396,13 @@ try {
       .filter((line) =>
         line.includes('"parsedEvent":{"type":"agent_message","text":"partial-once"'),
       )
-    assert.equal(parsed.length, 1)
-    log("partial-parsed-count", parsed.length)
+    if (!full) assert.equal(parsed.length, 1)
+    log(
+      "partial-parsed-count",
+      full
+        ? "not instrumented in full daemon; verified transition and persisted output asserted"
+        : parsed.length,
+    )
     assert.equal(
       db
         .query("SELECT count(*) AS n FROM evidence_transitions WHERE run_id=? AND state='verified'")
@@ -372,11 +420,18 @@ try {
     const path = join(root, "agent-processes", runId)
     const bytes = (await stat(join(path, "events.jsonl"))).size
     log("bounded-bytes", bytes)
-    assert.equal(bytes, 4096)
+    assert.equal(bytes, full ? 10 * 1024 * 1024 : 4096)
     const stderrBytes = (await stat(join(path, "stderr.log"))).size
-    assert.equal(stderrBytes, 4096)
+    assert.equal(stderrBytes, full ? 10 * 1024 * 1024 : 4096)
     log("bounded-stderr-bytes", stderrBytes)
-    await Bun.sleep(1200)
+    if (full) {
+      const old = new Date(Date.now() - 8 * 24 * 60 * 60_000)
+      await utimes(join(path, "result.json"), old, old)
+      log(
+        "retention-fixture",
+        "aged scratch result mtime eight days; production seven-day retention",
+      )
+    } else await Bun.sleep(1200)
     await start()
     assert.equal(await exists(path), false)
     log("retention-cleanup", { runId, removed: true, row: row(runId) })
@@ -417,21 +472,57 @@ try {
       binary,
       "BLOCKED: set EVIDENCE_REAL_CODEX_BINARY to the real executable and authenticate scratch CODEX_HOME; production credentials are forbidden",
     )
-    await rm(join(root, "launch-barrier"), { force: true })
-    await start({ EVIDENCE_BINARY: binary, EVIDENCE_LAUNCH_BARRIER: "1" })
-    const s = input("real", "Reply with EVIDENCE59_REAL_OK. Do not run commands or read files.")
-    const pending = post(s).catch(() => null)
-    await wait(() => exists(join(root, "launch-barrier")))
-    const before = await snapshot(id(s), "real-launched")
-    await stop()
-    await pending
     await start({ EVIDENCE_BINARY: binary })
-    const after = await snapshot(id(s), "real-reattached")
+    const s = input(
+      "real",
+      "Run the shell command sleep 12, then reply exactly EVIDENCE59_REAL_OK. Do not read files or do anything else.",
+    )
+    const pending = post(s).catch(() => null)
+    const runId = id(s)
+    await wait(async () => {
+      try {
+        return (
+          await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+        ).includes("command_execution")
+      } catch {
+        return false
+      }
+    }, 120000)
+    const before = await snapshot(runId, "real-before-restart")
+    assert.ok(before.custody.invocationId)
+    await stop("SIGTERM")
+    await pending
+    const down = await snapshot(runId, "real-host-down")
+    assert.match(down.unit.stdout, /ActiveState=active/)
+    assert.equal(await exists(before.custody.resultPath), false)
+    await start({ EVIDENCE_BINARY: binary })
+    const after = await snapshot(runId, "real-reattached")
+    assert.match(after.unit.stdout, /ActiveState=active/)
     assert.equal(before.custody.launchId, after.custody.launchId)
-    const r = await terminal(id(s))
+    assert.equal(before.custody.invocationId, after.custody.invocationId)
+    const r = await terminal(runId)
     log("real-terminal", r)
     assert.equal(r.state, "completed")
-    log("real-output", await readFile(join(root, "agent-processes", id(s), "events.jsonl"), "utf8"))
+    assert.equal(
+      db
+        .query(
+          "SELECT count(*) AS n FROM evidence_transitions WHERE run_id=? AND state='completed'",
+        )
+        .get(runId).n,
+      1,
+    )
+    const output = await readFile(join(root, "agent-processes", runId, "events.jsonl"), "utf8")
+    log("real-output", output)
+    const messages = output
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((event) => event.type === "item.completed" && event.item.type === "agent_message")
+    assert.equal(
+      messages.filter((event) => event.item.text.trim() === "EVIDENCE59_REAL_OK").length,
+      1,
+    )
+    assert.ok(r.last_output_tokens > 0)
   })
 } catch (error) {
   results.push({ scenario: "Harness", result: "FAIL", detail: String(error) })
@@ -439,6 +530,9 @@ try {
 } finally {
   interrupted = false
   await stop()
+  await fullSetup?.fixture.stop(true)
+  await rm(env.CODEX_HOME, { recursive: true, force: true })
+  log("auth-cleanup", { absent: !(await exists(join(env.CODEX_HOME, "auth.json"))) })
   for (const unit of await owned()) {
     try {
       await removeUnit(unit)

@@ -17,8 +17,8 @@ if (prompt === "partial") {
   process.stdout.write('tial-once"}}\n')
 } else emit({ type: "item.completed", item: { type: "agent_message", text: "first-output" } })
 if (prompt === "limit") {
-  console.log("x".repeat(20000))
-  process.stderr.write("e".repeat(20000))
+  console.log("x".repeat(11 * 1024 * 1024))
+  process.stderr.write("e".repeat(11 * 1024 * 1024))
 }
 if (prompt === "trap") await Bun.sleep(120000)
 else await Bun.sleep(prompt === "down" ? 1500 : 4000)
