@@ -488,7 +488,8 @@ try {
     TMPDIR: root,
     LANG: "C.UTF-8",
     EVIDENCE_ROOT: root,
-    EVIDENCE_CODEX_BIN: command(["which", "codex"], { PATH: path }),
+    EVIDENCE_CODEX_BIN:
+      process.env.EVIDENCE_CODEX_BIN ?? command(["which", "codex"], { PATH: path }),
     GITHUB_APP_ID: process.env.EVIDENCE_GITHUB_APP_ID ?? "2147483647",
     GITHUB_PRIVATE_KEY_PATH: keyPath,
     GITHUB_WEBHOOK_SECRET: webhookSecret,
