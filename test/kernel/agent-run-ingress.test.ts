@@ -539,9 +539,10 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
 
 test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
   let interrupted = false
-  let finishExit: (value: { exitCode: number; stderr: string }) => void = () => {}
-  const exit = new Promise<{ exitCode: number; stderr: string }>((resolve) => {
-    finishExit = resolve
+  const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
   })
   const events = {
     async *[Symbol.asyncIterator]() {
@@ -561,23 +562,30 @@ test("a Codex stall interrupts its owned execution before waiting for exit", asy
         Effect.succeed({
           executionId: "test-stalled.service",
           events,
-          exited: Effect.promise(() => exit),
+          exited: Effect.promise(async () => ({ exitCode: await child.exited, stderr: "" })),
           cancel: Effect.sync(() => {
             interrupted = true
-            finishExit({ exitCode: -1, stderr: "" })
+            expect(child.exitCode).toBeNull()
+            child.kill("SIGKILL")
           }),
         }),
     },
     { progressWindowMs: 10 },
   )
-  const run = await Effect.runPromise(
-    Effect.gen(function* () {
-      const receipt = yield* register({ ...submission, route: "scan" })
-      return yield* waitForRunState(receipt.runId, ["operator_required"])
-    }).pipe(Effect.provide(layer)),
-  )
-  expect(interrupted).toBe(true)
-  expect(run?.state).toBe("operator_required")
+  try {
+    const run = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ ...submission, route: "scan" })
+        return yield* waitForRunState(receipt.runId, ["operator_required"])
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(interrupted).toBe(true)
+    expect(run?.state).toBe("operator_required")
+    expect(child.signalCode).toBe("SIGKILL")
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await child.exited
+  }
 })
 for (const detail of [null, "turn.failed", "error"] as const) {
   test(`a failed Codex run persists its exit diagnostic after first output (${detail})`, async () => {

@@ -27,6 +27,7 @@ export function startAppServer(
     [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
     {
       env,
+      detached: true,
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -50,6 +51,33 @@ export function startAppServer(
     reader.close()
     notify({ method: "workflowd/disconnected", params: null })
   })
+  const signalGroup = (signal: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, signal)
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ESRCH")) throw cause
+    }
+  }
+  let closing: Promise<void> | undefined
+  const stop = async () => {
+    rpc.close()
+    reader.close()
+    signalGroup("SIGTERM")
+    let force: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        child.exited,
+        new Promise<void>((resolve) => {
+          force = setTimeout(resolve, 1000)
+        }),
+      ])
+      // The leader can exit before descendants; always terminate the remaining group.
+      signalGroup("SIGKILL")
+      await child.exited
+    } finally {
+      clearTimeout(force)
+    }
+  }
   return {
     pid: child.pid,
     rpc,
@@ -61,16 +89,6 @@ export function startAppServer(
       child.stdin.write('{"method":"initialized"}\n')
       void child.stdin.flush()
     },
-    close: async () => {
-      rpc.close()
-      reader.close()
-      child.kill()
-      const force = setTimeout(() => child.kill("SIGKILL"), 1000)
-      try {
-        await child.exited
-      } finally {
-        clearTimeout(force)
-      }
-    },
+    close: () => (closing ??= stop()),
   }
 }
