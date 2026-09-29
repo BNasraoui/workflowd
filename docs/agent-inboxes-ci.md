@@ -266,3 +266,13 @@ OpenCode mailbox provisioning adds an opt-in hook to `agent-run-ingress.ts`;
 completion source defers parent wakes until a resident run finishes. Credential rotation must preserve the resident process root
 (or re-register the new owned root) so socket authentication and mailbox custody
 remain valid.
+
+CI mailbox subscriptions expire after 24 hours by default. Set
+`WORKFLOWD_CI_WAIT_TIMEOUT_MS` to a positive integer in milliseconds to change
+this limit. The earliest outstanding CI wait sets the thread's persisted
+`wait_deadline`; duplicate registration does not extend it. Existing waits without
+a deadline use their original registration time. Expiry writes one durable mailbox
+message saying the CI result did not arrive in time, marks the mailbox/thread and
+verified run `operator_required`, and consumes the subscription. Late CI results
+remain available in the CI store but are ignored by the expired subscription;
+an operator must decide how to resume work.

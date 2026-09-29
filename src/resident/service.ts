@@ -267,6 +267,11 @@ export const ResidentCodexLive = (
           }
         }
         yield* subscriptions.reconcile()
+        for (const runId of servers.keys()) {
+          const run = yield* runs.read(runId)
+          if (run?.state === "operator_required" && run.nativeSessionId !== null)
+            yield* finish(run.nativeSessionId, true)
+        }
         yield* flush()
       })
       yield* tick.pipe(

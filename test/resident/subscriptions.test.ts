@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { ConfigProvider, Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -10,7 +10,10 @@ import { WorkflowStoreLive } from "../../src/store"
 import { makeResidentStore } from "../../src/resident/store"
 import { makeSubscriptions } from "../../src/resident/subscriptions"
 
+import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
+
 const layer = Layer.mergeAll(
+  KernelSessionStoreLive,
   KernelEventStoreLive,
   AgentRunStoreLive,
   Layer.effect(CiService, makeCiStore),
@@ -224,4 +227,121 @@ test("a never-final run keeps its subscription visible and pending without deliv
       expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(0)
       expect(yield* store.pending()).toHaveLength(0)
     }).pipe(Effect.provide(layer)),
+  ))
+
+test("CI deadline expires once and ignores a later real result", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      const ci = yield* CiService
+      const sql = yield* SqlClient.SqlClient
+      const runs = yield* AgentRunStore
+      yield* runs.create({
+        runId: "parent",
+        route: "test",
+        providerId: "codex-cli",
+        modelId: "m",
+        agent: "build",
+        repository: "o/r",
+        directory: "/work",
+        prompt: "task",
+        promptSha256: "a".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 1,
+        createdAt: new Date(),
+      })
+      const sessions = yield* KernelSessionStore
+      const now = new Date()
+      yield* sessions.registerResource({
+        resourceId: "resource",
+        owningHostId: "host",
+        absolutePath: "/work",
+        kind: "worktree",
+        createdAt: now,
+      })
+      yield* sessions.registerSession({
+        sessionId: "session",
+        providerKind: "codex",
+        providerVersion: 1,
+        providerId: "codex-cli",
+        serverId: "host",
+        owningHostId: "host",
+        endpointAlias: "local-cli",
+        endpointIdentity: "codex-cli://host",
+        nativeSessionId: "thread",
+        resourceId: "resource",
+        createdAt: now,
+      })
+      yield* sql`UPDATE kernel_agent_runs SET state = 'verified', session_id = 'session', resource_id = 'resource', native_session_id = 'thread' WHERE run_id = 'parent'`
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      yield* ci.watch(target, 1, ["CI"], Date.now())
+      const receipt = yield* subscriptions.register("thread", { kind: "ci", ...target })
+      const thread = yield* store.read("thread")
+      expect(thread?.wait_deadline).toBeGreaterThan(Date.now())
+      expect(thread!.wait_deadline! - Date.now()).toBeLessThanOrEqual(86_400_000)
+      yield* subscriptions.register("thread", { kind: "ci", ...target })
+      expect((yield* store.read("thread"))?.wait_deadline).toBe(thread?.wait_deadline)
+      yield* sql`UPDATE resident_threads SET wait_deadline = 0 WHERE thread_id = 'thread'`
+      yield* subscriptions.reconcile()
+      yield* subscriptions.reconcile()
+      expect(yield* sql`SELECT prompt, state FROM resident_inbox WHERE id = ${receipt.id}`).toEqual(
+        [
+          {
+            prompt: expect.stringContaining("CI result did not arrive in time"),
+            state: "operator_required",
+          },
+        ],
+      )
+      expect((yield* store.read("thread"))?.state).toBe("operator_required")
+      expect((yield* runs.read("parent"))?.state).toBe("operator_required")
+      expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${receipt.id}`).toEqual([
+        { state: "consumed" },
+      ])
+      yield* ci.snapshot(
+        target,
+        [
+          {
+            id: 42,
+            name: "CI",
+            attempt: 1,
+            status: "completed",
+            conclusion: "success",
+            failingJobs: [],
+          },
+        ],
+        null,
+        Date.now(),
+      )
+      yield* subscriptions.reconcile()
+      expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(1)
+      expect(yield* store.deliveryState(receipt.id)).toBe("operator_required")
+    }).pipe(Effect.provide(layer)),
+  ))
+
+test("configured CI deadline backfills old waits without extending them", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      const sql = yield* SqlClient.SqlClient
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      const before = Date.now()
+      yield* subscriptions.register("thread", { kind: "ci", ...target })
+      expect((yield* store.read("thread"))?.wait_deadline).toBeGreaterThanOrEqual(before + 60_000)
+      expect((yield* store.read("thread"))!.wait_deadline! - Date.now()).toBeLessThanOrEqual(60_000)
+      yield* sql`UPDATE resident_threads SET wait_deadline = NULL`
+      yield* sql`UPDATE kernel_workflow_instances SET created_at = '2000-01-01T00:00:00.000Z'`
+      yield* subscriptions.reconcile()
+      expect((yield* store.read("thread"))?.state).toBe("operator_required")
+    }).pipe(
+      Effect.provide(layer),
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromUnknown({ WORKFLOWD_CI_WAIT_TIMEOUT_MS: "60000" }),
+      ),
+    ),
   ))
