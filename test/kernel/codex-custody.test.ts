@@ -6,6 +6,30 @@ import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
 import { parseCodexWorkerArguments, runCodexWorker } from "../../src/kernel/codex-worker"
 
+const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
+  let active = false
+  let description = ""
+  return async (command: ReadonlyArray<string>) => {
+    commands.push(command)
+    if (command[0] === "systemd-run") {
+      active = true
+      description = command.find((part) => part.startsWith("--description="))?.slice(14) ?? ""
+    } else if (command.includes("stop") || command.includes("kill")) {
+      active = false
+    }
+    if (command.includes("show")) {
+      return {
+        exitCode: 0,
+        stdout:
+          `InvocationID=invocation-test\nDescription=${description}\n` +
+          `ActiveState=${active ? "active" : "inactive"}\nResult=success\n`,
+        stderr: "",
+      }
+    }
+    return { exitCode: 0, stdout: "", stderr: "" }
+  }
+}
+
 test("the worker command parser accepts exact pairs and rejects malformed arguments", () => {
   expect(
     parseCodexWorkerArguments([
@@ -80,10 +104,7 @@ test("launches in an independent user service with durable custody and no prompt
     const cli = makeCodexCli({
       binary: "/opt/codex/bin/codex",
       custodyRoot: root,
-      runCommand: async (command) => {
-        commands.push(command)
-        return { exitCode: 0, stderr: "" }
-      },
+      runCommand: fakeSystemd(commands),
     })
     const run = await Effect.runPromise(
       cli.spawn({
@@ -94,18 +115,17 @@ test("launches in an independent user service with durable custody and no prompt
       }),
     )
 
-    expect(commands).toHaveLength(1)
-    expect(commands[0]![0]).toBe("systemd-run")
-    expect(commands[0]).toContain("--user")
-    expect(commands[0]).toContain("--service-type=exec")
-    expect(commands[0]).toContain(`--unit=${run.executionId}`)
-    expect(commands[0]).toContain("--max-output-bytes")
-    expect(commands[0]).toContain(String(10 * 1024 * 1024))
-    expect(commands[0]!.join(" ")).not.toContain("credential rotation must not kill me")
+    const launch = commands.find((command) => command[0] === "systemd-run")!
+    expect(launch).toContain("--user")
+    expect(launch).toContain("--service-type=exec")
+    expect(launch).toContain(`--unit=${run.executionId}`)
+    expect(launch).toContain("--max-output-bytes")
+    expect(launch).toContain(String(10 * 1024 * 1024))
+    expect(launch.join(" ")).not.toContain("credential rotation must not kill me")
     expect(
       JSON.parse(await readFile(join(root, "agent-run-abc123", "manifest.json"), "utf8")),
     ).toMatchObject({
-      version: 1,
+      version: 2,
       runId: "agent-run-abc123",
       executionId: run.executionId,
     })
@@ -126,10 +146,7 @@ test("reattaches to durable output without relaunching and cancels only when exp
       binary: "/opt/codex/bin/codex",
       custodyRoot: root,
       pollIntervalMs: 5,
-      runCommand: async (command: ReadonlyArray<string>) => {
-        commands.push(command)
-        return { exitCode: 0, stderr: "" }
-      },
+      runCommand: fakeSystemd(commands),
     }
     const launched = await Effect.runPromise(
       makeCodexCli(options).spawn({
@@ -157,7 +174,7 @@ test("reattaches to durable output without relaunching and cancels only when exp
     expect(await Effect.runPromise(reattached.exited)).toEqual({ exitCode: 0, stderr: "" })
     expect(events.some((event) => event.type === "agent_message")).toBe(true)
     expect(reattached.executionId).toBe(launched.executionId)
-    expect(commands).toHaveLength(1)
+    expect(commands.filter((command) => command[0] === "systemd-run")).toHaveLength(1)
 
     const pending = await Effect.runPromise(
       makeCodexCli(options).spawn({
@@ -168,7 +185,11 @@ test("reattaches to durable output without relaunching and cancels only when exp
       }),
     )
     await Effect.runPromise(pending.cancel)
-    expect(commands.find((command) => command[0] === "systemctl")).toContain(pending.executionId)
+    expect(
+      commands.find(
+        (command) => command[0] === "systemctl" && command.includes(pending.executionId),
+      ),
+    ).toBeDefined()
   } finally {
     await rm(root, { recursive: true, force: true })
   }
