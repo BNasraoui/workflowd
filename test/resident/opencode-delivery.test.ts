@@ -46,6 +46,7 @@ for (const outcome of ["accepted", "gone", "refused", "failed", "sending"] as co
         agent: "build",
         model: { providerID: "test", modelID: "model" },
         text: "completion",
+        delivery: "queue",
       })
   })
 }

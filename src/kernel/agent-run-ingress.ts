@@ -1,3 +1,4 @@
+import { OpenCodeMailbox } from "../resident/opencode"
 import { WorkerIdentity } from "../worker-identity/service"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
@@ -12,7 +13,7 @@ import {
   type AgentRunSubmission as AgentRunSubmissionType,
 } from "../agent-run-contract"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
-import type { WorkspaceError } from "../workspace/errors"
+import { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
 import { AgentRunWorktrees } from "./agent-run-worktrees"
@@ -165,6 +166,7 @@ const make = (options: AgentRunIngressOptions) =>
     const waits = yield* AgentWaitIngress
     const claude = yield* ClaudeCli
     const identity = yield* Effect.serviceOption(WorkerIdentity)
+    const mailbox = yield* Effect.serviceOption(OpenCodeMailbox)
     const workerPrompt = (run: AgentRunRecord) =>
       Option.isSome(identity)
         ? identity.value
@@ -276,12 +278,21 @@ const make = (options: AgentRunIngressOptions) =>
             nativeSessionId,
             now,
           })
+          const mailboxInstructions = Option.isSome(mailbox)
+            ? yield* mailbox.value
+                .prepare(run.runId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) => new WorkspaceError({ operation: "prepare OpenCode mailbox", cause }),
+                  ),
+                )
+            : ""
           yield* provider.promptSession({
             sessionID: nativeSessionId,
             directory: run.directory,
             agent: run.agent,
             model: { providerID: route.providerID, modelID: route.modelID },
-            text: yield* workerPrompt(run),
+            text: `${mailboxInstructions}\n\n${yield* workerPrompt(run)}`.trim(),
           })
         }
         const outputTokens = yield* verifyFirstToken(nativeSessionId)

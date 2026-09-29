@@ -1,3 +1,4 @@
+import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
@@ -292,6 +293,21 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
           Layer.provide(storeLayer),
         )
+  const openCodeMailboxLayer =
+    config.residentOpenCodeSocket === undefined || config.ci === undefined || ciLive === undefined
+      ? Layer.empty
+      : OpenCodeMailboxLive(
+          {
+            ...completionSourceOptions,
+            socket: config.residentOpenCodeSocket,
+            repositories: config.ci.repositories,
+          },
+          openCodeAdapter,
+        ).pipe(
+          Layer.provide(ciLive),
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+          Layer.provide(storeLayer),
+        )
   const residentLayer = residentLive ?? Layer.empty
   const codexCliLayer =
     residentLive === undefined
@@ -389,6 +405,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
           Layer.provideMerge(workerIdentityLayer),
+          Layer.provideMerge(openCodeMailboxLayer),
           Layer.provideMerge(workSignalLayer),
         )
   const qrspiLayer =

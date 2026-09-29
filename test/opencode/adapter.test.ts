@@ -11,6 +11,7 @@ import {
 
 function makeClient(overrides: Partial<OpenCodeSdkClient> = {}): OpenCodeSdkClient {
   return {
+    setSessionEnvironment: () => Effect.void,
     createSession: () => Effect.succeed({ id: "ses_1" }),
     promptSession: () => Effect.void,
     subscribeEvents: () => Stream.empty,
@@ -426,4 +427,78 @@ describe("toWireEvent", () => {
       toWireEvent({ type: "session.message.content.updated", data: { sessionID: "ses_1" } }),
     ).toBeUndefined()
   })
+})
+
+test("OpenCode session environment is scoped to the assigned session", async () => {
+  const inputs: unknown[] = []
+  const adapter = new SdkOpenCodeAdapter(
+    makeClient({
+      setSessionEnvironment: (input) =>
+        Effect.sync(() => {
+          inputs.push(input)
+        }),
+    }),
+  )
+  const input = { sessionID: "ses_owned", variables: { WORKFLOWD_RUN_ID: "run" } }
+  await Effect.runPromise(adapter.setSessionEnvironment(input))
+  expect(inputs).toEqual([input])
+})
+
+test("v2 mailbox transport queues a prompt and sets environment without waiting for a model", async () => {
+  const { OpenCode } = await import("@opencode-ai/client/effect")
+  const { FetchHttpClient } = await import("effect/unstable/http")
+  const { makeOpenCodeSdkClient } = await import("../../src/opencode/adapter")
+  const calls: Array<{ path: string; body: unknown }> = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname
+      const body = await request.json()
+      calls.push({ path, body })
+      if (path.endsWith("/prompt"))
+        return Response.json({
+          data: {
+            id: "msg_fixture",
+            sessionID: "ses_fixture",
+            timeCreated: 1,
+            type: "user",
+            payload: { text: "completion" },
+            delivery: "queue",
+          },
+        })
+      return new Response(null, { status: 204 })
+    },
+  })
+  try {
+    const client = OpenCode.make({ baseUrl: server.url.toString() }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    )
+    const adapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(client))
+    await Effect.runPromise(
+      adapter.setSessionEnvironment({
+        sessionID: "ses_fixture",
+        variables: { WORKFLOWD_RUN_ID: "run-fixture" },
+      }),
+    )
+    await Effect.runPromise(
+      adapter.promptSession({
+        sessionID: "ses_fixture",
+        directory: "/fixture",
+        agent: "build",
+        model: { providerID: "fixture", modelID: "fixture" },
+        text: "completion",
+        delivery: "queue",
+      }),
+    )
+    expect(calls.find((call) => call.path.endsWith("/environment"))?.body).toEqual({
+      variables: { WORKFLOWD_RUN_ID: "run-fixture" },
+    })
+    expect(calls.find((call) => call.path.endsWith("/prompt"))?.body).toMatchObject({
+      text: "completion",
+      delivery: "queue",
+    })
+  } finally {
+    await server.stop(true)
+  }
 })

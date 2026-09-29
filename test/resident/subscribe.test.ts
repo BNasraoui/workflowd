@@ -162,3 +162,24 @@ test("subscribe.ts exits after registration while the event is still pending", a
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("OpenCode subscription helper uses only its per-session capability", async () => {
+  const env = {
+    WORKFLOWD_OPENCODE_RESIDENT_SOCKET: "/fixture/opencode.sock",
+    WORKFLOWD_RUN_ID: "caller",
+    WORKFLOWD_SUBSCRIPTION_CAPABILITY: "a".repeat(64),
+  }
+  const sent: unknown[] = []
+  const selector = { kind: "agent_run", run_id: "child" }
+  await subscribeToEvent(selector, env, async (socket, path, body) => {
+    sent.push({ socket, path, body: JSON.parse(body!) })
+    return Response.json({ id: "subscription", status: "registered" }, { status: 202 })
+  })
+  expect(sent).toEqual([
+    {
+      socket: env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET,
+      path: "/subscriptions",
+      body: { runId: "caller", capability: env.WORKFLOWD_SUBSCRIPTION_CAPABILITY, selector },
+    },
+  ])
+})

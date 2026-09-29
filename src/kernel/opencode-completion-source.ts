@@ -305,6 +305,11 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_working_resources AS resource ON resource.resource_id = watch.resource_id
       WHERE watch.provider_kind = 'opencode' AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
+        AND NOT EXISTS (
+          SELECT 1 FROM resident_threads t JOIN kernel_agent_runs a ON a.run_id = t.run_id
+          WHERE t.provider_kind = 'opencode' AND t.thread_id = watch.native_session_id
+            AND a.state IN ('accepted','spawning','spawned','verified')
+        )
       ORDER BY watch.updated_at, watch.registered_at, watch.instance_id LIMIT 1`
     if (rows.length === 0) return { status: "idle" as const }
     const decoded = yield* Schema.decodeUnknownEffect(WatchRow)(rows[0]).pipe(

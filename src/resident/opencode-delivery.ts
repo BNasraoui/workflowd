@@ -17,8 +17,10 @@ export const deliverOpenCode = Effect.fn("Resident.deliverOpenCode")(
       agent: run.agent,
       model: { providerID: run.providerId, modelID: run.modelId },
       text: message.prompt,
+      delivery: "queue",
     })
     return "delivered" as const
   },
+  Effect.timeout("15 seconds"),
   Effect.catch(() => Effect.succeed("uncertain" as const)),
 )

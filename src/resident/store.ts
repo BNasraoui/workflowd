@@ -2,6 +2,8 @@ import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 export const ResidentThread = Schema.Struct({
   run_id: Schema.String,
+  provider_kind: Schema.Literals(["codex", "opencode"]),
+  capability_hash: Schema.NullOr(Schema.String),
   thread_id: Schema.String,
   directory: Schema.String,
   model: Schema.NullOr(Schema.String),
@@ -25,12 +27,16 @@ export const makeResidentStore = Effect.gen(function* () {
     threadId: string,
     directory: string,
     model: string | null,
+    providerKind: "codex" | "opencode" = "codex",
+    capabilityHash: string | null = null,
   ) {
-    yield* sql`INSERT INTO resident_threads(run_id,thread_id,directory,model,state) VALUES(${runId},${threadId},${directory},${model},'active')`
+    yield* sql`INSERT INTO resident_threads(run_id,thread_id,directory,model,state,provider_kind,capability_hash) VALUES(${runId},${threadId},${directory},${model},'active',${providerKind},${capabilityHash})`
   })
-  const threads = Effect.fn("Resident.threads")(function* () {
+  const threads = Effect.fn("Resident.threads")(function* (
+    providerKind: "codex" | "opencode" = "codex",
+  ) {
     const rows =
-      yield* sql`SELECT * FROM resident_threads WHERE state IN ('active','waiting') ORDER BY run_id`
+      yield* sql`SELECT * FROM resident_threads WHERE provider_kind = ${providerKind} AND state IN ('active','waiting') ORDER BY run_id`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(ResidentThread)(row))
   })
   const read = Effect.fn("Resident.read")(function* (threadId: string) {
@@ -68,9 +74,11 @@ export const makeResidentStore = Effect.gen(function* () {
   ) {
     yield* sql`INSERT INTO resident_inbox(id,thread_id,prompt,state) VALUES(${id},${threadId},${prompt},'prepared') ON CONFLICT(id) DO NOTHING`
   })
-  const pending = Effect.fn("Resident.pending")(function* () {
+  const pending = Effect.fn("Resident.pending")(function* (
+    providerKind: "codex" | "opencode" = "codex",
+  ) {
     const rows =
-      yield* sql`SELECT * FROM resident_inbox WHERE state IN ('prepared','sending') ORDER BY rowid LIMIT 100`
+      yield* sql`SELECT i.* FROM resident_inbox i JOIN resident_threads t ON t.thread_id = i.thread_id WHERE t.provider_kind = ${providerKind} AND i.state IN ('prepared','sending') ORDER BY i.rowid LIMIT 100`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(Inbox)(row))
   })
   const deliveryState = Effect.fn("Resident.deliveryState")(function* (id: string) {

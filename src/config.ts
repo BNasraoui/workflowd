@@ -1,4 +1,8 @@
-import { loadResidentConfig, type ResidentConfig } from "./resident/config"
+import {
+  loadOpenCodeResidentSocket,
+  loadResidentConfig,
+  type ResidentConfig,
+} from "./resident/config"
 import { loadWorkerIdentityConfig, type WorkerIdentityConfig } from "./worker-identity/config"
 import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
@@ -109,6 +113,7 @@ export interface AgentRunConfig {
 }
 
 export interface AppConfig {
+  readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
   readonly ci?: CiConfig
   readonly workerIdentity?: WorkerIdentityConfig
@@ -654,6 +659,7 @@ export async function loadConfig(
   const hostId = workerHostId(env)
   const workerIdentity = loadWorkerIdentityConfig(env)
   const residentCodex = loadResidentConfig(env)
+  const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
@@ -661,6 +667,7 @@ export async function loadConfig(
   return {
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(residentCodex === undefined ? {} : { residentCodex }),
+    ...(residentOpenCodeSocket === undefined ? {} : { residentOpenCodeSocket }),
     ...(ci === undefined ? {} : { ci }),
     http: httpSection(env),
     github: githubSection(env, secrets.webhookSecret),

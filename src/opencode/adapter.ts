@@ -23,6 +23,7 @@ export type OpenCodePromptSessionInput = {
   readonly agent: string
   readonly model: OpenCodeModel
   readonly text: string
+  readonly delivery?: "queue"
 }
 
 type OpenCodeSessionInput = {
@@ -123,6 +124,10 @@ export type OpenCodeModelAvailability = {
 type SdkCall<Input, Output> = (input: Input) => Effect.Effect<Output, Error>
 
 export type OpenCodeSdkClient = {
+  readonly setSessionEnvironment: SdkCall<
+    { readonly sessionID: string; readonly variables: Readonly<Record<string, string>> },
+    void
+  >
   readonly createSession: SdkCall<OpenCodeCreateSessionInput, OpenCodeSession>
   readonly promptSession: SdkCall<
     {
@@ -130,6 +135,7 @@ export type OpenCodeSdkClient = {
       readonly agent: string
       readonly model: OpenCodeModel
       readonly text: string
+      readonly delivery?: "queue"
     },
     void
   >
@@ -269,6 +275,11 @@ function parseStructuredText(text: string): JsonValue {
 export class SdkOpenCodeAdapter implements OpenCodeAdapter {
   constructor(private readonly client: OpenCodeSdkClient) {}
 
+  readonly setSessionEnvironment = (input: {
+    readonly sessionID: string
+    readonly variables: Readonly<Record<string, string>>
+  }) => this.call("set session environment", this.client.setSessionEnvironment(input))
+
   readonly createSession: OpenCodeAdapter["createSession"] = (input) =>
     this.call("create session", this.client.createSession(input))
 
@@ -280,6 +291,7 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
         agent: input.agent,
         model: input.model,
         text: input.text,
+        ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       }),
     )
 
@@ -532,6 +544,13 @@ export function makeOpenCodeSdkClient(
     run: (client: OpenCodeClient) => Effect.Effect<A, Error>,
   ): Effect.Effect<A, Error> => Effect.flatMap(clientEffect, run)
   return {
+    setSessionEnvironment: (input) =>
+      withClient((client) =>
+        client.session.environment({
+          sessionID: toSessionID(input.sessionID),
+          variables: input.variables,
+        }),
+      ),
     createSession: (input) =>
       withClient((client) =>
         client.session
@@ -555,7 +574,11 @@ export function makeOpenCodeSdkClient(
               }),
             ),
             Effect.andThen(
-              client.session.prompt({ sessionID: toSessionID(input.sessionID), text: input.text }),
+              client.session.prompt({
+                sessionID: toSessionID(input.sessionID),
+                text: input.text,
+                delivery: input.delivery,
+              }),
             ),
             Effect.asVoid,
           ),

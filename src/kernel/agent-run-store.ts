@@ -395,9 +395,15 @@ const make = Effect.gen(function* () {
           ? sql`1 = 1`
           : sql`provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
-        WHERE ${verified}
-        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised}
-          AND updated_at < ${staleBefore})
+        WHERE (${verified}) AND NOT EXISTS (
+          SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
+          AND t.provider_kind = 'opencode' AND (
+            EXISTS (SELECT 1 FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
+              WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = t.thread_id AND w.state IN ('pending','matched'))
+            OR EXISTS (SELECT 1 FROM resident_inbox m WHERE m.thread_id = t.thread_id AND m.state IN ('prepared','sending'))
+          )
+        )
+        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised} AND updated_at < ${staleBefore})
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
     })

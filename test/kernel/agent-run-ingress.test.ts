@@ -595,3 +595,27 @@ for (const detail of [null, "turn.failed", "error"] as const) {
     )
   })
 }
+
+test("resident OpenCode dispatch provisions the run before its initial prompt", async () => {
+  const { OpenCodeMailbox } = await import("../../src/resident/opencode")
+  const state = defaultState()
+  const prepared: string[] = []
+  const mailbox = Layer.succeed(OpenCodeMailbox, {
+    prepare: (runId) =>
+      Effect.sync(() => {
+        prepared.push(runId)
+        expect(state.prompted).toHaveLength(0)
+        return "Subscribe and end your turn."
+      }),
+    route: () => Effect.succeed(new Response(null, { status: 403 })),
+    tick: Effect.void,
+  })
+  const result = await Effect.runPromise(
+    register(submission).pipe(
+      Effect.provide(makeLayer(makeProvider(state), worktrees([])).pipe(Layer.provide(mailbox))),
+    ),
+  )
+  expect(prepared).toEqual([result.runId])
+  expect(state.prompted[0]?.text).toContain("Subscribe and end your turn.")
+  expect(state.prompted[0]?.text).toContain(submission.prompt)
+})

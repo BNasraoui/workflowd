@@ -18,14 +18,20 @@ export async function subscribeToEvent(
   request: typeof requestRunSocket = requestRunSocket,
 ) {
   const decoded = Schema.decodeUnknownSync(EventSelector)(selector, { onExcessProperty: "error" })
-  const socket = env.WORKFLOWD_CODEX_RESIDENT_SOCKET
+  const socket = env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET ?? env.WORKFLOWD_CODEX_RESIDENT_SOCKET
   const runId = env.WORKFLOWD_RUN_ID
   if (socket === undefined || runId === undefined)
     throw new Error("Resident run environment required")
   const response = await request(
     socket,
     "/subscriptions",
-    JSON.stringify({ runId, selector: decoded }),
+    JSON.stringify({
+      runId,
+      selector: decoded,
+      ...(env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET === undefined
+        ? {}
+        : { capability: env.WORKFLOWD_SUBSCRIPTION_CAPABILITY }),
+    }),
   )
   if (response.status !== 202) throw new Error(`Subscription refused (${response.status})`)
   return Schema.decodeUnknownSync(Receipt)(await response.json())

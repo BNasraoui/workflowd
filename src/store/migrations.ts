@@ -1388,11 +1388,18 @@ const residentInboxStore = Effect.gen(function* () {
   yield* sql`CREATE INDEX resident_inbox_pending ON resident_inbox(state)`
 })
 
+const openCodeResidentMailbox = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE resident_threads ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'codex' CHECK(provider_kind IN ('codex','opencode'))`
+  yield* sql`ALTER TABLE resident_threads ADD COLUMN capability_hash TEXT`
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0019,
     "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
     "0021_ci_completion_store": ciCompletionStore,
     "0022_resident_inbox_store": residentInboxStore,
+    "0023_opencode_resident_mailbox": openCodeResidentMailbox,
   }),
 })

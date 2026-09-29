@@ -55,13 +55,15 @@ single completion message arrives. The equivalent run-bound shell call is
 The external cargo shim stops polling: its resident worker pushes and subscribes,
 then workflowd wakes that worker through its mailbox. The shim is not edited here.
 
-The tool runs in a per-run stdio MCP process configured on workflowd's owned
+For Codex, the tool runs in a per-run stdio MCP process configured on workflowd's owned
 app-server child. The daemon verifies the socket peer's ancestry and resolves
 that run's custodied thread; tool arguments cannot supply a subscriber identity.
 CI selectors are restricted to the caller's configured repository; agent-run
 selectors must name another managed run in the same repository. Shared HTTP MCP
 bearers and shared OpenCode process roots do not grant this subscription authority.
-Resident Codex is the supported subscriber in this release.
+Resident Codex and opt-in resident OpenCode sessions are supported. OpenCode
+uses a separate run-bound capability provisioned into its session environment;
+a shared HTTP MCP bearer or a claimed run ID alone is insufficient.
 
 Subscription identity is the subscriber plus normalized selector. Repeating it,
 including after delivery, never creates another message. Already-final jobs enqueue
@@ -155,6 +157,53 @@ App private key never leaves workflowd. Permission and identity changes take
 effect on the owner's planned restart; existing dispatched workers are not
 retrofitted or interrupted.
 
+## Resident OpenCode delivery (off by default)
+
+Set `WORKFLOWD_OPENCODE_RESIDENT_ENABLED=true` and
+`WORKFLOWD_OPENCODE_RESIDENT_SOCKET` to a dedicated absolute Unix socket path
+with an existing parent directory. Enable CI and managed agent-run dispatch.
+The socket must differ from the resident Codex socket. These flags take effect
+only at an owner-planned cutover; no running server or unit is reconfigured by
+this change.
+
+Before the first prompt, workflowd provisions a fresh 256-bit capability into
+that OpenCode session's local shell environment using `session.environment`.
+Only its hash is stored in workflowd’s SQLite database. The environment also identifies the calling
+run and subscription socket. The run-bound shell helper shown above works
+without caller-supplied identity arguments; `subscribe_to_event` uses the same
+boundary when its stdio MCP process is launched with that session environment.
+OpenCode dispatch instructions include the shell helper. This does not install
+a shared MCP bearer, write credential files, or expose the capability in prompts.
+The GitHub token broker still requires an owned Codex process tree; enabling it
+does not grant OpenCode GitHub credentials.
+
+Every registration checks the capability against the calling run, its verified
+state, the native session, the configured OpenCode endpoint/server/host, and
+reserved worktree custody. Selectors retain the same repository restrictions as
+Codex. Pending waits and prepared inbox messages keep the managed run from being
+finished by the watchdog. Parent completion observation waits for the resident
+run to finish, so ending an intermediate turn does not wake its parent. The existing kernel waits and inbox transaction provide
+one durable message per subscriber and selector, including late subscriptions.
+
+Delivery uses the asynchronous prompt admission API with queue delivery. On this
+branch's pinned OpenCode v2 client, that is `session.prompt` (the successor to
+`prompt_async` / `promptAsync`): it durably admits an inbox input and schedules
+execution, returning before the model answers. Active sessions receive the
+message through their queue. Calls are bounded to 15 seconds. A missing session,
+refusal, failed call, invalid custody, or uncertain acknowledgement moves the
+inbox and active run to `operator_required`. There is no automatic prompt replay.
+A restart with a `prepared` message sends it once; a restart with a `sending`
+message requires an operator because the adapter cannot prove acceptance.
+`delivered` means the server accepted the message, not that the resumed task has
+finished. Inspect the subscription receipt/ID and durable inbox state to resolve
+operator-required delivery.
+
+Migration 0023 adds provider separation and the capability hash to resident
+mailboxes; existing rows default to Codex. Each delivery worker reads only its
+own provider's mailboxes. No real OpenCode server or credentials are needed for
+the test suite: adapter doubles, an ephemeral HTTP fixture, Unix sockets, and
+isolated SQLite databases cover both event kinds and restart/failure behavior.
+
 ## Resident Codex dispatch (off by default)
 
 Set `WORKFLOWD_CODEX_RESIDENT_ENABLED=true`,
@@ -208,11 +257,12 @@ The Codex wire shapes were checked against locally generated experimental types
 from Codex 0.156 in an isolated scratch home, in addition to the prior
 `explore/agent-inboxes` probes.
 
-This rework adds no migration beyond 0020/0021. The old single-target resident wait
+The mailbox work adds migration 0023 on top of existing migrations 0020–0022. The old single-target resident wait
 columns remain unused for schema compatibility. Drain any earlier experimental
 resident waits before cutover; they are not converted into new subscriptions.
 Dispatch changes in PR #58 and `fix/credential-rotation-keeps-runs` are separate:
-this rework leaves `agent-run-ingress.ts`, `runtime.ts`, and the legacy parent-wake
-workers untouched. Credential rotation must preserve the resident process root
+OpenCode mailbox provisioning adds an opt-in hook to `agent-run-ingress.ts`;
+`runtime.ts` and the parent resume workers remain unchanged. The OpenCode
+completion source defers parent wakes until a resident run finishes. Credential rotation must preserve the resident process root
 (or re-register the new owned root) so socket authentication and mailbox custody
 remain valid.
