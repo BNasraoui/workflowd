@@ -83,14 +83,24 @@ for await (const line of createInterface({input:process.stdin})) {
   let descendant: number | undefined
   try {
     await server.initialize()
-    const { Schema } = await import("effect")
+    const { Effect, Schedule, Schema } = await import("effect")
     descendant = Schema.decodeUnknownSync(Schema.Struct({ pid: Schema.Number }))(
       await server.rpc.request("thread/list", {}),
     ).pid
     await server.close()
     const { readFile } = await import("node:fs/promises")
-    const stat = await readFile(`/proc/${descendant}/stat`, "utf8").catch(() => "")
-    expect(stat === "" || stat.split(") ")[1]?.startsWith("Z ")).toBe(true)
+    const terminated = (stat: string) =>
+      stat === "" || stat.split(") ")[1]?.startsWith("Z ") === true
+    const stat = await Effect.runPromise(
+      Effect.tryPromise(() => readFile(`/proc/${descendant}/stat`, "utf8").catch(() => "")).pipe(
+        Effect.repeat({
+          while: (stat) => !terminated(stat),
+          schedule: Schedule.spaced("10 millis"),
+        }),
+        Effect.timeout("1 second"),
+      ),
+    )
+    expect(terminated(stat)).toBe(true)
   } finally {
     if (descendant !== undefined) {
       try {
