@@ -227,26 +227,28 @@ async function collectTrustedActionsCheckSuites(
   }
 
   const workflows = new Map<number, string>()
-  for (const { context, path } of requiredWorkflows) {
-    const baseContentSha = await repositoryContentSha(
-      getContentSha,
-      input,
-      path,
-      input.target.baseSha,
-      signal,
-    )
-    if (baseContentSha === undefined) {
-      contextsAbsentFromBase.add(context)
-      continue
-    }
-    const [workflow, headContentSha] = await Promise.all([
-      getWorkflow({ ...input.repository, workflow_id: path, request: { signal } }),
-      repositoryContentSha(getContentSha, input, path, input.target.headSha, signal),
-    ])
-    if (workflow.path === path && baseContentSha === headContentSha) {
-      workflows.set(workflow.id, path)
-    }
-  }
+  await Promise.all(
+    requiredWorkflows.map(async ({ context, path }) => {
+      const baseContentSha = await repositoryContentSha(
+        getContentSha,
+        input,
+        path,
+        input.target.baseSha,
+        signal,
+      )
+      if (baseContentSha === undefined) {
+        contextsAbsentFromBase.add(context)
+        return
+      }
+      const [workflow, headContentSha] = await Promise.all([
+        getWorkflow({ ...input.repository, workflow_id: path, request: { signal } }),
+        repositoryContentSha(getContentSha, input, path, input.target.headSha, signal),
+      ])
+      if (workflow.path === path && baseContentSha === headContentSha) {
+        workflows.set(workflow.id, path)
+      }
+    }),
+  )
 
   for await (const page of listRuns({
     ...input.repository,
@@ -422,13 +424,13 @@ async function appendRunPageLogs(
   logs: Map<string, string>,
   bounds: LogBounds,
 ): Promise<boolean> {
-  for (const run of runs) {
-    bounds.runsSeen += 1
-    if (bounds.runsSeen > 20 || bounds.retained >= 3) return true
-    if (run.headSha !== input.target.headSha || run.conclusion === "success") continue
+  const run = runs[0]
+  if (run === undefined) return false
+  bounds.runsSeen += 1
+  if (bounds.runsSeen > 20 || bounds.retained >= 3) return true
+  if (run.headSha === input.target.headSha && run.conclusion !== "success")
     await appendRunJobLogs(input, run.id, signal, logs, bounds)
-  }
-  return false
+  return appendRunPageLogs(input, runs.slice(1), signal, logs, bounds)
 }
 
 function canCollectJobLogs(client: GitHubInstallationAdapter): boolean {
@@ -463,10 +465,11 @@ async function appendJobPageLogs(
   bounds: LogBounds,
   downloadLog: NonNullable<GitHubInstallationAdapter["downloadWorkflowJobLog"]>,
 ): Promise<boolean> {
-  for (const job of jobs) {
-    bounds.jobsSeen += 1
-    if (bounds.jobsSeen > 100 || bounds.retained >= 3) return true
-    if (!failedJob(job)) continue
+  const job = jobs[0]
+  if (job === undefined) return false
+  bounds.jobsSeen += 1
+  if (bounds.jobsSeen > 100 || bounds.retained >= 3) return true
+  if (failedJob(job)) {
     const raw = await downloadLog({ ...input.repository, job_id: job.id, request: { signal } })
     logs.set(
       job.name,
@@ -474,7 +477,7 @@ async function appendJobPageLogs(
     )
     bounds.retained += 1
   }
-  return false
+  return appendJobPageLogs(input, jobs.slice(1), signal, logs, bounds, downloadLog)
 }
 
 function collectSonar(
