@@ -166,22 +166,27 @@ export const makeCodexCli = (
         }
         const iterator: AsyncIterator<import("../../src/kernel/codex-session").CodexExecEvent> = {
           next: async () => {
-            for (;;) {
-              if (queue.items.length > 0) {
-                return { value: queue.items.shift()!, done: false }
-              }
-              if (queue.closed) return { value: undefined, done: true }
-              await new Promise<void>((resolve) => {
-                queue.waiter = resolve
-              })
+            if (queue.items.length > 0) {
+              return { value: queue.items.shift()!, done: false }
             }
+            if (queue.closed) return { value: undefined, done: true }
+            await new Promise<void>((resolve) => {
+              queue.waiter = resolve
+            })
+            return iterator.next()
           },
         }
         void (async () => {
-          for (const event of [{ type: "thread.started", threadId } as const, ...events]) {
+          const pushNext = async (
+            remaining: import("../../src/kernel/codex-session").CodexExecEvent[],
+          ) => {
+            const event = remaining.shift()
+            if (event === undefined) return
             await Bun.sleep(5)
             queue.push(event)
+            return pushNext(remaining)
           }
+          await pushNext([{ type: "thread.started", threadId }, ...events])
           queue.close()
         })()
         return {

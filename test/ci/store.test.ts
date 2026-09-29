@@ -41,7 +41,7 @@ test("persists deduplicated ingress and replayable aggregate; missing workflows 
       const failed = yield* store.read(target)
       expect(failed?.conclusion).toBe("failure")
       expect(failed?.failingJobs).toEqual(["unit tests"])
-      expect((yield* store.events(target, pending!.sequence)).length).toBe(1)
+      expect(yield* store.events(target, pending!.sequence)).toHaveLength(1)
       const reconcilerRow = { ...target, installation_id: 2, etag: "etag2" }
       yield* store.snapshot(
         reconcilerRow,
@@ -49,15 +49,15 @@ test("persists deduplicated ingress and replayable aggregate; missing workflows 
         "etag2",
         1003,
       )
-      expect((yield* store.outbox()).length).toBe(2)
-      expect((yield* store.deliveryOutbox()).length).toBe(1)
+      expect(yield* store.outbox()).toHaveLength(2)
+      expect(yield* store.deliveryOutbox()).toHaveLength(1)
       yield* store.deliveryPublished("delivery-1")
-      expect((yield* store.deliveryOutbox()).length).toBe(0)
-      expect((yield* store.due(1005)).length).toBe(0)
+      expect(yield* store.deliveryOutbox()).toHaveLength(0)
+      expect(yield* store.due(1005)).toHaveLength(0)
       yield* store.defer(target, 1005)
-      expect((yield* store.due(1005)).length).toBe(1)
+      expect(yield* store.due(1005)).toHaveLength(1)
       yield* store.published(failed!.sequence)
-      expect((yield* store.outbox()).length).toBe(1)
+      expect(yield* store.outbox()).toHaveLength(1)
       yield* store.snapshot(target, [run("CI", "success"), run("Build", null, 2, 2)], "etag3", 1004)
       expect((yield* store.read(target))?.conclusion).toBe("pending")
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),

@@ -416,6 +416,12 @@ export function startHookService(
 
     // Acquire the listener last so its finalizer stops acceptance and drains
     // request fibers before worker and store scopes are released.
+    const submitTestJob = (input: TestJobSubmission, now: Date) =>
+      Option.getOrThrow(testJobCanary)
+        .submit(input, now)
+        .pipe(
+          Effect.tap((result) => (result.newlyEnqueued ? signals.wake("kernel-job") : Effect.void)),
+        )
     const server = yield* serveHookHttpWithHandler(
       {
         ...config.http,
@@ -445,14 +451,7 @@ export function startHookService(
               : {
                   testJobs: {
                     token: config.testJobCanary.token,
-                    submit: (input: TestJobSubmission, now: Date) =>
-                      Option.getOrThrow(testJobCanary)
-                        .submit(input, now)
-                        .pipe(
-                          Effect.tap((result) =>
-                            result.newlyEnqueued ? signals.wake("kernel-job") : Effect.void,
-                          ),
-                        ),
+                    submit: submitTestJob,
                     status: Option.getOrThrow(testJobCanary).status,
                   },
                 }),

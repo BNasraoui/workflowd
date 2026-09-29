@@ -454,7 +454,7 @@ export const makeLiveLayer = (config: AppConfig) => {
                   })
                   return new GitHubQrspiRepository(
                     config.qrspi!,
-                    async (installationId) => {
+                    (installationId) => {
                       const app = new App({
                         appId: config.github.appId,
                         privateKey,

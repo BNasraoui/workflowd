@@ -70,7 +70,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,
         },
       })
-      return `You are a resident workflowd worker. After pushing, subscribe with: bun ${JSON.stringify(`${import.meta.dir}/subscribe.ts`)} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). The subscribe_to_event MCP tool in ${import.meta.dir}/mcp.ts uses the same session environment. Wait for the registration receipt, then end your turn; workflowd sends one completion message. Never print the subscription capability or poll for completion.`
+      return `You are a resident workflowd worker. After pushing, subscribe with: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). The subscribe_to_event MCP tool in ${import.meta.dir}/mcp.ts uses the same session environment. Wait for the registration receipt, then end your turn; workflowd sends one completion message. Never print the subscription capability or poll for completion.`
     })
     const uncertain = Effect.fn("OpenCodeMailbox.uncertain")(function* (
       id: string,

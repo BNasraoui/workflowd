@@ -55,7 +55,9 @@ for await (const line of createInterface({input:process.stdin})) {
     // This PID belongs to the fixture started above.
     try {
       process.kill(server.pid, "SIGKILL")
-    } catch {}
+    } catch {
+      // The bounded shutdown already reaped the fixture.
+    }
     await server.close()
     await rm(directory, { recursive: true, force: true })
   }

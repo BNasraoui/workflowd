@@ -28,6 +28,18 @@ const Jobs = Schema.Struct({
 const success = (conclusion: string | null) =>
   conclusion !== null && ["success", "skipped", "neutral"].includes(conclusion)
 
+const failingJobNames = Effect.fn("Ci.failingJobNames")(function* (
+  request: CiRequest,
+  path: string,
+) {
+  const response = yield* Effect.tryPromise(() => request(path, null))
+  if (response.status !== 200) return yield* Effect.fail(new Error("CI jobs unavailable"))
+  const jobs = yield* Schema.decodeUnknownEffect(Jobs)(response.data)
+  if (jobs.total_count > jobs.jobs.length)
+    return yield* Effect.fail(new Error("CI jobs exceed bounded page"))
+  return jobs.jobs.filter((job) => !success(job.conclusion)).map((job) => job.name)
+})
+
 /** One inventory and at most ten job requests per pass. Incomplete inventories fail closed. */
 export const reconcileCi = Effect.fn("Ci.reconcile")(function* (
   request: CiRequest,
@@ -62,17 +74,12 @@ export const reconcileCi = Effect.fn("Ci.reconcile")(function* (
     return yield* Effect.fail(new Error("CI job inventory exceeds request budget"))
   const runs: CiRun[] = []
   for (const run of latest.values()) {
-    let failingJobs: ReadonlyArray<string> = []
-    if (failed.includes(run)) {
-      const response = yield* Effect.tryPromise(() =>
-        request(`${base}/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`, null),
-      )
-      if (response.status !== 200) return yield* Effect.fail(new Error("CI jobs unavailable"))
-      const jobs = yield* Schema.decodeUnknownEffect(Jobs)(response.data)
-      if (jobs.total_count > jobs.jobs.length)
-        return yield* Effect.fail(new Error("CI jobs exceed bounded page"))
-      failingJobs = jobs.jobs.filter((job) => !success(job.conclusion)).map((job) => job.name)
-    }
+    const failingJobs = failed.includes(run)
+      ? yield* failingJobNames(
+          request,
+          `${base}/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+        )
+      : []
     runs.push({
       id: run.id,
       name: run.name,

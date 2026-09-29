@@ -38,15 +38,16 @@ const env = {
   EVIDENCE_PREFIX: prefix,
   EVIDENCE_BINARY: resolve("scripts/evidence/credential-rotation-worker.mjs"),
 }
-for (const path of [
-  env.HOME,
-  env.CODEX_HOME,
-  env.XDG_CONFIG_HOME,
-  env.XDG_DATA_HOME,
-  env.XDG_STATE_HOME,
-  env.XDG_CACHE_HOME,
-])
-  await mkdir(path, { recursive: true, mode: 0o700 })
+await Promise.all(
+  [
+    env.HOME,
+    env.CODEX_HOME,
+    env.XDG_CONFIG_HOME,
+    env.XDG_DATA_HOME,
+    env.XDG_STATE_HOME,
+    env.XDG_CACHE_HOME,
+  ].map((path) => mkdir(path, { recursive: true, mode: 0o700 })),
+)
 const entries = []
 const results = []
 let fullSetup = null
@@ -73,15 +74,13 @@ const interrupt = () => {
 }
 process.on("SIGINT", interrupt)
 process.on("SIGTERM", interrupt)
-const wait = async (fn, ms = 15000) => {
-  const deadline = Date.now() + ms
-  do {
-    if (interrupted) throw new Error("evidence run interrupted")
-    const value = await fn()
-    if (value) return value
-    await Bun.sleep(40)
-  } while (Date.now() < deadline)
-  throw new Error("condition timed out")
+const wait = async (fn, ms = 15000, deadline = Date.now() + ms) => {
+  if (interrupted) throw new Error("evidence run interrupted")
+  const value = await fn()
+  if (value) return value
+  await Bun.sleep(40)
+  if (Date.now() >= deadline) throw new Error("condition timed out")
+  return wait(fn, ms, deadline)
 }
 const exists = (path) =>
   stat(path).then(
@@ -219,8 +218,8 @@ try {
     ["user.name", "user.email"].map((key) => command(["git", "config", key], { env: process.env })),
   )
   assert.ok(identity.every((x) => x.code === 0 && x.stdout.trim()))
-  for (let i = 0; i < 2; i++)
-    await command([
+  const configureIdentity = (i) =>
+    command([
       "git",
       "-C",
       join(root, "repo"),
@@ -228,6 +227,8 @@ try {
       ["user.name", "user.email"][i],
       identity[i].stdout.trim(),
     ])
+  await configureIdentity(0)
+  await configureIdentity(1)
   await writeFile(join(root, "repo", "README"), "Scratch evidence repository.\n")
   await command(["git", "-C", join(root, "repo"), "add", "README"])
   assert.equal(
@@ -303,7 +304,7 @@ try {
     await complete(runId)
   })
   await scenario("4. Absent and reused units", async () => {
-    for (const reuse of [false, true]) {
+    const checkMissingUnit = async (reuse) => {
       await start()
       const s = input(reuse ? "reuse" : "absent")
       const runId = id(s)
@@ -343,6 +344,8 @@ try {
         await removeUnit(unit)
       }
     }
+    await checkMissingUnit(false)
+    await checkMissingUnit(true)
   })
   await scenario("5. Cancellation with SIGTERM-trapping child", async () => {
     await start()
@@ -531,13 +534,15 @@ try {
   await fullSetup?.fixture.stop(true)
   await rm(env.CODEX_HOME, { recursive: true, force: true })
   log("auth-cleanup", { absent: !(await exists(join(env.CODEX_HOME, "auth.json"))) })
-  for (const unit of await owned()) {
-    try {
-      await removeUnit(unit)
-    } catch (error) {
-      results.push({ scenario: `Cleanup ${unit}`, result: "FAIL", detail: String(error) })
-    }
-  }
+  await Promise.all(
+    (await owned()).map(async (unit) => {
+      try {
+        await removeUnit(unit)
+      } catch (error) {
+        results.push({ scenario: `Cleanup ${unit}`, result: "FAIL", detail: String(error) })
+      }
+    }),
+  )
   const remaining = await command([
     "systemctl",
     "--user",

@@ -23,9 +23,13 @@ const repository = "BNasraoui/workflowd"
 let stage = "credential copy"
 try {
   const source = join(homedir(), ".config/workflowd")
-  const id = readFileSync(join(source, "env"), "utf8").match(
-    /^\s*(?:export\s+)?GITHUB_APP_ID\s*=\s*["']?(\d+)/m,
-  )?.[1]
+  const id = readFileSync(join(source, "env"), "utf8")
+    .split("\n")
+    .map(
+      (line) =>
+        line.trimStart().match(/^(?:export[ \t]+)?GITHUB_APP_ID[ \t]*=[ \t]*["']?(\d+)/)?.[1],
+    )
+    .find((value) => value !== undefined)
   assert.ok(id, "App ID unavailable")
   writeFileSync(join(root, "app-id"), id, { mode: 0o600 })
   for (const file of ["github-app.pem", "github-webhook-secret"]) {
@@ -76,52 +80,54 @@ try {
     [repository],
   )
   const fixtures = { repository, workflows: ["CI"] }
-  for (const [name, deliveryId] of [
-    ["success", process.env.EVIDENCE_SUCCESS_DELIVERY],
-    ["failure", process.env.EVIDENCE_FAILURE_DELIVERY],
-  ]) {
-    assert.match(deliveryId ?? "", /^\d+$/, "Set both EVIDENCE_*_DELIVERY IDs")
-    const delivery = await api(`/app/hook/deliveries/${deliveryId}`)
-    assert.equal(delivery.event, "workflow_run")
-    assert.equal(delivery.action, "completed")
-    const payload = delivery.request.payload
-    assert.equal(payload.repository.full_name, repository)
-    assert.equal(payload.installation.id, installation.id)
-    assert.equal(payload.workflow_run.conclusion, name)
-    const body = JSON.stringify(payload)
-    const signature = delivery.request.headers["X-Hub-Signature-256"]
-    assert.equal(
-      "sha256=" + createHmac("sha256", secret).update(body).digest("hex"),
-      signature,
-      "Cannot reconstruct original signed bytes",
-    )
-    const run = payload.workflow_run
-    const jobs = await api(
-      `/repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
-      token.token,
-    )
-    fixtures[name] = {
-      sha: run.head_sha,
-      runId: run.id,
-      attempt: run.run_attempt,
-      failingJobs: jobs.jobs
-        .filter((job) => !["success", "skipped", "neutral"].includes(job.conclusion))
-        .map((job) => job.name),
-      body,
-      signature,
-      deliveryId: delivery.guid,
-    }
-    console.log(
-      JSON.stringify({
-        kind: "verified-original-delivery",
-        name,
+  await Promise.all(
+    [
+      ["success", process.env.EVIDENCE_SUCCESS_DELIVERY],
+      ["failure", process.env.EVIDENCE_FAILURE_DELIVERY],
+    ].map(async ([name, deliveryId]) => {
+      assert.match(deliveryId ?? "", /^\d+$/, "Set both EVIDENCE_*_DELIVERY IDs")
+      const delivery = await api(`/app/hook/deliveries/${deliveryId}`)
+      assert.equal(delivery.event, "workflow_run")
+      assert.equal(delivery.action, "completed")
+      const payload = delivery.request.payload
+      assert.equal(payload.repository.full_name, repository)
+      assert.equal(payload.installation.id, installation.id)
+      assert.equal(payload.workflow_run.conclusion, name)
+      const body = JSON.stringify(payload)
+      const signature = delivery.request.headers["X-Hub-Signature-256"]
+      assert.equal(
+        "sha256=" + createHmac("sha256", secret).update(body).digest("hex"),
+        signature,
+        "Cannot reconstruct original signed bytes",
+      )
+      const run = payload.workflow_run
+      const jobs = await api(
+        `/repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`,
+        token.token,
+      )
+      fixtures[name] = {
+        sha: run.head_sha,
         runId: run.id,
         attempt: run.run_attempt,
+        failingJobs: jobs.jobs
+          .filter((job) => !["success", "skipped", "neutral"].includes(job.conclusion))
+          .map((job) => job.name),
+        body,
+        signature,
         deliveryId: delivery.guid,
-        failingJobs: fixtures[name].failingJobs,
-      }),
-    )
-  }
+      }
+      console.log(
+        JSON.stringify({
+          kind: "verified-original-delivery",
+          name,
+          runId: run.id,
+          attempt: run.run_attempt,
+          deliveryId: delivery.guid,
+          failingJobs: fixtures[name].failingJobs,
+        }),
+      )
+    }),
+  )
   writeFileSync(join(root, "fixtures.json"), JSON.stringify(fixtures), { mode: 0o600 })
   stage = "isolated harness"
   const child = spawn(process.execPath, [join(repo, "scripts/evidence/agent-inboxes.mjs")], {

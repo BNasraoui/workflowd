@@ -22,5 +22,8 @@ export const deliverOpenCode = Effect.fn("Resident.deliverOpenCode")(
     return "delivered" as const
   },
   Effect.timeout("15 seconds"),
-  Effect.catch(() => Effect.succeed("uncertain" as const)),
+  Effect.matchEffect({
+    onSuccess: Effect.succeed,
+    onFailure: () => Effect.succeed("uncertain" as const),
+  }),
 )

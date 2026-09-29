@@ -58,5 +58,8 @@ export const deliverResident = Effect.fn("Resident.deliver")(
     )
     return "delivered" as const
   },
-  Effect.catch(() => Effect.succeed("uncertain" as const)),
+  Effect.matchEffect({
+    onSuccess: Effect.succeed,
+    onFailure: () => Effect.succeed("uncertain" as const),
+  }),
 )

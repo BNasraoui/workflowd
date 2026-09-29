@@ -474,6 +474,15 @@ function wakeCommandWork(
   return result.status === "enqueued" ? signals.wake("command") : Effect.void
 }
 
+function webhookAction(payload: unknown) {
+  return typeof payload === "object" &&
+    payload !== null &&
+    "action" in payload &&
+    typeof payload.action === "string"
+    ? payload.action
+    : null
+}
+
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
@@ -517,13 +526,7 @@ export function handleGitHubWebhook(
     )
     if (decoded instanceof Response) return decoded
 
-    const action =
-      typeof payload === "object" &&
-      payload !== null &&
-      "action" in payload &&
-      typeof payload.action === "string"
-        ? payload.action
-        : null
+    const action = webhookAction(payload)
     const delivery = {
       deliveryId,
       event: eventName,

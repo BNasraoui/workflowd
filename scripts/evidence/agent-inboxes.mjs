@@ -63,14 +63,12 @@ const log = (kind, data) =>
     scrub(JSON.stringify({ at: new Date().toISOString(), kind, data })) + "\n",
   )
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
-async function until(label, fn, ms = 90000) {
-  const deadline = Date.now() + ms
-  while (Date.now() < deadline) {
-    const value = await fn()
-    if (value) return value
-    await delay(100)
-  }
-  throw new Error(`Timed out: ${label}`)
+async function until(label, fn, ms = 90000, deadline = Date.now() + ms) {
+  if (Date.now() >= deadline) throw new Error(`Timed out: ${label}`)
+  const value = await fn()
+  if (value) return value
+  await delay(100)
+  return until(label, fn, ms, deadline)
 }
 async function port() {
   const s = createServer()
@@ -112,7 +110,7 @@ function start(name, args, env) {
   return p
 }
 async function stop(p) {
-  if (!p || p.exitCode !== null || p.signalCode !== null) return
+  if (p?.exitCode !== null || p.signalCode !== null) return
   rememberChildren(p.pid)
   p.kill("SIGCONT")
   p.kill("SIGTERM")
@@ -145,42 +143,45 @@ function rememberChildren(pid) {
     }
   }
 }
-async function stopDescendants() {
-  for (const [pid, birth] of [...descendants].reverse()) {
-    const alive = () => {
-      try {
-        const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")
-        return fields[19] === birth && fields[0] !== "Z"
-      } catch {
-        return false
-      }
-    }
-    if (!alive()) continue
-    process.kill(pid, "SIGCONT")
-    process.kill(pid, "SIGTERM")
+async function stopDescendants(remaining = [...descendants].reverse()) {
+  const entry = remaining.shift()
+  if (entry === undefined) return
+  const [pid, birth] = entry
+  const alive = () => {
     try {
-      await until("owned descendant exits", () => !alive(), 5000)
+      const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")
+      return fields[19] === birth && fields[0] !== "Z"
     } catch {
-      if (alive()) process.kill(pid, "SIGKILL")
-      await until("owned descendant killed", () => !alive(), 5000)
+      return false
     }
-    log("descendant-stopped", { pid, birth })
   }
+  if (!alive()) return stopDescendants(remaining)
+  process.kill(pid, "SIGCONT")
+  process.kill(pid, "SIGTERM")
+  try {
+    await until("owned descendant exits", () => !alive(), 5000)
+  } catch {
+    if (alive()) process.kill(pid, "SIGKILL")
+    await until("owned descendant killed", () => !alive(), 5000)
+  }
+  log("descendant-stopped", { pid, birth })
+  return stopDescendants(remaining)
 }
-async function stopRecorders() {
-  for (const event of frames().filter((e) => e.direction === "launch")) {
-    const stat = `/proc/${event.pid}/stat`
-    if (!existsSync(stat)) continue
-    const birth = readFileSync(stat, "utf8").split(") ")[1].split(" ")[19]
-    if (birth !== event.frame.birth) continue
-    process.kill(event.pid, "SIGTERM")
-    await until(
-      "owned recorder exits",
-      () => !existsSync(stat) || readFileSync(stat, "utf8").split(") ")[1].startsWith("Z "),
-      15000,
-    )
-    log("recorder-stopped", { pid: event.pid, birth })
-  }
+async function stopRecorders(remaining = frames().filter((e) => e.direction === "launch")) {
+  const event = remaining.shift()
+  if (event === undefined) return
+  const stat = `/proc/${event.pid}/stat`
+  if (!existsSync(stat)) return stopRecorders(remaining)
+  const birth = readFileSync(stat, "utf8").split(") ")[1].split(" ")[19]
+  if (birth !== event.frame.birth) return stopRecorders(remaining)
+  process.kill(event.pid, "SIGTERM")
+  await until(
+    "owned recorder exits",
+    () => !existsSync(stat) || readFileSync(stat, "utf8").split(") ")[1].startsWith("Z "),
+    15000,
+  )
+  log("recorder-stopped", { pid: event.pid, birth })
+  return stopRecorders(remaining)
 }
 async function cancel(r) {
   const child = start(
@@ -332,10 +333,13 @@ async function natsSnapshot(label) {
   const manager = await jetstreamManager(nc)
   const info = await manager.streams.info("WORKFLOWD_CI_V1")
   const messages = []
-  for (let seq = info.state.first_seq; seq > 0 && seq <= info.state.last_seq; seq++) {
+  const readMessage = async (seq) => {
+    if (seq <= 0 || seq > info.state.last_seq) return
     const m = await manager.streams.getMessage("WORKFLOWD_CI_V1", { seq })
     messages.push({ seq: m.seq, subject: m.subject, body: new TextDecoder().decode(m.data) })
+    return readMessage(seq + 1)
   }
+  await readMessage(info.state.first_seq)
   log("nats-snapshot", { label, state: info.state, messages })
   return messages
 }
@@ -594,14 +598,16 @@ try {
     },
     30000,
   )
-  for (const resource of ["agent", "model"]) {
-    const response = await fetch(env.OPENCODE_SERVER_URL + `/api/${resource}`, {
-      headers: {
-        authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
-      },
-    })
-    log(`opencode-${resource}`, await response.json())
-  }
+  await Promise.all(
+    ["agent", "model"].map(async (resource) => {
+      const response = await fetch(env.OPENCODE_SERVER_URL + `/api/${resource}`, {
+        headers: {
+          authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+        },
+      })
+      log(`opencode-${resource}`, await response.json())
+    }),
+  )
   await until(
     "OpenCode agent catalog ready",
     async () => {
@@ -912,7 +918,7 @@ try {
     await boot()
     const r = await dispatch(
       "opencode-mailbox",
-      `This is an isolated mailbox evidence task. Do not inspect files, run git, search for executables, or change anything. First say Registering opencode-mailbox and run the shell command printf 'REGISTERING\\n' so workflowd can verify the generated step. Then run exactly this shell command once: ${JSON.stringify(process.execPath)} ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. If the command fails, report the failure and stop; do not search or retry. After a successful receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
+      String.raw`This is an isolated mailbox evidence task. Do not inspect files, run git, search for executables, or change anything. First say Registering opencode-mailbox and run the shell command printf 'REGISTERING\n' so workflowd can verify the generated step. Then run exactly this shell command once: ${JSON.stringify(process.execPath)} ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. If the command fails, report the failure and stop; do not search or retry. After a successful receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
     )
     const get = async (suffix) => {
       const response = await fetch(
@@ -987,14 +993,18 @@ try {
     }
     db.close()
   }
-  if (nc) await nc.close()
-  for (const p of [...processes].reverse()) {
+  if (nc) nc.close()
+  const stopProcesses = async (remaining) => {
+    const p = remaining.shift()
+    if (p === undefined) return
     try {
       await stop(p)
     } catch (e) {
       log("cleanup-failure", { pid: p.pid, message: e.message })
     }
+    return stopProcesses(remaining)
   }
+  await stopProcesses([...processes].reverse())
   try {
     await stopRecorders()
   } catch (error) {
@@ -1060,7 +1070,7 @@ try {
     rows
       .map(
         (r) =>
-          `| ${r.id} | ${r.name} | ${r.status} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`,
+          `| ${r.id} | ${r.name} | ${r.status} | ${r.detail.replaceAll("|", String.raw`\|`).replaceAll("\n", " ")} |`,
       )
       .join("\n")
   writeFileSync(

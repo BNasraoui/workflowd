@@ -167,22 +167,26 @@ export const ResidentCodexLive = (
             AND s.state IN ('ready','active') AND r.state = 'reserved'`
         return rows.length === 1
       })
+      const restoreCustody = Effect.fn("Resident.restoreCustody")(function* (
+        row: typeof import("./store").ResidentThread.Type,
+      ) {
+        const run = yield* runs.read(row.run_id)
+        if (yield* hasCustody(row.thread_id)) return true
+        yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
+        yield* finish(row.thread_id, true)
+        if (run !== null && ["accepted", "spawning", "spawned"].includes(run.state))
+          yield* runs.operatorRequired({
+            runId: row.run_id,
+            diagnostic: "resident_dispatch_incomplete",
+            now: new Date(),
+          })
+        return false
+      })
       const restore = Effect.fn("Resident.restore")(function* (onlyThread?: string) {
         for (const row of yield* store.threads()) {
           if (onlyThread !== undefined && row.thread_id !== onlyThread) continue
           threadRuns.set(row.thread_id, row.run_id)
-          const run = yield* runs.read(row.run_id)
-          if (!(yield* hasCustody(row.thread_id))) {
-            yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
-            yield* finish(row.thread_id, true)
-            if (run !== null && ["accepted", "spawning", "spawned"].includes(run.state))
-              yield* runs.operatorRequired({
-                runId: row.run_id,
-                diagnostic: "resident_dispatch_incomplete",
-                now: new Date(),
-              })
-            continue
-          }
+          if (!(yield* restoreCustody(row))) continue
           if (!servers.has(row.run_id)) yield* launch(row.run_id)
           yield* Effect.tryPromise(() =>
             request("thread/resume", {
@@ -339,7 +343,7 @@ export const ResidentCodexLive = (
             })
             listeners.set(threadId, { queue, finish: resolveExit })
             queue.push({ type: "thread.started", threadId })
-            const instructions = `You are a resident workflowd worker. After pushing, use subscribe_to_event with {"kind":"ci","repository":"OWNER/NAME","sha":"HEAD_SHA"}, or {"kind":"agent_run","run_id":"RUN_ID"}. Equivalent shell call: bun ${JSON.stringify(`${import.meta.dir}/subscribe.ts`)} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). After registration succeeds, END YOUR TURN. workflowd will queue one completion message. Do not sleep or poll.\n\n`
+            const instructions = `You are a resident workflowd worker. After pushing, use subscribe_to_event with {"kind":"ci","repository":"OWNER/NAME","sha":"HEAD_SHA"}, or {"kind":"agent_run","run_id":"RUN_ID"}. Equivalent shell call: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). After registration succeeds, END YOUR TURN. workflowd will queue one completion message. Do not sleep or poll.\n\n`
             yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
             yield* flush()
             return {
