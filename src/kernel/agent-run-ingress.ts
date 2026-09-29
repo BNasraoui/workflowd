@@ -446,7 +446,7 @@ const make = (options: AgentRunIngressOptions) =>
             resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
           modelId:
             resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "")
+              ? (resolution.route.modelID ?? "<cli-default>")
               : resolution.route.modelID,
           agent: options.agent,
           repository: repository.name,
@@ -520,7 +520,7 @@ const make = (options: AgentRunIngressOptions) =>
             resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
           modelId:
             resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "")
+              ? (resolution.route.modelID ?? "<cli-default>")
               : resolution.route.modelID,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),

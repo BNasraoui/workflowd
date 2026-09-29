@@ -131,3 +131,20 @@ test("explicit Codex cancellation records cancelled only after the owned unit st
   expect(stopped).toBe(true)
   expect(result?.state).toBe("cancelled")
 })
+
+test("a Codex route using the CLI default model persists a valid run", async () => {
+  const codex = makeCodexCli([
+    { type: "agent_message", text: "default model" },
+    { type: "turn.completed", outputTokens: 2 },
+  ])
+  const layer = makeLayer(makeProvider(defaultState()), worktrees([]), codex.port, {
+    codexRoutes: [{ name: "scan", modelID: null }],
+  })
+  const receipt = await Effect.runPromise(
+    register({ route: "scan", repository: "workflowd", prompt: "default" }).pipe(
+      Effect.provide(layer),
+    ),
+  )
+  expect(receipt.modelId).toBe("<cli-default>")
+  expect(codex.state.spawned[0]?.model).toBeNull()
+})
