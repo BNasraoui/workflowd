@@ -1,0 +1,26 @@
+#!/usr/bin/env bun
+/* global Bun */
+// Deliberately controlled process fixtures for timing, signals and byte limits.
+if (process.argv.includes("--version") || process.argv.includes("status")) process.exit(0)
+const prompt = await new Response(Bun.stdin.stream()).text()
+const emit = (value) => console.log(JSON.stringify(value))
+if (prompt === "trap") {
+  Bun.spawn(["/bin/sh", "-c", 'trap "" TERM; echo child-ready; while :; do sleep 1; done'], {
+    stdout: "inherit",
+    stderr: "inherit",
+  })
+}
+emit({ type: "thread.started", thread_id: `thread-${process.pid}` })
+if (prompt === "partial") {
+  process.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"par')
+  await Bun.sleep(1000)
+  process.stdout.write('tial-once"}}\n')
+} else emit({ type: "item.completed", item: { type: "agent_message", text: "first-output" } })
+if (prompt === "limit") {
+  console.log("x".repeat(20000))
+  process.stderr.write("e".repeat(20000))
+}
+if (prompt === "trap") await Bun.sleep(120000)
+else await Bun.sleep(prompt === "down" ? 1500 : 4000)
+emit({ type: "item.completed", item: { type: "agent_message", text: "full-final-output" } })
+emit({ type: "turn.completed", usage: { output_tokens: 42 } })

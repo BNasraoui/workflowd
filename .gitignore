@@ -18,3 +18,6 @@ env
 .beads-credential-key
 .beads/proxieddb/
 .claude/worktrees/
+
+# Local, credential-isolated manual evidence runs
+.scratch/
