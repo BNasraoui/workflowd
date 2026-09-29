@@ -365,6 +365,25 @@ export const makeCodexCli = (
           parse: parseCodexExecEvent,
         })
 
+        const waitInactive = (durationMs: number): Promise<boolean> => {
+          const deadline = Date.now() + durationMs
+          return Effect.runPromise(
+            Effect.tryPromise({
+              try: async () => {
+                const observed = await reconcile(path, manifest)
+                manifest = observed.manifest
+                return !observed.unit.present || !observed.unit.active
+              },
+              catch: normalizeError,
+            }).pipe(
+              Effect.repeat({
+                while: (inactive) => !inactive && Date.now() < deadline,
+                schedule: Schedule.spaced(pollIntervalMs),
+              }),
+            ),
+          )
+        }
+
         const cancelUnit = async () => {
           const reconciled = await reconcile(path, manifest)
           manifest = reconciled.manifest
@@ -377,24 +396,6 @@ export const makeCodexCli = (
             manifest.executionId,
           ])
           if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)
-          const waitInactive = (durationMs: number): Promise<boolean> => {
-            const deadline = Date.now() + durationMs
-            return Effect.runPromise(
-              Effect.tryPromise({
-                try: async () => {
-                  const observed = await reconcile(path, manifest)
-                  manifest = observed.manifest
-                  return !observed.unit.present || !observed.unit.active
-                },
-                catch: normalizeError,
-              }).pipe(
-                Effect.repeat({
-                  while: (inactive) => !inactive && Date.now() < deadline,
-                  schedule: Schedule.spaced(pollIntervalMs),
-                }),
-              ),
-            )
-          }
           if (!(await waitInactive(cancellationGraceMs))) {
             const killed = await runBoundedCommand([
               "systemctl",
