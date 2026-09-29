@@ -76,7 +76,7 @@ child.on("exit", (code) => {
   record("exit", { code })
   process.exit(code ?? 1)
 })
-child.on("error", () => {
-  record("exit", { error: "could not spawn Codex" })
+child.on("error", (error) => {
+  record("exit", { error: "could not spawn Codex", code: error.code })
   process.exit(1)
 })
