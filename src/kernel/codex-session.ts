@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Context, Effect, Schema } from "effect"
+import { Context, Effect, Schedule, Schema } from "effect"
 import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
@@ -377,16 +377,23 @@ export const makeCodexCli = (
             manifest.executionId,
           ])
           if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)
-          const waitInactive = async (durationMs: number): Promise<boolean> => {
+          const waitInactive = (durationMs: number): Promise<boolean> => {
             const deadline = Date.now() + durationMs
-            let observed = await reconcile(path, manifest)
-            manifest = observed.manifest
-            while (observed.unit.present && observed.unit.active && Date.now() < deadline) {
-              await Bun.sleep(pollIntervalMs)
-              observed = await reconcile(path, manifest)
-              manifest = observed.manifest
-            }
-            return !observed.unit.present || !observed.unit.active
+            return Effect.runPromise(
+              Effect.tryPromise({
+                try: async () => {
+                  const observed = await reconcile(path, manifest)
+                  manifest = observed.manifest
+                  return !observed.unit.present || !observed.unit.active
+                },
+                catch: normalizeError,
+              }).pipe(
+                Effect.repeat({
+                  while: (inactive) => !inactive && Date.now() < deadline,
+                  schedule: Schedule.spaced(pollIntervalMs),
+                }),
+              ),
+            )
           }
           if (!(await waitInactive(cancellationGraceMs))) {
             const killed = await runBoundedCommand([
@@ -408,11 +415,15 @@ export const makeCodexCli = (
         }
 
         const observeExit = async (): Promise<CodexExit> => {
-          let exit = await terminal()
-          while (exit === null && Date.now() - attachedAt < observationTimeoutMs) {
-            await Bun.sleep(pollIntervalMs)
-            exit = await terminal()
-          }
+          const exit = await Effect.runPromise(
+            Effect.tryPromise({ try: terminal, catch: normalizeError }).pipe(
+              Effect.repeat({
+                while: (result) =>
+                  result === null && Date.now() - attachedAt < observationTimeoutMs,
+                schedule: Schedule.spaced(pollIntervalMs),
+              }),
+            ),
+          )
           if (exit !== null) return exit
           await cancelUnit()
           return {

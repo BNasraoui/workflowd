@@ -15,7 +15,7 @@ const cli = makeCodexCli({
   pollIntervalMs: 0,
   observationTimeoutMs: 60_000,
   cancellationGraceMs: 60_000,
-  runCommand: async (command: ReadonlyArray<string>) => {
+  runCommand: (command: ReadonlyArray<string>) => {
     if (command[0] === "systemd-run")
       description = command.find((v) => v.startsWith("--description="))?.slice(14) ?? ""
     if (command.includes("stop")) polling = true
@@ -27,13 +27,13 @@ const cli = makeCodexCli({
           samples.push(heapStats().objectTypeCounts.Promise ?? 0)
         }
       }
-      return {
+      return Promise.resolve({
         exitCode: 0,
         stderr: "",
         stdout: `MainPID=12345\nInvocationID=fixture\nDescription=${description}\nActiveState=${polls >= 1200 ? "inactive" : "active"}\n`,
-      }
+      })
     }
-    return { exitCode: 0, stderr: "", stdout: "" }
+    return Promise.resolve({ exitCode: 0, stderr: "", stdout: "" })
   },
 })
 try {
