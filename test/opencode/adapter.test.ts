@@ -502,3 +502,73 @@ test("v2 mailbox transport queues a prompt and sets environment without waiting 
     await server.stop(true)
   }
 })
+
+test("v2 first-token telemetry observes generated steps before session totals settle", async () => {
+  const { OpenCode } = await import("@opencode-ai/client/effect")
+  const { FetchHttpClient } = await import("effect/unstable/http")
+  const { makeOpenCodeSdkClient } = await import("../../src/opencode/adapter")
+  const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  let total = 0
+  let idle = false
+  let generated = true
+  const requests: string[] = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url)
+      requests.push(url.pathname + url.search)
+      if (url.pathname.endsWith("/message"))
+        return Response.json({
+          data: generated
+            ? [
+                {
+                  id: "msg_step",
+                  type: "assistant",
+                  agent: "build",
+                  model: { id: "fixture", providerID: "fixture" },
+                  content: [],
+                  tokens: { ...zero, output: 150, reasoning: 207 },
+                  time: { created: 2, streamed: 3 },
+                },
+              ]
+            : [],
+          cursor: {},
+        })
+      return Response.json({
+        data: {
+          id: "ses_fixture",
+          projectID: "fixture",
+          cost: 0,
+          tokens: { ...zero, output: total },
+          time: { created: 1, updated: 1, ...(idle ? { idle: 4 } : {}) },
+          location: { directory: "/fixture" },
+        },
+      })
+    },
+  })
+  try {
+    const client = OpenCode.make({ baseUrl: server.url.toString() }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    )
+    const adapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(client))
+    const telemetry = () =>
+      Effect.runPromise(adapter.sessionTelemetry({ sessionID: "ses_fixture" }))
+    expect(await telemetry()).toMatchObject({ outputTokens: 357, idle: false })
+    expect(requests.some((path) => path.includes("limit=20") && path.includes("order=desc"))).toBe(
+      true,
+    )
+    generated = false
+    expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: false })
+    total = 500
+    const before = requests.length
+    expect(await telemetry()).toMatchObject({ outputTokens: 500, idle: false })
+    expect(requests.length - before).toBe(1)
+    total = 0
+    idle = true
+    generated = true
+    expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: true })
+  } finally {
+    await server.stop(true)
+  }
+})

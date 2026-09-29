@@ -885,7 +885,7 @@ try {
     await boot()
     const r = await dispatch(
       "opencode-mailbox",
-      "Reply exactly READY opencode-mailbox. Do not use tools or inspect anything. End the turn.",
+      `This is an isolated mailbox evidence task. Do not inspect files, run git, search for executables, or change anything. First say Registering opencode-mailbox and run the shell command printf 'REGISTERING\\n' so workflowd can verify the generated step. Then run exactly this shell command once: ${JSON.stringify(process.execPath)} ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. If the command fails, report the failure and stop; do not search or retry. After a successful receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
     )
     const get = async (suffix) => {
       const response = await fetch(
@@ -899,27 +899,6 @@ try {
       assert.equal(response.status, 200)
       return response.json()
     }
-    await until("OpenCode priming turn ended", async () => (await get("")).data.time?.idle)
-    log("opencode-primed", { sessionId: r.nativeSessionId, session: await get("") })
-    const admission = await fetch(
-      env.OPENCODE_SERVER_URL + `/api/session/${r.nativeSessionId}/prompt`,
-      {
-        method: "POST",
-        headers: {
-          authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          delivery: "queue",
-          text: `This is an isolated mailbox evidence task. Do not inspect files, run git, search for executables, or change anything. Run exactly this shell command once: ${JSON.stringify(process.execPath)} ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. If the command fails, report the failure and stop; do not search or retry. After a successful receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
-        }),
-      },
-    )
-    assert.equal(admission.status, 200)
-    log("opencode-subscription-admitted", {
-      sessionId: r.nativeSessionId,
-      status: admission.status,
-    })
     const texts = (page) =>
       page.data
         .filter((m) => m.type === "assistant")

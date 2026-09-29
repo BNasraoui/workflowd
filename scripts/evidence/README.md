@@ -56,9 +56,9 @@ real store, captures the persisted state and absent mailbox message, crashes the
 scratch daemon, then restarts the same branch and database.
 
 Scenario 12 uses the separate scratch OpenCode server with a credential-free
-catalog model. After a short priming turn establishes verified custody, it registers an
-agent-run subscription through the session-bound socket command using the absolute
-Bun executable, ends that turn, then receives one cancellation completion
+catalog model. It emits a short registration step to establish verified custody, then registers
+an agent-run subscription through the session-bound socket command using the
+absolute Bun executable, ends the turn, and receives one cancellation completion
 and replies. The harness checks the durable inbox and actual session history.
 No OpenCode credentials or production server are used.
 `EVIDENCE_OPENCODE_MODEL` can select another available credential-free model.
