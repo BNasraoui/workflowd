@@ -254,6 +254,7 @@ export const makeCodexCli = (
   }
 
   type UnitState = {
+    readonly pid: number
     readonly present: boolean
     readonly active: boolean
     readonly invocationId: string
