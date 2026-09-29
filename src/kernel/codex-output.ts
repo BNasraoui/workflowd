@@ -52,6 +52,7 @@ export const incrementalLines = <A>(options: {
   async *[Symbol.asyncIterator]() {
     let offset = 0
     let buffered = ""
+    let stopped = false
     const decoder = new TextDecoder()
     for (;;) {
       try {
@@ -78,8 +79,11 @@ export const incrementalLines = <A>(options: {
         buffered = buffered.slice(newline + 1)
         yield options.parse(line)
       }
-      if (await options.shouldStop()) return
-      await Bun.sleep(options.pollIntervalMs)
+      if (stopped) return
+      // Completion can publish its final bytes while shouldStop is awaiting
+      // the manager. Drain once more after observing the terminal boundary.
+      stopped = await options.shouldStop()
+      if (!stopped) await Bun.sleep(options.pollIntervalMs)
     }
   },
 })

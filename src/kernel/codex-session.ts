@@ -318,6 +318,10 @@ export const makeCodexCli = (
         const attachedAt = Date.now()
 
         const terminal = async (): Promise<CodexExit | null> => {
+          // The wrapper publishes its result before exiting. Inspect the unit
+          // first so a result published during this query is not missed.
+          const reconciled = await reconcile(path, manifest)
+          manifest = reconciled.manifest
           if (await fileExists(manifest.resultPath)) {
             const result = await readJson(manifest.resultPath, ResultRecord)
             return { exitCode: result.exitCode, stderr: await boundedText(manifest.stderrPath) }
@@ -325,8 +329,6 @@ export const makeCodexCli = (
           if (await fileExists(manifest.cancelledPath)) {
             return { exitCode: -1, stderr: await boundedText(manifest.stderrPath) }
           }
-          const reconciled = await reconcile(path, manifest)
-          manifest = reconciled.manifest
           if (!reconciled.unit.present) {
             return { exitCode: -1, stderr: "codex transient unit is absent and has no result" }
           }

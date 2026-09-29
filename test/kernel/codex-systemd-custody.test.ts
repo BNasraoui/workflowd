@@ -312,3 +312,31 @@ test("cancellation requests a nonblocking stop and waits through deactivation be
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("completion appearing during a manager query wins over an absent-unit snapshot", async () => {
+  const root = join(tmpdir(), `codex-result-race-${crypto.randomUUID()}`)
+  try {
+    const launched = await spawn(root)
+    let finishing = false
+    const cli = makeCodexCli({
+      binary: "codex",
+      custodyRoot: root,
+      runCommand: async (command) => {
+        if (finishing) {
+          await writeFile(join(launched.directory, "result.json"), '{"version":1,"exitCode":0}\n')
+          return {
+            exitCode: 0,
+            stdout: "LoadState=not-found\nActiveState=inactive\nInvocationID=\n",
+            stderr: "",
+          }
+        }
+        return launched.systemd.runCommand(command)
+      },
+    })
+    const attached = await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }))
+    finishing = true
+    expect(await Effect.runPromise(attached!.exited)).toMatchObject({ exitCode: 0 })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
