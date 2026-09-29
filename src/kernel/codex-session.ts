@@ -261,6 +261,7 @@ export const makeCodexCli = (
       "systemctl",
       "--user",
       "show",
+      "--property=LoadState",
       "--property=InvocationID",
       "--property=Description",
       "--property=ActiveState",
@@ -279,8 +280,8 @@ export const makeCodexCli = (
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
     return {
-      present: true,
-      active: fields.get("ActiveState") === "active" || fields.get("ActiveState") === "activating",
+      present: fields.get("LoadState") !== "not-found",
+      active: ["active", "activating", "deactivating"].includes(fields.get("ActiveState") ?? ""),
       invocationId: fields.get("InvocationID") ?? "",
       description: fields.get("Description") ?? "",
       result: fields.get("Result") ?? "",
@@ -354,6 +355,7 @@ export const makeCodexCli = (
             "systemctl",
             "--user",
             "stop",
+            "--no-block",
             manifest.executionId,
           ])
           if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)

@@ -250,3 +250,65 @@ test("isolated callers can namespace transient units without changing the defaul
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("systemctl's successful not-found response recovers a durable result", async () => {
+  const root = join(tmpdir(), `codex-unloaded-${crypto.randomUUID()}`)
+  try {
+    const launched = await spawn(root)
+    await writeFile(join(launched.directory, "result.json"), '{"version":1,"exitCode":0}\n')
+    const cli = makeCodexCli({
+      binary: "codex",
+      custodyRoot: root,
+      runCommand: async () => ({
+        exitCode: 0,
+        stdout: "LoadState=not-found\nActiveState=inactive\nInvocationID=\n",
+        stderr: "",
+      }),
+    })
+    const attached = await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }))
+    expect(await Effect.runPromise(attached!.exited)).toMatchObject({ exitCode: 0 })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("cancellation requests a nonblocking stop and waits through deactivation before killing", async () => {
+  const root = join(tmpdir(), `codex-deactivating-${crypto.randomUUID()}`)
+  const systemd = manager()
+  let deactivating = false
+  let killed = false
+  try {
+    const runCommand = async (command: ReadonlyArray<string>) => {
+      if (command.includes("stop")) {
+        expect(command).toContain("--no-block")
+        deactivating = true
+        return { exitCode: 0, stdout: "", stderr: "" }
+      }
+      if (command.includes("kill")) {
+        killed = true
+        deactivating = false
+      }
+      const result = await systemd.runCommand(command)
+      return deactivating && command.includes("show")
+        ? {
+            ...result,
+            stdout: result.stdout.replace("ActiveState=active", "ActiveState=deactivating"),
+          }
+        : result
+    }
+    const cli = makeCodexCli({
+      binary: "codex",
+      custodyRoot: root,
+      pollIntervalMs: 2,
+      cancellationGraceMs: 5,
+      runCommand,
+    })
+    const process = await Effect.runPromise(
+      cli.spawn({ runId: "agent-run-systemd", directory: root, prompt: "go", model: null }),
+    )
+    await Effect.runPromise(process.cancel)
+    expect(killed).toBe(true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
