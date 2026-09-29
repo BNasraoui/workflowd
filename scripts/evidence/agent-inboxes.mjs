@@ -909,7 +909,7 @@ try {
         return (
           subscribed.length === 1 &&
           texts(messages).some((t) => t.includes("SUBSCRIBED opencode-mailbox")) &&
-          session.time?.idle
+          session.data.time?.idle
         )
       },
       180000,
