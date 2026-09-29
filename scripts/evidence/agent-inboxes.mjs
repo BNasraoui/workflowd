@@ -859,41 +859,6 @@ try {
     workflow.kill("SIGKILL")
     await until("scratch daemon crashed", () => workflow.signalCode !== null)
     await stopRecorders()
-    const custody = join(root, "agent-processes")
-    for (const name of existsSync(custody) ? readdirSync(custody) : []) {
-      const manifestPath = join(custody, name, "manifest.json")
-      if (!existsSync(manifestPath)) continue
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
-      assert.ok(manifest.executionId.startsWith(unitPrefix))
-      const status = spawnSync(
-        "systemctl",
-        [
-          "--user",
-          "show",
-          manifest.executionId,
-          "-p",
-          "InvocationID",
-          "-p",
-          "Description",
-          "-p",
-          "ActiveState",
-        ],
-        { env, encoding: "utf8" },
-      )
-      if (
-        status.status === 0 &&
-        /ActiveState=(active|activating|deactivating)/.test(status.stdout)
-      ) {
-        assert.ok(status.stdout.includes(`InvocationID=${manifest.invocationId}`))
-        assert.ok(status.stdout.includes(`Description=workflowd codex launch ${manifest.launchId}`))
-        command(["systemctl", "--user", "stop", manifest.executionId], env)
-      }
-      spawnSync("/usr/bin/systemctl", ["--user", "reset-failed", manifest.executionId], {
-        env,
-        stdio: "ignore",
-      })
-      log("scratch-unit-cleaned", { unit: manifest.executionId })
-    }
     await stopDescendants()
     for (const name of ["resident.sock", "identity.sock"]) rmSync(join(root, name), { force: true })
     await boot()
@@ -1034,6 +999,38 @@ try {
     await stopRecorders()
   } catch (error) {
     log("cleanup-failure", { message: error.message })
+  }
+  const custody = join(root, "agent-processes")
+  for (const name of existsSync(custody) ? readdirSync(custody) : []) {
+    const manifestPath = join(custody, name, "manifest.json")
+    if (!existsSync(manifestPath)) continue
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    assert.ok(manifest.executionId.startsWith(unitPrefix))
+    const status = spawnSync(
+      "/usr/bin/systemctl",
+      [
+        "--user",
+        "show",
+        manifest.executionId,
+        "-p",
+        "InvocationID",
+        "-p",
+        "Description",
+        "-p",
+        "ActiveState",
+      ],
+      { env, encoding: "utf8" },
+    )
+    if (status.status === 0 && /ActiveState=(active|activating|deactivating)/.test(status.stdout)) {
+      assert.ok(status.stdout.includes(`InvocationID=${manifest.invocationId}`))
+      assert.ok(status.stdout.includes(`Description=workflowd codex launch ${manifest.launchId}`))
+      command(["systemctl", "--user", "stop", manifest.executionId], env)
+    }
+    spawnSync("/usr/bin/systemctl", ["--user", "reset-failed", manifest.executionId], {
+      env,
+      stdio: "ignore",
+    })
+    log("scratch-unit-cleaned", { unit: manifest.executionId })
   }
   await stopDescendants()
   log("cleanup-complete", { ownedProcesses: processes.size, trackedDescendants: descendants.size })
