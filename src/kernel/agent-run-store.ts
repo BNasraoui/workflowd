@@ -343,9 +343,10 @@ const make = Effect.gen(function* () {
     transition(
       input.runId,
       "run is not cancellable",
-      sql`UPDATE kernel_agent_runs SET state = 'cancelled',
+      sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = NULL,
         updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('spawning', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND (state IN ('spawning', 'spawned', 'verified')
+          OR (state = 'operator_required' AND provider_id = 'codex-cli'))
         RETURNING run_id`,
     )
 

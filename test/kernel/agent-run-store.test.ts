@@ -272,3 +272,28 @@ describe("agent-run store", () => {
     expect(result.retry.status).toBe("created")
   })
 })
+
+test("confirmed Codex cancellation wins when its exit observer escalated first", async () => {
+  const result = await run(
+    Effect.gen(function* () {
+      const store = yield* AgentRunStore
+      yield* store.create({ ...input, providerId: "codex-cli" })
+      yield* spawn(store)
+      yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+      yield* store.operatorRequired({
+        runId: input.runId,
+        diagnostic: "codex_failed: exit -1",
+        now: later,
+      })
+      // The dispatcher invokes this only after exact-invocation cgroup shutdown.
+      yield* store.cancel({ runId: input.runId, now: later })
+      const staleObserver = yield* store
+        .operatorRequired({ runId: input.runId, diagnostic: "late observer", now: later })
+        .pipe(Effect.result)
+      return { row: yield* store.read(input.runId), staleObserver }
+    }),
+  )
+  expect(result.row?.state).toBe("cancelled")
+  expect(result.row?.diagnostic).toBeNull()
+  expect(result.staleObserver._tag).toBe("Failure")
+})
