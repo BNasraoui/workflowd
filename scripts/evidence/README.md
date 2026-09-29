@@ -15,59 +15,37 @@ Each invocation creates `.scratch/evidence/<timestamp>/` with its own home,
 configuration, SQLite database, Git repository/worktrees, Unix sockets, NATS
 JetStream store and loopback ports. It starts this branch's `src/main.ts` and a
 separate OpenCode server needed by workflowd's startup validation. No systemd,
-deployment checkout, existing daemon, production credentials or service ports
-are used. The recorder forwards real Codex protocol traffic without synthesizing
+deployment checkout, existing daemon, or production service ports are used.
+Production App credentials are read only by the explicitly authorized wrapper. The recorder forwards real Codex protocol traffic without synthesizing
 responses. Only the mailbox-failure scenario stops its owned app-server before a
 queue call. The restart scenario freezes and kills only the workflowd process
 created by this invocation. Recorder cleanup checks process birth times before
 signalling a recorded PID.
 
-For scenarios 1–5, supply **separate test GitHub App credentials**, with Actions
-read access to a repository containing successful and failing runs:
-
-An existing App may be reused only with explicit owner authorization. Before
-starting any services or CI runs, use read-only App API requests to verify an
-unsuspended installation, Actions read permission, and `workflow_run` event
-subscription. `check_suite` is also supported by workflowd. Do not change App
-settings as part of the harness. If the owner requires stopping on missing App
-settings, stop the evidence run and report those prerequisites.
-
-The authorized existing-App preflight on 2026-09-29 failed these prerequisites;
-see [the recorded result](./ci-opencode-preflight.md). No new scenarios were run.
-The fixture mode below signs constructed payloads with a scratch secret; it does
-**not** replay GitHub's original payload bytes and signature. A follow-up run
-requiring real delivery replay must add that input path before claiming success.
+For scenarios 1–5, use the owner-authorized App runner after the read-only
+preflight. It requires exactly one active installation, exactly
+`BNasraoui/workflowd`, accepted Actions read, and Workflow run / Check suite
+subscriptions. It never changes App settings or triggers CI. Re-run only the
+chosen existing job separately, then pass the App delivery IDs as decimal strings:
 
 ```sh
-EVIDENCE_GITHUB_APP_ID=12345 \
-EVIDENCE_GITHUB_INSTALLATION_ID=67890 \
-EVIDENCE_GITHUB_KEY=/absolute/path/to/test-app.pem \
-EVIDENCE_CI_FIXTURES=/absolute/path/to/fixtures.json \
-bun scripts/evidence/agent-inboxes.mjs
+EVIDENCE_SUCCESS_DELIVERY=3845408192221683712 \
+EVIDENCE_FAILURE_DELIVERY=3845408194853617664 \
+bun scripts/evidence/github-app-run.mjs
 ```
 
-The fixtures JSON contains real repository/run values:
+The runner copies only the App ID, key, and webhook secret from the explicitly
+authorized production configuration into a private worktree scratch directory.
+It fetches the two completed deliveries, reconstructs their original bytes, and
+requires an exact match against the original GitHub signature before replay.
+The actual workflowd reconciler uses the App API; no aggregate results are seeded.
+The CI policy is restricted to `BNasraoui/workflowd`. The negative repository test
+uses a synthetic signed payload that is rejected before any GitHub API access.
 
-```json
-{
-  "repository": "owner/test-repository",
-  "workflows": ["CI"],
-  "success": { "sha": "40-character-successful-commit-sha", "runId": 123 },
-  "failure": {
-    "sha": "40-character-failing-commit-sha",
-    "runId": 456,
-    "failingJobs": ["typecheck", "test"]
-  }
-}
-```
-
-Missing test credentials produce **BLOCKED**, not PASS. In that mode the harness
-generates an invalid scratch App key: signed webhook ingress and JetStream
-publication are still real, but authenticated GitHub reconciliation cannot
-produce the aggregate mailbox result. No fake GitHub API or seeded CI result is
-substituted. A webhook's conclusion does not bypass the PR's reconciliation
-policy. Fixture workflow names must match the actual required workflows, and
-failure job names must match GitHub's jobs API.
+All copied credentials, fixture signatures, and scratch App configuration are
+removed on normal completion or failure. Allow the harness to finish cleanup;
+do not kill its wrapper. Preflight observations are in
+[the recorded result](./ci-opencode-preflight.md).
 
 Scenario 6 completes one real worker and administratively cancels another
 through the production `AgentRunStore.cancel` implementation. This branch has no
@@ -77,10 +55,11 @@ Scenario 9 pauses the scratch delivery process, commits cancellation through the
 real store, captures the persisted state and absent mailbox message, crashes the
 scratch daemon, then restarts the same branch and database.
 
-Scenario 12 is reported as unsupported: this PR's `subscribe_to_event` and
-resident inbox adapter are Codex-only. Existing OpenCode parent wakes are a
-different interface; this harness does not claim they prove resident OpenCode
-subscriptions.
+Scenario 12 uses the separate scratch OpenCode server with a credential-free
+catalog model. It registers an agent-run subscription through the session-bound
+socket command, ends its first turn, then receives one cancellation completion
+and replies. The harness checks the durable inbox and actual session history.
+No OpenCode credentials or production server are used.
 
 `logs/results.md` contains the result table. `logs/evidence.jsonl` contains
 timestamped HTTP observations, SQLite snapshots, JetStream sequences/bodies and

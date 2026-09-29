@@ -46,11 +46,14 @@ const secret = () => {
   secrets.push(s)
   return s
 }
-const webhookSecret = secret(),
+const webhookSecret = process.env.EVIDENCE_GITHUB_WEBHOOK_SECRET_FILE
+    ? readFileSync(process.env.EVIDENCE_GITHUB_WEBHOOK_SECRET_FILE, "utf8").trim()
+    : secret(),
   natsToken = secret(),
   runToken = secret(),
   ciToken = secret(),
   ocPassword = secret()
+secrets.push(webhookSecret)
 const scrub = (value) => secrets.reduce((s, key) => s.split(key).join("[REDACTED]"), String(value))
 const log = (kind, data) =>
   appendFileSync(
@@ -197,7 +200,6 @@ async function cancel(r) {
   log("cancel-persisted", { runId: r.runId })
 }
 class Blocked extends Error {}
-class NotApplicable extends Error {}
 async function scenario(id, name, run) {
   if (interrupted) throw new Error("Evidence run interrupted; cleaning up owned processes")
   log("scenario-start", { id, name })
@@ -209,8 +211,7 @@ async function scenario(id, name, run) {
     rows.push({
       id,
       name,
-      status:
-        error instanceof NotApplicable ? "N/A" : error instanceof Blocked ? "BLOCKED" : "FAIL",
+      status: error instanceof Blocked ? "BLOCKED" : "FAIL",
       detail: scrub(error.message),
       started,
     })
@@ -333,26 +334,43 @@ async function natsSnapshot(label) {
 }
 const fixturesPath = process.env.EVIDENCE_CI_FIXTURES
 const fixtures = fixturesPath ? JSON.parse(readFileSync(fixturesPath, "utf8")) : null
-const repository = fixtures?.repository ?? "evidence/inboxes"
+for (const target of [fixtures?.success, fixtures?.failure])
+  if (target?.signature) secrets.push(target.signature)
+const repository = fixtures?.repository ?? "BNasraoui/workflowd"
+assert.equal(
+  repository,
+  "BNasraoui/workflowd",
+  "Evidence CI policy must contain only the authorized repository",
+)
 const installationId = Number(process.env.EVIDENCE_GITHUB_INSTALLATION_ID ?? 2147483647)
 const sha = (id) => id.toString(16).padStart(40, "0")
 async function webhook(name, target, conclusion, configured = true) {
-  const deliveryId = `evidence-${name}`
-  const payload = JSON.stringify({
-    action: "completed",
-    installation: { id: installationId },
-    repository: { full_name: configured ? repository : "unconfigured/ignored" },
-    workflow_run: {
-      id: target.runId ?? 987654321,
-      name: "CI",
-      head_sha: target.sha,
-      status: "completed",
-      conclusion,
-      run_attempt: 1,
-      html_url: `https://github.com/${repository}/actions/runs/${target.runId ?? 987654321}`,
-    },
-  })
-  const signature = "sha256=" + createHmac("sha256", webhookSecret).update(payload).digest("hex")
+  const deliveryId = configured && target.deliveryId ? target.deliveryId : `evidence-${name}`
+  const payload =
+    configured && target.body
+      ? target.body
+      : JSON.stringify({
+          action: "completed",
+          installation: { id: installationId },
+          repository: { full_name: configured ? repository : "unconfigured/ignored" },
+          workflow_run: {
+            id: target.runId ?? 987654321,
+            name: "CI",
+            head_sha: target.sha,
+            status: "completed",
+            conclusion,
+            run_attempt: 1,
+            html_url: `https://github.com/${repository}/actions/runs/${target.runId ?? 987654321}`,
+          },
+        })
+  const signature =
+    configured && target.signature
+      ? target.signature
+      : "sha256=" + createHmac("sha256", webhookSecret).update(payload).digest("hex")
+  assert.equal(
+    signature,
+    "sha256=" + createHmac("sha256", webhookSecret).update(payload).digest("hex"),
+  )
   log("webhook-send", { deliveryId, payload })
   const response = await fetch(base + "/hooks/github", {
     method: "POST",
@@ -379,7 +397,7 @@ async function webhook(name, target, conclusion, configured = true) {
 function requireCi() {
   if (!fixtures || !process.env.EVIDENCE_GITHUB_KEY)
     throw new Blocked(
-      "Needs separate test GitHub App credentials and real successful/failing run fixtures; webhook receipt alone is not a mailbox result",
+      "Needs owner-authorized App credentials and real successful/failing deliveries",
     )
 }
 async function ciResult(target) {
@@ -590,7 +608,9 @@ try {
     httpPort,
     unusedOpenCodePort,
     gitHead: command(["git", "rev-parse", "HEAD"], { PATH: path }),
-    credentialMode: fixtures ? "separate-test-app" : "generated-invalid-app-key",
+    credentialMode: fixtures
+      ? "owner-authorized-app-original-signed-deliveries"
+      : "generated-invalid-app-key",
     model: env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES,
   })
   writeFileSync(
@@ -627,7 +647,9 @@ try {
       "NATS completion",
       async () =>
         (await natsSnapshot("success")).some(
-          (m) => JSON.parse(m.body).deliveryId === "evidence-ci-success",
+          (m) =>
+            JSON.parse(m.body).deliveryId ===
+            (fixtures?.success.deliveryId ?? "evidence-ci-success"),
         ),
       10000,
     )
@@ -664,7 +686,10 @@ try {
     await webhook("ci-success", fixtures?.success ?? { sha: sha(1) }, "success")
     const messages = await natsSnapshot("duplicate")
     assert.equal(
-      messages.filter((m) => JSON.parse(m.body).deliveryId === "evidence-ci-success").length,
+      messages.filter(
+        (m) =>
+          JSON.parse(m.body).deliveryId === (fixtures?.success.deliveryId ?? "evidence-ci-success"),
+      ).length,
       1,
     )
     requireCi()
@@ -840,9 +865,82 @@ try {
     return "Real codex exec --json dispatch completed; no resident thread"
   })
   await scenario(12, "OpenCode resident completion", async () => {
-    throw new NotApplicable(
-      "Not supported by this PR's subscribe_to_event: only ResidentCodex owns subscription sockets and inbox delivery; no OpenCode resident subscription adapter",
+    const child = query(
+      "SELECT run_id FROM kernel_agent_runs WHERE prompt LIKE '%cross-run-victim%' AND state='verified'",
+    )[0]
+    assert.ok(child, "Needs the still-waiting run from scenario 7")
+    await stop(workflow)
+    env.WORKFLOWD_WORKER_GITHUB_ENABLED = "false"
+    env.WORKFLOWD_CODEX_RESIDENT_ENABLED = "false"
+    delete env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES
+    env.WORKFLOWD_OPENCODE_RESIDENT_ENABLED = "true"
+    env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET = join(socketRoot, "opencode-resident.sock")
+    env.WORKFLOWD_AGENT_RUN_ROUTES = "evidence=opencode/nemotron-3.5-lightning-free"
+    await boot()
+    const r = await dispatch(
+      "opencode-mailbox",
+      `This is an isolated mailbox evidence task. Do not inspect files, run git, or change anything. Run exactly this shell command once: bun ${JSON.stringify(join(repo, "src/resident/subscribe.ts"))} --agent-run ${child.run_id}. It uses the subscribe_to_event registration path and returns immediately. Never print environment variables or credentials. After the receipt, reply SUBSCRIBED opencode-mailbox and END YOUR TURN. Do not sleep or poll. When a completion message arrives in a NEW turn, reply RESULT opencode-mailbox followed by its status and summary. Do not call further tools.`,
     )
+    const get = async (suffix) => {
+      const response = await fetch(
+        env.OPENCODE_SERVER_URL + `/api/session/${r.nativeSessionId}${suffix}`,
+        {
+          headers: {
+            authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+          },
+        },
+      )
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const texts = (page) =>
+      page.data
+        .filter((m) => m.type === "assistant")
+        .flatMap((m) => m.content.filter((c) => c.type === "text").map((c) => c.text))
+    await until(
+      "OpenCode subscription and first turn ended",
+      async () => {
+        const messages = await get("/message?limit=100&order=asc")
+        const session = await get("")
+        const subscribed = query(
+          "SELECT * FROM kernel_workflow_instances WHERE workflow_type='mailbox_subscription' AND workflow_key=?",
+          r.nativeSessionId,
+        )
+        return (
+          subscribed.length === 1 &&
+          texts(messages).some((t) => t.includes("SUBSCRIBED opencode-mailbox")) &&
+          session.time?.idle
+        )
+      },
+      180000,
+    )
+    log("opencode-first-turn-ended", {
+      sessionId: r.nativeSessionId,
+      messages: await get("/message?limit=100&order=asc"),
+      session: await get(""),
+    })
+    await cancel({ runId: child.run_id })
+    await until(
+      "OpenCode mailbox continuation",
+      async () => {
+        const messages = await get("/message?limit=100&order=asc")
+        return texts(messages).some(
+          (t) => t.includes("RESULT opencode-mailbox") && t.includes("cancelled"),
+        )
+      },
+      180000,
+    )
+    const messages = await get("/message?limit=100&order=asc")
+    log("opencode-mailbox-continuation", { sessionId: r.nativeSessionId, messages })
+    const inbox = query(
+      "SELECT * FROM resident_inbox WHERE thread_id=? AND id LIKE 'subscription-%'",
+      r.nativeSessionId,
+    )
+    assert.equal(inbox.length, 1)
+    assert.equal(inbox[0].state, "delivered")
+    assert.equal(texts(messages).filter((t) => t.includes("RESULT opencode-mailbox")).length, 1)
+    snapshot("OpenCode completion delivered")
+    return "Separate credential-free OpenCode server: registered, ended first turn, one durable delivered inbox and one cancellation reply"
   })
 } catch (error) {
   log("setup-failure", { message: scrub(error.message) })
