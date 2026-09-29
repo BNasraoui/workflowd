@@ -104,6 +104,40 @@ async function stop(p) {
   await until("owned process exits", () => p.exitCode !== null || p.signalCode !== null, 20000)
   log("process-stop", { pid: p.pid, code: p.exitCode, signal: p.signalCode })
 }
+async function stopRecorders() {
+  for (const event of frames().filter((e) => e.direction === "launch")) {
+    const stat = `/proc/${event.pid}/stat`
+    if (!existsSync(stat)) continue
+    const birth = readFileSync(stat, "utf8").split(") ")[1].split(" ")[19]
+    if (birth !== event.frame.birth) continue
+    process.kill(event.pid, "SIGTERM")
+    await until(
+      "owned recorder exits",
+      () => !existsSync(stat) || readFileSync(stat, "utf8").split(") ")[1].startsWith("Z "),
+      15000,
+    )
+    log("recorder-stopped", { pid: event.pid, birth })
+  }
+}
+async function cancel(r) {
+  const child = start(
+    "cancellation",
+    [
+      process.execPath,
+      join(repo, "scripts/evidence/cancel-run.mjs"),
+      env.WORKFLOWD_DATABASE_PATH,
+      r.runId,
+    ],
+    env,
+  )
+  await until("administrative cancellation", () => child.exitCode !== null)
+  assert.equal(child.exitCode, 0)
+  assert.equal(
+    query("SELECT state FROM kernel_agent_runs WHERE run_id=?", r.runId)[0]?.state,
+    "cancelled",
+  )
+  log("cancel-persisted", { runId: r.runId })
+}
 class Blocked extends Error {}
 async function scenario(id, name, run) {
   log("scenario-start", { id, name })
@@ -401,12 +435,12 @@ try {
     WORKFLOWD_WORKER_GITHUB_REPOSITORIES: JSON.stringify([
       { name: "evidence", repository, installationId, permissions: { contents: "read" } },
     ]),
-    WORKFLOWD_REVIEWER_AGENT: "build",
-    WORKFLOWD_FIXER_AGENT: "build",
+    WORKFLOWD_REVIEWER_AGENT: "evidence",
+    WORKFLOWD_FIXER_AGENT: "evidence",
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       autoupdate: false,
       share: "disabled",
-      agents: { build: { mode: "primary", description: "Isolated evidence worker" } },
+      agents: { evidence: { mode: "primary", description: "Isolated evidence worker" } },
       providers: { openai: { models: { "gpt-5.6-sol": { name: "GPT 5.6 Sol" } } } },
     }),
     OPENCODE_DISABLE_PROJECT_CONFIG: "true",
@@ -446,6 +480,27 @@ try {
       }
     },
     30000,
+  )
+  for (const resource of ["agent", "model"]) {
+    const response = await fetch(env.OPENCODE_SERVER_URL + `/api/${resource}`, {
+      headers: {
+        authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+      },
+    })
+    log(`opencode-${resource}`, await response.json())
+  }
+  await until(
+    "OpenCode agent catalog ready",
+    async () => {
+      const response = await fetch(env.OPENCODE_SERVER_URL + "/api/agent", {
+        headers: {
+          authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+        },
+      })
+      const result = await response.json()
+      return result.data.some((agent) => agent.name === "evidence")
+    },
+    15000,
   )
   command(["git", "init", "-q", work], env)
   command(
@@ -574,23 +629,36 @@ try {
     )
     const parent = await subscribe("agent-completed", { kind: "agent_run", run_id: child.runId })
     await delivered(parent, "completed")
-    throw new Blocked(
-      "Completed outcome exercised; cancellation has no public ingress on this branch (requires explicit store-level administrative cancellation)",
-    )
+    const childToCancel = await subscribe("child-cancelled", {
+      kind: "ci",
+      repository,
+      sha: sha(6),
+    })
+    const cancellationParent = await subscribe("agent-cancelled", {
+      kind: "agent_run",
+      run_id: childToCancel.runId,
+    })
+    await cancel(childToCancel)
+    await delivered(cancellationParent, "cancelled")
+    return "Real completed run and real store administrative cancellation each delivered once in a new turn"
   })
   await scenario(7, "Cross-run peer credentials", async () => {
-    assert.ok(first, "A verified resident run is required")
+    const victim = await subscribe("cross-run-victim", { kind: "ci", repository, sha: sha(7) })
+    assert.equal(
+      query("SELECT state FROM kernel_agent_runs WHERE run_id=?", victim.runId)[0]?.state,
+      "verified",
+    )
     const subscription = await requestRunSocket(
       env.WORKFLOWD_CODEX_RESIDENT_SOCKET,
       "/subscriptions",
-      JSON.stringify({ runId: first.runId, selector: { kind: "ci", repository, sha: sha(7) } }),
+      JSON.stringify({ runId: victim.runId, selector: { kind: "ci", repository, sha: sha(70) } }),
     )
     const token = await requestRunSocket(
       env.WORKFLOWD_WORKER_GITHUB_SOCKET,
-      `/workers/github/${first.runId}/token`,
+      `/workers/github/${victim.runId}/token`,
     )
     log("cross-run-denial", {
-      runId: first.runId,
+      runId: victim.runId,
       peerPid: process.pid,
       subscription: subscription.status,
       token: token.status,
@@ -600,14 +668,10 @@ try {
     return "Unrelated process denied 403 on subscription and token sockets"
   })
   await scenario(8, "Mailbox failure requires operator", async () => {
-    requireCi()
-    const r = await subscribe("ci-mailbox-failure", {
-      kind: "ci",
-      repository,
-      sha: fixtures.failure.sha,
-    })
+    const child = await subscribe("failure-child", { kind: "ci", repository, sha: sha(8) })
+    const r = await subscribe("mailbox-failure", { kind: "agent_run", run_id: child.runId })
     writeFileSync(join(root, `fail-${r.runId}`), "fail next queue")
-    await ciResult(fixtures.failure)
+    await cancel(child)
     await until(
       "operator required",
       () =>
@@ -617,13 +681,47 @@ try {
         ).length === 1,
     )
     snapshot("operator-required")
-    return "Owned app-server stopped before queue call; durable operator_required"
+    const attempts = () =>
+      threadFrames(r.nativeSessionId).filter(
+        (e) =>
+          e.direction === "send" &&
+          e.frame.method === "thread/queue/add" &&
+          e.frame.params.clientUserMessageId.startsWith("subscription-"),
+      ).length
+    assert.equal(attempts(), 1)
+    await delay(6000)
+    assert.equal(attempts(), 1)
+    assert.equal(
+      query("SELECT state FROM resident_threads WHERE thread_id=?", r.nativeSessionId)[0].state,
+      "operator_required",
+    )
+    snapshot("operator-required after six delivery intervals")
+    return "Owned app-server stopped before queue call; operator_required persists, one attempt across six retry intervals"
   })
   await scenario(9, "Restart between persist and deliver", async () => {
-    requireCi()
-    throw new Blocked(
-      "Needs a distinct unfinished CI target and a controlled persistence/delivery barrier; no restart claim from unit tests",
+    const child = await subscribe("restart-child", { kind: "ci", repository, sha: sha(9) })
+    const parent = await subscribe("restart-parent", { kind: "agent_run", run_id: child.runId })
+    // Freeze only this harness's workflowd to make the crash window deterministic.
+    workflow.kill("SIGSTOP")
+    await until("scratch daemon frozen", () =>
+      readFileSync(`/proc/${workflow.pid}/stat`, "utf8").split(") ")[1].startsWith("T "),
     )
+    await cancel(child)
+    assert.equal(
+      query(
+        "SELECT * FROM resident_inbox WHERE thread_id=? AND id LIKE 'subscription-%'",
+        parent.nativeSessionId,
+      ).length,
+      0,
+    )
+    snapshot("terminal event persisted while delivery process frozen")
+    workflow.kill("SIGKILL")
+    await until("scratch daemon crashed", () => workflow.signalCode !== null)
+    await stopRecorders()
+    for (const name of ["resident.sock", "identity.sock"]) rmSync(join(root, name), { force: true })
+    await boot()
+    await delivered(parent, "cancelled")
+    return "Real terminal run state persisted before owned daemon crash; restart resumed thread and delivered exactly once"
   })
   await scenario(10, "Unconfigured repository ignored", async () => {
     const before = await natsSnapshot("before ignored")
@@ -680,6 +778,11 @@ try {
     } catch (e) {
       log("cleanup-failure", { pid: p.pid, message: e.message })
     }
+  }
+  try {
+    await stopRecorders()
+  } catch (error) {
+    log("cleanup-failure", { message: error.message })
   }
   await Promise.allSettled(drains)
   // Credentials are never among uploadable logs and are removed after use.

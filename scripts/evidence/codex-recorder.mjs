@@ -24,7 +24,8 @@ const record = (direction, frame) =>
     ) + "\n",
   )
 const args = process.argv.slice(2)
-record("launch", { args })
+const birth = readFileSync(`/proc/${process.pid}/stat`, "utf8").split(") ")[1].split(" ")[19]
+record("launch", { args, birth })
 const child = spawn(process.env.EVIDENCE_CODEX_BIN, args, {
   env: process.env,
   stdio: ["pipe", "pipe", "pipe"],

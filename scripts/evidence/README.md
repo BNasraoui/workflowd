@@ -1,3 +1,89 @@
+# Agent inbox evidence
+
+Run manually from this checkout:
+
+```sh
+bun scripts/evidence/agent-inboxes.mjs
+```
+
+Requires Linux, Bun, Git, `nats-server`, `codex`, `opencode2`, and a working
+`~/.codex/auth.json`. The harness copies only that auth file into a fresh private
+directory, removes the copy at teardown, and does not read the normal Codex
+configuration. `EVIDENCE_MODEL` optionally selects the Codex model.
+
+Each invocation creates `.scratch/evidence/<timestamp>/` with its own home,
+configuration, SQLite database, Git repository/worktrees, Unix sockets, NATS
+JetStream store and loopback ports. It starts this branch's `src/main.ts` and a
+separate OpenCode server needed by workflowd's startup validation. No systemd,
+deployment checkout, existing daemon, production credentials or service ports
+are used. The recorder forwards real Codex protocol traffic without synthesizing
+responses. Only the mailbox-failure scenario stops its owned app-server before a
+queue call. The restart scenario freezes and kills only the workflowd process
+created by this invocation. Recorder cleanup checks process birth times before
+signalling a recorded PID.
+
+For scenarios 1–5, supply **separate test GitHub App credentials**, with Actions
+read access to a repository containing successful and failing runs:
+
+```sh
+EVIDENCE_GITHUB_APP_ID=12345 \
+EVIDENCE_GITHUB_INSTALLATION_ID=67890 \
+EVIDENCE_GITHUB_KEY=/absolute/path/to/test-app.pem \
+EVIDENCE_CI_FIXTURES=/absolute/path/to/fixtures.json \
+bun scripts/evidence/agent-inboxes.mjs
+```
+
+The fixtures JSON contains real repository/run values:
+
+```json
+{
+  "repository": "owner/test-repository",
+  "workflows": ["CI"],
+  "success": { "sha": "40-character-successful-commit-sha", "runId": 123 },
+  "failure": {
+    "sha": "40-character-failing-commit-sha",
+    "runId": 456,
+    "failingJobs": ["typecheck", "test"]
+  }
+}
+```
+
+Missing test credentials produce **BLOCKED**, not PASS. In that mode the harness
+generates an invalid scratch App key: signed webhook ingress and JetStream
+publication are still real, but authenticated GitHub reconciliation cannot
+produce the aggregate mailbox result. No fake GitHub API or seeded CI result is
+substituted. A webhook's conclusion does not bypass the PR's reconciliation
+policy. Fixture workflow names must match the actual required workflows, and
+failure job names must match GitHub's jobs API.
+
+Scenario 6 completes one real worker and administratively cancels another
+through the production `AgentRunStore.cancel` implementation. This branch has no
+public cancellation endpoint. Scenarios 8 and 9 use agent-run terminal events,
+so their mailbox failure/restart evidence does not depend on GitHub credentials.
+Scenario 9 pauses the scratch delivery process, commits cancellation through the
+real store, captures the persisted state and absent mailbox message, crashes the
+scratch daemon, then restarts the same branch and database.
+
+Scenario 12 is reported as unsupported: this PR's `subscribe_to_event` and
+resident inbox adapter are Codex-only. Existing OpenCode parent wakes are a
+different interface; this harness does not claim they prove resident OpenCode
+subscriptions.
+
+`logs/results.md` contains the result table. `logs/evidence.jsonl` contains
+timestamped HTTP observations, SQLite snapshots, JetStream sequences/bodies and
+process lifecycle records. `logs/codex.jsonl` contains the actual app-server
+protocol, including tool receipts, queue requests, new turn IDs and model replies.
+Other log files contain process diagnostics. Secrets known to the harness are
+redacted before writing uploadable logs. Credentials and configs remain outside
+`logs/` and are removed at teardown. Review **only the logs directory** before
+publishing; never upload the scratch home, database or session files wholesale.
+
+The command exits nonzero if any required scenario fails or is blocked. It does
+not create a Gist or PR comment automatically. Publish reviewed logs explicitly
+with `gh gist create` (secret by default), then link them in the PR evidence
+comment. This script is outside `test/`, has no `.test.*` suffix, and is not added
+to package scripts or GitHub Actions: **it does not run in CI**.
+
 # Manual PR 59 custody evidence
 
 Run from the repository root on a Linux host with a working systemd user manager:
