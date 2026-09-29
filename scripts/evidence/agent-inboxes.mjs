@@ -1,0 +1,712 @@
+#!/usr/bin/env bun
+// Opt-in real-process evidence. Never imported by bun test or CI.
+import assert from "node:assert/strict"
+import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto"
+import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { homedir } from "node:os"
+import { join, resolve } from "node:path"
+import { createServer } from "node:net"
+import { spawn, spawnSync } from "node:child_process"
+import { Database } from "bun:sqlite"
+import { connect } from "@nats-io/transport-node"
+import { jetstreamManager } from "@nats-io/jetstream"
+import { requestRunSocket } from "../../src/worker-identity/socket-client.ts"
+
+const repo = resolve(import.meta.dirname, "../..")
+const root = join(repo, ".scratch/evidence", new Date().toISOString().replaceAll(/[:.]/g, "-"))
+mkdirSync(join(root, "logs"), { recursive: true, mode: 0o700 })
+chmodSync(root, 0o700)
+// Short absolute Linux paths avoid AF_UNIX's 108-byte pathname limit.
+process.chdir(root)
+const socketRoot = `/proc/${process.pid}/cwd`
+const logs = join(root, "logs")
+const rows = []
+const processes = new Set()
+const drains = []
+const secrets = []
+const secret = () => {
+  const s = randomBytes(32).toString("hex")
+  secrets.push(s)
+  return s
+}
+const webhookSecret = secret(),
+  natsToken = secret(),
+  runToken = secret(),
+  ciToken = secret(),
+  ocPassword = secret()
+const scrub = (value) => secrets.reduce((s, key) => s.split(key).join("[REDACTED]"), String(value))
+const log = (kind, data) =>
+  appendFileSync(
+    join(logs, "evidence.jsonl"),
+    scrub(JSON.stringify({ at: new Date().toISOString(), kind, data })) + "\n",
+  )
+const delay = (ms) => new Promise((r) => setTimeout(r, ms))
+async function until(label, fn, ms = 90000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const value = await fn()
+    if (value) return value
+    await delay(100)
+  }
+  throw new Error(`Timed out: ${label}`)
+}
+async function port() {
+  const s = createServer()
+  await new Promise((r) => s.listen(0, "127.0.0.1", r))
+  const p = s.address().port
+  await new Promise((r) => s.close(r))
+  return p
+}
+function command(args, env, cwd = repo) {
+  const r = spawnSync(args[0], args.slice(1), { cwd, env, encoding: "utf8" })
+  assert.equal(r.status, 0, `Command failed: ${args[0]}: ${scrub(r.stderr)}`)
+  return r.stdout.trim()
+}
+function start(name, args, env) {
+  const p = spawn(args[0], args.slice(1), { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] })
+  processes.add(p)
+  for (const [streamName, stream] of [
+    ["stdout", p.stdout],
+    ["stderr", p.stderr],
+  ]) {
+    drains.push(
+      (async () => {
+        let pending = ""
+        for await (const chunk of stream) {
+          pending += chunk.toString()
+          const lines = pending.split("\n")
+          pending = lines.pop()
+          for (const line of lines)
+            appendFileSync(
+              join(logs, `${name}.log`),
+              `${new Date().toISOString()} ${streamName} ${scrub(line)}\n`,
+            )
+        }
+        if (pending) appendFileSync(join(logs, `${name}.log`), scrub(pending) + "\n")
+      })(),
+    )
+  }
+  log("process-start", { name, pid: p.pid })
+  return p
+}
+async function stop(p) {
+  if (!p || p.exitCode !== null || p.signalCode !== null) return
+  p.kill("SIGTERM")
+  await until("owned process exits", () => p.exitCode !== null || p.signalCode !== null, 20000)
+  log("process-stop", { pid: p.pid, code: p.exitCode, signal: p.signalCode })
+}
+class Blocked extends Error {}
+async function scenario(id, name, run) {
+  log("scenario-start", { id, name })
+  const started = new Date().toISOString()
+  try {
+    const detail = await run()
+    rows.push({ id, name, status: "PASS", detail, started })
+  } catch (error) {
+    rows.push({
+      id,
+      name,
+      status: error instanceof Blocked ? "BLOCKED" : "FAIL",
+      detail: scrub(error.message),
+      started,
+    })
+  }
+  log("scenario-result", rows.at(-1))
+  console.log(`${id}. ${rows.at(-1).status}: ${name} — ${rows.at(-1).detail}`)
+}
+let db, nc, workflow, base, env
+const query = (sql, ...params) => db.query(sql).all(...params)
+function snapshot(label) {
+  const tables = [
+    "webhook_deliveries",
+    "ci_deliveries",
+    "ci_targets",
+    "ci_events",
+    "resident_threads",
+    "resident_inbox",
+    "kernel_agent_runs",
+    "kernel_workflow_instances",
+    "kernel_waits",
+    "kernel_wait_event_deliveries",
+  ]
+  const data = Object.fromEntries(tables.map((t) => [t, query(`SELECT * FROM ${t}`)]))
+  log("sqlite-snapshot", { label, data })
+  return data
+}
+function frames() {
+  const path = join(logs, "codex.jsonl")
+  return existsSync(path)
+    ? readFileSync(path, "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+    : []
+}
+const threadFrames = (id) => frames().filter((e) => e.frame.params?.threadId === id)
+async function dispatch(name, prompt) {
+  const response = await fetch(base + "/workflows/agent-runs", {
+    method: "POST",
+    headers: { authorization: `Bearer ${runToken}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      route: "evidence",
+      repository: "evidence",
+      prompt,
+      idempotencyKey: name,
+    }),
+    signal: AbortSignal.timeout(180000),
+  })
+  const body = await response.json()
+  log("dispatch", { name, status: response.status, body })
+  assert.equal(response.status, 202, JSON.stringify(body))
+  return body
+}
+async function subscribe(name, selector) {
+  const r = await dispatch(
+    name,
+    `This is an isolated inbox evidence task. Do not inspect files, run git, access the network, or change anything. First send the commentary message "Registering ${name}" so workflowd verifies custody. Then call the MCP tool subscribe_to_event with exactly ${JSON.stringify(selector)}. After successful registration, reply "SUBSCRIBED ${name}" and END YOUR TURN. Do not sleep or poll. When a workflowd completion arrives in a NEW turn, reply "RESULT ${name}: " followed by its conclusion/status and all failing job names. Do not call any further tools.`,
+  )
+  await until("subscription is durable and first turn has ended", () => {
+    const subscriptions = query(
+      "SELECT * FROM kernel_workflow_instances WHERE workflow_type='mailbox_subscription' AND workflow_key=?",
+      r.nativeSessionId,
+    )
+    const completed = threadFrames(r.nativeSessionId).some(
+      (e) => e.frame.method === "turn/completed",
+    )
+    return subscriptions.length === 1 && completed
+  })
+  snapshot(`${name}: subscribed, turn ended`)
+  return r
+}
+async function delivered(r, expected) {
+  await until(
+    "one inbox delivery and model reply",
+    () => {
+      const inbox = query(
+        "SELECT * FROM resident_inbox WHERE thread_id=? AND id LIKE 'subscription-%'",
+        r.nativeSessionId,
+      )
+      const replies = threadFrames(r.nativeSessionId)
+        .filter(
+          (e) => e.frame.method === "item/completed" && e.frame.params.item.type === "agentMessage",
+        )
+        .map((e) => e.frame.params.item.text)
+      return (
+        inbox.length === 1 &&
+        inbox[0].state === "delivered" &&
+        replies.some((s) => s?.includes("RESULT") && s.includes(expected))
+      )
+    },
+    120000,
+  )
+  const f = threadFrames(r.nativeSessionId)
+  assert.equal(
+    f.filter(
+      (e) =>
+        e.direction === "send" &&
+        e.frame.method === "thread/queue/add" &&
+        e.frame.params.clientUserMessageId.startsWith("subscription-"),
+    ).length,
+    1,
+  )
+  const turns = f
+    .filter((e) => e.frame.method === "turn/started")
+    .map((e) => e.frame.params.turn.id)
+  assert.equal(new Set(turns).size, 2, "completion must start exactly one NEW turn")
+  snapshot("delivered")
+}
+async function natsSnapshot(label) {
+  const manager = await jetstreamManager(nc)
+  const info = await manager.streams.info("WORKFLOWD_CI_V1")
+  const messages = []
+  for (let seq = info.state.first_seq; seq > 0 && seq <= info.state.last_seq; seq++) {
+    const m = await manager.streams.getMessage("WORKFLOWD_CI_V1", { seq })
+    messages.push({ seq: m.seq, subject: m.subject, body: new TextDecoder().decode(m.data) })
+  }
+  log("nats-snapshot", { label, state: info.state, messages })
+  return messages
+}
+const fixturesPath = process.env.EVIDENCE_CI_FIXTURES
+const fixtures = fixturesPath ? JSON.parse(readFileSync(fixturesPath, "utf8")) : null
+const repository = fixtures?.repository ?? "evidence/inboxes"
+const installationId = Number(process.env.EVIDENCE_GITHUB_INSTALLATION_ID ?? 2147483647)
+const sha = (id) => id.toString(16).padStart(40, "0")
+async function webhook(name, target, conclusion, configured = true) {
+  const deliveryId = `evidence-${name}`
+  const payload = JSON.stringify({
+    action: "completed",
+    installation: { id: installationId },
+    repository: { full_name: configured ? repository : "unconfigured/ignored" },
+    workflow_run: {
+      id: target.runId ?? 987654321,
+      name: "CI",
+      head_sha: target.sha,
+      status: "completed",
+      conclusion,
+      run_attempt: 1,
+      html_url: `https://github.com/${repository}/actions/runs/${target.runId ?? 987654321}`,
+    },
+  })
+  const signature = "sha256=" + createHmac("sha256", webhookSecret).update(payload).digest("hex")
+  log("webhook-send", { deliveryId, payload })
+  const response = await fetch(base + "/hooks/github", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": "workflow_run",
+      "x-github-delivery": deliveryId,
+      "x-hub-signature-256": signature,
+    },
+    body: payload,
+  })
+  // Query synchronously on receipt, before parsing or yielding to another operation.
+  const persisted = query("SELECT * FROM webhook_deliveries WHERE delivery_id=?", deliveryId)
+  log("webhook-response", {
+    deliveryId,
+    status: response.status,
+    persistedAtResponse: persisted,
+    body: await response.text(),
+  })
+  assert.equal(response.status, 202)
+  assert.equal(persisted.length, configured ? 1 : 0)
+  return deliveryId
+}
+function requireCi() {
+  if (!fixtures || !process.env.EVIDENCE_GITHUB_KEY)
+    throw new Blocked(
+      "Needs separate test GitHub App credentials and real successful/failing run fixtures; webhook receipt alone is not a mailbox result",
+    )
+}
+async function ciResult(target) {
+  await until(
+    "GitHub reconciliation produces CI state",
+    () =>
+      query("SELECT * FROM ci_events WHERE sha=?", target.sha).some(
+        (r) => JSON.parse(r.state_json).conclusion !== "pending",
+      ),
+    420000,
+  )
+}
+async function boot(resident = true) {
+  const next = { ...env }
+  if (!resident)
+    for (const name of Object.keys(next))
+      if (/^WORKFLOWD_(CI_|CODEX_RESIDENT_|WORKER_GITHUB_)/.test(name)) delete next[name]
+  workflow = start(
+    resident ? "workflowd" : "workflowd-defaults",
+    [process.execPath, join(repo, "src/main.ts")],
+    next,
+  )
+  await until(
+    "workflowd health",
+    async () => {
+      assert.equal(workflow.exitCode, null, "workflowd exited")
+      try {
+        return (await fetch(base + "/health")).ok
+      } catch {
+        return false
+      }
+    },
+    30000,
+  )
+}
+
+try {
+  const home = join(root, "home"),
+    codexHome = join(root, "codex"),
+    work = join(root, "repository")
+  for (const dir of [home, codexHome, work]) mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const auth = readFileSync(join(homedir(), ".codex/auth.json"), "utf8")
+  const collect = (v) => {
+    if (typeof v === "string" && v.length >= 8) secrets.push(v)
+    else if (v && typeof v === "object") Object.values(v).forEach(collect)
+  }
+  collect(JSON.parse(auth))
+  writeFileSync(join(codexHome, "auth.json"), auth, { mode: 0o600 })
+  writeFileSync(
+    join(codexHome, "config.toml"),
+    'model_reasoning_effort = "low"\n[features]\napps = false\n',
+  )
+  const keyPath = join(root, "github.pem")
+  if (process.env.EVIDENCE_GITHUB_KEY) copyFileSync(process.env.EVIDENCE_GITHUB_KEY, keyPath)
+  else
+    writeFileSync(
+      keyPath,
+      generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        privateKeyEncoding: { type: "pkcs8", format: "pem" },
+        publicKeyEncoding: { type: "spki", format: "pem" },
+      }).privateKey,
+      { mode: 0o600 },
+    )
+  const natsPort = await port(),
+    httpPort = await port(),
+    unusedOpenCodePort = await port()
+  base = `http://127.0.0.1:${httpPort}`
+  const path = process.env.PATH
+  env = {
+    PATH: path,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_DATA_HOME: join(home, ".local/share"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    CODEX_HOME: codexHome,
+    TMPDIR: root,
+    LANG: "C.UTF-8",
+    EVIDENCE_ROOT: root,
+    EVIDENCE_CODEX_BIN: command(["which", "codex"], { PATH: path }),
+    GITHUB_APP_ID: process.env.EVIDENCE_GITHUB_APP_ID ?? "2147483647",
+    GITHUB_PRIVATE_KEY_PATH: keyPath,
+    GITHUB_WEBHOOK_SECRET: webhookSecret,
+    OPENCODE_SERVER_PASSWORD: ocPassword,
+    OPENCODE_SERVER_URL: `http://127.0.0.1:${unusedOpenCodePort}`,
+    WORKFLOWD_OPENCODE_ATTACH_URL: `http://127.0.0.1:${unusedOpenCodePort}`,
+    WORKFLOWD_HOST: "127.0.0.1",
+    WORKFLOWD_PORT: String(httpPort),
+    WORKFLOWD_DATABASE_PATH: join(root, "workflowd.db"),
+    WORKFLOWD_STATE_DIR: join(root, "state"),
+    WORKFLOWD_CACHE_DIR: join(root, "cache"),
+    WORKFLOWD_WORKTREE_ROOT: join(root, "worktrees"),
+    WORKFLOWD_REPOSITORY_ROOT: work,
+    WORKFLOWD_LOCAL_REPOSITORIES: work,
+    OPENCODE_WORKTREE_REGISTRY: join(root, "registry"),
+    WORKFLOWD_CI_ENABLED: "true",
+    WORKFLOWD_CI_TOKEN: ciToken,
+    WORKFLOWD_CI_REPOSITORIES: JSON.stringify([
+      {
+        repository,
+        dispatchRepository: "evidence",
+        installationId,
+        workflows: fixtures?.workflows ?? ["CI"],
+      },
+    ]),
+    WORKFLOWD_NATS_SERVERS: `nats://127.0.0.1:${natsPort}`,
+    WORKFLOWD_NATS_TOKEN: natsToken,
+    WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+    WORKFLOWD_CODEX_RESIDENT_HOME: codexHome,
+    WORKFLOWD_CODEX_RESIDENT_SOCKET: join(socketRoot, "resident.sock"),
+    WORKFLOWD_WORKER_GITHUB_ENABLED: "true",
+    WORKFLOWD_WORKER_GITHUB_DIRECTORY: join(root, "gh"),
+    WORKFLOWD_WORKER_GITHUB_SOCKET: join(socketRoot, "identity.sock"),
+    WORKFLOWD_WORKER_GITHUB_REPOSITORIES: JSON.stringify([
+      { name: "evidence", repository, installationId, permissions: { contents: "read" } },
+    ]),
+    WORKFLOWD_REVIEWER_AGENT: "build",
+    WORKFLOWD_FIXER_AGENT: "build",
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      autoupdate: false,
+      share: "disabled",
+      agents: { build: { mode: "primary", description: "Isolated evidence worker" } },
+      providers: { openai: { models: { "gpt-5.6-sol": { name: "GPT 5.6 Sol" } } } },
+    }),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+    WORKFLOWD_AGENT_RUN_TOKEN: runToken,
+    WORKFLOWD_AGENT_RUN_ROUTES: "unused=openai/gpt-5.6-sol",
+    WORKFLOWD_AGENT_RUN_CODEX_ROUTES: `evidence=${process.env.EVIDENCE_MODEL ?? "gpt-5.6-sol"}`,
+    WORKFLOWD_AGENT_RUN_REPOSITORIES: `evidence=${work}`,
+    WORKFLOWD_AGENT_RUN_CODEX_BIN: join(repo, "scripts/evidence/codex-recorder.mjs"),
+    WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS: "120000",
+  }
+  writeFileSync(join(root, "redactions.json"), JSON.stringify(secrets), { mode: 0o600 })
+  start(
+    "opencode",
+    [
+      command(["which", "opencode2"], env),
+      "serve",
+      "--hostname",
+      "127.0.0.1",
+      "--port",
+      String(unusedOpenCodePort),
+    ],
+    env,
+  )
+  await until(
+    "scratch OpenCode",
+    async () => {
+      try {
+        return (
+          await fetch(env.OPENCODE_SERVER_URL + "/api/agent", {
+            headers: {
+              authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64"),
+            },
+          })
+        ).ok
+      } catch {
+        return false
+      }
+    },
+    30000,
+  )
+  command(["git", "init", "-q", work], env)
+  command(
+    [
+      "git",
+      "-C",
+      work,
+      "-c",
+      "user.name=Evidence",
+      "-c",
+      "user.email=evidence@localhost",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "Isolated evidence workspace",
+    ],
+    env,
+  )
+  log("isolation", {
+    root,
+    natsPort,
+    httpPort,
+    unusedOpenCodePort,
+    gitHead: command(["git", "rev-parse", "HEAD"], { PATH: path }),
+    credentialMode: fixtures ? "separate-test-app" : "generated-invalid-app-key",
+    model: env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES,
+  })
+  writeFileSync(
+    join(root, "nats.conf"),
+    `host: 127.0.0.1\nport: ${natsPort}\nauthorization { token: "${natsToken}" }\njetstream { store_dir: "${join(root, "jetstream")}" }\n`,
+    { mode: 0o600 },
+  )
+  start("nats", [command(["which", "nats-server"], env), "-c", join(root, "nats.conf")], env)
+  await until(
+    "scratch NATS",
+    async () => {
+      try {
+        nc = await connect({
+          servers: env.WORKFLOWD_NATS_SERVERS,
+          token: natsToken,
+          reconnect: false,
+          timeout: 300,
+        })
+        return true
+      } catch {
+        return false
+      }
+    },
+    10000,
+  )
+  await boot()
+  db = new Database(env.WORKFLOWD_DATABASE_PATH, { readonly: true })
+  let first
+  await scenario(1, "CI success and new turn", async () => {
+    const target = fixtures?.success ?? { sha: sha(1) }
+    first = await subscribe("ci-success", { kind: "ci", repository, sha: target.sha })
+    await webhook("ci-success", target, "success")
+    await until(
+      "NATS completion",
+      async () =>
+        (await natsSnapshot("success")).some(
+          (m) => JSON.parse(m.body).deliveryId === "evidence-ci-success",
+        ),
+      10000,
+    )
+    requireCi()
+    await ciResult(target)
+    await delivered(first, "success")
+    return "Signed webhook persisted by 202, JetStream receipt, one inbox message, two distinct turns, success reply"
+  })
+  await scenario(2, "CI failure includes failing jobs", async () => {
+    requireCi()
+    const t = fixtures.failure
+    const r = await subscribe("ci-failure", { kind: "ci", repository, sha: t.sha })
+    await webhook("ci-failure", t, "failure")
+    await ciResult(t)
+    await delivered(r, "failure")
+    const inbox = query(
+      "SELECT prompt FROM resident_inbox WHERE thread_id=? AND id LIKE 'subscription-%'",
+      r.nativeSessionId,
+    )[0]
+    assert.ok(t.failingJobs.length)
+    for (const job of t.failingJobs) assert.ok(inbox.prompt.includes(job))
+    return "Failure and all expected job names delivered"
+  })
+  await scenario(3, "Duplicate webhook delivers once", async () => {
+    await webhook("ci-success", fixtures?.success ?? { sha: sha(1) }, "success")
+    const messages = await natsSnapshot("duplicate")
+    assert.equal(
+      messages.filter((m) => JSON.parse(m.body).deliveryId === "evidence-ci-success").length,
+      1,
+    )
+    requireCi()
+    assert.ok(first)
+    await delivered(first, "success")
+    return "One persisted receipt, NATS completion, mailbox message and continuation"
+  })
+  await scenario(4, "Late subscription", async () => {
+    requireCi()
+    await ciResult(fixtures.success)
+    const r = await subscribe("ci-late", { kind: "ci", repository, sha: fixtures.success.sha })
+    await delivered(r, "success")
+    return "Existing terminal CI state queues one message immediately"
+  })
+  await scenario(5, "Two worker threads", async () => {
+    requireCi()
+    const a = await subscribe("ci-two-a", { kind: "ci", repository, sha: fixtures.success.sha })
+    const b = await subscribe("ci-two-b", { kind: "ci", repository, sha: fixtures.success.sha })
+    assert.notEqual(a.nativeSessionId, b.nativeSessionId)
+    await delivered(a, "success")
+    await delivered(b, "success")
+    return "Two distinct threads each received one continuation"
+  })
+  await scenario(6, "Agent-run completed and cancelled", async () => {
+    const child = await dispatch(
+      "child-completed",
+      "Reply exactly CHILD COMPLETE. Do not use tools or inspect anything.",
+    )
+    await until(
+      "child completes",
+      () =>
+        query("SELECT state FROM kernel_agent_runs WHERE run_id=?", child.runId)[0]?.state ===
+        "completed",
+    )
+    const parent = await subscribe("agent-completed", { kind: "agent_run", run_id: child.runId })
+    await delivered(parent, "completed")
+    throw new Blocked(
+      "Completed outcome exercised; cancellation has no public ingress on this branch (requires explicit store-level administrative cancellation)",
+    )
+  })
+  await scenario(7, "Cross-run peer credentials", async () => {
+    assert.ok(first, "A verified resident run is required")
+    const subscription = await requestRunSocket(
+      env.WORKFLOWD_CODEX_RESIDENT_SOCKET,
+      "/subscriptions",
+      JSON.stringify({ runId: first.runId, selector: { kind: "ci", repository, sha: sha(7) } }),
+    )
+    const token = await requestRunSocket(
+      env.WORKFLOWD_WORKER_GITHUB_SOCKET,
+      `/workers/github/${first.runId}/token`,
+    )
+    log("cross-run-denial", {
+      runId: first.runId,
+      peerPid: process.pid,
+      subscription: subscription.status,
+      token: token.status,
+    })
+    assert.equal(subscription.status, 403)
+    assert.equal(token.status, 403)
+    return "Unrelated process denied 403 on subscription and token sockets"
+  })
+  await scenario(8, "Mailbox failure requires operator", async () => {
+    requireCi()
+    const r = await subscribe("ci-mailbox-failure", {
+      kind: "ci",
+      repository,
+      sha: fixtures.failure.sha,
+    })
+    writeFileSync(join(root, `fail-${r.runId}`), "fail next queue")
+    await ciResult(fixtures.failure)
+    await until(
+      "operator required",
+      () =>
+        query(
+          "SELECT * FROM resident_inbox WHERE thread_id=? AND state='operator_required'",
+          r.nativeSessionId,
+        ).length === 1,
+    )
+    snapshot("operator-required")
+    return "Owned app-server stopped before queue call; durable operator_required"
+  })
+  await scenario(9, "Restart between persist and deliver", async () => {
+    requireCi()
+    throw new Blocked(
+      "Needs a distinct unfinished CI target and a controlled persistence/delivery barrier; no restart claim from unit tests",
+    )
+  })
+  await scenario(10, "Unconfigured repository ignored", async () => {
+    const before = await natsSnapshot("before ignored")
+    await webhook("unconfigured", { sha: sha(10) }, "success", false)
+    await delay(1500)
+    assert.equal(
+      query("SELECT * FROM ci_deliveries WHERE delivery_id='evidence-unconfigured'").length,
+      0,
+    )
+    const after = await natsSnapshot("after ignored")
+    assert.equal(after.filter((m) => m.body.includes("unconfigured/ignored")).length, 0)
+    snapshot("ignored")
+    return `No receipt, CI delivery or NATS message (stream ${before.length} → ${after.length})`
+  })
+  await scenario(11, "Defaults off uses legacy exec", async () => {
+    await stop(workflow)
+    await boot(false)
+    const r = await dispatch(
+      "defaults-off",
+      "Reply exactly DEFAULTS OFF. Do not use tools or inspect anything.",
+    )
+    await until(
+      "legacy completes",
+      () =>
+        query("SELECT state FROM kernel_agent_runs WHERE run_id=?", r.runId)[0]?.state ===
+        "completed",
+    )
+    assert.equal(query("SELECT * FROM resident_threads WHERE run_id=?", r.runId).length, 0)
+    assert.ok(frames().some((f) => f.direction === "launch" && f.frame.args[0] === "exec"))
+    snapshot("defaults-off")
+    return "Real codex exec --json dispatch completed; no resident thread"
+  })
+  await scenario(12, "OpenCode resident completion", async () => {
+    throw new Blocked(
+      "Not supported by this PR's subscribe_to_event: only ResidentCodex owns subscription sockets and inbox delivery; no OpenCode resident subscription adapter",
+    )
+  })
+} catch (error) {
+  log("setup-failure", { message: scrub(error.message) })
+  console.error(scrub(error.message))
+} finally {
+  if (db) {
+    try {
+      snapshot("final")
+    } catch {
+      /* setup may be incomplete */
+    }
+    db.close()
+  }
+  if (nc) await nc.close()
+  for (const p of [...processes].reverse()) {
+    try {
+      await stop(p)
+    } catch (e) {
+      log("cleanup-failure", { pid: p.pid, message: e.message })
+    }
+  }
+  await Promise.allSettled(drains)
+  // Credentials are never among uploadable logs and are removed after use.
+  for (const file of ["codex/auth.json", "redactions.json", "github.pem", "nats.conf"])
+    rmSync(join(root, file), { force: true })
+  for (let id = 1; id <= 12; id++)
+    if (!rows.some((r) => r.id === id))
+      rows.push({
+        id,
+        name: `Scenario ${id}`,
+        status: "BLOCKED",
+        detail: "Setup failed; see evidence log",
+      })
+  rows.sort((a, b) => a.id - b.id)
+  const table =
+    "| # | Scenario | Result | Evidence / limitation |\n|---|---|---|---|\n" +
+    rows
+      .map(
+        (r) =>
+          `| ${r.id} | ${r.name} | ${r.status} | ${r.detail.replaceAll("|", "\\|").replaceAll("\n", " ")} |`,
+      )
+      .join("\n")
+  writeFileSync(
+    join(logs, "results.md"),
+    `## Evidence\n\nRerun: \`bun scripts/evidence/agent-inboxes.mjs\`\n\n${table}\n`,
+  )
+  writeFileSync(join(logs, "results.json"), JSON.stringify(rows, null, 2))
+  console.log(table + `\nEvidence: ${logs}`)
+  process.exitCode = rows.every((r) => r.status === "PASS") ? 0 : 1
+}
