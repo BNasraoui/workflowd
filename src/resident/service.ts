@@ -328,7 +328,10 @@ export const ResidentCodexLive = (
               events: queue.iterable,
               executionId: threadId,
               cancel: cancelRun(input.runId),
-              exited: Effect.promise(() => exited),
+              exited: Effect.tryPromise({
+                try: () => exited,
+                catch: (cause) => new WorkspaceError({ operation: "observe resident exit", cause }),
+              }),
             }
           }).pipe(
             Effect.mapError(

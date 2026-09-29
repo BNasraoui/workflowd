@@ -96,8 +96,8 @@ any host service. Roll back by removing the feature settings at the next planned
 restart; durable CI history remains in SQLite.
 
 Migrations always apply on startup, even with every feature flag absent.
-Migration 0020 adds `ci_targets`, `ci_deliveries`, and `ci_events` plus their
-target/outbox/due indexes. Migration 0021 adds `resident_threads` and
+Migration 0021 adds `ci_targets`, `ci_deliveries`, and `ci_events` plus their
+target/outbox/due indexes. Migration 0022 adds `resident_threads` and
 `resident_inbox` plus the pending-inbox index. They are additive: existing
 dispatch tables and rows are unchanged. They also add migration-ledger entries.
 

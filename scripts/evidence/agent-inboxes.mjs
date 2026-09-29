@@ -887,7 +887,7 @@ try {
         assert.ok(status.stdout.includes(`Description=workflowd codex launch ${manifest.launchId}`))
         command(["systemctl", "--user", "stop", manifest.executionId], env)
       }
-      spawnSync("systemctl", ["--user", "reset-failed", manifest.executionId], {
+      spawnSync("/usr/bin/systemctl", ["--user", "reset-failed", manifest.executionId], {
         env,
         stdio: "ignore",
       })

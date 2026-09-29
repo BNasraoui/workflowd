@@ -473,7 +473,7 @@ try {
     await start({ EVIDENCE_BINARY: binary })
     const s = input(
       "real",
-      "Run the shell command sleep 12, then reply exactly EVIDENCE59_REAL_OK. Do not read files or do anything else.",
+      "First say STARTING as a commentary message. Then run the shell command sleep 30, then reply exactly EVIDENCE59_REAL_OK. Do not read files or do anything else.",
     )
     const pending = post(s).catch(() => null)
     const runId = id(s)
