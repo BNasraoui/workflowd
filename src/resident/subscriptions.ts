@@ -39,18 +39,20 @@ export const makeSubscriptions = Effect.gen(function* () {
     selector: EventSelector,
     deadline: number | undefined,
   ) {
-    const expired = selector.kind === "ci" && deadline !== undefined && deadline <= Date.now()
+    let expired = false
     let result: Record<string, string | number | null | readonly string[]> | null = null
-    if (expired)
-      result = {
-        kind: "ci",
-        status: "operator_required",
-        diagnostic: "CI result did not arrive in time",
-      }
-    else if (selector.kind === "ci") {
+    if (selector.kind === "ci") {
       const state = yield* ci.read(selector)
       if (state !== null && state.conclusion !== "pending")
         result = { ...state, runLinks: state.runLinks ?? [] }
+      else if (deadline !== undefined && deadline <= Date.now()) {
+        expired = true
+        result = {
+          kind: "ci",
+          status: "operator_required",
+          diagnostic: "CI result did not arrive in time",
+        }
+      }
     }
     if (selector.kind === "agent_run") {
       const run = yield* runs.read(selector.run_id)

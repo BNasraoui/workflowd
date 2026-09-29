@@ -396,3 +396,46 @@ test("CI subscriptions on one thread expire independently from their registratio
     clock.mockRestore()
   }
 })
+
+for (const conclusion of ["success", "failure"] as const) {
+  test(`final CI ${conclusion} wins when reconciliation runs after the deadline`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const subscriptions = yield* makeSubscriptions
+        const ci = yield* CiService
+        const sql = yield* SqlClient.SqlClient
+        yield* store.attach("parent", "thread", "/work", null)
+        yield* store.started("thread", "turn")
+        yield* ci.watch(target, 1, ["CI"], Date.now())
+        const receipt = yield* subscriptions.register("thread", { kind: "ci", ...target })
+        yield* store.completed("thread", "turn")
+        yield* sql`UPDATE kernel_workflow_instances SET payload_json = json_set(payload_json, '$.deadline', 0) WHERE instance_id = ${receipt.id}`
+        yield* ci.snapshot(
+          target,
+          [
+            {
+              id: 42,
+              name: "CI",
+              attempt: 1,
+              status: "completed",
+              conclusion,
+              failingJobs: conclusion === "failure" ? ["lint"] : [],
+            },
+          ],
+          null,
+          Date.now(),
+        )
+        yield* subscriptions.reconcile()
+        yield* subscriptions.reconcile()
+        const messages = yield* store.pending()
+        expect(messages).toHaveLength(1)
+        expect(messages[0]?.prompt).toContain(`"conclusion":"${conclusion}"`)
+        expect(messages[0]?.prompt).not.toContain("did not arrive")
+        expect((yield* store.read("thread"))?.state).toBe("waiting")
+        expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${receipt.id}`).toEqual([
+          { state: "consumed" },
+        ])
+      }).pipe(Effect.provide(layer)),
+    ))
+}
