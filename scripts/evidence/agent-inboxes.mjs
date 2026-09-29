@@ -1068,10 +1068,10 @@ try {
   const table =
     "| # | Scenario | Result | Evidence / limitation |\n|---|---|---|---|\n" +
     rows
-      .map(
-        (r) =>
-          `| ${r.id} | ${r.name} | ${r.status} | ${r.detail.replaceAll("|", String.raw`\|`).replaceAll("\n", " ")} |`,
-      )
+      .map((r) => {
+        const detail = r.detail.replaceAll("|", String.raw`\|`).replaceAll("\n", " ")
+        return `| ${r.id} | ${r.name} | ${r.status} | ${detail} |`
+      })
       .join("\n")
   writeFileSync(
     join(logs, "results.md"),
