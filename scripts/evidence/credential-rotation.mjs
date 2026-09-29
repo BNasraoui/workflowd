@@ -470,7 +470,7 @@ try {
     const binary = process.env.EVIDENCE_REAL_CODEX_BINARY
     assert.ok(
       binary,
-      "BLOCKED: set EVIDENCE_REAL_CODEX_BINARY to the real executable and authenticate scratch CODEX_HOME; production credentials are forbidden",
+      "BLOCKED: set EVIDENCE_REAL_CODEX_BINARY; EVIDENCE_COPY_AUTH=1 requires explicit owner permission to copy only the Codex login file",
     )
     await start({ EVIDENCE_BINARY: binary })
     const s = input(

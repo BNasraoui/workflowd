@@ -155,3 +155,15 @@ runner supplies a unique `workflowd-evidence59-<timestamp>-` prefix. Its PATH
 shim launches real systemd units, enforces that prefix, clears ambient manager
 environment for workers and optionally delays the launch acknowledgement for
 scenario 2. No application services are replaced in the full daemon.
+
+The 2026-09-29 full-daemon run at executable evidence commit `14b0137` passed
+scenarios 1–9 and the real turn. During graceful daemon shutdown and recovery,
+the real worker retained launch nonce `de5b8b6b-dc9e-4ddd-9408-cb5d87974a00` and
+InvocationID `b7298eda9d82423fa76df5fa2536a0df`. It completed once with
+`EVIDENCE59_REAL_OK` and 55 output tokens. All scratch authentication copies,
+daemon processes and transient units were removed. Initial fixture failures
+and the final passing run are retained in the PR's evidence archive.
+
+[Full redacted logs and earlier attempts](https://gist.github.com/BNasraoui/5aee27dbe1c0cdd9ef3c1516988f6739).
+Validation: `bun run check` passed with 281/281 Effect files, 1,398 tests,
+0 failures and 3,247 assertions.
