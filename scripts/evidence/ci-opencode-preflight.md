@@ -18,5 +18,5 @@ An installation token was used only to enumerate repository access. No credentia
 webhook URL, raw response, or token was logged. Scratch credential copies were
 removed in `finally`. No App setting, production service, or CI run was changed.
 
-Runtime evidence is pending the isolated harness run; earlier PASS results are
-not carried forward as current-head evidence.
+The final isolated run passed all 12 scenarios. See
+[the complete CI and OpenCode evidence](./ci-opencode-evidence.md).
