@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { appendFile, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
 
@@ -382,7 +383,11 @@ for (const mode of ["exit", "cancel"]) {
   test(`${mode} polling retains a bounded number of promises`, async () => {
     // A separate heap keeps this measurement independent of the rest of the test suite.
     const probe = Bun.spawn(
-      [process.execPath, join(import.meta.dir, "fixtures/codex-poll-retention.ts"), mode],
+      [
+        process.execPath,
+        fileURLToPath(import.meta.resolve("./fixtures/codex-poll-retention.ts")),
+        mode,
+      ],
       { stdout: "pipe", stderr: "pipe" },
     )
     const [exitCode, stdout, stderr] = await Promise.all([
