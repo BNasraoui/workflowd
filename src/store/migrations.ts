@@ -1242,7 +1242,8 @@ const kernelAgentRuns = Effect.gen(function* () {
         native_session_id IS NULL OR length(CAST(native_session_id AS BLOB)) BETWEEN 1 AND 256
       ),
       state TEXT NOT NULL CHECK (state IN (
-        'accepted', 'spawning', 'spawned', 'verified', 'completed', 'failed', 'operator_required'
+        'accepted', 'spawning', 'spawned', 'verified', 'completed', 'cancelled', 'failed',
+        'operator_required'
       )),
       attempt INTEGER NOT NULL CHECK (attempt > 0),
       max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),

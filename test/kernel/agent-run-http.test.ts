@@ -24,6 +24,12 @@ const post = (input: unknown, headers: Record<string, string> = {}) =>
     body: typeof input === "string" ? input : JSON.stringify(input),
   })
 
+const cancel = (runId: string, headers: Record<string, string> = {}) =>
+  new Request(`http://localhost/workflows/agent-runs/${runId}`, {
+    method: "DELETE",
+    headers,
+  })
+
 const authorization = { authorization: `Bearer ${token}` }
 
 const ambient = Layer.merge(
@@ -31,12 +37,16 @@ const ambient = Layer.merge(
   WorkSignalLive,
 )
 
-const route = (request: Request, register: AgentRunIngressPort["register"]) =>
+const route = (
+  request: Request,
+  register: AgentRunIngressPort["register"],
+  cancelRun: AgentRunIngressPort["cancel"] = () => Effect.void,
+) =>
   Effect.runPromise(
     routeRequest(request, {
       webhookSecret: "unused",
       now,
-      agentRuns: { token, register },
+      agentRuns: { token, register, cancel: cancelRun },
     }).pipe(Effect.provide(ambient)),
   )
 
@@ -121,5 +131,21 @@ describe("POST /workflows/agent-runs", () => {
 
     expect(response.status).toBe(409)
     expect(await response.json()).toEqual({ error: "conflict", reason: "idempotency_conflict" })
+  })
+})
+
+describe("DELETE /workflows/agent-runs/:runId", () => {
+  test("authenticates and invokes explicit cancellation", async () => {
+    let seen: unknown
+    const response = await route(
+      cancel("agent-run-abc", authorization),
+      () => Effect.succeed(receipt),
+      (runId, at) =>
+        Effect.sync(() => {
+          seen = { runId, at }
+        }),
+    )
+    expect(response.status).toBe(204)
+    expect(seen).toEqual({ runId: "agent-run-abc", at: now })
   })
 })

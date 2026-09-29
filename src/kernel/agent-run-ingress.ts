@@ -29,6 +29,7 @@ export type AgentRunRefusalReason =
   | "ambiguous_route"
   | "unknown_repository"
   | "provider_not_authenticated"
+  | "systemd_unavailable"
   | "model_not_available"
   | "invalid_wait_pairing"
   | "missing_parent_session"
@@ -59,6 +60,7 @@ export type AgentRunIngressPort = {
     input: AgentRunSubmissionType,
     now: Date,
   ) => Effect.Effect<AgentRunReceipt, AgentRunIngressError>
+  readonly cancel: (runId: string, now: Date) => Effect.Effect<void, AgentRunIngressError>
 }
 
 export const AgentRunIngress = Context.Service<AgentRunIngressPort>(
@@ -163,6 +165,10 @@ const make = (options: AgentRunIngressOptions) =>
     const claude = yield* ClaudeCli
     const codex = yield* CodexCli
     const signals = yield* WorkSignal
+    const codexReadiness = yield* codex.preflight.pipe(Effect.result)
+    if (codexReadiness._tag === "Failure") {
+      yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
+    }
 
     const { ensureResource, ensureSession, registerWait, resolveParentDirectory } =
       makeAgentRunCustody({ sessions, provider, waits, claude, options, refuse })
@@ -396,15 +402,16 @@ const make = (options: AgentRunIngressOptions) =>
         if (resolution.provider === "opencode") {
           yield* preflightRoute(resolution.route)
         } else {
-          yield* codex.preflight.pipe(
-            Effect.mapError(
-              (issue) =>
-                new AgentRunRefusalError({
-                  reason: "provider_not_authenticated",
-                  detail: issue.detail,
-                }),
-            ),
-          )
+          if (codexReadiness._tag === "Failure") {
+            const issue = codexReadiness.failure
+            return yield* new AgentRunRefusalError({
+              reason:
+                issue.kind === "systemd_unavailable"
+                  ? "systemd_unavailable"
+                  : "provider_not_authenticated",
+              detail: issue.detail,
+            })
+          }
         }
         return { submission, resolution, repository }
       })
@@ -521,7 +528,29 @@ const make = (options: AgentRunIngressOptions) =>
         }
       })
 
-    return AgentRunIngress.of({ register })
+    const cancel: AgentRunIngressPort["cancel"] = (runId, now) =>
+      Effect.gen(function* () {
+        const run = yield* store.read(runId)
+        if (run === null) return yield* refuse("run_conflict", `run ${runId} does not exist`)
+        if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
+          return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
+        }
+        if (run.providerId === CODEX_PROVIDER_ID) {
+          yield* codexRuns.cancel(run, now)
+          return
+        }
+        if (run.nativeSessionId === null) {
+          return yield* refuse("run_conflict", `run ${runId} has no provider session to cancel`)
+        }
+        const stopped = yield* provider.abortSession({
+          sessionID: run.nativeSessionId,
+          directory: run.directory,
+        })
+        if (!stopped) return yield* refuse("run_conflict", `run ${runId} could not be stopped`)
+        yield* store.cancel({ runId, now })
+      })
+
+    return AgentRunIngress.of({ register, cancel })
   })
 
 export const AgentRunIngressLive = (options: AgentRunIngressOptions) =>

@@ -20,13 +20,15 @@ type Custody = ReturnType<typeof makeAgentRunCustody>
 export type AgentRunCodexStore = Pick<
   AgentRunStorePort,
   | "claimSpawn"
+  | "abandonLaunch"
   | "markSpawned"
   | "markVerified"
   | "fail"
   | "recordProgress"
   | "complete"
+  | "cancel"
   | "operatorRequired"
-  | "listVerifiedByProvider"
+  | "listActiveByProvider"
 >
 
 const pullEvent = (iterator: AsyncIterator<CodexExecEvent>) =>
@@ -223,12 +225,26 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           kind: "worktree",
           createdAt: run.createdAt,
         })
-        const process = yield* codex.spawn({
-          runId: run.runId,
-          directory: run.directory,
-          prompt: run.prompt,
-          model: route.modelID,
-        })
+        const process = yield* codex
+          .spawn({
+            runId: run.runId,
+            directory: run.directory,
+            prompt: run.prompt,
+            model: route.modelID,
+          })
+          .pipe(
+            Effect.tapError((cause) =>
+              store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(
+                Effect.tap(() =>
+                  Effect.logError("codex launch failed; incomplete run claim removed", {
+                    runId: run.runId,
+                    cause,
+                  }),
+                ),
+                Effect.ignore,
+              ),
+            ),
+          )
         const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs)
         if (observed.result.outcome === "refused") {
           yield* store
@@ -286,10 +302,20 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
     })
 
   const recover = Effect.gen(function* () {
-    const runs = yield* store.listVerifiedByProvider("codex-cli")
+    const runs = yield* store.listActiveByProvider("codex-cli")
+    yield* codex.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {
-      const process = yield* codex.attach({ runId: run.runId })
+      const attachment = yield* codex.attach({ runId: run.runId }).pipe(Effect.result)
+      if (attachment._tag === "Failure") {
+        yield* store.operatorRequired({
+          runId: run.runId,
+          diagnostic: `codex_recovery_failed: ${String(attachment.failure.cause)}`,
+          now: new Date(),
+        })
+        continue
+      }
+      const process = attachment.success
       if (process === null) {
         yield* store.operatorRequired({
           runId: run.runId,
@@ -298,17 +324,57 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
         })
         continue
       }
-      yield* Effect.forkDetach(
-        Effect.gen(function* () {
-          const exited = yield* Effect.forkDetach(process.exited)
-          yield* complete({
+      let iterator = process.events[Symbol.asyncIterator]()
+      let exited = yield* Effect.forkDetach(process.exited)
+      let initialFinalMessage: string | null = null
+      if (run.state === "spawning") {
+        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs)
+        if (observed.result.outcome === "refused") {
+          yield* store.fail({
             runId: run.runId,
-            iterator: process.events[Symbol.asyncIterator](),
-            exited,
-            cancel: process.cancel,
-            initialFinalMessage: null,
-            stallWindowMs: dependencies.progressWindowMs,
+            diagnostic: `codex_recovery_failed: ${observed.result.detail}`,
+            now: new Date(),
           })
+          continue
+        }
+        const resourceId = yield* ensureResource({
+          resourceId: `agent-run-resource-${run.runId.slice("agent-run-".length)}`,
+          absolutePath: run.directory,
+          kind: "worktree",
+          createdAt: run.createdAt,
+        })
+        const sessionId = yield* ensureSession({
+          nativeSessionId: observed.result.threadId,
+          resourceId,
+          createdAt: run.createdAt,
+          kind: "codex",
+        })
+        yield* store.markSpawned({
+          runId: run.runId,
+          resourceId,
+          sessionId,
+          nativeSessionId: observed.result.threadId,
+          now: new Date(),
+        })
+        yield* store.markVerified({ runId: run.runId, outputTokens: 1, now: new Date() })
+        iterator = observed.iterator
+        exited = observed.exited
+        initialFinalMessage = observed.result.firstMessage
+      } else if (run.state === "spawned") {
+        yield* store.markVerified({
+          runId: run.runId,
+          outputTokens: Math.max(1, run.lastOutputTokens),
+          now: new Date(),
+        })
+      }
+      yield* Effect.forkDetach(
+        complete({
+          runId: run.runId,
+          iterator,
+          exited,
+          cancel: process.cancel,
+          initialFinalMessage,
+          stallWindowMs: dependencies.progressWindowMs,
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.logError("recovered codex completion failed", { runId: run.runId, cause }),
@@ -320,5 +386,30 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
     return attached
   })
 
-  return { dispatch, recover }
+  const cancel = (run: AgentRunRecord, now: Date) =>
+    Effect.gen(function* () {
+      const attachment = yield* codex.attach({ runId: run.runId })
+      if (attachment === null) {
+        yield* store.operatorRequired({
+          runId: run.runId,
+          diagnostic: "codex_cancel_failed: durable process custody is missing",
+          now,
+        })
+        return yield* refuse("run_conflict", "codex process custody is missing")
+      }
+      yield* attachment.cancel.pipe(
+        Effect.tapError((cause) =>
+          store
+            .operatorRequired({
+              runId: run.runId,
+              diagnostic: `codex_cancel_failed: ${String(cause.cause)}`,
+              now,
+            })
+            .pipe(Effect.ignore),
+        ),
+      )
+      yield* store.cancel({ runId: run.runId, now })
+    })
+
+  return { dispatch, recover, cancel }
 }

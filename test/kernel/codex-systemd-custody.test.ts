@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -125,11 +125,13 @@ test("absent and exited units without a result terminate observation clearly", a
 test("active observation has a bounded terminal timeout", async () => {
   const root = join(tmpdir(), `codex-timeout-${crypto.randomUUID()}`)
   try {
-    const { process } = await spawn(root, manager(), 15)
+    const systemd = manager()
+    const { process } = await spawn(root, systemd, 15)
     expect(await Effect.runPromise(process.exited)).toMatchObject({
       exitCode: -1,
       stderr: expect.stringContaining("observation timed out"),
     })
+    expect(systemd.commands.some((command) => command.includes("stop"))).toBe(true)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -192,6 +194,34 @@ test("cancellation stops the whole exact unit and escalates before recording can
       version: 1,
       invocationId: "invocation-1",
     })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("startup cleanup removes only expired finished custody outside active run protection", async () => {
+  const root = join(tmpdir(), `codex-cleanup-${crypto.randomUUID()}`)
+  const now = new Date("2026-09-29T00:00:00Z")
+  try {
+    for (const name of ["agent-run-expired", "agent-run-fresh", "agent-run-protected"]) {
+      const directory = join(root, name)
+      await mkdir(directory, { recursive: true })
+      const result = join(directory, "result.json")
+      await writeFile(result, '{"version":1,"exitCode":0}\n')
+      const age = name === "agent-run-fresh" ? 500 : 2_000
+      await utimes(result, new Date(now.getTime() - age), new Date(now.getTime() - age))
+    }
+    const cli = makeCodexCli({
+      binary: "codex",
+      custodyRoot: root,
+      retentionMs: 1_000,
+      now: () => now,
+      runCommand: manager().runCommand,
+    })
+    expect(await Effect.runPromise(cli.cleanup!(["agent-run-protected"]))).toBe(1)
+    await expect(stat(join(root, "agent-run-expired"))).rejects.toThrow()
+    expect((await stat(join(root, "agent-run-fresh"))).isDirectory()).toBe(true)
+    expect((await stat(join(root, "agent-run-protected"))).isDirectory()).toBe(true)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

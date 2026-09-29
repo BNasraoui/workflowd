@@ -6,7 +6,7 @@ import { Context, Effect, Schema } from "effect"
 import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
-import { incrementalLines } from "./codex-output"
+import { cleanupFinishedCustody, incrementalLines } from "./codex-output"
 
 /**
  * Codex CLI sessions are threads under the daemon host's `~/.codex`
@@ -152,6 +152,9 @@ export type CodexCliPort = {
   readonly attach: (input: {
     readonly runId: string
   }) => Effect.Effect<CodexRunProcess | null, WorkspaceError>
+  readonly cleanup?: (
+    protectedRunIds: ReadonlyArray<string>,
+  ) => Effect.Effect<number, WorkspaceError>
 }
 
 export const CodexCli = Context.Service<CodexCliPort>("workflowd/kernel/CodexCli")
@@ -172,6 +175,8 @@ export type CodexCliOptions = {
   readonly observationTimeoutMs?: number
   readonly cancellationGraceMs?: number
   readonly commandTimeoutMs?: number
+  readonly retentionMs?: number
+  readonly now?: () => Date
   readonly runCommand?: RunCommand
 }
 
@@ -249,6 +254,8 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
   const observationTimeoutMs = options.observationTimeoutMs ?? 24 * 60 * 60_000
   const cancellationGraceMs = options.cancellationGraceMs ?? 5_000
   const commandTimeoutMs = options.commandTimeoutMs ?? 5_000
+  const retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60_000
+  const now = options.now ?? (() => new Date())
   const runCommand = options.runCommand ?? defaultRunCommand
   const workerPath = fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
   const manifestPath = (runId: string) =>
@@ -368,12 +375,53 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
           parse: parseCodexExecEvent,
         })
 
+        const cancelUnit = async () => {
+          const reconciled = await reconcile(path, manifest)
+          manifest = reconciled.manifest
+          if (!reconciled.unit.present || !reconciled.unit.active) return
+          const result = await runBoundedCommand([
+            "systemctl",
+            "--user",
+            "stop",
+            manifest.executionId,
+          ])
+          if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)
+          const waitInactive = async (durationMs: number) => {
+            const deadline = Date.now() + durationMs
+            for (;;) {
+              const observed = await reconcile(path, manifest)
+              manifest = observed.manifest
+              if (!observed.unit.present || !observed.unit.active) return true
+              if (Date.now() >= deadline) return false
+              await Bun.sleep(pollIntervalMs)
+            }
+          }
+          if (!(await waitInactive(cancellationGraceMs))) {
+            const killed = await runBoundedCommand([
+              "systemctl",
+              "--user",
+              "kill",
+              "--kill-whom=all",
+              "--signal=SIGKILL",
+              manifest.executionId,
+            ])
+            if (killed.exitCode !== 0 || !(await waitInactive(cancellationGraceMs))) {
+              throw commandFailure("kill codex transient unit", killed)
+            }
+          }
+          await writeJsonAtomic(manifest.cancelledPath, {
+            version: 1,
+            invocationId: manifest.invocationId,
+          })
+        }
+
         const exited = Effect.tryPromise({
           try: async () => {
             for (;;) {
               const exit = await terminal()
               if (exit !== null) return exit
               if (Date.now() - attachedAt >= observationTimeoutMs) {
+                await cancelUnit()
                 return {
                   exitCode: -1,
                   stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
@@ -390,47 +438,7 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
         })
 
         const cancel = Effect.tryPromise({
-          try: async () => {
-            const reconciled = await reconcile(path, manifest)
-            manifest = reconciled.manifest
-            if (!reconciled.unit.present || !reconciled.unit.active) return
-            const result = await runBoundedCommand([
-              "systemctl",
-              "--user",
-              "stop",
-              manifest.executionId,
-            ])
-            if (result.exitCode !== 0) {
-              throw commandFailure("cancel codex transient unit", result)
-            }
-            const waitInactive = async (durationMs: number) => {
-              const deadline = Date.now() + durationMs
-              for (;;) {
-                const observed = await reconcile(path, manifest)
-                manifest = observed.manifest
-                if (!observed.unit.present || !observed.unit.active) return true
-                if (Date.now() >= deadline) return false
-                await Bun.sleep(pollIntervalMs)
-              }
-            }
-            if (!(await waitInactive(cancellationGraceMs))) {
-              const killed = await runBoundedCommand([
-                "systemctl",
-                "--user",
-                "kill",
-                "--kill-whom=all",
-                "--signal=SIGKILL",
-                manifest.executionId,
-              ])
-              if (killed.exitCode !== 0 || !(await waitInactive(cancellationGraceMs))) {
-                throw commandFailure("kill codex transient unit", killed)
-              }
-            }
-            await writeJsonAtomic(manifest.cancelledPath, {
-              version: 1,
-              invocationId: manifest.invocationId,
-            })
-          },
+          try: cancelUnit,
           catch: (cause) =>
             cause instanceof WorkspaceError
               ? cause
@@ -450,6 +458,22 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
     })
 
   return {
+    cleanup: (protectedRunIds) =>
+      Effect.tryPromise({
+        try: async () => {
+          return cleanupFinishedCustody({
+            root: options.custodyRoot,
+            protectedRunIds,
+            retentionMs,
+            now: now(),
+          })
+        },
+        catch: (cause) =>
+          new WorkspaceError({
+            operation: "clean up finished codex custody",
+            cause: normalizeError(cause),
+          }),
+      }),
     preflight: Effect.gen(function* () {
       const manager = yield* Effect.tryPromise({
         try: () => runBoundedCommand(["systemctl", "--user", "show-environment"]),

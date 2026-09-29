@@ -459,6 +459,7 @@ export function startHookService(
                 agentRuns: {
                   token: config.agentRuns.token,
                   register: Option.getOrThrow(agentRuns).register,
+                  cancel: Option.getOrThrow(agentRuns).cancel,
                 },
               }),
           ...(config.dogfood === undefined
