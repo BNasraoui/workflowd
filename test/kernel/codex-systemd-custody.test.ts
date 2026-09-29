@@ -226,3 +226,27 @@ test("startup cleanup removes only expired finished custody outside active run p
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("isolated callers can namespace transient units without changing the default", async () => {
+  const root = join(tmpdir(), `codex-prefix-${crypto.randomUUID()}`)
+  try {
+    const systemd = manager()
+    const cli = makeCodexCli({
+      binary: "codex",
+      custodyRoot: root,
+      unitPrefix: "workflowd-evidence59-",
+      runCommand: systemd.runCommand,
+    })
+    const process = await Effect.runPromise(
+      cli.spawn({
+        runId: "agent-run-prefix",
+        directory: root,
+        prompt: "go",
+        model: null,
+      }),
+    )
+    expect(process.executionId).toMatch(/^workflowd-evidence59-[a-f0-9]{24}\.service$/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

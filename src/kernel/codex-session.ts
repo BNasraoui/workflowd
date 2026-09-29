@@ -136,6 +136,7 @@ type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 export type CodexCliOptions = {
   readonly binary: string
   readonly custodyRoot: string
+  readonly unitPrefix?: string
   readonly pollIntervalMs?: number
   readonly maxOutputBytes?: number
   readonly observationTimeoutMs?: number
@@ -171,8 +172,8 @@ const safeRunId = (runId: string) => {
   return runId
 }
 
-const executionIdFor = (runId: string) =>
-  `workflowd-agent-${createHash("sha256").update(runId).digest("hex").slice(0, 24)}.service`
+const executionIdFor = (runId: string, prefix: string) =>
+  `${prefix}${createHash("sha256").update(runId).digest("hex").slice(0, 24)}.service`
 
 const defaultRunCommand: RunCommand = async (command) => {
   const child = Bun.spawn([...command], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
@@ -218,6 +219,8 @@ export const makeCodexCli = (
   options: CodexCliOptions,
 ): Extract<CodexCliPort, { readonly ownership: "transient-exec" }> => {
   const pollIntervalMs = options.pollIntervalMs ?? 100
+  const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")
   const maxOutputBytes = options.maxOutputBytes ?? 10 * 1024 * 1024
   const observationTimeoutMs = options.observationTimeoutMs ?? 24 * 60 * 60_000
   const cancellationGraceMs = options.cancellationGraceMs ?? 5_000
@@ -476,7 +479,7 @@ export const makeCodexCli = (
           try {
             safeRunId(input.runId)
             const directory = join(options.custodyRoot, input.runId)
-            const executionId = executionIdFor(input.runId)
+            const executionId = executionIdFor(input.runId, unitPrefix)
             const launchId = crypto.randomUUID()
             const promptPath = join(directory, "prompt")
             const eventsPath = join(directory, "events.jsonl")
