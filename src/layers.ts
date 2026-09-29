@@ -269,6 +269,9 @@ export const makeLiveLayer = (config: AppConfig) => {
     CodexCli,
     makeCodexCli({
       binary: config.agentRuns?.codexBinary ?? "codex",
+      ...(config.agentRuns?.codexUnitPrefix === undefined
+        ? {}
+        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
       custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
     }),
   )

@@ -73,6 +73,17 @@ describe("loadConfig", () => {
     })
   })
 
+  test("configures an isolated Codex unit namespace", async () => {
+    const config = await loadConfig({
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "scratch-token",
+      WORKFLOWD_AGENT_RUN_ROUTES: "other=fixture/fixture",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "scratch=/tmp/scratch",
+      WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX: "workflowd-evidence59-test-",
+    })
+    expect(config.agentRuns?.codexUnitPrefix).toBe("workflowd-evidence59-test-")
+  })
+
   test("parses the claude host allow-list and rejects malformed hosts and timeouts", async () => {
     const base = {
       ...requiredEnvironment,

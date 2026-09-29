@@ -92,6 +92,7 @@ export interface AgentRunConfig {
   readonly token: string
   readonly claudeBinary: string
   readonly claudeHosts: ReadonlyArray<string>
+  readonly codexUnitPrefix?: string
   readonly codexBinary: string
   readonly remoteTurnTimeoutMs: number
   readonly routes: ReadonlyArray<AgentRunRoute>
@@ -395,6 +396,11 @@ function loadAgentRunConfig(
         ? []
         : parseAgentRunClaudeHosts(env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS),
     codexBinary: env.WORKFLOWD_AGENT_RUN_CODEX_BIN ?? "codex",
+    ...(env.WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX === undefined
+      ? {}
+      : {
+          codexUnitPrefix: env.WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX,
+        }),
     remoteTurnTimeoutMs,
     routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
     codexRoutes:
