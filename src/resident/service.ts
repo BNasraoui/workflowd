@@ -1,3 +1,4 @@
+import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
 import { Context, Effect, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
@@ -330,7 +331,11 @@ export const ResidentCodexLive = (
               cancel: cancelRun(input.runId),
               exited: Effect.tryPromise({
                 try: () => exited,
-                catch: (cause) => new WorkspaceError({ operation: "observe resident exit", cause }),
+                catch: (cause) =>
+                  new WorkspaceError({
+                    operation: "observe resident exit",
+                    cause: normalizeError(cause),
+                  }),
               }),
             }
           }).pipe(

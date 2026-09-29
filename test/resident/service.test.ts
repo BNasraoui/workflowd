@@ -657,3 +657,32 @@ test("restart delivers both CI subscribers once after prepared inbox rows are co
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("resident cancellation closes only its run and cannot restore or deliver it again", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const runs = yield* AgentRunStore
+      const store = yield* makeResidentStore
+      const now = new Date()
+      yield* prepareRun(now)
+      const process = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      expect(resident.cli.ownership).toBe("resident-thread")
+      if (resident.cli.ownership !== "resident-thread") throw new Error("wrong owner")
+      yield* resident.cli.cancelRun("missing")
+      yield* resident.cli.cancelRun("a")
+      yield* runs.cancel({ runId: "a", now })
+      expect((yield* process.exited).exitCode).toBe(1)
+      expect(yield* store.threads()).toHaveLength(0)
+      expect((yield* runs.read("a"))?.state).toBe("cancelled")
+      expect(fake.closed.filter((pid) => pid === fake.pids.get("thread-1"))).toHaveLength(1)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
