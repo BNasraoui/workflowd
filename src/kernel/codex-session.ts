@@ -163,6 +163,7 @@ export type CodexCliOptions = {
   readonly binary: string
   readonly custodyRoot: string
   readonly pollIntervalMs?: number
+  readonly maxOutputBytes?: number
   readonly runCommand?: RunCommand
 }
 
@@ -230,6 +231,7 @@ const commandFailure = (operation: string, result: CommandResult) =>
 
 export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
   const pollIntervalMs = options.pollIntervalMs ?? 100
+  const maxOutputBytes = options.maxOutputBytes ?? 10 * 1024 * 1024
   const runCommand = options.runCommand ?? defaultRunCommand
   const workerPath = fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
   const manifestPath = (runId: string) =>
@@ -387,8 +389,6 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
             `--unit=${executionId}`,
             `--working-directory=${input.directory}`,
             "--property=KillMode=control-group",
-            `--property=StandardOutput=append:${eventsPath}`,
-            `--property=StandardError=append:${stderrPath}`,
             ...forwardedEnvironment,
             process.execPath,
             workerPath,
@@ -400,6 +400,12 @@ export const makeCodexCli = (options: CodexCliOptions): CodexCliPort => {
             promptPath,
             "--result-file",
             resultPath,
+            "--events-file",
+            eventsPath,
+            "--stderr-file",
+            stderrPath,
+            "--max-output-bytes",
+            String(maxOutputBytes),
             ...(input.model === null ? [] : ["--model", input.model]),
           ]
           const launched = await runCommand(command)

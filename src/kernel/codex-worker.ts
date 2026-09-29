@@ -1,10 +1,13 @@
-import { readFile, rename, writeFile } from "node:fs/promises"
+import { open, readFile, rename, writeFile } from "node:fs/promises"
 
 export type CodexWorkerOptions = {
   readonly binary: string
   readonly directory: string
   readonly promptFile: string
   readonly resultFile: string
+  readonly eventsFile: string
+  readonly stderrFile: string
+  readonly maxOutputBytes: number
   readonly model: string | null
 }
 
@@ -14,8 +17,26 @@ const writeResult = async (path: string, exitCode: number) => {
   await rename(temporary, path)
 }
 
-/** Runs inside a transient user service. Systemd owns stdout/stderr and
- * appends both streams to the custody paths configured by the launcher. */
+const drainBounded = async (stream: ReadableStream<Uint8Array>, path: string, limit: number) => {
+  const file = await open(path, "w", 0o600)
+  const reader = stream.getReader()
+  let written = 0
+  try {
+    for (;;) {
+      const next = await reader.read()
+      if (next.done) return
+      if (written >= limit) continue
+      const chunk = next.value.subarray(0, limit - written)
+      await file.write(chunk)
+      written += chunk.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+    await file.close()
+  }
+}
+
+/** Runs inside a transient user service and durably captures bounded output. */
 export async function runCodexWorker(options: CodexWorkerOptions): Promise<number> {
   const prompt = await readFile(options.promptFile)
   const child = Bun.spawn(
@@ -33,11 +54,15 @@ export async function runCodexWorker(options: CodexWorkerOptions): Promise<numbe
       cwd: options.directory,
       env: process.env,
       stdin: prompt,
-      stdout: "inherit",
-      stderr: "inherit",
+      stdout: "pipe",
+      stderr: "pipe",
     },
   )
-  const status = await child.exited
+  const [status] = await Promise.all([
+    child.exited,
+    drainBounded(child.stdout, options.eventsFile, options.maxOutputBytes),
+    drainBounded(child.stderr, options.stderrFile, options.maxOutputBytes),
+  ])
   const exitCode = typeof status === "number" ? status : -1
   await writeResult(options.resultFile, exitCode)
   return exitCode
@@ -65,6 +90,9 @@ export const parseCodexWorkerArguments = (
     directory: required("--directory"),
     promptFile: required("--prompt-file"),
     resultFile: required("--result-file"),
+    eventsFile: required("--events-file"),
+    stderrFile: required("--stderr-file"),
+    maxOutputBytes: Number.parseInt(required("--max-output-bytes"), 10),
     model: values.get("--model") ?? null,
   }
 }

@@ -17,6 +17,12 @@ test("the worker command parser accepts exact pairs and rejects malformed argume
       "/state/prompt",
       "--result-file",
       "/state/result",
+      "--events-file",
+      "/state/events",
+      "--stderr-file",
+      "/state/stderr",
+      "--max-output-bytes",
+      "1024",
       "--model",
       "gpt-5.1-codex",
     ]),
@@ -25,6 +31,9 @@ test("the worker command parser accepts exact pairs and rejects malformed argume
     directory: "/work",
     promptFile: "/state/prompt",
     resultFile: "/state/result",
+    eventsFile: "/state/events",
+    stderrFile: "/state/stderr",
+    maxOutputBytes: 1024,
     model: "gpt-5.1-codex",
   })
   expect(() => parseCodexWorkerArguments(["binary", "codex"])).toThrow("--name value pairs")
@@ -37,6 +46,8 @@ test("the transient worker feeds the prompt on stdin and records its exit durabl
     const promptPath = join(root, "prompt")
     const resultPath = join(root, "result.json")
     const capturePath = join(root, "stdin-capture")
+    const eventsPath = join(root, "events.jsonl")
+    const stderrPath = join(root, "stderr.log")
     const binary = join(root, "codex")
     await writeFile(promptPath, "prompt stays out of argv")
     await writeFile(binary, `#!/bin/sh\ncat > "${capturePath}"\nexit 7\n`, { mode: 0o755 })
@@ -46,12 +57,17 @@ test("the transient worker feeds the prompt on stdin and records its exit durabl
       directory: root,
       promptFile: promptPath,
       resultFile: resultPath,
+      eventsFile: eventsPath,
+      stderrFile: stderrPath,
+      maxOutputBytes: 64,
       model: null,
     })
 
     expect(exitCode).toBe(7)
     expect(await readFile(capturePath, "utf8")).toBe("prompt stays out of argv")
     expect(JSON.parse(await readFile(resultPath, "utf8"))).toEqual({ version: 1, exitCode: 7 })
+    expect((await stat(eventsPath)).size).toBeLessThanOrEqual(64)
+    expect((await stat(stderrPath)).size).toBeLessThanOrEqual(64)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -83,9 +99,8 @@ test("launches in an independent user service with durable custody and no prompt
     expect(commands[0]).toContain("--user")
     expect(commands[0]).toContain("--service-type=exec")
     expect(commands[0]).toContain(`--unit=${run.executionId}`)
-    expect(commands[0]!.some((part) => part.startsWith("--property=StandardOutput=append:"))).toBe(
-      true,
-    )
+    expect(commands[0]).toContain("--max-output-bytes")
+    expect(commands[0]).toContain(String(10 * 1024 * 1024))
     expect(commands[0]!.join(" ")).not.toContain("credential rotation must not kill me")
     expect(
       JSON.parse(await readFile(join(root, "agent-run-abc123", "manifest.json"), "utf8")),
