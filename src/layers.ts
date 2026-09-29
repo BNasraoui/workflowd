@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { OpenCode } from "@opencode-ai/client/effect"
@@ -266,7 +267,13 @@ export const makeLiveLayer = (config: AppConfig) => {
   )
   const codexCliLayer = Layer.succeed(
     CodexCli,
-    makeCodexCli({ binary: config.agentRuns?.codexBinary ?? "codex" }),
+    makeCodexCli({
+      binary: config.agentRuns?.codexBinary ?? "codex",
+      ...(config.agentRuns?.codexUnitPrefix === undefined
+        ? {}
+        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
+      custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
+    }),
   )
   const claudeResumeWorkerLayer =
     config.agentRuns === undefined

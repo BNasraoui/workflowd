@@ -311,6 +311,11 @@ Two optional units ship beside it:
 - `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Without `WORKFLOWD_MCP_TOKEN` it starts read-only; write tools refuse every call. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
 - `workflowd-runner.service` — a host-specific remote runner. It needs a NATS credential and `deploy/runner.env.example` copied to `~/.config/workflowd/runner.env`; install steps, credential minting, and the `claude_resume` threat model are in [docs/remote-runner.md](docs/remote-runner.md).
 
+Codex agent runs survive workflowd's scheduled credential-rotation restart via
+independent transient user services and durable reattachment. See
+[docs/credential-rotation-run-survival.md](docs/credential-rotation-run-survival.md)
+for the decision, evidence, and rollout steps.
+
 ## Verification
 
 Run these before activating either the Workflowd listener or Funnel:

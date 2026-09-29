@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Effect, Fiber } from "effect"
+import { Effect } from "effect"
 import {
   codexFailureLooksUnauthenticated,
   makeCodexCli,
@@ -93,37 +93,15 @@ describe("codex exec JSONL parsing", () => {
   })
 })
 
-/** A fake codex CLI that records its --cd/-m arguments and stdin, then plays
- * back the given stdout fixture. Paths are baked into the script because the
- * port passes the daemon's environment through unchanged. */
-const writeFakeCli = async (
-  root: string,
-  name: string,
-  stdoutFixture: string | null,
-): Promise<string> => {
-  const capture = join(root, "capture")
-  const lines = [
-    "#!/bin/sh",
-    'prev=""',
-    'for a in "$@"; do',
-    'if [ "$prev" = "--cd" ]; then echo "$a" > "' + capture + '-cd"; fi',
-    'if [ "$prev" = "-m" ]; then echo "$a" > "' + capture + '-model"; fi',
-    'prev="$a"',
-    "done",
-  ]
-  if (stdoutFixture === null) {
-    lines.push(`echo $$ > "${capture}-pid"`, "sleep 30")
-  } else {
-    lines.push(`cat > "${capture}-stdin"`, `cat "${stdoutFixture}"`)
-  }
-  const binary = join(root, name)
-  await writeFile(binary, `${lines.join("\n")}\n`, { mode: 0o755 })
-  return binary
-}
-
 describe("codex cli port", () => {
+  const managerReady = async () => ({ exitCode: 0, stdout: "", stderr: "" })
+
   test("preflight maps a missing binary and a failed login check to distinct kinds", async () => {
-    const absent = makeCodexCli({ binary: join(tmpdir(), "codex-does-not-exist") })
+    const absent = makeCodexCli({
+      binary: join(tmpdir(), "codex-does-not-exist"),
+      custodyRoot: join(tmpdir(), "unused-codex-custody"),
+      runCommand: managerReady,
+    })
     const unusable = await Effect.runPromise(absent.preflight.pipe(Effect.result))
     expect(unusable._tag).toBe("Failure")
     if (unusable._tag === "Failure") {
@@ -138,7 +116,11 @@ describe("codex cli port", () => {
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 0.153.4';;\n  login) case \"$2\" in status) echo 'Not logged in'; exit 1;; esac;;\nesac\n",
         { mode: 0o755 },
       )
-      const cli = makeCodexCli({ binary: unauthenticated })
+      const cli = makeCodexCli({
+        binary: unauthenticated,
+        custodyRoot: join(root, "custody"),
+        runCommand: managerReady,
+      })
       const result = await Effect.runPromise(cli.preflight.pipe(Effect.result))
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
@@ -158,80 +140,13 @@ describe("codex cli port", () => {
         "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 0.153.4';;\n  login) echo 'Logged in using ChatGPT';;\nesac\n",
         { mode: 0o755 },
       )
-      const cli = makeCodexCli({ binary: authenticated })
+      const cli = makeCodexCli({
+        binary: authenticated,
+        custodyRoot: join(root, "custody"),
+        runCommand: managerReady,
+      })
       const result = await Effect.runPromise(cli.preflight.pipe(Effect.result))
       expect(result._tag).toBe("Success")
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
-  test("spawns the captured success turn through a fake cli and streams its events", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-fake-run-"))
-    try {
-      const fixture = join(root, "stdout-fixture")
-      await writeFile(fixture, `${capturedSuccessTurn.join("\n")}\n`)
-      const codex = await writeFakeCli(root, "codex", fixture)
-      const cli = makeCodexCli({ binary: codex })
-      const run = await Effect.runPromise(
-        cli.spawn({
-          directory: root,
-          prompt: "Reply with exactly the word: pong",
-          model: "gpt-5.1-codex",
-        }),
-      )
-      const events: CodexExecEvent[] = []
-      for await (const event of run.events) events.push(event)
-      const exit = await Effect.runPromise(run.exited)
-      expect(exit.exitCode).toBe(0)
-      expect(events[0]).toEqual({
-        type: "thread.started",
-        threadId: "01a09976-e799-7c52-9759-8b76d692b755",
-      })
-      expect(events.some((event) => event.type === "agent_message")).toBe(true)
-      // The prompt rode stdin, never argv; --cd and -m reached the CLI.
-      expect((await Bun.file(join(root, "capture-stdin")).text()).trim()).toBe(
-        "Reply with exactly the word: pong",
-      )
-      expect((await Bun.file(join(root, "capture-cd")).text()).trim()).toBe(root)
-      expect((await Bun.file(join(root, "capture-model")).text()).trim()).toBe("gpt-5.1-codex")
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
-  test("interrupting exited terminates a hung run's process group", async () => {
-    const root = await mkdtemp(join(tmpdir(), "codex-fake-hang-"))
-    try {
-      const codex = await writeFakeCli(root, "codex-hang", null)
-      const cli = makeCodexCli({ binary: codex })
-      await Effect.runPromise(
-        Effect.gen(function* () {
-          const run = yield* cli.spawn({ directory: root, prompt: "hang", model: null })
-          const exited = yield* Effect.forkChild(run.exited)
-          yield* Effect.sleep(150)
-          const pidFile = Bun.file(join(root, "capture-pid"))
-          const pid = Number.parseInt((yield* Effect.promise(() => pidFile.text())).trim(), 10)
-          expect(Number.isFinite(pid)).toBe(true)
-          const alive = () => {
-            try {
-              process.kill(-pid, 0)
-              return true
-            } catch {
-              return false
-            }
-          }
-          expect(alive()).toBe(true)
-          yield* Fiber.interrupt(exited)
-          const deadline = Date.now() + 5_000
-          while (alive()) {
-            if (Date.now() > deadline) {
-              throw new Error("hung codex process group survived interruption")
-            }
-            yield* Effect.sleep(50)
-          }
-        }),
-      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }

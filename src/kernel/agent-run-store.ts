@@ -14,7 +14,14 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
  * receipt has been issued) → completed | failed | operator_required.
  */
 export type AgentRunState =
-  "accepted" | "spawning" | "spawned" | "verified" | "completed" | "failed" | "operator_required"
+  | "accepted"
+  | "spawning"
+  | "spawned"
+  | "verified"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "operator_required"
 
 const AgentRunRow = Schema.Struct({
   run_id: Schema.String,
@@ -36,6 +43,7 @@ const AgentRunRow = Schema.Struct({
     "spawned",
     "verified",
     "completed",
+    "cancelled",
     "failed",
     "operator_required",
   ]),
@@ -110,6 +118,7 @@ export type AgentRunStorePort = {
     input: AgentRunCreateInput,
   ) => Effect.Effect<{ readonly status: "created" | "duplicate" }, AgentRunStoreError>
   readonly claimSpawn: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
+  readonly abandonLaunch: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly read: (runId: string) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
   readonly markSpawned: (
     input: Authority & {
@@ -129,6 +138,7 @@ export type AgentRunStorePort = {
     input: Authority & { readonly attempt: number; readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly complete: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
+  readonly cancel: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
     input: Authority & { readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
@@ -144,6 +154,11 @@ export type AgentRunStorePort = {
      * still cleaned up through the dispatch-incomplete path. */
     readonly unsupervisedProviderIds: ReadonlyArray<string>
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
+  /** Startup recovery surface for providers whose execution lives outside
+   * the daemon and can be reattached after a restart. */
+  readonly listActiveByProvider: (
+    providerId: string,
+  ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
 }
 
 export const AgentRunStore = Context.Service<AgentRunStorePort>("workflowd/kernel/AgentRunStore")
@@ -246,6 +261,14 @@ const make = Effect.gen(function* () {
         WHERE run_id = ${input.runId} AND state = 'accepted' RETURNING run_id`,
     )
 
+  const abandonLaunch: AgentRunStorePort["abandonLaunch"] = (input) =>
+    transition(
+      input.runId,
+      "run is not an incomplete launch",
+      sql`DELETE FROM kernel_agent_runs
+        WHERE run_id = ${input.runId} AND state = 'spawning' RETURNING run_id`,
+    )
+
   const markSpawned: AgentRunStorePort["markSpawned"] = (input) =>
     Effect.gen(function* () {
       const existing = yield* readRow(input.runId)
@@ -316,6 +339,17 @@ const make = Effect.gen(function* () {
         WHERE run_id = ${input.runId} AND state = 'verified' RETURNING run_id`,
     )
 
+  const cancel: AgentRunStorePort["cancel"] = (input) =>
+    transition(
+      input.runId,
+      "run is not cancellable",
+      sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = NULL,
+        updated_at = ${input.now.toISOString()}
+        WHERE run_id = ${input.runId} AND (state IN ('spawning', 'spawned', 'verified')
+          OR (state = 'operator_required' AND provider_id = 'codex-cli'))
+        RETURNING run_id`,
+    )
+
   const fail: AgentRunStorePort["fail"] = (input) =>
     transition(
       input.runId,
@@ -343,16 +377,30 @@ const make = Effect.gen(function* () {
           ? sql`state = 'verified'`
           : sql`state = 'verified'
         AND provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
+      const externallySupervised =
+        input.unsupervisedProviderIds.length === 0
+          ? sql`1 = 1`
+          : sql`provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
         WHERE ${verified}
-        OR (state IN ('accepted', 'spawning', 'spawned') AND updated_at < ${staleBefore})
+        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised}
+          AND updated_at < ${staleBefore})
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
+    })
+
+  const listActiveByProvider: AgentRunStorePort["listActiveByProvider"] = (providerId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql`SELECT * FROM kernel_agent_runs
+        WHERE provider_id = ${providerId} AND state IN ('spawning', 'spawned', 'verified')
+        ORDER BY created_at, run_id`
+      return yield* Effect.forEach(rows, toRecord)
     })
 
   return AgentRunStore.of({
     create,
     claimSpawn,
+    abandonLaunch,
     read: readRow,
     markSpawned,
     markVerified,
@@ -360,9 +408,11 @@ const make = Effect.gen(function* () {
     touch,
     beginAttempt,
     complete,
+    cancel,
     fail,
     operatorRequired,
     nextWatchable,
+    listActiveByProvider,
   })
 })
 

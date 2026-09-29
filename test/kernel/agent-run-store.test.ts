@@ -195,7 +195,7 @@ describe("agent-run store", () => {
     expect(result.terminal).toBeNull()
   })
 
-  test("nextWatchable skips verified runs of unsupervised providers but still fails their stale dispatches", async () => {
+  test("nextWatchable leaves every state of an externally supervised provider to its owner", async () => {
     // A codex run completes inline in the dispatching daemon process; the
     // watchdog must never observe its verified window (the OpenCode server
     // does not know the session and would escalate to operator_required).
@@ -229,6 +229,71 @@ describe("agent-run store", () => {
       }),
     )
     expect(result.supervisedWindow).toBeNull()
-    expect(result.stale?.runId).toBe("agent-run-stale-codex")
+    expect(result.stale).toBeNull()
   })
+
+  test("lists every unit-owning run state for one provider so startup can recover custody", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create({ ...input, providerId: "codex-cli" })
+        yield* spawn(store)
+        yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        yield* store.create({
+          ...input,
+          runId: "agent-run-spawning",
+          prompt: "spawning",
+          promptSha256: "c".repeat(64),
+          providerId: "codex-cli",
+        })
+        yield* store.claimSpawn({ runId: "agent-run-spawning", now: at })
+        const codex = yield* store.listActiveByProvider("codex-cli")
+        const other = yield* store.listActiveByProvider("opencode-primary")
+        return { codex, other }
+      }),
+    )
+    expect(result.codex.map((record) => record.runId)).toEqual([input.runId, "agent-run-spawning"])
+    expect(result.other).toEqual([])
+  })
+
+  test("abandons a failed launch row so an identical request can be created again", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create({ ...input, providerId: "codex-cli" })
+        yield* store.claimSpawn({ runId: input.runId, now: at })
+        yield* store.abandonLaunch({ runId: input.runId, now: later })
+        const missing = yield* store.read(input.runId)
+        const retry = yield* store.create({ ...input, providerId: "codex-cli" })
+        return { missing, retry }
+      }),
+    )
+    expect(result.missing).toBeNull()
+    expect(result.retry.status).toBe("created")
+  })
+})
+
+test("confirmed Codex cancellation wins when its exit observer escalated first", async () => {
+  const result = await run(
+    Effect.gen(function* () {
+      const store = yield* AgentRunStore
+      yield* store.create({ ...input, providerId: "codex-cli" })
+      yield* spawn(store)
+      yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+      yield* store.operatorRequired({
+        runId: input.runId,
+        diagnostic: "codex_failed: exit -1",
+        now: later,
+      })
+      // The dispatcher invokes this only after exact-invocation cgroup shutdown.
+      yield* store.cancel({ runId: input.runId, now: later })
+      const staleObserver = yield* store
+        .operatorRequired({ runId: input.runId, diagnostic: "late observer", now: later })
+        .pipe(Effect.result)
+      return { row: yield* store.read(input.runId), staleObserver }
+    }),
+  )
+  expect(result.row?.state).toBe("cancelled")
+  expect(result.row?.diagnostic).toBeNull()
+  expect(result.staleObserver._tag).toBe("Failure")
 })

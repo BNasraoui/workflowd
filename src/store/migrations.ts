@@ -1215,9 +1215,10 @@ const removeAgentCompletionBaseline = Effect.gen(function* () {
     WHERE state = 'watching'`
 })
 
-const kernelAgentRuns = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient
-  yield* sql`
+const kernelAgentRuns = (includeCancelled = false) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
     CREATE TABLE kernel_agent_runs (
       run_id TEXT PRIMARY KEY CHECK (length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
       route TEXT NOT NULL CHECK (length(CAST(route AS BLOB)) BETWEEN 1 AND 128),
@@ -1241,9 +1242,11 @@ const kernelAgentRuns = Effect.gen(function* () {
       native_session_id TEXT CHECK (
         native_session_id IS NULL OR length(CAST(native_session_id AS BLOB)) BETWEEN 1 AND 256
       ),
-      state TEXT NOT NULL CHECK (state IN (
-        'accepted', 'spawning', 'spawned', 'verified', 'completed', 'failed', 'operator_required'
-      )),
+      state TEXT NOT NULL CHECK (${
+        includeCancelled
+          ? sql`state IN ('accepted', 'spawning', 'spawned', 'verified', 'completed', 'cancelled', 'failed', 'operator_required')`
+          : sql`state IN ('accepted', 'spawning', 'spawned', 'verified', 'completed', 'failed', 'operator_required')`
+      }),
       attempt INTEGER NOT NULL CHECK (attempt > 0),
       max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
       last_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (last_output_tokens >= 0),
@@ -1257,10 +1260,10 @@ const kernelAgentRuns = Effect.gen(function* () {
       CHECK (state NOT IN ('spawned', 'verified') OR session_id IS NOT NULL)
     ) STRICT
   `
-  yield* sql`CREATE INDEX kernel_agent_runs_watchable
-    ON kernel_agent_runs (state, updated_at, run_id)
-    WHERE state IN ('accepted', 'spawning', 'spawned', 'verified')`
-})
+    yield* sql`CREATE INDEX kernel_agent_runs_watchable
+      ON kernel_agent_runs (state, updated_at, run_id)
+      WHERE state IN ('accepted', 'spawning', 'spawned', 'verified')`
+  })
 
 const migrationsThrough0008 = {
   "0001_initial_schema": initialSchema,
@@ -1328,11 +1331,31 @@ const kernelAgentRunsSessionIndex = Effect.gen(function* () {
     ON kernel_agent_runs (session_id, updated_at, created_at, run_id)`
 })
 
+const migrationsThrough0019 = {
+  ...migrationsThrough0016,
+  "0017_remove_agent_completion_baseline": removeAgentCompletionBaseline,
+  "0018_kernel_agent_runs": kernelAgentRuns(),
+  "0019_kernel_agent_runs_session_index": kernelAgentRunsSessionIndex,
+}
+
+export const runStoreMigrationsThrough0019 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0019),
+})
+
+const kernelAgentRunCancellation = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs RENAME TO kernel_agent_runs_old`
+  yield* sql`DROP INDEX kernel_agent_runs_watchable`
+  yield* sql`DROP INDEX kernel_agent_runs_session`
+  yield* kernelAgentRuns(true)
+  yield* sql`INSERT INTO kernel_agent_runs SELECT * FROM kernel_agent_runs_old`
+  yield* sql`DROP TABLE kernel_agent_runs_old`
+  yield* kernelAgentRunsSessionIndex
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0016,
-    "0017_remove_agent_completion_baseline": removeAgentCompletionBaseline,
-    "0018_kernel_agent_runs": kernelAgentRuns,
-    "0019_kernel_agent_runs_session_index": kernelAgentRunsSessionIndex,
+    ...migrationsThrough0019,
+    "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
   }),
 })

@@ -45,7 +45,7 @@ type AgentWaitIngressBinding = Pick<AgentWaitIngressPort, "register"> & {
   readonly token: string
 }
 
-type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register"> & {
+type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register" | "cancel"> & {
   readonly token: string
 }
 
@@ -90,6 +90,10 @@ export function routeRequest(
       options.maxBodyBytes ?? 1_048_576,
     )
   }
+  const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
+  if (agentRunCancel !== null && request.method === "DELETE" && options.agentRuns !== undefined) {
+    return handleAgentRunCancel(request, options.agentRuns, agentRunCancel[1]!, options.now)
+  }
   if (
     pathname === "/workflows/agent-runs" &&
     request.method === "POST" &&
@@ -112,6 +116,33 @@ export function routeRequest(
   const testJobResponse = routeTestJobRequest(request, pathname, options)
   if (testJobResponse !== undefined) return testJobResponse
   return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+}
+
+function handleAgentRunCancel(
+  request: Request,
+  ingress: AgentRunIngressBinding,
+  runId: string,
+  now: Date,
+) {
+  if (!authorized(request.headers.get("authorization"), ingress.token)) {
+    return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+  }
+  return ingress.cancel(runId, now).pipe(
+    Effect.matchEffect({
+      onFailure: (error) => {
+        const response = agentRunFailure(error)
+        return response.status === 500
+          ? Effect.logError("Agent-run cancellation failed", error).pipe(Effect.as(response))
+          : Effect.succeed(response)
+      },
+      onSuccess: () => Effect.succeed(new Response(null, { status: 204 })),
+    }),
+    Effect.catchCause((cause) =>
+      Effect.logError("Agent-run cancellation failed", cause).pipe(
+        Effect.as(Response.json({ error: "internal server error" }, { status: 500 })),
+      ),
+    ),
+  )
 }
 
 function routeTestJobRequest(

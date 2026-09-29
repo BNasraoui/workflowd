@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { join } from "node:path"
-import { Context, Data, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Context, Data, Effect, Layer, Schema } from "effect"
 import {
   AgentRunSubmission,
   resolveAgentRunRouteChoice,
@@ -15,24 +15,10 @@ import type { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
 import { AgentRunWorktrees } from "./agent-run-worktrees"
-import {
-  CLAUDE_ENDPOINT_ALIAS,
-  CLAUDE_PROVIDER_ID,
-  ClaudeCli,
-  claudeEndpointIdentity,
-  claudeSessionCustodyId,
-} from "./claude-session"
-import {
-  CODEX_ENDPOINT_ALIAS,
-  CODEX_PROVIDER_ID,
-  CodexCli,
-  codexEndpointIdentity,
-  codexFailureLooksUnauthenticated,
-  codexSessionCustodyId,
-  type CodexExecEvent,
-  type CodexExit,
-  type CodexRunProcess,
-} from "./codex-session"
+import { ClaudeCli } from "./claude-session"
+import { makeAgentRunCodexDispatcher } from "./agent-run-codex"
+import { makeAgentRunCustody } from "./agent-run-custody"
+import { CODEX_PROVIDER_ID, CodexCli, codexSessionCustodyId } from "./codex-session"
 import type { AgentCompletionSourceIdentity } from "./agent-handoff-store"
 import { AgentRunStore, type AgentRunRecord, type AgentRunStoreError } from "./agent-run-store"
 import { KernelSessionStore, type KernelSessionStoreError } from "./session-store"
@@ -43,6 +29,7 @@ export type AgentRunRefusalReason =
   | "ambiguous_route"
   | "unknown_repository"
   | "provider_not_authenticated"
+  | "systemd_unavailable"
   | "model_not_available"
   | "invalid_wait_pairing"
   | "missing_parent_session"
@@ -73,6 +60,7 @@ export type AgentRunIngressPort = {
     input: AgentRunSubmissionType,
     now: Date,
   ) => Effect.Effect<AgentRunReceipt, AgentRunIngressError>
+  readonly cancel: (runId: string, now: Date) => Effect.Effect<void, AgentRunIngressError>
 }
 
 export const AgentRunIngress = Context.Service<AgentRunIngressPort>(
@@ -167,30 +155,6 @@ const routeRefusalDetail = (
   return `route "${route}" matches no configured route or model`
 }
 
-const pullCodexEvent = (iterator: AsyncIterator<CodexExecEvent>) =>
-  Effect.promise(() =>
-    iterator.next().then(
-      (next) => (next.done ? ("closed" as const) : next.value),
-      () => "closed" as const,
-    ),
-  )
-
-const codexCompletionDiagnostic = (
-  stalled: boolean,
-  stallWindowMs: number,
-  exit: Exit.Exit<CodexExit, WorkspaceError>,
-  turnFailed: string | null,
-) => {
-  if (stalled)
-    return `codex_stalled: no codex event for ${stallWindowMs}ms; the process group was terminated`
-  const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
-  let diagnostic = `codex_failed: exit ${exitCode}`
-  if (turnFailed !== null) diagnostic += `; ${turnFailed}`
-  if (Exit.isSuccess(exit) && exit.value.stderr !== "")
-    diagnostic += `; stderr: ${exit.value.stderr.slice(0, 500)}`
-  return diagnostic
-}
-
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
@@ -201,84 +165,13 @@ const make = (options: AgentRunIngressOptions) =>
     const claude = yield* ClaudeCli
     const codex = yield* CodexCli
     const signals = yield* WorkSignal
+    const codexReadiness = yield* codex.preflight.pipe(Effect.result)
+    if (codexReadiness._tag === "Failure") {
+      yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
+    }
 
-    /** Registers custody rows read-first so replays and shared parents are
-     * duplicates rather than conflicts (createdAt differs across runs).
-     * Resolution is by PATH first: a directory has one custody resource per
-     * host, shared by every session working in it, whatever id first named
-     * it. Returns the resource id actually holding the path. */
-    const ensureResource = (input: {
-      readonly resourceId: string
-      readonly absolutePath: string
-      readonly kind: "worktree" | "checkout"
-      readonly createdAt: Date
-    }) =>
-      Effect.gen(function* () {
-        const held = yield* sessions.readResourceByPath({
-          owningHostId: options.identity.owningHostId,
-          absolutePath: input.absolutePath,
-        })
-        if (held !== null && typeof held.resource_id === "string") {
-          return held.resource_id
-        }
-        yield* sessions.registerResource({
-          resourceId: input.resourceId,
-          owningHostId: options.identity.owningHostId,
-          absolutePath: input.absolutePath,
-          kind: input.kind,
-          createdAt: input.createdAt,
-        })
-        return input.resourceId
-      })
-
-    const ensureSession = (input: {
-      readonly nativeSessionId: string
-      readonly resourceId: string
-      readonly createdAt: Date
-      readonly kind?: "opencode" | "claude" | "codex"
-      readonly host?: string
-    }) =>
-      Effect.gen(function* () {
-        const kind = input.kind ?? "opencode"
-        const claudeHost = input.host ?? options.identity.owningHostId
-        const providerConfig = {
-          claude: {
-            sessionId: claudeSessionCustodyId(input.nativeSessionId),
-            providerId: CLAUDE_PROVIDER_ID,
-            serverId: claudeHost,
-            endpointAlias: CLAUDE_ENDPOINT_ALIAS,
-            endpointIdentity: claudeEndpointIdentity(claudeHost),
-          },
-          codex: {
-            sessionId: codexSessionCustodyId(input.nativeSessionId),
-            providerId: CODEX_PROVIDER_ID,
-            serverId: options.identity.serverId,
-            endpointAlias: CODEX_ENDPOINT_ALIAS,
-            endpointIdentity: codexEndpointIdentity(options.identity.owningHostId),
-          },
-          opencode: {
-            sessionId: opencodeSessionCustodyId(input.nativeSessionId),
-            providerId: options.identity.providerId,
-            serverId: options.identity.serverId,
-            endpointAlias: options.identity.endpointAlias,
-            endpointIdentity: options.identity.endpointIdentity,
-          },
-        }[kind]
-        const { sessionId } = providerConfig
-        const existing = yield* sessions.readSession(sessionId)
-        if (existing === null) {
-          yield* sessions.registerSession({
-            providerKind: kind,
-            providerVersion: options.identity.providerVersion,
-            ...providerConfig,
-            owningHostId: options.identity.owningHostId,
-            nativeSessionId: input.nativeSessionId,
-            resourceId: input.resourceId,
-            createdAt: input.createdAt,
-          })
-        }
-        return sessionId
-      })
+    const { ensureResource, ensureSession, registerWait, resolveParentDirectory } =
+      makeAgentRunCustody({ sessions, provider, waits, claude, options, refuse })
 
     const preflightRoute = (route: AgentRunRoute) =>
       Effect.gen(function* () {
@@ -318,106 +211,6 @@ const make = (options: AgentRunIngressOptions) =>
           yield* Effect.sleep(options.verifyPollIntervalMs)
         }
         return null
-      })
-
-    /** Resolves the parent's working directory in its own harness: the
-     * opencode server for opencode parents, the local session transcript
-     * for same-host claude parents. Cross-host claude parents register
-     * optimistically — the transcript can only be probed on the owning
-     * host, so a missing one surfaces loudly at wake delivery instead of
-     * doubling remote round trips here. Refusal happens before anything is
-     * spawned. */
-    const resolveParentDirectory = (parent: {
-      readonly nativeSessionId: string
-      readonly kind: "opencode" | "claude"
-      readonly host: string
-      readonly directory: string | undefined
-    }) =>
-      Effect.gen(function* () {
-        if (parent.kind === "claude") {
-          if (parent.directory === undefined) {
-            return yield* refuse(
-              "invalid_wait_pairing",
-              "parentDirectory is required when parentKind is claude",
-            )
-          }
-          const known = [options.identity.owningHostId, ...options.claudeHosts]
-          if (!known.includes(parent.host)) {
-            return yield* refuse(
-              "missing_parent_session",
-              `host ${parent.host} is not on the claude-hosts allow-list; ` +
-                "its sessions cannot be woken",
-            )
-          }
-          if (parent.host !== options.identity.owningHostId) {
-            return parent.directory
-          }
-          const exists = yield* claude.sessionExists({
-            nativeSessionId: parent.nativeSessionId,
-            directory: parent.directory,
-          })
-          if (!exists) {
-            return yield* refuse(
-              "missing_parent_session",
-              `claude session ${parent.nativeSessionId} has no transcript for ` +
-                `directory ${parent.directory} on this host`,
-            )
-          }
-          return parent.directory
-        }
-        const telemetry = yield* provider.sessionTelemetry({ sessionID: parent.nativeSessionId })
-        if (telemetry === undefined) {
-          return yield* refuse(
-            "missing_parent_session",
-            `parent session ${parent.nativeSessionId} does not exist on the OpenCode server`,
-          )
-        }
-        return telemetry.directory
-      })
-
-    const registerWait = (run: {
-      readonly runId: string
-      readonly parentNativeSessionId: string
-      readonly parentKind: "opencode" | "claude"
-      readonly parentHost: string
-      readonly parentDirectory: string
-      readonly childSessionId: string
-      readonly resumePrompt: string
-      readonly createdAt: Date
-      readonly now: Date
-    }) =>
-      Effect.gen(function* () {
-        const parentResourceId = yield* ensureResource({
-          resourceId: `${run.parentKind}-session-resource-${run.parentNativeSessionId}`,
-          absolutePath: run.parentDirectory,
-          kind: "checkout",
-          createdAt: run.createdAt,
-        })
-        const parentSessionId = yield* ensureSession({
-          nativeSessionId: run.parentNativeSessionId,
-          resourceId: parentResourceId,
-          createdAt: run.createdAt,
-          kind: run.parentKind,
-          host: run.parentHost,
-        })
-        // The wait's registration boundary is anchored at run creation, not
-        // the request clock: a retry after a transient wait failure must not
-        // move the boundary past a child answer that already completed, or
-        // the completion source would quarantine it as stale.
-        const receipt = yield* waits.register(
-          {
-            parentSessionId,
-            childSessionId: run.childSessionId,
-            resumePrompt: run.resumePrompt,
-            idempotencyKey: `${run.runId}-wait`,
-          },
-          run.createdAt,
-        )
-        return {
-          waitId: receipt.waitId,
-          instanceId: receipt.instanceId,
-          status: receipt.status,
-        }
       })
 
     const dispatch = (
@@ -504,266 +297,18 @@ const make = (options: AgentRunIngressOptions) =>
         return { nativeSessionId, outputTokens, kind: "opencode" as const }
       })
 
-    /**
-     * Codex runs execute as one synchronous `codex exec --json` subprocess
-     * in the prepared worktree: the thread id arrives with the first event,
-     * custody is registered, and the receipt returns at the first
-     * model-output event (bounded by verifyTimeoutMs, like the opencode
-     * first-token wait). Process exit is completion: a detached continuation
-     * drains the rest of the event stream and completes or escalates the run
-     * inline — there is deliberately no completion watch for codex, because
-     * the completion source only observes opencode sessions.
-     */
-    type CodexFirstToken =
-      | {
-          readonly outcome: "generating"
-          readonly threadId: string
-          readonly firstMessage: string
-        }
-      | {
-          readonly outcome: "refused"
-          readonly reason: "provider_not_authenticated" | "no_first_token"
-          readonly detail: string
-        }
-
-    type CodexObservation = {
-      readonly result: CodexFirstToken
-      readonly iterator: AsyncIterator<CodexExecEvent>
-      readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
-    }
-
-    const observeCodexFirstToken = (process: CodexRunProcess, firstTokenTimeoutMs: number) =>
-      Effect.gen(function* () {
-        const iterator = process.events[Symbol.asyncIterator]()
-        // The process fiber must outlive the dispatching HTTP request: the
-        // receipt returns while codex is still streaming, and a scoped child
-        // fiber dies with the request scope — taking the process group with
-        // it (observed as `codex_failed: exit -1` the moment a client
-        // disconnected after the receipt). Detach so only the drain fiber's
-        // explicit interrupt or codex's own exit ends the process.
-        const exited = yield* Effect.forkDetach(process.exited)
-        let threadId: string | null = null
-        let firstMessage: string | null = null
-        const errors: string[] = []
-        const streamed: Effect.Effect<CodexFirstToken> = Effect.gen(function* () {
-          const pull = pullCodexEvent(iterator)
-          for (;;) {
-            const step = yield* pull
-            if (step === "closed") {
-              return {
-                outcome: "refused" as const,
-                reason: "no_first_token" as const,
-                detail:
-                  firstMessage !== null
-                    ? "codex produced model output but never announced a thread id; the runner cannot custody it"
-                    : "codex exited before producing model output",
-              }
-            }
-            if (step.type === "thread.started") {
-              threadId = step.threadId
-            } else if (step.type === "agent_message") {
-              firstMessage ??= step.text
-              if (threadId !== null) {
-                return { outcome: "generating" as const, threadId, firstMessage }
-              }
-            } else if (step.type === "error" || step.type === "turn.failed") {
-              errors.push(step.message)
-            }
-          }
-        })
-        const timedOut: Effect.Effect<CodexFirstToken> = Effect.as(
-          Effect.sleep(firstTokenTimeoutMs),
-          {
-            outcome: "refused" as const,
-            reason: "no_first_token" as const,
-            detail: `codex produced no model output within ${firstTokenTimeoutMs}ms of spawn`,
-          },
-        )
-        const result = yield* Effect.race(streamed, timedOut)
-        if (result.outcome === "generating") {
-          return { result, iterator, exited } satisfies CodexObservation
-        }
-        // Refused. Give a process that is already dying a short grace period
-        // to deliver its exit facts, then terminate whatever remains — a
-        // refusal never leaves codex burning.
-        const graceExit: CodexExit | null = yield* Effect.race(
-          Fiber.join(exited),
-          Effect.as(Effect.sleep(500), null),
-        )
-        if (graceExit === null) yield* Fiber.interrupt(exited).pipe(Effect.ignore)
-        const authFailed =
-          codexFailureLooksUnauthenticated(errors) ||
-          (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
-        const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
-        let detail = result.detail
-        if (authFailed) detail += ": the codex CLI reported an authentication failure"
-        else {
-          if (errors.length > 0) detail += `; last error: ${errors.at(-1)}`
-          if (graceExit !== null && graceExit.stderr !== "")
-            detail += `; stderr: ${graceExit.stderr.slice(0, 300)}`
-        }
-        return {
-          result: { outcome: "refused" as const, reason, detail },
-          iterator,
-          exited,
-        } satisfies CodexObservation
-      })
-
-    const dispatchCodex = (
-      run: AgentRunRecord,
-      route: AgentRunCodexRoute,
-      target: {
-        readonly repositoryDirectory: string
-        readonly resourceId: string
-        readonly short: string
-      },
-      now: Date,
-    ) =>
-      Effect.gen(function* () {
-        if (run.state === "spawning") {
-          return yield* refuse(
-            "run_conflict",
-            "an identical dispatch is already spawning this run; retry after it settles",
-          )
-        }
-        if (run.state === "accepted" || run.nativeSessionId === null) {
-          yield* store.claimSpawn({ runId: run.runId, now })
-          yield* worktrees.create({
-            repository: target.repositoryDirectory,
-            directory: run.directory,
-            branch: `agent-run/${target.short}`,
-          })
-          const resourceId = yield* ensureResource({
-            resourceId: target.resourceId,
-            absolutePath: run.directory,
-            kind: "worktree",
-            createdAt: run.createdAt,
-          })
-          const process = yield* codex.spawn({
-            directory: run.directory,
-            prompt: run.prompt,
-            model: route.modelID,
-          })
-          const observed = yield* observeCodexFirstToken(process, options.verifyTimeoutMs)
-          if (observed.result.outcome === "refused") {
-            yield* store
-              .fail({
-                runId: run.runId,
-                diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
-                now,
-              })
-              .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-            return yield* refuse(observed.result.reason, observed.result.detail)
-          }
-          const threadId = observed.result.threadId
-          yield* ensureSession({
-            nativeSessionId: threadId,
-            resourceId,
-            createdAt: run.createdAt,
-            kind: "codex",
-          })
-          yield* store.markSpawned({
-            runId: run.runId,
-            resourceId,
-            sessionId: codexSessionCustodyId(threadId),
-            nativeSessionId: threadId,
-            now,
-          })
-          yield* store.markVerified({
-            runId: run.runId,
-            // The receipt needs a positive count before usage exists; the
-            // inline completion records the real turn.completed tokens.
-            outputTokens: 1,
-            now,
-          })
-          yield* Effect.forkDetach(
-            completeCodexInline({
-              runId: run.runId,
-              iterator: observed.iterator,
-              exited: observed.exited,
-              initialFinalMessage: observed.result.firstMessage,
-              stallWindowMs: options.progressWindowMs,
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError("codex inline completion failed", { runId: run.runId, cause }),
-              ),
-            ),
-          )
-          yield* signals.wake("agent-run")
-          return { nativeSessionId: threadId, outputTokens: 1, kind: "codex" as const }
-        }
-        if (run.state === "verified" && run.nativeSessionId !== null) {
-          // A prior request verified this run and its inline completion is
-          // still draining; the row carries the receipt facts.
-          return {
-            nativeSessionId: run.nativeSessionId,
-            outputTokens: run.lastOutputTokens,
-            kind: "codex" as const,
-          }
-        }
-        return yield* refuse(
-          "run_conflict",
-          `a previous dispatch left this run ${run.state}; codex processes cannot be re-observed`,
-        )
-      })
-
-    const completeCodexInline = (input: {
-      readonly runId: string
-      readonly iterator: AsyncIterator<CodexExecEvent>
-      readonly exited: Fiber.Fiber<CodexExit, WorkspaceError>
-      /** The first-token message the dispatch already consumed; the final
-       * agent_message of the run is the latest one seen across both phases. */
-      readonly initialFinalMessage: string
-      readonly stallWindowMs: number
-    }) =>
-      Effect.gen(function* () {
-        let finalMessage: string | null = input.initialFinalMessage
-        let outputTokens: number | null = null
-        let turnFailed: string | null = null
-        let stalled = false
-        for (;;) {
-          const next = yield* pullCodexEvent(input.iterator).pipe(
-            Effect.timeoutOption(input.stallWindowMs),
-          )
-          if (Option.isNone(next)) {
-            stalled = true
-            break
-          }
-          if (next.value === "closed") break
-          const event = next.value
-          if (event.type === "agent_message") {
-            finalMessage = event.text
-          } else if (event.type === "turn.completed") {
-            outputTokens = event.outputTokens
-          } else if (event.type === "turn.failed") {
-            turnFailed = event.message
-          } else if (event.type === "error") {
-            turnFailed ??= event.message
-          }
-        }
-        if (stalled) {
-          yield* Fiber.interrupt(input.exited).pipe(Effect.ignore)
-        }
-        const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
-          Fiber.join(input.exited),
-        )
-        const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
-        if (!stalled && exitCode === 0 && finalMessage !== null) {
-          if (outputTokens !== null) {
-            yield* store
-              .recordProgress({ runId: input.runId, outputTokens, now: new Date() })
-              .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-          }
-          yield* store
-            .complete({ runId: input.runId, now: new Date() })
-            .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-          return
-        }
-        const diagnostic = codexCompletionDiagnostic(stalled, input.stallWindowMs, exit, turnFailed)
-        yield* store
-          .operatorRequired({ runId: input.runId, diagnostic, now: new Date() })
-          .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-      })
+    const codexRuns = makeAgentRunCodexDispatcher({
+      codex,
+      store,
+      worktrees,
+      signals,
+      ensureResource,
+      ensureSession,
+      refuse,
+      verifyTimeoutMs: options.verifyTimeoutMs,
+      progressWindowMs: options.progressWindowMs,
+    })
+    yield* codexRuns.recover
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
@@ -856,16 +401,15 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (resolution.provider === "opencode") {
           yield* preflightRoute(resolution.route)
-        } else {
-          yield* codex.preflight.pipe(
-            Effect.mapError(
-              (issue) =>
-                new AgentRunRefusalError({
-                  reason: "provider_not_authenticated",
-                  detail: issue.detail,
-                }),
-            ),
-          )
+        } else if (codexReadiness._tag === "Failure") {
+          const issue = codexReadiness.failure
+          return yield* new AgentRunRefusalError({
+            reason:
+              issue.kind === "systemd_unavailable"
+                ? "systemd_unavailable"
+                : "provider_not_authenticated",
+            detail: issue.detail,
+          })
         }
         return { submission, resolution, repository }
       })
@@ -900,7 +444,7 @@ const make = (options: AgentRunIngressOptions) =>
             resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
           modelId:
             resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "")
+              ? (resolution.route.modelID ?? "<cli-default>")
               : resolution.route.modelID,
           agent: options.agent,
           repository: repository.name,
@@ -932,7 +476,7 @@ const make = (options: AgentRunIngressOptions) =>
                   run.providerId === CODEX_PROVIDER_ID ? ("codex" as const) : ("opencode" as const),
               }
             : resolution.provider === "codex"
-              ? yield* dispatchCodex(
+              ? yield* codexRuns.dispatch(
                   run,
                   resolution.route,
                   {
@@ -974,7 +518,7 @@ const make = (options: AgentRunIngressOptions) =>
             resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
           modelId:
             resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "")
+              ? (resolution.route.modelID ?? "<cli-default>")
               : resolution.route.modelID,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),
@@ -982,7 +526,29 @@ const make = (options: AgentRunIngressOptions) =>
         }
       })
 
-    return AgentRunIngress.of({ register })
+    const cancel: AgentRunIngressPort["cancel"] = (runId, now) =>
+      Effect.gen(function* () {
+        const run = yield* store.read(runId)
+        if (run === null) return yield* refuse("run_conflict", `run ${runId} does not exist`)
+        if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
+          return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
+        }
+        if (run.providerId === CODEX_PROVIDER_ID) {
+          yield* codexRuns.cancel(run, now)
+          return
+        }
+        if (run.nativeSessionId === null) {
+          return yield* refuse("run_conflict", `run ${runId} has no provider session to cancel`)
+        }
+        const stopped = yield* provider.abortSession({
+          sessionID: run.nativeSessionId,
+          directory: run.directory,
+        })
+        if (!stopped) return yield* refuse("run_conflict", `run ${runId} could not be stopped`)
+        yield* store.cancel({ runId, now })
+      })
+
+    return AgentRunIngress.of({ register, cancel })
   })
 
 export const AgentRunIngressLive = (options: AgentRunIngressOptions) =>
