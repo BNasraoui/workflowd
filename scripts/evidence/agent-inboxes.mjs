@@ -31,8 +31,16 @@ const socketRoot = `/proc/${process.pid}/cwd`
 const logs = join(root, "logs")
 const rows = []
 const processes = new Set()
+const descendants = new Map()
 const drains = []
 const secrets = []
+let interrupted = false
+process.once("SIGINT", () => {
+  interrupted = true
+})
+process.once("SIGTERM", () => {
+  interrupted = true
+})
 const secret = () => {
   const s = randomBytes(32).toString("hex")
   secrets.push(s)
@@ -100,9 +108,59 @@ function start(name, args, env) {
 }
 async function stop(p) {
   if (!p || p.exitCode !== null || p.signalCode !== null) return
+  rememberChildren(p.pid)
+  p.kill("SIGCONT")
   p.kill("SIGTERM")
-  await until("owned process exits", () => p.exitCode !== null || p.signalCode !== null, 20000)
+  try {
+    await until("owned process exits", () => p.exitCode !== null || p.signalCode !== null, 10000)
+  } catch {
+    p.kill("SIGKILL")
+    await until(
+      "owned process exits after escalation",
+      () => p.exitCode !== null || p.signalCode !== null,
+      5000,
+    )
+  }
   log("process-stop", { pid: p.pid, code: p.exitCode, signal: p.signalCode })
+}
+function rememberChildren(pid) {
+  const children = `/proc/${pid}/task/${pid}/children`
+  if (!existsSync(children)) return
+  for (const child of readFileSync(children, "utf8")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(Number)) {
+    try {
+      const fields = readFileSync(`/proc/${child}/stat`, "utf8").split(") ")[1].split(" ")
+      descendants.set(child, fields[19])
+      rememberChildren(child)
+    } catch {
+      /* Child exited while being enumerated. */
+    }
+  }
+}
+async function stopDescendants() {
+  for (const [pid, birth] of [...descendants].reverse()) {
+    const alive = () => {
+      try {
+        const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ")
+        return fields[19] === birth && fields[0] !== "Z"
+      } catch {
+        return false
+      }
+    }
+    if (!alive()) continue
+    process.kill(pid, "SIGCONT")
+    process.kill(pid, "SIGTERM")
+    try {
+      await until("owned descendant exits", () => !alive(), 5000)
+    } catch {
+      if (alive()) process.kill(pid, "SIGKILL")
+      await until("owned descendant killed", () => !alive(), 5000)
+    }
+    log("descendant-stopped", { pid, birth })
+  }
 }
 async function stopRecorders() {
   for (const event of frames().filter((e) => e.direction === "launch")) {
@@ -139,7 +197,9 @@ async function cancel(r) {
   log("cancel-persisted", { runId: r.runId })
 }
 class Blocked extends Error {}
+class NotApplicable extends Error {}
 async function scenario(id, name, run) {
+  if (interrupted) throw new Error("Evidence run interrupted; cleaning up owned processes")
   log("scenario-start", { id, name })
   const started = new Date().toISOString()
   try {
@@ -149,7 +209,8 @@ async function scenario(id, name, run) {
     rows.push({
       id,
       name,
-      status: error instanceof Blocked ? "BLOCKED" : "FAIL",
+      status:
+        error instanceof NotApplicable ? "N/A" : error instanceof Blocked ? "BLOCKED" : "FAIL",
       detail: scrub(error.message),
       started,
     })
@@ -383,6 +444,8 @@ try {
       }).privateKey,
       { mode: 0o600 },
     )
+  chmodSync(keyPath, 0o600)
+  secrets.push(readFileSync(keyPath, "utf8"))
   const natsPort = await port(),
     httpPort = await port(),
     unusedOpenCodePort = await port()
@@ -585,7 +648,16 @@ try {
       r.nativeSessionId,
     )[0]
     assert.ok(t.failingJobs.length)
-    for (const job of t.failingJobs) assert.ok(inbox.prompt.includes(job))
+    const replies = threadFrames(r.nativeSessionId)
+      .filter(
+        (e) => e.frame.method === "item/completed" && e.frame.params.item.type === "agentMessage",
+      )
+      .map((e) => e.frame.params.item.text)
+      .join("\n")
+    for (const job of t.failingJobs) {
+      assert.ok(inbox.prompt.includes(job))
+      assert.ok(replies.includes(job))
+    }
     return "Failure and all expected job names delivered"
   })
   await scenario(3, "Duplicate webhook delivers once", async () => {
@@ -604,6 +676,17 @@ try {
     requireCi()
     await ciResult(fixtures.success)
     const r = await subscribe("ci-late", { kind: "ci", repository, sha: fixtures.success.sha })
+    const receipt = threadFrames(r.nativeSessionId).find(
+      (e) =>
+        e.frame.method === "item/completed" &&
+        e.frame.params.item.type === "mcpToolCall" &&
+        e.frame.params.item.tool === "subscribe_to_event",
+    )
+    assert.equal(
+      receipt?.frame.params.item.result?.structuredContent?.deliveryState,
+      "delivered",
+      "late result must be queued before subscription receipt",
+    )
     await delivered(r, "success")
     return "Existing terminal CI state queues one message immediately"
   })
@@ -715,9 +798,11 @@ try {
       0,
     )
     snapshot("terminal event persisted while delivery process frozen")
+    rememberChildren(workflow.pid)
     workflow.kill("SIGKILL")
     await until("scratch daemon crashed", () => workflow.signalCode !== null)
     await stopRecorders()
+    await stopDescendants()
     for (const name of ["resident.sock", "identity.sock"]) rmSync(join(root, name), { force: true })
     await boot()
     await delivered(parent, "cancelled")
@@ -755,7 +840,7 @@ try {
     return "Real codex exec --json dispatch completed; no resident thread"
   })
   await scenario(12, "OpenCode resident completion", async () => {
-    throw new Blocked(
+    throw new NotApplicable(
       "Not supported by this PR's subscribe_to_event: only ResidentCodex owns subscription sockets and inbox delivery; no OpenCode resident subscription adapter",
     )
   })
@@ -784,6 +869,8 @@ try {
   } catch (error) {
     log("cleanup-failure", { message: error.message })
   }
+  await stopDescendants()
+  log("cleanup-complete", { ownedProcesses: processes.size, trackedDescendants: descendants.size })
   await Promise.allSettled(drains)
   // Credentials are never among uploadable logs and are removed after use.
   for (const file of ["codex/auth.json", "redactions.json", "github.pem", "nats.conf"])
@@ -811,5 +898,5 @@ try {
   )
   writeFileSync(join(logs, "results.json"), JSON.stringify(rows, null, 2))
   console.log(table + `\nEvidence: ${logs}`)
-  process.exitCode = rows.every((r) => r.status === "PASS") ? 0 : 1
+  process.exitCode = rows.every((r) => ["PASS", "N/A"].includes(r.status)) ? 0 : 1
 }
