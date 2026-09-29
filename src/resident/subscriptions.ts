@@ -12,7 +12,11 @@ export const EventSelector = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("agent_run"), run_id: Schema.NonEmptyString }),
 ])
 export type EventSelector = typeof EventSelector.Type
-const Subscription = Schema.Struct({ threadId: Schema.String, selector: EventSelector })
+const Subscription = Schema.Struct({
+  threadId: Schema.String,
+  selector: EventSelector,
+  deadline: Schema.optionalKey(Schema.Number),
+})
 const Pending = Schema.Struct({
   instance_id: Schema.String,
   event_cursor: Schema.Number,
@@ -32,15 +36,10 @@ export const makeSubscriptions = Effect.gen(function* () {
   const ci = yield* CiService
   const runs = yield* AgentRunStore
   const resultFor = Effect.fn("Subscriptions.result")(function* (
-    threadId: string,
     selector: EventSelector,
+    deadline: number | undefined,
   ) {
-    const thread = yield* inbox.read(threadId)
-    const expired =
-      selector.kind === "ci" &&
-      thread?.wait_deadline !== null &&
-      thread?.wait_deadline !== undefined &&
-      thread.wait_deadline <= Date.now()
+    const expired = selector.kind === "ci" && deadline !== undefined && deadline <= Date.now()
     let result: Record<string, string | number | null | readonly string[]> | null = null
     if (expired)
       result = {
@@ -70,19 +69,19 @@ export const makeSubscriptions = Effect.gen(function* () {
     return { result, expired }
   })
   const reconcile = Effect.fn("Subscriptions.reconcile")(function* () {
-    yield* sql`UPDATE resident_threads SET wait_deadline = (
-      SELECT MIN(CAST(unixepoch(i.created_at) * 1000 AS INTEGER)) + ${waitTimeoutMs}
-      FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
-      WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = resident_threads.thread_id
-        AND json_extract(i.payload_json, '$.selector.kind') = 'ci' AND w.state IN ('pending','matched')
-    ) WHERE wait_deadline IS NULL AND state IN ('active','waiting')`
+    // Older subscriptions have no payload deadline. Anchor them to their own creation time.
+    yield* sql`UPDATE kernel_workflow_instances SET payload_json = json_set(payload_json,
+      '$.deadline', CAST(unixepoch(created_at, 'subsec') * 1000 AS INTEGER) + ${waitTimeoutMs})
+      WHERE workflow_type = 'mailbox_subscription'
+        AND json_extract(payload_json, '$.selector.kind') = 'ci'
+        AND json_extract(payload_json, '$.deadline') IS NULL`
     const rows = yield* sql`SELECT i.instance_id, i.event_cursor, i.payload_json
       FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
       WHERE i.workflow_type = 'mailbox_subscription' AND w.state IN ('pending','matched')`
     for (const raw of rows) {
       const row = yield* Schema.decodeUnknownEffect(Pending)(raw)
-      const { threadId, selector } = row.payload_json
-      const { result, expired } = yield* resultFor(threadId, selector)
+      const { threadId, selector, deadline } = row.payload_json
+      const { result, expired } = yield* resultFor(selector, deadline)
       if (result === null) continue
       yield* sql.withTransaction(
         Effect.gen(function* () {
@@ -135,13 +134,15 @@ export const makeSubscriptions = Effect.gen(function* () {
               expectedCursor: row.event_cursor,
             })
           }
-          yield* sql`UPDATE resident_threads SET wait_deadline = NULL WHERE thread_id = ${threadId}
-            AND NOT EXISTS (SELECT 1 FROM kernel_waits w JOIN kernel_workflow_instances i ON i.instance_id = w.instance_id
-              WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = ${threadId}
-              AND json_extract(i.payload_json, '$.selector.kind') = 'ci' AND w.state IN ('pending','matched'))`
         }),
       )
     }
+    yield* sql`UPDATE resident_threads SET wait_deadline = (
+      SELECT MIN(json_extract(i.payload_json, '$.deadline'))
+      FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
+      WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = resident_threads.thread_id
+        AND json_extract(i.payload_json, '$.selector.kind') = 'ci' AND w.state IN ('pending','matched')
+    )`
   })
   const register = Effect.fn("Subscriptions.register")(function* (
     threadId: string,
@@ -159,18 +160,27 @@ export const makeSubscriptions = Effect.gen(function* () {
     const id = `subscription-${createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`
     const status = yield* sql.withTransaction(
       Effect.gen(function* () {
+        const existing =
+          yield* sql`SELECT payload_json FROM kernel_workflow_instances WHERE instance_id = ${id}`
+        const durablePayload =
+          existing.length > 0
+            ? yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Subscription))(
+                existing[0]?.payload_json,
+              )
+            : {
+                ...payload,
+                ...(selector.kind === "ci" ? { deadline: Date.now() + waitTimeoutMs } : {}),
+              }
         const instance = yield* events.createInstance({
           instanceId: id,
           workflowType: "mailbox_subscription",
           workflowVersion: 1,
           workflowKey: threadId,
-          payload,
+          payload: durablePayload,
           createdAt: new Date(),
         })
         if (instance.status === "created") {
           yield* inbox.park(threadId)
-          if (selector.kind === "ci")
-            yield* sql`UPDATE resident_threads SET wait_deadline = COALESCE(wait_deadline, ${Date.now() + waitTimeoutMs}) WHERE thread_id = ${threadId}`
           yield* events.registerWait({
             instanceId: id,
             waitId: id,

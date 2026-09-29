@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
@@ -284,7 +284,7 @@ test("CI deadline expires once and ignores a later real result", () =>
       expect(thread!.wait_deadline! - Date.now()).toBeLessThanOrEqual(86_400_000)
       yield* subscriptions.register("thread", { kind: "ci", ...target })
       expect((yield* store.read("thread"))?.wait_deadline).toBe(thread?.wait_deadline)
-      yield* sql`UPDATE resident_threads SET wait_deadline = 0 WHERE thread_id = 'thread'`
+      yield* sql`UPDATE kernel_workflow_instances SET payload_json = json_set(payload_json, '$.deadline', 0) WHERE instance_id = ${receipt.id}`
       yield* subscriptions.reconcile()
       yield* subscriptions.reconcile()
       expect(yield* sql`SELECT prompt, state FROM resident_inbox WHERE id = ${receipt.id}`).toEqual(
@@ -333,7 +333,7 @@ test("configured CI deadline backfills old waits without extending them", () =>
       yield* subscriptions.register("thread", { kind: "ci", ...target })
       expect((yield* store.read("thread"))?.wait_deadline).toBeGreaterThanOrEqual(before + 60_000)
       expect((yield* store.read("thread"))!.wait_deadline! - Date.now()).toBeLessThanOrEqual(60_000)
-      yield* sql`UPDATE resident_threads SET wait_deadline = NULL`
+      yield* sql`UPDATE kernel_workflow_instances SET payload_json = json_remove(payload_json, '$.deadline')`
       yield* sql`UPDATE kernel_workflow_instances SET created_at = '2000-01-01T00:00:00.000Z'`
       yield* subscriptions.reconcile()
       expect((yield* store.read("thread"))?.state).toBe("operator_required")
@@ -345,3 +345,54 @@ test("configured CI deadline backfills old waits without extending them", () =>
       ),
     ),
   ))
+
+test("CI subscriptions on one thread expire independently from their registration times", async () => {
+  let now = Date.now()
+  const clock = spyOn(Date, "now").mockImplementation(() => now)
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const subscriptions = yield* makeSubscriptions
+        const sql = yield* SqlClient.SqlClient
+        yield* store.attach("parent", "thread", "/work", null)
+        yield* store.started("thread", "turn")
+        const first = yield* subscriptions.register("thread", { kind: "ci", ...target })
+        now += 30_000
+        const second = yield* subscriptions.register("thread", {
+          kind: "ci",
+          repository: target.repository,
+          sha: "b".repeat(40),
+        })
+        now += 30_001
+        yield* subscriptions.reconcile()
+        expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${first.id}`).toEqual([
+          { state: "consumed" },
+        ])
+        expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${second.id}`).toEqual([
+          { state: "pending" },
+        ])
+        expect(yield* sql`SELECT * FROM resident_inbox WHERE id = ${second.id}`).toHaveLength(0)
+        // Reconstruct the reducer to verify deadlines survive restart and duplicate registration.
+        const restarted = yield* makeSubscriptions
+        expect((yield* restarted.register("thread", { kind: "ci", ...target })).status).toBe(
+          "duplicate",
+        )
+        now += 30_000
+        yield* restarted.reconcile()
+        expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${second.id}`).toEqual([
+          { state: "consumed" },
+        ])
+        expect(yield* sql`SELECT id FROM resident_inbox`).toHaveLength(2)
+      }).pipe(
+        Effect.provide(layer),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromUnknown({ WORKFLOWD_CI_WAIT_TIMEOUT_MS: "60000" }),
+        ),
+      ),
+    )
+  } finally {
+    clock.mockRestore()
+  }
+})
