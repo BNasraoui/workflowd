@@ -54,7 +54,7 @@ export const incrementalLines = <A>(options: {
     let buffered = ""
     let stopped = false
     const decoder = new TextDecoder()
-    for (;;) {
+    const readAvailable = async () => {
       try {
         const file = await open(options.path, "r")
         try {
@@ -72,6 +72,9 @@ export const incrementalLines = <A>(options: {
       } catch {
         // The service may not have opened stdout yet.
       }
+    }
+    for (;;) {
+      await readAvailable()
       for (;;) {
         const newline = buffered.indexOf("\n")
         if (newline < 0) break

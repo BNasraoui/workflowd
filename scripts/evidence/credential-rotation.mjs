@@ -17,7 +17,7 @@ import { resolve, join } from "node:path"
 import { fullDaemonEnvironment } from "./credential-rotation-full.mjs"
 import { Database } from "bun:sqlite"
 import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress.ts"
-if (process.env.CI) throw Error("This manual evidence runner must not run in CI")
+if (process.env.CI) throw new Error("This manual evidence runner must not run in CI")
 const full = process.argv.includes("--full")
 const base = resolve(".scratch/evidence59")
 const root = join(base, `run-${Date.now()}`)
@@ -76,12 +76,12 @@ process.on("SIGTERM", interrupt)
 const wait = async (fn, ms = 15000) => {
   const deadline = Date.now() + ms
   do {
-    if (interrupted) throw Error("evidence run interrupted")
+    if (interrupted) throw new Error("evidence run interrupted")
     const value = await fn()
     if (value) return value
     await Bun.sleep(40)
   } while (Date.now() < deadline)
-  throw Error("condition timed out")
+  throw new Error("condition timed out")
 }
 const exists = (path) =>
   stat(path).then(
@@ -120,7 +120,7 @@ const start = async (extra = {}) => {
     },
   )
   await wait(async () => {
-    if (host.exitCode !== null) throw Error(`scratch host exited ${host.exitCode}`)
+    if (host.exitCode !== null) throw new Error(`scratch host exited ${host.exitCode}`)
     if (full)
       return fetch(`http://127.0.0.1:${fullSetup.port}/health`).then(
         () => true,
@@ -132,15 +132,13 @@ const start = async (extra = {}) => {
   log("host-start", { pid: host.pid, port, extra: Object.keys(extra) })
 }
 const post = async (input) => {
-  const response = await fetch(
-    `http://127.0.0.1:${port}/workflows/agent-runs${input.cancel ? `/${input.cancel}` : ""}`,
-    {
-      method: input.cancel ? "DELETE" : "POST",
-      headers: { authorization: `Bearer ${env.EVIDENCE_TOKEN}` },
-      ...(input.cancel ? {} : { body: JSON.stringify(input) }),
-      signal: AbortSignal.timeout(65000),
-    },
-  )
+  const suffix = input.cancel ? `/${input.cancel}` : ""
+  const response = await fetch(`http://127.0.0.1:${port}/workflows/agent-runs${suffix}`, {
+    method: input.cancel ? "DELETE" : "POST",
+    headers: { authorization: `Bearer ${env.EVIDENCE_TOKEN}` },
+    ...(input.cancel ? {} : { body: JSON.stringify(input) }),
+    signal: AbortSignal.timeout(65000),
+  })
   const body = await response.json()
   return response.ok
     ? { _tag: "Success", status: response.status, value: body }
@@ -193,7 +191,7 @@ const complete = async (runId) => {
   assert.equal(r.last_output_tokens, 42)
 }
 const scenario = async (name, fn) => {
-  if (interrupted) throw Error("evidence run interrupted")
+  if (interrupted) throw new Error("evidence run interrupted")
   try {
     await fn()
     results.push({ scenario: name, result: "PASS" })

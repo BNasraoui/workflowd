@@ -22,18 +22,18 @@ import { WorkflowStoreLive } from "../../src/store.ts"
 import { WorkSignal } from "../../src/work-signal.ts"
 
 const root = process.env.EVIDENCE_ROOT
-if (!root?.includes("/.scratch/evidence59/")) throw Error("scratch root required")
+if (!root?.includes("/.scratch/evidence59/")) throw new Error("scratch root required")
 const prefix = process.env.EVIDENCE_PREFIX
-if (!prefix?.startsWith("workflowd-evidence59-")) throw Error("scratch unit prefix required")
+if (!prefix?.startsWith("workflowd-evidence59-")) throw new Error("scratch unit prefix required")
 const runCommand = async (command) => {
   if (command[0] === "systemd-run") {
-    if (!command.some((x) => x.startsWith(`--unit=${prefix}`))) throw Error("unsafe unit")
+    if (!command.some((x) => x.startsWith(`--unit=${prefix}`))) throw new Error("unsafe unit")
     const unit = command.find((x) => x.startsWith("--unit=")).slice(7)
     await writeFile(join(root, `owned-${unit}`), "")
     // A user manager can have ambient credentials. The worker receives only
     // scratch paths and PATH, even if the manager has additional environment.
     const executable = command.indexOf(process.execPath)
-    if (executable < 0) throw Error("worker executable missing")
+    if (executable < 0) throw new Error("worker executable missing")
     const clean = [
       "HOME",
       "PATH",

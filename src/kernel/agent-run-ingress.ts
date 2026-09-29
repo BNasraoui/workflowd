@@ -401,17 +401,15 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (resolution.provider === "opencode") {
           yield* preflightRoute(resolution.route)
-        } else {
-          if (codexReadiness._tag === "Failure") {
-            const issue = codexReadiness.failure
-            return yield* new AgentRunRefusalError({
-              reason:
-                issue.kind === "systemd_unavailable"
-                  ? "systemd_unavailable"
-                  : "provider_not_authenticated",
-              detail: issue.detail,
-            })
-          }
+        } else if (codexReadiness._tag === "Failure") {
+          const issue = codexReadiness.failure
+          return yield* new AgentRunRefusalError({
+            reason:
+              issue.kind === "systemd_unavailable"
+                ? "systemd_unavailable"
+                : "provider_not_authenticated",
+            detail: issue.detail,
+          })
         }
         return { submission, resolution, repository }
       })
