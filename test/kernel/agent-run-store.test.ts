@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import {
   AgentRunStore,
@@ -325,3 +326,16 @@ for (const state of ["accepted", "spawning", "spawned", "verified"] as const) {
       }),
     ))
 }
+
+test("transient recovery excludes durable resident custody", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* AgentRunStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.create({ ...input, providerId: "codex-cli" })
+      yield* spawn(store)
+      yield* sql`INSERT INTO resident_threads(run_id,thread_id,directory,state) VALUES (${input.runId},'resident-thread',${input.directory},'waiting')`
+      expect(yield* store.listActiveByProvider("codex-cli")).toHaveLength(1)
+      expect(yield* store.listActiveByProvider("codex-cli", true)).toHaveLength(0)
+    }),
+  ))

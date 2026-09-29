@@ -252,9 +252,6 @@ export const ResidentCodexLive = (
             yield* launch(row.run_id, entry.attempts + 1)
             yield* restore(row.thread_id)
           }
-          // Local liveness events keep the legacy first-token drain from treating
-          // a registered CI wait as a silent stalled model turn.
-          if (row.state === "waiting") listeners.get(row.thread_id)?.queue.push({ type: "other" })
         }
         yield* subscriptions.reconcile()
         yield* flush()
@@ -267,7 +264,25 @@ export const ResidentCodexLive = (
         Effect.forkScoped,
       )
 
+      const cancelRun = Effect.fn("Resident.cancel")(
+        function* (runId: string) {
+          const run = yield* runs.read(runId)
+          if (run?.nativeSessionId === null || run?.nativeSessionId === undefined) return
+          const threadId = run.nativeSessionId
+          yield* store.uncertain(`cancel:${runId}`, threadId)
+          yield* finish(threadId, true)
+        },
+        Effect.mapError(
+          (cause) =>
+            new WorkspaceError({
+              operation: "cancel resident thread",
+              cause,
+            }),
+        ),
+      )
       const cli: CodexCliPort = {
+        ownership: "resident-thread",
+        cancelRun,
         preflight: Effect.acquireUseRelease(
           Effect.try(() => start({ binary, home: config.home }, () => {})),
           (process) =>
@@ -311,27 +326,9 @@ export const ResidentCodexLive = (
             yield* flush()
             return {
               events: queue.iterable,
-              exited: Effect.callback<CodexExit, WorkspaceError>((resume) => {
-                let finished = false
-                void exited.then((exit) => {
-                  finished = true
-                  resume(Effect.succeed(exit))
-                })
-                return Effect.gen(function* () {
-                  if (finished) return
-                  const row = yield* store.read(threadId)
-                  if (row?.current_turn !== null && row?.current_turn !== undefined) {
-                    yield* Effect.tryPromise(() =>
-                      request("turn/interrupt", { threadId, turnId: row.current_turn }),
-                    )
-                  }
-                  yield* finish(threadId, true)
-                }).pipe(
-                  Effect.catch(() =>
-                    Effect.logWarning("Resident thread interruption requires operator attention"),
-                  ),
-                )
-              }),
+              executionId: threadId,
+              cancel: cancelRun(input.runId),
+              exited: Effect.promise(() => exited),
             }
           }).pipe(
             Effect.mapError(

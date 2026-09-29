@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import {
   at,
@@ -539,9 +539,13 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
 
 test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
   let interrupted = false
-  const queue = makeEventQueue()
-  queue.push({ type: "thread.started", threadId: "stalled-thread" })
-  queue.push({ type: "agent_message", text: "started" })
+  const events = {
+    async *[Symbol.asyncIterator]() {
+      yield { type: "thread.started" as const, threadId: "stalled-thread" }
+      yield { type: "agent_message" as const, text: "started" }
+      await new Promise(() => {})
+    },
+  }
   const layer = makeLayer(
     makeProvider(defaultState()),
     worktrees([]),

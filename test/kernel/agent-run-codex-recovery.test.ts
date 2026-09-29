@@ -123,6 +123,7 @@ test("startup recovery owns spawning, spawned, and verified Codex transition bou
 })
 
 test("resident mode leaves recovery and cancellation to the resident supervisor", async () => {
+  let completed = 0
   let listed = false
   let supervisorCancellations = 0
   let recordedCancellations = 0
@@ -133,7 +134,10 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
     markVerified: () => Effect.void,
     fail: () => Effect.void,
     recordProgress: () => Effect.void,
-    complete: () => Effect.void,
+    complete: () =>
+      Effect.sync(() => {
+        completed += 1
+      }),
     operatorRequired: () => Effect.void,
     listActiveByProvider: () =>
       Effect.sync(() => {
@@ -148,7 +152,18 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
   const codex: CodexCliPort = {
     ownership: "resident-thread",
     preflight: Effect.void,
-    spawn: () => Effect.die("unused"),
+    spawn: () =>
+      Effect.succeed({
+        executionId: "resident-thread",
+        events: {
+          async *[Symbol.asyncIterator]() {
+            yield { type: "thread.started" as const, threadId: "thread-1" }
+            yield { type: "agent_message" as const, text: "subscribed" }
+          },
+        },
+        exited: Effect.succeed({ exitCode: 0, stderr: "" }),
+        cancel: Effect.void,
+      }),
     cancelRun: () =>
       Effect.sync(() => {
         supervisorCancellations += 1
@@ -168,6 +183,16 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
 
   expect(await Effect.runPromise(runtime.recover)).toBe(0)
   await Effect.runPromise(runtime.cancel(record, new Date()))
+  await Effect.runPromise(
+    runtime.dispatch(
+      { ...record, state: "accepted" },
+      { name: "scan", modelID: null },
+      { repositoryDirectory: "/repo", resourceId: "resource-1", short: "recover" },
+      new Date(),
+    ),
+  )
+  await Bun.sleep(20)
+  expect(completed).toBe(0)
   expect(listed).toBe(false)
   expect(supervisorCancellations).toBe(1)
   expect(recordedCancellations).toBe(1)

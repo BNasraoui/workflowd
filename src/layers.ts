@@ -1,6 +1,6 @@
 import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
-import { WorkerIdentityLive } from "./worker-identity/service"
+import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -311,16 +311,20 @@ export const makeLiveLayer = (config: AppConfig) => {
   const residentLayer = residentLive ?? Layer.empty
   const codexCliLayer =
     residentLive === undefined
-      ? Layer.succeed(
-    CodexCli,
-    makeCodexCli({
-      binary: config.agentRuns?.codexBinary ?? "codex",
-      ...(config.agentRuns?.codexUnitPrefix === undefined
-        ? {}
-        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
-      custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
-    }),
-  )
+      ? Layer.effect(
+          CodexCli,
+          Effect.gen(function* () {
+            const identity = yield* Effect.serviceOption(WorkerIdentity)
+            return makeCodexCli({
+              binary: config.agentRuns?.codexBinary ?? "codex",
+              ...(config.agentRuns?.codexUnitPrefix === undefined
+                ? {}
+                : { unitPrefix: config.agentRuns.codexUnitPrefix }),
+              custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
+              ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+            })
+          }),
+        ).pipe(Layer.provide(workerIdentityLayer))
       : Layer.effect(
           CodexCli,
           Effect.map(ResidentCodex, (resident) => resident.cli),

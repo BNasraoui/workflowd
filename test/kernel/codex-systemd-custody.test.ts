@@ -25,7 +25,7 @@ const manager = (behavior?: { readonly ignoreStop?: boolean }) => {
       return {
         exitCode: 0,
         stdout:
-          `InvocationID=${invocationId}\nDescription=${description}\n` +
+          `MainPID=12345\nInvocationID=${invocationId}\nDescription=${description}\n` +
           `ActiveState=${state}\nSubState=${state === "active" ? "running" : "dead"}\n` +
           `Result=${state === "active" ? "success" : "signal"}\n`,
         stderr: "",
@@ -336,6 +336,43 @@ test("completion appearing during a manager query wins over an absent-unit snaps
     const attached = await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }))
     finishing = true
     expect(await Effect.runPromise(attached!.exited)).toMatchObject({ exitCode: 0 })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("worker identity is restored only under verified transient custody", async () => {
+  const root = join(tmpdir(), `codex-identity-${crypto.randomUUID()}`)
+  const systemd = manager()
+  const registered: Array<[string, number]> = []
+  const cli = makeCodexCli({
+    binary: "codex",
+    custodyRoot: root,
+    runCommand: systemd.runCommand,
+    identity: {
+      environment: () => ({ WORKFLOWD_RUN_ID: "agent-run-systemd", GH_TOKEN: "" }),
+      register: (runId, pid) => {
+        registered.push([runId, pid])
+      },
+    },
+  })
+  try {
+    await Effect.runPromise(
+      cli.spawn({ runId: "agent-run-systemd", directory: root, prompt: "go", model: null }),
+    )
+    await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }))
+    expect(registered).toEqual([
+      ["agent-run-systemd", 12345],
+      ["agent-run-systemd", 12345],
+    ])
+    expect(systemd.commands[0]).toContain("--setenv=WORKFLOWD_RUN_ID=agent-run-systemd")
+    expect(systemd.commands[0]).toContain("--setenv=GH_TOKEN=")
+    systemd.reuse()
+    expect(
+      (await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }).pipe(Effect.result)))
+        ._tag,
+    ).toBe("Failure")
+    expect(registered).toHaveLength(2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

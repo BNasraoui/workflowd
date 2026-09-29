@@ -2,7 +2,7 @@ import { OpenCodeMailbox } from "../resident/opencode"
 import { WorkerIdentity } from "../worker-identity/service"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
-import { Context, Data, Effect, Layer, Schema } from "effect"
+import { Context, Data, Effect, Layer, Option, Schema } from "effect"
 import {
   AgentRunSubmission,
   resolveAgentRunRouteChoice,
@@ -326,9 +326,9 @@ const make = (options: AgentRunIngressOptions) =>
       refuse,
       verifyTimeoutMs: options.verifyTimeoutMs,
       progressWindowMs: options.progressWindowMs,
+      workerPrompt,
     })
     yield* codexRuns.recover
-
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType

@@ -135,6 +135,10 @@ type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CodexCliOptions = {
   readonly binary: string
+  readonly identity?: {
+    readonly environment: (runId: string) => Readonly<Record<string, string>>
+    readonly register: (runId: string, pid: number) => void
+  }
   readonly custodyRoot: string
   readonly unitPrefix?: string
   readonly pollIntervalMs?: number
@@ -262,6 +266,7 @@ export const makeCodexCli = (
       "--user",
       "show",
       "--property=LoadState",
+      "--property=MainPID",
       "--property=InvocationID",
       "--property=Description",
       "--property=ActiveState",
@@ -271,7 +276,14 @@ export const makeCodexCli = (
       executionId,
     ])
     if (result.exitCode !== 0) {
-      return { present: false, active: false, invocationId: "", description: "", result: "" }
+      return {
+        pid: 0,
+        present: false,
+        active: false,
+        invocationId: "",
+        description: "",
+        result: "",
+      }
     }
     const fields = new Map(
       (result.stdout ?? "")
@@ -280,6 +292,7 @@ export const makeCodexCli = (
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
     return {
+      pid: Number(fields.get("MainPID") ?? 0),
       present: fields.get("LoadState") !== "not-found",
       active: ["active", "activating", "deactivating"].includes(fields.get("ActiveState") ?? ""),
       invocationId: fields.get("InvocationID") ?? "",
@@ -315,6 +328,8 @@ export const makeCodexCli = (
         if (manifest.runId !== input.runId) throw new Error("codex custody run id mismatch")
         const initial = await reconcile(path, manifest)
         manifest = initial.manifest
+        if (initial.unit.active && Number.isSafeInteger(initial.unit.pid) && initial.unit.pid > 0)
+          options.identity?.register(input.runId, initial.unit.pid)
         const attachedAt = Date.now()
 
         const terminal = async (): Promise<CodexExit | null> => {
@@ -533,6 +548,9 @@ export const makeCodexCli = (
               `--working-directory=${input.directory}`,
               "--property=KillMode=control-group",
               ...forwardedEnvironment,
+              ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+                ([name, value]) => `--setenv=${name}=${value}`,
+              ),
               process.execPath,
               workerPath,
               "--binary",
@@ -571,5 +589,39 @@ export const makeCodexCli = (
               }),
       }),
     attach,
+  }
+}
+
+/** Single-consumer push queue turning stdout lines into an async iterable. */
+export const makeEventQueue = () => {
+  const pending: CodexExecEvent[] = []
+  let closed = false
+  let waiter: (() => void) | null = null
+  const wake = () => {
+    const ready = waiter
+    waiter = null
+    ready?.()
+  }
+  const next = async (): Promise<IteratorResult<CodexExecEvent>> => {
+    for (;;) {
+      if (pending.length > 0) return { value: pending.shift()!, done: false }
+      if (closed) return { value: undefined, done: true }
+      await new Promise<void>((resolve) => {
+        waiter = resolve
+      })
+    }
+  }
+  const iterator: AsyncIterator<CodexExecEvent> = { next }
+  return {
+    push: (event: CodexExecEvent) => {
+      if (closed) return
+      pending.push(event)
+      wake()
+    },
+    close: () => {
+      closed = true
+      wake()
+    },
+    iterable: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<CodexExecEvent>,
   }
 }

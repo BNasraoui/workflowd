@@ -131,6 +131,7 @@ export const makeCodexCli = (
   exitCode = 0,
   preflightError?: import("../../src/kernel/codex-session").CodexPreflightError,
   threadId = "01a09976-e799-7c52-9759-8b76d692b755",
+  stderr = "",
 ) => {
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
@@ -186,7 +187,7 @@ export const makeCodexCli = (
         return {
           executionId: `test-${input.runId}.service`,
           events: { [Symbol.asyncIterator]: () => iterator },
-          exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr: "" })),
+          exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr })),
           cancel: Effect.sync(() => {
             state.killed = true
           }),

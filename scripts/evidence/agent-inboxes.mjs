@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
@@ -29,6 +30,7 @@ chmodSync(root, 0o700)
 process.chdir(root)
 const socketRoot = `/proc/${process.pid}/cwd`
 const logs = join(root, "logs")
+const unitPrefix = `workflowd-evidence57-${Date.now()}-`
 const rows = []
 const processes = new Set()
 const descendants = new Map()
@@ -475,6 +477,8 @@ try {
   base = `http://127.0.0.1:${httpPort}`
   const path = process.env.PATH
   env = {
+    XDG_RUNTIME_DIR: `/run/user/${process.getuid()}`,
+    DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${process.getuid()}/bus`,
     PATH: path,
     HOME: home,
     XDG_CONFIG_HOME: join(home, ".config"),
@@ -534,9 +538,31 @@ try {
     WORKFLOWD_AGENT_RUN_ROUTES: "unused=openai/gpt-5.6-sol",
     WORKFLOWD_AGENT_RUN_CODEX_ROUTES: `evidence=${process.env.EVIDENCE_MODEL ?? "gpt-5.6-sol"}`,
     WORKFLOWD_AGENT_RUN_REPOSITORIES: `evidence=${work}`,
-    WORKFLOWD_AGENT_RUN_CODEX_BIN: join(repo, "scripts/evidence/codex-recorder.mjs"),
+    WORKFLOWD_AGENT_RUN_CODEX_BIN: join(root, "codex-launch.mjs"),
+    WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX: unitPrefix,
     WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS: "120000",
   }
+  // The transient unit receives only scratch configuration, even if the user
+  // manager has ambient credentials. Preserve the resident's run-bound routing.
+  const workerEnv = Object.fromEntries(
+    [
+      "PATH",
+      "HOME",
+      "CODEX_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+      "EVIDENCE_ROOT",
+      "EVIDENCE_CODEX_BIN",
+    ].map((name) => [name, env[name]]),
+  )
+  writeFileSync(
+    env.WORKFLOWD_AGENT_RUN_CODEX_BIN,
+    `#!${process.execPath}\nconst owned = ${JSON.stringify(workerEnv)};\n` +
+      `for (const name of Object.keys(process.env)) if (!name.startsWith("WORKFLOWD_") && name !== "GH_CONFIG_DIR") delete process.env[name];\n` +
+      `Object.assign(process.env, owned);\nawait import(${JSON.stringify(join(repo, "scripts/evidence/codex-recorder.mjs"))});\n`,
+    { mode: 0o700 },
+  )
   writeFileSync(join(root, "redactions.json"), JSON.stringify(secrets), { mode: 0o600 })
   start(
     "opencode",
@@ -832,6 +858,41 @@ try {
     workflow.kill("SIGKILL")
     await until("scratch daemon crashed", () => workflow.signalCode !== null)
     await stopRecorders()
+    const custody = join(root, "agent-processes")
+    for (const name of existsSync(custody) ? readdirSync(custody) : []) {
+      const manifestPath = join(custody, name, "manifest.json")
+      if (!existsSync(manifestPath)) continue
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+      assert.ok(manifest.executionId.startsWith(unitPrefix))
+      const status = spawnSync(
+        "systemctl",
+        [
+          "--user",
+          "show",
+          manifest.executionId,
+          "-p",
+          "InvocationID",
+          "-p",
+          "Description",
+          "-p",
+          "ActiveState",
+        ],
+        { env, encoding: "utf8" },
+      )
+      if (
+        status.status === 0 &&
+        /ActiveState=(active|activating|deactivating)/.test(status.stdout)
+      ) {
+        assert.ok(status.stdout.includes(`InvocationID=${manifest.invocationId}`))
+        assert.ok(status.stdout.includes(`Description=workflowd codex launch ${manifest.launchId}`))
+        command(["systemctl", "--user", "stop", manifest.executionId], env)
+      }
+      spawnSync("systemctl", ["--user", "reset-failed", manifest.executionId], {
+        env,
+        stdio: "ignore",
+      })
+      log("scratch-unit-cleaned", { unit: manifest.executionId })
+    }
     await stopDescendants()
     for (const name of ["resident.sock", "identity.sock"]) rmSync(join(root, name), { force: true })
     await boot()
@@ -851,7 +912,7 @@ try {
     snapshot("ignored")
     return `No receipt, CI delivery or NATS message (stream ${before.length} → ${after.length})`
   })
-  await scenario(11, "Defaults off uses legacy exec", async () => {
+  await scenario(11, "Defaults off uses transient exec", async () => {
     await stop(workflow)
     await boot(false)
     const r = await dispatch(
@@ -867,7 +928,7 @@ try {
     assert.equal(query("SELECT * FROM resident_threads WHERE run_id=?", r.runId).length, 0)
     assert.ok(frames().some((f) => f.direction === "launch" && f.frame.args[0] === "exec"))
     snapshot("defaults-off")
-    return "Real codex exec --json dispatch completed; no resident thread"
+    return "Real transient-systemd codex exec --json dispatch completed; no resident thread"
   })
   await scenario(12, "OpenCode resident completion", async () => {
     const child = query(
@@ -977,7 +1038,13 @@ try {
   log("cleanup-complete", { ownedProcesses: processes.size, trackedDescendants: descendants.size })
   await Promise.allSettled(drains)
   // Credentials are never among uploadable logs and are removed after use.
-  for (const file of ["codex/auth.json", "redactions.json", "github.pem", "nats.conf"])
+  for (const file of [
+    "codex/auth.json",
+    "redactions.json",
+    "github.pem",
+    "nats.conf",
+    "codex-launch.mjs",
+  ])
     rmSync(join(root, file), { force: true })
   for (let id = 1; id <= 12; id++)
     if (!rows.some((r) => r.id === id))
