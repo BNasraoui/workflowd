@@ -155,8 +155,8 @@ const ciConfig = {
   servers: [],
   auth: { mode: "token" as const, token: "nats" },
 }
-const layer = (factory: typeof startAppServer) =>
-  ResidentCodexLive(config, "unused", ciConfig, factory).pipe(
+const layer = (factory: typeof startAppServer, progressWindowMs?: number) =>
+  ResidentCodexLive({ ...config, progressWindowMs }, "unused", ciConfig, factory).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         Layer.effect(CiService, makeCiStore),
@@ -684,5 +684,28 @@ test("resident cancellation closes only its run and cannot restore or deliver it
       expect((yield* runs.read("a"))?.state).toBe("cancelled")
       expect(fake.closed.filter((pid) => pid === fake.pids.get("thread-1"))).toHaveLength(1)
     }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("a silent active resident is stopped and leaves verified", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const runs = yield* AgentRunStore
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      const result = yield* worker.exited.pipe(Effect.timeoutOption("2 seconds"))
+      expect(result._tag).toBe("Some")
+      expect((yield* runs.read("a"))?.state).toBe("operator_required")
+      expect(fake.closed).toContain(fake.pids.get("thread-1")!)
+    }).pipe(Effect.provide(layer(fake.factory, 10))),
   )
 })

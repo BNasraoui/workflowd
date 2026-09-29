@@ -1,6 +1,10 @@
 import { isAbsolute, resolve } from "node:path"
 import { homedir } from "node:os"
-export type ResidentConfig = { readonly home: string; readonly socket: string }
+export type ResidentConfig = {
+  readonly home: string
+  readonly socket: string
+  readonly progressWindowMs?: number | undefined
+}
 export function loadResidentConfig(
   env: Record<string, string | undefined>,
 ): ResidentConfig | undefined {

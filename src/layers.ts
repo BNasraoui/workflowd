@@ -284,7 +284,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     config.residentCodex === undefined || config.ci === undefined || ciLive === undefined
       ? undefined
       : ResidentCodexLive(
-          config.residentCodex,
+          { ...config.residentCodex, progressWindowMs: config.agentRuns?.progressWindowMs },
           config.agentRuns?.codexBinary ?? "codex",
           config.ci,
         ).pipe(

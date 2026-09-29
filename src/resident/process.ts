@@ -65,7 +65,12 @@ export function startAppServer(
       rpc.close()
       reader.close()
       child.kill()
-      await child.exited
+      const force = setTimeout(() => child.kill("SIGKILL"), 1000)
+      try {
+        await child.exited
+      } finally {
+        clearTimeout(force)
+      }
     },
   }
 }

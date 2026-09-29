@@ -61,6 +61,7 @@ export const ResidentCodexLive = (
           process: ReturnType<typeof startAppServer>
           disconnected: boolean
           attempts: number
+          lastEventAt: number
         }
       >()
       const threadRuns = new Map<string, string>()
@@ -77,6 +78,8 @@ export const ResidentCodexLive = (
         }
         const process = yield* Effect.try(() =>
           start({ binary, home: config.home, env }, (frame) => {
+            const current = servers.get(runId)
+            if (current !== undefined) current.lastEventAt = Date.now()
             if (frame.method === "workflowd/disconnected") {
               const entry = servers.get(runId)
               if (entry !== undefined) entry.disconnected = true
@@ -84,7 +87,7 @@ export const ResidentCodexLive = (
             Queue.offerUnsafe(notifications, frame)
           }),
         )
-        servers.set(runId, { process, disconnected: false, attempts })
+        servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
         yield* Effect.try(() => {
           peers.register(runId, process.pid)
           if (Option.isSome(identity)) identity.value.register(runId, process.pid)
@@ -242,6 +245,15 @@ export const ResidentCodexLive = (
       const tick = Effect.gen(function* () {
         for (const row of yield* store.threads()) {
           const entry = servers.get(row.run_id)
+          if (
+            entry !== undefined &&
+            row.state === "active" &&
+            Date.now() - entry.lastEventAt >= (config.progressWindowMs ?? 20 * 60_000)
+          ) {
+            yield* store.uncertain(`stall:${row.thread_id}`, row.thread_id)
+            yield* finish(row.thread_id, true)
+            continue
+          }
           if (entry?.disconnected) {
             if (entry.attempts >= 3) {
               yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)

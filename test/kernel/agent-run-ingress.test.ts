@@ -539,6 +539,10 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
 
 test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
   let interrupted = false
+  let finishExit: (value: { exitCode: number; stderr: string }) => void = () => {}
+  const exit = new Promise<{ exitCode: number; stderr: string }>((resolve) => {
+    finishExit = resolve
+  })
   const events = {
     async *[Symbol.asyncIterator]() {
       yield { type: "thread.started" as const, threadId: "stalled-thread" }
@@ -557,9 +561,10 @@ test("a Codex stall interrupts its owned execution before waiting for exit", asy
         Effect.succeed({
           executionId: "test-stalled.service",
           events,
-          exited: Effect.succeed({ exitCode: -1, stderr: "" }),
+          exited: Effect.promise(() => exit),
           cancel: Effect.sync(() => {
             interrupted = true
+            finishExit({ exitCode: -1, stderr: "" })
           }),
         }),
     },
