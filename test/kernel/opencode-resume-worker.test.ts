@@ -443,16 +443,17 @@ describe("OpenCode local resume worker", () => {
   })
 
   test("heartbeats its exact claim while waiting on provider events", async () => {
-    const wallStart = Date.now()
-    const clock = () => new Date(startedAt.getTime() + (Date.now() - wallStart))
+    let now = startedAt
+    const prompted = Promise.withResolvers<void>()
+    const releaseEvent = Promise.withResolvers<void>()
     const provider: OpenCodeResumeProviderPort = {
       sessionExists: async () => true,
       sessionFinished: () => Promise.resolve(true),
       listMessages: async () => [],
-      promptAsync: async () => undefined,
+      promptAsync: async () => prompted.resolve(),
       subscribeEvents: async () =>
         (async function* () {
-          await Bun.sleep(30)
+          await releaseEvent.promise
           yield {
             type: "message.updated" as const,
             sessionID: "ses_exact",
@@ -469,12 +470,33 @@ describe("OpenCode local resume worker", () => {
       ":memory:",
       Effect.gen(function* () {
         yield* registerRequest
-        return yield* runOpenCodeResumeIteration({
-          ...options,
-          leaseDurationMs: 20,
-          heartbeatIntervalMs: 5,
-          now: clock,
-        }).pipe(Effect.provide(Layer.succeed(OpenCodeResumeProvider, provider)))
+        const sql = yield* SqlClient.SqlClient
+        const worker = yield* Effect.forkChild(
+          runOpenCodeResumeIteration({
+            ...options,
+            leaseDurationMs: 20,
+            heartbeatIntervalMs: 5,
+            now: () => now,
+          }).pipe(Effect.provide(Layer.succeed(OpenCodeResumeProvider, provider))),
+        )
+        yield* Effect.promise(() => prompted.promise)
+        now = new Date(startedAt.getTime() + 10)
+        const renewedLease = new Date(now.getTime() + 20).toISOString()
+        try {
+          // Wait for the observable renewal, keeping authority time independent
+          // of host load, SQLite startup and timer scheduling.
+          yield* Effect.gen(function* () {
+            for (;;) {
+              const rows = yield* sql`SELECT lease_until FROM kernel_resume_attempts
+                WHERE request_id = 'resume-1' AND attempt = 1 AND state = 'sent'`
+              if (rows[0]?.lease_until === renewedLease) return
+              yield* Effect.sleep(1)
+            }
+          }).pipe(Effect.timeout(1000))
+        } finally {
+          releaseEvent.resolve()
+        }
+        return yield* Fiber.join(worker)
       }),
     )
 

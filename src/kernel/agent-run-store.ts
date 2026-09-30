@@ -11,7 +11,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect"
  * one dispatching request holds the spawn; concurrent duplicates conflict
  * before any external side effect) → spawned (worktree, session and custody
  * exist, prompt sent) → verified (first generated token observed; the
- * receipt has been issued) → completed | failed | operator_required.
+ * receipt has been issued) → completed | failed | cancelled | operator_required.
  */
 export type AgentRunState =
   | "accepted"
@@ -138,9 +138,11 @@ export type AgentRunStorePort = {
     input: Authority & { readonly attempt: number; readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly complete: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
-  readonly cancel: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
     input: Authority & { readonly diagnostic: string },
+  ) => Effect.Effect<void, AgentRunStoreError>
+  readonly cancel: (
+    input: Authority & { readonly diagnostic?: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly operatorRequired: (
     input: Authority & { readonly diagnostic: string },
@@ -158,6 +160,7 @@ export type AgentRunStorePort = {
    * the daemon and can be reattached after a restart. */
   readonly listActiveByProvider: (
     providerId: string,
+    transientOnly?: boolean,
   ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
 }
 
@@ -343,9 +346,9 @@ const make = Effect.gen(function* () {
     transition(
       input.runId,
       "run is not cancellable",
-      sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = NULL,
+      sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
         updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND (state IN ('spawning', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND (state IN ('accepted', 'spawning', 'spawned', 'verified')
           OR (state = 'operator_required' AND provider_id = 'codex-cli'))
         RETURNING run_id`,
     )
@@ -382,17 +385,29 @@ const make = Effect.gen(function* () {
           ? sql`1 = 1`
           : sql`provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
-        WHERE ${verified}
-        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised}
-          AND updated_at < ${staleBefore})
+        WHERE (${verified}) AND NOT EXISTS (
+          SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
+          AND t.provider_kind = 'opencode' AND (
+            EXISTS (SELECT 1 FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
+              WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = t.thread_id AND w.state IN ('pending','matched'))
+            OR EXISTS (SELECT 1 FROM resident_inbox m WHERE m.thread_id = t.thread_id AND m.state IN ('prepared','sending'))
+          )
+        )
+        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised} AND updated_at < ${staleBefore})
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
     })
 
-  const listActiveByProvider: AgentRunStorePort["listActiveByProvider"] = (providerId) =>
+  const listActiveByProvider: AgentRunStorePort["listActiveByProvider"] = (
+    providerId,
+    transientOnly = false,
+  ) =>
     Effect.gen(function* () {
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
         WHERE provider_id = ${providerId} AND state IN ('spawning', 'spawned', 'verified')
+        AND (${transientOnly ? 1 : 0} = 0 OR NOT EXISTS (
+          SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
+        ))
         ORDER BY created_at, run_id`
       return yield* Effect.forEach(rows, toRecord)
     })

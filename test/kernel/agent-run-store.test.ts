@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import {
   AgentRunStore,
@@ -297,3 +298,44 @@ test("confirmed Codex cancellation wins when its exit observer escalated first",
   expect(result.row?.diagnostic).toBeNull()
   expect(result.staleObserver._tag).toBe("Failure")
 })
+for (const state of ["accepted", "spawning", "spawned", "verified"] as const) {
+  test(`cancels a ${state} run durably and refuses subsequent transitions`, () =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* AgentRunStore
+        yield* store.create(input)
+        if (state === "spawning") yield* store.claimSpawn({ runId: input.runId, now: at })
+        if (state === "spawned" || state === "verified") yield* spawn(store)
+        if (state === "verified")
+          yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+        yield* store.cancel({ runId: input.runId, diagnostic: "user_cancelled", now: later })
+        expect(yield* store.read(input.runId)).toMatchObject({
+          state: "cancelled",
+          diagnostic: "user_cancelled",
+          updatedAt: later,
+        })
+        expect(
+          yield* store.nextWatchable({ now: later, staleAfterMs: 0, unsupervisedProviderIds: [] }),
+        ).toBeNull()
+        for (const transition of [
+          store.cancel({ runId: input.runId, diagnostic: "again", now: later }),
+          store.complete({ runId: input.runId, now: later }),
+          store.operatorRequired({ runId: input.runId, diagnostic: "again", now: later }),
+        ])
+          expect((yield* transition.pipe(Effect.result))._tag).toBe("Failure")
+      }),
+    ))
+}
+
+test("transient recovery excludes durable resident custody", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* AgentRunStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.create({ ...input, providerId: "codex-cli" })
+      yield* spawn(store)
+      yield* sql`INSERT INTO resident_threads(run_id,thread_id,directory,state) VALUES (${input.runId},'resident-thread',${input.directory},'waiting')`
+      expect(yield* store.listActiveByProvider("codex-cli")).toHaveLength(1)
+      expect(yield* store.listActiveByProvider("codex-cli", true)).toHaveLength(0)
+    }),
+  ))

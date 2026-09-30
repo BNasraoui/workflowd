@@ -603,3 +603,66 @@ describe("collectHeadEvidence", () => {
     ).toBe(true)
   })
 })
+
+test("head evidence preserves adapter receivers for workflow trust and failed logs", async () => {
+  const original = github({
+    listCheckRunPages: () =>
+      onePage([
+        ...requiredCheckRuns,
+        { id: 900, name: "Tests", status: "completed", conclusion: "failure" },
+      ]),
+    listWorkflowRunPages: () =>
+      onePage([
+        ...requiredWorkflowRuns,
+        {
+          id: 91,
+          name: "Other CI",
+          headSha,
+          status: "completed",
+          conclusion: "failure",
+          workflowId: 999,
+          path: ".github/workflows/other.yml",
+        },
+      ]),
+    listWorkflowJobPages: () =>
+      onePage([{ id: 92, name: "Tests", status: "completed", conclusion: "failure" }]),
+    downloadWorkflowJobLog: async () => "real failure log",
+  })
+  const client: GitHubInstallationAdapter = {
+    ...original,
+    getWorkflow(input) {
+      expect(this).toBe(client)
+      return original.getWorkflow!(input)
+    },
+    getRepositoryContentSha(input) {
+      expect(this).toBe(client)
+      return original.getRepositoryContentSha!(input)
+    },
+    listWorkflowRunPages(input) {
+      expect(this).toBe(client)
+      return original.listWorkflowRunPages!(input)
+    },
+    listWorkflowJobPages(input) {
+      expect(this).toBe(client)
+      return original.listWorkflowJobPages!(input)
+    },
+    downloadWorkflowJobLog(input) {
+      expect(this).toBe(client)
+      return original.downloadWorkflowJobLog!(input)
+    },
+  }
+  const evidence = await Effect.runPromise(
+    collectHeadEvidence({
+      client,
+      repository: workflowdRepository,
+      pullRequestNumber: 7,
+      target,
+      workflowdAppId,
+      sonarRequest: sonar(),
+    }),
+  )
+  expect(evidence.ci.state).toBe("available")
+  expect(evidence.ci.checks.find((check) => check.name === "Tests")?.log).toContain(
+    "real failure log",
+  )
+})

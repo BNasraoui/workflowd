@@ -1,3 +1,4 @@
+import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
@@ -54,6 +55,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
   readonly maxBodyBytes?: number
@@ -472,6 +474,15 @@ function wakeCommandWork(
   return result.status === "enqueued" ? signals.wake("command") : Effect.void
 }
 
+function webhookAction(payload: unknown) {
+  return typeof payload === "object" &&
+    payload !== null &&
+    "action" in payload &&
+    typeof payload.action === "string"
+    ? payload.action
+    : null
+}
+
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
@@ -504,26 +515,28 @@ export function handleGitHubWebhook(
     )
     if (payload instanceof Response) return payload
 
-    const decoded = yield* decodeGitHubEvent(eventName, payload).pipe(
+    const decode =
+      options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
+        ? Effect.succeed({ _tag: "Ignored" as const, reason: `unsupported:${eventName}` })
+        : decodeGitHubEvent(eventName, payload)
+    const decoded = yield* decode.pipe(
       Effect.catch((error) =>
         Effect.succeed(Response.json({ error: error.message }, { status: 400 })),
       ),
     )
     if (decoded instanceof Response) return decoded
 
-    const action =
-      typeof payload === "object" &&
-      payload !== null &&
-      "action" in payload &&
-      typeof payload.action === "string"
-        ? payload.action
-        : null
+    const action = webhookAction(payload)
     const delivery = {
       deliveryId,
       event: eventName,
       action,
       payload: bodyText,
       receivedAt: options.now,
+    }
+    if (decoded._tag === "CiCompletion" && options.ci !== undefined) {
+      const status = yield* options.ci.ingest(deliveryId, decoded, bodyText, options.now.getTime())
+      return Response.json({ status }, { status: 202 })
     }
     const store = yield* WorkflowStore
     const signals = yield* WorkSignal
@@ -543,7 +556,10 @@ export function handleGitHubWebhook(
     return Response.json(
       result === "duplicate"
         ? { status: "duplicate" }
-        : { status: "ignored", reason: decoded.reason },
+        : {
+            status: "ignored",
+            reason: decoded._tag === "CiCompletion" ? "ci-disabled" : decoded.reason,
+          },
       { status: 202 },
     )
   }).pipe(

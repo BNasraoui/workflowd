@@ -1,3 +1,5 @@
+import { CiService } from "./ci/service"
+import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
 import { normalizeError } from "./errors"
@@ -238,6 +240,7 @@ export function startHookService(
   ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
   return Effect.gen(function* () {
+    const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Automation
     const signals = yield* WorkSignal
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
@@ -413,63 +416,71 @@ export function startHookService(
 
     // Acquire the listener last so its finalizer stops acceptance and drains
     // request fibers before worker and store scopes are released.
+    const submitTestJob = (input: TestJobSubmission, now: Date) =>
+      Option.getOrThrow(testJobCanary)
+        .submit(input, now)
+        .pipe(
+          Effect.tap((result) => (result.newlyEnqueued ? signals.wake("kernel-job") : Effect.void)),
+        )
     const server = yield* serveHookHttpWithHandler(
       {
         ...config.http,
         webhookSecret: config.github.webhookSecret,
       },
       (request, options) =>
-        routeRequest(request, {
-          ...options,
-          ...(config.qrspi === undefined
-            ? {}
-            : {
-                qrspi: {
-                  token: config.qrspi.token,
-                  start: Option.getOrThrow(workflowStart).start,
-                },
-              }),
-          ...(config.testJobCanary === undefined
-            ? {}
-            : {
-                testJobs: {
-                  token: config.testJobCanary.token,
-                  submit: (input: TestJobSubmission, now: Date) =>
-                    Option.getOrThrow(testJobCanary)
-                      .submit(input, now)
-                      .pipe(
-                        Effect.tap((result) =>
-                          result.newlyEnqueued ? signals.wake("kernel-job") : Effect.void,
-                        ),
-                      ),
-                  status: Option.getOrThrow(testJobCanary).status,
-                },
-              }),
-          ...(config.agentWaits === undefined
-            ? {}
-            : {
-                agentWaits: {
-                  token: config.agentWaits.token,
-                  register: Option.getOrThrow(agentWaits).register,
-                },
-              }),
-          ...(config.agentRuns === undefined
-            ? {}
-            : {
-                agentRuns: {
-                  token: config.agentRuns.token,
-                  register: Option.getOrThrow(agentRuns).register,
-                  cancel: Option.getOrThrow(agentRuns).cancel,
-                },
-              }),
-          ...(config.dogfood === undefined
-            ? {}
-            : {
-                dogfood: {
-                  token: config.dogfood.token,
-                  sessions: Option.getOrThrow(dogfood).sessions,
-                },
-              }),
+        Effect.gen(function* () {
+          if (config.ci !== undefined) {
+            const response = yield* routeCi(request, config.ci, Option.getOrThrow(ci)).pipe(
+              Effect.catch(() => Effect.succeed(new Response(null, { status: 503 }))),
+            )
+            if (response !== undefined) return response
+          }
+          return yield* routeRequest(request, {
+            ...options,
+            ...(Option.isSome(ci) ? { ci: ci.value } : {}),
+            ...(config.qrspi === undefined
+              ? {}
+              : {
+                  qrspi: {
+                    token: config.qrspi.token,
+                    start: Option.getOrThrow(workflowStart).start,
+                  },
+                }),
+            ...(config.testJobCanary === undefined
+              ? {}
+              : {
+                  testJobs: {
+                    token: config.testJobCanary.token,
+                    submit: submitTestJob,
+                    status: Option.getOrThrow(testJobCanary).status,
+                  },
+                }),
+            ...(config.agentWaits === undefined
+              ? {}
+              : {
+                  agentWaits: {
+                    token: config.agentWaits.token,
+                    register: Option.getOrThrow(agentWaits).register,
+                  },
+                }),
+            ...(config.agentRuns === undefined
+              ? {}
+              : {
+                  agentRuns: {
+                    token: config.agentRuns.token,
+                    register: Option.getOrThrow(agentRuns).register,
+                    cancel: Option.getOrThrow(agentRuns).cancel,
+                  },
+                }),
+            ...(config.dogfood === undefined
+              ? {}
+              : {
+                  dogfood: {
+                    token: config.dogfood.token,
+                    sessions: Option.getOrThrow(dogfood).sessions,
+                  },
+                }),
+          })
         }),
     )
     yield* Effect.logInfo(`workflowd listening on http://${server.hostname}:${server.port}`)

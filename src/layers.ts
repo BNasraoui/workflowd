@@ -1,3 +1,7 @@
+import { OpenCodeMailboxLive } from "./resident/opencode"
+import { ResidentCodex, ResidentCodexLive } from "./resident/service"
+import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
+import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { App } from "@octokit/app"
@@ -265,16 +269,67 @@ export const makeLiveLayer = (config: AppConfig) => {
     ClaudeCli,
     makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
   )
-  const codexCliLayer = Layer.succeed(
-    CodexCli,
-    makeCodexCli({
-      binary: config.agentRuns?.codexBinary ?? "codex",
-      ...(config.agentRuns?.codexUnitPrefix === undefined
-        ? {}
-        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
-      custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
-    }),
-  )
+  const workerIdentityLayer =
+    config.workerIdentity === undefined
+      ? Layer.empty
+      : WorkerIdentityLive(config.workerIdentity, config.github).pipe(
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+        )
+  const ciLive =
+    config.ci === undefined
+      ? undefined
+      : CiServiceLive(config.ci, config.github).pipe(Layer.provide(storeLayer))
+  const ciLayer = ciLive ?? Layer.empty
+  const residentLive =
+    config.residentCodex === undefined || config.ci === undefined || ciLive === undefined
+      ? undefined
+      : ResidentCodexLive(
+          { ...config.residentCodex, progressWindowMs: config.agentRuns?.progressWindowMs },
+          config.agentRuns?.codexBinary ?? "codex",
+          config.ci,
+        ).pipe(
+          Layer.provide(ciLive),
+          Layer.provide(workerIdentityLayer),
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+          Layer.provide(storeLayer),
+        )
+  const openCodeMailboxLayer =
+    config.residentOpenCodeSocket === undefined || config.ci === undefined || ciLive === undefined
+      ? Layer.empty
+      : OpenCodeMailboxLive(
+          {
+            ...completionSourceOptions,
+            socket: config.residentOpenCodeSocket,
+            repositories: config.ci.repositories,
+          },
+          openCodeAdapter,
+        ).pipe(
+          Layer.provide(ciLive),
+          Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
+          Layer.provide(storeLayer),
+        )
+  const residentLayer = residentLive ?? Layer.empty
+  const codexCliLayer =
+    residentLive === undefined
+      ? Layer.effect(
+          CodexCli,
+          Effect.gen(function* () {
+            const identity = yield* Effect.serviceOption(WorkerIdentity)
+            return makeCodexCli({
+              binary: config.agentRuns?.codexBinary ?? "codex",
+              ...(config.agentRuns?.codexUnitPrefix === undefined
+                ? {}
+                : { unitPrefix: config.agentRuns.codexUnitPrefix }),
+              custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
+              ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+            })
+          }),
+        ).pipe(Layer.provide(workerIdentityLayer))
+      : Layer.effect(
+          CodexCli,
+          Effect.map(ResidentCodex, (resident) => resident.cli),
+        ).pipe(Layer.provideMerge(residentLive))
+
   const claudeResumeWorkerLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -353,6 +408,8 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
+          Layer.provideMerge(workerIdentityLayer),
+          Layer.provideMerge(openCodeMailboxLayer),
           Layer.provideMerge(workSignalLayer),
         )
   const qrspiLayer =
@@ -397,7 +454,7 @@ export const makeLiveLayer = (config: AppConfig) => {
                   })
                   return new GitHubQrspiRepository(
                     config.qrspi!,
-                    async (installationId) => {
+                    (installationId) => {
                       const app = new App({
                         appId: config.github.appId,
                         privateKey,
@@ -450,6 +507,9 @@ export const makeLiveLayer = (config: AppConfig) => {
           ),
         )
   return Layer.mergeAll(
+    ciLayer,
+    residentLayer,
+    workerIdentityLayer,
     workSignalLayer,
     providerLayer,
     resumeWorkerLayer,

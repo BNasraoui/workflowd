@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { appendFile, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
 
@@ -25,7 +26,7 @@ const manager = (behavior?: { readonly ignoreStop?: boolean }) => {
       return {
         exitCode: 0,
         stdout:
-          `InvocationID=${invocationId}\nDescription=${description}\n` +
+          `MainPID=12345\nInvocationID=${invocationId}\nDescription=${description}\n` +
           `ActiveState=${state}\nSubState=${state === "active" ? "running" : "dead"}\n` +
           `Result=${state === "active" ? "success" : "signal"}\n`,
         stderr: "",
@@ -340,3 +341,61 @@ test("completion appearing during a manager query wins over an absent-unit snaps
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("worker identity is restored only under verified transient custody", async () => {
+  const root = join(tmpdir(), `codex-identity-${crypto.randomUUID()}`)
+  const systemd = manager()
+  const registered: Array<[string, number]> = []
+  const cli = makeCodexCli({
+    binary: "codex",
+    custodyRoot: root,
+    runCommand: systemd.runCommand,
+    identity: {
+      environment: () => ({ WORKFLOWD_RUN_ID: "agent-run-systemd", GH_TOKEN: "" }),
+      register: (runId, pid) => {
+        registered.push([runId, pid])
+      },
+    },
+  })
+  try {
+    await Effect.runPromise(
+      cli.spawn({ runId: "agent-run-systemd", directory: root, prompt: "go", model: null }),
+    )
+    await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }))
+    expect(registered).toEqual([
+      ["agent-run-systemd", 12345],
+      ["agent-run-systemd", 12345],
+    ])
+    expect(systemd.commands[0]).toContain("--setenv=WORKFLOWD_RUN_ID=agent-run-systemd")
+    expect(systemd.commands[0]).toContain("--setenv=GH_TOKEN=")
+    systemd.reuse()
+    expect(
+      (await Effect.runPromise(cli.attach({ runId: "agent-run-systemd" }).pipe(Effect.result)))
+        ._tag,
+    ).toBe("Failure")
+    expect(registered).toHaveLength(2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const mode of ["exit", "cancel"]) {
+  test(`${mode} polling retains a bounded number of promises`, async () => {
+    // A separate heap keeps this measurement independent of the rest of the test suite.
+    const probe = Bun.spawn(
+      [
+        process.execPath,
+        fileURLToPath(import.meta.resolve("./fixtures/codex-poll-retention.ts")),
+        mode,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    const [exitCode, stdout, stderr] = await Promise.all([
+      probe.exited,
+      new Response(probe.stdout).text(),
+      new Response(probe.stderr).text(),
+    ])
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(JSON.parse(stdout).polls).toBe(1200)
+  })
+}

@@ -417,3 +417,12 @@ Responses:
 | 409 | Refused with a machine-readable reason: `provider_prefixed_route`, `unknown_route`, `ambiguous_route`, `unknown_repository`, `provider_not_authenticated`, `model_not_available`, `invalid_wait_pairing`, `missing_parent_session`, `no_first_token`, `run_conflict` — or an idempotency/custody conflict. |
 | 413 | Body exceeds `WORKFLOWD_MAX_WEBHOOK_BYTES`. |
 | 500 | Store or provider fault; details stay server-side. |
+
+## Resident mailbox subscriptions
+
+Resident workers receive a per-run stdio MCP server exposing `subscribe_to_event`.
+After pushing, subscribe to CI by repository and head SHA, end the turn, then
+continue when the mailbox delivers the result. Agent-run completion selectors are
+also supported. This tool uses run-bound Unix peer authentication, not the shared
+HTTP MCP write bearer. See [agent inboxes and CI](agent-inboxes-ci.md#agent-pattern-push-subscribe-end-the-turn)
+for selectors, delivery guarantees, and the cargo shim change.

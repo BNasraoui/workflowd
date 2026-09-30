@@ -131,6 +131,7 @@ export const makeCodexCli = (
   exitCode = 0,
   preflightError?: import("../../src/kernel/codex-session").CodexPreflightError,
   threadId = "01a09976-e799-7c52-9759-8b76d692b755",
+  stderr = "",
 ) => {
   const state: CodexState = { spawned: [], killed: false }
   const port: import("../../src/kernel/codex-session").CodexCliPort = {
@@ -165,28 +166,33 @@ export const makeCodexCli = (
         }
         const iterator: AsyncIterator<import("../../src/kernel/codex-session").CodexExecEvent> = {
           next: async () => {
-            for (;;) {
-              if (queue.items.length > 0) {
-                return { value: queue.items.shift()!, done: false }
-              }
-              if (queue.closed) return { value: undefined, done: true }
-              await new Promise<void>((resolve) => {
-                queue.waiter = resolve
-              })
+            if (queue.items.length > 0) {
+              return { value: queue.items.shift()!, done: false }
             }
+            if (queue.closed) return { value: undefined, done: true }
+            await new Promise<void>((resolve) => {
+              queue.waiter = resolve
+            })
+            return iterator.next()
           },
         }
         void (async () => {
-          for (const event of [{ type: "thread.started", threadId } as const, ...events]) {
+          const pushNext = async (
+            remaining: import("../../src/kernel/codex-session").CodexExecEvent[],
+          ) => {
+            const event = remaining.shift()
+            if (event === undefined) return
             await Bun.sleep(5)
             queue.push(event)
+            return pushNext(remaining)
           }
+          await pushNext([{ type: "thread.started", threadId }, ...events])
           queue.close()
         })()
         return {
           executionId: `test-${input.runId}.service`,
           events: { [Symbol.asyncIterator]: () => iterator },
-          exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr: "" })),
+          exited: Effect.suspend(() => Effect.succeed({ exitCode, stderr })),
           cancel: Effect.sync(() => {
             state.killed = true
           }),

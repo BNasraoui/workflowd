@@ -750,3 +750,56 @@ describe("OpenCode agent completion source", () => {
     expect(parentPrompts).toBe(1)
   })
 })
+
+test("a resident OpenCode turn ending does not wake its parent before the run finishes", async () => {
+  const { AgentRunStore, AgentRunStoreLive } = await import("../../src/kernel/agent-run-store")
+  const { makeResidentStore } = await import("../../src/resident/store")
+  const provider: OpenCodeCompletionProviderPort = {
+    sessionExists: async () => true,
+    sessionFinished: async () => true,
+    listMessages: async () => [childAnswer],
+    subscribeEvents: async () => (async function* () {})(),
+  }
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* arrange
+      const runs = yield* AgentRunStore
+      const inbox = yield* makeResidentStore
+      yield* runs.create({
+        runId: "resident-child",
+        route: "test",
+        providerId: "provider",
+        modelId: "model",
+        agent: "build",
+        repository: "o/r",
+        directory: process.cwd(),
+        prompt: "task",
+        promptSha256: "a".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 1,
+        createdAt: at,
+      })
+      yield* runs.claimSpawn({ runId: "resident-child", now: at })
+      yield* runs.markSpawned({
+        runId: "resident-child",
+        resourceId: "child-resource",
+        sessionId: "child-stable",
+        nativeSessionId: "ses_child",
+        now: at,
+      })
+      yield* runs.markVerified({ runId: "resident-child", outputTokens: 1, now: at })
+      yield* inbox.attach("resident-child", "ses_child", process.cwd(), "model", "opencode")
+      expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("idle")
+      yield* runs.complete({ runId: "resident-child", now: at })
+      expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("completed")
+    }).pipe(
+      Effect.provide(AgentRunStoreLive.pipe(Layer.provideMerge(stores))),
+      Effect.provideService(OpenCodeCompletionProvider, provider),
+      Effect.provideService(WorkSignal, {
+        subscribe: () => Effect.die("unused"),
+        wake: () => Effect.void,
+      }),
+    ),
+  )
+})

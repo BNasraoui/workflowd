@@ -2,6 +2,9 @@
   "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
   "entry": [
     "test/**/*.test.ts",
+    "src/worker-identity/command.ts",
+    "src/resident/subscribe.ts",
+    "src/resident/mcp.ts",
     "test/kernel/register-wait-process.ts",
     "scripts/**/*.{mjs,ts}",
     "skills/**/scripts/**/*.{mjs,ts}",

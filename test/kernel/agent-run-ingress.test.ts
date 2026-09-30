@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import {
   at,
@@ -539,10 +539,15 @@ const waitForRunState = (runId: string, states: ReadonlyArray<string>) =>
 
 test("a Codex stall interrupts its owned execution before waiting for exit", async () => {
   let interrupted = false
-  const events: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
+  const child = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  const events = {
     async *[Symbol.asyncIterator]() {
-      yield { type: "thread.started", threadId: "stalled-thread" }
-      yield { type: "agent_message", text: "started" }
+      yield { type: "thread.started" as const, threadId: "stalled-thread" }
+      yield { type: "agent_message" as const, text: "started" }
       await new Promise(() => {})
     },
   }
@@ -557,20 +562,77 @@ test("a Codex stall interrupts its owned execution before waiting for exit", asy
         Effect.succeed({
           executionId: "test-stalled.service",
           events,
-          exited: Effect.succeed({ exitCode: -1, stderr: "" }),
+          exited: Effect.promise(async () => ({ exitCode: await child.exited, stderr: "" })),
           cancel: Effect.sync(() => {
             interrupted = true
+            expect(child.exitCode).toBeNull()
+            child.kill("SIGKILL")
           }),
         }),
     },
     { progressWindowMs: 10 },
   )
-  const run = await Effect.runPromise(
-    Effect.gen(function* () {
-      const receipt = yield* register({ ...submission, route: "scan" })
-      return yield* waitForRunState(receipt.runId, ["operator_required"])
-    }).pipe(Effect.provide(layer)),
+  try {
+    const run = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ ...submission, route: "scan" })
+        return yield* waitForRunState(receipt.runId, ["operator_required"])
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(interrupted).toBe(true)
+    expect(run?.state).toBe("operator_required")
+    expect(child.signalCode).toBe("SIGKILL")
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await child.exited
+  }
+})
+for (const detail of [null, "turn.failed", "error"] as const) {
+  test(`a failed Codex run persists its exit diagnostic after first output (${detail})`, async () => {
+    const stderr = "x".repeat(600)
+    const codex = makeCodexCli(
+      [
+        { type: "agent_message", text: "started" },
+        ...(detail === null ? [] : [{ type: detail, message: "provider rejected turn" }]),
+      ],
+      2,
+      undefined,
+      "failed-thread",
+      stderr,
+    )
+    const run = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ route: "scan", repository: "workflowd", prompt: "task" })
+        return yield* waitForRunState(receipt.runId, ["operator_required"])
+      }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
+    )
+    expect(run?.state).toBe("operator_required")
+    expect(run?.diagnostic).toBe(
+      `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: ${stderr.slice(0, 500)}`,
+    )
+  })
+}
+
+test("resident OpenCode dispatch provisions the run before its initial prompt", async () => {
+  const { OpenCodeMailbox } = await import("../../src/resident/opencode")
+  const state = defaultState()
+  const prepared: string[] = []
+  const mailbox = Layer.succeed(OpenCodeMailbox, {
+    prepare: (runId) =>
+      Effect.sync(() => {
+        prepared.push(runId)
+        expect(state.prompted).toHaveLength(0)
+        return "Subscribe and end your turn."
+      }),
+    route: () => Effect.succeed(new Response(null, { status: 403 })),
+    tick: Effect.void,
+  })
+  const result = await Effect.runPromise(
+    register(submission).pipe(
+      Effect.provide(makeLayer(makeProvider(state), worktrees([])).pipe(Layer.provide(mailbox))),
+    ),
   )
-  expect(interrupted).toBe(true)
-  expect(run?.state).toBe("operator_required")
+  expect(prepared).toEqual([result.runId])
+  expect(state.prompted[0]?.text).toContain("Subscribe and end your turn.")
+  expect(state.prompted[0]?.text).toContain(submission.prompt)
 })

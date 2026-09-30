@@ -66,3 +66,28 @@ A matching worktree that already exists independently of the automation lifecycl
 
 **Managed Worktree**:
 A worktree whose lifecycle is owned by the automation.
+
+**CI Target**:
+An exact GitHub repository and head SHA, with an explicitly configured set of
+workflow names whose latest attempts must all finish before the target is terminal.
+
+**CI Observation**:
+A signed workflow-run or check-suite completion delivery, durably recorded before
+acknowledgement. An observation triggers bounded reconciliation; it does not by
+itself prove that the whole CI Target is complete.
+
+**CI Aggregate**:
+The durable pending/success/failure result of a reconciled CI Target, including
+failing job names and a replay sequence. It does not authorize PR publication or
+advance a Generation.
+
+**Resident Inbox**:
+A durable queue of external events for a custodied worker thread. Ending a turn
+while a CI wait is registered preserves the active Agent Run; the queued completion
+or timeout event starts a later turn. Recovery rechecks session and working-resource
+custody before waking a thread.
+
+**Worker GitHub Capability**:
+A short-lived authorization bound to one live Agent Run and its configured
+repository/permission policy. It permits obtaining a GitHub App installation token;
+it conveys neither the App private key nor another worker's identity.

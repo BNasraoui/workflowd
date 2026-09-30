@@ -1,0 +1,94 @@
+import { join } from "node:path"
+import { createInterface } from "node:readline"
+import { Readable } from "node:stream"
+import { RpcClient } from "./rpc"
+
+/** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
+export function startAppServer(
+  options: {
+    readonly binary: string
+    readonly home: string
+    readonly env?: Readonly<Record<string, string>>
+  },
+  notify: (frame: { readonly method: string; readonly params: unknown }) => void,
+) {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ...options.env,
+    CODEX_HOME: options.home,
+    GH_CONFIG_DIR: join(options.home, "worker-gh"),
+  }
+  delete env.GH_TOKEN
+  delete env.GITHUB_TOKEN
+  delete env.GH_ENTERPRISE_TOKEN
+  delete env.GITHUB_ENTERPRISE_TOKEN
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const child = Bun.spawn(
+    [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
+    {
+      env,
+      detached: true,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "ignore",
+    },
+  )
+  const rpc = new RpcClient((line) => {
+    child.stdin.write(line)
+    void child.stdin.flush()
+  }, notify)
+  const reader = createInterface({ input: Readable.fromWeb(child.stdout), crlfDelay: Infinity })
+  reader.on("line", (line) => {
+    try {
+      rpc.receive(line)
+    } catch {
+      rpc.close()
+      child.kill()
+    }
+  })
+  void child.exited.then(() => {
+    rpc.close()
+    reader.close()
+    notify({ method: "workflowd/disconnected", params: null })
+  })
+  const signalGroup = (signal: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, signal)
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ESRCH")) throw cause
+    }
+  }
+  let closing: Promise<void> | undefined
+  const stop = async () => {
+    rpc.close()
+    reader.close()
+    signalGroup("SIGTERM")
+    let force: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        child.exited,
+        new Promise<void>((resolve) => {
+          force = setTimeout(resolve, 1000)
+        }),
+      ])
+      // The leader can exit before descendants; always terminate the remaining group.
+      signalGroup("SIGKILL")
+      await child.exited
+    } finally {
+      clearTimeout(force)
+    }
+  }
+  return {
+    pid: child.pid,
+    rpc,
+    initialize: async () => {
+      await rpc.request("initialize", {
+        clientInfo: { name: "workflowd", version: "1" },
+        capabilities: { experimentalApi: true },
+      })
+      child.stdin.write('{"method":"initialized"}\n')
+      void child.stdin.flush()
+    },
+    close: () => (closing ??= stop()),
+  }
+}

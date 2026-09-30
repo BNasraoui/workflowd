@@ -23,6 +23,7 @@ export type OpenCodePromptSessionInput = {
   readonly agent: string
   readonly model: OpenCodeModel
   readonly text: string
+  readonly delivery?: "queue"
 }
 
 type OpenCodeSessionInput = {
@@ -123,6 +124,10 @@ export type OpenCodeModelAvailability = {
 type SdkCall<Input, Output> = (input: Input) => Effect.Effect<Output, Error>
 
 export type OpenCodeSdkClient = {
+  readonly setSessionEnvironment: SdkCall<
+    { readonly sessionID: string; readonly variables: Readonly<Record<string, string>> },
+    void
+  >
   readonly createSession: SdkCall<OpenCodeCreateSessionInput, OpenCodeSession>
   readonly promptSession: SdkCall<
     {
@@ -130,6 +135,7 @@ export type OpenCodeSdkClient = {
       readonly agent: string
       readonly model: OpenCodeModel
       readonly text: string
+      readonly delivery?: "queue"
     },
     void
   >
@@ -269,6 +275,11 @@ function parseStructuredText(text: string): JsonValue {
 export class SdkOpenCodeAdapter implements OpenCodeAdapter {
   constructor(private readonly client: OpenCodeSdkClient) {}
 
+  readonly setSessionEnvironment = (input: {
+    readonly sessionID: string
+    readonly variables: Readonly<Record<string, string>>
+  }) => this.call("set session environment", this.client.setSessionEnvironment(input))
+
   readonly createSession: OpenCodeAdapter["createSession"] = (input) =>
     this.call("create session", this.client.createSession(input))
 
@@ -280,6 +291,7 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
         agent: input.agent,
         model: input.model,
         text: input.text,
+        ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       }),
     )
 
@@ -532,6 +544,13 @@ export function makeOpenCodeSdkClient(
     run: (client: OpenCodeClient) => Effect.Effect<A, Error>,
   ): Effect.Effect<A, Error> => Effect.flatMap(clientEffect, run)
   return {
+    setSessionEnvironment: (input) =>
+      withClient((client) =>
+        client.session.environment({
+          sessionID: toSessionID(input.sessionID),
+          variables: input.variables,
+        }),
+      ),
     createSession: (input) =>
       withClient((client) =>
         client.session
@@ -555,7 +574,11 @@ export function makeOpenCodeSdkClient(
               }),
             ),
             Effect.andThen(
-              client.session.prompt({ sessionID: toSessionID(input.sessionID), text: input.text }),
+              client.session.prompt({
+                sessionID: toSessionID(input.sessionID),
+                text: input.text,
+                delivery: input.delivery,
+              }),
             ),
             Effect.asVoid,
           ),
@@ -637,13 +660,42 @@ export function makeOpenCodeSdkClient(
     sessionTelemetry: (input) =>
       withClient((client) =>
         client.session.get({ sessionID: toSessionID(input.sessionID) }).pipe(
-          Effect.map((session): OpenCodeSessionTelemetry | undefined => ({
-            directory: session.location.directory,
-            outputTokens: session.tokens.output + session.tokens.reasoning,
-            updatedAtMs: toEpochMillis(session.time.updated) ?? 0,
-            idle: toEpochMillis(session.time.idle) !== undefined,
-            ...(session.outcome === undefined ? {} : { outcome: session.outcome }),
-          })),
+          Effect.flatMap((session) =>
+            Effect.gen(function* () {
+              let idle = toEpochMillis(session.time.idle) !== undefined
+              if (idle) {
+                const queued = yield* client.session.inbox.list({
+                  sessionID: toSessionID(input.sessionID),
+                })
+                if (queued.length > 0) idle = false
+                else {
+                  // A queued prompt can start while the inbox request is in flight.
+                  session = yield* client.session.get({ sessionID: toSessionID(input.sessionID) })
+                  idle = toEpochMillis(session.time.idle) !== undefined
+                }
+              }
+              let outputTokens = session.tokens.output + session.tokens.reasoning
+              // Session totals settle at execution end. Streamed assistant steps
+              // already prove generation while the worker is still using tools.
+              if (outputTokens === 0 && !idle) {
+                const messages = yield* client.message.list({
+                  sessionID: toSessionID(input.sessionID),
+                  limit: 20,
+                  order: "desc",
+                })
+                for (const message of messages.data)
+                  if (message.type === "assistant" && message.tokens !== undefined)
+                    outputTokens += message.tokens.output + message.tokens.reasoning
+              }
+              return {
+                directory: session.location.directory,
+                outputTokens,
+                updatedAtMs: toEpochMillis(session.time.updated) ?? 0,
+                idle,
+                ...(session.outcome === undefined ? {} : { outcome: session.outcome }),
+              }
+            }),
+          ),
           Effect.catch((cause) =>
             isNotFound(cause) ? Effect.succeed(undefined) : Effect.fail(cause),
           ),

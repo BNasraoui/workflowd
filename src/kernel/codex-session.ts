@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Context, Effect, Schema } from "effect"
+import { Context, Effect, Schedule, Schema } from "effect"
 import { normalizeError } from "../errors"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
@@ -135,6 +135,10 @@ type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CodexCliOptions = {
   readonly binary: string
+  readonly identity?: {
+    readonly environment: (runId: string) => Readonly<Record<string, string>>
+    readonly register: (runId: string, pid: number) => void
+  }
   readonly custodyRoot: string
   readonly unitPrefix?: string
   readonly pollIntervalMs?: number
@@ -250,6 +254,7 @@ export const makeCodexCli = (
   }
 
   type UnitState = {
+    readonly pid: number
     readonly present: boolean
     readonly active: boolean
     readonly invocationId: string
@@ -262,6 +267,7 @@ export const makeCodexCli = (
       "--user",
       "show",
       "--property=LoadState",
+      "--property=MainPID",
       "--property=InvocationID",
       "--property=Description",
       "--property=ActiveState",
@@ -271,7 +277,14 @@ export const makeCodexCli = (
       executionId,
     ])
     if (result.exitCode !== 0) {
-      return { present: false, active: false, invocationId: "", description: "", result: "" }
+      return {
+        pid: 0,
+        present: false,
+        active: false,
+        invocationId: "",
+        description: "",
+        result: "",
+      }
     }
     const fields = new Map(
       (result.stdout ?? "")
@@ -280,6 +293,7 @@ export const makeCodexCli = (
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
     return {
+      pid: Number(fields.get("MainPID") ?? 0),
       present: fields.get("LoadState") !== "not-found",
       active: ["active", "activating", "deactivating"].includes(fields.get("ActiveState") ?? ""),
       invocationId: fields.get("InvocationID") ?? "",
@@ -315,6 +329,8 @@ export const makeCodexCli = (
         if (manifest.runId !== input.runId) throw new Error("codex custody run id mismatch")
         const initial = await reconcile(path, manifest)
         manifest = initial.manifest
+        if (initial.unit.active && Number.isSafeInteger(initial.unit.pid) && initial.unit.pid > 0)
+          options.identity?.register(input.runId, initial.unit.pid)
         const attachedAt = Date.now()
 
         const terminal = async (): Promise<CodexExit | null> => {
@@ -349,6 +365,25 @@ export const makeCodexCli = (
           parse: parseCodexExecEvent,
         })
 
+        const waitInactive = (durationMs: number): Promise<boolean> => {
+          const deadline = Date.now() + durationMs
+          return Effect.runPromise(
+            Effect.tryPromise({
+              try: async () => {
+                const observed = await reconcile(path, manifest)
+                manifest = observed.manifest
+                return !observed.unit.present || !observed.unit.active
+              },
+              catch: normalizeError,
+            }).pipe(
+              Effect.repeat({
+                while: (inactive) => !inactive && Date.now() < deadline,
+                schedule: Schedule.spaced(pollIntervalMs),
+              }),
+            ),
+          )
+        }
+
         const cancelUnit = async () => {
           const reconciled = await reconcile(path, manifest)
           manifest = reconciled.manifest
@@ -361,16 +396,6 @@ export const makeCodexCli = (
             manifest.executionId,
           ])
           if (result.exitCode !== 0) throw commandFailure("cancel codex transient unit", result)
-          const waitInactive = async (durationMs: number) => {
-            const deadline = Date.now() + durationMs
-            for (;;) {
-              const observed = await reconcile(path, manifest)
-              manifest = observed.manifest
-              if (!observed.unit.present || !observed.unit.active) return true
-              if (Date.now() >= deadline) return false
-              await Bun.sleep(pollIntervalMs)
-            }
-          }
           if (!(await waitInactive(cancellationGraceMs))) {
             const killed = await runBoundedCommand([
               "systemctl",
@@ -390,21 +415,25 @@ export const makeCodexCli = (
           })
         }
 
+        const observeExit = async (): Promise<CodexExit> => {
+          const exit = await Effect.runPromise(
+            Effect.tryPromise({ try: terminal, catch: normalizeError }).pipe(
+              Effect.repeat({
+                while: (result) =>
+                  result === null && Date.now() - attachedAt < observationTimeoutMs,
+                schedule: Schedule.spaced(pollIntervalMs),
+              }),
+            ),
+          )
+          if (exit !== null) return exit
+          await cancelUnit()
+          return {
+            exitCode: -1,
+            stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
+          }
+        }
         const exited = Effect.tryPromise({
-          try: async () => {
-            for (;;) {
-              const exit = await terminal()
-              if (exit !== null) return exit
-              if (Date.now() - attachedAt >= observationTimeoutMs) {
-                await cancelUnit()
-                return {
-                  exitCode: -1,
-                  stderr: `codex observation timed out after ${observationTimeoutMs}ms`,
-                }
-              }
-              await Bun.sleep(pollIntervalMs)
-            }
-          },
+          try: observeExit,
           catch: (cause) =>
             new WorkspaceError({
               operation: "observe codex transient unit",
@@ -533,6 +562,9 @@ export const makeCodexCli = (
               `--working-directory=${input.directory}`,
               "--property=KillMode=control-group",
               ...forwardedEnvironment,
+              ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+                ([name, value]) => `--setenv=${name}=${value}`,
+              ),
               process.execPath,
               workerPath,
               "--binary",
@@ -571,5 +603,38 @@ export const makeCodexCli = (
               }),
       }),
     attach,
+  }
+}
+
+/** Single-consumer push queue turning stdout lines into an async iterable. */
+export const makeEventQueue = () => {
+  const pending: CodexExecEvent[] = []
+  let closed = false
+  let waiter: (() => void) | null = null
+  const wake = () => {
+    const ready = waiter
+    waiter = null
+    ready?.()
+  }
+  const next = async (): Promise<IteratorResult<CodexExecEvent>> => {
+    if (pending.length > 0) return { value: pending.shift()!, done: false }
+    if (closed) return { value: undefined, done: true }
+    await new Promise<void>((resolve) => {
+      waiter = resolve
+    })
+    return next()
+  }
+  const iterator: AsyncIterator<CodexExecEvent> = { next }
+  return {
+    push: (event: CodexExecEvent) => {
+      if (closed) return
+      pending.push(event)
+      wake()
+    },
+    close: () => {
+      closed = true
+      wake()
+    },
+    iterable: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<CodexExecEvent>,
   }
 }

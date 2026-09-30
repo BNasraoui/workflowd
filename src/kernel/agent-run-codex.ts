@@ -140,6 +140,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
   readonly refuse: (reason: RefusalReason, detail: string) => AgentRunRefusalError
   readonly verifyTimeoutMs: number
   readonly progressWindowMs: number
+  readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
 }) => {
   const { codex, store, worktrees, signals, ensureResource, ensureSession, refuse } = dependencies
 
@@ -229,7 +230,10 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           .spawn({
             runId: run.runId,
             directory: run.directory,
-            prompt: run.prompt,
+            prompt:
+              dependencies.workerPrompt === undefined
+                ? run.prompt
+                : yield* dependencies.workerPrompt(run),
             model: route.modelID,
           })
           .pipe(
@@ -271,20 +275,21 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           now,
         })
         yield* store.markVerified({ runId: run.runId, outputTokens: 1, now })
-        yield* Effect.forkDetach(
-          complete({
-            runId: run.runId,
-            iterator: observed.iterator,
-            exited: observed.exited,
-            cancel: observed.cancel,
-            initialFinalMessage: observed.result.firstMessage,
-            stallWindowMs: dependencies.progressWindowMs,
-          }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("codex inline completion failed", { runId: run.runId, cause }),
+        if (codex.ownership === "transient-exec")
+          yield* Effect.forkDetach(
+            complete({
+              runId: run.runId,
+              iterator: observed.iterator,
+              exited: observed.exited,
+              cancel: observed.cancel,
+              initialFinalMessage: observed.result.firstMessage,
+              stallWindowMs: dependencies.progressWindowMs,
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logError("codex inline completion failed", { runId: run.runId, cause }),
+              ),
             ),
-          ),
-        )
+          )
         yield* signals.wake("agent-run")
         return { nativeSessionId: threadId, outputTokens: 1, kind: "codex" as const }
       }
@@ -303,7 +308,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
 
   const recover = Effect.gen(function* () {
     if (codex.ownership === "resident-thread") return 0
-    const runs = yield* store.listActiveByProvider("codex-cli")
+    const runs = yield* store.listActiveByProvider("codex-cli", true)
     yield* codex.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {

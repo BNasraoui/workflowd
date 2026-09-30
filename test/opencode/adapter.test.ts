@@ -11,6 +11,7 @@ import {
 
 function makeClient(overrides: Partial<OpenCodeSdkClient> = {}): OpenCodeSdkClient {
   return {
+    setSessionEnvironment: () => Effect.void,
     createSession: () => Effect.succeed({ id: "ses_1" }),
     promptSession: () => Effect.void,
     subscribeEvents: () => Stream.empty,
@@ -426,4 +427,183 @@ describe("toWireEvent", () => {
       toWireEvent({ type: "session.message.content.updated", data: { sessionID: "ses_1" } }),
     ).toBeUndefined()
   })
+})
+
+test("OpenCode session environment is scoped to the assigned session", async () => {
+  const inputs: unknown[] = []
+  const adapter = new SdkOpenCodeAdapter(
+    makeClient({
+      setSessionEnvironment: (input) =>
+        Effect.sync(() => {
+          inputs.push(input)
+        }),
+    }),
+  )
+  const input = { sessionID: "ses_owned", variables: { WORKFLOWD_RUN_ID: "run" } }
+  await Effect.runPromise(adapter.setSessionEnvironment(input))
+  expect(inputs).toEqual([input])
+})
+
+test("v2 mailbox transport queues a prompt and sets environment without waiting for a model", async () => {
+  const { OpenCode } = await import("@opencode-ai/client/effect")
+  const { FetchHttpClient } = await import("effect/unstable/http")
+  const { makeOpenCodeSdkClient } = await import("../../src/opencode/adapter")
+  const calls: Array<{ path: string; body: unknown }> = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname
+      const body = await request.json()
+      calls.push({ path, body })
+      if (path.endsWith("/prompt"))
+        return Response.json({
+          data: {
+            id: "msg_fixture",
+            sessionID: "ses_fixture",
+            timeCreated: 1,
+            type: "user",
+            payload: { text: "completion" },
+            delivery: "queue",
+          },
+        })
+      return new Response(null, { status: 204 })
+    },
+  })
+  try {
+    const client = OpenCode.make({ baseUrl: server.url.toString() }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    )
+    const adapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(client))
+    await Effect.runPromise(
+      adapter.setSessionEnvironment({
+        sessionID: "ses_fixture",
+        variables: { WORKFLOWD_RUN_ID: "run-fixture" },
+      }),
+    )
+    await Effect.runPromise(
+      adapter.promptSession({
+        sessionID: "ses_fixture",
+        directory: "/fixture",
+        agent: "build",
+        model: { providerID: "fixture", modelID: "fixture" },
+        text: "completion",
+        delivery: "queue",
+      }),
+    )
+    expect(calls.find((call) => call.path.endsWith("/environment"))?.body).toEqual({
+      variables: { WORKFLOWD_RUN_ID: "run-fixture" },
+    })
+    expect(calls.find((call) => call.path.endsWith("/prompt"))?.body).toMatchObject({
+      text: "completion",
+      delivery: "queue",
+    })
+  } finally {
+    await server.stop(true)
+  }
+})
+
+test("v2 first-token telemetry observes generated steps before session totals settle", async () => {
+  const { OpenCode } = await import("@opencode-ai/client/effect")
+  const { FetchHttpClient } = await import("effect/unstable/http")
+  const { makeOpenCodeSdkClient } = await import("../../src/opencode/adapter")
+  const zero = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+  let total = 0
+  let idle = false
+  let generated = true
+  let queued = 0
+  let startWhileInspecting = false
+  let rejectInbox = false
+  const requests: string[] = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url)
+      requests.push(url.pathname + url.search)
+      if (url.pathname.endsWith("/inbox")) {
+        if (rejectInbox) return new Response(null, { status: 503 })
+        if (startWhileInspecting) idle = false
+        return Response.json({
+          data: Array.from({ length: queued }, (_, index) => ({
+            id: `msg_queued_${index}`,
+            sessionID: "ses_fixture",
+            timeCreated: 3,
+            type: "user",
+            payload: { text: "result" },
+            delivery: "queue",
+          })),
+        })
+      }
+      if (url.pathname.endsWith("/message"))
+        return Response.json({
+          data: generated
+            ? [
+                {
+                  id: "msg_step",
+                  type: "assistant",
+                  agent: "build",
+                  model: { id: "fixture", providerID: "fixture" },
+                  content: [],
+                  tokens: { ...zero, output: 150, reasoning: 207 },
+                  time: { created: 2, streamed: 3 },
+                },
+              ]
+            : [],
+          cursor: {},
+        })
+      return Response.json({
+        data: {
+          id: "ses_fixture",
+          projectID: "fixture",
+          cost: 0,
+          tokens: { ...zero, output: total },
+          time: { created: 1, updated: 1, ...(idle ? { idle: 4 } : {}) },
+          location: { directory: "/fixture" },
+        },
+      })
+    },
+  })
+  try {
+    const client = OpenCode.make({ baseUrl: server.url.toString() }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    )
+    const adapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(client))
+    const telemetry = () =>
+      Effect.runPromise(adapter.sessionTelemetry({ sessionID: "ses_fixture" }))
+    expect(await telemetry()).toMatchObject({ outputTokens: 357, idle: false })
+    expect(requests.some((path) => path.includes("limit=20") && path.includes("order=desc"))).toBe(
+      true,
+    )
+    generated = false
+    expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: false })
+    total = 500
+    const before = requests.length
+    expect(await telemetry()).toMatchObject({ outputTokens: 500, idle: false })
+    expect(requests.length - before).toBe(1)
+    total = 0
+    idle = true
+    generated = true
+    expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: true })
+    queued = 2
+    expect(await telemetry()).toMatchObject({ idle: false })
+    queued = 1
+    expect(await telemetry()).toMatchObject({ idle: false })
+    queued = 0
+    startWhileInspecting = true
+    expect(await telemetry()).toMatchObject({ idle: false })
+    startWhileInspecting = false
+    idle = true
+    expect(await telemetry()).toMatchObject({ idle: true })
+    rejectInbox = true
+    expect(
+      (
+        await Effect.runPromise(
+          Effect.result(adapter.sessionTelemetry({ sessionID: "ses_fixture" })),
+        )
+      )._tag,
+    ).toBe("Failure")
+  } finally {
+    await server.stop(true)
+  }
 })

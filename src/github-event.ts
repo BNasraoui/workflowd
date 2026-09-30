@@ -1,4 +1,5 @@
 import { Data, Effect, Schema } from "effect"
+import { decodeCiCompletion, type CiCompletion } from "./ci/event"
 import { Command } from "./domain/command"
 import {
   PullRequestObservation,
@@ -10,6 +11,7 @@ export type RepositoryRef = typeof RepositoryRefSchema.Encoded
 export type PullRequestRef = typeof PullRequestRefSchema.Encoded
 
 export type GitHubEvent =
+  | CiCompletion
   | typeof PullRequestObservation.Type
   | typeof Command.Type
   | { readonly _tag: "Ignored"; readonly reason: string }
@@ -66,6 +68,11 @@ export function decodeGitHubEvent(
   event: string,
   payload: unknown,
 ): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
+  if (event === "workflow_run" || event === "check_suite") {
+    return decodeCiCompletion(event, payload).pipe(
+      Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
+    )
+  }
   if (event === "issue_comment") {
     return Schema.decodeUnknownEffect(IssueCommentPayload)(payload).pipe(
       Effect.mapError((error) => new InvalidGitHubEvent({ message: String(error) })),
