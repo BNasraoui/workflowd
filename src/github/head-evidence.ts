@@ -210,9 +210,9 @@ async function collectTrustedActionsCheckSuites(
   readonly checkSuites: ReadonlyMap<number, string>
   readonly contextsAbsentFromBase: ReadonlySet<string>
 }> {
-  const getWorkflow = input.client.getWorkflow
-  const getContentSha = input.client.getRepositoryContentSha
-  const listRuns = input.client.listWorkflowRunPages
+  const getWorkflow = input.client.getWorkflow?.bind(input.client)
+  const getContentSha = input.client.getRepositoryContentSha?.bind(input.client)
+  const listRuns = input.client.listWorkflowRunPages?.bind(input.client)
   const trusted = new Map<number, string>()
   const contextsAbsentFromBase = new Set<string>()
   const requiredWorkflows = requiredContexts.flatMap((context) => {
@@ -395,7 +395,7 @@ function collectFailedJobLogs(
 ): Effect.Effect<ReadonlyMap<string, string>, HeadEvidenceError> {
   const logs = new Map<string, string>()
   return attempt("collect failed Actions job logs", async (signal) => {
-    const listRuns = input.client.listWorkflowRunPages
+    const listRuns = input.client.listWorkflowRunPages?.bind(input.client)
     if (listRuns === undefined || !canCollectJobLogs(input.client)) return
     const bounds = { retained: 0, runsSeen: 0, jobsSeen: 0 }
     for await (const runs of listRuns({
@@ -442,8 +442,8 @@ async function appendRunJobLogs(
   logs: Map<string, string>,
   bounds: LogBounds,
 ): Promise<void> {
-  const listJobs = input.client.listWorkflowJobPages
-  const downloadLog = input.client.downloadWorkflowJobLog
+  const listJobs = input.client.listWorkflowJobPages?.bind(input.client)
+  const downloadLog = input.client.downloadWorkflowJobLog?.bind(input.client)
   if (listJobs === undefined || downloadLog === undefined) return
   for await (const jobs of listJobs({
     ...input.repository,
