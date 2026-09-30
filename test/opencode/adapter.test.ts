@@ -511,6 +511,9 @@ test("v2 first-token telemetry observes generated steps before session totals se
   let total = 0
   let idle = false
   let generated = true
+  let queued = 0
+  let startWhileInspecting = false
+  let rejectInbox = false
   const requests: string[] = []
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -518,6 +521,20 @@ test("v2 first-token telemetry observes generated steps before session totals se
     fetch(request) {
       const url = new URL(request.url)
       requests.push(url.pathname + url.search)
+      if (url.pathname.endsWith("/inbox")) {
+        if (rejectInbox) return new Response(null, { status: 503 })
+        if (startWhileInspecting) idle = false
+        return Response.json({
+          data: Array.from({ length: queued }, (_, index) => ({
+            id: `msg_queued_${index}`,
+            sessionID: "ses_fixture",
+            timeCreated: 3,
+            type: "user",
+            payload: { text: "result" },
+            delivery: "queue",
+          })),
+        })
+      }
       if (url.pathname.endsWith("/message"))
         return Response.json({
           data: generated
@@ -568,6 +585,24 @@ test("v2 first-token telemetry observes generated steps before session totals se
     idle = true
     generated = true
     expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: true })
+    queued = 2
+    expect(await telemetry()).toMatchObject({ idle: false })
+    queued = 1
+    expect(await telemetry()).toMatchObject({ idle: false })
+    queued = 0
+    startWhileInspecting = true
+    expect(await telemetry()).toMatchObject({ idle: false })
+    startWhileInspecting = false
+    idle = true
+    expect(await telemetry()).toMatchObject({ idle: true })
+    rejectInbox = true
+    expect(
+      (
+        await Effect.runPromise(
+          Effect.result(adapter.sessionTelemetry({ sessionID: "ses_fixture" })),
+        )
+      )._tag,
+    ).toBe("Failure")
   } finally {
     await server.stop(true)
   }

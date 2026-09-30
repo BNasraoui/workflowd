@@ -51,16 +51,24 @@ export const makeResidentStore = Effect.gen(function* () {
       WHERE thread_id = ${threadId} AND state IN ('active','waiting') AND current_turn IS NOT NULL RETURNING thread_id`
     if (rows.length !== 1) return yield* Effect.fail(new Error("Resident thread is not active"))
   })
-  const completed = Effect.fn("Resident.completed")(function* (threadId: string, turnId: string) {
+  const completed = Effect.fn("Resident.completed")(function* (
+    threadId: string,
+    turnId: string,
+    queuedWork = false,
+  ) {
     const row = yield* read(threadId)
     if (row === null) return "unknown" as const
     if (row.wait_turn === turnId) return "waiting" as const
     if (row.current_turn !== turnId) return "stale" as const
-    const outstanding = yield* sql`SELECT w.wait_id FROM kernel_waits w
+    const outstanding = yield* sql`SELECT 1 WHERE EXISTS (
+      SELECT 1 FROM kernel_waits w
       JOIN kernel_workflow_instances i ON i.instance_id = w.instance_id
       WHERE i.workflow_type = 'mailbox_subscription' AND i.workflow_key = ${threadId}
-        AND w.state IN ('pending','matched') LIMIT 1`
-    if (outstanding.length > 0) {
+        AND w.state IN ('pending','matched')
+    ) OR EXISTS (
+      SELECT 1 FROM resident_inbox WHERE thread_id = ${threadId} AND state IN ('prepared','sending')
+    )`
+    if (queuedWork || outstanding.length > 0) {
       yield* park(threadId)
       return "waiting" as const
     }

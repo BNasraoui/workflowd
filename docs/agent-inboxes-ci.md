@@ -229,7 +229,12 @@ subscription keeps its original turn from finishing the agent run. The daemon
 observes persisted job state and queues one result with `thread/queue/add`; an idle
 thread starts a turn, while an active thread receives it after its current turn.
 There is no agent-side polling. Multiple outstanding subscriptions retain the
-resident worker until their results have arrived.
+resident worker until every result's turn completes. Prepared or sending durable
+inbox rows block completion. Before Codex teardown, workflowd also checks the
+app-server queue and latest turn, including work whose started notification has
+not yet been handled. OpenCode idle telemetry checks its provider inbox and
+re-reads the session after an empty queue, so queued results cannot be mistaken
+for a completed run.
 
 After app-server restart, workflowd reloads persisted thread IDs with
 `thread/resume` (the app-server reload operation), restores their cwd/model/policy,

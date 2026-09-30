@@ -662,8 +662,19 @@ export function makeOpenCodeSdkClient(
         client.session.get({ sessionID: toSessionID(input.sessionID) }).pipe(
           Effect.flatMap((session) =>
             Effect.gen(function* () {
+              let idle = toEpochMillis(session.time.idle) !== undefined
+              if (idle) {
+                const queued = yield* client.session.inbox.list({
+                  sessionID: toSessionID(input.sessionID),
+                })
+                if (queued.length > 0) idle = false
+                else {
+                  // A queued prompt can start while the inbox request is in flight.
+                  session = yield* client.session.get({ sessionID: toSessionID(input.sessionID) })
+                  idle = toEpochMillis(session.time.idle) !== undefined
+                }
+              }
               let outputTokens = session.tokens.output + session.tokens.reasoning
-              const idle = toEpochMillis(session.time.idle) !== undefined
               // Session totals settle at execution end. Streamed assistant steps
               // already prove generation while the worker is still using tools.
               if (outputTokens === 0 && !idle) {

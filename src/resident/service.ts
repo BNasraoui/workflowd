@@ -24,6 +24,10 @@ const ItemEvent = Schema.Struct({
   item: Schema.Struct({ type: Schema.String, text: Schema.optional(Schema.String) }),
 })
 const Subscribe = Schema.Struct({ runId: Schema.NonEmptyString, selector: EventSelector })
+const Queued = Schema.Struct({
+  data: Schema.Array(Schema.Unknown),
+  nextCursor: Schema.NullOr(Schema.String),
+})
 const History = Schema.Struct({
   thread: Schema.Struct({
     turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
@@ -130,6 +134,27 @@ export const ResidentCodexLive = (
         listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
         listeners.delete(threadId)
       })
+      const deliveryLock = yield* Semaphore.make(1)
+      const completeTurn = Effect.fn("Resident.completeTurn")(function* (
+        event: typeof TurnEvent.Type,
+      ) {
+        const queued = yield* Effect.tryPromise(() =>
+          request("thread/queue/list", { threadId: event.threadId, cursor: null, limit: 1 }),
+        ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Queued)))
+        let queuedWork = queued.data.length > 0 || queued.nextCursor !== null
+        if (!queuedWork) {
+          // The next submission may have left the queue before its started notification is handled.
+          const history = yield* Effect.tryPromise(() =>
+            request("thread/read", { threadId: event.threadId, includeTurns: true }),
+          ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
+          const last = history.thread.turns.at(-1)
+          queuedWork =
+            last !== undefined && last.id !== event.turn.id && last.status === "inProgress"
+        }
+        const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
+        if (state === "finished" || event.turn.status === "failed")
+          yield* finish(event.threadId, event.turn.status !== "completed")
+      })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string
         readonly params: unknown
@@ -146,9 +171,7 @@ export const ResidentCodexLive = (
               ?.queue.push({ type: "agent_message", text: event.item.text })
         } else if (frame.method === "turn/completed") {
           const event = yield* Schema.decodeUnknownEffect(TurnEvent)(frame.params)
-          const state = yield* store.completed(event.threadId, event.turn.id)
-          if (state === "finished" || event.turn.status === "failed")
-            yield* finish(event.threadId, event.turn.status !== "completed")
+          yield* Semaphore.withPermits(deliveryLock, 1)(completeTurn(event))
         }
       })
       yield* Effect.forever(
@@ -217,7 +240,6 @@ export const ResidentCodexLive = (
         }
       })
       yield* restore()
-      const deliveryLock = yield* Semaphore.make(1)
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
         for (const message of yield* store.pending()) {
           const row = yield* store.read(message.thread_id)

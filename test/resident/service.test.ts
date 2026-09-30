@@ -15,7 +15,8 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { startAppServer } from "../../src/resident/process"
 
-function fixture() {
+function fixture(manualQueue = false) {
+  const queued = new Map<string, string[]>()
   let rejectedMethod: string | undefined
   const closed: number[] = []
   const pids = new Map<string, number>()
@@ -86,11 +87,23 @@ function fixture() {
       }
       if (frame.method === "thread/read")
         result = { thread: { turns: history.get(String(frame.params.threadId)) ?? [] } }
-      if (frame.method === "thread/queue/list") result = { data: [], nextCursor: null }
+      if (frame.method === "thread/queue/list")
+        result = {
+          data: (queued.get(String(frame.params.threadId)) ?? []).map((id) => ({
+            clientUserMessageId: id,
+          })),
+          nextCursor: null,
+        }
       rpc.receive(JSON.stringify({ id: frame.id, result }))
       if (frame.method === "thread/queue/add") {
         const threadId = frame.params.threadId
         const id = frame.params.clientUserMessageId
+        if (manualQueue) {
+          const pending = queued.get(String(threadId)) ?? []
+          pending.push(String(id))
+          queued.set(String(threadId), pending)
+          return
+        }
         const turns = history.get(String(threadId)) ?? []
         turns.push({
           id: String(id),
@@ -107,11 +120,13 @@ function fixture() {
           !Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ text: Schema.String })))(
             frame.params.input,
           )[0]?.text.endsWith("hold")
-        )
+        ) {
+          turns[turns.length - 1]!.status = "completed"
           notify({
             method: "turn/completed",
             params: { threadId, turn: { id, status: "completed" } },
           })
+        }
       }
     }, notification)
     currentRpc = rpc
@@ -141,8 +156,20 @@ function fixture() {
       currentRpc?.close()
       notify({ method: "workflowd/disconnected", params: null })
     },
-    complete: (threadId: string, id: string) =>
-      notify({ method: "turn/completed", params: { threadId, turn: { id, status: "completed" } } }),
+    startNext: (threadId: string) => {
+      const id = queued.get(threadId)?.shift()
+      if (id === undefined) throw new Error("No queued turn")
+      const turns = history.get(threadId) ?? []
+      turns.push({ id, status: "inProgress", items: [{ type: "userMessage", clientId: id }] })
+      history.set(threadId, turns)
+      notify({ method: "turn/started", params: { threadId, turn: { id, status: "inProgress" } } })
+      return id
+    },
+    complete: (threadId: string, id: string) => {
+      const turn = history.get(threadId)?.find((turn) => turn.id === id)
+      if (turn !== undefined) turn.status = "completed"
+      notify({ method: "turn/completed", params: { threadId, turn: { id, status: "completed" } } })
+    },
   }
 }
 const config = {
@@ -709,3 +736,80 @@ test("a silent active resident is stopped and leaves verified", async () => {
     }).pipe(Effect.provide(layer(fake.factory, 10))),
   )
 })
+
+test.each([false, true])(
+  "two results retain one resident until both turns complete, next started=%s",
+  async (startBeforeCompletion) => {
+    const fake = fixture(true)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const store = yield* makeResidentStore
+        const runs = yield* AgentRunStore
+        const { makeSubscriptions } = yield* Effect.promise(
+          () => import("../../src/resident/subscriptions"),
+        )
+        const subscriptions = yield* makeSubscriptions
+        const now = new Date()
+        yield* prepareRun(now)
+        const worker = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        const waitForTurn = (id: string) =>
+          store.read("thread-1").pipe(
+            Effect.repeat({
+              while: (row) => row?.current_turn !== id,
+              schedule: Schedule.spaced("10 millis"),
+            }),
+            Effect.timeout("3 seconds"),
+          )
+        const initial = fake.startNext("thread-1")
+        yield* waitForTurn(initial)
+        yield* verifyRun(now)
+        for (const runId of ["child-1", "child-2"]) {
+          yield* prepareRun(now, runId)
+          yield* subscriptions.register("thread-1", { kind: "agent_run", run_id: runId })
+        }
+        for (const runId of ["child-1", "child-2"])
+          yield* runs.fail({ runId, diagnostic: "child result", now })
+        fake.complete("thread-1", initial)
+        yield* subscriptions.reconcile()
+        expect(yield* store.pending()).toHaveLength(2)
+        yield* store.pending().pipe(
+          Effect.repeat({
+            while: (messages) => messages.length > 0,
+            schedule: Schedule.spaced("10 millis"),
+          }),
+          Effect.timeout("3 seconds"),
+        )
+        const sql = yield* SqlClient.SqlClient
+        expect(yield* sql`SELECT state FROM resident_inbox WHERE id LIKE 'subscription-%'`).toEqual(
+          [{ state: "delivered" }, { state: "delivered" }],
+        )
+        const first = fake.startNext("thread-1")
+        yield* waitForTurn(first)
+        fake.complete("thread-1", first)
+        const second = startBeforeCompletion ? fake.startNext("thread-1") : undefined
+        yield* store.read("thread-1").pipe(
+          Effect.repeat({
+            while: (row) => row?.state === "active" && row.current_turn === first,
+            schedule: Schedule.spaced("10 millis"),
+          }),
+          Effect.timeout("3 seconds"),
+        )
+        expect((yield* store.read("thread-1"))?.state).not.toBe("finished")
+        expect(fake.closed).not.toContain(fake.pids.get("thread-1")!)
+        expect((yield* runs.read("a"))?.state).toBe("verified")
+        const final = second ?? fake.startNext("thread-1")
+        yield* waitForTurn(final)
+        fake.complete("thread-1", final)
+        expect((yield* worker.exited).exitCode).toBe(0)
+        expect((yield* runs.read("a"))?.state).toBe("completed")
+        expect(fake.closed).toContain(fake.pids.get("thread-1")!)
+      }).pipe(Effect.provide(layer(fake.factory))),
+    )
+  },
+)
