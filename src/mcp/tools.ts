@@ -361,7 +361,7 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     const input = yield* decodeArguments(DispatchAgentArguments, args).pipe(Effect.result)
     if (input._tag === "Failure") {
       return failure(
-        "invalid arguments: route, repository and prompt must be non-empty strings " +
+        "invalid arguments: provide exactly one of route or model, plus repository and prompt as non-empty strings " +
           `(prompt at most ${MAX_AGENT_RUN_PROMPT_BYTES} UTF-8 bytes), and ` +
           "parent_session_id/resume_prompt/idempotency_key, when given, must be non-empty strings",
       )

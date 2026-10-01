@@ -435,7 +435,7 @@ const make = Effect.gen(function* () {
       "run is not active",
       sql`UPDATE kernel_agent_runs SET state = 'operator_required',
         diagnostic = ${input.diagnostic}, updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified', 'operator_required')
         RETURNING run_id`,
     )
 

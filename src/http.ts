@@ -329,8 +329,8 @@ function handleAgentRunRegister(
       return Response.json(
         {
           error:
-            "invalid agent run: route, repository and prompt are required non-empty " +
-            "strings, with optional parentSessionId, resumePrompt and idempotencyKey",
+            "invalid agent run: provide exactly one of route or model, plus repository and prompt " +
+            "as non-empty strings; optional selection and parent fields must match the schema",
         },
         { status: 400 },
       )

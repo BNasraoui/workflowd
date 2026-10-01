@@ -44,6 +44,21 @@ const args = {
 }
 
 describe("dispatch_agent", () => {
+  test("schema refusals describe route or model without forwarding malformed explicit input", async () => {
+    const calls: Array<Call> = []
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        { model: "native", prompt: "missing repository" },
+        daemon(() => json(receipt), calls),
+      ),
+    )
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain("exactly one of route or model")
+    expect(firstText(result)).toContain("repository and prompt")
+    expect(calls).toHaveLength(0)
+  })
+
   test("accepts explicit native selection and proxies exact thinking without a route", async () => {
     const calls: Array<Call> = []
     const input = {

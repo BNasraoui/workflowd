@@ -76,10 +76,13 @@ type FirstToken =
     }
 type Observation = {
   readonly result: FirstToken
+  readonly terminationConfirmed: boolean
   readonly iterator: AsyncIterator<CliEvent>
   readonly exited: Fiber.Fiber<CliExit, WorkspaceError>
   readonly cancel: Effect.Effect<void, WorkspaceError>
 }
+
+const cliFailureDetail = (error: WorkspaceError) => `${error.operation}: ${String(error.cause)}`
 
 const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: string) =>
   Effect.gen(function* () {
@@ -125,26 +128,55 @@ const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: s
     })
     const result = yield* Effect.race(streamed, timedOut)
     if (result.outcome === "generating") {
-      return { result, iterator, exited, cancel: process.cancel } satisfies Observation
+      return {
+        result,
+        terminationConfirmed: false,
+        iterator,
+        exited,
+        cancel: process.cancel,
+      } satisfies Observation
     }
-    const graceExit: CliExit | null = yield* Effect.race(
-      Fiber.join(exited),
-      Effect.as(Effect.sleep(500), null),
-    )
-    if (graceExit === null) yield* process.cancel.pipe(Effect.ignore)
+    const grace = yield* Fiber.join(exited).pipe(Effect.result, Effect.timeoutOption(500))
+    let terminalExit =
+      Option.isSome(grace) && grace.value._tag === "Success" ? grace.value.success : null
+    const cleanupDetails: string[] = []
+    if (Option.isSome(grace) && grace.value._tag === "Failure")
+      cleanupDetails.push(`exit observation failed: ${cliFailureDetail(grace.value.failure)}`)
+    if (terminalExit === null) {
+      const cancelled = yield* process.cancel.pipe(Effect.result)
+      if (cancelled._tag === "Failure") {
+        cleanupDetails.push(`first-token cleanup failed: ${cliFailureDetail(cancelled.failure)}`)
+      } else {
+        // A cancellation acknowledgement alone is not proof of native termination.
+        // Refresh observation after cleanup, including an earlier inspection failure.
+        const stopped = yield* process.exited.pipe(Effect.result, Effect.timeoutOption(500))
+        if (Option.isSome(stopped) && stopped.value._tag === "Success")
+          terminalExit = stopped.value.success
+        else
+          cleanupDetails.push(
+            Option.isSome(stopped) && stopped.value._tag === "Failure"
+              ? `termination observation failed: ${cliFailureDetail(stopped.value.failure)}`
+              : "cleanup did not confirm native termination within 500ms",
+          )
+      }
+    }
     const authFailed =
       codexFailureLooksUnauthenticated(errors) ||
-      (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
+      (terminalExit !== null && codexFailureLooksUnauthenticated([terminalExit.stderr]))
     const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
     let detail = result.detail
     if (authFailed) detail += `: the ${cliName} CLI reported an authentication failure`
     else {
       if (errors.length > 0) detail += `; last error: ${errors.at(-1)}`
-      if (graceExit !== null && graceExit.stderr !== "")
-        detail += `; stderr: ${graceExit.stderr.slice(0, 300)}`
+      if (terminalExit !== null && terminalExit.stderr !== "")
+        detail += `; stderr: ${terminalExit.stderr.slice(0, 300)}`
     }
+    if (cleanupDetails.length > 0) detail += `; ${cleanupDetails.join("; ")}`
+    if (terminalExit === null)
+      detail += "; native termination unconfirmed; process custody retained"
     return {
       result: { outcome: "refused" as const, reason, detail },
+      terminationConfirmed: terminalExit !== null,
       iterator,
       exited,
       cancel: process.cancel,
@@ -300,13 +332,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           )
         const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
         if (observed.result.outcome === "refused") {
-          yield* store
-            .fail({
-              runId: run.runId,
-              diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
-              now,
-            })
-            .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+          yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
+            runId: run.runId,
+            diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
+            now,
+          }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
           return yield* refuse(observed.result.reason, observed.result.detail)
         }
         const threadId = observed.result.threadId
@@ -381,16 +411,16 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         continue
       }
       let iterator = process.events[Symbol.asyncIterator]()
-      let exited = yield* Effect.forkDetach(process.exited)
+      let exited: Fiber.Fiber<CliExit, WorkspaceError>
       let initialFinalMessage: string | null = null
       if (run.state === "spawning") {
         const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
         if (observed.result.outcome === "refused") {
-          yield* store.fail({
+          yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
             runId: run.runId,
             diagnostic: `${kind}_recovery_failed: ${observed.result.detail}`,
             now: new Date(),
-          })
+          }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
           continue
         }
         yield* recordModelEvidence(run, observed.result.model, new Date())
@@ -417,12 +447,15 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         iterator = observed.iterator
         exited = observed.exited
         initialFinalMessage = observed.result.firstMessage
-      } else if (run.state === "spawned") {
-        yield* store.markVerified({
-          runId: run.runId,
-          outputTokens: Math.max(1, run.lastOutputTokens),
-          now: new Date(),
-        })
+      } else {
+        exited = yield* Effect.forkDetach(process.exited)
+        if (run.state === "spawned") {
+          yield* store.markVerified({
+            runId: run.runId,
+            outputTokens: Math.max(1, run.lastOutputTokens),
+            now: new Date(),
+          })
+        }
       }
       yield* Effect.forkDetach(
         complete({
@@ -443,6 +476,14 @@ export const makeAgentRunCliDispatcher = (dependencies: {
     return attached
   })
 
+  const cancellationUnconfirmed = (run: AgentRunRecord, now: Date, detail: string) =>
+    Effect.gen(function* () {
+      yield* store
+        .operatorRequired({ runId: run.runId, diagnostic: `${kind}_cancel_failed: ${detail}`, now })
+        .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+      return yield* refuse("run_conflict", `${detail}; process custody retained`)
+    })
+
   const cancel = (run: AgentRunRecord, now: Date) =>
     Effect.gen(function* () {
       if (cli.ownership === "resident-thread") {
@@ -450,26 +491,24 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         yield* store.cancel({ runId: run.runId, now })
         return
       }
-      const attachment = yield* cli.attach({ runId: run.runId })
-      if (attachment === null) {
-        yield* store.operatorRequired({
-          runId: run.runId,
-          diagnostic: `${kind}_cancel_failed: durable process custody is missing`,
+      const attached = yield* cli.attach({ runId: run.runId }).pipe(Effect.result)
+      if (attached._tag === "Failure")
+        return yield* cancellationUnconfirmed(
+          run,
           now,
-        })
-        return yield* refuse("run_conflict", `${kind} process custody is missing`)
+          `${kind} process custody cannot be confirmed: ${cliFailureDetail(attached.failure)}`,
+        )
+      const attachment = attached.success
+      if (attachment === null) {
+        return yield* cancellationUnconfirmed(run, now, `${kind} process custody is missing`)
       }
-      yield* attachment.cancel.pipe(
-        Effect.tapError((cause) =>
-          store
-            .operatorRequired({
-              runId: run.runId,
-              diagnostic: `${kind}_cancel_failed: ${String(cause.cause)}`,
-              now,
-            })
-            .pipe(Effect.ignore),
-        ),
-      )
+      const cancelled = yield* attachment.cancel.pipe(Effect.result)
+      if (cancelled._tag === "Failure")
+        return yield* cancellationUnconfirmed(
+          run,
+          now,
+          `${kind} cancellation unconfirmed: ${cliFailureDetail(cancelled.failure)}`,
+        )
       yield* store.cancel({ runId: run.runId, now })
     })
 

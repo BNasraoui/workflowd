@@ -103,6 +103,13 @@ retains the manifest and spawning row, fences duplicate launches and permits res
 reconciliation with the same invocation. An absent unit before invocation adoption
 is still uncertain unless a durable terminal record exists; recovery escalates to
 `operator_required` while retaining custody, so a late launch can still be cancelled.
+First-token refusal records terminal `failed` only after native termination/result
+is confirmed. Failed or uncertain cleanup retains `operator_required` custody and
+the actual cleanup diagnostic; it never permits another launch of that run.
+Explicit native cancellation reports attach/stop uncertainty as typed `run_conflict`
+while retaining custody and the current diagnostic, including repeated attempts.
+An absent unadopted unit is never declared cancelled solely because it is absent;
+a later-visible execution can still be cancelled through the same manifest.
 Parent wakes continue to require an OpenCode child.
 
 ## Execution-only daemon
