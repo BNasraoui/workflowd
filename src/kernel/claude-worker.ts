@@ -1,7 +1,7 @@
-import { parseCodexWorkerArguments, runCliWorker, type CodexWorkerOptions } from "./codex-worker"
+import { parseCodexWorkerArguments, runCliWorker, type CliWorkerOptions } from "./codex-worker"
 
 /** Claude Code uses its own local subscription credentials and persisted sessions. */
-export const runClaudeWorker = (options: CodexWorkerOptions): Promise<number> =>
+export const runClaudeWorker = (options: CliWorkerOptions): Promise<number> =>
   runCliWorker(options, [
     options.binary,
     "--print",
@@ -11,6 +11,7 @@ export const runClaudeWorker = (options: CodexWorkerOptions): Promise<number> =>
     "--include-partial-messages",
     "--dangerously-skip-permissions",
     ...(options.model === null ? [] : ["--model", options.model]),
+    ...(options.effort === undefined ? [] : ["--effort", options.effort]),
   ])
 
 if (import.meta.main) {

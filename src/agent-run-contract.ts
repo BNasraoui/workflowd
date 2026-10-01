@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { utf8BoundedText } from "./agent-wait-contract"
+import { RequestedSelection, ResolvedSelection } from "./execution-selection"
 
 export const MAX_AGENT_RUN_PROMPT_BYTES = 32_768
 export const MAX_AGENT_RUN_ROUTE_BYTES = 128
@@ -29,13 +30,15 @@ export type AgentRunRepository = {
  * model id. `modelID === null` means the codex CLI's own default model, so a
  * deployment can expose codex without pinning a model.
  */
-export type AgentRunCodexRoute = {
+export type AgentRunCliRoute = {
   readonly name: string
   readonly modelID: string | null
 }
 
+export type AgentRunCodexRoute = AgentRunCliRoute
+
 /** A model passed directly to `claude --model` on the daemon host. */
-export type AgentRunClaudeRoute = AgentRunCodexRoute
+export type AgentRunClaudeRoute = AgentRunCliRoute
 
 const ROUTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const MODEL_PAIR_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[^\s/]\S*$/
@@ -254,13 +257,13 @@ export function parseAgentRunClaudeHosts(value: string): ReadonlyArray<string> {
 }
 
 export const AgentRunSubmission = Schema.Struct({
-  route: utf8BoundedText(MAX_AGENT_RUN_ROUTE_BYTES),
+  ...RequestedSelection.fields,
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
   prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
   parentSessionId: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_SESSION_ID_BYTES)),
   /** Which harness holds the parent: an opencode session on the managed
    * server (default), or a Claude Code session woken through the claude
-   * CLI. Children are always opencode. */
+   * CLI. Parent wakes currently require an OpenCode child. */
   parentKind: Schema.optional(Schema.Literals(["opencode", "claude"])),
   /** Host owning the Claude parent session. Defaults to the daemon host;
    * other hosts must be on the server's claude-hosts allow-list, where the
@@ -282,6 +285,8 @@ export const AgentRunReceipt = Schema.Struct({
   modelId: Schema.String,
   outputTokens: Schema.Int,
   status: Schema.Literals(["dispatched", "duplicate"]),
+  requestedSelection: Schema.optionalKey(RequestedSelection),
+  resolvedSelection: Schema.optionalKey(ResolvedSelection),
   wait: Schema.optional(
     Schema.Struct({
       waitId: Schema.String,

@@ -486,7 +486,7 @@ test("v2 mailbox transport queues a prompt and sets environment without waiting 
         sessionID: "ses_fixture",
         directory: "/fixture",
         agent: "build",
-        model: { providerID: "fixture", modelID: "fixture" },
+        model: { providerID: "fixture", modelID: "fixture", variant: "native-deep" },
         text: "completion",
         delivery: "queue",
       }),
@@ -497,6 +497,9 @@ test("v2 mailbox transport queues a prompt and sets environment without waiting 
     expect(calls.find((call) => call.path.endsWith("/prompt"))?.body).toMatchObject({
       text: "completion",
       delivery: "queue",
+    })
+    expect(calls.find((call) => call.path.endsWith("/model"))?.body).toMatchObject({
+      model: { id: "fixture", providerID: "fixture", variant: "native-deep" },
     })
   } finally {
     await server.stop(true)

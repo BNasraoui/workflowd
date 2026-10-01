@@ -64,6 +64,7 @@ test("durable worker invokes Claude print mode directly and persists output and 
         stderrFile: join(root, "stderr"),
         maxOutputBytes: 10000,
         model: "claude-opus-5-5",
+        effort: "xhigh",
       }),
     ).toBe(0)
     const invoked = JSON.parse(await readFile(join(root, "invocation.json"), "utf8"))
@@ -76,6 +77,8 @@ test("durable worker invokes Claude print mode directly and persists output and 
       "--dangerously-skip-permissions",
       "--model",
       "claude-opus-5-5",
+      "--effort",
+      "xhigh",
     ])
     expect(invoked.prompt).toBe("Reply OK")
     expect(invoked.cwd).toBe(root)

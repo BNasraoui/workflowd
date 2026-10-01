@@ -8,6 +8,7 @@ export type { OpenCodeModelAvailability } from "./model-capabilities"
 export type OpenCodeModel = {
   readonly providerID: string
   readonly modelID: string
+  readonly variant?: string
 }
 
 export type OpenCodeCreateSessionInput = {
@@ -473,6 +474,7 @@ const toAgentID = (value: string) => Agent.ID.make(value)
 const toModelRef = (model: OpenCodeModel) =>
   Model.Ref.make({
     id: Model.ID.make(model.modelID),
+    ...(model.variant === undefined ? {} : { variant: Model.VariantID.make(model.variant) }),
     providerID: Model.Ref.fields.providerID.make(model.providerID),
   })
 const toLocationRef = (directory: string) =>

@@ -19,7 +19,7 @@ const storesLayer = Layer.merge(AgentRunStoreLive, KernelSessionStoreLive).pipe(
 )
 
 type ProviderCalls = {
-  prompted: Array<{ sessionID: string; text: string }>
+  prompted: Array<{ sessionID: string; text: string; model?: unknown }>
   aborted: Array<string>
 }
 
@@ -30,7 +30,7 @@ const provider = (
   createSession: () => Effect.die(new Error("unused")),
   promptSession: (input) =>
     Effect.sync(() => {
-      calls.prompted.push({ sessionID: input.sessionID, text: input.text })
+      calls.prompted.push({ sessionID: input.sessionID, text: input.text, model: input.model })
     }),
   abortSession: (input) =>
     Effect.sync(() => {
@@ -134,6 +134,40 @@ const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof storesLayer>
   Effect.runPromise(effect.pipe(Effect.provide(storesLayer)))
 
 describe("agent-run watchdog", () => {
+  test("retry prompts preserve the accepted catalog model and thinking variant", async () => {
+    const calls: ProviderCalls = { prompted: [], aborted: [] }
+    await run(
+      Effect.gen(function* () {
+        yield* seedVerifiedRun
+        const store = yield* AgentRunStore
+        yield* store.recordResolvedSelection({
+          runId: "agent-run-x",
+          now: at,
+          selection: {
+            host: "mint",
+            executor: "opencode:primary",
+            executorKind: "opencode",
+            provider: "real-provider",
+            model: "native",
+            selectionModel: "catalog",
+            thinking: { variant: "native-deep", effort: "provider-defined" },
+            availability: "available",
+            evidence: "advertised",
+          },
+        })
+        yield* iterate(observing(7, true, "interrupted"), calls, minutes(2))
+        expect((yield* store.read("agent-run-x"))?.resolvedSelection?.thinking).toEqual({
+          variant: "native-deep",
+          effort: "provider-defined",
+        })
+      }),
+    )
+    expect(calls.prompted[0]?.model).toEqual({
+      providerID: "real-provider",
+      modelID: "catalog",
+      variant: "native-deep",
+    })
+  })
   test("records climbing token counters as progress", async () => {
     const calls: ProviderCalls = { prompted: [], aborted: [] }
     const result = await run(

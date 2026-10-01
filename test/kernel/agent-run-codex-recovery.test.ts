@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect } from "effect"
+import { makeAgentRunCliDispatcher } from "../../src/kernel/agent-run-cli"
+import { parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
 import {
   makeAgentRunCodexDispatcher,
   type AgentRunCodexStore,
@@ -33,6 +35,96 @@ const record: AgentRunRecord = {
   createdAt: new Date("2026-09-29T00:00:00Z"),
   updatedAt: new Date("2026-09-29T00:00:00Z"),
 }
+
+test("Claude spawning recovery persists native model evidence and Claude custody", async () => {
+  const recovered: AgentRunRecord = {
+    ...record,
+    state: "spawning",
+    providerId: "claude-cli",
+    executorKind: "claude",
+    route: "opus",
+    modelId: "opus",
+    nativeSessionId: null,
+    sessionId: null,
+    requestedSelection: { route: "opus" },
+    resolvedSelection: {
+      host: "host",
+      executor: "claude:local",
+      executorKind: "claude",
+      provider: null,
+      model: "opus",
+      selectionModel: "opus",
+      thinking: {},
+      availability: "unknown",
+      evidence: "configured",
+    },
+  }
+  const completion = Promise.withResolvers<void>()
+  const sessionKinds: string[] = []
+  const runtime = makeAgentRunCliDispatcher({
+    executor: {
+      kind: "claude",
+      custodyProviderId: "claude-cli",
+      sessionCustodyId: (id) => `claude-session-${id}`,
+    },
+    cli: {
+      ownership: "transient-exec",
+      preflight: Effect.void,
+      spawn: () => Effect.die("recovery must not spawn"),
+      attach: () =>
+        Effect.succeed({
+          executionId: "claude-recovered.service",
+          events: {
+            async *[Symbol.asyncIterator]() {
+              for (const event of [
+                { type: "system", subtype: "init", session_id: "native", model: "native-model" },
+                { type: "assistant", message: { content: [{ type: "text", text: "done" }] } },
+                { type: "result", is_error: false, usage: { output_tokens: 10 } },
+              ])
+                yield parseClaudeDispatchEvent(JSON.stringify(event))
+            },
+          },
+          exited: Effect.succeed({ exitCode: 0, stderr: "" }),
+          cancel: Effect.void,
+        }),
+    },
+    store: {
+      claimSpawn: () => Effect.void,
+      abandonLaunch: () => Effect.void,
+      markSpawned: () => Effect.void,
+      markVerified: () => Effect.void,
+      fail: () => Effect.void,
+      recordProgress: () => Effect.void,
+      cancel: () => Effect.void,
+      operatorRequired: () => Effect.void,
+      listActiveByProvider: (provider) => {
+        expect(provider).toBe("claude-cli")
+        return Effect.succeed([recovered])
+      },
+      recordResolvedSelection: ({ selection }) =>
+        Effect.sync(() => {
+          Object.assign(recovered, { resolvedSelection: selection })
+        }),
+      complete: () => Effect.sync(() => completion.resolve()),
+    },
+    worktrees: { create: () => Effect.die("recovery must not create another worktree") },
+    signals: { subscribe: () => Effect.die("unused"), wake: () => Effect.void },
+    ensureResource: () => Effect.succeed("resource"),
+    ensureSession: (input) =>
+      Effect.sync(() => {
+        sessionKinds.push(input.kind ?? "opencode")
+        return "claude-session-native"
+      }),
+    refuse: (reason, detail) => new AgentRunRefusalError({ reason, detail }),
+    verifyTimeoutMs: 50,
+    progressWindowMs: 1000,
+  })
+  expect(await Effect.runPromise(runtime.recover)).toBe(1)
+  await completion.promise
+  expect(recovered.requestedSelection).toEqual({ route: "opus" })
+  expect(recovered.resolvedSelection).toMatchObject({ model: "native-model", evidence: "runtime" })
+  expect(sessionKinds).toEqual(["claude"])
+})
 
 test("startup recovery owns spawning, spawned, and verified Codex transition boundaries", async () => {
   const states = ["spawning", "spawned", "verified"] as const

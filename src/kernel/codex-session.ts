@@ -1,3 +1,4 @@
+import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -21,8 +22,8 @@ export type {
  * directory, and the `codex exec --json` subcommand is their programmatic
  * surface: it runs one non-interactive turn in a working directory, prints
  * the event stream as JSONL on stdout, and exits when the turn is over.
- * That subprocess is the codex analog of OpenCode's promptAsync —
- * deliberately the only way workflowd ever drives a codex model.
+ * This module owns one-shot process custody. Resident threads use the
+ * separate app-server supervisor in resident/service.ts.
  */
 export const CODEX_PROVIDER_ID = "codex-cli"
 export const CODEX_ENDPOINT_ALIAS = "local-cli"
@@ -37,14 +38,8 @@ export const codexEndpointIdentity = (owningHostId: string) => `codex-cli://${ow
  * items, diffs) decodes to "other" and is ignored. Shapes captured from a
  * real codex-cli 0.153.4 run; see test/kernel/codex-session.test.ts.
  */
-export type CodexExecEvent =
-  | { readonly type: "thread.started"; readonly threadId: string }
-  | { readonly type: "turn.started" }
-  | { readonly type: "agent_message"; readonly text: string }
-  | { readonly type: "turn.completed"; readonly outputTokens: number | null }
-  | { readonly type: "turn.failed"; readonly message: string }
-  | { readonly type: "error"; readonly message: string }
-  | { readonly type: "other" }
+export type { CliEvent as CodexExecEvent } from "./cli-process-contract"
+import type { CliEvent as CodexExecEvent } from "./cli-process-contract"
 
 const isObject = (value: unknown): value is object => typeof value === "object" && value !== null
 
@@ -134,14 +129,14 @@ type CommandResult = {
 }
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
-export type CodexCliOptions = {
+export type CliProcessOptions = {
   readonly binary: string
   /** CLI-specific protocol; process custody and systemd ownership are shared. */
-  readonly driver?: {
+  readonly driver: {
     readonly name: string
     readonly workerPath: string
-    readonly parseEvent: (line: string) => CodexExecEvent
-    readonly preflight: Effect.Effect<void, CodexPreflightError>
+    readonly parseEvent: (line: string) => CliEvent
+    readonly preflight: Effect.Effect<void, CliPreflightError>
   }
   readonly identity?: {
     readonly environment: (runId: string) => Readonly<Record<string, string>>
@@ -227,9 +222,9 @@ const commandFailure = (operation: string, result: CommandResult) =>
     cause: new Error(`${operation} exited ${result.exitCode}: ${result.stderr.trim()}`),
   })
 
-export const makeCodexCli = (
-  options: CodexCliOptions,
-): Extract<CodexCliPort, { readonly ownership: "transient-exec" }> => {
+export const makeDurableCliProcess = (
+  options: CliProcessOptions,
+): Extract<CliPort, { readonly ownership: "transient-exec" }> => {
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")
@@ -240,9 +235,8 @@ export const makeCodexCli = (
   const retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60_000
   const now = options.now ?? (() => new Date())
   const runCommand = options.runCommand ?? defaultRunCommand
-  const workerPath =
-    options.driver?.workerPath ?? fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
-  const cliName = options.driver?.name ?? "codex"
+  const workerPath = options.driver.workerPath
+  const cliName = options.driver.name
   const manifestPath = (runId: string) =>
     join(options.custodyRoot, safeRunId(runId), "manifest.json")
 
@@ -372,7 +366,7 @@ export const makeCodexCli = (
           pollIntervalMs,
           shouldStop: async () =>
             (await terminal()) !== null || Date.now() - attachedAt >= observationTimeoutMs,
-          parse: options.driver?.parseEvent ?? parseCodexExecEvent,
+          parse: options.driver.parseEvent,
         })
 
         const waitInactive = (durationMs: number): Promise<boolean> => {
@@ -503,22 +497,7 @@ export const makeCodexCli = (
           detail: `the user systemd manager is unavailable: ${manager.stderr.trim()}`,
         })
       }
-      if (options.driver !== undefined) {
-        yield* options.driver.preflight
-        return
-      }
-      yield* runWorkspaceCommand("check codex cli", [options.binary, "--version"]).pipe(
-        Effect.mapError((cause): CodexPreflightError => ({
-          kind: "cli_unusable",
-          detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
-        })),
-      )
-      yield* runWorkspaceCommand("check codex auth", [options.binary, "login", "status"]).pipe(
-        Effect.mapError((cause): CodexPreflightError => ({
-          kind: "not_authenticated",
-          detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
-        })),
-      )
+      yield* options.driver.preflight
     }),
     spawn: (input) =>
       Effect.tryPromise({
@@ -597,6 +576,8 @@ export const makeCodexCli = (
               "--max-output-bytes",
               String(maxOutputBytes),
               ...(input.model === null ? [] : ["--model", input.model]),
+              ...(input.effort === undefined ? [] : ["--effort", input.effort]),
+              ...(input.provider == null ? [] : ["--provider", input.provider]),
             ]
             const launched = await runBoundedCommand(command)
             if (launched.exitCode !== 0)
@@ -653,3 +634,30 @@ export const makeEventQueue = () => {
     iterable: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<CodexExecEvent>,
   }
 }
+
+export type CodexCliOptions = Omit<CliProcessOptions, "driver">
+export const makeCodexCli = (options: CodexCliOptions) =>
+  makeDurableCliProcess({
+    ...options,
+    driver: {
+      name: "codex",
+      workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
+      parseEvent: parseCodexExecEvent,
+      preflight: codexPreflight(options.binary),
+    },
+  })
+const codexPreflight = (binary: string) =>
+  Effect.gen(function* () {
+    yield* runWorkspaceCommand("check codex cli", [binary, "--version"]).pipe(
+      Effect.mapError((cause): CodexPreflightError => ({
+        kind: "cli_unusable",
+        detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
+      })),
+    )
+    yield* runWorkspaceCommand("check codex auth", [binary, "login", "status"]).pipe(
+      Effect.mapError((cause): CodexPreflightError => ({
+        kind: "not_authenticated",
+        detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
+      })),
+    )
+  })

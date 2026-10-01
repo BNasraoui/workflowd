@@ -44,6 +44,37 @@ const args = {
 }
 
 describe("dispatch_agent", () => {
+  test("accepts explicit native selection and proxies exact thinking without a route", async () => {
+    const calls: Array<Call> = []
+    const input = {
+      model: "native-new",
+      provider: "native-provider",
+      executor: "codex:local",
+      model_identity: "native",
+      thinking: { effort: "xhigh" },
+      allow_unknown_access: true,
+      repository: "workflowd",
+      prompt: "Fix",
+    }
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        input,
+        daemon(() => Response.json(receipt), calls),
+      ),
+    )
+    expect(result.isError).not.toBe(true)
+    expect(JSON.parse(calls[0]!.body)).toEqual({
+      model: "native-new",
+      provider: "native-provider",
+      executor: "codex:local",
+      modelIdentity: "native",
+      thinking: { effort: "xhigh" },
+      allowUnknownAccess: true,
+      repository: "workflowd",
+      prompt: "Fix",
+    })
+  })
   test("is advertised as intent-based, pre-flighted and first-token-verified", () => {
     const definition = TOOL_DEFINITIONS.find((tool) => tool.name === "dispatch_agent")
     expect(definition).toBeDefined()

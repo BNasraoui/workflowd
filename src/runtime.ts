@@ -1,3 +1,6 @@
+import { AgentHarness } from "./agent-harness"
+import { GitHub } from "./github"
+import { Workspace } from "./workspace"
 import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
@@ -218,7 +221,8 @@ function firstMissingService(
   }
   if (
     config.agentRuns !== undefined &&
-    (Option.isNone(services.agentRuns) || Option.isNone(services.agentRunWatchdog))
+    (Option.isNone(services.agentRuns) ||
+      (config.mode !== "execution" && Option.isNone(services.agentRunWatchdog)))
   ) {
     return "Agent runs are configured without their services"
   }
@@ -242,7 +246,10 @@ export function startHookService(
 
   return Effect.gen(function* () {
     const ci = yield* Effect.serviceOption(CiService)
-    const automation = yield* Automation
+    const automation = yield* Effect.serviceOption(Automation)
+    const github = yield* Effect.serviceOption(GitHub)
+    const harness = yield* Effect.serviceOption(AgentHarness)
+    const workspace = yield* Effect.serviceOption(Workspace)
     const signals = yield* WorkSignal
     const workflowStart = yield* Effect.serviceOption(WorkflowStart)
     const testJobCanary = yield* Effect.serviceOption(TestJobCanary)
@@ -270,19 +277,23 @@ export function startHookService(
     })
     if (missingService !== null) return yield* Effect.die(new Error(missingService))
 
-    yield* automation
-      .validateAvailability({
-        fixWorkEnabled: config.fixWork.enabled,
-      })
-      .pipe(
-        Effect.mapError(
-          (error) =>
-            new Error(
-              `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-              { cause: error },
-            ),
-        ),
-      )
+    if (config.mode !== "execution") {
+      if (Option.isNone(automation))
+        return yield* Effect.die(new Error("Automation service is required"))
+      yield* automation.value
+        .validateAvailability({
+          fixWorkEnabled: config.fixWork.enabled,
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new Error(
+                `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
+                { cause: error },
+              ),
+          ),
+        )
+    }
 
     if (config.remoteCoordinator !== undefined) {
       yield* startRemoteCoordinatorWorkers(config.worker.pollIntervalMs, (name) =>
@@ -290,51 +301,67 @@ export function startHookService(
       ).pipe(Effect.provideService(RemoteCoordinator, remoteCoordinator))
     }
 
-    for (let index = 0; index < config.worker.concurrency; index += 1) {
-      const workerId = `${process.pid}:worker:${index}`
-      yield* superviseWorker(
-        "Job worker",
-        config.worker.pollIntervalMs,
-        "job",
-        observed(
-          "job",
-          runJobIteration({
-            workerId,
-            leaseDurationMs: config.worker.jobLeaseDurationMs,
-            maxAttempts: 3,
-            timeoutMs: config.worker.jobTimeoutMs,
-            cancellationPollIntervalMs: config.worker.pollIntervalMs,
-            agentBranchPrefixes: config.worker.agentBranchPrefixes,
-            trustedAgentUsers: config.worker.trustedAgentUsers,
-            fixWorkEnabled: config.fixWork.enabled,
-            now: () => new Date(),
-          }),
-        ),
+    if (config.mode !== "execution") {
+      if (
+        Option.isNone(automation) ||
+        Option.isNone(github) ||
+        Option.isNone(harness) ||
+        Option.isNone(workspace)
       )
-    }
-
-    yield* superviseWorker(
-      "Kernel job worker",
-      config.worker.pollIntervalMs,
-      "kernel-job",
-      observed(
-        "kernel-job",
-        Effect.suspend(() => {
-          const iterationAt = new Date()
-          return enqueueNextAgentHandoff(iterationAt).pipe(
-            Effect.andThen(
-              runKernelJobIteration({
-                workerId: `${process.pid}:kernel-job`,
-                now: () => new Date(),
+        return yield* Effect.die(new Error("Automation consumer services are required"))
+      yield* Effect.gen(function* () {
+        for (let index = 0; index < config.worker.concurrency; index += 1) {
+          const workerId = `${process.pid}:worker:${index}`
+          yield* superviseWorker(
+            "Job worker",
+            config.worker.pollIntervalMs,
+            "job",
+            observed(
+              "job",
+              runJobIteration({
+                workerId,
                 leaseDurationMs: config.worker.jobLeaseDurationMs,
-                retryDelayMs: config.worker.pollIntervalMs,
+                maxAttempts: 3,
+                timeoutMs: config.worker.jobTimeoutMs,
+                cancellationPollIntervalMs: config.worker.pollIntervalMs,
+                agentBranchPrefixes: config.worker.agentBranchPrefixes,
+                trustedAgentUsers: config.worker.trustedAgentUsers,
+                fixWorkEnabled: config.fixWork.enabled,
+                now: () => new Date(),
               }),
             ),
-            Effect.map((result) => result.status),
           )
-        }),
-      ),
-    )
+        }
+
+        yield* superviseWorker(
+          "Kernel job worker",
+          config.worker.pollIntervalMs,
+          "kernel-job",
+          observed(
+            "kernel-job",
+            Effect.suspend(() => {
+              const iterationAt = new Date()
+              return enqueueNextAgentHandoff(iterationAt).pipe(
+                Effect.andThen(
+                  runKernelJobIteration({
+                    workerId: `${process.pid}:kernel-job`,
+                    now: () => new Date(),
+                    leaseDurationMs: config.worker.jobLeaseDurationMs,
+                    retryDelayMs: config.worker.pollIntervalMs,
+                  }),
+                ),
+                Effect.map((result) => result.status),
+              )
+            }),
+          ),
+        )
+      }).pipe(
+        Effect.provideService(Automation, automation.value),
+        Effect.provideService(GitHub, github.value),
+        Effect.provideService(AgentHarness, harness.value),
+        Effect.provideService(Workspace, workspace.value),
+      )
+    }
 
     if (Option.isSome(completionSource)) {
       yield* superviseWorker(
@@ -372,53 +399,63 @@ export function startHookService(
       )
     }
 
-    yield* superviseWorker(
-      "Publisher",
-      config.worker.pollIntervalMs,
-      "publication",
-      observed(
-        "publication",
-        runPublicationIteration({
-          workerId: `${process.pid}:publisher`,
-          leaseDurationMs: config.worker.publicationLeaseDurationMs,
-          timeoutMs: config.worker.publicationTimeoutMs,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      ),
-    )
+    if (config.mode !== "execution") {
+      if (Option.isNone(automation) || Option.isNone(github) || Option.isNone(workspace))
+        return yield* Effect.die(new Error("Automation publication services are required"))
+      yield* Effect.gen(function* () {
+        yield* superviseWorker(
+          "Publisher",
+          config.worker.pollIntervalMs,
+          "publication",
+          observed(
+            "publication",
+            runPublicationIteration({
+              workerId: `${process.pid}:publisher`,
+              leaseDurationMs: config.worker.publicationLeaseDurationMs,
+              timeoutMs: config.worker.publicationTimeoutMs,
+              maxAttempts: 5,
+              now: () => new Date(),
+            }),
+          ),
+        )
 
-    yield* superviseWorker(
-      "Reconciliation",
-      config.worker.pollIntervalMs,
-      "reconciliation",
-      observed(
-        "reconciliation",
-        runReconciliationIteration({
-          workerId: `${process.pid}:reconciler`,
-          leaseDurationMs: 2 * 60_000,
-          maxAttempts: 5,
-          now: () => new Date(),
-        }),
-      ),
-    )
+        yield* superviseWorker(
+          "Reconciliation",
+          config.worker.pollIntervalMs,
+          "reconciliation",
+          observed(
+            "reconciliation",
+            runReconciliationIteration({
+              workerId: `${process.pid}:reconciler`,
+              leaseDurationMs: 2 * 60_000,
+              maxAttempts: 5,
+              now: () => new Date(),
+            }),
+          ),
+        )
 
-    yield* superviseWorker(
-      "Command worker",
-      config.worker.pollIntervalMs,
-      "command",
-      observed(
-        "command",
-        runCommandIteration({
-          workerId: `${process.pid}:commands`,
-          leaseDurationMs: 60_000,
-          maxAttempts: 3,
-          commandUsers: config.worker.commandUsers,
-          fixWorkEnabled: config.fixWork.enabled,
-          now: () => new Date(),
-        }),
-      ),
-    )
+        yield* superviseWorker(
+          "Command worker",
+          config.worker.pollIntervalMs,
+          "command",
+          observed(
+            "command",
+            runCommandIteration({
+              workerId: `${process.pid}:commands`,
+              leaseDurationMs: 60_000,
+              maxAttempts: 3,
+              commandUsers: config.worker.commandUsers,
+              fixWorkEnabled: config.fixWork.enabled,
+              now: () => new Date(),
+            }),
+          ),
+        )
+      }).pipe(
+        Effect.provideService(Automation, automation.value),
+        Effect.provideService(GitHub, github.value),
+        Effect.provideService(Workspace, workspace.value),
+      )
+    }
 
     // Acquire the listener last so its finalizer stops acceptance and drains
     // request fibers before worker and store scopes are released.
@@ -431,7 +468,7 @@ export function startHookService(
     const server = yield* serveHookHttpWithHandler(
       {
         ...config.http,
-        webhookSecret: config.github.webhookSecret,
+        webhookSecret: config.github?.webhookSecret ?? "",
       },
       (request, options) =>
         Effect.gen(function* () {
@@ -443,6 +480,7 @@ export function startHookService(
           }
           return yield* routeRequest(request, {
             ...options,
+            prAutomationEnabled: config.mode !== "execution",
             ...(Option.isSome(ci) ? { ci: ci.value } : {}),
             ...(config.qrspi === undefined
               ? {}

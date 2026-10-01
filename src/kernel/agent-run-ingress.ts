@@ -1,3 +1,11 @@
+import { canonicalJson } from "./session-store-support"
+import { ExecutionDiscovery } from "../execution-capabilities"
+import {
+  resolveExecutionSelection,
+  type RequestedSelection,
+  type ResolvedSelection,
+  type SelectionRefusal,
+} from "../execution-selection"
 import { OpenCodeMailbox } from "../resident/opencode"
 import { WorkerIdentity } from "../worker-identity/service"
 import { createHash } from "node:crypto"
@@ -11,6 +19,7 @@ import {
   type AgentRunReceipt,
   type AgentRunRepository,
   type AgentRunRoute,
+  type AgentRunRouteChoice,
   type AgentRunSubmission as AgentRunSubmissionType,
 } from "../agent-run-contract"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
@@ -20,7 +29,7 @@ import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingre
 import { AgentRunWorktrees } from "./agent-run-worktrees"
 import { CLAUDE_PROVIDER_ID, ClaudeCli, claudeSessionCustodyId } from "./claude-session"
 import { ClaudeDispatchCli } from "./claude-dispatch"
-import { makeAgentRunCodexDispatcher } from "./agent-run-codex"
+import { makeAgentRunCliDispatcher } from "./agent-run-cli"
 import { makeAgentRunCustody } from "./agent-run-custody"
 import { CODEX_PROVIDER_ID, CodexCli, codexSessionCustodyId } from "./codex-session"
 import type { AgentCompletionSourceIdentity } from "./agent-handoff-store"
@@ -39,6 +48,8 @@ export type AgentRunRefusalReason =
   | "missing_parent_session"
   | "no_first_token"
   | "run_conflict"
+  | "invalid_selection"
+  | SelectionRefusal
 
 /**
  * A refusal is the loud, machine-readable alternative to the silent hangs
@@ -160,14 +171,36 @@ const routeRefusalDetail = (
   return `route "${route}" matches no configured route or model`
 }
 
+const choiceForSelection = (
+  selection: ResolvedSelection,
+  name: string,
+): Extract<AgentRunRouteChoice, { outcome: "resolved" }> =>
+  selection.executorKind === "opencode"
+    ? {
+        outcome: "resolved",
+        provider: "opencode",
+        route: {
+          name,
+          providerID: selection.provider ?? "",
+          modelID: selection.selectionModel ?? "",
+        },
+      }
+    : {
+        outcome: "resolved",
+        provider: selection.executorKind,
+        route: { name, modelID: selection.model },
+      }
+
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
     const sessions = yield* KernelSessionStore
-    const provider = yield* AgentRunProvider
+    const providerOption = yield* Effect.serviceOption(AgentRunProvider)
+    const provider = Option.getOrUndefined(providerOption)
+    const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
     const worktrees = yield* AgentRunWorktrees
-    const waits = yield* AgentWaitIngress
-    const claude = yield* ClaudeCli
+    const waits = Option.getOrUndefined(yield* Effect.serviceOption(AgentWaitIngress))
+    const claude = Option.getOrUndefined(yield* Effect.serviceOption(ClaudeCli))
     const identity = yield* Effect.serviceOption(WorkerIdentity)
     const mailbox = yield* Effect.serviceOption(OpenCodeMailbox)
     const workerPrompt = (run: AgentRunRecord) =>
@@ -177,13 +210,17 @@ const make = (options: AgentRunIngressOptions) =>
             .pipe(Effect.map((instruction) => `${instruction}\n\n${run.prompt}`))
         : Effect.succeed(run.prompt)
     const codex = yield* CodexCli
-    const claudeDispatch = yield* ClaudeDispatchCli
+    const claudeDispatchOption = yield* Effect.serviceOption(ClaudeDispatchCli)
+    const claudeDispatch = Option.getOrUndefined(claudeDispatchOption)
     const signals = yield* WorkSignal
     const codexReadiness = yield* codex.preflight.pipe(Effect.result)
     if (codexReadiness._tag === "Failure") {
       yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
     }
-    const claudeReadiness = yield* claudeDispatch.preflight.pipe(Effect.result)
+    const claudeReadiness = yield* (
+      claudeDispatch?.preflight ??
+      Effect.fail({ kind: "cli_unusable" as const, detail: "Claude executor is disabled" })
+    ).pipe(Effect.result)
     if (claudeReadiness._tag === "Failure" && (options.claudeRoutes?.length ?? 0) > 0)
       yield* Effect.logWarning("Claude CLI route unavailable at startup", claudeReadiness.failure)
 
@@ -192,6 +229,8 @@ const make = (options: AgentRunIngressOptions) =>
 
     const preflightRoute = (route: AgentRunRoute) =>
       Effect.gen(function* () {
+        if (provider === undefined)
+          return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         const [providers, models] = yield* Effect.all(
           [provider.listProviders({}), provider.listModels({})],
           { concurrency: 2 },
@@ -219,6 +258,8 @@ const make = (options: AgentRunIngressOptions) =>
      * automated form of the "confirm nonzero output tokens" operator ritual. */
     const verifyFirstToken = (nativeSessionId: string) =>
       Effect.gen(function* () {
+        if (provider === undefined)
+          return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         const polls = Math.max(1, Math.ceil(options.verifyTimeoutMs / options.verifyPollIntervalMs))
         for (let poll = 0; poll < polls; poll += 1) {
           const telemetry = yield* provider.sessionTelemetry({ sessionID: nativeSessionId })
@@ -241,6 +282,8 @@ const make = (options: AgentRunIngressOptions) =>
       now: Date,
     ) =>
       Effect.gen(function* () {
+        if (provider === undefined)
+          return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         let nativeSessionId = run.nativeSessionId
         if (run.state === "spawning") {
           // Another in-flight request holds the spawn; refusing here keeps
@@ -270,7 +313,13 @@ const make = (options: AgentRunIngressOptions) =>
             directory: run.directory,
             title: `workflowd ${run.runId}`,
             agent: run.agent,
-            model: { providerID: route.providerID, modelID: route.modelID },
+            model: {
+              providerID: route.providerID,
+              modelID: route.modelID,
+              ...(run.resolvedSelection?.thinking.variant === undefined
+                ? {}
+                : { variant: run.resolvedSelection.thinking.variant }),
+            },
           })
           nativeSessionId = session.id
           const sessionId = yield* ensureSession({
@@ -298,7 +347,13 @@ const make = (options: AgentRunIngressOptions) =>
             sessionID: nativeSessionId,
             directory: run.directory,
             agent: run.agent,
-            model: { providerID: route.providerID, modelID: route.modelID },
+            model: {
+              providerID: route.providerID,
+              modelID: route.modelID,
+              ...(run.resolvedSelection?.thinking.variant === undefined
+                ? {}
+                : { variant: run.resolvedSelection.thinking.variant }),
+            },
             text: `${mailboxInstructions}\n\n${yield* workerPrompt(run)}`.trim(),
           })
         }
@@ -323,8 +378,13 @@ const make = (options: AgentRunIngressOptions) =>
         return { nativeSessionId, outputTokens, kind: "opencode" as const }
       })
 
-    const codexRuns = makeAgentRunCodexDispatcher({
-      codex,
+    const codexRuns = makeAgentRunCliDispatcher({
+      cli: codex,
+      executor: {
+        kind: "codex",
+        custodyProviderId: CODEX_PROVIDER_ID,
+        sessionCustodyId: codexSessionCustodyId,
+      },
       store,
       worktrees,
       signals,
@@ -336,23 +396,26 @@ const make = (options: AgentRunIngressOptions) =>
       workerPrompt,
     })
     yield* codexRuns.recover
-    const claudeRuns = makeAgentRunCodexDispatcher({
-      codex: claudeDispatch,
-      harness: {
-        kind: "claude",
-        providerId: CLAUDE_PROVIDER_ID,
-        sessionCustodyId: claudeSessionCustodyId,
-      },
-      store,
-      worktrees,
-      signals,
-      ensureResource,
-      ensureSession,
-      refuse,
-      verifyTimeoutMs: options.verifyTimeoutMs,
-      progressWindowMs: options.progressWindowMs,
-    })
-    yield* claudeRuns.recover
+    const claudeRuns =
+      claudeDispatch === undefined
+        ? undefined
+        : makeAgentRunCliDispatcher({
+            cli: claudeDispatch,
+            executor: {
+              kind: "claude",
+              custodyProviderId: CLAUDE_PROVIDER_ID,
+              sessionCustodyId: claudeSessionCustodyId,
+            },
+            store,
+            worktrees,
+            signals,
+            ensureResource,
+            ensureSession,
+            refuse,
+            verifyTimeoutMs: options.verifyTimeoutMs,
+            progressWindowMs: options.progressWindowMs,
+          })
+    if (claudeRuns !== undefined) yield* claudeRuns.recover
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
@@ -413,17 +476,143 @@ const make = (options: AgentRunIngressOptions) =>
             "parentSessionId and resumePrompt must be provided together or not at all",
           )
         }
-        const resolution = resolveAgentRunRouteChoice(
-          options.routes,
-          options.codexRoutes,
-          submission.route,
-          options.claudeRoutes,
+        if ((submission.route === undefined) === (submission.model === undefined))
+          return yield* refuse("invalid_selection", "Provide exactly one of route or model")
+        if (
+          submission.route !== undefined &&
+          (submission.provider !== undefined ||
+            submission.executor !== undefined ||
+            submission.modelIdentity !== undefined)
         )
-        if (resolution.outcome === "refused") {
           return yield* refuse(
-            resolution.reason,
-            routeRefusalDetail(submission.route, resolution.reason),
+            "invalid_selection",
+            "Use model for explicit provider/executor selection; route is a configured alias",
           )
+        const requested: RequestedSelection = {
+          ...(submission.route === undefined ? {} : { route: submission.route }),
+          ...(submission.model === undefined ? {} : { model: submission.model }),
+          ...(submission.provider === undefined ? {} : { provider: submission.provider }),
+          ...(submission.executor === undefined ? {} : { executor: submission.executor }),
+          ...(submission.modelIdentity === undefined
+            ? {}
+            : { modelIdentity: submission.modelIdentity }),
+          ...(submission.thinking === undefined ? {} : { thinking: submission.thinking }),
+          ...(submission.allowUnknownAccess === undefined
+            ? {}
+            : { allowUnknownAccess: submission.allowUnknownAccess }),
+        }
+        let resolution: Extract<AgentRunRouteChoice, { outcome: "resolved" }>
+        let selection: ResolvedSelection
+        // A duplicate uses its immutable accepted choice, even after catalog refresh.
+        const aliasForIdentity =
+          submission.route === undefined
+            ? undefined
+            : resolveAgentRunRouteChoice(
+                options.routes,
+                options.codexRoutes,
+                submission.route,
+                options.claudeRoutes,
+              )
+        const identityRoute =
+          submission.model === undefined
+            ? aliasForIdentity?.outcome === "resolved"
+              ? aliasForIdentity.route.name
+              : (submission.route ?? "")
+            : `selection-${promptSha256(canonicalJson(requested))}`
+        const keyed = yield* store.read(
+          agentRunIdentifiers({
+            route: identityRoute,
+            repository: submission.repository,
+            prompt: submission.prompt,
+            parentSessionId:
+              submission.parentSessionId === undefined
+                ? null
+                : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
+            resumePrompt: submission.resumePrompt ?? null,
+            idempotencyKey: submission.idempotencyKey,
+          }).runId,
+        )
+        if (
+          keyed?.resolvedSelection != null &&
+          canonicalJson(keyed.requestedSelection ?? null) === canonicalJson(requested)
+        ) {
+          selection = keyed.resolvedSelection
+          resolution = choiceForSelection(selection, keyed.route)
+        } else if (submission.model !== undefined) {
+          if (Option.isNone(discovery))
+            return yield* refuse("executor_unavailable", "Capability discovery is disabled")
+          const catalog = yield* discovery.value
+            .list()
+            .pipe(
+              Effect.mapError(() =>
+                refuse("executor_unavailable", "Capability discovery unavailable"),
+              ),
+            )
+          const selected = resolveExecutionSelection(catalog, requested)
+          if (selected.outcome === "refused")
+            return yield* refuse(
+              selected.reason,
+              `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
+            )
+          selection = selected.selection
+          resolution = choiceForSelection(selection, identityRoute)
+        } else {
+          const alias = resolveAgentRunRouteChoice(
+            options.routes,
+            options.codexRoutes,
+            submission.route!,
+            options.claudeRoutes,
+          )
+          if (alias.outcome === "refused")
+            return yield* refuse(alias.reason, routeRefusalDetail(submission.route!, alias.reason))
+          resolution = alias
+          selection = {
+            host: options.identity.owningHostId,
+            executor:
+              alias.provider === "opencode"
+                ? `opencode:${options.identity.serverId}`
+                : `${alias.provider}:local`,
+            executorKind: alias.provider,
+            provider: alias.provider === "opencode" ? alias.route.providerID : null,
+            model: alias.route.modelID,
+            selectionModel: alias.route.modelID,
+            thinking: {},
+            availability: "unknown",
+            evidence: "configured",
+          }
+          if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
+            if (alias.provider === "claude") {
+              return yield* refuse(
+                "unsupported_thinking",
+                "Claude cannot verify per-model thinking or silent effort caps before execution",
+              )
+            } else {
+              if (Option.isNone(discovery))
+                return yield* refuse(
+                  "unsupported_thinking",
+                  "Thinking requires native capability metadata",
+                )
+              const catalog = yield* discovery.value
+                .list()
+                .pipe(
+                  Effect.mapError(() =>
+                    refuse("executor_unavailable", "Capability discovery unavailable"),
+                  ),
+                )
+              const selected = resolveExecutionSelection(catalog, {
+                model: alias.route.modelID ?? "",
+                modelIdentity: alias.provider === "opencode" ? "catalog" : "native",
+                executor: selection.executor,
+                ...(alias.provider === "opencode" ? { provider: alias.route.providerID } : {}),
+                thinking: submission.thinking,
+                allowUnknownAccess: true,
+              })
+              if (selected.outcome === "refused")
+                return yield* refuse(selected.reason, `Alias thinking refused: ${selected.reason}`)
+              selection = selected.selection
+              resolution = choiceForSelection(selection, alias.route.name)
+            }
+          }
         }
         const repository = options.repositories.find(
           (candidate) => candidate.name === submission.repository,
@@ -444,9 +633,11 @@ const make = (options: AgentRunIngressOptions) =>
               "dispatch without parentSessionId/resumePrompt and read the outcome later",
           )
         }
-        if (resolution.provider === "opencode") {
+        if (keyed !== null && ["spawned", "verified", "completed"].includes(keyed.state)) {
+          // Already-launched duplicates need no fresh launch preflight.
+        } else if (resolution.provider === "opencode" && submission.model === undefined) {
           yield* preflightRoute(resolution.route)
-        } else {
+        } else if (resolution.provider !== "opencode") {
           const readiness = resolution.provider === "claude" ? claudeReadiness : codexReadiness
           if (readiness._tag === "Failure") {
             const issue = readiness.failure
@@ -459,19 +650,21 @@ const make = (options: AgentRunIngressOptions) =>
             })
           }
         }
-        return { submission, resolution, repository }
+        return { submission, resolution, repository, requested, selection, accepted: keyed }
       })
 
     const register: AgentRunIngressPort["register"] = (input, now) =>
       Effect.gen(function* () {
-        const { submission, resolution, repository } = yield* prepareRegistration(input)
+        const { submission, resolution, repository, requested, selection, accepted } =
+          yield* prepareRegistration(input)
         const providerId =
-          resolution.provider === "opencode"
+          accepted?.providerId ??
+          (resolution.provider === "opencode"
             ? resolution.route.providerID
             : resolution.provider === "claude"
               ? CLAUDE_PROVIDER_ID
-              : CODEX_PROVIDER_ID
-        const modelId = resolution.route.modelID ?? "<cli-default>"
+              : CODEX_PROVIDER_ID)
+        const modelId = accepted?.modelId ?? resolution.route.modelID ?? "<cli-default>"
         const parentKind = submission.parentKind ?? "opencode"
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
@@ -497,6 +690,9 @@ const make = (options: AgentRunIngressOptions) =>
           route: resolution.route.name,
           providerId,
           modelId,
+          executorKind: selection.executorKind,
+          requestedSelection: requested,
+          resolvedSelection: selection,
           agent: options.agent,
           repository: repository.name,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
@@ -526,7 +722,7 @@ const make = (options: AgentRunIngressOptions) =>
                 kind: resolution.provider,
               }
             : resolution.provider !== "opencode"
-              ? yield* (resolution.provider === "claude" ? claudeRuns : codexRuns).dispatch(
+              ? yield* (resolution.provider === "claude" ? claudeRuns! : codexRuns).dispatch(
                   run,
                   resolution.route,
                   {
@@ -561,6 +757,7 @@ const make = (options: AgentRunIngressOptions) =>
           createdAt: run.createdAt,
           now,
         })
+        const resolvedRun = yield* store.read(identifiers.runId)
         return {
           runId: identifiers.runId,
           sessionId: childSessionId,
@@ -569,6 +766,8 @@ const make = (options: AgentRunIngressOptions) =>
           modelId,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),
+          requestedSelection: run.requestedSelection ?? requested,
+          resolvedSelection: resolvedRun?.resolvedSelection ?? selection,
           ...(wait === undefined ? {} : { wait }),
         }
       })
@@ -580,17 +779,27 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
-        if (run.providerId === CODEX_PROVIDER_ID) {
+        if (
+          run.executorKind === "codex" ||
+          (run.executorKind === undefined && run.providerId === CODEX_PROVIDER_ID)
+        ) {
           yield* codexRuns.cancel(run, now)
           return
         }
-        if (run.providerId === CLAUDE_PROVIDER_ID) {
+        if (
+          run.executorKind === "claude" ||
+          (run.executorKind === undefined && run.providerId === CLAUDE_PROVIDER_ID)
+        ) {
+          if (claudeRuns === undefined)
+            return yield* refuse("executor_unavailable", "Claude executor is disabled")
           yield* claudeRuns.cancel(run, now)
           return
         }
         if (run.nativeSessionId === null) {
           return yield* refuse("run_conflict", `run ${runId} has no provider session to cancel`)
         }
+        if (provider === undefined)
+          return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         const stopped = yield* provider.abortSession({
           sessionID: run.nativeSessionId,
           directory: run.directory,

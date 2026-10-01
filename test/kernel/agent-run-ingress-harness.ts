@@ -120,7 +120,7 @@ const claudeCli: ClaudeCliPort = {
 }
 
 export type CodexState = {
-  spawned: Array<{ directory: string; prompt: string; model: string | null }>
+  spawned: Array<{ directory: string; prompt: string; model: string | null; effort?: string }>
   killed: boolean
 }
 
@@ -141,7 +141,12 @@ export const makeCodexCli = (
     attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
-        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        state.spawned.push({
+          directory: input.directory,
+          prompt: input.prompt,
+          model: input.model,
+          ...(input.effort === undefined ? {} : { effort: input.effort }),
+        })
         const queue: {
           push: (event: import("../../src/kernel/codex-session").CodexExecEvent) => void
           close: () => void
@@ -211,7 +216,12 @@ export const codexNeverStreams = () => {
     attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
-        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        state.spawned.push({
+          directory: input.directory,
+          prompt: input.prompt,
+          model: input.model,
+          ...(input.effort === undefined ? {} : { effort: input.effort }),
+        })
         const never: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
           [Symbol.asyncIterator]: () => ({
             next: neverCodexEvent,

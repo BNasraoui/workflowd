@@ -120,7 +120,13 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
         sessionID: run.nativeSessionId,
         directory: run.directory,
         agent: run.agent,
-        model: { providerID: run.providerId, modelID: run.modelId },
+        model: {
+          providerID: run.resolvedSelection?.provider ?? run.providerId,
+          modelID: run.resolvedSelection?.selectionModel ?? run.modelId,
+          ...(run.resolvedSelection?.thinking.variant === undefined
+            ? {}
+            : { variant: run.resolvedSelection.thinking.variant }),
+        },
         text: continuationPrompt(run),
       })
       return "worked" as const

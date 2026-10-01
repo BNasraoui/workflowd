@@ -7,10 +7,12 @@ import { makeOpenCodeDiscovery } from "./opencode"
 
 export function localDiscoverySources(
   config: AppConfig,
-  client: Effect.Effect<OpenCodeClient, Error>,
+  client?: Effect.Effect<OpenCodeClient, Error>,
 ): ReadonlyArray<DiscoverySource> {
   const sources: DiscoverySource[] = [
-    makeOpenCodeDiscovery(`opencode:${config.openCode.serverId}`, client),
+    ...(config.openCode === undefined || client === undefined
+      ? []
+      : [makeOpenCodeDiscovery(`opencode:${config.openCode.serverId}`, client)]),
   ]
   if (config.executionCapabilities?.codexEnabled)
     sources.push(
@@ -19,7 +21,10 @@ export function localDiscoverySources(
         ...(config.residentCodex === undefined ? {} : { home: config.residentCodex.home }),
       }),
     )
-  if (config.agentRuns?.claudeHosts.includes(config.worker.hostId))
+  if (
+    config.agentRuns?.claudeHosts.includes(config.worker.hostId) ||
+    (config.agentRuns?.claudeRoutes.length ?? 0) > 0
+  )
     sources.push({
       executor: "claude:local",
       kind: "claude",

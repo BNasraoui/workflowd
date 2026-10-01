@@ -56,6 +56,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly prAutomationEnabled?: boolean
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
@@ -96,7 +97,9 @@ export function routeRequest(
     return Effect.succeed(Response.json({ status: "ok" }))
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
-    return handleGitHubWebhook(request, options)
+    return options.prAutomationEnabled === false
+      ? Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+      : handleGitHubWebhook(request, options)
   }
   if (pathname === "/workflows/qrspi" && request.method === "POST" && options.qrspi !== undefined) {
     return handleQrspiStart(request, options.qrspi, options.maxBodyBytes ?? 1_048_576)

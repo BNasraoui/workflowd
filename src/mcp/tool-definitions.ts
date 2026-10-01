@@ -1,3 +1,4 @@
+import { ThinkingSelection, RequestedSelection, ResolvedSelection } from "../execution-selection"
 import { MAX_RECENT_JOBS } from "./queries"
 import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
@@ -221,6 +222,7 @@ export const TOOL_DEFINITIONS = [
       "another host: the worktree, kernel custody, first-token verification, " +
       "and watchdog supervision described below are all handled by this one " +
       "call — never shell into a runner host to spawn an agent yourself. " +
+      "Explicit selection: pass model, optional provider/executor/model_identity, thinking and allow_unknown_access. Omitted executor uses deterministic capability selection; native and catalog IDs are separate. Resolved selection is returned and preserved for retries. Unsupported thinking is refused. Or use a legacy route. " +
       "Pass a configured route name (e.g. 'implement', 'review') or a bare " +
       "model id — never a provider-prefixed id; the workflowd runner resolves " +
       "the route, pre-flights that the provider is authenticated and the model " +
@@ -258,6 +260,30 @@ export const TOOL_DEFINITIONS = [
           description:
             "Configured route name (intent like 'implement') or bare model id. " +
             "Provider-prefixed ids are refused.",
+        },
+        model: {
+          type: "string",
+          description: "Explicit native model ID; independent of route aliases.",
+        },
+        provider: {
+          type: ["string", "null"],
+          description:
+            "Exact model provider identity; null selects an unknown native provider identity.",
+        },
+        executor: {
+          type: "string",
+          description: "Optional exact executor identity from list_execution_capabilities.",
+        },
+        model_identity: {
+          type: "string",
+          enum: ["native", "catalog"],
+          description: "Model namespace; native by default. Catalog selects selectionModel.",
+        },
+        thinking: toJsonSchemaObject(ThinkingSelection),
+        allow_unknown_access: {
+          type: "boolean",
+          description:
+            "Opt into an advertised model whose account access is unknown. Never grants access to an unavailable model.",
         },
         repository: {
           type: "string",
@@ -303,7 +329,11 @@ export const TOOL_DEFINITIONS = [
           description: "Optional stable identity making re-dispatch safe.",
         },
       },
-      required: ["route", "repository", "prompt"],
+      required: ["repository", "prompt"],
+      oneOf: [
+        { required: ["route"], not: { required: ["model"] } },
+        { required: ["model"], not: { required: ["route"] } },
+      ],
       additionalProperties: false,
     },
     outputSchema: withRefusal(
@@ -314,6 +344,10 @@ export const TOOL_DEFINITIONS = [
           native_session_id: { type: "string" },
           provider_id: { type: "string" },
           model_id: { type: "string" },
+          requested_selection: {
+            anyOf: [toJsonSchemaObject(RequestedSelection), { type: "null" }],
+          },
+          resolved_selection: { anyOf: [toJsonSchemaObject(ResolvedSelection), { type: "null" }] },
           output_tokens: { type: "integer" },
           status: { type: "string", enum: ["dispatched", "duplicate"] },
           wait: { type: ["object", "null"] },

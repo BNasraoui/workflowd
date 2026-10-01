@@ -19,7 +19,7 @@ type WorkerIdentityPort = {
 export const WorkerIdentity = Context.Service<WorkerIdentityPort>("workflowd/WorkerIdentity")
 export const WorkerIdentityLive = (
   config: WorkerIdentityConfig,
-  github: AppConfig["github"],
+  github: NonNullable<AppConfig["github"]>,
   OctokitClass: typeof Octokit = Octokit,
 ) =>
   Layer.effect(

@@ -1,15 +1,10 @@
+import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schema } from "effect"
 import { runWorkspaceCommand } from "../workspace/command"
-import {
-  makeCodexCli,
-  type CodexCliOptions,
-  type CodexCliPort,
-  type CodexExecEvent,
-  type CodexPreflightError,
-} from "./codex-session"
+import { makeDurableCliProcess, type CliProcessOptions } from "./codex-session"
 
-export const ClaudeDispatchCli = Context.Service<CodexCliPort>("workflowd/kernel/ClaudeDispatchCli")
+export const ClaudeDispatchCli = Context.Service<CliPort>("workflowd/kernel/ClaudeDispatchCli")
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null
@@ -28,7 +23,7 @@ const contentText = (value: unknown): string => {
 }
 
 /** Normalize the real `claude -p --output-format stream-json` wire protocol. */
-export const parseClaudeDispatchEvent = (line: string): CodexExecEvent => {
+export const parseClaudeDispatchEvent = (line: string): CliEvent => {
   let value: unknown
   try {
     value = JSON.parse(line)
@@ -37,7 +32,11 @@ export const parseClaudeDispatchEvent = (line: string): CodexExecEvent => {
   }
   if (!record(value)) return { type: "other" }
   if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string")
-    return { type: "thread.started", threadId: value.session_id }
+    return {
+      type: "thread.started",
+      threadId: value.session_id,
+      ...(typeof value.model === "string" ? { model: value.model } : {}),
+    }
   if (value.parent_tool_use_id != null) return { type: "other" }
   if (value.type === "result") {
     if (value.is_error === true)
@@ -83,8 +82,8 @@ export const parseClaudeDispatchEvent = (line: string): CodexExecEvent => {
 
 const AuthStatus = Schema.Struct({ loggedIn: Schema.Boolean })
 
-export const makeClaudeDispatchCli = (options: Omit<CodexCliOptions, "driver">) =>
-  makeCodexCli({
+export const makeClaudeDispatchCli = (options: Omit<CliProcessOptions, "driver">): CliPort => ({
+  ...makeDurableCliProcess({
     ...options,
     unitPrefix: options.unitPrefix ?? "workflowd-claude-",
     driver: {
@@ -93,7 +92,7 @@ export const makeClaudeDispatchCli = (options: Omit<CodexCliOptions, "driver">) 
       parseEvent: parseClaudeDispatchEvent,
       preflight: Effect.gen(function* () {
         yield* runWorkspaceCommand("check claude cli", [options.binary, "--version"]).pipe(
-          Effect.mapError((cause): CodexPreflightError => ({
+          Effect.mapError((cause): CliPreflightError => ({
             kind: "cli_unusable",
             detail: `Claude CLI version check failed: ${String(cause.cause)}`,
           })),
@@ -106,7 +105,7 @@ export const makeClaudeDispatchCli = (options: Omit<CodexCliOptions, "driver">) 
           Effect.flatMap((stdout) =>
             Schema.decodeUnknownEffect(Schema.fromJsonString(AuthStatus))(stdout),
           ),
-          Effect.mapError((): CodexPreflightError => ({
+          Effect.mapError((): CliPreflightError => ({
             kind: "not_authenticated",
             detail:
               "Claude CLI authentication check failed; run claude auth login on the daemon host",
@@ -119,4 +118,5 @@ export const makeClaudeDispatchCli = (options: Omit<CodexCliOptions, "driver">) 
           })
       }),
     },
-  })
+  }),
+})

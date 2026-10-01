@@ -13,8 +13,14 @@ import { makeResidentStore } from "./store"
 import { startAppServer } from "./process"
 import { deliverResident } from "./delivery"
 import type { ResidentConfig } from "./config"
+import { ExecutionSelectionError } from "../execution-selection"
 
-const ThreadResult = Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) })
+const ThreadResult = Schema.Struct({
+  thread: Schema.Struct({ id: Schema.String }),
+  model: Schema.optionalKey(Schema.String),
+  modelProvider: Schema.optionalKey(Schema.String),
+  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
 const TurnEvent = Schema.Struct({
   threadId: Schema.String,
   turn: Schema.Struct({ id: Schema.String, status: Schema.String }),
@@ -211,15 +217,48 @@ export const ResidentCodexLive = (
           threadRuns.set(row.thread_id, row.run_id)
           if (!(yield* restoreCustody(row))) continue
           if (!servers.has(row.run_id)) yield* launch(row.run_id)
-          yield* Effect.tryPromise(() =>
+          const accepted = yield* runs.read(row.run_id)
+          const selection = accepted?.resolvedSelection
+          const resumed = yield* Effect.tryPromise(() =>
             request("thread/resume", {
               threadId: row.thread_id,
               cwd: row.directory,
-              model: row.model,
+              model: selection?.model ?? row.model,
+              ...(selection?.provider == null ? {} : { modelProvider: selection.provider }),
+              ...(selection?.thinking.effort === undefined
+                ? {}
+                : { config: { model_reasoning_effort: selection.thinking.effort } }),
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             }),
+          ).pipe(
+            Effect.flatMap(
+              Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  model: Schema.optionalKey(Schema.String),
+                  modelProvider: Schema.optionalKey(Schema.String),
+                  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+                }),
+              ),
+            ),
           )
+          if (
+            selection != null &&
+            ((selection.thinking.effort !== undefined &&
+              resumed.reasoningEffort !== selection.thinking.effort) ||
+              (selection.model !== null && resumed.model !== selection.model) ||
+              (selection.provider !== null && resumed.modelProvider !== selection.provider))
+          ) {
+            yield* store.uncertain(`selection:${row.thread_id}`, row.thread_id)
+            yield* runs.operatorRequired({
+              runId: row.run_id,
+              diagnostic:
+                "resident_selection_mismatch: native resume did not confirm the accepted selection",
+              now: new Date(),
+            })
+            yield* finish(row.thread_id, true)
+            continue
+          }
           const history = yield* Effect.tryPromise(() =>
             request("thread/read", { threadId: row.thread_id, includeTurns: true }),
           ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
@@ -351,10 +390,56 @@ export const ResidentCodexLive = (
               server.rpc.request("thread/start", {
                 cwd: input.directory,
                 model: input.model,
+                ...(input.provider == null ? {} : { modelProvider: input.provider }),
+                ...(input.effort === undefined
+                  ? {}
+                  : { config: { model_reasoning_effort: input.effort } }),
                 approvalPolicy: "never",
                 sandbox: "danger-full-access",
               }),
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
+            const rejectSelection = (
+              reason: "unsupported_thinking" | "model_not_available",
+              detail: string,
+            ) =>
+              Effect.gen(function* () {
+                peers.revoke(input.runId)
+                servers.delete(input.runId)
+                yield* Effect.tryPromise(() => server.close())
+                return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
+              })
+            if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
+              return yield* rejectSelection(
+                "unsupported_thinking",
+                "Native Codex did not confirm the requested reasoning effort",
+              )
+            if (input.model !== null && thread.model !== input.model)
+              return yield* rejectSelection(
+                "model_not_available",
+                "Native Codex resolved a different model",
+              )
+            if (input.provider != null && thread.modelProvider !== input.provider)
+              return yield* rejectSelection(
+                "model_not_available",
+                "Native Codex resolved a different provider",
+              )
+            const accepted = yield* runs.read(input.runId)
+            if (accepted?.resolvedSelection != null && thread.model !== undefined) {
+              yield* runs.recordResolvedSelection({
+                runId: input.runId,
+                now: new Date(),
+                selection: {
+                  ...accepted.resolvedSelection,
+                  model: thread.model,
+                  provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
+                  thinking:
+                    thread.reasoningEffort == null
+                      ? accepted.resolvedSelection.thinking
+                      : { ...accepted.resolvedSelection.thinking, effort: thread.reasoningEffort },
+                  evidence: "runtime",
+                },
+              })
+            }
             const threadId = thread.thread.id
             threadRuns.set(threadId, input.runId)
             yield* store.attach(input.runId, threadId, input.directory, input.model)
@@ -382,12 +467,13 @@ export const ResidentCodexLive = (
               }),
             }
           }).pipe(
-            Effect.mapError(
-              () =>
-                new WorkspaceError({
-                  operation: "resident dispatch",
-                  cause: new Error("resident dispatch failed; inspect durable inbox"),
-                }),
+            Effect.mapError((error) =>
+              error instanceof ExecutionSelectionError
+                ? error
+                : new WorkspaceError({
+                    operation: "resident dispatch",
+                    cause: new Error("resident dispatch failed; inspect durable inbox"),
+                  }),
             ),
           ),
       }

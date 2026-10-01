@@ -40,6 +40,18 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("execution-only mode needs no OpenCode or GitHub credentials and no aliases", async () => {
+    const config = await loadConfig({
+      WORKFLOWD_MODE: "execution",
+      WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+    })
+    expect(config.mode).toBe("execution")
+    expect(config.agentRuns?.routes).toEqual([])
+    expect(config.executionCapabilities?.codexEnabled).toBe(true)
+    expect(config.github).toBeUndefined()
+    expect(config.openCode).toBeUndefined()
+  })
   test("loads Claude CLI-only dispatch routes and validates their syntax", async () => {
     const base = {
       ...requiredEnvironment,
@@ -168,7 +180,7 @@ describe("loadConfig", () => {
         { ...requiredEnvironment, WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret" },
         { home: "/home/test" },
       ),
-    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_ROUTES")
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_REPOSITORIES")
   })
 
   test("loads an optional central remote coordinator with token-file credentials", async () => {
@@ -266,7 +278,7 @@ describe("loadConfig", () => {
       { home: "/home/test" },
     )
 
-    expect(config.openCode.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
+    expect(config.openCode?.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
     await expect(
       loadConfig(
         {
@@ -496,8 +508,8 @@ describe("loadConfig", () => {
     )
 
     expect(reads).toEqual(["/run/credentials/webhook-secret", "/run/credentials/opencode-password"])
-    expect(config.github.webhookSecret).toBe("webhook-from-file")
-    expect(config.openCode.password).toBe("password-from-file")
+    expect(config.github?.webhookSecret).toBe("webhook-from-file")
+    expect(config.openCode?.password).toBe("password-from-file")
   })
 
   test.each([

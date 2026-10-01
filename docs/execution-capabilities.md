@@ -95,7 +95,9 @@ observation output to 8 MB. OpenCode rejects incompatible SDK responses as
 | `WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED` | True when agent runs or resident Codex is enabled; otherwise false. Explicit true/false overrides discovery composition. |
 | `WORKFLOWD_AGENT_RUN_CODEX_BIN` | `codex`; discovery uses the same configured executable. |
 
-OpenCode is already a required local adapter. Codex uses the resident's configured
+OpenCode is required for the default automation consumer and absent in explicit
+execution-only mode. See [local dispatch](execution-dispatch.md) for consumer
+configuration and deterministic model/thinking selection. Codex uses the resident's configured
 home when resident Codex is enabled, otherwise the daemon's inherited Codex home.
 Without a discovery credential the HTTP route is unregistered (404). The credential
 can enable discovery without configuring agent-run routes or repositories. An
@@ -112,8 +114,8 @@ outgoing discovery fetch.
 
 ## Following slices
 
-`workflowd-ccw.2` can consume this normalized contract for explicit executor/model
-selection, including the native/selection ID distinction, and apply/persist thinking
-settings. Dispatch behavior and route resolution are unchanged here. `.3` owns
+`workflowd-ccw.2` consumes this normalized contract for explicit executor/model
+selection, including the native/selection ID distinction, and applies/persists thinking
+settings. [Local dispatch](execution-dispatch.md) documents the interface. `.3` owns
 runner registration and remote advertisements. No remote or messaging lifecycle is
 introduced by this local read interface.

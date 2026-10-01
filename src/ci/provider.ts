@@ -23,7 +23,7 @@ export const CiProvider = Context.Service<{
 const STREAM = "WORKFLOWD_CI_V1"
 export const CiProviderLive = (
   config: CiConfig,
-  github: AppConfig["github"],
+  github: NonNullable<AppConfig["github"]>,
   OctokitClass: typeof Octokit = Octokit,
 ) =>
   Layer.effect(

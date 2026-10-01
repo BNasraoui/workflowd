@@ -1394,6 +1394,14 @@ const openCodeResidentMailbox = Effect.gen(function* () {
   yield* sql`ALTER TABLE resident_threads ADD COLUMN capability_hash TEXT`
 })
 
+const executionSelection = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN executor_kind TEXT NOT NULL DEFAULT 'opencode' CHECK(executor_kind IN ('opencode','codex','claude'))`
+  yield* sql`UPDATE kernel_agent_runs SET executor_kind = CASE provider_id WHEN 'codex-cli' THEN 'codex' WHEN 'claude-cli' THEN 'claude' ELSE 'opencode' END`
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN requested_selection TEXT`
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN resolved_selection TEXT`
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0019,
@@ -1401,5 +1409,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0021_ci_completion_store": ciCompletionStore,
     "0022_resident_inbox_store": residentInboxStore,
     "0023_opencode_resident_mailbox": openCodeResidentMailbox,
+    "0024_execution_selection": executionSelection,
   }),
 })
