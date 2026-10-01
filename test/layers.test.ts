@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Effect, Layer } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
@@ -20,6 +20,7 @@ import { Automation } from "../src/opencode"
 import { WorkflowStore } from "../src/store/contracts"
 import { Workspace } from "../src/workspace"
 import { WorkflowStart } from "../src/qrspi/workflow-start"
+import { ExecutionDiscovery } from "../src/execution-capabilities"
 
 const qrspiDefinition = {
   contractVersion: 1,
@@ -107,6 +108,9 @@ test("starts and restarts the full live layer with both kernel stores", async ()
         WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
         WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
         WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
+        WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+        WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
+        OPENCODE_SERVER_URL: "http://127.0.0.1:1",
       },
       { home: directory },
     )
@@ -123,6 +127,19 @@ test("starts and restarts the full live layer with both kernel stores", async ()
           const watchdog = yield* AgentRunWatchdog
           const claudeResume = yield* ClaudeResumeWorker
           const dogfood = yield* DogfoodStore
+          const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
+          if (Option.isNone(discovery))
+            return yield* Effect.die(new Error("expected configured discovery module"))
+          const catalog = yield* discovery.value.list()
+          if (
+            catalog.sources.length !== 1 ||
+            catalog.sources[0]?.kind !== "opencode" ||
+            catalog.sources[0]?.status !== "unavailable"
+          ) {
+            return yield* Effect.die(
+              new Error("expected only the enabled, unavailable OpenCode discovery source"),
+            )
+          }
           // Both supervised iterations run once against the empty store so
           // the composed worker pipelines execute, not just resolve.
           const watchdogStatus = yield* watchdog.iteration

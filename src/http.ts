@@ -32,6 +32,7 @@ import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
 import type { DogfoodStorePort } from "./kernel/dogfood-store"
 import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
+import type { ExecutionCapabilities } from "./execution-capability-contract"
 
 type QrspiIngress = {
   readonly token: string
@@ -64,6 +65,10 @@ export type WebhookHandlerOptions = {
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
+  readonly executionCapabilities?: {
+    readonly token: string
+    readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
+  }
 }
 
 export function routeRequest(
@@ -71,6 +76,22 @@ export function routeRequest(
   options: WebhookHandlerOptions,
 ): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   const { pathname } = new URL(request.url)
+  if (
+    pathname === "/execution-capabilities" &&
+    request.method === "GET" &&
+    options.executionCapabilities !== undefined
+  ) {
+    if (!authorized(request.headers.get("authorization"), options.executionCapabilities.token)) {
+      return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+    }
+    return options.executionCapabilities.list().pipe(
+      Effect.match({
+        onSuccess: (capabilities) => Response.json(capabilities),
+        onFailure: () =>
+          Response.json({ error: "capability discovery unavailable" }, { status: 503 }),
+      }),
+    )
+  }
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
   }

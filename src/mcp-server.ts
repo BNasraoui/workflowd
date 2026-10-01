@@ -10,6 +10,7 @@ import { RemoteProbeProducerLive } from "./remote/probe-producer"
 import { WorkflowStoreLive } from "./store"
 import {
   loadAgentRunDaemon,
+  loadExecutionCapabilitiesDaemon,
   loadAgentWaitDaemon,
   loadMcpWriteAuth,
   requireDaemonTokenWithUrl,
@@ -79,8 +80,17 @@ export const startMcpServer = (
       try: () => loadAgentRunDaemon(env),
       catch: (cause) => new Error(String(cause)),
     })
+    const executionCapabilitiesDaemon = yield* Effect.tryPromise({
+      try: () => loadExecutionCapabilitiesDaemon(env),
+      catch: (cause) => new Error(String(cause)),
+    })
     yield* Effect.try({
-      try: () => requireDaemonTokenWithUrl(env, [agentWaitDaemon, agentRunDaemon]),
+      try: () =>
+        requireDaemonTokenWithUrl(env, [
+          agentWaitDaemon,
+          agentRunDaemon,
+          executionCapabilitiesDaemon,
+        ]),
       catch: (cause) => new Error(String(cause)),
     })
     const filename =
@@ -111,6 +121,7 @@ export const startMcpServer = (
       auth,
       ...(agentWaitDaemon === undefined ? {} : { agentWaitDaemon }),
       ...(agentRunDaemon === undefined ? {} : { agentRunDaemon }),
+      ...(executionCapabilitiesDaemon === undefined ? {} : { executionCapabilitiesDaemon }),
     })
     const server = yield* Effect.try({
       try: () => Bun.serve({ hostname: "127.0.0.1", port, fetch: fetchHandler }),

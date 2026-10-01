@@ -5,12 +5,13 @@ runs on mint beside the coordinator, listens on loopback
 (`127.0.0.1:$WORKFLOWD_MCP_PORT`, default 8791), and is fronted by
 `tailscale serve` the same way as the opencode server. The MCP process holds
 no workflow state of its own — every tool call reads or writes the same
-database the coordinator and the remote-enqueue CLI use.
+database the coordinator and the remote-enqueue CLI use. Capability discovery
+proxies the daemon's live adapter catalogs.
 
-The server targets MCP revision **2025-11-25** using SDK 1.30.0. All six
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All seven
 tools advertise an `outputSchema` and return the corresponding
 `structuredContent` in addition to a human-readable text rendering. Tool
-names use the SEP-986 canonical character set. The three query tools carry
+names use the SEP-986 canonical character set. The four query tools carry
 `readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
@@ -42,6 +43,7 @@ contract so agents learn it from the schema itself.
 | `job_status(job_id)` | read | Durable state of one job, plus its recorded result when complete. |
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
+| `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
 | `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
 | `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
@@ -238,8 +240,8 @@ receipt: end the turn after it arrives.
 
 ## Authorization
 
-Reads need no credential beyond reaching the transport (loopback or your
-tailnet). Both write tools are gated by a bearer token:
+The three store query tools need no credential beyond reaching the transport
+(loopback or your tailnet). Capability discovery and all write tools require a bearer token:
 
 - `WORKFLOWD_MCP_TOKEN` — token value directly (development only).
 - `WORKFLOWD_MCP_TOKEN_FILE` — path to a file containing the token. The
@@ -247,8 +249,8 @@ tailnet). Both write tools are gated by a bearer token:
   `WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token`, matching the other workflowd
   units.
 
-When neither is set, the server starts read-only and both write tools refuse
-every call. The token is never logged or echoed, including in error text.
+When neither is set, the store queries remain available; capability discovery
+and write tools refuse every call. The token is never logged or echoed, including in error text.
 
 `wait_for_agent` additionally needs to reach the daemon's agent-wait ingress,
 which carries its own token:

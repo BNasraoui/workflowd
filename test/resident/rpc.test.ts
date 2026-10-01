@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { RpcClient } from "../../src/resident/rpc"
+import { RpcRequestError } from "../../src/resident/rpc"
 test("multiplexes concurrent requests and routes notifications without consuming replies", async () => {
   const sent: string[] = []
   const notifications: unknown[] = []
@@ -32,4 +33,29 @@ test("disconnect rejects pending calls and redacts server errors", async () => {
   rpc.close()
   await expect(pending).rejects.toThrow("disconnected")
   await expect(rpc.request("thread/start", {})).rejects.toThrow("disconnected")
+})
+
+test("RPC error codes distinguish unsupported discovery while messages stay redacted", async () => {
+  let sent = ""
+  const rpc = new RpcClient(
+    (line) => {
+      sent = line
+    },
+    () => {},
+    1000,
+  )
+  const pending = rpc.request("model/list", {})
+  rpc.receive(
+    JSON.stringify({ id: JSON.parse(sent).id, error: { code: -32601, message: "secret" } }),
+  )
+  try {
+    await pending
+    throw new Error("expected failure")
+  } catch (error) {
+    expect(error).toBeInstanceOf(RpcRequestError)
+    expect(error instanceof RpcRequestError && error.code).toBe(-32601)
+    expect(String(error)).not.toContain("secret")
+  } finally {
+    rpc.close()
+  }
 })

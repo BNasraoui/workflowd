@@ -74,6 +74,7 @@ test("the streamable HTTP endpoint lists every tool with the fire-and-ack contra
     "enqueue_probe",
     "host_health",
     "job_status",
+    "list_execution_capabilities",
     "list_recent_jobs",
     "wait_for_agent",
   ])

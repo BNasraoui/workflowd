@@ -1,6 +1,8 @@
 import { MAX_RECENT_JOBS } from "./queries"
 import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
+import { ExecutionCapabilities } from "../execution-capability-contract"
+import { toJsonSchemaObject } from "../json"
 
 const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
   type: "object" as const,
@@ -48,6 +50,14 @@ type SuccessOutput = ReturnType<typeof objectSchema>
 const withRefusal = (success: SuccessOutput) => ({ anyOf: [success, REFUSED_OUTPUT] })
 
 export const TOOL_DEFINITIONS = [
+  {
+    name: "list_execution_capabilities",
+    description:
+      "List enabled local execution catalogs through authenticated daemon discovery. Identities separate host, executor, provider and native model. Advertised thinking variants, efforts, budgets and defaults are retained. Source timestamps and availability distinguish advertisement from verified access. Refresh is bounded; no route names are needed. Requires the MCP bearer token.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: { ...toJsonSchemaObject(ExecutionCapabilities), type: "object" as const },
+    annotations: readAnnotations,
+  },
   {
     name: "job_status",
     description:

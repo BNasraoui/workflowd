@@ -21,6 +21,7 @@ export type McpHttpHandlerOptions = {
   readonly auth: McpWriteAuth
   readonly agentWaitDaemon?: AgentWaitDaemonConfig
   readonly agentRunDaemon?: AgentWaitDaemonConfig
+  readonly executionCapabilitiesDaemon?: AgentWaitDaemonConfig
   readonly now?: () => Date
 }
 
@@ -48,6 +49,9 @@ export const createMcpFetchHandler = (options: McpHttpHandlerOptions) => {
         ? {}
         : { agentWaitDaemon: options.agentWaitDaemon }),
       ...(options.agentRunDaemon === undefined ? {} : { agentRunDaemon: options.agentRunDaemon }),
+      ...(options.executionCapabilitiesDaemon === undefined
+        ? {}
+        : { executionCapabilitiesDaemon: options.executionCapabilitiesDaemon }),
     }
     const server = new Server(
       { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
