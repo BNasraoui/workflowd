@@ -28,6 +28,7 @@ export type DiscoverySource = {
   readonly executor: string
   readonly kind?: string
   readonly protocol?: string
+  /** Abort ends the observation; settle only after owned native resources have been released. */
   readonly discover: (
     signal: AbortSignal,
   ) => Promise<
@@ -45,8 +46,11 @@ export function makeExecutionCapabilities(options: {
   readonly refreshMs: number
   readonly timeoutMs: number
   readonly now?: () => number
-}): () => Promise<ExecutionCapabilities> {
+}): { readonly list: () => Promise<ExecutionCapabilities>; readonly close: () => Promise<void> } {
   const now = options.now ?? Date.now
+  let closed = false
+  let closing: Promise<void> | undefined
+  const refreshes = new Set<{ controller: AbortController; completion: Promise<void> }>()
   type Observation = {
     checkedAt: number
     observedAt: number | null
@@ -61,18 +65,18 @@ export function makeExecutionCapabilities(options: {
     const refresh = (): Promise<Observation> => {
       if (pending) return pending
       const controller = new AbortController()
+      const native = Promise.resolve().then(() => {
+        controller.signal.throwIfAborted()
+        return source.discover(controller.signal)
+      })
       const operation = (async () => {
         let timer: ReturnType<typeof setTimeout> | undefined
+        const abort = Promise.withResolvers<never>()
+        const cancelled = () => abort.reject(new Error("Discovery cancelled"))
+        controller.signal.addEventListener("abort", cancelled, { once: true })
         try {
-          const result = await Promise.race([
-            Promise.resolve().then(() => source.discover(controller.signal)),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
-                controller.abort()
-                reject(new Error("timeout"))
-              }, options.timeoutMs)
-            }),
-          ])
+          timer = setTimeout(() => controller.abort(), options.timeoutMs)
+          const result = await Promise.race([native, abort.promise])
           const at = now()
           previous =
             "status" in result
@@ -92,10 +96,20 @@ export function makeExecutionCapabilities(options: {
           }
         } finally {
           clearTimeout(timer)
-          pending = undefined
+          controller.signal.removeEventListener("abort", cancelled)
         }
         return previous
       })()
+      // A bounded read can finish before native teardown. Keep ownership and
+      // coalescing until both settle, so disposal joins the actual adapter cleanup.
+      const owned = {
+        controller,
+        completion: Promise.allSettled([native, operation]).then(() => {
+          pending = undefined
+          refreshes.delete(owned)
+        }),
+      }
+      refreshes.add(owned)
       pending = operation
       return operation
     }
@@ -107,12 +121,14 @@ export function makeExecutionCapabilities(options: {
           : refresh(),
     }
   })
-  return async () => {
+  const list = async () => {
+    if (closed) throw new Error("Capability discovery closed")
     const results = await Promise.all(
       sources.map(async ({ source, read }) => {
         return { source, observation: await read() }
       }),
     )
+    if (closed) throw new Error("Capability discovery closed")
     return {
       sources: results.map(({ source, observation }) => ({
         executor: source.executor,
@@ -172,5 +188,15 @@ export function makeExecutionCapabilities(options: {
             })),
       ),
     }
+  }
+  return {
+    list,
+    close: () => {
+      if (closing) return closing
+      closed = true
+      for (const refresh of refreshes) refresh.controller.abort()
+      closing = Promise.all(Array.from(refreshes, (refresh) => refresh.completion)).then(() => {})
+      return closing
+    },
   }
 }

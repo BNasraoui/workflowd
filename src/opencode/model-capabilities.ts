@@ -4,6 +4,7 @@ import type { ExecutionThinking } from "../execution-capability-contract"
 
 const Settings = Schema.Struct({
   reasoningEffort: Schema.optionalKey(Schema.String),
+  reasoning_effort: Schema.optionalKey(Schema.String),
   reasoning: Schema.optionalKey(Schema.Struct({ effort: Schema.optionalKey(Schema.String) })),
   reasoningBudget: Schema.optionalKey(Schema.Finite),
   thinkingBudget: Schema.optionalKey(Schema.Finite),
@@ -32,10 +33,25 @@ function thinkingSettings(value: unknown) {
   ] as const) {
     if (amount !== undefined) budgets.push({ parameter, value: amount, unit: "tokens" })
   }
-  const effort = settings.reasoningEffort ?? settings.reasoning?.effort
+  const effort = settings.reasoning_effort ?? settings.reasoningEffort ?? settings.reasoning?.effort
   return {
     ...(effort === undefined ? {} : { effort }),
     ...(budgets.length === 0 ? {} : { budgets }),
+  }
+}
+
+function thinkingOverlays(settings: unknown, body: unknown) {
+  const base = thinkingSettings(settings)
+  const overlay = thinkingSettings(body)
+  // Raw body wins for the same native parameter, while distinct parameters survive.
+  const budgets = new Map([
+    ...(base.budgets ?? []).map((budget) => [budget.parameter, budget] as const),
+    ...(overlay.budgets ?? []).map((budget) => [budget.parameter, budget] as const),
+  ])
+  const effort = overlay.effort ?? base.effort
+  return {
+    ...(effort === undefined ? {} : { effort }),
+    ...(budgets.size === 0 ? {} : { budgets: Array.from(budgets.values()) }),
   }
 }
 
@@ -63,9 +79,8 @@ export function publicOpenCodeModel(model: Model.Info): OpenCodeModelAvailabilit
     limits: model.limit,
     variants: model.variants.map((variant) => ({
       id: variant.id,
-      ...thinkingSettings(variant.settings),
-      ...thinkingSettings(variant.body),
+      ...thinkingOverlays(variant.settings, variant.body),
     })),
-    defaults: { ...thinkingSettings(model.settings), ...thinkingSettings(model.body) },
+    defaults: thinkingOverlays(model.settings, model.body),
   }
 }

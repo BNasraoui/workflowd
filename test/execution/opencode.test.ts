@@ -12,6 +12,75 @@ const location = {
   project: { id: "fixture", directory: "/fixture", canonical: "/fixture" },
 }
 
+async function observeModel(model: Model.Info) {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname
+      return Response.json({
+        location,
+        data: path.endsWith("/provider") ? [] : path.endsWith("/default") ? model : [model],
+      })
+    },
+  })
+  try {
+    const client = OpenCode.make({ baseUrl: server.url.toString() }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+    )
+    return await makeExecutionCapabilities({
+      host: "box",
+      refreshMs: 1000,
+      timeoutMs: 1000,
+      sources: [makeOpenCodeDiscovery("oc", client)],
+    }).list()
+  } finally {
+    await server.stop(true)
+  }
+}
+
+test("OpenCode preserves raw body effort strings for defaults and variants without provider overlays", async () => {
+  const result = await observeModel({
+    ...Model.Info.default(Model.Ref.fields.providerID.make("fixture"), Model.ID.make("fixture")),
+    settings: { reasoningEffort: "settings-effort", apiKey: "private-credential" },
+    body: { reasoning_effort: "provider-deliberate", api_key: "private-credential" },
+    variants: [
+      {
+        id: Model.VariantID.make("deep"),
+        body: { reasoning_effort: "provider-extreme", secret: "private-credential" },
+      },
+    ],
+  })
+  expect(result.capabilities[0]?.thinking.defaultEffort).toBe("provider-deliberate")
+  expect(result.capabilities[0]?.thinking.variants).toEqual([
+    { id: "deep", effort: "provider-extreme" },
+  ])
+  expect(JSON.stringify(result)).not.toContain("private-credential")
+})
+
+test("OpenCode merges distinct native budget parameters and lets body override matching settings", async () => {
+  const settings = { reasoningBudget: 1024, thinkingBudget: 512, apiKey: "private-credential" }
+  const body = {
+    thinkingBudget: 4096,
+    thinking: { budget_tokens: 2048 },
+    secret: "private-credential",
+  }
+  const result = await observeModel({
+    ...Model.Info.default(Model.Ref.fields.providerID.make("fixture"), Model.ID.make("fixture")),
+    settings,
+    body,
+    variants: [{ id: Model.VariantID.make("deep"), settings, body }],
+  })
+  const budgets = [
+    { parameter: "reasoningBudget", value: 1024, unit: "tokens" },
+    { parameter: "thinkingBudget", value: 4096, unit: "tokens" },
+    { parameter: "thinking.budget_tokens", value: 2048, unit: "tokens" },
+  ]
+  expect(result.capabilities[0]?.thinking.defaultBudgets).toEqual(budgets)
+  expect(result.capabilities[0]?.thinking.variants).toEqual([{ id: "deep", budgets }])
+  expect(JSON.stringify(result)).not.toContain("private-credential")
+})
+
 test("installed OpenCode SDK retains capabilities, variants, native ids and safe thinking defaults", async () => {
   const model = {
     ...Model.Info.default(Model.Ref.fields.providerID.make("fixture"), Model.ID.make("picker-id")),
@@ -75,7 +144,7 @@ test("installed OpenCode SDK retains capabilities, variants, native ids and safe
       ],
     })
     let now = 0
-    const list = makeExecutionCapabilities({
+    const { list } = makeExecutionCapabilities({
       host: "box",
       sources: [makeOpenCodeDiscovery("oc-local", client)],
       refreshMs: 1,
@@ -138,7 +207,7 @@ test("OpenCode auth rejection and an unconfigured provider have honest availabil
       status: "unauthenticated",
     })
     unauthorized = false
-    const list = makeExecutionCapabilities({
+    const { list } = makeExecutionCapabilities({
       host: "box",
       sources: [source],
       refreshMs: 1,

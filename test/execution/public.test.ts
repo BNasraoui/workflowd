@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import { routeRequest } from "../../src/http"
 import { callTool } from "../../src/mcp/tools"
 import { McpQueriesLive } from "../../src/mcp/queries"
@@ -9,7 +9,7 @@ import { kernelLayer } from "../kernel/job-store-harness"
 import { createMcpFetchHandler } from "../../src/mcp/server"
 import { makeExecutionCapabilities } from "../../src/execution-capabilities"
 
-const snapshot = makeExecutionCapabilities({
+const { list: snapshot } = makeExecutionCapabilities({
   host: "box",
   refreshMs: 100,
   timeoutMs: 10,
@@ -27,6 +27,44 @@ const daemonHandler = (request: Request) =>
       executionCapabilities: { token: "daemon-secret", list: listing },
     }).pipe(Effect.provide(testLayer)),
   )
+
+test("interrupting MCP discovery aborts its native fetch and remains an interruption", async () => {
+  const started = Promise.withResolvers<AbortSignal>()
+  const finish = Promise.withResolvers<Response>()
+  const abort = new AbortController()
+  const pending = Effect.runPromiseExit(
+    callTool(
+      "list_execution_capabilities",
+      {},
+      {
+        writesAuthorized: true,
+        writesConfigured: true,
+        now: () => new Date(),
+        executionCapabilitiesDaemon: {
+          baseUrl: "http://daemon",
+          token: "private-credential",
+          send: async (_url, init) => {
+            started.resolve(init.signal!)
+            return finish.promise
+          },
+        },
+      },
+    ).pipe(Effect.provide(testLayer)),
+    { signal: abort.signal },
+  )
+  try {
+    const signal = await started.promise
+    abort.abort()
+    const exit = await pending
+    expect(signal.aborted).toBe(true)
+    expect(exit._tag).toBe("Failure")
+    if (exit._tag === "Failure") expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+  } finally {
+    abort.abort()
+    finish.resolve(Response.json({ capabilities: [], sources: [] }))
+    await pending
+  }
+})
 
 test("daemon discovery is authenticated and lists native capabilities independently of dispatch", async () => {
   const denied = await daemonHandler(new Request("http://daemon/execution-capabilities"))

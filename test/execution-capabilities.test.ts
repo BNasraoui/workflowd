@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { makeExecutionCapabilities } from "../src/execution-capabilities"
 
 test("discovery keeps native identities and advertised thinking dialects separate", async () => {
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "box-a",
     refreshMs: 10,
     timeoutMs: 100,
@@ -47,7 +47,7 @@ test("bounded refresh reveals new models and never presents stale data as availa
   let now = 0
   let names = ["one"]
   let fail = false
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "box-a",
     refreshMs: 10,
     timeoutMs: 10,
@@ -79,7 +79,7 @@ test("bounded refresh reveals new models and never presents stale data as availa
 test("concurrent readers share refresh and timed out discoveries are cancelled", async () => {
   let calls = 0
   let cancelled = false
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "h",
     refreshMs: 10,
     timeoutMs: 5,
@@ -107,7 +107,7 @@ test("concurrent readers share refresh and timed out discoveries are cancelled",
 })
 
 test("one failed or unsupported source does not hide healthy sources", async () => {
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "h",
     refreshMs: 10,
     timeoutMs: 5,
@@ -125,7 +125,7 @@ test("one failed or unsupported source does not hide healthy sources", async () 
 test("a synchronous source failure can recover on the next bounded refresh", async () => {
   let now = 0
   let failed = true
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "h",
     refreshMs: 10,
     timeoutMs: 10,
@@ -149,7 +149,7 @@ test("a synchronous source failure can recover on the next bounded refresh", asy
 test("cached capabilities that expire while another source refreshes are marked stale and omitted", async () => {
   let now = 0
   const delayed = Promise.withResolvers<ReadonlyArray<{ provider: string; model: string }>>()
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "h",
     refreshMs: 10,
     timeoutMs: 10,
@@ -174,7 +174,7 @@ test("cached capabilities that expire while another source refreshes are marked 
 test("loss of authentication preserves observation time while withdrawing capabilities", async () => {
   let now = 0
   let authenticated = true
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "h",
     refreshMs: 10,
     timeoutMs: 10,
@@ -197,4 +197,57 @@ test("loss of authentication preserves observation time while withdrawing capabi
     stale: true,
     observedAt: new Date(0).toISOString(),
   })
+})
+
+test("disposal joins native teardown after a bounded read has already timed out", async () => {
+  const teardownStarted = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let calls = 0
+  let now = 0
+  let cleanupFinished = false
+  const discovery = makeExecutionCapabilities({
+    host: "h",
+    refreshMs: 10,
+    timeoutMs: 5,
+    now: () => now,
+    sources: [
+      {
+        executor: "fixture",
+        discover: async (signal) => {
+          calls++
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          )
+          teardownStarted.resolve()
+          await release.promise
+          cleanupFinished = true
+          throw new Error("cancelled")
+        },
+      },
+    ],
+  })
+  try {
+    expect((await discovery.list()).sources[0]?.status).toBe("unavailable")
+    await teardownStarted.promise
+    now = 11
+    expect((await discovery.list()).sources[0]?.status).toBe("unavailable")
+    expect(calls).toBe(1)
+    let disposed = false
+    const closing = discovery.close()
+    void closing.then(() => {
+      disposed = true
+    })
+    expect(discovery.close()).toBe(closing)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(disposed).toBe(false)
+    expect(cleanupFinished).toBe(false)
+    await expect(discovery.list()).rejects.toThrow("closed")
+    release.resolve()
+    await closing
+    expect(cleanupFinished).toBe(true)
+    expect(disposed).toBe(true)
+  } finally {
+    release.resolve()
+    await discovery.close()
+  }
 })

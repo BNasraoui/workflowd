@@ -137,22 +137,34 @@ export const makeLiveLayer = (config: AppConfig) => {
   const executionDiscoveryLayer =
     executionDiscoveryConfig === undefined
       ? Layer.empty
-      : Layer.sync(ExecutionDiscovery, () => {
-          const list = makeExecutionCapabilities({
-            host: config.worker.hostId,
-            sources: localDiscoverySources(config, openCodeClientEffect),
-            refreshMs: executionDiscoveryConfig.refreshMs,
-            timeoutMs: executionDiscoveryConfig.timeoutMs,
-          })
-          return ExecutionDiscovery.of({
-            list: Effect.fn("ExecutionDiscovery.list")(() =>
-              Effect.tryPromise({
-                try: list,
-                catch: () => new Error("Capability discovery unavailable"),
-              }),
-            ),
-          })
-        })
+      : Layer.effect(
+          ExecutionDiscovery,
+          Effect.gen(function* () {
+            const discovery = yield* Effect.acquireRelease(
+              Effect.sync(() =>
+                makeExecutionCapabilities({
+                  host: config.worker.hostId,
+                  sources: localDiscoverySources(config, openCodeClientEffect),
+                  refreshMs: executionDiscoveryConfig.refreshMs,
+                  timeoutMs: executionDiscoveryConfig.timeoutMs,
+                }),
+              ),
+              (resource) =>
+                Effect.tryPromise({
+                  try: () => resource.close(),
+                  catch: () => new Error("Capability discovery cleanup failed"),
+                }).pipe(Effect.orDie),
+            )
+            return ExecutionDiscovery.of({
+              list: Effect.fn("ExecutionDiscovery.list")(() =>
+                Effect.tryPromise({
+                  try: () => discovery.list(),
+                  catch: () => new Error("Capability discovery unavailable"),
+                }),
+              ),
+            })
+          }),
+        )
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,

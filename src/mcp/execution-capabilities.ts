@@ -20,13 +20,13 @@ export const listExecutionCapabilities = Effect.fn("Mcp.listExecutionCapabilitie
   if (daemon === undefined)
     return error("capability discovery is not configured on this MCP server")
   const result = yield* Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const response = await (daemon.send ?? fetch)(
         new URL("/execution-capabilities", daemon.baseUrl),
         {
           method: "GET",
           headers: { authorization: `Bearer ${daemon.token}`, accept: "application/json" },
-          signal: AbortSignal.timeout(35_000),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]),
         },
       )
       if (!response.ok) throw new Error("Daemon discovery refused")

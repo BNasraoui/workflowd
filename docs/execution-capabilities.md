@@ -32,18 +32,22 @@ settings and the default model. Enabled models on configured, active providers a
 guarantee that a subsequent inference will succeed.
 
 The OpenCode variant and model overlays can contain credentials. Discovery projects
-only catalog fields and recognized thinking parameters (`reasoningEffort`,
+only catalog fields and recognized thinking parameters (`reasoningEffort`, `reasoning_effort`,
 `reasoning.effort`, `reasoningBudget`, `thinkingBudget`, `thinking.budgetTokens`,
 `thinking.budget_tokens`, and `thinkingConfig.thinkingBudget`). It never exports
 headers or arbitrary settings/body fields. Unrecognized settings remain unknown.
 Defaults are observations from the model catalog, not a universal reasoning enum.
+Model defaults and variants merge these projections from `settings` and raw `body`.
+Budgets with distinct native parameter names are retained; `body` overrides `settings`
+for matching parameters and effort defaults. Within one overlay, `reasoning_effort`
+takes precedence over `reasoningEffort`, then `reasoning.effort`.
 
 Codex uses a short-lived owned `app-server --listen stdio://`, initializes JSON-RPC,
 then reads `config/read`, `account/read` and all pages of `model/list` (including
 hidden models). The native contract was checked using Codex 0.159.1
 `app-server generate-ts`. Effort names remain strings; `defaultReasoningEffort`
 and `isDefault` are catalog defaults. The process closes after each observation
-and is terminated on timeout. It creates no thread or turn.
+and is terminated on timeout or disposal of the owning discovery layer. It creates no thread or turn.
 
 Codex model availability is `unknown` even when authenticated: its native catalog
 may be bundled or cached and does not prove account access to each model.
@@ -66,6 +70,10 @@ Reads share an in-flight refresh per source. A fresh observation is reused until
 the refresh interval expires. The next read refreshes expired sources concurrently,
 so a newly advertised native model appears without a route entry or daemon restart.
 This is request-driven refresh, with no background polling or subscription.
+The Effect layer owns shared refreshes. Interrupting one reader leaves the refresh
+available to other readers; disposing the layer aborts every owned observation and
+awaits native teardown, including teardown still running after a read timed out.
+A source cannot start another observation while its previous teardown is unfinished.
 
 Each source has a timeout and cancellation signal. Failure is isolated from healthy
 sources. Failed refreshes retain the last successful timestamp but omit stale
@@ -99,7 +107,8 @@ also needs `WORKFLOWD_DAEMON_URL` and the dedicated discovery token (or the exis
 agent-run token), matching the daemon. MCP proxies the daemon and schema-decodes
 the public response; it does not open its own model catalogs. Proxy failures return
 an in-band error with no structured success payload. Its deadline is 35 seconds,
-above the maximum source timeout.
+above the maximum source timeout. Interrupting the MCP request also aborts its
+outgoing discovery fetch.
 
 ## Following slices
 

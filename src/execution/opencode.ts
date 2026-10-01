@@ -4,6 +4,9 @@ import { HttpClientError } from "effect/unstable/http"
 import type { DiscoverySource, ExecutionModel } from "../execution-capabilities"
 import { publicOpenCodeModel } from "../opencode/model-capabilities"
 
+// Native protocol error preserved by the installed SDK (not a transport ClientError).
+const Unauthorized = Schema.TaggedStruct("UnauthorizedError", { message: Schema.String })
+
 export function makeOpenCodeDiscovery(
   executor: string,
   clientEffect: Effect.Effect<OpenCodeClient, Error>,
@@ -70,6 +73,9 @@ export function makeOpenCodeDiscovery(
               error,
             ): Effect.Effect<{ readonly status: "unsupported" | "unauthenticated" }, Error> => {
               const cause = "cause" in error ? error.cause : error
+              // The SDK preserves protocol errors, but wraps transport/decode errors.
+              if (Schema.is(Unauthorized)(error))
+                return Effect.succeed({ status: "unauthenticated" as const })
               if (Schema.isSchemaError(cause))
                 return Effect.succeed({ status: "unsupported" as const })
               if (HttpClientError.isHttpClientError(cause) && "response" in cause.reason) {

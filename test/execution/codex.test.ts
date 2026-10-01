@@ -8,7 +8,7 @@ const fixture = (mode = "normal") =>
   })
 
 test("Codex supported model/list protocol paginates and retains effort/default and native identity", async () => {
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "box",
     refreshMs: 10,
     timeoutMs: 1000,
@@ -40,7 +40,7 @@ test("Codex discovery reports auth, unsupported and malformed native sources wit
     ["malformed", "unsupported"],
     ["cycle", "unavailable"],
   ] as const) {
-    const list = makeExecutionCapabilities({
+    const { list } = makeExecutionCapabilities({
       host: "box",
       refreshMs: 10,
       timeoutMs: 1000,
@@ -54,7 +54,7 @@ test("Codex discovery reports auth, unsupported and malformed native sources wit
 })
 
 test("Codex discovery terminates the owned app-server on refresh timeout", async () => {
-  const list = makeExecutionCapabilities({
+  const { list } = makeExecutionCapabilities({
     host: "box",
     refreshMs: 10,
     timeoutMs: 40,
