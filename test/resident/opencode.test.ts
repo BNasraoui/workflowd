@@ -178,7 +178,7 @@ for (const late of [false, true])
             yield* runs.nextWatchable({
               now: new Date(),
               staleAfterMs: 1000,
-              unsupervisedProviderIds: [],
+              unsupervisedExecutorKinds: [],
             }),
           ).toBeNull()
           yield* complete

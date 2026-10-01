@@ -33,7 +33,14 @@ import { makeAgentRunCliDispatcher } from "./agent-run-cli"
 import { makeAgentRunCustody } from "./agent-run-custody"
 import { CODEX_PROVIDER_ID, CodexCli, codexSessionCustodyId } from "./codex-session"
 import type { AgentCompletionSourceIdentity } from "./agent-handoff-store"
-import { AgentRunStore, type AgentRunRecord, type AgentRunStoreError } from "./agent-run-store"
+import {
+  AgentRunStore,
+  AgentRunStoreConflictError,
+  agentRunExecutorKind,
+  type AgentRunRecord,
+  type AgentRunStoreError,
+} from "./agent-run-store"
+import type { CliPort, CliPreflightError } from "./cli-process-contract"
 import { KernelSessionStore, type KernelSessionStoreError } from "./session-store"
 
 export type AgentRunRefusalReason =
@@ -213,14 +220,26 @@ const make = (options: AgentRunIngressOptions) =>
     const claudeDispatchOption = yield* Effect.serviceOption(ClaudeDispatchCli)
     const claudeDispatch = Option.getOrUndefined(claudeDispatchOption)
     const signals = yield* WorkSignal
-    const codexReadiness = yield* codex.preflight.pipe(Effect.result)
+    const currentReadiness = (cli: CliPort | undefined, kind: string) =>
+      (
+        cli?.preflight ??
+        Effect.fail({ kind: "cli_unusable" as const, detail: `${kind} executor is disabled` })
+      ).pipe(
+        Effect.timeoutOrElse({
+          duration: "5 seconds",
+          orElse: () =>
+            Effect.fail({
+              kind: "cli_unusable",
+              detail: `${kind} preflight did not complete within 5 seconds`,
+            } satisfies CliPreflightError),
+        }),
+        Effect.result,
+      )
+    const codexReadiness = yield* currentReadiness(codex, "Codex")
     if (codexReadiness._tag === "Failure") {
       yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
     }
-    const claudeReadiness = yield* (
-      claudeDispatch?.preflight ??
-      Effect.fail({ kind: "cli_unusable" as const, detail: "Claude executor is disabled" })
-    ).pipe(Effect.result)
+    const claudeReadiness = yield* currentReadiness(claudeDispatch, "Claude")
     if (claudeReadiness._tag === "Failure" && (options.claudeRoutes?.length ?? 0) > 0)
       yield* Effect.logWarning("Claude CLI route unavailable at startup", claudeReadiness.failure)
 
@@ -382,7 +401,6 @@ const make = (options: AgentRunIngressOptions) =>
       cli: codex,
       executor: {
         kind: "codex",
-        custodyProviderId: CODEX_PROVIDER_ID,
         sessionCustodyId: codexSessionCustodyId,
       },
       store,
@@ -403,7 +421,6 @@ const make = (options: AgentRunIngressOptions) =>
             cli: claudeDispatch,
             executor: {
               kind: "claude",
-              custodyProviderId: CLAUDE_PROVIDER_ID,
               sessionCustodyId: claudeSessionCustodyId,
             },
             store,
@@ -461,6 +478,36 @@ const make = (options: AgentRunIngressOptions) =>
             host: parentHost,
             directory: submission.parentDirectory,
           })
+
+    const historicalSelection = (run: AgentRunRecord) =>
+      Effect.gen(function* () {
+        const custody = run.sessionId === null ? null : yield* sessions.readSession(run.sessionId)
+        if (run.sessionId !== null && custody === null)
+          return yield* refuse("run_conflict", "Historical session custody is missing")
+        const scope =
+          custody === null
+            ? {
+                owning_host_id: options.identity.owningHostId,
+                server_id: options.identity.serverId,
+              }
+            : yield* Schema.decodeUnknownEffect(
+                Schema.Struct({ owning_host_id: Schema.String, server_id: Schema.String }),
+              )(custody)
+        const kind = agentRunExecutorKind(run)
+        const model = run.modelId === "<cli-default>" ? null : run.modelId
+        return {
+          host: scope.owning_host_id,
+          executor: kind === "opencode" ? `opencode:${scope.server_id}` : `${kind}:local`,
+          executorKind: kind,
+          provider: kind === "opencode" ? run.providerId : null,
+          // Historical OpenCode rows record the catalog ID, not its native identity.
+          model: kind === "opencode" ? null : model,
+          selectionModel: model,
+          thinking: {},
+          availability: "unknown",
+          evidence: "configured",
+        } satisfies ResolvedSelection
+      })
 
     const prepareRegistration = (input: Parameters<AgentRunIngressPort["register"]>[0]) =>
       Effect.gen(function* () {
@@ -532,11 +579,22 @@ const make = (options: AgentRunIngressOptions) =>
             idempotencyKey: submission.idempotencyKey,
           }).runId,
         )
-        if (
-          keyed?.resolvedSelection != null &&
-          canonicalJson(keyed.requestedSelection ?? null) === canonicalJson(requested)
-        ) {
+        if (keyed?.resolvedSelection != null) {
+          // Immutable replay needs no current catalog; create still compares the
+          // complete requested document and rejects changed keyed choices.
           selection = keyed.resolvedSelection
+          resolution = choiceForSelection(selection, keyed.route)
+        } else if (keyed !== null) {
+          if (
+            submission.model !== undefined ||
+            submission.thinking !== undefined ||
+            identityRoute !== keyed.route
+          )
+            return yield* new AgentRunStoreConflictError({
+              runId: keyed.runId,
+              detail: "Historical accepted choice cannot confirm a changed selection",
+            })
+          selection = yield* historicalSelection(keyed)
           resolution = choiceForSelection(selection, keyed.route)
         } else if (submission.model !== undefined) {
           if (Option.isNone(discovery))
@@ -633,19 +691,24 @@ const make = (options: AgentRunIngressOptions) =>
               "dispatch without parentSessionId/resumePrompt and read the outcome later",
           )
         }
-        if (keyed !== null && ["spawned", "verified", "completed"].includes(keyed.state)) {
+        if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
         } else if (resolution.provider === "opencode" && submission.model === undefined) {
           yield* preflightRoute(resolution.route)
         } else if (resolution.provider !== "opencode") {
-          const readiness = resolution.provider === "claude" ? claudeReadiness : codexReadiness
+          const readiness = yield* currentReadiness(
+            resolution.provider === "claude" ? claudeDispatch : codex,
+            resolution.provider,
+          )
           if (readiness._tag === "Failure") {
             const issue = readiness.failure
             return yield* new AgentRunRefusalError({
               reason:
                 issue.kind === "systemd_unavailable"
                   ? "systemd_unavailable"
-                  : "provider_not_authenticated",
+                  : issue.kind === "not_authenticated"
+                    ? "provider_not_authenticated"
+                    : "executor_unavailable",
               detail: issue.detail,
             })
           }
@@ -766,7 +829,7 @@ const make = (options: AgentRunIngressOptions) =>
           modelId,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),
-          requestedSelection: run.requestedSelection ?? requested,
+          ...(run.requestedSelection == null ? {} : { requestedSelection: run.requestedSelection }),
           resolvedSelection: resolvedRun?.resolvedSelection ?? selection,
           ...(wait === undefined ? {} : { wait }),
         }
@@ -779,17 +842,11 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
-        if (
-          run.executorKind === "codex" ||
-          (run.executorKind === undefined && run.providerId === CODEX_PROVIDER_ID)
-        ) {
+        if (agentRunExecutorKind(run) === "codex") {
           yield* codexRuns.cancel(run, now)
           return
         }
-        if (
-          run.executorKind === "claude" ||
-          (run.executorKind === undefined && run.providerId === CLAUDE_PROVIDER_ID)
-        ) {
+        if (agentRunExecutorKind(run) === "claude") {
           if (claudeRuns === undefined)
             return yield* refuse("executor_unavailable", "Claude executor is disabled")
           yield* claudeRuns.cancel(run, now)

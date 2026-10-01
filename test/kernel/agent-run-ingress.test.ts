@@ -585,7 +585,7 @@ describe("agent-run ingress", () => {
         ),
       ),
     )
-    expect(refusal.reason).toBe("provider_not_authenticated")
+    expect(refusal.reason).toBe("executor_unavailable")
     expect(unusable.state.spawned).toHaveLength(0)
 
     const unauthenticated = makeCodexCli([], 0, {

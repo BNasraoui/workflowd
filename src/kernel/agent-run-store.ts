@@ -124,6 +124,18 @@ export type AgentRunStoreError =
 
 type Authority = { readonly runId: string; readonly now: Date }
 
+/** Only pre-contract callers lack an executor kind; their old markers identify native CLIs. */
+export const agentRunExecutorKind = (run: {
+  readonly executorKind?: "opencode" | "codex" | "claude"
+  readonly providerId: string
+}): "opencode" | "codex" | "claude" =>
+  run.executorKind ??
+  (run.providerId === "codex-cli"
+    ? "codex"
+    : run.providerId === "claude-cli"
+      ? "claude"
+      : "opencode")
+
 export type AgentRunStorePort = {
   readonly recordResolvedSelection: (
     input: Authority & { readonly selection: ResolvedSelection },
@@ -164,16 +176,18 @@ export type AgentRunStorePort = {
   readonly nextWatchable: (input: {
     readonly now: Date
     readonly staleAfterMs: number
-    /** Providers whose verified runs complete outside the watchdog (inline
-     * subprocess execution like codex-cli). Verified rows of these providers
-     * are invisible to the watchdog; their stale pre-verification rows are
-     * still cleaned up through the dispatch-incomplete path. */
-    readonly unsupervisedProviderIds: ReadonlyArray<string>
+    /** Executor kinds supervised through native process custody rather than the
+     * OpenCode watchdog, including uncertain pre-verification launches. */
+    readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
-  /** Startup recovery surface for providers whose execution lives outside
-   * the daemon and can be reattached after a restart. */
+  /** Metadata query for callers explicitly interested in a model provider. */
   readonly listActiveByProvider: (
     providerId: string,
+    transientOnly?: boolean,
+  ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
+  /** Startup recovery classifies execution by the persisted executor kind. */
+  readonly listActiveByExecutor: (
+    kind: "opencode" | "codex" | "claude",
     transientOnly?: boolean,
   ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
 }
@@ -284,13 +298,7 @@ const make = Effect.gen(function* () {
           (legacyAlias ||
             canonicalJson(existing.requestedSelection ?? null) ===
               canonicalJson(input.requestedSelection ?? null)) &&
-          existing.executorKind ===
-            (input.executorKind ??
-              (input.providerId === "codex-cli"
-                ? "codex"
-                : input.providerId === "claude-cli"
-                  ? "claude"
-                  : "opencode"))
+          existing.executorKind === agentRunExecutorKind(input)
         if (exact) return { status: "duplicate" as const }
         return yield* Effect.fail(
           conflict(input.runId, "run identity exists with different submission fields"),
@@ -303,7 +311,7 @@ const make = Effect.gen(function* () {
         ${input.agent}, ${input.repository}, ${input.directory}, ${input.prompt},
         ${input.promptSha256}, ${input.parentSessionId}, ${input.resumePrompt}, 'accepted', 1,
         ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()},
-        ${input.executorKind ?? (input.providerId === "codex-cli" ? "codex" : input.providerId === "claude-cli" ? "claude" : "opencode")},
+        ${agentRunExecutorKind(input)},
         ${input.requestedSelection === undefined ? null : JSON.stringify(input.requestedSelection)},
         ${input.resolvedSelection === undefined ? null : JSON.stringify(input.resolvedSelection)})`
       return { status: "created" as const }
@@ -408,7 +416,7 @@ const make = Effect.gen(function* () {
       sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND (state IN ('accepted', 'spawning', 'spawned', 'verified')
-          OR (state = 'operator_required' AND provider_id IN ('codex-cli', 'claude-cli')))
+          OR (state = 'operator_required' AND executor_kind IN ('codex', 'claude')))
         RETURNING run_id`,
     )
 
@@ -435,14 +443,14 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const staleBefore = new Date(input.now.getTime() - input.staleAfterMs).toISOString()
       const verified =
-        input.unsupervisedProviderIds.length === 0
+        input.unsupervisedExecutorKinds.length === 0
           ? sql`state = 'verified'`
           : sql`state = 'verified'
-        AND provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
+        AND executor_kind NOT IN ${sql.in(input.unsupervisedExecutorKinds)}`
       const externallySupervised =
-        input.unsupervisedProviderIds.length === 0
+        input.unsupervisedExecutorKinds.length === 0
           ? sql`1 = 1`
-          : sql`provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
+          : sql`executor_kind NOT IN ${sql.in(input.unsupervisedExecutorKinds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
         WHERE (${verified}) AND NOT EXISTS (
           SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
@@ -471,6 +479,19 @@ const make = Effect.gen(function* () {
       return yield* Effect.forEach(rows, toRecord)
     })
 
+  const listActiveByExecutor: AgentRunStorePort["listActiveByExecutor"] = (
+    kind,
+    transientOnly = false,
+  ) =>
+    Effect.gen(function* () {
+      const rows = yield* sql`SELECT * FROM kernel_agent_runs
+        WHERE executor_kind = ${kind} AND state IN ('spawning', 'spawned', 'verified')
+        AND (${transientOnly ? 1 : 0} = 0 OR NOT EXISTS (
+          SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
+        )) ORDER BY created_at, run_id`
+      return yield* Effect.forEach(rows, toRecord)
+    })
+
   return AgentRunStore.of({
     recordResolvedSelection: (input) =>
       transition(
@@ -493,6 +514,7 @@ const make = Effect.gen(function* () {
     operatorRequired,
     nextWatchable,
     listActiveByProvider,
+    listActiveByExecutor,
   })
 })
 

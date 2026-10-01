@@ -80,8 +80,15 @@ for compatibility; the new resolved document is authoritative for model identity
 
 Migration `0024_execution_selection` adds executor kind and requested/resolved JSON
 documents to run rows. Old executor markers migrate to kinds; old selection JSON
-stays null. It does not invent historical model or thinking evidence. Plain legacy
-alias duplicates remain compatible when their original fields match.
+stays null. It does not invent historical model or thinking evidence. Historical
+alias duplicates replay the original persisted provider/catalog model, even if the
+alias changes provider, model or executor or the catalog is unavailable. Custodied
+host/server identity comes from the original session. Their receipts omit the
+unknown requested document and report unknown native OpenCode model/thinking
+rather than substituting the current alias. Explicit model/thinking changes conflict.
+Runtime recovery, cancellation and watchdog filtering use executor kind; provider
+names such as `codex-cli` and `claude-cli` remain valid OpenCode model providers.
+Only genuine pre-contract rows use those markers as an executor migration fallback.
 
 Accepted selections are immutable across catalog refresh, duplicate calls,
 watchdog retries and native recovery. OpenCode retries/mailbox prompts carry the
@@ -91,7 +98,12 @@ conflicts before launch. Unkeyed explicit choices have distinct durable identiti
 Use an idempotency key when replaying across alias configuration changes. Native
 CLI completion, cancellation, leases and process custody retain their existing
 semantics; native CLI failures still escalate rather than introducing automatic
-CLI turn replay. Parent wakes continue to require an OpenCode child.
+CLI turn replay. A launch command error, timeout or subsequent inspection failure
+retains the manifest and spawning row, fences duplicate launches and permits restart
+reconciliation with the same invocation. An absent unit before invocation adoption
+is still uncertain unless a durable terminal record exists; recovery escalates to
+`operator_required` while retaining custody, so a late launch can still be cancelled.
+Parent wakes continue to require an OpenCode child.
 
 ## Execution-only daemon
 
@@ -106,8 +118,11 @@ WORKFLOWD_HOST_ID=your-host
 ```
 
 Codex is enabled by default when agent runs are configured. Its local authentication
-and user-systemd custody requirements still apply to launch. Capability discovery
-can be separately disabled with its existing Codex flag. No flat aliases, OpenCode
+and user-systemd custody requirements still apply to launch. New native launches
+refresh current preflight with a five-second bound, so authentication/readiness can
+recover or become unavailable without a daemon restart. Already-launched duplicates
+replay their accepted choice without requiring current authentication or discovery.
+Capability discovery can be separately disabled with its existing Codex flag. No flat aliases, OpenCode
 server/password or GitHub App/private key/webhook secret are required. Optional
 `WORKFLOWD_AGENT_RUN_CODEX_ROUTES` and `WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES` preserve
 configured conveniences. The GitHub webhook route returns 404 in this mode.

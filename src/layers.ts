@@ -30,9 +30,8 @@ import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
-import { CODEX_PROVIDER_ID, CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { CodexCli, makeCodexCli } from "./kernel/codex-session"
 import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
-import { CLAUDE_PROVIDER_ID } from "./kernel/claude-session"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import {
   ClaudeResumeRemoteProducer,
@@ -516,7 +515,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
             // Codex runs complete inline in the dispatching request; their
             // verified rows are invisible to the watchdog.
-            unsupervisedProviderIds: [CODEX_PROVIDER_ID, CLAUDE_PROVIDER_ID],
+            unsupervisedExecutorKinds: ["codex", "claude"],
             now: () => new Date(),
           }),
         ).pipe(

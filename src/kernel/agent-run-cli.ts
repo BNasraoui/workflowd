@@ -34,7 +34,7 @@ export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSe
     | "complete"
     | "cancel"
     | "operatorRequired"
-    | "listActiveByProvider"
+    | "listActiveByExecutor"
   >
 
 const pullEvent = (iterator: AsyncIterator<CliEvent>) =>
@@ -155,7 +155,6 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   /** Claude and Codex share durable process custody, verification, and recovery. */
   readonly executor: {
     readonly kind: "codex" | "claude"
-    readonly custodyProviderId: string
     readonly sessionCustodyId: (nativeSessionId: string) => string
   }
   readonly cli: CliPort
@@ -171,7 +170,6 @@ export const makeAgentRunCliDispatcher = (dependencies: {
 }) => {
   const { cli, store, worktrees, signals, ensureResource, ensureSession, refuse } = dependencies
   const kind = dependencies.executor.kind
-  const providerId = dependencies.executor.custodyProviderId
   const sessionCustodyId = dependencies.executor.sessionCustodyId
 
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
@@ -288,19 +286,16 @@ export const makeAgentRunCliDispatcher = (dependencies: {
               : { effort: run.resolvedSelection.thinking.effort }),
           })
           .pipe(
+            Effect.tapError((error) =>
+              error instanceof ExecutionSelectionError
+                ? store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(Effect.ignore)
+                : Effect.logError(`${kind} launch result uncertain; spawning custody retained`, {
+                    runId: run.runId,
+                    cause: error,
+                  }),
+            ),
             Effect.mapError((error) =>
               error instanceof ExecutionSelectionError ? refuse(error.reason, error.detail) : error,
-            ),
-            Effect.tapError((cause) =>
-              store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(
-                Effect.tap(() =>
-                  Effect.logError(`${kind} launch failed; incomplete run claim removed`, {
-                    runId: run.runId,
-                    cause,
-                  }),
-                ),
-                Effect.ignore,
-              ),
             ),
           )
         const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
@@ -363,7 +358,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
 
   const recover = Effect.gen(function* () {
     if (cli.ownership === "resident-thread") return 0
-    const runs = yield* store.listActiveByProvider(providerId, true)
+    const runs = yield* store.listActiveByExecutor(kind, true)
     yield* cli.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {

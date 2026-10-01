@@ -14,7 +14,6 @@ export const makeAgentRunCodexDispatcher = (
     cli: codex,
     executor: {
       kind: "codex",
-      custodyProviderId: "codex-cli",
       sessionCustodyId: codexSessionCustodyId,
     },
   })

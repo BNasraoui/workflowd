@@ -22,7 +22,12 @@ const manager = (behavior?: { readonly ignoreStop?: boolean }) => {
     }
     if (command.includes("show-environment")) return { exitCode: 0, stdout: "", stderr: "" }
     if (command.includes("show")) {
-      if (state === "absent") return { exitCode: 1, stdout: "", stderr: "Unit not found" }
+      if (state === "absent")
+        return {
+          exitCode: 1,
+          stdout: "LoadState=not-found\nActiveState=inactive\n",
+          stderr: "Unit not found",
+        }
       return {
         exitCode: 0,
         stdout:

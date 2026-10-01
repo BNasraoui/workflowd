@@ -110,7 +110,7 @@ const iterate = (
   runAgentRunWatchdogIteration({
     progressWindowMs,
     staleAfterMs: 60 * 60_000,
-    unsupervisedProviderIds: [],
+    unsupervisedExecutorKinds: [],
     now: () => now,
   }).pipe(
     Effect.provideService(AgentRunProvider, provider(telemetry, calls)),

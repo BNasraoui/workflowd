@@ -1,6 +1,6 @@
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
@@ -280,22 +280,15 @@ export const makeDurableCliProcess = (
       "--no-pager",
       executionId,
     ])
-    if (result.exitCode !== 0) {
-      return {
-        pid: 0,
-        present: false,
-        active: false,
-        invocationId: "",
-        description: "",
-        result: "",
-      }
-    }
     const fields = new Map(
       (result.stdout ?? "")
         .split("\n")
         .filter((line) => line.includes("="))
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
+    // A failed manager query is not evidence that the unit is absent.
+    if (result.exitCode !== 0 && fields.get("LoadState") !== "not-found")
+      throw commandFailure("inspect transient unit", result)
     return {
       pid: Number(fields.get("MainPID") ?? 0),
       present: fields.get("LoadState") !== "not-found",
@@ -308,7 +301,17 @@ export const makeDurableCliProcess = (
 
   const reconcile = async (path: string, manifest: Manifest) => {
     const unit = await inspectUnit(manifest.executionId)
-    if (!unit.present) return { manifest, unit }
+    if (!unit.present) {
+      // An unconfirmed launch command can still publish its unit after this query.
+      // Only an adopted invocation or a durable terminal record proves it settled.
+      if (
+        manifest.invocationId === null &&
+        !(await fileExists(manifest.resultPath)) &&
+        !(await fileExists(manifest.cancelledPath))
+      )
+        throw new Error(`${cliName} launch remains unconfirmed; process custody retained`)
+      return { manifest, unit }
+    }
     const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
       throw new Error("codex transient unit invocation identity mismatch")
@@ -502,93 +505,89 @@ export const makeDurableCliProcess = (
     spawn: (input) =>
       Effect.tryPromise({
         try: async () => {
-          try {
-            safeRunId(input.runId)
-            const directory = join(options.custodyRoot, input.runId)
-            const executionId = executionIdFor(input.runId, unitPrefix)
-            const launchId = crypto.randomUUID()
-            const promptPath = join(directory, "prompt")
-            const eventsPath = join(directory, "events.jsonl")
-            const stderrPath = join(directory, "stderr.log")
-            const resultPath = join(directory, "result.json")
-            const cancelledPath = join(directory, "cancelled.json")
-            await mkdir(directory, { recursive: true, mode: 0o700 })
-            await chmod(directory, 0o700)
-            await writeFile(promptPath, input.prompt, { mode: 0o600, flag: "wx" })
-            await writeFile(eventsPath, "", { mode: 0o600, flag: "wx" })
-            await writeFile(stderrPath, "", { mode: 0o600, flag: "wx" })
-            const manifest: Manifest = {
-              version: 2,
-              runId: input.runId,
-              launchId,
-              executionId,
-              invocationId: null,
-              eventsPath,
-              stderrPath,
-              resultPath,
-              cancelledPath,
-            }
-            await writeJsonAtomic(manifestPath(input.runId), manifest)
-
-            const forwardedEnvironment = [
-              "HOME",
-              "PATH",
-              "CODEX_HOME",
-              "CLAUDE_CONFIG_DIR",
-              "SSH_AUTH_SOCK",
-              "GIT_CONFIG_GLOBAL",
-              "GIT_SSH_COMMAND",
-              "XDG_CONFIG_HOME",
-              "XDG_DATA_HOME",
-              "XDG_STATE_HOME",
-              "XDG_CACHE_HOME",
-            ].flatMap((name) => {
-              const value = process.env[name]
-              return value === undefined ? [] : [`--setenv=${name}=${value}`]
-            })
-            const command = [
-              "systemd-run",
-              "--user",
-              "--quiet",
-              "--service-type=exec",
-              `--unit=${executionId}`,
-              `--description=workflowd ${cliName} launch ${launchId}`,
-              `--working-directory=${input.directory}`,
-              "--property=KillMode=control-group",
-              ...forwardedEnvironment,
-              ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
-                ([name, value]) => `--setenv=${name}=${value}`,
-              ),
-              process.execPath,
-              workerPath,
-              "--binary",
-              options.binary,
-              "--directory",
-              input.directory,
-              "--prompt-file",
-              promptPath,
-              "--result-file",
-              resultPath,
-              "--events-file",
-              eventsPath,
-              "--stderr-file",
-              stderrPath,
-              "--max-output-bytes",
-              String(maxOutputBytes),
-              ...(input.model === null ? [] : ["--model", input.model]),
-              ...(input.effort === undefined ? [] : ["--effort", input.effort]),
-              ...(input.provider == null ? [] : ["--provider", input.provider]),
-            ]
-            const launched = await runBoundedCommand(command)
-            if (launched.exitCode !== 0)
-              throw commandFailure("launch codex transient unit", launched)
-            const process_ = await Effect.runPromise(attach({ runId: input.runId }))
-            if (process_ === null) throw new Error("codex custody vanished after launch")
-            return process_
-          } catch (cause) {
-            await rm(join(options.custodyRoot, input.runId), { recursive: true, force: true })
-            throw cause
+          safeRunId(input.runId)
+          const directory = join(options.custodyRoot, input.runId)
+          const executionId = executionIdFor(input.runId, unitPrefix)
+          const launchId = crypto.randomUUID()
+          const promptPath = join(directory, "prompt")
+          const eventsPath = join(directory, "events.jsonl")
+          const stderrPath = join(directory, "stderr.log")
+          const resultPath = join(directory, "result.json")
+          const cancelledPath = join(directory, "cancelled.json")
+          await mkdir(directory, { recursive: true, mode: 0o700 })
+          await chmod(directory, 0o700)
+          await writeFile(promptPath, input.prompt, { mode: 0o600, flag: "wx" })
+          await writeFile(eventsPath, "", { mode: 0o600, flag: "wx" })
+          await writeFile(stderrPath, "", { mode: 0o600, flag: "wx" })
+          const manifest: Manifest = {
+            version: 2,
+            runId: input.runId,
+            launchId,
+            executionId,
+            invocationId: null,
+            eventsPath,
+            stderrPath,
+            resultPath,
+            cancelledPath,
           }
+          await writeJsonAtomic(manifestPath(input.runId), manifest)
+
+          const forwardedEnvironment = [
+            "HOME",
+            "PATH",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "SSH_AUTH_SOCK",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_SSH_COMMAND",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+          ].flatMap((name) => {
+            const value = process.env[name]
+            return value === undefined ? [] : [`--setenv=${name}=${value}`]
+          })
+          const command = [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--service-type=exec",
+            `--unit=${executionId}`,
+            `--description=workflowd ${cliName} launch ${launchId}`,
+            `--working-directory=${input.directory}`,
+            "--property=KillMode=control-group",
+            ...forwardedEnvironment,
+            ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+              ([name, value]) => `--setenv=${name}=${value}`,
+            ),
+            process.execPath,
+            workerPath,
+            "--binary",
+            options.binary,
+            "--directory",
+            input.directory,
+            "--prompt-file",
+            promptPath,
+            "--result-file",
+            resultPath,
+            "--events-file",
+            eventsPath,
+            "--stderr-file",
+            stderrPath,
+            "--max-output-bytes",
+            String(maxOutputBytes),
+            ...(input.model === null ? [] : ["--model", input.model]),
+            ...(input.effort === undefined ? [] : ["--effort", input.effort]),
+            ...(input.provider == null ? [] : ["--provider", input.provider]),
+          ]
+          // Retain the manifest on every uncertain launch/inspection outcome. A manager
+          // command error or timeout does not prove the native execution stopped.
+          const launched = await runBoundedCommand(command)
+          if (launched.exitCode !== 0) throw commandFailure("launch codex transient unit", launched)
+          const process_ = await Effect.runPromise(attach({ runId: input.runId }))
+          if (process_ === null) throw new Error("codex custody vanished after launch")
+          return process_
         },
         catch: (cause) =>
           cause instanceof WorkspaceError

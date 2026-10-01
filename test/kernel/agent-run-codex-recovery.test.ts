@@ -64,7 +64,6 @@ test("Claude spawning recovery persists native model evidence and Claude custody
   const runtime = makeAgentRunCliDispatcher({
     executor: {
       kind: "claude",
-      custodyProviderId: "claude-cli",
       sessionCustodyId: (id) => `claude-session-${id}`,
     },
     cli: {
@@ -97,8 +96,8 @@ test("Claude spawning recovery persists native model evidence and Claude custody
       recordProgress: () => Effect.void,
       cancel: () => Effect.void,
       operatorRequired: () => Effect.void,
-      listActiveByProvider: (provider) => {
-        expect(provider).toBe("claude-cli")
+      listActiveByExecutor: (provider) => {
+        expect(provider).toBe("claude")
         return Effect.succeed([recovered])
       },
       recordResolvedSelection: ({ selection }) =>
@@ -161,7 +160,7 @@ test("startup recovery owns spawning, spawned, and verified Codex transition bou
       }),
     fail: () => Effect.void,
     abandonLaunch: () => Effect.void,
-    listActiveByProvider: () => Effect.succeed(records),
+    listActiveByExecutor: () => Effect.succeed(records),
     recordProgress: (input: { readonly outputTokens: number }) =>
       Effect.sync(() => {
         outputTokens = input.outputTokens
@@ -231,7 +230,7 @@ test("resident mode leaves recovery and cancellation to the resident supervisor"
         completed += 1
       }),
     operatorRequired: () => Effect.void,
-    listActiveByProvider: () =>
+    listActiveByExecutor: () =>
       Effect.sync(() => {
         listed = true
         return [record]

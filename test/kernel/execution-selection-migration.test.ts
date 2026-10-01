@@ -27,7 +27,18 @@ test("migration retains legacy rows, separates executors and rejects malformed s
         expect(row?.executorKind).toBe(kind)
         expect(row?.resolvedSelection).toBeNull()
         expect(row?.modelId).toBe("configured")
+        yield* store.claimSpawn({ runId: id, now: new Date("2026-10-01") })
+        expect((yield* store.listActiveByExecutor(kind, true)).map((run) => run.runId)).toEqual([
+          id,
+        ])
       }
+      expect(
+        (yield* store.nextWatchable({
+          now: new Date("2026-10-02"),
+          staleAfterMs: 1000,
+          unsupervisedExecutorKinds: ["codex", "claude"],
+        }))?.runId,
+      ).toBe("opencode-provider")
       expect(
         yield* store.create({
           runId: "codex-cli",

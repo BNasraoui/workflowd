@@ -24,7 +24,7 @@ export type AgentRunWatchdogOptions = {
   readonly staleAfterMs: number
   /** Providers whose verified runs complete outside the watchdog (inline
    * subprocess execution like codex-cli); those rows are never watchable. */
-  readonly unsupervisedProviderIds: ReadonlyArray<string>
+  readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
   readonly now: () => Date
 }
 
@@ -51,7 +51,7 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
     const run = yield* store.nextWatchable({
       now,
       staleAfterMs: options.staleAfterMs,
-      unsupervisedProviderIds: options.unsupervisedProviderIds,
+      unsupervisedExecutorKinds: options.unsupervisedExecutorKinds,
     })
     if (run === null) return "idle" as const
 
