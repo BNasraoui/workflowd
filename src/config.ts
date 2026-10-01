@@ -12,6 +12,7 @@ import {
   type AgentRunCodexRoute,
   parseAgentRunClaudeHosts,
   parseAgentRunCodexRoutes,
+  parseAgentRunClaudeRoutes,
   parseAgentRunRepositories,
   parseAgentRunRoutes,
   type AgentRunRepository,
@@ -108,6 +109,7 @@ export interface AgentRunConfig {
   readonly remoteTurnTimeoutMs: number
   readonly routes: ReadonlyArray<AgentRunRoute>
   readonly codexRoutes: ReadonlyArray<AgentRunCodexRoute>
+  readonly claudeRoutes: ReadonlyArray<AgentRunCodexRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
   readonly verifyTimeoutMs: number
@@ -390,7 +392,8 @@ function loadAgentRunConfig(
   if (token === undefined) {
     if (
       env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
-      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined
+      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
@@ -418,11 +421,20 @@ function loadAgentRunConfig(
           codexUnitPrefix: env.WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX,
         }),
     remoteTurnTimeoutMs,
-    routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
+    routes:
+      env.WORKFLOWD_AGENT_RUN_ROUTES === undefined &&
+      (env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
+        env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined)
+        ? []
+        : parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
     codexRoutes:
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES === undefined
         ? []
         : parseAgentRunCodexRoutes(env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES),
+    claudeRoutes:
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES === undefined
+        ? []
+        : parseAgentRunClaudeRoutes(env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES),
     repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
     verifyTimeoutMs: positiveInteger(

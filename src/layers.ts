@@ -31,6 +31,8 @@ import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
 import { CODEX_PROVIDER_ID, CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
+import { CLAUDE_PROVIDER_ID } from "./kernel/claude-session"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import {
   ClaudeResumeRemoteProducer,
@@ -343,6 +345,13 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provide(storeLayer),
         )
   const residentLayer = residentLive ?? Layer.empty
+  const claudeDispatchLayer = Layer.succeed(
+    ClaudeDispatchCli,
+    makeClaudeDispatchCli({
+      binary: config.agentRuns?.claudeBinary ?? "claude",
+      custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+    }),
+  )
   const codexCliLayer =
     residentLive === undefined
       ? Layer.effect(
@@ -415,6 +424,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           AgentRunIngressLive({
             routes: config.agentRuns.routes,
             codexRoutes: config.agentRuns.codexRoutes,
+            claudeRoutes: config.agentRuns.claudeRoutes,
             repositories: config.agentRuns.repositories,
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
@@ -432,7 +442,7 @@ export const makeLiveLayer = (config: AppConfig) => {
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
             // Codex runs complete inline in the dispatching request; their
             // verified rows are invisible to the watchdog.
-            unsupervisedProviderIds: [CODEX_PROVIDER_ID],
+            unsupervisedProviderIds: [CODEX_PROVIDER_ID, CLAUDE_PROVIDER_ID],
             now: () => new Date(),
           }),
         ).pipe(
@@ -442,6 +452,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
+          Layer.provideMerge(claudeDispatchLayer),
           Layer.provideMerge(workerIdentityLayer),
           Layer.provideMerge(openCodeMailboxLayer),
           Layer.provideMerge(workSignalLayer),

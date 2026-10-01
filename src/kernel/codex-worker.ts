@@ -38,26 +38,31 @@ const drainBounded = async (stream: ReadableStream<Uint8Array>, path: string, li
 
 /** Runs inside a transient user service and durably captures bounded output. */
 export async function runCodexWorker(options: CodexWorkerOptions): Promise<number> {
+  return runCliWorker(options, [
+    options.binary,
+    "exec",
+    "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--cd",
+    options.directory,
+    ...(options.model === null ? [] : ["-m", options.model]),
+    "-",
+  ])
+}
+
+/** Shared bounded capture for durable CLI processes. */
+export async function runCliWorker(
+  options: CodexWorkerOptions,
+  command: ReadonlyArray<string>,
+): Promise<number> {
   const prompt = await readFile(options.promptFile)
-  const child = Bun.spawn(
-    [
-      options.binary,
-      "exec",
-      "--json",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--cd",
-      options.directory,
-      ...(options.model === null ? [] : ["-m", options.model]),
-      "-",
-    ],
-    {
-      cwd: options.directory,
-      env: process.env,
-      stdin: prompt,
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  )
+  const child = Bun.spawn([...command], {
+    cwd: options.directory,
+    env: process.env,
+    stdin: prompt,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
   const [status] = await Promise.all([
     child.exited,
     drainBounded(child.stdout, options.eventsFile, options.maxOutputBytes),

@@ -40,6 +40,31 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("loads Claude CLI-only dispatch routes and validates their syntax", async () => {
+    const base = {
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+    }
+    const config = await loadConfig({
+      ...base,
+      WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=claude-opus-5-5,sonnet=claude-sonnet-5-5",
+    })
+    expect(config.agentRuns?.routes).toEqual([])
+    expect(config.agentRuns?.claudeRoutes).toEqual([
+      { name: "claude", modelID: "claude-opus-5-5" },
+      { name: "sonnet", modelID: "claude-sonnet-5-5" },
+    ])
+    await expect(
+      loadConfig({
+        ...base,
+        WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=anthropic/claude-opus-5-5",
+      }),
+    ).rejects.toThrow("claude model id")
+    await expect(
+      loadConfig({ ...requiredEnvironment, WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=opus" }),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_TOKEN is required")
+  })
   test("loads the optional agent-run section with routes and repositories", async () => {
     const config = await loadConfig(
       {
@@ -57,6 +82,7 @@ describe("loadConfig", () => {
       token: "agent-run-secret",
       claudeBinary: "claude",
       claudeHosts: [],
+      claudeRoutes: [],
       codexBinary: "codex",
       remoteTurnTimeoutMs: 120_000,
       routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],

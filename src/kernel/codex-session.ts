@@ -116,7 +116,8 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
   }
 }
 
-const AUTH_FAILURE_PATTERN = /401|unauthorized|not logged in|missing bearer/i
+const AUTH_FAILURE_PATTERN =
+  /401|unauthorized|not logged in|missing bearer|authentication_failed|please log ?in/i
 
 /** Heuristic over collected codex error text: did the failure look like
  * missing or rejected credentials rather than a model/turn problem? */
@@ -135,6 +136,13 @@ type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CodexCliOptions = {
   readonly binary: string
+  /** CLI-specific protocol; process custody and systemd ownership are shared. */
+  readonly driver?: {
+    readonly name: string
+    readonly workerPath: string
+    readonly parseEvent: (line: string) => CodexExecEvent
+    readonly preflight: Effect.Effect<void, CodexPreflightError>
+  }
   readonly identity?: {
     readonly environment: (runId: string) => Readonly<Record<string, string>>
     readonly register: (runId: string, pid: number) => void
@@ -232,7 +240,9 @@ export const makeCodexCli = (
   const retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60_000
   const now = options.now ?? (() => new Date())
   const runCommand = options.runCommand ?? defaultRunCommand
-  const workerPath = fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
+  const workerPath =
+    options.driver?.workerPath ?? fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
+  const cliName = options.driver?.name ?? "codex"
   const manifestPath = (runId: string) =>
     join(options.custodyRoot, safeRunId(runId), "manifest.json")
 
@@ -305,7 +315,7 @@ export const makeCodexCli = (
   const reconcile = async (path: string, manifest: Manifest) => {
     const unit = await inspectUnit(manifest.executionId)
     if (!unit.present) return { manifest, unit }
-    const expectedDescription = `workflowd codex launch ${manifest.launchId}`
+    const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
       throw new Error("codex transient unit invocation identity mismatch")
     }
@@ -362,7 +372,7 @@ export const makeCodexCli = (
           pollIntervalMs,
           shouldStop: async () =>
             (await terminal()) !== null || Date.now() - attachedAt >= observationTimeoutMs,
-          parse: parseCodexExecEvent,
+          parse: options.driver?.parseEvent ?? parseCodexExecEvent,
         })
 
         const waitInactive = (durationMs: number): Promise<boolean> => {
@@ -493,6 +503,10 @@ export const makeCodexCli = (
           detail: `the user systemd manager is unavailable: ${manager.stderr.trim()}`,
         })
       }
+      if (options.driver !== undefined) {
+        yield* options.driver.preflight
+        return
+      }
       yield* runWorkspaceCommand("check codex cli", [options.binary, "--version"]).pipe(
         Effect.mapError((cause): CodexPreflightError => ({
           kind: "cli_unusable",
@@ -541,6 +555,7 @@ export const makeCodexCli = (
               "HOME",
               "PATH",
               "CODEX_HOME",
+              "CLAUDE_CONFIG_DIR",
               "SSH_AUTH_SOCK",
               "GIT_CONFIG_GLOBAL",
               "GIT_SSH_COMMAND",
@@ -558,7 +573,7 @@ export const makeCodexCli = (
               "--quiet",
               "--service-type=exec",
               `--unit=${executionId}`,
-              `--description=workflowd codex launch ${launchId}`,
+              `--description=workflowd ${cliName} launch ${launchId}`,
               `--working-directory=${input.directory}`,
               "--property=KillMode=control-group",
               ...forwardedEnvironment,

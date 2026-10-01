@@ -95,6 +95,31 @@ describe("agent-run cross-provider route resolution", () => {
   )
   const codex = parseAgentRunCodexRoutes("scan=gpt-5.1-codex,default")
 
+  test("resolves Claude CLI routes without any OpenCode Claude provider", () => {
+    const claude = [{ name: "claude", modelID: "claude-opus-5-5" }] as const
+    for (const requested of ["claude", "claude-opus-5-5"]) {
+      expect(resolveAgentRunRouteChoice(openCode, codex, requested, claude)).toEqual({
+        outcome: "resolved",
+        provider: "claude",
+        route: claude[0],
+      })
+    }
+    expect(
+      resolveAgentRunRouteChoice(openCode, codex, "hard", [{ name: "hard", modelID: "opus" }]),
+    ).toEqual({
+      outcome: "refused",
+      reason: "ambiguous_route",
+    })
+    expect(
+      resolveAgentRunRouteChoice(openCode, codex, "claude-fable-5", [
+        { name: "fable", modelID: "claude-fable-5" },
+      ]),
+    ).toEqual({
+      outcome: "refused",
+      reason: "ambiguous_route",
+    })
+  })
+
   test("resolves opencode routes first and codex routes by name or bare model id", () => {
     expect(resolveAgentRunRouteChoice(openCode, codex, "hard")).toEqual({
       outcome: "resolved",

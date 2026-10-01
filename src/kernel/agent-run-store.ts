@@ -349,7 +349,7 @@ const make = Effect.gen(function* () {
       sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND (state IN ('accepted', 'spawning', 'spawned', 'verified')
-          OR (state = 'operator_required' AND provider_id = 'codex-cli'))
+          OR (state = 'operator_required' AND provider_id IN ('codex-cli', 'claude-cli')))
         RETURNING run_id`,
     )
 

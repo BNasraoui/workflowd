@@ -44,11 +44,12 @@ const diagnostic = (
   stallWindowMs: number,
   exit: Exit.Exit<CodexExit, WorkspaceError>,
   turnFailed: string | null,
+  cliName: string,
 ) => {
   if (stalled)
-    return `codex_stalled: no codex event for ${stallWindowMs}ms; the process group was terminated`
+    return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
   const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
-  let detail = `codex_failed: exit ${exitCode}`
+  let detail = `${cliName}_failed: exit ${exitCode}`
   if (turnFailed !== null) detail += `; ${turnFailed}`
   if (Exit.isSuccess(exit) && exit.value.stderr !== "")
     detail += `; stderr: ${exit.value.stderr.slice(0, 500)}`
@@ -69,7 +70,7 @@ type Observation = {
   readonly cancel: Effect.Effect<void, WorkspaceError>
 }
 
-const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
+const observeFirstToken = (process: CodexRunProcess, timeoutMs: number, cliName: string) =>
   Effect.gen(function* () {
     const iterator = process.events[Symbol.asyncIterator]()
     const exited = yield* Effect.forkDetach(process.exited)
@@ -86,8 +87,8 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
             reason: "no_first_token" as const,
             detail:
               firstMessage === null
-                ? "codex exited before producing model output"
-                : "codex produced model output but never announced a thread id; the runner cannot custody it",
+                ? `${cliName} exited before producing model output`
+                : `${cliName} produced model output but never announced a session id; the runner cannot custody it`,
           }
         }
         if (step.type === "thread.started") threadId = step.threadId
@@ -100,7 +101,7 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
     const timedOut: Effect.Effect<FirstToken> = Effect.as(Effect.sleep(timeoutMs), {
       outcome: "refused" as const,
       reason: "no_first_token" as const,
-      detail: `codex produced no model output within ${timeoutMs}ms of spawn`,
+      detail: `${cliName} produced no model output within ${timeoutMs}ms of spawn`,
     })
     const result = yield* Effect.race(streamed, timedOut)
     if (result.outcome === "generating") {
@@ -116,7 +117,7 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
       (graceExit !== null && codexFailureLooksUnauthenticated([graceExit.stderr]))
     const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
     let detail = result.detail
-    if (authFailed) detail += ": the codex CLI reported an authentication failure"
+    if (authFailed) detail += `: the ${cliName} CLI reported an authentication failure`
     else {
       if (errors.length > 0) detail += `; last error: ${errors.at(-1)}`
       if (graceExit !== null && graceExit.stderr !== "")
@@ -131,6 +132,12 @@ const observeFirstToken = (process: CodexRunProcess, timeoutMs: number) =>
   })
 
 export const makeAgentRunCodexDispatcher = (dependencies: {
+  /** Claude and Codex share durable process custody, verification, and recovery. */
+  readonly harness?: {
+    readonly kind: "codex" | "claude"
+    readonly providerId: string
+    readonly sessionCustodyId: (nativeSessionId: string) => string
+  }
   readonly codex: CodexCliPort
   readonly store: AgentRunCodexStore
   readonly worktrees: AgentRunWorktreesPort
@@ -143,6 +150,9 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
   readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
 }) => {
   const { codex, store, worktrees, signals, ensureResource, ensureSession, refuse } = dependencies
+  const kind = dependencies.harness?.kind ?? "codex"
+  const providerId = dependencies.harness?.providerId ?? "codex-cli"
+  const sessionCustodyId = dependencies.harness?.sessionCustodyId ?? codexSessionCustodyId
 
   const complete = (input: {
     readonly runId: string
@@ -176,7 +186,13 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       const exit: Exit.Exit<CodexExit, WorkspaceError> = yield* Effect.exit(
         Fiber.join(input.exited),
       )
-      if (!stalled && Exit.isSuccess(exit) && exit.value.exitCode === 0 && finalMessage !== null) {
+      if (
+        !stalled &&
+        turnFailed === null &&
+        Exit.isSuccess(exit) &&
+        exit.value.exitCode === 0 &&
+        finalMessage !== null
+      ) {
         if (outputTokens !== null) {
           yield* store
             .recordProgress({ runId: input.runId, outputTokens, now: new Date() })
@@ -190,7 +206,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       yield* store
         .operatorRequired({
           runId: input.runId,
-          diagnostic: diagnostic(stalled, input.stallWindowMs, exit, turnFailed),
+          diagnostic: diagnostic(stalled, input.stallWindowMs, exit, turnFailed, kind),
           now: new Date(),
         })
         .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
@@ -240,7 +256,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
             Effect.tapError((cause) =>
               store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(
                 Effect.tap(() =>
-                  Effect.logError("codex launch failed; incomplete run claim removed", {
+                  Effect.logError(`${kind} launch failed; incomplete run claim removed`, {
                     runId: run.runId,
                     cause,
                   }),
@@ -249,7 +265,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
               ),
             ),
           )
-        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs)
+        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
         if (observed.result.outcome === "refused") {
           yield* store
             .fail({
@@ -265,12 +281,12 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           nativeSessionId: threadId,
           resourceId,
           createdAt: run.createdAt,
-          kind: "codex",
+          kind,
         })
         yield* store.markSpawned({
           runId: run.runId,
           resourceId,
-          sessionId: codexSessionCustodyId(threadId),
+          sessionId: sessionCustodyId(threadId),
           nativeSessionId: threadId,
           now,
         })
@@ -286,29 +302,29 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
               stallWindowMs: dependencies.progressWindowMs,
             }).pipe(
               Effect.catchCause((cause) =>
-                Effect.logError("codex inline completion failed", { runId: run.runId, cause }),
+                Effect.logError(`${kind} inline completion failed`, { runId: run.runId, cause }),
               ),
             ),
           )
         yield* signals.wake("agent-run")
-        return { nativeSessionId: threadId, outputTokens: 1, kind: "codex" as const }
+        return { nativeSessionId: threadId, outputTokens: 1, kind }
       }
       if (run.state === "verified" && run.nativeSessionId !== null) {
         return {
           nativeSessionId: run.nativeSessionId,
           outputTokens: run.lastOutputTokens,
-          kind: "codex" as const,
+          kind,
         }
       }
       return yield* refuse(
         "run_conflict",
-        `a previous dispatch left this run ${run.state}; codex processes cannot be re-observed`,
+        `a previous dispatch left this run ${run.state}; ${kind} processes cannot be re-observed`,
       )
     })
 
   const recover = Effect.gen(function* () {
     if (codex.ownership === "resident-thread") return 0
-    const runs = yield* store.listActiveByProvider("codex-cli", true)
+    const runs = yield* store.listActiveByProvider(providerId, true)
     yield* codex.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {
@@ -316,7 +332,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       if (attachment._tag === "Failure") {
         yield* store.operatorRequired({
           runId: run.runId,
-          diagnostic: `codex_recovery_failed: ${String(attachment.failure.cause)}`,
+          diagnostic: `${kind}_recovery_failed: ${String(attachment.failure.cause)}`,
           now: new Date(),
         })
         continue
@@ -325,7 +341,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       if (process === null) {
         yield* store.operatorRequired({
           runId: run.runId,
-          diagnostic: "codex_recovery_failed: durable process custody is missing",
+          diagnostic: `${kind}_recovery_failed: durable process custody is missing`,
           now: new Date(),
         })
         continue
@@ -334,11 +350,11 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       let exited = yield* Effect.forkDetach(process.exited)
       let initialFinalMessage: string | null = null
       if (run.state === "spawning") {
-        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs)
+        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
         if (observed.result.outcome === "refused") {
           yield* store.fail({
             runId: run.runId,
-            diagnostic: `codex_recovery_failed: ${observed.result.detail}`,
+            diagnostic: `${kind}_recovery_failed: ${observed.result.detail}`,
             now: new Date(),
           })
           continue
@@ -353,7 +369,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           nativeSessionId: observed.result.threadId,
           resourceId,
           createdAt: run.createdAt,
-          kind: "codex",
+          kind,
         })
         yield* store.markSpawned({
           runId: run.runId,
@@ -383,7 +399,7 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
           stallWindowMs: dependencies.progressWindowMs,
         }).pipe(
           Effect.catchCause((cause) =>
-            Effect.logError("recovered codex completion failed", { runId: run.runId, cause }),
+            Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
           ),
         ),
       )
@@ -403,17 +419,17 @@ export const makeAgentRunCodexDispatcher = (dependencies: {
       if (attachment === null) {
         yield* store.operatorRequired({
           runId: run.runId,
-          diagnostic: "codex_cancel_failed: durable process custody is missing",
+          diagnostic: `${kind}_cancel_failed: durable process custody is missing`,
           now,
         })
-        return yield* refuse("run_conflict", "codex process custody is missing")
+        return yield* refuse("run_conflict", `${kind} process custody is missing`)
       }
       yield* attachment.cancel.pipe(
         Effect.tapError((cause) =>
           store
             .operatorRequired({
               runId: run.runId,
-              diagnostic: `codex_cancel_failed: ${String(cause.cause)}`,
+              diagnostic: `${kind}_cancel_failed: ${String(cause.cause)}`,
               now,
             })
             .pipe(Effect.ignore),

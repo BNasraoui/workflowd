@@ -13,6 +13,7 @@ import { AgentRunWorktrees, type AgentRunWorktreesPort } from "../../src/kernel/
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { ClaudeCli, type ClaudeCliPort } from "../../src/kernel/claude-session"
 import { CodexCli } from "../../src/kernel/codex-session"
+import { ClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { OpenCodeSessionTelemetry } from "../../src/opencode/adapter"
@@ -248,6 +249,7 @@ export const makeLayer = (
   optionOverrides: Partial<
     import("../../src/kernel/agent-run-ingress").AgentRunIngressOptions
   > = {},
+  claude: import("../../src/kernel/codex-session").CodexCliPort = defaultCodex.port,
 ) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
@@ -268,6 +270,7 @@ export const makeLayer = (
     Layer.provideMerge(Layer.succeed(AgentRunWorktrees, trees)),
     Layer.provideMerge(Layer.succeed(ClaudeCli, claudeCli)),
     Layer.provideMerge(Layer.succeed(CodexCli, codex)),
+    Layer.provideMerge(Layer.succeed(ClaudeDispatchCli, claude)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 }

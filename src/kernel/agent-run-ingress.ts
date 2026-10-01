@@ -7,6 +7,7 @@ import {
   AgentRunSubmission,
   resolveAgentRunRouteChoice,
   type AgentRunCodexRoute,
+  type AgentRunClaudeRoute,
   type AgentRunReceipt,
   type AgentRunRepository,
   type AgentRunRoute,
@@ -17,7 +18,8 @@ import { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
 import { AgentRunWorktrees } from "./agent-run-worktrees"
-import { ClaudeCli } from "./claude-session"
+import { CLAUDE_PROVIDER_ID, ClaudeCli, claudeSessionCustodyId } from "./claude-session"
+import { ClaudeDispatchCli } from "./claude-dispatch"
 import { makeAgentRunCodexDispatcher } from "./agent-run-codex"
 import { makeAgentRunCustody } from "./agent-run-custody"
 import { CODEX_PROVIDER_ID, CodexCli, codexSessionCustodyId } from "./codex-session"
@@ -93,6 +95,7 @@ export type AgentRunIngressOptions = {
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
   readonly codexRoutes: ReadonlyArray<AgentRunCodexRoute>
+  readonly claudeRoutes?: ReadonlyArray<AgentRunClaudeRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
   readonly worktreeRoot: string
@@ -174,11 +177,15 @@ const make = (options: AgentRunIngressOptions) =>
             .pipe(Effect.map((instruction) => `${instruction}\n\n${run.prompt}`))
         : Effect.succeed(run.prompt)
     const codex = yield* CodexCli
+    const claudeDispatch = yield* ClaudeDispatchCli
     const signals = yield* WorkSignal
     const codexReadiness = yield* codex.preflight.pipe(Effect.result)
     if (codexReadiness._tag === "Failure") {
       yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
     }
+    const claudeReadiness = yield* claudeDispatch.preflight.pipe(Effect.result)
+    if (claudeReadiness._tag === "Failure" && (options.claudeRoutes?.length ?? 0) > 0)
+      yield* Effect.logWarning("Claude CLI route unavailable at startup", claudeReadiness.failure)
 
     const { ensureResource, ensureSession, registerWait, resolveParentDirectory } =
       makeAgentRunCustody({ sessions, provider, waits, claude, options, refuse })
@@ -329,6 +336,23 @@ const make = (options: AgentRunIngressOptions) =>
       workerPrompt,
     })
     yield* codexRuns.recover
+    const claudeRuns = makeAgentRunCodexDispatcher({
+      codex: claudeDispatch,
+      harness: {
+        kind: "claude",
+        providerId: CLAUDE_PROVIDER_ID,
+        sessionCustodyId: claudeSessionCustodyId,
+      },
+      store,
+      worktrees,
+      signals,
+      ensureResource,
+      ensureSession,
+      refuse,
+      verifyTimeoutMs: options.verifyTimeoutMs,
+      progressWindowMs: options.progressWindowMs,
+    })
+    yield* claudeRuns.recover
 
     const registerWaitIfPaired = (input: {
       readonly submission: AgentRunSubmissionType
@@ -393,6 +417,7 @@ const make = (options: AgentRunIngressOptions) =>
           options.routes,
           options.codexRoutes,
           submission.route,
+          options.claudeRoutes,
         )
         if (resolution.outcome === "refused") {
           return yield* refuse(
@@ -409,27 +434,30 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
-        if (resolution.provider === "codex" && submission.parentSessionId !== undefined) {
+        if (resolution.provider !== "opencode" && submission.parentSessionId !== undefined) {
           // The completion source only observes opencode children, so a codex
           // child could never deliver a parent wake; refusing loudly beats
           // registering a watch that can never complete.
           return yield* refuse(
             "invalid_wait_pairing",
-            "codex routes complete inline and support no parent wake yet; " +
+            `${resolution.provider} CLI routes complete inline and support no parent wake yet; ` +
               "dispatch without parentSessionId/resumePrompt and read the outcome later",
           )
         }
         if (resolution.provider === "opencode") {
           yield* preflightRoute(resolution.route)
-        } else if (codexReadiness._tag === "Failure") {
-          const issue = codexReadiness.failure
-          return yield* new AgentRunRefusalError({
-            reason:
-              issue.kind === "systemd_unavailable"
-                ? "systemd_unavailable"
-                : "provider_not_authenticated",
-            detail: issue.detail,
-          })
+        } else {
+          const readiness = resolution.provider === "claude" ? claudeReadiness : codexReadiness
+          if (readiness._tag === "Failure") {
+            const issue = readiness.failure
+            return yield* new AgentRunRefusalError({
+              reason:
+                issue.kind === "systemd_unavailable"
+                  ? "systemd_unavailable"
+                  : "provider_not_authenticated",
+              detail: issue.detail,
+            })
+          }
         }
         return { submission, resolution, repository }
       })
@@ -437,6 +465,13 @@ const make = (options: AgentRunIngressOptions) =>
     const register: AgentRunIngressPort["register"] = (input, now) =>
       Effect.gen(function* () {
         const { submission, resolution, repository } = yield* prepareRegistration(input)
+        const providerId =
+          resolution.provider === "opencode"
+            ? resolution.route.providerID
+            : resolution.provider === "claude"
+              ? CLAUDE_PROVIDER_ID
+              : CODEX_PROVIDER_ID
+        const modelId = resolution.route.modelID ?? "<cli-default>"
         const parentKind = submission.parentKind ?? "opencode"
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
@@ -460,12 +495,8 @@ const make = (options: AgentRunIngressOptions) =>
         const created = yield* store.create({
           runId: identifiers.runId,
           route: resolution.route.name,
-          providerId:
-            resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
-          modelId:
-            resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "<cli-default>")
-              : resolution.route.modelID,
+          providerId,
+          modelId,
           agent: options.agent,
           repository: repository.name,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
@@ -492,11 +523,10 @@ const make = (options: AgentRunIngressOptions) =>
             ? {
                 nativeSessionId: run.nativeSessionId ?? "",
                 outputTokens: run.lastOutputTokens,
-                kind:
-                  run.providerId === CODEX_PROVIDER_ID ? ("codex" as const) : ("opencode" as const),
+                kind: resolution.provider,
               }
-            : resolution.provider === "codex"
-              ? yield* codexRuns.dispatch(
+            : resolution.provider !== "opencode"
+              ? yield* (resolution.provider === "claude" ? claudeRuns : codexRuns).dispatch(
                   run,
                   resolution.route,
                   {
@@ -516,10 +546,11 @@ const make = (options: AgentRunIngressOptions) =>
                   },
                   now,
                 )
-        const childSessionId =
-          dispatched.kind === "codex"
-            ? codexSessionCustodyId(dispatched.nativeSessionId)
-            : opencodeSessionCustodyId(dispatched.nativeSessionId)
+        const childSessionId = {
+          claude: claudeSessionCustodyId,
+          codex: codexSessionCustodyId,
+          opencode: opencodeSessionCustodyId,
+        }[dispatched.kind](dispatched.nativeSessionId)
         const wait = yield* registerWaitIfPaired({
           submission,
           parentKind,
@@ -534,12 +565,8 @@ const make = (options: AgentRunIngressOptions) =>
           runId: identifiers.runId,
           sessionId: childSessionId,
           nativeSessionId: dispatched.nativeSessionId,
-          providerId:
-            resolution.provider === "codex" ? CODEX_PROVIDER_ID : resolution.route.providerID,
-          modelId:
-            resolution.provider === "codex"
-              ? (resolution.route.modelID ?? "<cli-default>")
-              : resolution.route.modelID,
+          providerId,
+          modelId,
           outputTokens: dispatched.outputTokens,
           status: created.status === "duplicate" ? ("duplicate" as const) : ("dispatched" as const),
           ...(wait === undefined ? {} : { wait }),
@@ -555,6 +582,10 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (run.providerId === CODEX_PROVIDER_ID) {
           yield* codexRuns.cancel(run, now)
+          return
+        }
+        if (run.providerId === CLAUDE_PROVIDER_ID) {
+          yield* claudeRuns.cancel(run, now)
           return
         }
         if (run.nativeSessionId === null) {

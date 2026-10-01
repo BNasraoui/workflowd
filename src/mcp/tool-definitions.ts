@@ -229,6 +229,10 @@ export const TOOL_DEFINITIONS = [
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +
       "reason — no silent hangs. Requires bearer-token authorization. " +
+      "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
+      "using its own credentials and model selection; Claude CLI routes never " +
+      "use an OpenCode provider. CLI runs have durable process custody and " +
+      "inline completion supervision. " +
       "PARENT WAKES: optionally pass parent_session_id plus resume_prompt to " +
       "also register a durable wait, and workflowd prompts your session when " +
       "the child finishes. The parent must be in kernel custody: sessions " +
@@ -240,6 +244,8 @@ export const TOOL_DEFINITIONS = [
       "When you are an external session the kernel does not hold, omit " +
       "parent_session_id: you still get the first-token-verified receipt and " +
       "can read the outcome later with job_status. " +
+      "Parent wakes currently require an OpenCode child; omit parent_session_id " +
+      "and resume_prompt for Claude CLI and Codex CLI routes. " +
       REFUSAL_CONTRACT +
       " After the receipt, END YOUR TURN — the runner's watchdog supervises " +
       "progress, auto-recovers stalls, and escalates to operator_required; do " +
