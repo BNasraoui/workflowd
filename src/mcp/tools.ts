@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
 import { McpQueries, MAX_RECENT_JOBS } from "./queries"
+import { listExecutionCapabilities } from "./execution-capabilities"
 import {
   AgentWaitReceipt,
   AgentWaitRefusal,
@@ -44,6 +45,7 @@ export type ToolCallContext = {
   readonly now: () => Date
   readonly agentWaitDaemon?: AgentWaitDaemon
   readonly agentRunDaemon?: AgentWaitDaemon
+  readonly executionCapabilitiesDaemon?: AgentWaitDaemon
 }
 
 const JobStatusArguments = Schema.Struct({ job_id: Schema.NonEmptyString })
@@ -116,6 +118,8 @@ const decodeArguments = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
 export const callTool = (name: string, args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
     switch (name) {
+      case "list_execution_capabilities":
+        return yield* listExecutionCapabilities(args, context)
       case "job_status": {
         const queries = yield* McpQueries
         const input = yield* decodeArguments(JobStatusArguments, args).pipe(Effect.result)

@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto"
 import { readFile } from "node:fs/promises"
 
 /**
- * The MCP write credential. Reads stay open on the loopback/tailnet
+ * The MCP credential for writes and local capability discovery. Store reads stay open on the loopback/tailnet
  * transport; the single write tool is refused unless the caller presents
  * this bearer token. When no source is configured, writes are disabled.
  *
@@ -155,6 +155,26 @@ export async function loadAgentRunDaemon(
     "WORKFLOWD_AGENT_RUN_TOKEN_FILE",
     "agent-run",
   )
+}
+
+/** A dedicated discovery credential takes precedence; legacy agent-run installations share its token. */
+export async function loadExecutionCapabilitiesDaemon(
+  env: Record<string, string | undefined>,
+  read: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
+): Promise<AgentWaitDaemonConfig | undefined> {
+  if (
+    env.WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN !== undefined ||
+    env.WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE !== undefined
+  ) {
+    return loadDaemonBinding(
+      env,
+      read,
+      "WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN",
+      "WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE",
+      "execution-capabilities",
+    )
+  }
+  return loadAgentRunDaemon(env, read)
 }
 
 /** Constant-time bearer comparison; never logs or echoes either value. */

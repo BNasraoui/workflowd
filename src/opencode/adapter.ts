@@ -2,6 +2,8 @@ import type { OpenCodeClient } from "@opencode-ai/client/effect"
 import { AbsolutePath, Agent, Location, Model, Session } from "@opencode-ai/client/effect"
 import { Data, DateTime, Effect, Filter, Option, Schema, Stream } from "effect"
 import { JsonValueSchema, type JsonValue } from "../json"
+import { publicOpenCodeModel, type OpenCodeModelAvailability } from "./model-capabilities"
+export type { OpenCodeModelAvailability } from "./model-capabilities"
 
 export type OpenCodeModel = {
   readonly providerID: string
@@ -114,11 +116,6 @@ export type OpenCodeSessionTelemetry = {
   readonly updatedAtMs: number
   readonly idle: boolean
   readonly outcome?: "succeeded" | "failed" | "interrupted"
-}
-
-export type OpenCodeModelAvailability = {
-  readonly providerID: string
-  readonly id: string
 }
 
 type SdkCall<Input, Output> = (input: Input) => Effect.Effect<Output, Error>
@@ -641,11 +638,7 @@ export function makeOpenCodeSdkClient(
       withClient((client) =>
         client.model
           .list(toLocationFilter(input.directory))
-          .pipe(
-            Effect.map((models) =>
-              models.data.map((model) => ({ providerID: model.providerID, id: model.id })),
-            ),
-          ),
+          .pipe(Effect.map((models) => models.data.map(publicOpenCodeModel))),
       ),
     // `provider.list` returns only providers the server has configured with
     // credentials, so membership here is the authentication pre-flight; the

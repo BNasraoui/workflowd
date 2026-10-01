@@ -73,6 +73,8 @@ import { WorkSignal, WorkSignalLive } from "./work-signal"
 import { RemoteCoordinatorLive } from "./remote/coordinator"
 import { RemoteCoordinatorStoreLive } from "./remote/coordinator-store"
 import { RemoteTransportLive } from "./remote/transport"
+import { ExecutionDiscovery, makeExecutionCapabilities } from "./execution-capabilities"
+import { localDiscoverySources } from "./execution/local"
 
 const resumeContract = <A, I>(definition: {
   readonly ref: { readonly name: string; readonly version: number }
@@ -131,6 +133,26 @@ export const makeLiveLayer = (config: AppConfig) => {
     ),
   )
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
+  const executionDiscoveryConfig = config.executionCapabilities
+  const executionDiscoveryLayer =
+    executionDiscoveryConfig === undefined
+      ? Layer.empty
+      : Layer.sync(ExecutionDiscovery, () => {
+          const list = makeExecutionCapabilities({
+            host: config.worker.hostId,
+            sources: localDiscoverySources(config, openCodeClientEffect),
+            refreshMs: executionDiscoveryConfig.refreshMs,
+            timeoutMs: executionDiscoveryConfig.timeoutMs,
+          })
+          return ExecutionDiscovery.of({
+            list: Effect.fn("ExecutionDiscovery.list")(() =>
+              Effect.tryPromise({
+                try: list,
+                catch: () => new Error("Capability discovery unavailable"),
+              }),
+            ),
+          })
+        })
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
@@ -507,6 +529,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           ),
         )
   return Layer.mergeAll(
+    executionDiscoveryLayer,
     ciLayer,
     residentLayer,
     workerIdentityLayer,

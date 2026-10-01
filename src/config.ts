@@ -21,6 +21,10 @@ import { normalizeWorkflowDefinition, type WorkflowDefinition } from "./qrspi/do
 import { loadRemoteNatsAuth } from "./remote/auth"
 import type { RemoteNatsAuth } from "./remote/auth"
 import { parseNatsServers } from "./remote/nats-url"
+import {
+  loadExecutionCapabilitiesConfig,
+  type ExecutionCapabilitiesConfig,
+} from "./execution/config"
 
 interface HttpConfig {
   readonly host: string
@@ -113,6 +117,7 @@ export interface AgentRunConfig {
 }
 
 export interface AppConfig {
+  readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
   readonly ci?: CiConfig
@@ -662,10 +667,15 @@ export async function loadConfig(
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
+  const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
+    ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),
+    codexEnabled: agentRuns !== undefined || residentCodex !== undefined,
+  })
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
+    ...(executionCapabilities === undefined ? {} : { executionCapabilities }),
     ...(residentCodex === undefined ? {} : { residentCodex }),
     ...(residentOpenCodeSocket === undefined ? {} : { residentOpenCodeSocket }),
     ...(ci === undefined ? {} : { ci }),

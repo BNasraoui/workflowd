@@ -14,7 +14,7 @@ the others attach to it.
 | Plane | Process | Default port | Purpose |
 | --- | --- | --- | --- |
 | Daemon | `workflowd.service` (`bun src/main.ts`) | 8787 | Webhook listener, kernel workers, HTTP ingresses, remote coordinator |
-| MCP server | `workflowd-mcp.service` (`bun src/mcp-server.ts`) | 8791 | Six MCP tools over the same store; the agent-facing front door |
+| MCP server | `workflowd-mcp.service` (`bun src/mcp-server.ts`) | 8791 | Seven MCP tools over the store and live local catalogs; the agent-facing front door |
 | Remote runner | `workflowd-runner.service` (`bun src/remote-runner.ts`) | — | Per-host execution of probe and `claude_resume` commands |
 | OpenCode server | `opencode-server.service` (external, v2 CLI) | 4096 | Agent sessions the daemon creates, prompts, and resumes |
 
@@ -153,6 +153,7 @@ The daemon serves, on one listener:
 | `/workflows/qrspi` | POST | token configured | Start a QRSPI workflow |
 | `/workflows/agent-waits` | POST | token configured | Register a durable agent wait (proxied by `wait_for_agent`) |
 | `/workflows/agent-runs` | POST | token configured | Dispatch an agent run (proxied by `dispatch_agent`) |
+| `/execution-capabilities` | GET | discovery or agent-run token configured | Authenticated local model/thinking discovery (proxied by `list_execution_capabilities`) |
 | `/workflows/test-jobs` | POST | token configured | Authenticated test-job canary |
 | `/workflows/dogfood/sessions` | GET | token configured | Read-only dogfood session enrichment |
 
@@ -160,6 +161,8 @@ Every `/workflows/*` route is token-gated and registered only when its
 feature is configured; without its token the path 404s. Route-specific
 request and response contracts are documented in [docs/mcp-server.md](docs/mcp-server.md)
 (agent waits and runs).
+The independent local discovery interface and its configuration are documented in
+[docs/execution-capabilities.md](docs/execution-capabilities.md).
 
 ## GitHub App
 

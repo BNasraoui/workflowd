@@ -1,4 +1,12 @@
-import { Schema } from "effect"
+import { Option, Schema } from "effect"
+const RpcErrorCode = Schema.Struct({ code: Schema.Int })
+
+/** Carries the protocol category, never the server's potentially sensitive payload. */
+export class RpcRequestError extends Error {
+  constructor(readonly code: number | undefined) {
+    super("Codex app-server rejected request")
+  }
+}
 const Frame = Schema.Struct({
   id: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
   result: Schema.optional(Schema.Unknown),
@@ -48,8 +56,10 @@ export class RpcClient {
       if (pending === undefined) return
       clearTimeout(pending.timer)
       this.pending.delete(frame.id)
-      if (frame.error !== undefined) pending.reject(new Error("Codex app-server rejected request"))
-      else pending.resolve(frame.result)
+      if (frame.error !== undefined) {
+        const error = Schema.decodeUnknownOption(RpcErrorCode)(frame.error)
+        pending.reject(new RpcRequestError(Option.isSome(error) ? error.value.code : undefined))
+      } else pending.resolve(frame.result)
     } else if (frame.method !== undefined)
       this.notify({ method: frame.method, params: frame.params })
   }
