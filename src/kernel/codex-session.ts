@@ -1,5 +1,6 @@
+import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schedule, Schema } from "effect"
@@ -21,8 +22,8 @@ export type {
  * directory, and the `codex exec --json` subcommand is their programmatic
  * surface: it runs one non-interactive turn in a working directory, prints
  * the event stream as JSONL on stdout, and exits when the turn is over.
- * That subprocess is the codex analog of OpenCode's promptAsync —
- * deliberately the only way workflowd ever drives a codex model.
+ * This module owns one-shot process custody. Resident threads use the
+ * separate app-server supervisor in resident/service.ts.
  */
 export const CODEX_PROVIDER_ID = "codex-cli"
 export const CODEX_ENDPOINT_ALIAS = "local-cli"
@@ -37,14 +38,8 @@ export const codexEndpointIdentity = (owningHostId: string) => `codex-cli://${ow
  * items, diffs) decodes to "other" and is ignored. Shapes captured from a
  * real codex-cli 0.153.4 run; see test/kernel/codex-session.test.ts.
  */
-export type CodexExecEvent =
-  | { readonly type: "thread.started"; readonly threadId: string }
-  | { readonly type: "turn.started" }
-  | { readonly type: "agent_message"; readonly text: string }
-  | { readonly type: "turn.completed"; readonly outputTokens: number | null }
-  | { readonly type: "turn.failed"; readonly message: string }
-  | { readonly type: "error"; readonly message: string }
-  | { readonly type: "other" }
+export type { CliEvent as CodexExecEvent } from "./cli-process-contract"
+import type { CliEvent as CodexExecEvent } from "./cli-process-contract"
 
 const isObject = (value: unknown): value is object => typeof value === "object" && value !== null
 
@@ -116,7 +111,8 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
   }
 }
 
-const AUTH_FAILURE_PATTERN = /401|unauthorized|not logged in|missing bearer/i
+const AUTH_FAILURE_PATTERN =
+  /401|unauthorized|not logged in|missing bearer|authentication_failed|please log ?in/i
 
 /** Heuristic over collected codex error text: did the failure look like
  * missing or rejected credentials rather than a model/turn problem? */
@@ -133,8 +129,15 @@ type CommandResult = {
 }
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
-export type CodexCliOptions = {
+export type CliProcessOptions = {
   readonly binary: string
+  /** CLI-specific protocol; process custody and systemd ownership are shared. */
+  readonly driver: {
+    readonly name: string
+    readonly workerPath: string
+    readonly parseEvent: (line: string) => CliEvent
+    readonly preflight: Effect.Effect<void, CliPreflightError>
+  }
   readonly identity?: {
     readonly environment: (runId: string) => Readonly<Record<string, string>>
     readonly register: (runId: string, pid: number) => void
@@ -219,9 +222,9 @@ const commandFailure = (operation: string, result: CommandResult) =>
     cause: new Error(`${operation} exited ${result.exitCode}: ${result.stderr.trim()}`),
   })
 
-export const makeCodexCli = (
-  options: CodexCliOptions,
-): Extract<CodexCliPort, { readonly ownership: "transient-exec" }> => {
+export const makeDurableCliProcess = (
+  options: CliProcessOptions,
+): Extract<CliPort, { readonly ownership: "transient-exec" }> => {
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")
@@ -232,7 +235,8 @@ export const makeCodexCli = (
   const retentionMs = options.retentionMs ?? 7 * 24 * 60 * 60_000
   const now = options.now ?? (() => new Date())
   const runCommand = options.runCommand ?? defaultRunCommand
-  const workerPath = fileURLToPath(new URL("./codex-worker.ts", import.meta.url))
+  const workerPath = options.driver.workerPath
+  const cliName = options.driver.name
   const manifestPath = (runId: string) =>
     join(options.custodyRoot, safeRunId(runId), "manifest.json")
 
@@ -276,22 +280,15 @@ export const makeCodexCli = (
       "--no-pager",
       executionId,
     ])
-    if (result.exitCode !== 0) {
-      return {
-        pid: 0,
-        present: false,
-        active: false,
-        invocationId: "",
-        description: "",
-        result: "",
-      }
-    }
     const fields = new Map(
       (result.stdout ?? "")
         .split("\n")
         .filter((line) => line.includes("="))
         .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
     )
+    // A failed manager query is not evidence that the unit is absent.
+    if (result.exitCode !== 0 && fields.get("LoadState") !== "not-found")
+      throw commandFailure("inspect transient unit", result)
     return {
       pid: Number(fields.get("MainPID") ?? 0),
       present: fields.get("LoadState") !== "not-found",
@@ -304,8 +301,18 @@ export const makeCodexCli = (
 
   const reconcile = async (path: string, manifest: Manifest) => {
     const unit = await inspectUnit(manifest.executionId)
-    if (!unit.present) return { manifest, unit }
-    const expectedDescription = `workflowd codex launch ${manifest.launchId}`
+    if (!unit.present) {
+      // An unconfirmed launch command can still publish its unit after this query.
+      // Only an adopted invocation or a durable terminal record proves it settled.
+      if (
+        manifest.invocationId === null &&
+        !(await fileExists(manifest.resultPath)) &&
+        !(await fileExists(manifest.cancelledPath))
+      )
+        throw new Error(`${cliName} launch remains unconfirmed; process custody retained`)
+      return { manifest, unit }
+    }
+    const expectedDescription = `workflowd ${cliName} launch ${manifest.launchId}`
     if (unit.description !== expectedDescription || unit.invocationId === "") {
       throw new Error("codex transient unit invocation identity mismatch")
     }
@@ -362,7 +369,7 @@ export const makeCodexCli = (
           pollIntervalMs,
           shouldStop: async () =>
             (await terminal()) !== null || Date.now() - attachedAt >= observationTimeoutMs,
-          parse: parseCodexExecEvent,
+          parse: options.driver.parseEvent,
         })
 
         const waitInactive = (durationMs: number): Promise<boolean> => {
@@ -493,106 +500,94 @@ export const makeCodexCli = (
           detail: `the user systemd manager is unavailable: ${manager.stderr.trim()}`,
         })
       }
-      yield* runWorkspaceCommand("check codex cli", [options.binary, "--version"]).pipe(
-        Effect.mapError((cause): CodexPreflightError => ({
-          kind: "cli_unusable",
-          detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
-        })),
-      )
-      yield* runWorkspaceCommand("check codex auth", [options.binary, "login", "status"]).pipe(
-        Effect.mapError((cause): CodexPreflightError => ({
-          kind: "not_authenticated",
-          detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
-        })),
-      )
+      yield* options.driver.preflight
     }),
     spawn: (input) =>
       Effect.tryPromise({
         try: async () => {
-          try {
-            safeRunId(input.runId)
-            const directory = join(options.custodyRoot, input.runId)
-            const executionId = executionIdFor(input.runId, unitPrefix)
-            const launchId = crypto.randomUUID()
-            const promptPath = join(directory, "prompt")
-            const eventsPath = join(directory, "events.jsonl")
-            const stderrPath = join(directory, "stderr.log")
-            const resultPath = join(directory, "result.json")
-            const cancelledPath = join(directory, "cancelled.json")
-            await mkdir(directory, { recursive: true, mode: 0o700 })
-            await chmod(directory, 0o700)
-            await writeFile(promptPath, input.prompt, { mode: 0o600, flag: "wx" })
-            await writeFile(eventsPath, "", { mode: 0o600, flag: "wx" })
-            await writeFile(stderrPath, "", { mode: 0o600, flag: "wx" })
-            const manifest: Manifest = {
-              version: 2,
-              runId: input.runId,
-              launchId,
-              executionId,
-              invocationId: null,
-              eventsPath,
-              stderrPath,
-              resultPath,
-              cancelledPath,
-            }
-            await writeJsonAtomic(manifestPath(input.runId), manifest)
-
-            const forwardedEnvironment = [
-              "HOME",
-              "PATH",
-              "CODEX_HOME",
-              "SSH_AUTH_SOCK",
-              "GIT_CONFIG_GLOBAL",
-              "GIT_SSH_COMMAND",
-              "XDG_CONFIG_HOME",
-              "XDG_DATA_HOME",
-              "XDG_STATE_HOME",
-              "XDG_CACHE_HOME",
-            ].flatMap((name) => {
-              const value = process.env[name]
-              return value === undefined ? [] : [`--setenv=${name}=${value}`]
-            })
-            const command = [
-              "systemd-run",
-              "--user",
-              "--quiet",
-              "--service-type=exec",
-              `--unit=${executionId}`,
-              `--description=workflowd codex launch ${launchId}`,
-              `--working-directory=${input.directory}`,
-              "--property=KillMode=control-group",
-              ...forwardedEnvironment,
-              ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
-                ([name, value]) => `--setenv=${name}=${value}`,
-              ),
-              process.execPath,
-              workerPath,
-              "--binary",
-              options.binary,
-              "--directory",
-              input.directory,
-              "--prompt-file",
-              promptPath,
-              "--result-file",
-              resultPath,
-              "--events-file",
-              eventsPath,
-              "--stderr-file",
-              stderrPath,
-              "--max-output-bytes",
-              String(maxOutputBytes),
-              ...(input.model === null ? [] : ["--model", input.model]),
-            ]
-            const launched = await runBoundedCommand(command)
-            if (launched.exitCode !== 0)
-              throw commandFailure("launch codex transient unit", launched)
-            const process_ = await Effect.runPromise(attach({ runId: input.runId }))
-            if (process_ === null) throw new Error("codex custody vanished after launch")
-            return process_
-          } catch (cause) {
-            await rm(join(options.custodyRoot, input.runId), { recursive: true, force: true })
-            throw cause
+          safeRunId(input.runId)
+          const directory = join(options.custodyRoot, input.runId)
+          const executionId = executionIdFor(input.runId, unitPrefix)
+          const launchId = crypto.randomUUID()
+          const promptPath = join(directory, "prompt")
+          const eventsPath = join(directory, "events.jsonl")
+          const stderrPath = join(directory, "stderr.log")
+          const resultPath = join(directory, "result.json")
+          const cancelledPath = join(directory, "cancelled.json")
+          await mkdir(directory, { recursive: true, mode: 0o700 })
+          await chmod(directory, 0o700)
+          await writeFile(promptPath, input.prompt, { mode: 0o600, flag: "wx" })
+          await writeFile(eventsPath, "", { mode: 0o600, flag: "wx" })
+          await writeFile(stderrPath, "", { mode: 0o600, flag: "wx" })
+          const manifest: Manifest = {
+            version: 2,
+            runId: input.runId,
+            launchId,
+            executionId,
+            invocationId: null,
+            eventsPath,
+            stderrPath,
+            resultPath,
+            cancelledPath,
           }
+          await writeJsonAtomic(manifestPath(input.runId), manifest)
+
+          const forwardedEnvironment = [
+            "HOME",
+            "PATH",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "SSH_AUTH_SOCK",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_SSH_COMMAND",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+          ].flatMap((name) => {
+            const value = process.env[name]
+            return value === undefined ? [] : [`--setenv=${name}=${value}`]
+          })
+          const command = [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--service-type=exec",
+            `--unit=${executionId}`,
+            `--description=workflowd ${cliName} launch ${launchId}`,
+            `--working-directory=${input.directory}`,
+            "--property=KillMode=control-group",
+            ...forwardedEnvironment,
+            ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+              ([name, value]) => `--setenv=${name}=${value}`,
+            ),
+            process.execPath,
+            workerPath,
+            "--binary",
+            options.binary,
+            "--directory",
+            input.directory,
+            "--prompt-file",
+            promptPath,
+            "--result-file",
+            resultPath,
+            "--events-file",
+            eventsPath,
+            "--stderr-file",
+            stderrPath,
+            "--max-output-bytes",
+            String(maxOutputBytes),
+            ...(input.model === null ? [] : ["--model", input.model]),
+            ...(input.effort === undefined ? [] : ["--effort", input.effort]),
+            ...(input.provider == null ? [] : ["--provider", input.provider]),
+          ]
+          // Retain the manifest on every uncertain launch/inspection outcome. A manager
+          // command error or timeout does not prove the native execution stopped.
+          const launched = await runBoundedCommand(command)
+          if (launched.exitCode !== 0) throw commandFailure("launch codex transient unit", launched)
+          const process_ = await Effect.runPromise(attach({ runId: input.runId }))
+          if (process_ === null) throw new Error("codex custody vanished after launch")
+          return process_
         },
         catch: (cause) =>
           cause instanceof WorkspaceError
@@ -638,3 +633,30 @@ export const makeEventQueue = () => {
     iterable: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<CodexExecEvent>,
   }
 }
+
+export type CodexCliOptions = Omit<CliProcessOptions, "driver">
+export const makeCodexCli = (options: CodexCliOptions) =>
+  makeDurableCliProcess({
+    ...options,
+    driver: {
+      name: "codex",
+      workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
+      parseEvent: parseCodexExecEvent,
+      preflight: codexPreflight(options.binary),
+    },
+  })
+const codexPreflight = (binary: string) =>
+  Effect.gen(function* () {
+    yield* runWorkspaceCommand("check codex cli", [binary, "--version"]).pipe(
+      Effect.mapError((cause): CodexPreflightError => ({
+        kind: "cli_unusable",
+        detail: `the codex CLI did not answer a version check on the daemon host: ${String(cause.cause)}`,
+      })),
+    )
+    yield* runWorkspaceCommand("check codex auth", [binary, "login", "status"]).pipe(
+      Effect.mapError((cause): CodexPreflightError => ({
+        kind: "not_authenticated",
+        detail: `the codex CLI has no credentials on the daemon host (codex login status failed): ${String(cause.cause)}`,
+      })),
+    )
+  })

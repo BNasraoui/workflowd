@@ -1394,12 +1394,36 @@ const openCodeResidentMailbox = Effect.gen(function* () {
   yield* sql`ALTER TABLE resident_threads ADD COLUMN capability_hash TEXT`
 })
 
+const executionSelection = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN executor_kind TEXT NOT NULL DEFAULT 'opencode' CHECK(executor_kind IN ('opencode','codex','claude'))`
+  yield* sql`UPDATE kernel_agent_runs SET executor_kind = CASE provider_id WHEN 'codex-cli' THEN 'codex' WHEN 'claude-cli' THEN 'claude' ELSE 'opencode' END`
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN requested_selection TEXT`
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN resolved_selection TEXT`
+})
+
+const residentClosure = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  // Legacy thread state alone is not proof that its owned app-server was closed.
+  yield* sql`ALTER TABLE resident_threads ADD COLUMN closure_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(closure_confirmed IN (0,1))`
+})
+
+const migrationsThrough0024 = {
+  ...migrationsThrough0019,
+  "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
+  "0021_ci_completion_store": ciCompletionStore,
+  "0022_resident_inbox_store": residentInboxStore,
+  "0023_opencode_resident_mailbox": openCodeResidentMailbox,
+  "0024_execution_selection": executionSelection,
+}
+
+export const runStoreMigrationsThrough0024 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0024),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0019,
-    "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
-    "0021_ci_completion_store": ciCompletionStore,
-    "0022_resident_inbox_store": residentInboxStore,
-    "0023_opencode_resident_mailbox": openCodeResidentMailbox,
+    ...migrationsThrough0024,
+    "0025_resident_closure": residentClosure,
   }),
 })

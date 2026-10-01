@@ -212,6 +212,7 @@ test("OpenCode auth rejection and an unconfigured provider have honest availabil
       sources: [source],
       refreshMs: 1,
       timeoutMs: 1000,
+      now: () => 0,
     })
     expect((await list()).capabilities[0]?.availability).toBe("unavailable")
   } finally {

@@ -15,7 +15,7 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { startAppServer } from "../../src/resident/process"
 
-function fixture(manualQueue = false) {
+function fixture(manualQueue = false, effortOverride?: string) {
   const queued = new Map<string, string[]>()
   let rejectedMethod: string | undefined
   const closed: number[] = []
@@ -83,10 +83,33 @@ function fixture(manualQueue = false) {
       if (frame.method === "thread/start") {
         const id = `thread-${++counter}`
         pids.set(id, child.pid)
-        result = { thread: { id } }
+        result = {
+          thread: { id },
+          model: frame.params.model ?? "native-default",
+          modelProvider: frame.params.modelProvider ?? "native-provider",
+          reasoningEffort:
+            effortOverride ??
+            (typeof frame.params.config === "object" &&
+            frame.params.config !== null &&
+            "model_reasoning_effort" in frame.params.config
+              ? frame.params.config.model_reasoning_effort
+              : null),
+        }
       }
       if (frame.method === "thread/read")
         result = { thread: { turns: history.get(String(frame.params.threadId)) ?? [] } }
+      if (frame.method === "thread/resume")
+        result = {
+          model: frame.params.model ?? "native-default",
+          modelProvider: frame.params.modelProvider ?? "native-provider",
+          reasoningEffort:
+            effortOverride ??
+            (typeof frame.params.config === "object" &&
+            frame.params.config !== null &&
+            "model_reasoning_effort" in frame.params.config
+              ? frame.params.config.model_reasoning_effort
+              : null),
+        }
       if (frame.method === "thread/queue/list")
         result = {
           data: (queued.get(String(frame.params.threadId)) ?? []).map((id) => ({
@@ -195,7 +218,7 @@ const layer = (factory: typeof startAppServer, progressWindowMs?: number) =>
     Layer.provideMerge(WorkflowStoreLive),
     Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
   )
-const prepareRun = (now: Date, runId = "a") =>
+const prepareRun = (now: Date, runId = "a", effort?: string) =>
   Effect.gen(function* () {
     const runs = yield* AgentRunStore
     yield* runs.create({
@@ -203,6 +226,22 @@ const prepareRun = (now: Date, runId = "a") =>
       route: "test",
       providerId: "codex-cli",
       modelId: "test-model",
+      ...(effort === undefined
+        ? {}
+        : {
+            requestedSelection: { model: "model-a", thinking: { effort } },
+            resolvedSelection: {
+              host: "h",
+              executor: "codex:local",
+              executorKind: "codex" as const,
+              model: "model-a",
+              selectionModel: "picker",
+              provider: "native-provider",
+              thinking: { effort },
+              availability: "unknown" as const,
+              evidence: "advertised" as const,
+            },
+          }),
       agent: "build",
       repository: "o/r",
       directory: `/work/${runId}`,
@@ -257,7 +296,14 @@ test("dispatches concurrent threads with independent directories and completes t
       const processes = yield* Effect.all(
         [
           resident.cli.spawn({ runId: "a", directory: "/work/a", prompt: "done", model: null }),
-          resident.cli.spawn({ runId: "b", directory: "/work/b", prompt: "done", model: "model" }),
+          resident.cli.spawn({
+            runId: "b",
+            directory: "/work/b",
+            prompt: "done",
+            model: "model",
+            effort: "xhigh",
+            provider: "custom-provider",
+          }),
         ],
         { concurrency: "unbounded" },
       )
@@ -269,6 +315,12 @@ test("dispatches concurrent threads with independent directories and completes t
           .map((c) => c.params.cwd)
           .sort(),
       ).toEqual(["/work/a", "/work/b"])
+      expect(
+        fake.calls.find((c) => c.method === "thread/start" && c.params.cwd === "/work/b")?.params,
+      ).toMatchObject({
+        modelProvider: "custom-provider",
+        config: { model_reasoning_effort: "xhigh" },
+      })
       expect(fake.calls.some((c) => c.method === "turn/start")).toBe(false)
       expect(yield* resident.route(new Request("http://localhost/unrelated"))).toBeUndefined()
       expect(
@@ -347,18 +399,41 @@ test("a registered CI wait ends the old turn and queues a new one", async () => 
   )
 })
 
+test("native effort downgrade is a bounded refusal before any queued inference and releases its process", async () => {
+  const fake = fixture(false, "low")
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const result = yield* resident.cli
+        .spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: "model-a",
+          effort: "xhigh",
+        })
+        .pipe(Effect.result)
+      expect(result._tag).toBe("Failure")
+      if (result._tag === "Failure") expect(result.failure._tag).toBe("ExecutionSelectionError")
+      expect(fake.calls.some((call) => call.method === "thread/queue/add")).toBe(false)
+      expect(fake.closed).toHaveLength(1)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
 test("daemon restart reloads the same thread and queues interrupted work", async () => {
   const fake = fixture()
   await Effect.runPromise(
     Effect.gen(function* () {
       const resident = yield* ResidentCodex
       const now = new Date()
-      yield* prepareRun(now)
+      yield* prepareRun(now, "a", "xhigh")
       const process = yield* resident.cli.spawn({
         runId: "a",
         directory: "/work/a",
         prompt: "hold",
         model: "model-a",
+        effort: "xhigh",
       })
       const iterator = process.events[Symbol.asyncIterator]()
       for (;;) {
@@ -376,6 +451,8 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         model: "model-a",
         approvalPolicy: "never",
         sandbox: "danger-full-access",
+        modelProvider: "native-provider",
+        config: { model_reasoning_effort: "xhigh" },
       })
       expect(fake.calls.filter((c) => c.method === "thread/start")).toHaveLength(1)
     }).pipe(Effect.provide(layer(fake.factory))),
@@ -703,7 +780,10 @@ test("resident cancellation closes only its run and cannot restore or deliver it
       yield* verifyRun(now)
       expect(resident.cli.ownership).toBe("resident-thread")
       if (resident.cli.ownership !== "resident-thread") throw new Error("wrong owner")
-      yield* resident.cli.cancelRun("missing")
+      const missing = yield* resident.cli.cancelRun("missing").pipe(Effect.result)
+      expect(missing._tag).toBe("Failure")
+      if (missing._tag === "Failure")
+        expect(String(missing.failure.cause)).toContain("custody is missing")
       yield* resident.cli.cancelRun("a")
       yield* runs.cancel({ runId: "a", now })
       expect((yield* process.exited).exitCode).toBe(1)

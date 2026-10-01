@@ -1,3 +1,4 @@
+import { RequestedSelection } from "../execution-selection"
 import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
@@ -16,7 +17,6 @@ import {
   MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES,
   MAX_AGENT_RUN_PROMPT_BYTES,
   MAX_AGENT_RUN_REPOSITORY_BYTES,
-  MAX_AGENT_RUN_ROUTE_BYTES,
 } from "../agent-run-contract"
 
 export type ToolResult = {
@@ -72,7 +72,13 @@ const WaitForAgentArguments = Schema.Struct({
 })
 
 const DispatchAgentArguments = Schema.Struct({
-  route: utf8BoundedText(MAX_AGENT_RUN_ROUTE_BYTES),
+  route: RequestedSelection.fields.route,
+  model: RequestedSelection.fields.model,
+  provider: RequestedSelection.fields.provider,
+  executor: RequestedSelection.fields.executor,
+  model_identity: RequestedSelection.fields.modelIdentity,
+  thinking: RequestedSelection.fields.thinking,
+  allow_unknown_access: RequestedSelection.fields.allowUnknownAccess,
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
   prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
   parent_session_id: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES)),
@@ -355,7 +361,7 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     const input = yield* decodeArguments(DispatchAgentArguments, args).pipe(Effect.result)
     if (input._tag === "Failure") {
       return failure(
-        "invalid arguments: route, repository and prompt must be non-empty strings " +
+        "invalid arguments: provide exactly one of route or model, plus repository and prompt as non-empty strings " +
           `(prompt at most ${MAX_AGENT_RUN_PROMPT_BYTES} UTF-8 bytes), and ` +
           "parent_session_id/resume_prompt/idempotency_key, when given, must be non-empty strings",
       )
@@ -365,7 +371,17 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
       subject: "the dispatch",
       timeoutMs: DISPATCH_AGENT_TIMEOUT_MS,
       body: {
-        route: input.success.route,
+        ...(input.success.route === undefined ? {} : { route: input.success.route }),
+        ...(input.success.model === undefined ? {} : { model: input.success.model }),
+        ...(input.success.provider === undefined ? {} : { provider: input.success.provider }),
+        ...(input.success.executor === undefined ? {} : { executor: input.success.executor }),
+        ...(input.success.model_identity === undefined
+          ? {}
+          : { modelIdentity: input.success.model_identity }),
+        ...(input.success.thinking === undefined ? {} : { thinking: input.success.thinking }),
+        ...(input.success.allow_unknown_access === undefined
+          ? {}
+          : { allowUnknownAccess: input.success.allow_unknown_access }),
         repository: input.success.repository,
         prompt: input.success.prompt,
         ...(input.success.parent_session_id === undefined
@@ -395,7 +411,7 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     }
     const verified =
       `session ${receipt.success.nativeSessionId} on route ` +
-      `${input.success.route} is generating (${receipt.success.outputTokens} tokens observed)`
+      `${input.success.route ?? input.success.model} is generating (${receipt.success.outputTokens} tokens observed)`
     const received =
       receipt.success.status === "duplicate"
         ? `Already dispatched: ${verified}.`
@@ -407,6 +423,8 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
         native_session_id: receipt.success.nativeSessionId,
         provider_id: receipt.success.providerId,
         model_id: receipt.success.modelId,
+        requested_selection: receipt.success.requestedSelection ?? null,
+        resolved_selection: receipt.success.resolvedSelection ?? null,
         output_tokens: receipt.success.outputTokens,
         status: receipt.success.status,
         wait: receipt.success.wait === undefined ? null : { ...receipt.success.wait },

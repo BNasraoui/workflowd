@@ -1,7 +1,7 @@
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
-import { Context, Effect, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
+import { Context, Effect, Exit, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
@@ -13,8 +13,14 @@ import { makeResidentStore } from "./store"
 import { startAppServer } from "./process"
 import { deliverResident } from "./delivery"
 import type { ResidentConfig } from "./config"
+import { ExecutionSelectionError } from "../execution-selection"
 
-const ThreadResult = Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) })
+const ThreadResult = Schema.Struct({
+  thread: Schema.Struct({ id: Schema.String }),
+  model: Schema.optionalKey(Schema.String),
+  modelProvider: Schema.optionalKey(Schema.String),
+  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
 const TurnEvent = Schema.Struct({
   threadId: Schema.String,
   turn: Schema.Struct({ id: Schema.String, status: Schema.String }),
@@ -70,9 +76,27 @@ export const ResidentCodexLive = (
       >()
       const threadRuns = new Map<string, string>()
       yield* Effect.addFinalizer(() =>
-        Effect.tryPromise(async () => {
-          await Promise.all([...servers.values()].map((entry) => entry.process.close()))
-        }).pipe(Effect.orDie),
+        Effect.forEach(
+          [...servers.entries()],
+          ([runId, entry]) =>
+            Effect.gen(function* () {
+              yield* Effect.tryPromise(() => entry.process.close())
+              const row = yield* store.readRun(runId)
+              if (row !== null) {
+                yield* store.recordClosure(row.thread_id, true)
+                const listener = listeners.get(row.thread_id)
+                listener?.queue.close()
+                listener?.finish({ exitCode: 1, stderr: "resident scope closed" })
+              }
+            }).pipe(Effect.exit),
+          { concurrency: "unbounded" },
+        ).pipe(
+          Effect.flatMap((results) => {
+            const failure = results.find(Exit.isFailure)
+            return failure === undefined ? Effect.void : Effect.failCause(failure.cause)
+          }),
+          Effect.orDie,
+        ),
       )
       const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts: number = 0) {
         const env = {
@@ -80,6 +104,8 @@ export const ResidentCodexLive = (
           WORKFLOWD_RUN_ID: runId,
           WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
         }
+        const owned = yield* store.readRun(runId)
+        if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
         const process = yield* Effect.try(() =>
           start({ binary, home: config.home, env }, (frame) => {
             const current = servers.get(runId)
@@ -116,9 +142,16 @@ export const ResidentCodexLive = (
         if (row !== null) {
           peers.revoke(row.run_id)
           const entry = servers.get(row.run_id)
+          if (entry !== undefined) {
+            yield* Effect.tryPromise({ try: () => entry.process.close(), catch: normalizeError })
+            yield* store.recordClosure(threadId, true)
+          } else if (row.closure_confirmed !== 1) {
+            return yield* Effect.fail(
+              new Error("Resident process closure cannot be confirmed from durable custody"),
+            )
+          }
           servers.delete(row.run_id)
           threadRuns.delete(threadId)
-          if (entry !== undefined) yield* Effect.tryPromise(() => entry.process.close())
           const run = yield* runs.read(row.run_id)
           if (run?.state === "verified") {
             yield* failed
@@ -196,7 +229,8 @@ export const ResidentCodexLive = (
         const run = yield* runs.read(row.run_id)
         if (yield* hasCustody(row.thread_id)) return true
         yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
-        yield* finish(row.thread_id, true)
+        // A prior daemon's unverified execution cannot be declared closed from thread state.
+        if (servers.has(row.run_id)) yield* finish(row.thread_id, true)
         if (run !== null && ["accepted", "spawning", "spawned"].includes(run.state))
           yield* runs.operatorRequired({
             runId: row.run_id,
@@ -211,15 +245,48 @@ export const ResidentCodexLive = (
           threadRuns.set(row.thread_id, row.run_id)
           if (!(yield* restoreCustody(row))) continue
           if (!servers.has(row.run_id)) yield* launch(row.run_id)
-          yield* Effect.tryPromise(() =>
+          const accepted = yield* runs.read(row.run_id)
+          const selection = accepted?.resolvedSelection
+          const resumed = yield* Effect.tryPromise(() =>
             request("thread/resume", {
               threadId: row.thread_id,
               cwd: row.directory,
-              model: row.model,
+              model: selection?.model ?? row.model,
+              ...(selection?.provider == null ? {} : { modelProvider: selection.provider }),
+              ...(selection?.thinking.effort === undefined
+                ? {}
+                : { config: { model_reasoning_effort: selection.thinking.effort } }),
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             }),
+          ).pipe(
+            Effect.flatMap(
+              Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  model: Schema.optionalKey(Schema.String),
+                  modelProvider: Schema.optionalKey(Schema.String),
+                  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+                }),
+              ),
+            ),
           )
+          if (
+            selection != null &&
+            ((selection.thinking.effort !== undefined &&
+              resumed.reasoningEffort !== selection.thinking.effort) ||
+              (selection.model !== null && resumed.model !== selection.model) ||
+              (selection.provider !== null && resumed.modelProvider !== selection.provider))
+          ) {
+            yield* store.uncertain(`selection:${row.thread_id}`, row.thread_id)
+            yield* runs.operatorRequired({
+              runId: row.run_id,
+              diagnostic:
+                "resident_selection_mismatch: native resume did not confirm the accepted selection",
+              now: new Date(),
+            })
+            yield* finish(row.thread_id, true)
+            continue
+          }
           const history = yield* Effect.tryPromise(() =>
             request("thread/read", { threadId: row.thread_id, includeTurns: true }),
           ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
@@ -268,6 +335,28 @@ export const ResidentCodexLive = (
         }
       })
       const flush = () => Semaphore.withPermits(deliveryLock, 1)(flushUnlocked())
+      const cancelRun = Effect.fn("Resident.cancel")(
+        function* (runId: string) {
+          yield* Semaphore.withPermits(
+            deliveryLock,
+            1,
+          )(
+            Effect.gen(function* () {
+              const row = yield* store.readRun(runId)
+              if (row === null)
+                return yield* Effect.fail(
+                  new Error("Resident run/thread custody is missing; closure unconfirmed"),
+                )
+              peers.revoke(runId)
+              yield* store.revokeDelivery(row.thread_id)
+              yield* finish(row.thread_id, true)
+            }),
+          )
+        },
+        Effect.mapError(
+          (cause) => new WorkspaceError({ operation: "cancel resident thread", cause }),
+        ),
+      )
       const tick = Effect.gen(function* () {
         for (const row of yield* store.threads()) {
           const entry = servers.get(row.run_id)
@@ -295,8 +384,15 @@ export const ResidentCodexLive = (
         yield* subscriptions.reconcile()
         for (const runId of servers.keys()) {
           const run = yield* runs.read(runId)
-          if (run?.state === "operator_required" && run.nativeSessionId !== null)
-            yield* finish(run.nativeSessionId, true)
+          if (run?.state === "operator_required") {
+            const stopped = yield* cancelRun(runId).pipe(Effect.result)
+            if (stopped._tag === "Failure")
+              yield* runs.operatorRequired({
+                runId,
+                diagnostic: `resident_cleanup_failed: ${String(stopped.failure.cause)}`,
+                now: new Date(),
+              })
+          }
         }
         yield* flush()
       })
@@ -308,22 +404,6 @@ export const ResidentCodexLive = (
         Effect.forkScoped,
       )
 
-      const cancelRun = Effect.fn("Resident.cancel")(
-        function* (runId: string) {
-          const run = yield* runs.read(runId)
-          if (run?.nativeSessionId === null || run?.nativeSessionId === undefined) return
-          const threadId = run.nativeSessionId
-          yield* store.uncertain(`cancel:${runId}`, threadId)
-          yield* finish(threadId, true)
-        },
-        Effect.mapError(
-          (cause) =>
-            new WorkspaceError({
-              operation: "cancel resident thread",
-              cause,
-            }),
-        ),
-      )
       const cli: CodexCliPort = {
         ownership: "resident-thread",
         cancelRun,
@@ -351,10 +431,56 @@ export const ResidentCodexLive = (
               server.rpc.request("thread/start", {
                 cwd: input.directory,
                 model: input.model,
+                ...(input.provider == null ? {} : { modelProvider: input.provider }),
+                ...(input.effort === undefined
+                  ? {}
+                  : { config: { model_reasoning_effort: input.effort } }),
                 approvalPolicy: "never",
                 sandbox: "danger-full-access",
               }),
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
+            const rejectSelection = (
+              reason: "unsupported_thinking" | "model_not_available",
+              detail: string,
+            ) =>
+              Effect.gen(function* () {
+                peers.revoke(input.runId)
+                servers.delete(input.runId)
+                yield* Effect.tryPromise(() => server.close())
+                return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
+              })
+            if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
+              return yield* rejectSelection(
+                "unsupported_thinking",
+                "Native Codex did not confirm the requested reasoning effort",
+              )
+            if (input.model !== null && thread.model !== input.model)
+              return yield* rejectSelection(
+                "model_not_available",
+                "Native Codex resolved a different model",
+              )
+            if (input.provider != null && thread.modelProvider !== input.provider)
+              return yield* rejectSelection(
+                "model_not_available",
+                "Native Codex resolved a different provider",
+              )
+            const accepted = yield* runs.read(input.runId)
+            if (accepted?.resolvedSelection != null && thread.model !== undefined) {
+              yield* runs.recordResolvedSelection({
+                runId: input.runId,
+                now: new Date(),
+                selection: {
+                  ...accepted.resolvedSelection,
+                  model: thread.model,
+                  provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
+                  thinking:
+                    thread.reasoningEffort == null
+                      ? accepted.resolvedSelection.thinking
+                      : { ...accepted.resolvedSelection.thinking, effort: thread.reasoningEffort },
+                  evidence: "runtime",
+                },
+              })
+            }
             const threadId = thread.thread.id
             threadRuns.set(threadId, input.runId)
             yield* store.attach(input.runId, threadId, input.directory, input.model)
@@ -382,12 +508,13 @@ export const ResidentCodexLive = (
               }),
             }
           }).pipe(
-            Effect.mapError(
-              () =>
-                new WorkspaceError({
-                  operation: "resident dispatch",
-                  cause: new Error("resident dispatch failed; inspect durable inbox"),
-                }),
+            Effect.mapError((error) =>
+              error instanceof ExecutionSelectionError
+                ? error
+                : new WorkspaceError({
+                    operation: "resident dispatch",
+                    cause: new Error("resident dispatch failed; inspect durable inbox"),
+                  }),
             ),
           ),
       }

@@ -1,6 +1,6 @@
 import { open, readFile, rename, writeFile } from "node:fs/promises"
 
-export type CodexWorkerOptions = {
+export type CliWorkerOptions = {
   readonly binary: string
   readonly directory: string
   readonly promptFile: string
@@ -9,6 +9,8 @@ export type CodexWorkerOptions = {
   readonly stderrFile: string
   readonly maxOutputBytes: number
   readonly model: string | null
+  readonly effort?: string
+  readonly provider?: string
 }
 
 const writeResult = async (path: string, exitCode: number) => {
@@ -37,27 +39,38 @@ const drainBounded = async (stream: ReadableStream<Uint8Array>, path: string, li
 }
 
 /** Runs inside a transient user service and durably captures bounded output. */
-export async function runCodexWorker(options: CodexWorkerOptions): Promise<number> {
+export async function runCodexWorker(options: CliWorkerOptions): Promise<number> {
+  return runCliWorker(options, [
+    options.binary,
+    "exec",
+    "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--cd",
+    options.directory,
+    ...(options.model === null ? [] : ["-m", options.model]),
+    ...(options.effort === undefined
+      ? []
+      : ["-c", `model_reasoning_effort=${JSON.stringify(options.effort)}`]),
+    ...(options.provider === undefined
+      ? []
+      : ["-c", `model_provider=${JSON.stringify(options.provider)}`]),
+    "-",
+  ])
+}
+
+/** Shared bounded capture for durable CLI processes. */
+export async function runCliWorker(
+  options: CliWorkerOptions,
+  command: ReadonlyArray<string>,
+): Promise<number> {
   const prompt = await readFile(options.promptFile)
-  const child = Bun.spawn(
-    [
-      options.binary,
-      "exec",
-      "--json",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--cd",
-      options.directory,
-      ...(options.model === null ? [] : ["-m", options.model]),
-      "-",
-    ],
-    {
-      cwd: options.directory,
-      env: process.env,
-      stdin: prompt,
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  )
+  const child = Bun.spawn([...command], {
+    cwd: options.directory,
+    env: process.env,
+    stdin: prompt,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
   const [status] = await Promise.all([
     child.exited,
     drainBounded(child.stdout, options.eventsFile, options.maxOutputBytes),
@@ -68,9 +81,7 @@ export async function runCodexWorker(options: CodexWorkerOptions): Promise<numbe
   return exitCode
 }
 
-export const parseCodexWorkerArguments = (
-  arguments_: ReadonlyArray<string>,
-): CodexWorkerOptions => {
+export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): CliWorkerOptions => {
   const values = new Map<string, string>()
   for (let index = 0; index < arguments_.length; index += 2) {
     const name = arguments_[index]
@@ -94,6 +105,8 @@ export const parseCodexWorkerArguments = (
     stderrFile: required("--stderr-file"),
     maxOutputBytes: Number.parseInt(required("--max-output-bytes"), 10),
     model: values.get("--model") ?? null,
+    ...(values.has("--effort") ? { effort: required("--effort") } : {}),
+    ...(values.has("--provider") ? { provider: required("--provider") } : {}),
   }
 }
 
@@ -106,3 +119,5 @@ if (import.meta.main) {
     process.exitCode = 1
   }
 }
+
+export type CodexWorkerOptions = CliWorkerOptions

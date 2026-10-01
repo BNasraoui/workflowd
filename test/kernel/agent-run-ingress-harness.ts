@@ -13,6 +13,7 @@ import { AgentRunWorktrees, type AgentRunWorktreesPort } from "../../src/kernel/
 import { AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { ClaudeCli, type ClaudeCliPort } from "../../src/kernel/claude-session"
 import { CodexCli } from "../../src/kernel/codex-session"
+import { ClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { OpenCodeSessionTelemetry } from "../../src/opencode/adapter"
@@ -119,7 +120,7 @@ const claudeCli: ClaudeCliPort = {
 }
 
 export type CodexState = {
-  spawned: Array<{ directory: string; prompt: string; model: string | null }>
+  spawned: Array<{ directory: string; prompt: string; model: string | null; effort?: string }>
   killed: boolean
 }
 
@@ -140,7 +141,12 @@ export const makeCodexCli = (
     attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
-        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        state.spawned.push({
+          directory: input.directory,
+          prompt: input.prompt,
+          model: input.model,
+          ...(input.effort === undefined ? {} : { effort: input.effort }),
+        })
         const queue: {
           push: (event: import("../../src/kernel/codex-session").CodexExecEvent) => void
           close: () => void
@@ -210,7 +216,12 @@ export const codexNeverStreams = () => {
     attach: () => Effect.succeed(null),
     spawn: (input) =>
       Effect.sync(() => {
-        state.spawned.push({ directory: input.directory, prompt: input.prompt, model: input.model })
+        state.spawned.push({
+          directory: input.directory,
+          prompt: input.prompt,
+          model: input.model,
+          ...(input.effort === undefined ? {} : { effort: input.effort }),
+        })
         const never: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
           [Symbol.asyncIterator]: () => ({
             next: neverCodexEvent,
@@ -248,6 +259,7 @@ export const makeLayer = (
   optionOverrides: Partial<
     import("../../src/kernel/agent-run-ingress").AgentRunIngressOptions
   > = {},
+  claude: import("../../src/kernel/codex-session").CodexCliPort | null = defaultCodex.port,
 ) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
@@ -268,6 +280,7 @@ export const makeLayer = (
     Layer.provideMerge(Layer.succeed(AgentRunWorktrees, trees)),
     Layer.provideMerge(Layer.succeed(ClaudeCli, claudeCli)),
     Layer.provideMerge(Layer.succeed(CodexCli, codex)),
+    Layer.provideMerge(claude === null ? Layer.empty : Layer.succeed(ClaudeDispatchCli, claude)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 }

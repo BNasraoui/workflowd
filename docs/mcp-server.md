@@ -384,6 +384,22 @@ enables it, the routes and repositories are then required):
   worktree/allow-list rules apply unchanged; the CLI must be installed and
   logged in on the daemon host.
 - `WORKFLOWD_AGENT_RUN_CODEX_BIN` — codex binary to spawn (default `codex`).
+- `WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES` — optional comma-separated `name=model`
+  pairs for **direct Claude Code CLI** dispatch, e.g.
+  `claude=claude-opus-5-5,claude-sonnet=claude-sonnet-5-5`.
+  These launch `claude --print --output-format stream-json` with the selected
+  `--model`, using the CLI's local credentials. They never use an OpenCode
+  provider. An empty model means the CLI default. The binary is selected by
+  `WORKFLOWD_AGENT_RUN_CLAUDE_BIN` (default `claude`); `claude auth status`
+  must report a logged-in session on the daemon host. Route/model collisions
+  across all three harnesses are refused as `ambiguous_route`.
+  `WORKFLOWD_AGENT_RUN_ROUTES` can be omitted for CLI-only deployments.
+  Like transient Codex runs, Claude runs use independent systemd user units
+  and durable output capture, reattach after a daemon restart, and support
+  explicit cancellation. Receipts carry `providerId: "claude-cli"` and
+  `sessionId: "claude-session-<UUID>"`. Parent wakes are currently supported
+  only for OpenCode children; omit parent session and resume prompt for CLI
+  dispatches.
 - `WORKFLOWD_AGENT_RUN_REPOSITORIES` — comma-separated `name=/absolute/path`
   pairs naming the dispatchable repositories. This is a security allow-list:
   dispatch is arbitrary prompt execution in the named directory's worktrees.

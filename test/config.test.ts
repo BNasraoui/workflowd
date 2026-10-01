@@ -40,6 +40,43 @@ const qrspiDefinition = {
 } as const
 
 describe("loadConfig", () => {
+  test("execution-only mode needs no OpenCode or GitHub credentials and no aliases", async () => {
+    const config = await loadConfig({
+      WORKFLOWD_MODE: "execution",
+      WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+    })
+    expect(config.mode).toBe("execution")
+    expect(config.agentRuns?.routes).toEqual([])
+    expect(config.executionCapabilities?.codexEnabled).toBe(true)
+    expect(config.github).toBeUndefined()
+    expect(config.openCode).toBeUndefined()
+  })
+  test("loads Claude CLI-only dispatch routes and validates their syntax", async () => {
+    const base = {
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+    }
+    const config = await loadConfig({
+      ...base,
+      WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=claude-opus-5-5,sonnet=claude-sonnet-5-5",
+    })
+    expect(config.agentRuns?.routes).toEqual([])
+    expect(config.agentRuns?.claudeRoutes).toEqual([
+      { name: "claude", modelID: "claude-opus-5-5" },
+      { name: "sonnet", modelID: "claude-sonnet-5-5" },
+    ])
+    await expect(
+      loadConfig({
+        ...base,
+        WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=anthropic/claude-opus-5-5",
+      }),
+    ).rejects.toThrow("claude model id")
+    await expect(
+      loadConfig({ ...requiredEnvironment, WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: "claude=opus" }),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_TOKEN is required")
+  })
   test("loads the optional agent-run section with routes and repositories", async () => {
     const config = await loadConfig(
       {
@@ -57,6 +94,7 @@ describe("loadConfig", () => {
       token: "agent-run-secret",
       claudeBinary: "claude",
       claudeHosts: [],
+      claudeRoutes: [],
       codexBinary: "codex",
       remoteTurnTimeoutMs: 120_000,
       routes: [{ name: "implement", providerID: "zai-coding-plan", modelID: "glm-5.3-flash" }],
@@ -142,7 +180,7 @@ describe("loadConfig", () => {
         { ...requiredEnvironment, WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret" },
         { home: "/home/test" },
       ),
-    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_ROUTES")
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_REPOSITORIES")
   })
 
   test("loads an optional central remote coordinator with token-file credentials", async () => {
@@ -240,7 +278,7 @@ describe("loadConfig", () => {
       { home: "/home/test" },
     )
 
-    expect(config.openCode.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
+    expect(config.openCode?.attachUrl).toBe("https://mint.example-tailnet.ts.net:4096")
     await expect(
       loadConfig(
         {
@@ -470,8 +508,8 @@ describe("loadConfig", () => {
     )
 
     expect(reads).toEqual(["/run/credentials/webhook-secret", "/run/credentials/opencode-password"])
-    expect(config.github.webhookSecret).toBe("webhook-from-file")
-    expect(config.openCode.password).toBe("password-from-file")
+    expect(config.github?.webhookSecret).toBe("webhook-from-file")
+    expect(config.openCode?.password).toBe("password-from-file")
   })
 
   test.each([

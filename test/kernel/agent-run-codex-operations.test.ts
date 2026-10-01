@@ -15,17 +15,6 @@ import {
   worktrees,
 } from "./agent-run-ingress-harness"
 
-const waitForTerminal = (runId: string) =>
-  Effect.gen(function* () {
-    const store = yield* AgentRunStore
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      const run = yield* store.read(runId)
-      if (run?.state === "completed") return run
-      yield* Effect.sleep(5)
-    }
-    return yield* store.read(runId)
-  })
-
 test("an unavailable user systemd manager is a typed Codex-only refusal", async () => {
   const unavailable = makeCodexCli([], 0, {
     kind: "systemd_unavailable",
@@ -41,7 +30,7 @@ test("an unavailable user systemd manager is a typed Codex-only refusal", async 
   expect(unavailable.state.spawned).toHaveLength(0)
 })
 
-test("a failed transient launch removes its row so an identical retry can succeed", async () => {
+test("an uncertain transient launch retains its row and fences an identical retry", async () => {
   const healthy = makeCodexCli([
     { type: "agent_message", text: "recovered" },
     { type: "turn.completed", outputTokens: 2 },
@@ -75,14 +64,17 @@ test("a failed transient launch removes its row so an identical retry can succee
         repository: "workflowd",
         prompt: "retry me",
         idempotencyKey: "launch-retry",
-      })
-      return { first, second, row: yield* waitForTerminal(second.runId) }
+      }).pipe(Effect.result)
+      const store = yield* AgentRunStore
+      const rows = yield* store.listActiveByExecutor("codex")
+      return { first, second, rows }
     }).pipe(Effect.provide(layer)),
   )
   expect(result.first._tag).toBe("Failure")
-  expect(result.second.status).toBe("dispatched")
-  expect(result.row?.state).toBe("completed")
-  expect(attempts).toBe(2)
+  expect(result.second._tag).toBe("Failure")
+  expect(result.rows).toHaveLength(1)
+  expect(result.rows[0]?.state).toBe("spawning")
+  expect(attempts).toBe(1)
 })
 
 test("explicit Codex cancellation records cancelled only after the owned unit stops", async () => {

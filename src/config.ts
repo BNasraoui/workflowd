@@ -12,6 +12,7 @@ import {
   type AgentRunCodexRoute,
   parseAgentRunClaudeHosts,
   parseAgentRunCodexRoutes,
+  parseAgentRunClaudeRoutes,
   parseAgentRunRepositories,
   parseAgentRunRoutes,
   type AgentRunRepository,
@@ -108,6 +109,7 @@ export interface AgentRunConfig {
   readonly remoteTurnTimeoutMs: number
   readonly routes: ReadonlyArray<AgentRunRoute>
   readonly codexRoutes: ReadonlyArray<AgentRunCodexRoute>
+  readonly claudeRoutes: ReadonlyArray<AgentRunCodexRoute>
   readonly repositories: ReadonlyArray<AgentRunRepository>
   readonly agent: string
   readonly verifyTimeoutMs: number
@@ -116,18 +118,16 @@ export interface AgentRunConfig {
   readonly maxAttempts: number
 }
 
-export interface AppConfig {
+interface SharedAppConfig {
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
   readonly ci?: CiConfig
   readonly workerIdentity?: WorkerIdentityConfig
   readonly http: HttpConfig
-  readonly github: GitHubConfig
   readonly storage: StorageConfig
   readonly fixWork: FixWorkConfig
   readonly workspace: WorkspaceConfig
-  readonly openCode: OpenCodeConfig
   readonly worker: WorkerConfig
   readonly qrspi?: QrspiConfig
   readonly testJobCanary?: { readonly token: string }
@@ -136,6 +136,16 @@ export interface AppConfig {
   readonly dogfood?: { readonly token: string }
   readonly remoteCoordinator?: RemoteCoordinatorConfig
 }
+
+export type AppConfig = SharedAppConfig &
+  (
+    | {
+        readonly mode?: "automation"
+        readonly github: GitHubConfig
+        readonly openCode: OpenCodeConfig
+      }
+    | { readonly mode: "execution"; readonly github?: undefined; readonly openCode?: undefined }
+  )
 
 export interface RemoteCoordinatorConfig {
   readonly servers: ReadonlyArray<string>
@@ -324,19 +334,14 @@ interface ResolvedSecrets {
 async function loadSecrets(
   env: Record<string, string | undefined>,
   read: (path: string) => Promise<string>,
+  executionOnly: boolean,
 ): Promise<ResolvedSecrets> {
-  const webhookSecret = await secret(
-    env,
-    "GITHUB_WEBHOOK_SECRET",
-    "GITHUB_WEBHOOK_SECRET_FILE",
-    read,
-  )
-  const openCodePassword = await secret(
-    env,
-    "OPENCODE_SERVER_PASSWORD",
-    "OPENCODE_SERVER_PASSWORD_FILE",
-    read,
-  )
+  const webhookSecret = executionOnly
+    ? ""
+    : await secret(env, "GITHUB_WEBHOOK_SECRET", "GITHUB_WEBHOOK_SECRET_FILE", read)
+  const openCodePassword = executionOnly
+    ? ""
+    : await secret(env, "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE", read)
   const testJobToken = await optionalSecret(
     env,
     "WORKFLOWD_TEST_JOB_TOKEN",
@@ -390,7 +395,8 @@ function loadAgentRunConfig(
   if (token === undefined) {
     if (
       env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
-      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined
+      env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
@@ -418,11 +424,18 @@ function loadAgentRunConfig(
           codexUnitPrefix: env.WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX,
         }),
     remoteTurnTimeoutMs,
-    routes: parseAgentRunRoutes(required(env, "WORKFLOWD_AGENT_RUN_ROUTES")),
+    routes:
+      env.WORKFLOWD_AGENT_RUN_ROUTES === undefined
+        ? []
+        : parseAgentRunRoutes(env.WORKFLOWD_AGENT_RUN_ROUTES),
     codexRoutes:
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES === undefined
         ? []
         : parseAgentRunCodexRoutes(env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES),
+    claudeRoutes:
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES === undefined
+        ? []
+        : parseAgentRunClaudeRoutes(env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES),
     repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
     verifyTimeoutMs: positiveInteger(
@@ -644,13 +657,46 @@ function workerSection(
   }
 }
 
+type ConfigFor<E> = "WORKFLOWD_MODE" extends keyof E
+  ? E extends { readonly WORKFLOWD_MODE: "execution" }
+    ? Extract<AppConfig, { mode: "execution" }>
+    : AppConfig
+  : Extract<AppConfig, { readonly mode?: "automation" }>
+export function loadConfig<E extends Record<string, string | undefined>>(
+  env: E,
+  options?: ConfigLoadOptions,
+): Promise<ConfigFor<E>>
 export async function loadConfig(
   env: Record<string, string | undefined>,
   options: ConfigLoadOptions = {},
 ): Promise<AppConfig> {
   const home = options.home ?? homedir()
   const read = options.readFile ?? ((path: string) => readFile(path, "utf8"))
-  const secrets = await loadSecrets(env, read)
+  const mode = env.WORKFLOWD_MODE ?? "automation"
+  if (mode !== "execution" && mode !== "automation")
+    throw new Error("WORKFLOWD_MODE must be execution or automation")
+  if (
+    mode === "execution" &&
+    [
+      "WORKFLOWD_AGENT_RUN_ROUTES",
+      "WORKFLOWD_AGENT_WAIT_TOKEN",
+      "WORKFLOWD_AGENT_WAIT_TOKEN_FILE",
+      "WORKFLOWD_TEST_JOB_TOKEN",
+      "WORKFLOWD_TEST_JOB_TOKEN_FILE",
+      "OPENCODE_SERVER_URL",
+      "OPENCODE_SERVER_PASSWORD",
+      "OPENCODE_SERVER_PASSWORD_FILE",
+      "WORKFLOWD_QRSPI_TOKEN",
+      "WORKFLOWD_CI_ENABLED",
+      "WORKFLOWD_WORKER_IDENTITY_ENABLED",
+      "WORKFLOWD_CODEX_RESIDENT_ENABLED",
+      "WORKFLOWD_OPENCODE_RESIDENT_ENABLED",
+    ].some((key) => env[key] !== undefined && env[key] !== "false")
+  )
+    throw new Error(
+      "Execution mode supports native local dispatch; OpenCode/PR/CI/resident consumers require automation mode",
+    )
+  const secrets = await loadSecrets(env, read, mode === "execution")
   const jobTiming = loadJobTiming(env)
   const publicationTiming = loadPublicationTiming(env)
   const qrspi = loadQrspiConfig(env)
@@ -658,9 +704,10 @@ export async function loadConfig(
     env.WORKFLOWD_FIX_WORK_ENABLED,
     "WORKFLOWD_FIX_WORK_ENABLED",
   )
+  if (mode === "execution" && fixWorkEnabled) throw new Error("Fix Work requires automation mode")
   const configuredTrustedAgentUsers = trustedAgentUsers(env.WORKFLOWD_TRUSTED_AGENT_USERS)
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
-  const baseUrl = openCodeBaseUrl(env)
+  const baseUrl = mode === "execution" ? undefined : openCodeBaseUrl(env)
   const hostId = workerHostId(env)
   const workerIdentity = loadWorkerIdentityConfig(env)
   const residentCodex = loadResidentConfig(env)
@@ -680,11 +727,15 @@ export async function loadConfig(
     ...(residentOpenCodeSocket === undefined ? {} : { residentOpenCodeSocket }),
     ...(ci === undefined ? {} : { ci }),
     http: httpSection(env),
-    github: githubSection(env, secrets.webhookSecret),
+    ...(mode === "execution"
+      ? { mode: "execution" as const }
+      : {
+          github: githubSection(env, secrets.webhookSecret),
+          openCode: openCodeSection(env, baseUrl!, secrets.openCodePassword),
+        }),
     storage: storageSection(env, home),
     fixWork: { enabled: fixWorkEnabled },
     workspace: workspaceSection(env, home, gitSigningKey),
-    openCode: openCodeSection(env, baseUrl, secrets.openCodePassword),
     worker: workerSection(
       env,
       { hostId, trustedAgentUsers: configuredTrustedAgentUsers },

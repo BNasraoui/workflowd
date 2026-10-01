@@ -2,7 +2,8 @@ import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import { makeResidentStore } from "../../src/resident/store"
-import { runStoreMigrations } from "../../src/store/migrations"
+import { SqlClient } from "effect/unstable/sql"
+import { runStoreMigrations, runStoreMigrationsThrough0024 } from "../../src/store/migrations"
 test("durable inbox separates waiting turn completion from wake turn completion", () =>
   Effect.runPromise(
     Effect.gen(function* () {
@@ -41,3 +42,25 @@ test.each(["prepared", "sending"])("completion retains a thread with a %s inbox 
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
   ),
 )
+
+test("closure migration preserves historical resident states without inventing process termination proof", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      yield* runStoreMigrationsThrough0024
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`INSERT INTO resident_threads (run_id,thread_id,directory,model,state) VALUES ('legacy','legacy-thread','/old',NULL,'finished')`
+      yield* runStoreMigrations
+      const store = yield* makeResidentStore
+      expect(yield* store.readRun("legacy")).toMatchObject({
+        run_id: "legacy",
+        thread_id: "legacy-thread",
+        state: "finished",
+        closure_confirmed: 0,
+      })
+      expect(yield* store.readRun("missing")).toBeNull()
+      yield* store.recordClosure("legacy-thread", true)
+      expect((yield* store.read("legacy-thread"))?.closure_confirmed).toBe(1)
+      yield* store.recordClosure("legacy-thread", false)
+      expect((yield* store.read("legacy-thread"))?.closure_confirmed).toBe(0)
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  ))

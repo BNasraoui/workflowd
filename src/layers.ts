@@ -30,7 +30,8 @@ import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
 import { ClaudeCli, makeClaudeCli } from "./kernel/claude-session"
-import { CODEX_PROVIDER_ID, CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { CodexCli, makeCodexCli } from "./kernel/codex-session"
+import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
 import { ClaudeResumeWorker, runClaudeResumeIteration } from "./kernel/claude-resume-worker"
 import {
   ClaudeResumeRemoteProducer,
@@ -114,7 +115,112 @@ const stageResumeContract = <A, I>(
     maxOutputBytes: contract.maxResultBytes,
   })
 
-export const makeLiveLayer = (config: AppConfig) => {
+function makeDiscoveryLayer(
+  config: AppConfig,
+  client?: Parameters<typeof localDiscoverySources>[1],
+) {
+  const executionDiscoveryConfig = config.executionCapabilities
+  return executionDiscoveryConfig === undefined
+    ? Layer.empty
+    : Layer.effect(
+        ExecutionDiscovery,
+        Effect.gen(function* () {
+          const discovery = yield* Effect.acquireRelease(
+            Effect.sync(() =>
+              makeExecutionCapabilities({
+                host: config.worker.hostId,
+                sources: localDiscoverySources(config, client),
+                refreshMs: executionDiscoveryConfig.refreshMs,
+                timeoutMs: executionDiscoveryConfig.timeoutMs,
+              }),
+            ),
+            (resource) =>
+              Effect.tryPromise({
+                try: () => resource.close(),
+                catch: () => new Error("Capability discovery cleanup failed"),
+              }).pipe(Effect.orDie),
+          )
+          return ExecutionDiscovery.of({
+            list: Effect.fn("ExecutionDiscovery.list")(() =>
+              Effect.tryPromise({
+                try: () => discovery.list(),
+                catch: () => new Error("Capability discovery unavailable"),
+              }),
+            ),
+          })
+        }),
+      )
+}
+
+function makeExecutionOnlyLayer(config: AppConfig) {
+  const kernel = Layer.mergeAll(
+    KernelEventStoreLive,
+    KernelJobStoreLive,
+    KernelSessionStoreLive,
+    DogfoodStoreLive,
+    Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
+  ).pipe(Layer.provideMerge(WorkflowStoreLive))
+  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel))
+  const signals = WorkSignalLive
+  const codex = Layer.succeed(
+    CodexCli,
+    makeCodexCli({
+      binary: config.agentRuns?.codexBinary ?? "codex",
+      custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
+      ...(config.agentRuns?.codexUnitPrefix === undefined
+        ? {}
+        : { unitPrefix: config.agentRuns.codexUnitPrefix }),
+    }),
+  )
+  const claude =
+    (config.agentRuns?.claudeRoutes.length ?? 0) === 0
+      ? Layer.empty
+      : Layer.succeed(
+          ClaudeDispatchCli,
+          makeClaudeDispatchCli({
+            binary: config.agentRuns?.claudeBinary ?? "claude",
+            custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+          }),
+        )
+  const discovery = makeDiscoveryLayer(config)
+  const identity = {
+    owningHostId: config.worker.hostId,
+    providerId: "native-local",
+    serverId: config.worker.hostId,
+    endpointAlias: "local",
+    endpointIdentity: `local://${config.worker.hostId}`,
+    providerVersion: 1,
+  }
+  const runs =
+    config.agentRuns === undefined
+      ? Layer.empty
+      : AgentRunIngressLive({
+          ...config.agentRuns,
+          identity,
+          worktreeRoot: config.workspace.worktreeRoot,
+        }).pipe(
+          Layer.provideMerge(store),
+          Layer.provideMerge(codex),
+          Layer.provideMerge(claude),
+          Layer.provideMerge(discovery),
+          Layer.provideMerge(signals),
+          Layer.provide(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+        )
+  return Layer.mergeAll(
+    kernel,
+    store,
+    signals,
+    discovery,
+    runs,
+    Layer.succeed(WorkflowStart, {
+      preflight: Effect.void,
+      start: () =>
+        Effect.fail(new WorkflowStartUnauthorized({ reason: "QRSPI ingress is disabled" })),
+    }),
+  )
+}
+
+const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
   const authorization = Buffer.from(
     `${config.openCode.username}:${config.openCode.password}`,
   ).toString("base64")
@@ -133,38 +239,7 @@ export const makeLiveLayer = (config: AppConfig) => {
     ),
   )
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
-  const executionDiscoveryConfig = config.executionCapabilities
-  const executionDiscoveryLayer =
-    executionDiscoveryConfig === undefined
-      ? Layer.empty
-      : Layer.effect(
-          ExecutionDiscovery,
-          Effect.gen(function* () {
-            const discovery = yield* Effect.acquireRelease(
-              Effect.sync(() =>
-                makeExecutionCapabilities({
-                  host: config.worker.hostId,
-                  sources: localDiscoverySources(config, openCodeClientEffect),
-                  refreshMs: executionDiscoveryConfig.refreshMs,
-                  timeoutMs: executionDiscoveryConfig.timeoutMs,
-                }),
-              ),
-              (resource) =>
-                Effect.tryPromise({
-                  try: () => resource.close(),
-                  catch: () => new Error("Capability discovery cleanup failed"),
-                }).pipe(Effect.orDie),
-            )
-            return ExecutionDiscovery.of({
-              list: Effect.fn("ExecutionDiscovery.list")(() =>
-                Effect.tryPromise({
-                  try: () => discovery.list(),
-                  catch: () => new Error("Capability discovery unavailable"),
-                }),
-              ),
-            })
-          }),
-        )
+  const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
     timeoutMs: config.worker.jobTimeoutMs,
@@ -343,6 +418,13 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provide(storeLayer),
         )
   const residentLayer = residentLive ?? Layer.empty
+  const claudeDispatchLayer = Layer.succeed(
+    ClaudeDispatchCli,
+    makeClaudeDispatchCli({
+      binary: config.agentRuns?.claudeBinary ?? "claude",
+      custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+    }),
+  )
   const codexCliLayer =
     residentLive === undefined
       ? Layer.effect(
@@ -415,6 +497,7 @@ export const makeLiveLayer = (config: AppConfig) => {
           AgentRunIngressLive({
             routes: config.agentRuns.routes,
             codexRoutes: config.agentRuns.codexRoutes,
+            claudeRoutes: config.agentRuns.claudeRoutes,
             repositories: config.agentRuns.repositories,
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
@@ -432,7 +515,7 @@ export const makeLiveLayer = (config: AppConfig) => {
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
             // Codex runs complete inline in the dispatching request; their
             // verified rows are invisible to the watchdog.
-            unsupervisedProviderIds: [CODEX_PROVIDER_ID],
+            unsupervisedExecutorKinds: ["codex", "claude"],
             now: () => new Date(),
           }),
         ).pipe(
@@ -442,6 +525,8 @@ export const makeLiveLayer = (config: AppConfig) => {
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
+          Layer.provideMerge(executionDiscoveryLayer),
+          Layer.provideMerge(claudeDispatchLayer),
           Layer.provideMerge(workerIdentityLayer),
           Layer.provideMerge(openCodeMailboxLayer),
           Layer.provideMerge(workSignalLayer),
@@ -585,4 +670,17 @@ export const makeLiveLayer = (config: AppConfig) => {
     claudeResumeWorkerLayer,
     remoteCoordinatorLayer,
   )
+}
+
+export function makeLiveLayer(
+  config: Extract<AppConfig, { readonly mode?: "automation" }>,
+): ReturnType<typeof makeAutomationLayer>
+export function makeLiveLayer(
+  config: Extract<AppConfig, { readonly mode: "execution" }>,
+): ReturnType<typeof makeExecutionOnlyLayer>
+export function makeLiveLayer(
+  config: AppConfig,
+): ReturnType<typeof makeAutomationLayer> | ReturnType<typeof makeExecutionOnlyLayer>
+export function makeLiveLayer(config: AppConfig) {
+  return config.mode === "execution" ? makeExecutionOnlyLayer(config) : makeAutomationLayer(config)
 }

@@ -57,7 +57,7 @@ export const makeCiWorkers = (repositories: CiConfig["repositories"]) =>
     })
     return { port: { ...store, ingest }, publish, reconcile }
   })
-export const CiServiceLive = (config: CiConfig, github: AppConfig["github"]) =>
+export const CiServiceLive = (config: CiConfig, github: NonNullable<AppConfig["github"]>) =>
   Layer.effect(
     CiService,
     Effect.gen(function* () {

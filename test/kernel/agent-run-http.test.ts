@@ -105,6 +105,24 @@ describe("POST /workflows/agent-runs", () => {
     expect(called).toBe(false)
   })
 
+  test("schema refusals explain the route or explicit model selection contract", async () => {
+    let called = false
+    const response = await route(
+      post({ model: "native", prompt: "missing repository" }, authorization),
+      () => {
+        called = true
+        return Effect.succeed(receipt)
+      },
+    )
+    expect(response.status).toBe(400)
+    const payload = Schema.decodeUnknownSync(Schema.Struct({ error: Schema.String }))(
+      await response.json(),
+    )
+    expect(payload.error).toContain("exactly one of route or model")
+    expect(payload.error).toContain("repository and prompt")
+    expect(called).toBe(false)
+  })
+
   test("surfaces a refusal as 409 with the machine-readable reason", async () => {
     const response = await route(post(body, authorization), () =>
       Effect.fail(

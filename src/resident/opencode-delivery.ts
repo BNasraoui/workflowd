@@ -7,7 +7,10 @@ export const deliverOpenCode = Effect.fn("Resident.deliverOpenCode")(
   function* (
     provider: Pick<OpenCodeAdapter, "sessionExists" | "promptSession">,
     message: { readonly thread_id: string; readonly prompt: string; readonly state: string },
-    run: Pick<AgentRunRecord, "directory" | "agent" | "providerId" | "modelId">,
+    run: Pick<
+      AgentRunRecord,
+      "directory" | "agent" | "providerId" | "modelId" | "resolvedSelection"
+    >,
   ) {
     if (message.state === "sending") return "uncertain" as const
     const reference = { sessionID: message.thread_id, directory: run.directory }
@@ -15,7 +18,13 @@ export const deliverOpenCode = Effect.fn("Resident.deliverOpenCode")(
     yield* provider.promptSession({
       ...reference,
       agent: run.agent,
-      model: { providerID: run.providerId, modelID: run.modelId },
+      model: {
+        providerID: run.resolvedSelection?.provider ?? run.providerId,
+        modelID: run.resolvedSelection?.selectionModel ?? run.modelId,
+        ...(run.resolvedSelection?.thinking.variant === undefined
+          ? {}
+          : { variant: run.resolvedSelection.thinking.variant }),
+      },
       text: message.prompt,
       delivery: "queue",
     })

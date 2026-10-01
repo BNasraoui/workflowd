@@ -16,6 +16,103 @@ import {
 } from "./agent-run-ingress-harness"
 
 describe("agent-run ingress", () => {
+  test("dispatches Claude CLI directly, registers Claude custody, and completes without OpenCode calls", async () => {
+    const state = defaultState()
+    state.providers = []
+    state.models = []
+    const cli = makeCodexCli([
+      { type: "agent_message", text: "OK" },
+      { type: "turn.completed", outputTokens: 4 },
+    ])
+    const layer = makeLayer(
+      makeProvider(state),
+      worktrees([]),
+      undefined,
+      {
+        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+      },
+      cli.port,
+    )
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ ...submission, route: "claude" })
+        const duplicate = yield* register({ ...submission, route: "claude" })
+        const sql = yield* SqlClient.SqlClient
+        const custody = yield* sql<{
+          readonly provider_kind: string
+          readonly endpoint_identity: string
+        }>`SELECT provider_kind, endpoint_identity FROM kernel_sessions`
+        const store = yield* AgentRunStore
+        const run = yield* store
+          .read(receipt.runId)
+          .pipe(Effect.repeat({ until: (r) => r?.state === "completed" }))
+        return { receipt, duplicate, custody, run }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.receipt.providerId).toBe("claude-cli")
+    expect(result.receipt.modelId).toBe("claude-opus-5-5")
+    expect(result.receipt.sessionId).toStartWith("claude-session-")
+    expect(result.duplicate.status).toBe("duplicate")
+    expect(result.custody[0]?.provider_kind).toBe("claude")
+    expect(result.custody[0]?.endpoint_identity).toBe("claude-cli://mint")
+    expect(result.run?.lastOutputTokens).toBe(4)
+    expect(cli.state.spawned).toHaveLength(1)
+    expect(cli.state.spawned[0]?.model).toBe("claude-opus-5-5")
+    expect(state.created).toHaveLength(0)
+    expect(state.prompted).toHaveLength(0)
+  })
+
+  test("refuses an unauthenticated Claude CLI before spawning", async () => {
+    const state = defaultState()
+    const cli = makeCodexCli([], 1, {
+      kind: "not_authenticated",
+      detail: "Claude CLI is not logged in",
+    })
+    const layer = makeLayer(
+      makeProvider(state),
+      worktrees([]),
+      undefined,
+      {
+        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+      },
+      cli.port,
+    )
+    const refusal = await refusalOf(
+      Effect.runPromise(register({ ...submission, route: "claude" }).pipe(Effect.provide(layer))),
+    )
+    expect(refusal.reason).toBe("provider_not_authenticated")
+    expect(refusal.detail).toContain("Claude CLI")
+    expect(cli.state.spawned).toHaveLength(0)
+    expect(state.created).toHaveLength(0)
+  })
+
+  test("a Claude result error after partial output fails even if the CLI exits zero", async () => {
+    const state = defaultState()
+    const cli = makeCodexCli([
+      { type: "agent_message", text: "Partial response" },
+      { type: "turn.failed", message: "Claude stopped at its turn limit" },
+    ])
+    const layer = makeLayer(
+      makeProvider(state),
+      worktrees([]),
+      undefined,
+      {
+        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+      },
+      cli.port,
+    )
+    const run = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({ ...submission, route: "claude" })
+        const store = yield* AgentRunStore
+        return yield* store
+          .read(receipt.runId)
+          .pipe(Effect.repeat({ until: (r) => r?.state !== "verified" }))
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(run?.state).toBe("operator_required")
+    expect(run?.diagnostic).toContain("Claude stopped at its turn limit")
+  })
   test("dispatches by intent and returns a first-token-verified receipt with custody registered", async () => {
     const state = defaultState()
     const trees: Array<{ repository: string; directory: string; branch: string }> = []
@@ -488,7 +585,7 @@ describe("agent-run ingress", () => {
         ),
       ),
     )
-    expect(refusal.reason).toBe("provider_not_authenticated")
+    expect(refusal.reason).toBe("executor_unavailable")
     expect(unusable.state.spawned).toHaveLength(0)
 
     const unauthenticated = makeCodexCli([], 0, {

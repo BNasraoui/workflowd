@@ -24,9 +24,9 @@ type CustodyRefusalReason = "invalid_wait_pairing" | "missing_parent_session"
 
 export const makeAgentRunCustody = (dependencies: {
   readonly sessions: KernelSessionStorePort
-  readonly provider: AgentRunProviderPort
-  readonly waits: AgentWaitIngressPort
-  readonly claude: ClaudeCliPort
+  readonly provider: AgentRunProviderPort | undefined
+  readonly waits: AgentWaitIngressPort | undefined
+  readonly claude: ClaudeCliPort | undefined
   readonly options: Pick<AgentRunIngressOptions, "identity" | "claudeHosts">
   readonly refuse: (reason: CustodyRefusalReason, detail: string) => AgentRunRefusalError
 }) => {
@@ -124,6 +124,8 @@ export const makeAgentRunCustody = (dependencies: {
           )
         }
         if (parent.host !== options.identity.owningHostId) return parent.directory
+        if (claude === undefined)
+          return yield* refuse("missing_parent_session", "Claude parent executor is disabled")
         const exists = yield* claude.sessionExists({
           nativeSessionId: parent.nativeSessionId,
           directory: parent.directory,
@@ -136,6 +138,8 @@ export const makeAgentRunCustody = (dependencies: {
         }
         return parent.directory
       }
+      if (provider === undefined)
+        return yield* refuse("missing_parent_session", "OpenCode executor is disabled")
       const telemetry = yield* provider.sessionTelemetry({ sessionID: parent.nativeSessionId })
       if (telemetry === undefined) {
         return yield* refuse(
@@ -158,6 +162,8 @@ export const makeAgentRunCustody = (dependencies: {
     readonly now: Date
   }) =>
     Effect.gen(function* () {
+      if (waits === undefined)
+        return yield* refuse("invalid_wait_pairing", "Parent wakes are disabled")
       const parentResourceId = yield* ensureResource({
         resourceId: `${run.parentKind}-session-resource-${run.parentNativeSessionId}`,
         absolutePath: run.parentDirectory,

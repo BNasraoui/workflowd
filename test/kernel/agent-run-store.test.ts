@@ -167,25 +167,25 @@ describe("agent-run store", () => {
         const fresh = yield* store.nextWatchable({
           now: at,
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: [],
+          unsupervisedExecutorKinds: [],
         })
         const stale = yield* store.nextWatchable({
           now: new Date(at.getTime() + 120_000),
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: [],
+          unsupervisedExecutorKinds: [],
         })
         yield* spawn(store)
         yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
         const verified = yield* store.nextWatchable({
           now: at,
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: [],
+          unsupervisedExecutorKinds: [],
         })
         yield* store.operatorRequired({ runId: input.runId, diagnostic: "done", now: at })
         const terminal = yield* store.nextWatchable({
           now: at,
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: [],
+          unsupervisedExecutorKinds: [],
         })
         return { fresh, stale, verified, terminal }
       }),
@@ -209,7 +209,7 @@ describe("agent-run store", () => {
         const supervisedWindow = yield* store.nextWatchable({
           now: at,
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: ["codex-cli"],
+          unsupervisedExecutorKinds: ["codex"],
         })
         yield* store.complete({ runId: input.runId, now: at })
         // Same provider, but the dispatching request died before verification:
@@ -224,7 +224,7 @@ describe("agent-run store", () => {
         const stale = yield* store.nextWatchable({
           now: new Date(at.getTime() + 120_000),
           staleAfterMs: 60_000,
-          unsupervisedProviderIds: ["codex-cli"],
+          unsupervisedExecutorKinds: ["codex"],
         })
         return { supervisedWindow, stale }
       }),
@@ -315,7 +315,11 @@ for (const state of ["accepted", "spawning", "spawned", "verified"] as const) {
           updatedAt: later,
         })
         expect(
-          yield* store.nextWatchable({ now: later, staleAfterMs: 0, unsupervisedProviderIds: [] }),
+          yield* store.nextWatchable({
+            now: later,
+            staleAfterMs: 0,
+            unsupervisedExecutorKinds: [],
+          }),
         ).toBeNull()
         for (const transition of [
           store.cancel({ runId: input.runId, diagnostic: "again", now: later }),

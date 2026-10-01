@@ -18,7 +18,14 @@ test("cancellation migration preserves existing runs and indexes and widens stat
         (yield* sql`UPDATE kernel_agent_runs SET state = 'cancelled'`.pipe(Effect.result))._tag,
       ).toBe("Failure")
       yield* runStoreMigrations
-      expect(yield* sql`SELECT * FROM kernel_agent_runs`).toEqual(before)
+      expect(yield* sql`SELECT * FROM kernel_agent_runs`).toEqual(
+        before.map((row) => ({
+          ...row,
+          executor_kind: "codex",
+          requested_selection: null,
+          resolved_selection: null,
+        })),
+      )
       yield* sql`UPDATE kernel_agent_runs SET state = 'cancelled'`
       expect(yield* sql`SELECT state FROM kernel_agent_runs`).toEqual([{ state: "cancelled" }])
       expect(

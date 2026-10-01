@@ -1,5 +1,7 @@
+import { canonicalJson } from "./session-store-support"
 import { SqlClient } from "effect/unstable/sql"
 import { Context, Data, Effect, Layer, Schema } from "effect"
+import { RequestedSelection, ResolvedSelection } from "../execution-selection"
 
 /**
  * Durable record of one managed agent run: a dispatched child session the
@@ -28,6 +30,9 @@ const AgentRunRow = Schema.Struct({
   route: Schema.String,
   provider_id: Schema.String,
   model_id: Schema.String,
+  executor_kind: Schema.Literals(["opencode", "codex", "claude"]),
+  requested_selection: Schema.NullOr(Schema.String),
+  resolved_selection: Schema.NullOr(Schema.String),
   agent: Schema.String,
   repository: Schema.String,
   directory: Schema.String,
@@ -57,6 +62,9 @@ const AgentRunRow = Schema.Struct({
 })
 
 export type AgentRunRecord = {
+  readonly executorKind?: "opencode" | "codex" | "claude"
+  readonly requestedSelection?: RequestedSelection | null
+  readonly resolvedSelection?: ResolvedSelection | null
   readonly runId: string
   readonly route: string
   readonly providerId: string
@@ -81,6 +89,9 @@ export type AgentRunRecord = {
 }
 
 export type AgentRunCreateInput = {
+  readonly executorKind?: "opencode" | "codex" | "claude"
+  readonly requestedSelection?: RequestedSelection
+  readonly resolvedSelection?: ResolvedSelection
   readonly runId: string
   readonly route: string
   readonly providerId: string
@@ -113,7 +124,22 @@ export type AgentRunStoreError =
 
 type Authority = { readonly runId: string; readonly now: Date }
 
+/** Only pre-contract callers lack an executor kind; their old markers identify native CLIs. */
+export const agentRunExecutorKind = (run: {
+  readonly executorKind?: "opencode" | "codex" | "claude"
+  readonly providerId: string
+}): "opencode" | "codex" | "claude" =>
+  run.executorKind ??
+  (run.providerId === "codex-cli"
+    ? "codex"
+    : run.providerId === "claude-cli"
+      ? "claude"
+      : "opencode")
+
 export type AgentRunStorePort = {
+  readonly recordResolvedSelection: (
+    input: Authority & { readonly selection: ResolvedSelection },
+  ) => Effect.Effect<void, AgentRunStoreError>
   readonly create: (
     input: AgentRunCreateInput,
   ) => Effect.Effect<{ readonly status: "created" | "duplicate" }, AgentRunStoreError>
@@ -150,16 +176,18 @@ export type AgentRunStorePort = {
   readonly nextWatchable: (input: {
     readonly now: Date
     readonly staleAfterMs: number
-    /** Providers whose verified runs complete outside the watchdog (inline
-     * subprocess execution like codex-cli). Verified rows of these providers
-     * are invisible to the watchdog; their stale pre-verification rows are
-     * still cleaned up through the dispatch-incomplete path. */
-    readonly unsupervisedProviderIds: ReadonlyArray<string>
+    /** Executor kinds supervised through native process custody rather than the
+     * OpenCode watchdog, including uncertain pre-verification launches. */
+    readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
-  /** Startup recovery surface for providers whose execution lives outside
-   * the daemon and can be reattached after a restart. */
+  /** Metadata query for callers explicitly interested in a model provider. */
   readonly listActiveByProvider: (
     providerId: string,
+    transientOnly?: boolean,
+  ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
+  /** Startup recovery classifies execution by the persisted executor kind. */
+  readonly listActiveByExecutor: (
+    kind: "opencode" | "codex" | "claude",
     transientOnly?: boolean,
   ) => Effect.Effect<ReadonlyArray<AgentRunRecord>, AgentRunStoreError>
 }
@@ -171,29 +199,54 @@ const toRecord = (row: Record<string, unknown>) =>
     Effect.mapError(
       (error) => new AgentRunStoreDataError({ runId: String(row.run_id), message: String(error) }),
     ),
-    Effect.map((decoded): AgentRunRecord => ({
-      runId: decoded.run_id,
-      route: decoded.route,
-      providerId: decoded.provider_id,
-      modelId: decoded.model_id,
-      agent: decoded.agent,
-      repository: decoded.repository,
-      directory: decoded.directory,
-      prompt: decoded.prompt,
-      parentSessionId: decoded.parent_session_id,
-      resumePrompt: decoded.resume_prompt,
-      resourceId: decoded.resource_id,
-      sessionId: decoded.session_id,
-      nativeSessionId: decoded.native_session_id,
-      state: decoded.state,
-      attempt: decoded.attempt,
-      maxAttempts: decoded.max_attempts,
-      lastOutputTokens: decoded.last_output_tokens,
-      lastProgressAt: decoded.last_progress_at === null ? null : new Date(decoded.last_progress_at),
-      diagnostic: decoded.diagnostic,
-      createdAt: new Date(decoded.created_at),
-      updatedAt: new Date(decoded.updated_at),
-    })),
+    Effect.flatMap((decoded) =>
+      Effect.gen(function* () {
+        const requestedSelection =
+          decoded.requested_selection === null
+            ? null
+            : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(RequestedSelection))(
+                decoded.requested_selection,
+              )
+        const resolvedSelection =
+          decoded.resolved_selection === null
+            ? null
+            : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ResolvedSelection))(
+                decoded.resolved_selection,
+              )
+        return {
+          executorKind: decoded.executor_kind,
+          requestedSelection,
+          resolvedSelection,
+          runId: decoded.run_id,
+          route: decoded.route,
+          providerId: decoded.provider_id,
+          modelId: decoded.model_id,
+          agent: decoded.agent,
+          repository: decoded.repository,
+          directory: decoded.directory,
+          prompt: decoded.prompt,
+          parentSessionId: decoded.parent_session_id,
+          resumePrompt: decoded.resume_prompt,
+          resourceId: decoded.resource_id,
+          sessionId: decoded.session_id,
+          nativeSessionId: decoded.native_session_id,
+          state: decoded.state,
+          attempt: decoded.attempt,
+          maxAttempts: decoded.max_attempts,
+          lastOutputTokens: decoded.last_output_tokens,
+          lastProgressAt:
+            decoded.last_progress_at === null ? null : new Date(decoded.last_progress_at),
+          diagnostic: decoded.diagnostic,
+          createdAt: new Date(decoded.created_at),
+          updatedAt: new Date(decoded.updated_at),
+        } satisfies AgentRunRecord
+      }).pipe(
+        Effect.mapError(
+          (error) =>
+            new AgentRunStoreDataError({ runId: String(row.run_id), message: String(error) }),
+        ),
+      ),
+    ),
   )
 
 const make = Effect.gen(function* () {
@@ -227,6 +280,13 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const existing = yield* readRow(input.runId)
       if (existing !== null) {
+        // Pre-migration rows carry no new selection document. A plain alias
+        // replay still has to match every original provider/model field below.
+        const legacyAlias =
+          existing.requestedSelection == null &&
+          input.requestedSelection?.route !== undefined &&
+          input.requestedSelection.model === undefined &&
+          input.requestedSelection.thinking === undefined
         const exact =
           existing.route === input.route &&
           existing.providerId === input.providerId &&
@@ -234,7 +294,11 @@ const make = Effect.gen(function* () {
           existing.repository === input.repository &&
           existing.prompt === input.prompt &&
           existing.parentSessionId === input.parentSessionId &&
-          existing.resumePrompt === input.resumePrompt
+          existing.resumePrompt === input.resumePrompt &&
+          (legacyAlias ||
+            canonicalJson(existing.requestedSelection ?? null) ===
+              canonicalJson(input.requestedSelection ?? null)) &&
+          existing.executorKind === agentRunExecutorKind(input)
         if (exact) return { status: "duplicate" as const }
         return yield* Effect.fail(
           conflict(input.runId, "run identity exists with different submission fields"),
@@ -242,11 +306,14 @@ const make = Effect.gen(function* () {
       }
       yield* sql`INSERT INTO kernel_agent_runs (run_id, route, provider_id, model_id, agent,
         repository, directory, prompt, prompt_sha256, parent_session_id, resume_prompt, state,
-        attempt, max_attempts, created_at, updated_at)
+        attempt, max_attempts, created_at, updated_at, executor_kind, requested_selection, resolved_selection)
         VALUES (${input.runId}, ${input.route}, ${input.providerId}, ${input.modelId},
         ${input.agent}, ${input.repository}, ${input.directory}, ${input.prompt},
         ${input.promptSha256}, ${input.parentSessionId}, ${input.resumePrompt}, 'accepted', 1,
-        ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()})`
+        ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()},
+        ${agentRunExecutorKind(input)},
+        ${input.requestedSelection === undefined ? null : JSON.stringify(input.requestedSelection)},
+        ${input.resolvedSelection === undefined ? null : JSON.stringify(input.resolvedSelection)})`
       return { status: "created" as const }
     }).pipe(sql.withTransaction)
 
@@ -349,7 +416,7 @@ const make = Effect.gen(function* () {
       sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND (state IN ('accepted', 'spawning', 'spawned', 'verified')
-          OR (state = 'operator_required' AND provider_id = 'codex-cli'))
+          OR (state = 'operator_required' AND executor_kind IN ('codex', 'claude')))
         RETURNING run_id`,
     )
 
@@ -368,7 +435,7 @@ const make = Effect.gen(function* () {
       "run is not active",
       sql`UPDATE kernel_agent_runs SET state = 'operator_required',
         diagnostic = ${input.diagnostic}, updated_at = ${input.now.toISOString()}
-        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified')
+        WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified', 'operator_required')
         RETURNING run_id`,
     )
 
@@ -376,14 +443,14 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const staleBefore = new Date(input.now.getTime() - input.staleAfterMs).toISOString()
       const verified =
-        input.unsupervisedProviderIds.length === 0
+        input.unsupervisedExecutorKinds.length === 0
           ? sql`state = 'verified'`
           : sql`state = 'verified'
-        AND provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
+        AND executor_kind NOT IN ${sql.in(input.unsupervisedExecutorKinds)}`
       const externallySupervised =
-        input.unsupervisedProviderIds.length === 0
+        input.unsupervisedExecutorKinds.length === 0
           ? sql`1 = 1`
-          : sql`provider_id NOT IN ${sql.in(input.unsupervisedProviderIds)}`
+          : sql`executor_kind NOT IN ${sql.in(input.unsupervisedExecutorKinds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
         WHERE (${verified}) AND NOT EXISTS (
           SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
@@ -412,7 +479,26 @@ const make = Effect.gen(function* () {
       return yield* Effect.forEach(rows, toRecord)
     })
 
+  const listActiveByExecutor: AgentRunStorePort["listActiveByExecutor"] = (
+    kind,
+    transientOnly = false,
+  ) =>
+    Effect.gen(function* () {
+      const rows = yield* sql`SELECT * FROM kernel_agent_runs
+        WHERE executor_kind = ${kind} AND state IN ('spawning', 'spawned', 'verified')
+        AND (${transientOnly ? 1 : 0} = 0 OR NOT EXISTS (
+          SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
+        )) ORDER BY created_at, run_id`
+      return yield* Effect.forEach(rows, toRecord)
+    })
+
   return AgentRunStore.of({
+    recordResolvedSelection: (input) =>
+      transition(
+        input.runId,
+        "selection evidence requires an active run",
+        sql`UPDATE kernel_agent_runs SET resolved_selection = ${JSON.stringify(input.selection)}, updated_at = ${input.now.toISOString()} WHERE run_id = ${input.runId} AND state IN ('accepted','spawning','spawned','verified') RETURNING run_id`,
+      ),
     create,
     claimSpawn,
     abandonLaunch,
@@ -428,6 +514,7 @@ const make = Effect.gen(function* () {
     operatorRequired,
     nextWatchable,
     listActiveByProvider,
+    listActiveByExecutor,
   })
 })
 
