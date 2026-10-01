@@ -259,7 +259,7 @@ export const makeLayer = (
   optionOverrides: Partial<
     import("../../src/kernel/agent-run-ingress").AgentRunIngressOptions
   > = {},
-  claude: import("../../src/kernel/codex-session").CodexCliPort = defaultCodex.port,
+  claude: import("../../src/kernel/codex-session").CodexCliPort | null = defaultCodex.port,
 ) => {
   const database = SqliteClient.layer({ filename: ":memory:" })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
@@ -280,7 +280,7 @@ export const makeLayer = (
     Layer.provideMerge(Layer.succeed(AgentRunWorktrees, trees)),
     Layer.provideMerge(Layer.succeed(ClaudeCli, claudeCli)),
     Layer.provideMerge(Layer.succeed(CodexCli, codex)),
-    Layer.provideMerge(Layer.succeed(ClaudeDispatchCli, claude)),
+    Layer.provideMerge(claude === null ? Layer.empty : Layer.succeed(ClaudeDispatchCli, claude)),
     Layer.provideMerge(Layer.succeed(WorkSignal, signals)),
   )
 }

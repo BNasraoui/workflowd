@@ -4,6 +4,7 @@ export const ResidentThread = Schema.Struct({
   run_id: Schema.String,
   provider_kind: Schema.Literals(["codex", "opencode"]),
   capability_hash: Schema.NullOr(Schema.String),
+  closure_confirmed: Schema.Literals([0, 1]),
   thread_id: Schema.String,
   directory: Schema.String,
   model: Schema.NullOr(Schema.String),
@@ -42,6 +43,25 @@ export const makeResidentStore = Effect.gen(function* () {
   const read = Effect.fn("Resident.read")(function* (threadId: string) {
     const rows = yield* sql`SELECT * FROM resident_threads WHERE thread_id = ${threadId}`
     return rows.length === 0 ? null : yield* Schema.decodeUnknownEffect(ResidentThread)(rows[0])
+  })
+  const readRun = Effect.fn("Resident.readRun")(function* (runId: string) {
+    const rows =
+      yield* sql`SELECT * FROM resident_threads WHERE run_id = ${runId} AND provider_kind = 'codex'`
+    return rows.length === 0 ? null : yield* Schema.decodeUnknownEffect(ResidentThread)(rows[0])
+  })
+  const recordClosure = Effect.fn("Resident.recordClosure")(function* (
+    threadId: string,
+    confirmed: boolean,
+  ) {
+    yield* sql`UPDATE resident_threads SET closure_confirmed = ${confirmed ? 1 : 0} WHERE thread_id = ${threadId}`
+  })
+  const revokeDelivery = Effect.fn("Resident.revokeDelivery")(function* (threadId: string) {
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE resident_inbox SET state = 'operator_required' WHERE thread_id = ${threadId} AND state IN ('prepared','sending')`
+        yield* sql`UPDATE resident_threads SET state = 'operator_required' WHERE thread_id = ${threadId}`
+      }),
+    )
   })
   const started = Effect.fn("Resident.started")(function* (threadId: string, turnId: string) {
     yield* sql`UPDATE resident_threads SET current_turn = ${turnId}, state = 'active' WHERE thread_id = ${threadId} AND state IN ('active','waiting')`
@@ -114,6 +134,9 @@ export const makeResidentStore = Effect.gen(function* () {
     attach,
     threads,
     read,
+    readRun,
+    recordClosure,
+    revokeDelivery,
     started,
     completed,
     enqueue,

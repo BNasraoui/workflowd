@@ -487,7 +487,13 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   const cancel = (run: AgentRunRecord, now: Date) =>
     Effect.gen(function* () {
       if (cli.ownership === "resident-thread") {
-        yield* cli.cancelRun(run.runId)
+        const cancelled = yield* cli.cancelRun(run.runId).pipe(Effect.result)
+        if (cancelled._tag === "Failure")
+          return yield* cancellationUnconfirmed(
+            run,
+            now,
+            `resident cancellation unconfirmed: ${cliFailureDetail(cancelled.failure)}`,
+          )
         yield* store.cancel({ runId: run.runId, now })
         return
       }

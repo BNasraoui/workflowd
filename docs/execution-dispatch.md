@@ -33,7 +33,9 @@ access, then executor kinds rank Codex, Claude, OpenCode, then executor and cata
 IDs sort lexically. The order is independent of discovery response ordering.
 Failures return bounded reasons including `unknown_model`, `ambiguous_model`,
 `executor_unavailable`, `model_access_unknown`, `model_not_available` and
-`unsupported_thinking`. No fallback model or lower effort is selected.
+`unsupported_thinking`. No fallback model or lower effort is selected. A CLI-default alias that pins no model
+refuses explicit thinking as `unsupported_thinking`; it cannot verify the native
+default model in advance.
 
 ## Thinking inputs
 
@@ -110,6 +112,17 @@ Explicit native cancellation reports attach/stop uncertainty as typed `run_confl
 while retaining custody and the current diagnostic, including repeated attempts.
 An absent unadopted unit is never declared cancelled solely because it is absent;
 a later-visible execution can still be cancelled through the same manifest.
+Resident Codex cancellation resolves its durable run/thread ownership before first
+output, revokes pending inbox delivery, and awaits the owned app-server's closure.
+Closure failure or missing ownership returns typed `run_conflict` with operator
+custody and the actual diagnostic. Background operator cleanup follows the same
+ownership path. Migration `0025_resident_closure` records confirmed closure; old
+rows default to unconfirmed. That proof is cleared before reacquiring an app-server,
+so a restart cannot mistake an old close for termination of a new execution.
+Unverified old custody without closure proof is retained for operator attention;
+recovery does not queue a replacement turn. Fully verified native duplicate receipts
+replay the accepted model/thinking without a currently enabled executor. An incomplete
+native replay requiring a disabled executor returns `executor_unavailable`.
 Parent wakes continue to require an OpenCode child.
 
 ## Execution-only daemon

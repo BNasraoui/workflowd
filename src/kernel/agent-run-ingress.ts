@@ -639,6 +639,11 @@ const make = (options: AgentRunIngressOptions) =>
             evidence: "configured",
           }
           if (submission.thinking !== undefined && Object.keys(submission.thinking).length > 0) {
+            if (alias.provider !== "opencode" && alias.route.modelID === null)
+              return yield* refuse(
+                "unsupported_thinking",
+                "This CLI alias pins no model, so thinking cannot be verified before execution",
+              )
             if (alias.provider === "claude") {
               return yield* refuse(
                 "unsupported_thinking",
@@ -777,34 +782,41 @@ const make = (options: AgentRunIngressOptions) =>
               (run.diagnostic === null ? "" : `: ${run.diagnostic}`),
           )
         }
-        const dispatched =
-          run.state === "completed"
-            ? {
-                nativeSessionId: run.nativeSessionId ?? "",
-                outputTokens: run.lastOutputTokens,
-                kind: resolution.provider,
-              }
-            : resolution.provider !== "opencode"
-              ? yield* (resolution.provider === "claude" ? claudeRuns! : codexRuns).dispatch(
-                  run,
-                  resolution.route,
-                  {
-                    repositoryDirectory: repository.directory,
-                    resourceId: identifiers.resourceId,
-                    short: identifiers.short,
-                  },
-                  now,
-                )
-              : yield* dispatch(
-                  run,
-                  resolution.route,
-                  {
-                    repositoryDirectory: repository.directory,
-                    resourceId: identifiers.resourceId,
-                    short: identifiers.short,
-                  },
-                  now,
-                )
+        const immutableReceipt =
+          run.state === "completed" ||
+          (resolution.provider !== "opencode" &&
+            run.state === "verified" &&
+            run.nativeSessionId !== null)
+        const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
+        const dispatched = immutableReceipt
+          ? {
+              nativeSessionId: run.nativeSessionId ?? "",
+              outputTokens: run.lastOutputTokens,
+              kind: resolution.provider,
+            }
+          : resolution.provider !== "opencode"
+            ? yield* nativeRuns === undefined
+                ? refuse("executor_unavailable", "Claude executor is disabled")
+                : nativeRuns.dispatch(
+                    run,
+                    resolution.route,
+                    {
+                      repositoryDirectory: repository.directory,
+                      resourceId: identifiers.resourceId,
+                      short: identifiers.short,
+                    },
+                    now,
+                  )
+            : yield* dispatch(
+                run,
+                resolution.route,
+                {
+                  repositoryDirectory: repository.directory,
+                  resourceId: identifiers.resourceId,
+                  short: identifiers.short,
+                },
+                now,
+              )
         const childSessionId = {
           claude: claudeSessionCustodyId,
           codex: codexSessionCustodyId,
