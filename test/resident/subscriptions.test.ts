@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { ConfigProvider, Effect, Layer } from "effect"
+import { ConfigProvider, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -443,3 +443,91 @@ for (const conclusion of ["success", "failure"] as const) {
       }).pipe(Effect.provide(layer)),
     ))
 }
+
+const completionPayload = (prompt: string | undefined) => {
+  const json = /^workflowd completion: (.*)\. Continue the task from this result\.$/s.exec(
+    prompt ?? "",
+  )?.[1]
+  return Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+  )(json)
+}
+
+for (const finalMessage of ["child summary", "x".repeat(70_000)]) {
+  test(`agent run subscription carries the child's caller-mailbox message (${finalMessage.length} chars)`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const subscriptions = yield* makeSubscriptions
+        const sql = yield* SqlClient.SqlClient
+        const runs = yield* AgentRunStore
+        yield* store.attach("parent", "thread", "/work", null)
+        yield* store.started("thread", "turn")
+        yield* runs.create({
+          runId: "child",
+          route: "test",
+          providerId: "codex-cli",
+          modelId: "m",
+          agent: "build",
+          repository: "o/r",
+          directory: "/child",
+          prompt: "task",
+          promptSha256: "a".repeat(64),
+          parentSessionId: null,
+          resumePrompt: null,
+          maxAttempts: 1,
+          createdAt: new Date(),
+        })
+        yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
+        yield* runs.fail({ runId: "child", now: new Date(), diagnostic: "boom", finalMessage })
+        yield* subscriptions.reconcile()
+        const [row] = yield* sql<{ prompt: string }>`SELECT prompt FROM resident_inbox
+          WHERE id = 'agent-run-end-child'`
+        const mailbox = Schema.decodeUnknownSync(
+          Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+        )(row?.prompt)
+        const messages = yield* store.pending()
+        expect(messages).toHaveLength(1)
+        const payload = completionPayload(messages[0]?.prompt)
+        expect(payload).toMatchObject({ kind: "agent_run", runId: "child", status: "failed" })
+        expect(payload.terminal).toEqual(
+          finalMessage.length < 1_000
+            ? mailbox
+            : { ...mailbox, final_message: null, final_message_ref: "child" },
+        )
+        expect(mailbox.final_message).toBe(finalMessage)
+      }).pipe(Effect.provide(layer)),
+    ))
+}
+
+test("agent run subscription without a caller-mailbox row carries a null terminal", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeResidentStore
+      const subscriptions = yield* makeSubscriptions
+      const sql = yield* SqlClient.SqlClient
+      const runs = yield* AgentRunStore
+      yield* store.attach("parent", "thread", "/work", null)
+      yield* store.started("thread", "turn")
+      yield* runs.create({
+        runId: "child",
+        route: "test",
+        providerId: "codex-cli",
+        modelId: "m",
+        agent: "build",
+        repository: "o/r",
+        directory: "/child",
+        prompt: "task",
+        promptSha256: "a".repeat(64),
+        parentSessionId: null,
+        resumePrompt: null,
+        maxAttempts: 1,
+        createdAt: new Date(),
+      })
+      yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
+      yield* sql`UPDATE kernel_agent_runs SET state = 'completed' WHERE run_id = 'child'`
+      yield* subscriptions.reconcile()
+      const messages = yield* store.pending()
+      expect(completionPayload(messages[0]?.prompt).terminal).toBeNull()
+    }).pipe(Effect.provide(layer)),
+  ))
