@@ -797,37 +797,40 @@ const make = (options: AgentRunIngressOptions) =>
                 mailboxId: run.callerMailboxId,
               })
             : error
-        const dispatched = immutableReceipt
-          ? {
-              nativeSessionId: run.nativeSessionId ?? "",
-              outputTokens: run.lastOutputTokens,
-              kind: resolution.provider,
-            }
-          : resolution.provider !== "opencode"
-            ? yield* (
-                nativeRuns === undefined
-                  ? refuse("executor_unavailable", "Claude executor is disabled")
-                  : nativeRuns.dispatch(
-                      run,
-                      resolution.route,
-                      {
-                        repositoryDirectory: repository.directory,
-                        resourceId: identifiers.resourceId,
-                        short: identifiers.short,
-                      },
-                      now,
-                    )
-              ).pipe(Effect.mapError(withMailbox))
-            : yield* dispatch(
-                run,
-                resolution.route,
-                {
-                  repositoryDirectory: repository.directory,
-                  resourceId: identifiers.resourceId,
-                  short: identifiers.short,
-                },
-                now,
-              ).pipe(Effect.mapError(withMailbox))
+        let dispatched
+        if (immutableReceipt) {
+          dispatched = {
+            nativeSessionId: run.nativeSessionId ?? "",
+            outputTokens: run.lastOutputTokens,
+            kind: resolution.provider,
+          }
+        } else if (resolution.provider !== "opencode") {
+          dispatched = yield* (
+            nativeRuns === undefined
+              ? refuse("executor_unavailable", "Claude executor is disabled")
+              : nativeRuns.dispatch(
+                  run,
+                  resolution.route,
+                  {
+                    repositoryDirectory: repository.directory,
+                    resourceId: identifiers.resourceId,
+                    short: identifiers.short,
+                  },
+                  now,
+                )
+          ).pipe(Effect.mapError(withMailbox))
+        } else {
+          dispatched = yield* dispatch(
+            run,
+            resolution.route,
+            {
+              repositoryDirectory: repository.directory,
+              resourceId: identifiers.resourceId,
+              short: identifiers.short,
+            },
+            now,
+          ).pipe(Effect.mapError(withMailbox))
+        }
         const childSessionId = {
           claude: claudeSessionCustodyId,
           codex: codexSessionCustodyId,
