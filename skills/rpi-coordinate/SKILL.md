@@ -52,8 +52,10 @@ The wake carries the stage's final message in `terminal.final_message` (or a ref
 After the plan stage, stop. Show the human the plan gist URL, the phase titles, and any
 **Decisions for the reviewer**. Dispatch `rpi-implement` only after the human explicitly
 approves that plan. Then record the approval first:
-`bd note <id> "plan approved: <plan gist url>"`. If the human asks for changes, dispatch
-`rpi-plan` again with their feedback added to the prompt, and wait for approval again.
+`bd note <id> "plan approved: <plan gist url>"`. If the human chose among the plan's
+**Decisions for the reviewer**, append their choices to that note and to the implement
+prompt. If the human asks for changes, dispatch `rpi-plan` again with their feedback added
+to the prompt, and wait for approval again.
 
 If implement stops and reports a missing file, a wrong Rule, or a plan gap, bring it to the
 human; do not widen the plan yourself. After implement, dispatch `rpi-review`. When review

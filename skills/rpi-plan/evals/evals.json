@@ -1,0 +1,37 @@
+{
+  "skill_name": "rpi-plan",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-plan skill. Input: bead workflowd-x52, research https://gist.github.com/example/r52",
+      "expected_output": "A plan of at most two pages in vertical slices whose cross-component phases name end-to-end tests through the fake GitHub server and real webhook handler.",
+      "files": [
+        "evals/fixtures/cross-component.md"
+      ],
+      "expectations": [
+        "The plan is at most 120 lines and 900 words.",
+        "Each phase states one observable result, and phases are vertical slices rather than layers (no phase is only types, only storage, or only API).",
+        "Each phase lists the files it changes as a compact tree, and the files are consistent with the research.",
+        "Every phase that crosses components names an end-to-end test that drives the real webhook handler, store, worker, or GitHub adapter through `test/ci/github-fixture.ts` or `test/webhook.test.ts`; no phase relies only on mocks or stubs.",
+        "Removing the label (the `unlabeled` action) is covered by a phase with its own end-to-end check.",
+        "Claims about current code match the research citations.",
+        "The output contains no implementation code beyond shape diffs, and the listed commands end with `bd set-state workflowd-x52 rpi=plan-review` without implementing."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-plan skill. Input: bead kiln-90, research https://gist.github.com/example/r90",
+      "expected_output": "The plan reports a shaping gap: no Requirement covers message expiry.",
+      "files": [
+        "evals/fixtures/no-requirement-fits.md"
+      ],
+      "expectations": [
+        "The plan and the final message report a shaping gap because no Requirement covers message lifetime or expiry.",
+        "The plan does not create or propose a new Requirement and does not attach new Rules to REQ-4 or REQ-6.",
+        "The plan does not link TOPIC-3 as the Topic for this work.",
+        "The plan leaves out phases that depend on the missing Requirement, or clearly marks them as blocked on the gap.",
+        "The output stops for human review and does not implement."
+      ]
+    }
+  ]
+}

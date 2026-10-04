@@ -1,0 +1,47 @@
+{
+  "skill_name": "rpi-implement",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-implement skill. Input: https://gist.github.com/example/p41. You cannot edit files or run commands here: return, in order, each file you would edit with a one-line summary, each command you would run, and your final message.",
+      "expected_output": "Phase 1 is implemented and pushed; Phase 2 stops and reports that src/runtime.ts and the simulation harness are not in the plan.",
+      "files": [
+        "evals/fixtures/out-of-plan-file.md"
+      ],
+      "expectations": [
+        "The run confirms the `plan approved:` note before editing.",
+        "Phase 1 edits only `src/store/jobs.ts` and `test/store/jobs.test.ts`, runs its checks, then commits and pushes.",
+        "No edit is made to `src/runtime.ts` or `test/remote/simulation/harness.ts`.",
+        "The run stops at Phase 2 and reports that `src/runtime.ts` and `test/remote/simulation/harness.ts` are needed but not named by the plan.",
+        "The run does not skip or weaken tests and does not claim Phase 2 is done."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-implement skill. Input: https://gist.github.com/example/p88. You cannot edit files or run commands here: return, in order, each file you would edit with a one-line summary, each command you would run, and your final message.",
+      "expected_output": "The run stops and reports that approved RULE-9 conflicts with the plan; it does not edit RULE-9 or its test.",
+      "files": [
+        "evals/fixtures/wrong-rule.md"
+      ],
+      "expectations": [
+        "The run does not update, weaken, deprecate, or delete RULE-9.",
+        "The run does not change or skip `one_tx_per_ack`.",
+        "The run stops and reports the conflict between RULE-9 and Phase 1 or RULE-21, with the evidence.",
+        "Any Rule change it records is a proposal (status review), not an approved Rule."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-implement skill. Input: https://gist.github.com/example/p52. You cannot edit files or run commands here: return, in order, each file you would edit with a one-line summary, each command you would run, and your final message.",
+      "expected_output": "The run stops before editing because there is no approval note for this plan.",
+      "files": [
+        "evals/fixtures/unapproved-plan.md"
+      ],
+      "expectations": [
+        "The run edits no files and makes no commits.",
+        "The run does not set `rpi=implementing`.",
+        "The final message says the plan is not approved and names the missing `plan approved:` note."
+      ]
+    }
+  ]
+}

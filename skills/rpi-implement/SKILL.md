@@ -26,9 +26,8 @@ For each phase, in order:
 1. Change only the files the phase lists. Follow the repository's own instructions
    (`AGENTS.md`, `CLAUDE.md`) for style, tests, and commits.
 2. If the work needs a file the plan does not name, or a shape the plan did not describe,
-   stop. Do not edit it "just this once". Report what is missing and why, and end the run.
-   Small fixes inside a named file are fine; new files, deleted files, and files from
-   another component are not.
+   stop. Do not edit it "just this once". Small fixes inside a named file are fine; new
+   files, deleted files, and files from another component are not.
 3. Run the phase's checks and its end-to-end test. A phase is done only when they pass. Do
    not skip, weaken, or mark tests pending to get there.
 4. Commit with a message naming the phase, then push.
@@ -39,6 +38,13 @@ You may add Rule changes only as proposals (`--status review`). If an approved R
 out wrong while you implement, stop and report it with evidence. Never weaken, delete, or
 re-scope an approved Rule to make code pass. Bind code to the Rules the plan names and run
 `provenance coverage scan --path . --validate-rules`.
+
+## Stopping early
+
+When you stop (missing file, wrong Rule, failing check you cannot fix within the plan),
+keep the phases already pushed, leave the PR as a draft, and skip to Finish step 3. The
+report states where you stopped, what is missing, and the evidence, so the coordinator can
+take it to the human.
 
 ## Finish
 

@@ -23,7 +23,8 @@ it as `path:line`.
 - **Vertical slices.** Each phase delivers one testable result a user or caller can observe.
   Do not split by layer ("types", then "storage", then "API").
 - **Files.** Each phase lists every file it changes as a compact tree. Show changed shapes
-  (types, signatures, config keys, schema) as small diffs. No full implementations.
+  (types, signatures, config keys, schema) as small diffs. No function bodies or control
+  flow; describe behavior in the phase's result instead.
 - **Checks.** Each phase names the commands that prove it: the repository's own checks and
   the specific tests.
 - **End-to-end tests.** A phase whose change crosses components (process, service, store,

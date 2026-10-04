@@ -1,0 +1,38 @@
+{
+  "skill_name": "rpi-research",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-research skill. Input: https://gist.github.com/example/9a1",
+      "expected_output": "A descriptive research document with file:line evidence that states the attempt comparison as a fact and recommends nothing.",
+      "files": [
+        "evals/fixtures/questions-with-bug.md"
+      ],
+      "expectations": [
+        "Every answer cites at least one `path:line` or `path:start-end` from the snapshot.",
+        "The answer to question 3 states that `src/store/jobs.ts:43` compares with `>`, so a job is scheduled again when attempts equals maxAttempts, as a fact.",
+        "The document contains no recommendation, fix, improvement, risk of a change, or next step (no 'should', 'recommend', 'consider', 'better', 'fix').",
+        "The document does not mention backoff, exponential delays, or jitter.",
+        "A Testing note names `test/store/jobs.test.ts` and the `test/remote/simulation/corpus.test.ts` harness with `bun run simulate:remote`, and states that no corpus scenario produces a TransientFailure.",
+        "The listed commands open a draft PR on branch `rpi/workflowd-x41` and record `bd set-state workflowd-x41 rpi=research`; the final message starts with the gist URL."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-research skill. Input: https://gist.github.com/example/c55",
+      "expected_output": "Research with a Graph section reporting REQ-4, RULE-9, its bindings, the open TOPIC-3, and that no Rule binds router.rs.",
+      "files": [
+        "evals/fixtures/provenance-graph.md"
+      ],
+      "expectations": [
+        "The Graph section reports REQ-4, RULE-9 refining REQ-4, its implementation at `crates/api/src/enqueue.rs:21`, and its verification test.",
+        "The Graph section reports that no Rule binds `crates/api/src/router.rs`.",
+        "The Graph section reports TOPIC-3 as open under REQ-4.",
+        "The answer about body limits cites `crates/api/src/router.rs:14` and `DefaultBodyLimit::disable()` as a fact.",
+        "The document does not propose new Rules, Topics, limits, or changes.",
+        "The Testing note names the in-memory test `crates/api/tests/enqueue.rs` and the docker-compose end-to-end harness run by `just e2e`.",
+        "The listed commands record the questions and research gists as Provenance Sources with revision URLs on branch `rpi/kiln-77`."
+      ]
+    }
+  ]
+}
