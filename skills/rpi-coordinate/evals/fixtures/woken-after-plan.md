@@ -1,12 +1,11 @@
-# Fixture: woken after the plan stage
+# Fixture: plan stage mailbox message
 
 You are a Claude Code session on host `mint` started in `/home/ben/Documents/repos/workflowd`.
-`$CLAUDE_CODE_SESSION_ID` is `5b0c2f7e-1d44-4c1a-9a51-0f3f2a7d9e10`. The user earlier asked
-to take `workflowd-x41` through RPI on repository `workflowd` with route `implement`, and said
+The user earlier asked to take `workflowd-x41` through RPI on repository `workflowd` with route `implement`, and said
 "run it end to end, I trust you". Do not call tools; return the exact tool calls (name and
 JSON arguments) and commands you would make, then your message.
 
-## Wake received
+## First message from `read_agent_mailbox`
 
 ```json
 {

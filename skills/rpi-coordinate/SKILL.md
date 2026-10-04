@@ -1,6 +1,6 @@
 ---
 name: rpi-coordinate
-description: Runs the RPI loop (questions → research → plan → human approval → implement → review) for a Beads ticket. Use when asked to take a ticket through RPI, or when woken by workflowd with a finished RPI stage. Dispatches each stage as a fresh workflowd run and stops for human approval after the plan.
+description: Runs the RPI loop (questions → research → plan → human approval → implement → review) for a Beads ticket. Use when asked to take a ticket through RPI, or when a finished RPI stage arrives in its caller mailbox. Dispatches each stage as a fresh workflowd run and stops for human approval after the plan.
 ---
 
 # RPI coordinate
@@ -27,21 +27,29 @@ Call the workflowd `dispatch_agent` MCP tool once per stage:
 - `prompt`: `Use the <skill> skill. Input: <inputs from the table>.` Add nothing else about
   the ticket.
 - `idempotency_key`: `rpi-<id>-<stage>-<attempt>`, so a retried call does not start twice.
-- Parent fields, so the stage's end wakes you:
-  - Claude Code: `parent_kind: "claude"`, `parent_session_id: $CLAUDE_CODE_SESSION_ID`,
-    `parent_directory`: the directory this session started in, `parent_host`: this host's
-    name when it is not the daemon host.
-  - OpenCode: `parent_session_id`: your session id (`ses_...`); `parent_kind` defaults to
-    `opencode`.
-- `resume_prompt`: `RPI <stage> finished for <id>. Continue with the rpi-coordinate skill.`
+- Do not send `parent_session_id`, `parent_kind`, `parent_directory`, `parent_host`, or
+  `resume_prompt`. Keep the receipt's `mailbox_id`.
 
-A refusal comes back with a reason; fix that cause and dispatch again. After the receipt, end
-your turn. Do not poll.
+A refusal comes back with a reason; fix that cause and dispatch again. After the receipt,
+start `scripts/wait-mailbox.sh <mailbox_id>` from this skill directory as a background command,
+save its output path, and end your turn. For example:
 
-## When woken
+```bash
+output=$(mktemp /tmp/rpi-mailbox.XXXXXX)
+nohup /path/to/rpi-coordinate/scripts/wait-mailbox.sh "$mailbox_id" >"$output" 2>"$output.err" </dev/null &
+```
 
-The wake carries the stage's final message in `terminal.final_message` (or a reference in
-`final_message_ref`). Its first line is the stage's gist URL.
+Use the installed skill's actual path in place of `/path/to/rpi-coordinate`. The waiter uses
+`WORKFLOWD_MCP_URL` or defaults to `http://127.0.0.1:8791/mcp`, the repo's loopback MCP endpoint.
+It uses `WORKFLOWD_MCP_TOKEN` or `~/.config/workflowd/mcp-token`. An optional second argument
+bounds the wait in seconds. Do not poll from this session.
+
+## When the mailbox message arrives
+
+Read the waiter's JSON output (or call `read_agent_mailbox` with the saved `mailbox_id`). The
+first mailbox message carries the stage's final message in `terminal.final_message` (or a
+reference in `final_message_ref`). Its first line is the stage's gist URL. If the waiter failed,
+read its stderr and report the error.
 
 1. If `terminal.status` is not a success, or the first line is not a gist URL, report the
    failure and the stage's message to the human. Stop.

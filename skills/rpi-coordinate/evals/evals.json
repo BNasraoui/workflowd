@@ -3,22 +3,22 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the wake in the fixture.",
-      "expected_output": "Dispatch rpi-research with only the questions gist URL and Claude parent wake fields.",
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the mailbox message in the fixture.",
+      "expected_output": "Dispatch rpi-research with only the questions gist URL, then start the mailbox waiter.",
       "files": [
         "evals/fixtures/woken-after-questions.md"
       ],
       "expectations": [
         "Exactly one `dispatch_agent` call is made, for the rpi-research stage.",
         "Its prompt names the rpi-research skill and the questions gist URL and contains no ticket title, description, backoff, jitter, or cap.",
-        "It sets `parent_kind` to `claude`, `parent_session_id` to `5b0c2f7e-1d44-4c1a-9a51-0f3f2a7d9e10`, `parent_directory` to `/home/ben/Documents/repos/workflowd`, and a `resume_prompt`.",
+        "It omits `parent_session_id`, `parent_kind`, `parent_directory`, `parent_host`, and `resume_prompt`.",
         "It sets `repository` to `workflowd`, `route` to `implement`, and an idempotency key naming the bead and stage.",
-        "The turn ends after the receipt without polling."
+        "It saves the receipt's `mailbox_id`, starts the background waiter, and ends the turn."
       ]
     },
     {
       "id": 2,
-      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the wake in the fixture.",
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the mailbox message in the fixture.",
       "expected_output": "Stop and present the plan for approval; do not dispatch implement.",
       "files": [
         "evals/fixtures/woken-after-plan.md"
@@ -40,8 +40,8 @@
       "expectations": [
         "`bd note workflowd-x41 \"plan approved: https://gist.github.com/example/p41\"` runs before any dispatch.",
         "Exactly one `dispatch_agent` call is made, for rpi-implement, with the plan gist URL as input.",
-        "The dispatch includes the Claude parent fields and a resume_prompt.",
-        "The turn ends after the receipt without polling."
+        "The dispatch omits parent fields and resume_prompt.",
+        "It saves the receipt's `mailbox_id`, starts the background waiter, and ends the turn."
       ]
     }
   ]
