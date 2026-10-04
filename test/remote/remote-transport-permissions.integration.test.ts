@@ -3,6 +3,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Effect, Fiber, Scope } from "effect"
+import { connect } from "@nats-io/transport-node"
+import { jetstream } from "@nats-io/jetstream"
+import { natsAuthOptions } from "../../src/remote/auth"
+import { CiProvider, CiProviderLive } from "../../src/ci/provider"
+import { githubFixture } from "../ci/github-fixture"
 import {
   RemoteTransport,
   RemoteTransportLive,
@@ -12,7 +17,6 @@ import type { RemoteNatsAuth } from "../../src/remote/auth"
 import { mintPermissionedBroker } from "./nats-creds-fixture"
 
 const container = `workflowd-nats-permissions-${process.pid}`
-const port = 46_000 + (process.pid % 1_000)
 let server = ""
 let configDir = ""
 const broker = mintPermissionedBroker()
@@ -52,7 +56,7 @@ beforeAll(async () => {
     "--name",
     container,
     "-p",
-    `127.0.0.1:${port}:4222`,
+    "127.0.0.1::4222",
     "-v",
     `${configDir}:/etc/nats:ro`,
     "nats:2.11.8-alpine",
@@ -60,7 +64,7 @@ beforeAll(async () => {
     "/etc/nats/nats.conf",
   )
   await waitForServerReady()
-  server = `nats://127.0.0.1:${port}`
+  server = `nats://${await docker("port", container, "4222/tcp")}`
 }, 60_000)
 
 afterAll(async () => {
@@ -143,6 +147,60 @@ const claudeResult = (commandId: string, hostId: string) => ({
 })
 
 describe.serial("permissioned NATS broker with per-identity creds", () => {
+  test("coordinator publishes a CI completion to a scoped subscriber", async () => {
+    const fixture = await githubFixture()
+    const listener = await connect({
+      servers: [server],
+      ...natsAuthOptions({ mode: "creds", creds: broker.ciSubscriberCreds }),
+    })
+    const subject = `workflowd.v1.ci.${Buffer.from("BNasraoui/workflowd").toString("hex")}.${"a".repeat(40)}.completed`
+    const subscription = listener.subscribe(subject)
+    const delivery = (async () => {
+      for await (const message of subscription) return new TextDecoder().decode(message.data)
+      throw new Error("CI subscription closed before delivery")
+    })()
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const provider = yield* CiProvider
+          yield* provider.publish(
+            subject,
+            '{"conclusion":"success"}',
+            "ci-delivery:permission-test",
+          )
+        }).pipe(
+          Effect.provide(
+            CiProviderLive(
+              { token: "ci", repositories: [], servers: [server], auth: coordinator },
+              fixture.github,
+              fixture.OctokitClass,
+            ),
+          ),
+        ),
+      )
+      expect(await delivery).toBe('{"conclusion":"success"}')
+    } finally {
+      void delivery.catch(() => undefined)
+      subscription.unsubscribe()
+      await listener.drain()
+      await fixture.close()
+    }
+  }, 30_000)
+
+  test("CI subscriber credential cannot publish CI completions", async () => {
+    const listener = await connect({
+      servers: [server],
+      ...natsAuthOptions({ mode: "creds", creds: broker.ciSubscriberCreds }),
+    })
+    try {
+      await expect(
+        jetstream(listener).publish("workflowd.v1.ci.repo.sha.completed", "forged"),
+      ).rejects.toThrow(/permissions violation/i)
+    } finally {
+      await listener.drain()
+    }
+  }, 30_000)
+
   test("coordinator creds administer JetStream and a runner works its own host end to end", async () => {
     await runAs(
       coordinator,

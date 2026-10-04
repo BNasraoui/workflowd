@@ -6,6 +6,21 @@ import { makeCiStore, type CiStore } from "./store"
 import { reconcileCi } from "./reconcile"
 import { CiProvider, CiProviderLive } from "./provider"
 export const CiService = Context.Service<CiStore>("workflowd/CiService")
+export const runCiPublicationLoop = <E>(publish: Effect.Effect<void, E>) =>
+  Effect.gen(function* () {
+    let failures = 0
+    while (true) {
+      const result = yield* Effect.result(publish)
+      if (result._tag === "Failure") {
+        failures += 1
+        yield* Effect.logWarning("CI publication failed; retained for retry")
+        yield* Effect.sleep(Math.min(300_000, 5_000 * 2 ** Math.min(failures - 1, 6)))
+      } else {
+        failures = 0
+        yield* Effect.sleep(1_000)
+      }
+    }
+  })
 export const makeCiWorkers = (repositories: CiConfig["repositories"]) =>
   Effect.gen(function* () {
     const store = yield* makeCiStore
@@ -68,7 +83,7 @@ export const CiServiceLive = (config: CiConfig, github: NonNullable<AppConfig["g
           Effect.repeat(Schedule.spaced(interval)),
           Effect.forkScoped,
         )
-      yield* supervise("publication", publish, 1000)
+      yield* runCiPublicationLoop(publish).pipe(Effect.forkScoped)
       yield* supervise("reconciliation", reconcile, 60000)
       return port
     }),

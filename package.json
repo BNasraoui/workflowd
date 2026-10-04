@@ -12,6 +12,7 @@
     "runner": "bun src/remote-runner.ts",
     "mcp": "bun src/mcp-server.ts",
     "cli": "bun src/cli.ts",
+    "mcp:channel": "bun src/mcp-channel.ts",
     "remote:enqueue": "bun src/remote-enqueue.ts",
     "test": "bun test",
     "simulate:remote": "bun test test/remote/simulation/corpus.test.ts",

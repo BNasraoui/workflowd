@@ -1,11 +1,37 @@
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
+import { TestClock } from "effect/testing"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { makeCiWorkers } from "../../src/ci/service"
+import { makeCiWorkers, runCiPublicationLoop } from "../../src/ci/service"
 import { CiProvider } from "../../src/ci/provider"
 import { runStoreMigrations } from "../../src/store/migrations"
 const repositories = [{ repository: "o/r", installationId: 1, workflows: ["CI"] }]
+test("failed CI publication retries back off and reset after success", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        let attempts = 0
+        yield* runCiPublicationLoop(
+          Effect.sync(() => {
+            attempts += 1
+          }).pipe(
+            Effect.flatMap(() => (attempts <= 2 ? Effect.fail(new Error("offline")) : Effect.void)),
+          ),
+        ).pipe(Effect.forkScoped)
+        yield* TestClock.adjust("4 seconds")
+        expect(attempts).toBe(1)
+        yield* TestClock.adjust("1 second")
+        expect(attempts).toBe(2)
+        yield* TestClock.adjust("9 seconds")
+        expect(attempts).toBe(2)
+        yield* TestClock.adjust("1 second")
+        expect(attempts).toBe(3)
+        yield* TestClock.adjust("1 second")
+        expect(attempts).toBe(4)
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  ))
 test("ingress registers reconciliation and outbox retries retain durable observations", () => {
   const publications: string[] = []
   let unavailable = true
