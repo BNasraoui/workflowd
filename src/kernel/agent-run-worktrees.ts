@@ -22,6 +22,7 @@ export const agentRunWorktreeFailure = (error: WorkspaceError) => {
   if (
     error.operation === "fetch agent-run repository" ||
     error.operation === "detect agent-run default branch" ||
+    error.operation === "resolve agent-run default branch" ||
     error.operation === "resolve agent-run default head"
   ) {
     return "repository_fetch_failed" as const

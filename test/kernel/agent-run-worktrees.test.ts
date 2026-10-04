@@ -32,6 +32,16 @@ describe("gitAgentRunWorktrees", () => {
       ),
     ).toBe("repository_fetch_failed")
   })
+  test("a default-branch resolution failure is a repository failure", () => {
+    expect(
+      agentRunWorktreeFailure(
+        new WorkspaceError({
+          operation: "resolve agent-run default branch",
+          cause: new Error("missing origin/HEAD"),
+        }),
+      ),
+    ).toBe("repository_fetch_failed")
+  })
   test("creates the worktree on the requested branch", async () => {
     const root = await mkdtemp(join(tmpdir(), "agent-run-worktrees-"))
     try {
