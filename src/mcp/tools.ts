@@ -13,6 +13,7 @@ import {
   utf8BoundedText,
 } from "../agent-wait-contract"
 import {
+  AgentRunBaseRef,
   AgentRunReceipt,
   AgentRunRefusal,
   MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES,
@@ -82,9 +83,7 @@ const DispatchAgentArguments = Schema.Struct({
   thinking: RequestedSelection.fields.thinking,
   allow_unknown_access: RequestedSelection.fields.allowUnknownAccess,
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
-  base_ref: Schema.optional(
-    Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/))),
-  ),
+  base_ref: Schema.optional(AgentRunBaseRef),
   prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
   parent_session_id: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_SESSION_ID_BYTES)),
   parent_kind: Schema.optional(Schema.Literals(["opencode", "claude"])),

@@ -263,6 +263,18 @@ describe("dispatch_agent", () => {
     expect(firstText(result)).toContain("prompt your session when the child completes")
   })
 
+  test("forwards an explicit origin base to the daemon", async () => {
+    const calls: Array<Call> = []
+    await run(
+      callTool(
+        "dispatch_agent",
+        { ...args, base_ref: "release" },
+        daemon(() => json(receipt), calls),
+      ),
+    )
+    expect(JSON.parse(calls[0]!.body)).toMatchObject({ baseRef: "release" })
+  })
+
   test("refuses without authorization or configuration and never calls the daemon", async () => {
     const calls: Array<Call> = []
     const context = daemon(() => json(receipt), calls)

@@ -256,12 +256,14 @@ export function parseAgentRunClaudeHosts(value: string): ReadonlyArray<string> {
   return hosts
 }
 
+export const AgentRunBaseRef = Schema.String.pipe(
+  Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/)),
+)
+
 export const AgentRunSubmission = Schema.Struct({
   ...RequestedSelection.fields,
   repository: utf8BoundedText(MAX_AGENT_RUN_REPOSITORY_BYTES),
-  baseRef: Schema.optional(
-    Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/))),
-  ),
+  baseRef: Schema.optional(AgentRunBaseRef),
   prompt: utf8BoundedText(MAX_AGENT_RUN_PROMPT_BYTES),
   parentSessionId: Schema.optional(utf8BoundedText(MAX_AGENT_RUN_SESSION_ID_BYTES)),
   /** Which harness holds the parent: an opencode session on the managed

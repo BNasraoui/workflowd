@@ -26,7 +26,7 @@ import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
 import { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
-import { AgentRunWorktrees } from "./agent-run-worktrees"
+import { AgentRunWorktrees, agentRunWorktreeFailure } from "./agent-run-worktrees"
 import { CLAUDE_PROVIDER_ID, ClaudeCli, claudeSessionCustodyId } from "./claude-session"
 import { ClaudeDispatchCli } from "./claude-dispatch"
 import { makeAgentRunCliDispatcher } from "./agent-run-cli"
@@ -56,6 +56,9 @@ export type AgentRunRefusalReason =
   | "no_first_token"
   | "run_conflict"
   | "invalid_selection"
+  | "repository_fetch_failed"
+  | "invalid_base_ref"
+  | "worktree_failed"
   | SelectionRefusal
 
 /**
@@ -138,6 +141,7 @@ export const agentRunIdentifiers = (input: {
   readonly parentSessionId: string | null
   readonly resumePrompt: string | null
   readonly idempotencyKey?: string | undefined
+  readonly baseRef?: string | null | undefined
 }) => {
   const identity =
     input.idempotencyKey ??
@@ -147,6 +151,7 @@ export const agentRunIdentifiers = (input: {
       input.prompt,
       input.parentSessionId ?? "",
       input.resumePrompt ?? "",
+      ...(input.baseRef == null ? [] : [input.baseRef]),
     ].join("\0")
   const digest = createHash("sha256").update(identity, "utf8").digest("hex")
   return {
@@ -315,12 +320,24 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (run.state === "accepted" || nativeSessionId === null) {
           yield* store.claimSpawn({ runId: run.runId, now })
-          yield* worktrees.create({
-            repository: target.repositoryDirectory,
-            directory: run.directory,
-            branch: `agent-run/${target.short}`,
-            ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
-          })
+          yield* worktrees
+            .create({
+              repository: target.repositoryDirectory,
+              directory: run.directory,
+              branch: `agent-run/${target.short}`,
+              ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
+            })
+            .pipe(
+              Effect.catch((error) =>
+                store
+                  .abandonLaunch({ runId: run.runId, now: new Date() })
+                  .pipe(
+                    Effect.andThen(
+                      Effect.fail(refuse(agentRunWorktreeFailure(error), error.cause.message)),
+                    ),
+                  ),
+              ),
+            )
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
           // unrecorded state as possible.
@@ -579,6 +596,7 @@ const make = (options: AgentRunIngressOptions) =>
                 : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
             resumePrompt: submission.resumePrompt ?? null,
             idempotencyKey: submission.idempotencyKey,
+            baseRef: submission.baseRef,
           }).runId,
         )
         if (keyed?.resolvedSelection != null) {
@@ -744,6 +762,7 @@ const make = (options: AgentRunIngressOptions) =>
               : `${parentKind}@${parentHost}:${submission.parentSessionId}`,
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
+          baseRef: submission.baseRef,
         })
         const created = yield* store.create({
           runId: identifiers.runId,
