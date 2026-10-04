@@ -62,7 +62,7 @@ if [ ! -e "$PROV_DEPLOY/.git" ]; then
 	log "skipping provenance: no deploy checkout at $PROV_DEPLOY"
 else
 	git -C "$PROV_DEPLOY" fetch origin --prune --quiet
-	prov_new=$(git -C "$PROV_DEPLOY" rev-parse --short origin/main)
+	prov_new=$(git -C "$PROV_DEPLOY" rev-parse origin/main)
 	state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/update-dev-infra"
 	prov_state="$state_dir/deployed-provenance.rev"
 	prov_record=$(cat "$prov_state" 2>/dev/null || true)
@@ -86,9 +86,9 @@ else
 			log "installed provenance $prov_new to ~/.local/bin"
 			all_pushed=1
 			for host in $PROV_REMOTE_HOSTS; do
-				if scp -o BatchMode=yes -o ConnectTimeout=5 -q "$binary" "ben@$host:.local/bin/provenance.new" \
+				if scp -o BatchMode=yes -o ConnectTimeout=5 -q "$binary" "ben@$host:provenance.new" \
 					&& ssh -o BatchMode=yes -o ConnectTimeout=5 "ben@$host" \
-						'~/.local/bin/provenance.new --version && install -m 755 ~/.local/bin/provenance.new ~/.local/bin/provenance && rm -f ~/.local/bin/provenance.new'; then
+						'~/provenance.new --version && mkdir -p ~/.local/bin && install -m 755 ~/provenance.new ~/.local/bin/provenance && rm -f ~/provenance.new'; then
 					log "pushed provenance $prov_new to $host"
 				else
 					log "WARN: could not push provenance to $host (will retry next run)"

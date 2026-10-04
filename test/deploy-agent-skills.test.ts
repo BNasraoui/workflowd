@@ -74,6 +74,8 @@ beforeEach(async () => {
   for (const [tool, status] of [
     ["bun", 0],
     ["systemctl", 1],
+    ["scp", 1],
+    ["ssh", 1],
   ] as const) {
     const stub = join(bin, tool)
     await writeFile(stub, `#!/bin/sh\necho "${tool} $*" >> "${root}/calls.log"\nexit ${status}\n`)
@@ -239,6 +241,8 @@ async function stubProvenanceRemote(sshStatus: number): Promise<void> {
 
 test("update-dev-infra generates provenance sources before native cargo and installs its binary", async () => {
   const checkout = await provenanceFixture()
+  await stubProvenanceRemote(0)
+  environment = { ...environment, PROV_REMOTE_HOSTS: "" }
   const bin = join(root, "bin")
   for (const tool of ["npm", "node", "cargo"]) {
     const stub = join(bin, tool)
@@ -259,6 +263,7 @@ test("update-dev-infra generates provenance sources before native cargo and inst
     "cargo build --release -p provenance-cli --features scanner dogfood --quiet local=1",
   ])
   expect(await readFile(join(home, ".local", "bin", "provenance"), "utf8")).toBe("dogfood")
+  expect(await Bun.file(join(root, "remote-calls.log")).exists()).toBe(false)
 })
 
 test("update-dev-infra skips provenance when codegen inputs are absent", async () => {
@@ -310,7 +315,7 @@ test("update-dev-infra validates the staged remote binary before adopting it and
   const checkout = await provenanceFixture()
   await stubProvenanceBuild(checkout)
   await stubProvenanceRemote(0)
-  const revision = await git(checkout, "rev-parse", "--short", "HEAD")
+  const revision = await git(checkout, "rev-parse", "HEAD")
 
   const first = await run(["bash", updater])
   expect(first.status).toBe(0)
@@ -321,7 +326,10 @@ test("update-dev-infra validates the staged remote binary before adopting it and
     ),
   ).toBe(`${revision}|ben-arch\n`)
   expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
-    "provenance.new --version && install",
+    "provenance.new --version && mkdir -p ~/.local/bin && install",
+  )
+  expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
+    "ben@ben-arch:provenance.new",
   )
   const second = await run(["bash", updater])
   expect(second.status).toBe(0)
@@ -343,7 +351,7 @@ test("update-dev-infra validates the staged remote binary before adopting it and
   expect(expanded.status).toBe(0)
   expect(expanded.stdout).toContain("pushed provenance")
   expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
-    "ben@mint:.local/bin/provenance.new",
+    "ben@mint:provenance.new",
   )
 })
 
@@ -388,4 +396,16 @@ test("update-dev-infra refuses to label a dirty provenance checkout as origin/ma
   expect(result.status).toBe(1)
   expect(result.stderr).toContain("provenance checkout is dirty")
   expect(await Bun.file(join(root, "build-calls.log")).exists()).toBe(false)
+})
+
+test("update-dev-infra defaults an unset remote host list to ben-arch", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout)
+  await stubProvenanceRemote(0)
+  delete environment.PROV_REMOTE_HOSTS
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(0)
+  expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
+    "ben@ben-arch:provenance.new",
+  )
 })
