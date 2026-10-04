@@ -16,7 +16,7 @@ Compared to reaching the host over SSH — which would hand the daemon an arbitr
 ## NATS over Tailscale
 
 1. Bind NATS to the coordinator's Tailscale address, enable JetStream file storage, and firewall TCP 4222 to the tailnet runner identities.
-2. Issue one NATS credential per identity with broker-enforced subject permissions, following [Per-identity credentials](#per-identity-credentials) below. A runner identity may only manage and pull its own filtered durable consumer on `workflowd.v1.commands.<host>` and publish `workflowd.v1.results`; the coordinator identity publishes `workflowd.v1.commands.*` and administers JetStream. A plain token cannot express any of this: NATS tokens carry no subject permissions, so token mode means every credential holder can read every host's commands and publish arbitrary results. Keep token mode for local smoke tests only.
+2. Issue one NATS credential per identity with broker-enforced subject permissions, following [Per-identity credentials](#per-identity-credentials) below. A runner identity may only manage and pull its own filtered durable consumer on `workflowd.v1.commands.<host>` and publish `workflowd.v1.results`; the coordinator identity publishes `workflowd.v1.commands.*` and `workflowd.v1.ci.>` and administers JetStream. A plain token cannot express any of this: NATS tokens carry no subject permissions, so token mode means every credential holder can read every host's commands and publish arbitrary results. Keep token mode for local smoke tests only.
 3. Put the credential in `~/.config/workflowd/runner.creds` (or `nats-token` for token-mode smoke tests) with mode `0600`; do not put it in the environment file.
 4. Copy `deploy/runner.env.example` to `~/.config/workflowd/runner.env`, replacing the server and host ID. Use an absolute database path because systemd does not expand `%h` inside `EnvironmentFile` values.
 5. Install `deploy/systemd/workflowd-runner.service` as a user unit, add the creds drop-in shown in `deploy/runner.env.example`, then run `systemctl --user daemon-reload && systemctl --user enable --now workflowd-runner`.
@@ -39,6 +39,7 @@ nsc edit account WORKFLOWD \
   --js-mem-storage -1 --js-disk-storage -1 --js-streams -1 --js-consumer -1
 nsc add user --account WORKFLOWD coordinator \
   --allow-pub 'workflowd.v1.commands.*' \
+  --allow-pub 'workflowd.v1.ci.>' \
   --allow-pub '$JS.API.>' \
   --allow-pub '$JS.ACK.WORKFLOWD_RESULTS_V1.>' \
   --allow-sub '_INBOX.>'
@@ -58,6 +59,8 @@ nsc generate creds --account WORKFLOWD --name runner-gpu-host > runner.creds
 ```
 
 Include `broker-auth.conf` from the nats-server configuration alongside the JetStream and listen settings. The subject lists mirror what the transport actually uses — stream and consumer administration, pull fetches, synchronous acks, and inbox replies — and `test/remote/remote-transport-permissions.integration.test.ts` exercises exactly these grants against a real broker, including the denial of a runner credential touching another host's subjects.
+
+For an existing noscope deployment, update the `coordinator` user in the nsc store on the broker host with `nsc edit user --account WORKFLOWD --name coordinator --allow-pub 'workflowd.v1.ci.>'`, preserving its existing command, JetStream API, and acknowledgement grants. Check the resulting permissions with `nsc describe user --account WORKFLOWD --name coordinator`. The noscope NATS provider mints fresh credentials from this user; restart `workflowd.service` after the grant so its current JWT is replaced. This one-time credential rotation does not require a broker configuration change. Run it only during the planned host rollout.
 
 What this still does not enforce, so unattended operation does not over-trust the broker:
 
