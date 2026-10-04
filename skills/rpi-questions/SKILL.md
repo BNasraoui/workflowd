@@ -9,6 +9,13 @@ You turn a ticket into questions. The next stage, research, sees only your quest
 the ticket. If your questions reveal the change, research will start designing it instead of
 describing the code. Your job is to hide the goal and point at the right code.
 
+## Start
+
+1. `bd dolt pull`, so you see the bead as the coordinator left it.
+2. `git fetch origin`, then `git checkout --detach origin/<default branch>`
+   (`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`). Record the commit
+   with `git rev-parse HEAD`; copy the full SHA from that output, never from memory.
+
 ## Steps
 
 1. Read the ticket: `bd show <id> --json`. Note every path, symbol, URL, and command it names.
@@ -36,7 +43,7 @@ Write the document outside the repository, at `/tmp/rpi/<id>/questions.md`:
 ```markdown
 # RPI questions: <id>
 
-Repository: <owner/repo> at <commit sha>
+Repository: <owner/repo> at <full commit sha>
 
 ## Pointers
 
@@ -49,9 +56,11 @@ Repository: <owner/repo> at <commit sha>
 
 ## Publish
 
-1. `gh gist create --desc "RPI questions <id>" /tmp/rpi/<id>/questions.md` prints the gist URL.
-   Gists are secret by default; never pass `--public`.
-2. `bd note <id> "questions: <gist url>"`
-3. `bd set-state <id> rpi=questions --reason "questions published"`
-4. Do not commit anything. Your final message starts with the gist URL on its own line,
+1. Re-read `/tmp/rpi/<id>/questions.md` and fix it before publishing.
+2. `gh gist create --desc "RPI questions <id>" /tmp/rpi/<id>/questions.md`. Gists are secret
+   by default; never pass `--public`. It can exit non-zero after printing the URL, so check
+   the output for a gist URL before you retry.
+3. `bd note <id> "questions: <gist url>"`
+4. `bd set-state <id> rpi=questions --reason "questions published"`, then `bd dolt push`.
+5. Do not commit anything. Your final message starts with the gist URL on its own line,
    followed by one sentence naming the areas the questions cover.

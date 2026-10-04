@@ -45,14 +45,14 @@ The wake carries the stage's final message in `terminal.final_message` (or a ref
 
 1. If `terminal.status` is not a success, or the first line is not a gist URL, report the
    failure and the stage's message to the human. Stop.
-2. Confirm the bead agrees: `bd show <id> --json` has the stage's note and the state from the
+2. Confirm the bead agrees: `bd dolt pull`, then `bd show <id> --json` has the stage's note and the state from the
    table.
 3. Dispatch the next stage with only the inputs in the table.
 
 After the plan stage, stop. Show the human the plan gist URL, the phase titles, and any
 **Decisions for the reviewer**. Dispatch `rpi-implement` only after the human explicitly
 approves that plan. Then record the approval first:
-`bd note <id> "plan approved: <plan gist url>"`. If the human chose among the plan's
+`bd note <id> "plan approved: <plan gist url>"` and `bd dolt push`. If the human chose among the plan's
 **Decisions for the reviewer**, append their choices to that note and to the implement
 prompt. If the human asks for changes, dispatch `rpi-plan` again with their feedback added
 to the prompt, and wait for approval again.

@@ -27,7 +27,8 @@ Checks: `bun test test/webhook.test.ts` posts signed payloads to the real handle
 ```text
 notes:
 questions: https://gist.github.com/example/q52
-research: https://gist.github.com/example/r52 pr: https://github.com/BNasraoui/workflowd/pull/91
+research: https://gist.github.com/example/r52
+pr: https://github.com/BNasraoui/workflowd/pull/91
 plan: https://gist.github.com/example/p52
 labels: rpi:plan-review
 ```

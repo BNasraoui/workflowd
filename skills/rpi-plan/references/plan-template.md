@@ -6,7 +6,7 @@ Keep the filled plan under two pages. Delete sections that do not apply.
 # RPI plan: <id> — <ticket title>
 
 Ticket: <id> Research: <research gist url> PR: <draft PR url>
-Repository: <owner/repo> at <commit sha>
+Repository: <owner/repo> at <full commit sha>
 
 ## Outcome
 

@@ -24,5 +24,5 @@ JSON arguments) and commands you would make, then your message.
 ## `bd show workflowd-x41 --json`
 
 ```json
-[{"id":"workflowd-x41","labels":["rpi:plan-review"],"notes":"questions: https://gist.github.com/example/q41\nresearch: https://gist.github.com/example/r41 pr: https://github.com/BNasraoui/workflowd/pull/90\nplan: https://gist.github.com/example/p41"}]
+[{"id":"workflowd-x41","labels":["rpi:plan-review"],"notes":"questions: https://gist.github.com/example/q41\nresearch: https://gist.github.com/example/r41\npr: https://github.com/BNasraoui/workflowd/pull/90\nplan: https://gist.github.com/example/p41"}]
 ```

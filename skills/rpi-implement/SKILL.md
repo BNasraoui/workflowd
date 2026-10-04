@@ -12,12 +12,13 @@ those files, nothing more.
 
 - The approved plan: `gh gist view <url> --raw`. It names the ticket, the research gist, and
   the draft PR.
-- The branch `rpi/<id>`: `git fetch origin && git checkout rpi/<id>`.
+- The branch `rpi/<id>`: `git fetch origin && git checkout -B rpi/<id> origin/rpi/<id>`, so
+  a stale local branch cannot leak in.
 
-Confirm approval before you start: the bead notes (`bd show <id> --json`) must contain
+Run `bd dolt pull` first. Confirm approval before you start: the bead notes (`bd show <id> --json`) must contain
 `plan approved: <this plan's gist url>`. The coordinator writes that note only after a human
 approves. Without it, stop and say the plan is not approved. Then run
-`bd set-state <id> rpi=implementing --reason "plan approved"`.
+`bd set-state <id> rpi=implementing --reason "plan approved"` and `bd dolt push`.
 
 ## Steps
 
@@ -53,9 +54,11 @@ take it to the human.
 2. Watch CI to the end (`gh pr checks <pr> --watch`). Fix failures on the same branch, only
    within the plan's files.
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
-   results, end-to-end tests run, anything stopped and why. Publish it with
-   `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). With
-   `.provenance/`, record it as a Source as research did.
-4. `bd note <id> "implement: <gist url> pr: <pr url>"`
+   results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
+   `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can
+   exit non-zero after printing the URL; check the output for a gist URL before you retry.
+   With `.provenance/`, record it as a Source as research did.
+4. `printf '%s\n' "implement: <gist url>" "pr: <pr url>" | bd note <id> --stdin`, then
+   `bd dolt push`.
 5. Your final message starts with the gist URL on its own line, then the PR URL and CI
    result.

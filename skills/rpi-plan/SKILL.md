@@ -8,6 +8,12 @@ description: Third RPI stage. Use when given a Beads ticket id and an RPI resear
 You write the plan a human approves before any code changes. The plan is the contract for the
 implement and review stages: they may touch only the files it names.
 
+## Start
+
+1. `bd dolt pull`.
+2. `git fetch origin`, then `git checkout --detach <sha>` with the full SHA from the research
+   document's `Repository:` line.
+
 ## Inputs
 
 - The ticket: `bd show <id> --json`.
@@ -60,9 +66,12 @@ Use [`references/plan-template.md`](references/plan-template.md). Write it to
 
 ## Publish
 
-1. `gh gist create --desc "RPI plan <id>" /tmp/rpi/<id>/plan.md` prints the gist URL (secret
-   by default; never `--public`).
-2. `bd note <id> "plan: <gist url>"`
-3. `bd set-state <id> rpi=plan-review --reason "plan awaiting human approval"`
-4. Stop. Do not implement. Your final message starts with the gist URL on its own line, then
+1. Re-read `/tmp/rpi/<id>/plan.md` and fix it before publishing.
+2. `gh gist create --desc "RPI plan <id>" /tmp/rpi/<id>/plan.md` (secret by default; never
+   `--public`). It can exit non-zero after printing the URL; check the output for a gist URL
+   before you retry.
+3. `bd note <id> "plan: <gist url>"`
+4. `bd set-state <id> rpi=plan-review --reason "plan awaiting human approval"`, then
+   `bd dolt push`.
+5. Stop. Do not implement. Your final message starts with the gist URL on its own line, then
    the phase titles and any **Decisions for the reviewer**.

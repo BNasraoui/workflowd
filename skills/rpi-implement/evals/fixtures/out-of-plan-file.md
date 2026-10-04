@@ -39,7 +39,8 @@ Checks: `bun run simulate:remote` drives the real worker and SQLite store throug
 
 ```text
 questions: https://gist.github.com/example/q41
-research: https://gist.github.com/example/r41 pr: https://github.com/BNasraoui/workflowd/pull/90
+research: https://gist.github.com/example/r41
+pr: https://github.com/BNasraoui/workflowd/pull/90
 plan: https://gist.github.com/example/p41
 plan approved: https://gist.github.com/example/p41
 ```

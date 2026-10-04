@@ -12,6 +12,9 @@ You check that the PR delivers the approved plan and nothing else. You do not fi
 - The PR: `gh pr view <pr> --json headRefName,files,commits,body` and `gh pr diff <pr>`.
 - The plan: `gh gist view <url> --raw`. It links the research gist; read that too.
 
+Start with `bd dolt pull` and `git fetch origin`, then
+`git checkout --detach <sha>` with the PR head from `gh pr view <pr> --json headRefOid`.
+
 ## Checks
 
 1. **Traceability.** Map every changed hunk to a plan phase. A change with no phase is a
@@ -38,9 +41,11 @@ major findings; otherwise `Verdict: changes requested`.
 
 ## Publish
 
-1. `gh gist create --desc "RPI review <id>" /tmp/rpi/<id>/review.md` (secret). With
+1. Re-read the findings, then `gh gist create --desc "RPI review <id>" /tmp/rpi/<id>/review.md`
+   (secret). It can exit non-zero after printing the URL; check the output for a gist URL
+   before you retry. With
    `.provenance/`, record it as a Source on `rpi/<id>` as research did.
 2. `bd note <id> "review: <gist url>"`
-3. `bd set-state <id> rpi=review --reason "<verdict>"`
+3. `bd set-state <id> rpi=review --reason "<verdict>"`, then `bd dolt push`.
 4. Your final message starts with the gist URL on its own line, then the verdict and the
    count of findings by severity.
