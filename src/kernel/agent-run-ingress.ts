@@ -196,6 +196,29 @@ const abandonFailedWorktreeLaunch = (
     )
 }
 
+const mailboxErrorMapper = (run: AgentRunRecord) => (error: AgentRunIngressError) =>
+  error instanceof AgentRunRefusalError
+    ? new AgentRunRefusalError({
+        reason: error.reason,
+        detail: error.detail,
+        mailboxId: run.callerMailboxId,
+      })
+    : error
+
+const worktreeFailureRecovery =
+  (
+    store: AgentRunStorePort,
+    run: AgentRunRecord,
+    withMailbox: (error: AgentRunIngressError) => AgentRunIngressError,
+  ) =>
+  <A, E extends AgentRunIngressError, R>(operation: Effect.Effect<A, E, R>) =>
+    operation.pipe(
+      Effect.mapError(withMailbox),
+      Effect.catchTag("AgentRunWorktreeSetupError", (error) =>
+        abandonFailedWorktreeLaunch(error, store, run),
+      ),
+    )
+
 const routeRefusalDetail = (
   route: string,
   reason: "provider_prefixed_route" | "unknown_route" | "ambiguous_route",
@@ -813,23 +836,8 @@ const make = (options: AgentRunIngressOptions) =>
             run.state === "verified" &&
             run.nativeSessionId !== null)
         const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
-        const withMailbox = (error: AgentRunIngressError) =>
-          error instanceof AgentRunRefusalError
-            ? new AgentRunRefusalError({
-                reason: error.reason,
-                detail: error.detail,
-                mailboxId: run.callerMailboxId,
-              })
-            : error
-        const recoverWorktreeFailure = <A, E extends AgentRunIngressError, R>(
-          operation: Effect.Effect<A, E, R>,
-        ) =>
-          operation.pipe(
-            Effect.mapError(withMailbox),
-            Effect.catchTag("AgentRunWorktreeSetupError", (error) =>
-              abandonFailedWorktreeLaunch(error, store, run),
-            ),
-          )
+        const withMailbox = mailboxErrorMapper(run)
+        const recoverWorktreeFailure = worktreeFailureRecovery(store, run, withMailbox)
         let dispatched
         if (immutableReceipt) {
           dispatched = {
