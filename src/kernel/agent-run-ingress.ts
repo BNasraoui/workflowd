@@ -63,6 +63,7 @@ export type AgentRunRefusalReason =
   | "run_conflict"
   | "invalid_selection"
   | "repository_fetch_failed"
+  | "repository_busy"
   | "invalid_base_ref"
   | "worktree_failed"
   | SelectionRefusal

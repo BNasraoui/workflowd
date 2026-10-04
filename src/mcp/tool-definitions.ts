@@ -240,6 +240,8 @@ export const TOOL_DEFINITIONS = [
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +
       "reason — no silent hangs. Requires bearer-token authorization. " +
+      "A dispatch waiting too long for another run to finish preparing the " +
+      "same repository is refused with reason repository_busy. " +
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
       "using its own credentials and model selection; Claude CLI routes never " +
       "use an OpenCode provider. CLI runs have durable process custody and " +

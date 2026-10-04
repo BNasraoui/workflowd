@@ -18,6 +18,7 @@ const remoteCommand = (operation: string, repository: string, args: string[]) =>
   )
 
 export const agentRunWorktreeFailure = (error: WorkspaceError) => {
+  if (error.operation === "wait for agent-run repository") return "repository_busy" as const
   if (error.operation === "resolve agent-run base") return "invalid_base_ref" as const
   if (
     error.operation === "fetch agent-run repository" ||
@@ -64,7 +65,18 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
   create: (input) =>
     Effect.scoped(
       Effect.gen(function* () {
-        yield* repositoryLocks.acquire(input.repository)
+        yield* repositoryLocks.acquire(input.repository).pipe(
+          Effect.timeoutOrElse({
+            duration: "5 seconds",
+            orElse: () =>
+              Effect.fail(
+                new WorkspaceError({
+                  operation: "wait for agent-run repository",
+                  cause: new Error("repository is busy preparing another agent run"),
+                }),
+              ),
+          }),
+        )
         if (yield* pathExists(input.directory)) return
         yield* remoteCommand("fetch agent-run repository", input.repository, ["fetch", "origin"])
         if (input.base === undefined) {

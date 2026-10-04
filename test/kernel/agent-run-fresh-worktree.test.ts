@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -216,4 +216,58 @@ describe("agent-run fresh worktree", () => {
         expect(await git(directory, "rev-parse", "HEAD")).toBe(newHead)
       }
     }))
+
+  test(
+    "a dispatch queued behind a slow fetch refuses as repository_busy",
+    () =>
+      withFixture(async ({ root, repository, layer }) => {
+        const marker = join(root, "fetch-started")
+        const uploadPack = join(root, "slow-upload-pack")
+        await writeFile(
+          uploadPack,
+          `#!/bin/sh\ntouch '${marker}'\nsleep 8\nexec git-upload-pack "$@"\n`,
+          { mode: 0o755 },
+        )
+        await git(repository, "config", "remote.origin.uploadpack", uploadPack)
+
+        const first = Effect.runPromise(
+          register({
+            route: "implement",
+            repository: "fixture",
+            prompt: "slow fetch",
+            baseRef: "release",
+          }).pipe(Effect.provide(layer)),
+        )
+        for (let attempt = 0; attempt < 200; attempt += 1) {
+          if (
+            await stat(marker).then(
+              () => true,
+              () => false,
+            )
+          )
+            break
+          await Bun.sleep(25)
+        }
+        expect(
+          await stat(marker).then(
+            () => true,
+            () => false,
+          ),
+        ).toBe(true)
+
+        const refusal = await refusalOf(
+          Effect.runPromise(
+            register({
+              route: "implement",
+              repository: "fixture",
+              prompt: "queued fetch",
+              baseRef: "release",
+            }).pipe(Effect.provide(layer)),
+          ),
+        )
+        expect(refusal.reason).toBe("repository_busy")
+        await first
+      }),
+    20_000,
+  )
 })
