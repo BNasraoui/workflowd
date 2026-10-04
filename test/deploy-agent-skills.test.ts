@@ -183,3 +183,101 @@ test("update-dev-infra links the deployed skills on update and when already curr
   expect(current.stdout).toContain("already at origin/main")
   expect(await linkTarget(join(home, ".claude", "skills", "rpi-research"))).toBe(deployed)
 })
+
+async function provenanceFixture(withCodegen = true): Promise<string> {
+  const deploy = join(root, "workflowd-deploy")
+  await mkdir(join(deploy, "deploy"), { recursive: true })
+  await git(deploy, "init", "-q", "-b", "main")
+  await writeFile(join(deploy, "deploy", "link-agent-skills.sh"), "#!/bin/sh\nexit 0\n")
+  await chmod(join(deploy, "deploy", "link-agent-skills.sh"), 0o755)
+  await git(deploy, "add", ".")
+  await git(deploy, "commit", "-q", "-m", "initial")
+  await git(deploy, "remote", "add", "origin", deploy)
+  const origin = join(root, "provenance-origin")
+  const checkout = join(root, "provenance")
+  await mkdir(origin)
+  await git(origin, "init", "-q", "-b", "main")
+  await writeFile(join(origin, "README.md"), "fixture\n")
+  if (withCodegen) {
+    await mkdir(join(origin, "tools", "operation-codegen"), { recursive: true })
+    await writeFile(join(origin, "tools", "operation-codegen", "package-lock.json"), "{}\n")
+    await writeFile(
+      join(origin, "tools", "operation-codegen", "ensure-generated.mjs"),
+      "// fixture\n",
+    )
+  }
+  await git(origin, "add", ".")
+  await git(origin, "commit", "-q", "-m", "initial")
+  await git(root, "clone", "-q", origin, checkout)
+  environment = { ...environment, DEPLOY: deploy, PROV_DEPLOY: checkout, PROV_REMOTE_HOSTS: "" }
+  return checkout
+}
+
+test("update-dev-infra generates provenance sources before native cargo and installs its binary", async () => {
+  const checkout = await provenanceFixture()
+  const bin = join(root, "bin")
+  for (const tool of ["npm", "node", "cargo"]) {
+    const stub = join(bin, tool)
+    await writeFile(
+      stub,
+      `#!/bin/sh\nprintf '%s %s local=%s\\n' '${tool}' "$*" "\${PROVENANCE_CI_LOCAL:-}" >> '${root}/provenance-calls.log'\n${tool === "cargo" ? `mkdir -p '${checkout}/target/release'; printf dogfood > '${checkout}/target/release/provenance'; chmod +x '${checkout}/target/release/provenance'` : ""}\n`,
+    )
+    await chmod(stub, 0o755)
+  }
+
+  const result = await run(["bash", updater])
+
+  expect(result.status).toBe(0)
+  expect(result.stdout).toContain("installed provenance")
+  expect((await readFile(join(root, "provenance-calls.log"), "utf8")).trim().split("\n")).toEqual([
+    "npm ci --prefix tools/operation-codegen local=",
+    "node tools/operation-codegen/ensure-generated.mjs local=",
+    "cargo build --release -p provenance-cli --features scanner dogfood --quiet local=1",
+  ])
+  expect(await readFile(join(home, ".local", "bin", "provenance"), "utf8")).toBe("dogfood")
+})
+
+test("update-dev-infra skips provenance when codegen inputs are absent", async () => {
+  await provenanceFixture(false)
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(0)
+  expect(result.stdout).toContain("skipping provenance: operation codegen inputs missing")
+  expect(result.stdout).toContain("done")
+})
+
+test("update-dev-infra finds codegen inputs added on origin/main", async () => {
+  const checkout = await provenanceFixture(false)
+  const origin = join(root, "provenance-origin")
+  await mkdir(join(origin, "tools", "operation-codegen"), { recursive: true })
+  await writeFile(join(origin, "tools", "operation-codegen", "package-lock.json"), "{}\n")
+  await writeFile(
+    join(origin, "tools", "operation-codegen", "ensure-generated.mjs"),
+    "// fixture\n",
+  )
+  await git(origin, "add", ".")
+  await git(origin, "commit", "-q", "-m", "add codegen")
+  for (const tool of ["npm", "node", "cargo"]) {
+    const stub = join(root, "bin", tool)
+    await writeFile(
+      stub,
+      `#!/bin/sh\n${tool === "cargo" ? `mkdir -p '${checkout}/target/release'; printf dogfood > '${checkout}/target/release/provenance'; chmod +x '${checkout}/target/release/provenance'` : "exit 0"}\n`,
+    )
+    await chmod(stub, 0o755)
+  }
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(0)
+  expect(result.stdout).toContain("installed provenance")
+})
+
+test("update-dev-infra reports when cargo produces no provenance binary", async () => {
+  await provenanceFixture()
+  const bin = join(root, "bin")
+  for (const tool of ["npm", "node", "cargo"]) {
+    const stub = join(bin, tool)
+    await writeFile(stub, "#!/bin/sh\nexit 0\n")
+    await chmod(stub, 0o755)
+  }
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain("provenance dev build produced no binary")
+})
