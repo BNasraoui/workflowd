@@ -14,7 +14,7 @@ the others attach to it.
 | Plane | Process | Default port | Purpose |
 | --- | --- | --- | --- |
 | Daemon | `workflowd.service` (`bun src/main.ts`) | 8787 | Webhook listener, kernel workers, HTTP ingresses, remote coordinator |
-| MCP server | `workflowd-mcp.service` (`bun src/mcp-server.ts`) | 8791 | Seven MCP tools over the store and live local catalogs; the agent-facing front door |
+| MCP server | `workflowd-mcp.service` (`bun src/mcp-server.ts`) | 8791 | Nine MCP tools over the store and live local catalogs; the agent-facing front door |
 | Remote runner | `workflowd-runner.service` (`bun src/remote-runner.ts`) | — | Per-host execution of probe and `claude_resume` commands |
 | OpenCode server | `opencode-server.service` (external, v2 CLI) | 4096 | Agent sessions the daemon creates, prompts, and resumes |
 
@@ -29,7 +29,7 @@ transport; runner inbox/outbox tables fence duplicate execution.
 ## Agent dispatch and waits
 
 `dispatch_agent` is the dispatch path for orchestrator agents. One call
-resolves a configured route (never a provider-prefixed model id), pre-flights
+resolves a live model family, configured intent, exact model or legacy route, pre-flights
 provider authentication and model availability, creates a fresh worktree of
 an allow-listed repository, spawns the session, registers it into kernel
 custody, and returns a receipt only after the session's first generated
@@ -38,15 +38,45 @@ refused — a quota-dead route can no longer report "dispatched". After the
 receipt, a watchdog polls token counters, re-prompts stalled runs in place,
 and escalates exhausted runs to `operator_required`.
 
+`list_models` lists native OpenCode, Codex and Claude catalogs with family/latest,
+thinking/speed and access evidence. Family requests prefer the native harness;
+`host` and explicit version are binding. Accepted choices are immutable on retry.
+All hosts are assumed to share harnesses, models and advertised settings. Selection
+uses the common local catalog; `catalogHost` identifies where it was observed.
+The compact CLI uses the same daemon resolver:
+
+```sh
+workflowd models list --host mint --harness claude
+workflowd job mint opus --dry-run
+workflowd job mint codex sol --repository workflowd --prompt "Fix the queue bug"
+```
+
+Configure `WORKFLOWD_DAEMON_URL` and the daemon token. Optional
+`WORKFLOWD_EXECUTION_POLICY_FILE` supplies versioned intent/custom-family defaults.
+Explicit remote hosts launch through the existing durable NATS command plane.
+The coordinator probes protocol readiness before accepting a new run; the runner
+uses its own repository/workspace allow-list, native adapters and credentials.
+Previews select from the common catalog without claiming runner readiness.
+OpenCode, Codex and Claude children have durable caller mailboxes and can wake
+supported parents. See
+[docs/execution-dispatch.md](docs/execution-dispatch.md) for policy and evidence limits.
+
 `wait_for_agent` registers a durable wait so a parent session is woken when
 a child session finishes. Both sessions must already be in kernel custody.
 Parents come in two kinds: OpenCode sessions on the managed server, and
-Claude Code sessions on the daemon's host (woken through two
+Claude Code sessions on the daemon's host or an allow-listed runner host (woken through two
 `claude -p --resume` turns).
 
 Both tools follow a fire-and-ack contract: every write returns a receipt,
 never a result, and there is deliberately no blocking wait tool. Read the
-outcome with `job_status` in a later turn. Refusals ride the advertised
+legacy workflow-job outcome with `job_status` in a later turn. Dispatch receipts
+include `mailbox_id` and `mailbox_tool=read_agent_mailbox`; that authenticated reader
+returns the durable terminal result without consuming it. Accepted duplicates and
+post-spawn refusal replays retain the same mailbox. Unified `run_id` status lookup
+is available through authenticated `job_status({job_id: run_id})`,
+`GET /workflows/agent-runs/:run_id`, or `workflowd job status RUN_ID`.
+Use `workflowd job cancel RUN_ID` for a durable host-addressed cancellation.
+Refusals ride the advertised
 output schema with a machine-readable reason. See
 [docs/mcp-server.md](docs/mcp-server.md) for the full tool, authorization,
 and HTTP-ingress documentation.
@@ -154,6 +184,8 @@ The daemon serves, on one listener:
 | `/workflows/agent-waits` | POST | token configured | Register a durable agent wait (proxied by `wait_for_agent`) |
 | `/workflows/agent-runs` | POST | token configured | Dispatch an agent run (proxied by `dispatch_agent`) |
 | `/execution-capabilities` | GET | discovery or agent-run token configured | Authenticated local model/thinking discovery (proxied by `list_execution_capabilities`) |
+| `/models` | GET | discovery or agent-run token configured | Compact host/harness/family-filtered discovery (proxied by `list_models`) |
+| `/execution-selections/resolve` | POST | discovery or agent-run token configured | Advisory selection preview without run/worktree creation |
 | `/workflows/test-jobs` | POST | token configured | Authenticated test-job canary |
 | `/workflows/dogfood/sessions` | GET | token configured | Read-only dogfood session enrichment |
 

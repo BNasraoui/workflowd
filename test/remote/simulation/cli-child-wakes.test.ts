@@ -47,6 +47,8 @@ import { toJsonSchemaObject } from "../../../src/json"
 import { simulationTimeoutMs } from "./budget"
 import { RemoteSimulation } from "./simulator"
 import { defaultState, makeProvider } from "../../kernel/agent-run-ingress-harness"
+import { ExecutionDiscovery } from "../../../src/execution-capabilities"
+import type { RequestedSelection } from "../../../src/execution-selection"
 
 setDefaultTimeout(simulationTimeoutMs(4_000))
 
@@ -209,13 +211,53 @@ console.log(JSON.stringify({type:"result",is_error:false,usage:{output_tokens:5}
     progressWindowMs: 5_000,
     maxAttempts: 3,
     claudeHosts: ["runner-b"],
+    executionPolicy: {
+      revision: "dynamic-wake-fixture",
+      intents: [{ name: "research", family: "opus" }],
+    },
     identity,
   }
+  let catalogAvailable = true
+  const discovery = Layer.succeed(ExecutionDiscovery, {
+    list: () =>
+      Effect.succeed({
+        sources: [
+          {
+            host: "coordinator",
+            executor: `${kind}:local`,
+            kind,
+            protocol: "fixture",
+            status: "available" as const,
+            checkedAt: simulation.now.toISOString(),
+            observedAt: simulation.now.toISOString(),
+            freshUntil: simulation.now.toISOString(),
+            stale: false,
+          },
+        ],
+        capabilities: catalogAvailable
+          ? (kind === "codex" ? ["gpt-6.9-sol", "gpt-6.10-sol"] : ["claude-opus-5-5"]).map(
+              (model) => ({
+                identity: {
+                  host: "coordinator",
+                  executor: `${kind}:local`,
+                  provider: null,
+                  model,
+                },
+                selectionModel: model,
+                availability: "available" as const,
+                thinking: { status: "unknown" as const },
+                observedAt: simulation.now.toISOString(),
+              }),
+            )
+          : [],
+      }),
+  })
   const trees = Layer.succeed(AgentRunWorktrees, {
     create: (input: { directory: string }) =>
       Effect.promise(() => mkdir(input.directory, { recursive: true })).pipe(Effect.asVoid),
   })
   const ingress = AgentRunIngressLive(options).pipe(
+    Layer.provideMerge(discovery),
     Layer.provideMerge(Layer.mergeAll(runs, sessions, waits)),
     Layer.provideMerge(Layer.succeed(AgentRunProvider, makeProvider(providerState))),
     Layer.provideMerge(Layer.succeed(CodexCli, codex)),
@@ -245,7 +287,17 @@ console.log(JSON.stringify({type:"result",is_error:false,usage:{output_tokens:5}
     await simulation[Symbol.asyncDispose]()
     await rm(root, { recursive: true, force: true })
   }
-  return { root, parentDirectory, nativeParent, simulation, run, close }
+  return {
+    root,
+    parentDirectory,
+    nativeParent,
+    simulation,
+    run,
+    close,
+    withdrawCatalog: () => {
+      catalogAvailable = false
+    },
+  }
 }
 
 const observe = runOpenCodeCompletionSourceIteration({
@@ -293,24 +345,23 @@ const dispatch = (
   parentKind: "claude" | "opencode" = "claude",
   terminal: "completed" | "operator_required" = "completed",
   kill = false,
+  target: RequestedSelection = { route: "child" },
 ) =>
   fixture.run(
     Effect.gen(function* () {
       const ingress = yield* AgentRunIngress
-      const receipt = yield* ingress.register(
-        {
-          route: "child",
-          repository: "fixture",
-          prompt: "Do the task",
-          parentSessionId: parentKind === "claude" ? fixture.nativeParent : "ses_opencode_parent",
-          parentKind,
-          ...(parentKind === "claude"
-            ? { parentHost: "runner-b", parentDirectory: fixture.parentDirectory }
-            : {}),
-          resumePrompt: "Continue parent.",
-        },
-        fixture.simulation.now,
-      )
+      const request = {
+        ...target,
+        repository: "fixture",
+        prompt: "Do the task",
+        parentSessionId: parentKind === "claude" ? fixture.nativeParent : "ses_opencode_parent",
+        parentKind,
+        ...(parentKind === "claude"
+          ? { parentHost: "runner-b", parentDirectory: fixture.parentDirectory }
+          : {}),
+        resumePrompt: "Continue parent.",
+      }
+      const receipt = yield* ingress.register(request, fixture.simulation.now)
       if (kill) {
         const runs = yield* AgentRunStore
         const current = yield* runs.read(receipt.runId)
@@ -327,6 +378,23 @@ const dispatch = (
         }),
         Effect.timeout("3 seconds"),
       )
+      fixture.withdrawCatalog()
+      const replay = yield* ingress.register(request, fixture.simulation.now).pipe(Effect.result)
+      if (terminal === "completed") {
+        expect(replay._tag).toBe("Success")
+        if (replay._tag === "Success") {
+          expect(replay.success.status).toBe("duplicate")
+          expect(replay.success.mailboxId).toBe(receipt.mailboxId)
+          expect(replay.success.resolvedSelection).toEqual(receipt.resolvedSelection)
+        }
+      } else {
+        expect(replay._tag).toBe("Failure")
+        if (replay._tag === "Failure")
+          expect(replay.failure).toMatchObject({
+            reason: "run_conflict",
+            mailboxId: receipt.mailboxId,
+          })
+      }
       return { receipt, row }
     }),
   )
@@ -372,52 +440,60 @@ const finishRemote = async (fixture: Awaited<ReturnType<typeof makeFixture>>) =>
   return outcome
 }
 
-test("remote Claude parent wakes from completed Codex CLI child through coordinator and runner", async () => {
-  const fixture = await makeFixture("codex")
-  try {
-    const { receipt, row } = await dispatch(fixture)
-    expect(row?.state).toBe("completed")
-    expect(await drain(fixture)).toMatchObject({
-      observed: { status: "completed" },
-      queued: { status: "enqueued" },
-      registered: { status: "completed" },
-      woken: { status: "remote_dispatched" },
-    })
-    await fixture.simulation.run([
-      { type: "coordinator" },
-      { type: "runner", host: "runner-b" },
-      { type: "coordinator" },
-    ])
-    const result = await records(fixture, receipt.mailboxId)
-    expect(result.inbox).toHaveLength(1)
-    expect(JSON.parse(result.inbox[0]!.prompt)).toMatchObject({
-      status: "completed",
-      final_message: "Codex child finished.",
-    })
-    expect(result.watch).toEqual([{ state: "completed" }])
-    expect(JSON.parse(result.remote[0]!.input_json).hostId).toBe("runner-b")
-    const wakes = (await readFile(join(fixture.parentDirectory, "wakes.jsonl"), "utf8"))
-      .trim()
-      .split("\n")
-      .map((line) =>
-        Schema.decodeUnknownSync(Schema.Struct({ prompt: Schema.String }))(JSON.parse(line)),
-      )
-    expect(wakes).toHaveLength(2)
-    expect(JSON.parse(wakes[0]!.prompt)).toMatchObject({
-      task: "Continue parent.",
-      terminal: {
-        run_id: receipt.runId,
-        mailbox_id: receipt.mailboxId,
+for (const target of [{ route: "child" }, { family: "sol", host: "coordinator" }])
+  test(`remote Claude parent wakes from completed Codex CLI ${target.family === undefined ? "route" : "family"} child through coordinator and runner`, async () => {
+    const fixture = await makeFixture("codex")
+    try {
+      const { receipt, row } = await dispatch(fixture, "claude", "completed", false, target)
+      expect(row?.state).toBe("completed")
+      if (target.family !== undefined)
+        expect(receipt.resolvedSelection).toMatchObject({
+          model: "gpt-6.10-sol",
+          family: "sol",
+          version: "6.10",
+          executorKind: "codex",
+        })
+      expect(await drain(fixture)).toMatchObject({
+        observed: { status: "completed" },
+        queued: { status: "enqueued" },
+        registered: { status: "completed" },
+        woken: { status: "remote_dispatched" },
+      })
+      await fixture.simulation.run([
+        { type: "coordinator" },
+        { type: "runner", host: "runner-b" },
+        { type: "coordinator" },
+      ])
+      const result = await records(fixture, receipt.mailboxId)
+      expect(result.inbox).toHaveLength(1)
+      expect(JSON.parse(result.inbox[0]!.prompt)).toMatchObject({
         status: "completed",
         final_message: "Codex child finished.",
-      },
-    })
-    expect(await finishRemote(fixture)).toMatchObject({ status: "completed" })
-    expect((await records(fixture, receipt.mailboxId)).results).toHaveLength(1)
-  } finally {
-    await fixture.close()
-  }
-})
+      })
+      expect(result.watch).toEqual([{ state: "completed" }])
+      expect(JSON.parse(result.remote[0]!.input_json).hostId).toBe("runner-b")
+      const wakes = (await readFile(join(fixture.parentDirectory, "wakes.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) =>
+          Schema.decodeUnknownSync(Schema.Struct({ prompt: Schema.String }))(JSON.parse(line)),
+        )
+      expect(wakes).toHaveLength(2)
+      expect(JSON.parse(wakes[0]!.prompt)).toMatchObject({
+        task: "Continue parent.",
+        terminal: {
+          run_id: receipt.runId,
+          mailbox_id: receipt.mailboxId,
+          status: "completed",
+          final_message: "Codex child finished.",
+        },
+      })
+      expect(await finishRemote(fixture)).toMatchObject({ status: "completed" })
+      expect((await records(fixture, receipt.mailboxId)).results).toHaveLength(1)
+    } finally {
+      await fixture.close()
+    }
+  })
 
 test("external SIGTERM on a Codex CLI child records the terminal reason and wakes its remote Claude parent once", async () => {
   const fixture = await makeFixture("codex", true, true)
@@ -458,74 +534,83 @@ test("external SIGTERM on a Codex CLI child records the terminal reason and wake
   }
 })
 
-test("Claude CLI child completion wakes an OpenCode parent with the final message", async () => {
-  const fixture = await makeFixture("claude")
-  try {
-    const { receipt, row } = await dispatch(fixture, "opencode")
-    expect(row?.state).toBe("completed")
-    const stage = await fixture.run(
-      Effect.gen(function* () {
-        const observed = yield* observe
-        const queued = yield* enqueueNextAgentHandoff(fixture.simulation.now)
-        const registered = yield* runKernelJobIteration({
-          workerId: "test",
-          now: () => fixture.simulation.now,
-          leaseDurationMs: 60_000,
-          retryDelayMs: 0,
+for (const target of [{ route: "child" }, { intent: "research" }])
+  test(`Claude CLI ${target.intent === undefined ? "route" : "intent"} child completion wakes an OpenCode parent with the final message`, async () => {
+    const fixture = await makeFixture("claude")
+    try {
+      const { receipt, row } = await dispatch(fixture, "opencode", "completed", false, target)
+      expect(row?.state).toBe("completed")
+      if (target.intent !== undefined)
+        expect(receipt.resolvedSelection).toMatchObject({
+          model: "claude-opus-5-5",
+          family: "opus",
+          version: "5.5",
+          executorKind: "claude",
+          policyRevision: "dynamic-wake-fixture",
         })
-        return { observed, queued, registered }
-      }),
-    )
-    expect(stage).toMatchObject({
-      observed: { status: "completed" },
-      queued: { status: "enqueued" },
-      registered: { status: "completed" },
-    })
-    const prompts: string[] = []
-    const provider = {
-      sessionExists: async () => true,
-      sessionFinished: async () => true,
-      listMessages: async () => [],
-      promptAsync: async (input: { prompt: string }) => {
-        prompts.push(input.prompt)
-      },
-      subscribeEvents: async () =>
-        (async function* () {
-          yield {
-            type: "message.updated" as const,
-            sessionID: "ses_opencode_parent",
-            message: { role: "assistant" as const, time: { created: 1, completed: 2 } },
-          }
-        })(),
-      generate: async () => ({ acknowledged: true, summary: "received" }),
+      const stage = await fixture.run(
+        Effect.gen(function* () {
+          const observed = yield* observe
+          const queued = yield* enqueueNextAgentHandoff(fixture.simulation.now)
+          const registered = yield* runKernelJobIteration({
+            workerId: "test",
+            now: () => fixture.simulation.now,
+            leaseDurationMs: 60_000,
+            retryDelayMs: 0,
+          })
+          return { observed, queued, registered }
+        }),
+      )
+      expect(stage).toMatchObject({
+        observed: { status: "completed" },
+        queued: { status: "enqueued" },
+        registered: { status: "completed" },
+      })
+      const prompts: string[] = []
+      const provider = {
+        sessionExists: async () => true,
+        sessionFinished: async () => true,
+        listMessages: async () => [],
+        promptAsync: async (input: { prompt: string }) => {
+          prompts.push(input.prompt)
+        },
+        subscribeEvents: async () =>
+          (async function* () {
+            yield {
+              type: "message.updated" as const,
+              sessionID: "ses_opencode_parent",
+              message: { role: "assistant" as const, time: { created: 1, completed: 2 } },
+            }
+          })(),
+        generate: async () => ({ acknowledged: true, summary: "received" }),
+      }
+      const resumed = await fixture.run(
+        runOpenCodeResumeIteration({
+          ...identity,
+          workerId: "test-opencode",
+          leaseDurationMs: 60_000,
+          heartbeatIntervalMs: 20_000,
+          now: () => fixture.simulation.now,
+          contracts: [
+            {
+              ...resultContract,
+              agent: "fixture",
+              model: { providerID: "fixture", modelID: "fixture" },
+            },
+          ],
+        }).pipe(Effect.provideService(OpenCodeResumeProvider, provider)),
+      )
+      expect(resumed).toMatchObject({ status: "completed" })
+      expect(prompts).toHaveLength(1)
+      expect(JSON.parse(prompts[0]!)).toMatchObject({
+        task: "Continue parent.",
+        terminal: { run_id: receipt.runId, final_message: "Claude child finished." },
+      })
+      expect((await records(fixture, receipt.mailboxId)).results).toHaveLength(1)
+    } finally {
+      await fixture.close()
     }
-    const resumed = await fixture.run(
-      runOpenCodeResumeIteration({
-        ...identity,
-        workerId: "test-opencode",
-        leaseDurationMs: 60_000,
-        heartbeatIntervalMs: 20_000,
-        now: () => fixture.simulation.now,
-        contracts: [
-          {
-            ...resultContract,
-            agent: "fixture",
-            model: { providerID: "fixture", modelID: "fixture" },
-          },
-        ],
-      }).pipe(Effect.provideService(OpenCodeResumeProvider, provider)),
-    )
-    expect(resumed).toMatchObject({ status: "completed" })
-    expect(prompts).toHaveLength(1)
-    expect(JSON.parse(prompts[0]!)).toMatchObject({
-      task: "Continue parent.",
-      terminal: { run_id: receipt.runId, final_message: "Claude child finished." },
-    })
-    expect((await records(fixture, receipt.mailboxId)).results).toHaveLength(1)
-  } finally {
-    await fixture.close()
-  }
-})
+  })
 
 test("coordinator restart and duplicate reordered deliveries wake the Claude parent once", async () => {
   const fixture = await makeFixture("codex")

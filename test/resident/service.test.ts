@@ -15,7 +15,12 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { startAppServer } from "../../src/resident/process"
 
-function fixture(manualQueue = false, effortOverride?: string, manualRestart = false) {
+function fixture(
+  manualQueue = false,
+  effortOverride?: string,
+  manualRestart = false,
+  speedOverride?: string,
+) {
   const queued = new Map<string, string[]>()
   let rejectedMethod: string | undefined
   let readsBeforeFailure: number | undefined
@@ -101,6 +106,7 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
           thread: { id },
           model: frame.params.model ?? "native-default",
           modelProvider: frame.params.modelProvider ?? "native-provider",
+          serviceTier: speedOverride ?? frame.params.serviceTier ?? null,
           reasoningEffort:
             effortOverride ??
             (typeof frame.params.config === "object" &&
@@ -116,6 +122,7 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
         result = {
           model: frame.params.model ?? "native-default",
           modelProvider: frame.params.modelProvider ?? "native-provider",
+          serviceTier: speedOverride ?? frame.params.serviceTier ?? null,
           reasoningEffort:
             effortOverride ??
             (typeof frame.params.config === "object" &&
@@ -272,6 +279,46 @@ const prepareRun = (now: Date, runId = "a", effort?: string) =>
     })
     yield* runs.claimSpawn({ runId, now })
   })
+
+test("resident Codex applies the native service tier before queued inference", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const worker = yield* resident.cli.spawn({
+        runId: "speed",
+        directory: "/work/speed",
+        prompt: "done",
+        model: "model",
+        serviceTier: "priority",
+      })
+      yield* worker.exited
+      expect(fake.calls.find((c) => c.method === "thread/start")?.params).toMatchObject({
+        serviceTier: "priority",
+      })
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("a resident speed mismatch refuses before queuing a turn", async () => {
+  const fake = fixture(false, undefined, false, "other")
+  const outcome = await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      return yield* resident.cli
+        .spawn({
+          runId: "speed",
+          directory: "/work/speed",
+          prompt: "done",
+          model: "model",
+          serviceTier: "priority",
+        })
+        .pipe(Effect.result)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+  expect(outcome._tag).toBe("Failure")
+  expect(fake.calls.some((c) => c.method === "thread/queue/add")).toBe(false)
+})
 const verifyRun = (now: Date, runId = "a", threadId = "thread-1") =>
   Effect.gen(function* () {
     const runs = yield* AgentRunStore

@@ -35,6 +35,7 @@ export type CliSpawnInput = {
   readonly model: string | null
   readonly provider?: string | null
   readonly effort?: string
+  readonly serviceTier?: string | null
 }
 
 type CliCommon = {

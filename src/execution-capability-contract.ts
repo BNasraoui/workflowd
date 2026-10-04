@@ -26,6 +26,14 @@ export const ExecutionThinking = Schema.Struct({
 })
 export type ExecutionThinking = Schema.Schema.Type<typeof ExecutionThinking>
 
+export const ExecutionSpeed = Schema.Struct({
+  status: Schema.Literals(["advertised", "unknown", "unsupported"]),
+  tiers: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ id: Schema.String, native: Schema.optionalKey(Schema.String) })),
+  ),
+  defaultTier: Schema.optionalKey(Schema.String),
+})
+
 export const ExecutionCapability = Schema.Struct({
   identity: Schema.Struct({
     host: Schema.String,
@@ -36,7 +44,9 @@ export const ExecutionCapability = Schema.Struct({
   selectionModel: Schema.String,
   name: Schema.optionalKey(Schema.String),
   thinking: ExecutionThinking,
+  speed: Schema.optionalKey(ExecutionSpeed),
   defaultModel: Schema.optionalKey(Schema.Boolean),
+  pickerEligible: Schema.optionalKey(Schema.Boolean),
   tools: Schema.optionalKey(Schema.Boolean),
   responsesWebsockets: Schema.optionalKey(Schema.Boolean),
   limits: Schema.optionalKey(
@@ -61,6 +71,7 @@ export const ExecutionCapabilities = Schema.Struct({
   capabilities: Schema.Array(ExecutionCapability),
   sources: Schema.Array(
     Schema.Struct({
+      host: Schema.optionalKey(Schema.String),
       executor: Schema.String,
       kind: Schema.String,
       protocol: Schema.String,

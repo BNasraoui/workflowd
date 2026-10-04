@@ -26,6 +26,7 @@ export type AgentRunWatchdogOptions = {
    * subprocess execution like codex-cli); those rows are never watchable. */
   readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
   readonly now: () => Date
+  readonly owningHostId?: string
 }
 
 export type AgentRunWatchdog = {
@@ -52,6 +53,7 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
       now,
       staleAfterMs: options.staleAfterMs,
       unsupervisedExecutorKinds: options.unsupervisedExecutorKinds,
+      ...(options.owningHostId === undefined ? {} : { owningHostId: options.owningHostId }),
     })
     if (run === null) return "idle" as const
 

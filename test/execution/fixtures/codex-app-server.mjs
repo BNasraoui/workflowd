@@ -14,6 +14,12 @@ const model = (id, isDefault) => ({
   defaultReasoningEffort: "deliberate",
   inputModalities: ["text", "image"],
   isDefault,
+  ...(mode === "tiers"
+    ? {
+        serviceTiers: [{ id: "priority", name: "Fast", description: "priority" }],
+        defaultServiceTier: null,
+      }
+    : {}),
 })
 createInterface({ input: process.stdin }).on("line", (line) => {
   const frame = JSON.parse(line)

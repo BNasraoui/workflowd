@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
 import { McpQueries, MAX_RECENT_JOBS } from "./queries"
-import { listExecutionCapabilities } from "./execution-capabilities"
+import { listExecutionCapabilities, listModelsTool } from "./execution-capabilities"
 import {
   AgentWaitReceipt,
   AgentWaitRefusal,
@@ -74,6 +74,12 @@ const WaitForAgentArguments = Schema.Struct({
 })
 
 const DispatchAgentArguments = Schema.Struct({
+  host: RequestedSelection.fields.host,
+  harness: RequestedSelection.fields.harness,
+  family: RequestedSelection.fields.family,
+  version: RequestedSelection.fields.version,
+  intent: RequestedSelection.fields.intent,
+  speed: RequestedSelection.fields.speed,
   route: RequestedSelection.fields.route,
   model: RequestedSelection.fields.model,
   provider: RequestedSelection.fields.provider,
@@ -128,11 +134,18 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
     switch (name) {
       case "list_execution_capabilities":
         return yield* listExecutionCapabilities(args, context)
+      case "list_models":
+        return yield* listModelsTool(args, context)
       case "job_status": {
         const queries = yield* McpQueries
         const input = yield* decodeArguments(JobStatusArguments, args).pipe(Effect.result)
         if (input._tag === "Failure")
           return failure("invalid arguments: job_id (string) is required")
+        if (
+          input.success.job_id.startsWith("agent-run-") &&
+          (!context.writesConfigured || !context.writesAuthorized)
+        )
+          return failure("unauthorized: agent run status requires a valid bearer token")
         const status = yield* queries
           .jobStatus(input.success.job_id)
           .pipe(Effect.catch(() => Effect.succeed(null)))
@@ -378,7 +391,7 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     const input = yield* decodeArguments(DispatchAgentArguments, args).pipe(Effect.result)
     if (input._tag === "Failure") {
       return failure(
-        "invalid arguments: provide exactly one of route or model, plus repository and prompt as non-empty strings " +
+        "invalid arguments: provide exactly one of route or model or family, or a configured intent, plus repository and prompt as non-empty strings " +
           `(prompt at most ${MAX_AGENT_RUN_PROMPT_BYTES} UTF-8 bytes), and ` +
           "parent_session_id/resume_prompt/idempotency_key, when given, must be non-empty strings",
       )
@@ -388,6 +401,12 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
       subject: "the dispatch",
       timeoutMs: DISPATCH_AGENT_TIMEOUT_MS,
       body: {
+        ...(input.success.host === undefined ? {} : { host: input.success.host }),
+        ...(input.success.harness === undefined ? {} : { harness: input.success.harness }),
+        ...(input.success.family === undefined ? {} : { family: input.success.family }),
+        ...(input.success.version === undefined ? {} : { version: input.success.version }),
+        ...(input.success.intent === undefined ? {} : { intent: input.success.intent }),
+        ...(input.success.speed === undefined ? {} : { speed: input.success.speed }),
         ...(input.success.route === undefined ? {} : { route: input.success.route }),
         ...(input.success.model === undefined ? {} : { model: input.success.model }),
         ...(input.success.provider === undefined ? {} : { provider: input.success.provider }),
@@ -428,7 +447,7 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     }
     const verified =
       `session ${receipt.success.nativeSessionId} on route ` +
-      `${input.success.route ?? input.success.model} is generating (${receipt.success.outputTokens} tokens observed)`
+      `${input.success.route ?? input.success.model ?? input.success.family ?? input.success.intent} is generating (${receipt.success.outputTokens} tokens observed)`
     const received =
       receipt.success.status === "duplicate"
         ? `Already dispatched: ${verified}.`

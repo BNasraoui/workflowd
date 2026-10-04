@@ -4,6 +4,7 @@ import {
   type ResidentConfig,
 } from "./resident/config"
 import { loadWorkerIdentityConfig, type WorkerIdentityConfig } from "./worker-identity/config"
+import { loadExecutionPolicy, type ExecutionPolicy } from "./execution/policy"
 import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -101,6 +102,7 @@ export interface QrspiConfig {
 }
 
 export interface AgentRunConfig {
+  readonly remoteHosts?: ReadonlyArray<string>
   readonly token: string
   readonly claudeBinary: string
   readonly claudeHosts: ReadonlyArray<string>
@@ -119,6 +121,7 @@ export interface AgentRunConfig {
 }
 
 interface SharedAppConfig {
+  readonly executionPolicy?: ExecutionPolicy
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
@@ -412,6 +415,9 @@ function loadAgentRunConfig(
   }
   return {
     token,
+    ...(env.WORKFLOWD_AGENT_RUN_HOSTS === undefined
+      ? {}
+      : { remoteHosts: parseAgentRunClaudeHosts(env.WORKFLOWD_AGENT_RUN_HOSTS) }),
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     claudeHosts:
       env.WORKFLOWD_AGENT_RUN_CLAUDE_HOSTS === undefined
@@ -714,14 +720,17 @@ export async function loadConfig(
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
+  const executionPolicy = await loadExecutionPolicy(env.WORKFLOWD_EXECUTION_POLICY_FILE, read)
   const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
     ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),
     codexEnabled: agentRuns !== undefined || residentCodex !== undefined,
+    claudeEnabled: agentRuns !== undefined,
   })
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
+    ...(executionPolicy === undefined ? {} : { executionPolicy }),
     ...(executionCapabilities === undefined ? {} : { executionCapabilities }),
     ...(residentCodex === undefined ? {} : { residentCodex }),
     ...(residentOpenCodeSocket === undefined ? {} : { residentOpenCodeSocket }),

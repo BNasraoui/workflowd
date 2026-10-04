@@ -4,6 +4,7 @@ import type { AppConfig } from "../config"
 import type { DiscoverySource } from "../execution-capabilities"
 import { makeCodexDiscovery } from "./codex"
 import { makeOpenCodeDiscovery } from "./opencode"
+import { makeClaudeDiscovery } from "./claude"
 
 export function localDiscoverySources(
   config: AppConfig,
@@ -21,15 +22,9 @@ export function localDiscoverySources(
         ...(config.residentCodex === undefined ? {} : { home: config.residentCodex.home }),
       }),
     )
-  if (
-    config.agentRuns?.claudeHosts.includes(config.worker.hostId) ||
-    (config.agentRuns?.claudeRoutes.length ?? 0) > 0
-  )
-    sources.push({
-      executor: "claude:local",
-      kind: "claude",
-      protocol: "unsupported",
-      discover: () => Promise.resolve({ status: "unsupported" }),
-    })
+  if (config.executionCapabilities?.claudeEnabled)
+    sources.push(
+      makeClaudeDiscovery("claude:local", config.executionCapabilities?.claudeBinary ?? "claude"),
+    )
   return sources
 }

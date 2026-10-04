@@ -1,4 +1,7 @@
 import type { CiStore } from "./ci/store"
+import { RequestedSelection, resolveExecutionSelection } from "./execution-selection"
+import { ModelFilters, listModels } from "./execution/models"
+import type { ExecutionPolicy } from "./execution/policy"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
@@ -48,6 +51,7 @@ type AgentWaitIngressBinding = Pick<AgentWaitIngressPort, "register"> & {
 }
 
 type AgentRunIngressBinding = Pick<AgentRunIngressPort, "register" | "cancel"> & {
+  readonly status?: AgentRunIngressPort["status"]
   readonly token: string
 }
 
@@ -69,30 +73,85 @@ export type WebhookHandlerOptions = {
   readonly executionCapabilities?: {
     readonly token: string
     readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
+    readonly policy?: ExecutionPolicy
   }
 }
 
-export function routeRequest(
+function routeExecutionRequest(
   request: Request,
   options: WebhookHandlerOptions,
-): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
+): Effect.Effect<Response> | undefined {
   const { pathname } = new URL(request.url)
   if (
-    pathname === "/execution-capabilities" &&
+    pathname === "/execution-selections/resolve" &&
+    request.method === "POST" &&
+    options.executionCapabilities !== undefined
+  ) {
+    const discovery = options.executionCapabilities
+    if (!authorized(request.headers.get("authorization"), discovery.token))
+      return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+    return Effect.gen(function* () {
+      const bytes = yield* Effect.tryPromise(() => request.arrayBuffer())
+      if (bytes.byteLength > 8192)
+        return Response.json({ error: "payload too large" }, { status: 413 })
+      const input = yield* Schema.decodeUnknownEffect(JsonText)(
+        new TextDecoder().decode(bytes),
+      ).pipe(
+        Effect.flatMap((value) =>
+          Schema.decodeUnknownEffect(RequestedSelection)(value, { onExcessProperty: "error" }),
+        ),
+        Effect.result,
+      )
+      if (input._tag === "Failure")
+        return Response.json({ error: "invalid selection" }, { status: 400 })
+      const catalog = yield* discovery.list()
+      const result = resolveExecutionSelection(catalog, input.success, discovery.policy)
+      return result.outcome === "refused"
+        ? Response.json({ error: "refused", reason: result.reason }, { status: 409 })
+        : Response.json(result)
+    }).pipe(
+      Effect.catch(() =>
+        Effect.succeed(Response.json({ error: "selection preview unavailable" }, { status: 503 })),
+      ),
+    )
+  }
+  if (
+    (pathname === "/execution-capabilities" || pathname === "/models") &&
     request.method === "GET" &&
     options.executionCapabilities !== undefined
   ) {
     if (!authorized(request.headers.get("authorization"), options.executionCapabilities.token)) {
       return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
     }
+    const parsed = Schema.decodeUnknownResult(ModelFilters)(
+      Object.fromEntries(new URL(request.url).searchParams),
+      { onExcessProperty: "error" },
+    )
+    if (pathname === "/models" && parsed._tag === "Failure")
+      return Effect.succeed(Response.json({ error: "invalid model filters" }, { status: 400 }))
+    const filters = parsed._tag === "Success" ? parsed.success : {}
+    const policy = options.executionCapabilities.policy
     return options.executionCapabilities.list().pipe(
       Effect.match({
-        onSuccess: (capabilities) => Response.json(capabilities),
+        onSuccess: (capabilities) =>
+          Response.json(
+            pathname === "/models" ? listModels(capabilities, filters, policy) : capabilities,
+          ),
         onFailure: () =>
           Response.json({ error: "capability discovery unavailable" }, { status: 503 }),
       }),
     )
   }
+  return undefined
+}
+
+export function routeRequest(
+  request: Request,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
+  const execution = routeExecutionRequest(request, options)
+  if (execution !== undefined) return execution
+  const { pathname } = new URL(request.url)
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
   }
@@ -116,7 +175,43 @@ export function routeRequest(
       options.maxBodyBytes ?? 1_048_576,
     )
   }
+  const agentRunResponse = routeAgentRunRequest(request, pathname, options)
+  if (agentRunResponse !== undefined) return agentRunResponse
+  if (
+    pathname === "/workflows/dogfood/sessions" &&
+    request.method === "GET" &&
+    options.dogfood !== undefined
+  ) {
+    return handleDogfoodSessions(request, options.dogfood)
+  }
+  const testJobResponse = routeTestJobRequest(request, pathname, options)
+  if (testJobResponse !== undefined) return testJobResponse
+  return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+}
+
+function routeAgentRunRequest(
+  request: Request,
+  pathname: string,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never> | undefined {
   const agentRunCancel = /^\/workflows\/agent-runs\/(agent-run-[a-zA-Z0-9_-]+)$/.exec(pathname)
+  if (
+    agentRunCancel !== null &&
+    request.method === "GET" &&
+    options.agentRuns?.status !== undefined
+  ) {
+    if (!authorized(request.headers.get("authorization"), options.agentRuns.token))
+      return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
+    return options.agentRuns.status(agentRunCancel[1]!).pipe(
+      Effect.match({
+        onFailure: agentRunFailure,
+        onSuccess: (run) =>
+          run === null
+            ? Response.json({ error: "run not found" }, { status: 404 })
+            : Response.json(run),
+      }),
+    )
+  }
   if (agentRunCancel !== null && request.method === "DELETE" && options.agentRuns !== undefined) {
     return handleAgentRunCancel(request, options.agentRuns, agentRunCancel[1]!, options.now)
   }
@@ -132,16 +227,7 @@ export function routeRequest(
       options.maxBodyBytes ?? 1_048_576,
     )
   }
-  if (
-    pathname === "/workflows/dogfood/sessions" &&
-    request.method === "GET" &&
-    options.dogfood !== undefined
-  ) {
-    return handleDogfoodSessions(request, options.dogfood)
-  }
-  const testJobResponse = routeTestJobRequest(request, pathname, options)
-  if (testJobResponse !== undefined) return testJobResponse
-  return Effect.succeed(Response.json({ error: "not found" }, { status: 404 }))
+  return undefined
 }
 
 function handleAgentRunCancel(
@@ -329,7 +415,7 @@ function handleAgentRunRegister(
       return Response.json(
         {
           error:
-            "invalid agent run: provide exactly one of route or model, plus repository and prompt " +
+            "invalid agent run: provide exactly one of route or model or family, or a configured intent, plus repository and prompt " +
             "as non-empty strings; optional selection and parent fields must match the schema",
         },
         { status: 400 },

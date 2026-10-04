@@ -4,6 +4,7 @@ import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
 import { ExecutionCapabilities } from "../execution-capability-contract"
 import { toJsonSchemaObject } from "../json"
+import { ModelFilters, ModelListing } from "../execution/models"
 
 const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
   type: "object" as const,
@@ -56,6 +57,14 @@ const withRefusal = (success: SuccessOutput) => ({ anyOf: [success, REFUSED_OUTP
 
 export const TOOL_DEFINITIONS = [
   {
+    name: "list_models",
+    description:
+      "List the common model/harness catalog, with family/latest selectors, thinking and speed options, source freshness and intent defaults. All hosts are assumed to share model capabilities. Optional host names the intended execution host; catalogHost and sources retain the observed catalog provenance, not remote readiness. Use harness=claude, codex or opencode to inspect native catalogs. Requires the MCP bearer token.",
+    inputSchema: { ...toJsonSchemaObject(ModelFilters), type: "object" as const },
+    outputSchema: { ...toJsonSchemaObject(ModelListing), type: "object" as const },
+    annotations: readAnnotations,
+  },
+  {
     name: "list_execution_capabilities",
     description:
       "List enabled local execution catalogs through authenticated daemon discovery. Identities separate host, executor, provider and native model. Advertised thinking variants, efforts, budgets and defaults are retained. Source timestamps and availability distinguish advertisement from verified access. Refresh is bounded; no route names are needed. Requires the MCP bearer token.",
@@ -66,14 +75,17 @@ export const TOOL_DEFINITIONS = [
   {
     name: "job_status",
     description:
-      "Read the current durable state of one workflowd job by its job id " +
+      "Read the current durable state of one workflowd job or agent run by its job_id/run_id " +
       "(state, attempt counts, schedule, and the recorded result when the job " +
       "has completed). Read-only; safe to call at any time. This reads the " +
-      "authoritative SQLite store directly — nothing is cached.",
+      "authoritative SQLite store directly — nothing is cached. Agent run lookup requires the bearer token and includes host/native/model/settings snapshot, caller mailbox and terminal result.",
     inputSchema: {
       type: "object",
       properties: {
-        job_id: { type: "string", description: "The job id from an enqueue receipt." },
+        job_id: {
+          type: "string",
+          description: "The job_id or run_id from an enqueue/dispatch receipt.",
+        },
       },
       required: ["job_id"],
       additionalProperties: false,
@@ -86,6 +98,7 @@ export const TOOL_DEFINITIONS = [
         maxAttempts: { type: "integer" },
         runAt: { type: "string" },
         result: { type: ["object", "null"] },
+        run: { type: "object" },
       },
       ["jobId", "state", "attempt", "maxAttempts", "runAt", "result"],
     ),
@@ -231,6 +244,7 @@ export const TOOL_DEFINITIONS = [
       "and watchdog supervision described below are all handled by this one " +
       "call — never shell into a runner host to spawn an agent yourself. " +
       "Explicit selection: pass model, optional provider/executor/model_identity, thinking and allow_unknown_access. Omitted executor uses deterministic capability selection; native and catalog IDs are separate. Resolved selection is returned and preserved for retries. Unsupported thinking is refused. Or use a legacy route. " +
+      "Simple selection: pass family (such as opus or sol), optional host/harness/version, or a configured intent. Family selects the latest supported stable version through its native harness from the common catalog, independently of execution host. Thinking and speed are independent optional controls; consult list_models. Named hosts are binding: an allow-listed remote runner is probed for protocol readiness, then launches with host-local repository/workspace policy and credentials; unavailable/old runners refuse and never fall back locally. " +
       "Pass a configured route name (e.g. 'implement', 'review') or a bare " +
       "model id — never a provider-prefixed id; the workflowd runner resolves " +
       "the route, pre-flights that the provider is authenticated and the model " +
@@ -266,6 +280,25 @@ export const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
+        host: { type: "string", description: "Child execution host, independent of parent_host." },
+        harness: {
+          type: "string",
+          enum: ["claude", "codex", "opencode"],
+          description: "Optional binding harness; otherwise family prefers its native harness.",
+        },
+        family: {
+          type: "string",
+          description: "Model family from list_models; latest stable by default.",
+        },
+        version: { type: "string", description: "Exact family version; requires family." },
+        intent: {
+          type: "string",
+          description: "Configured intent preset; explicit selection fields override defaults.",
+        },
+        speed: {
+          type: "string",
+          description: "Advertised speed tier, independent of thinking effort.",
+        },
         route: {
           type: "string",
           description:
@@ -341,9 +374,18 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["repository", "prompt"],
-      oneOf: [
-        { required: ["route"], not: { required: ["model"] } },
-        { required: ["model"], not: { required: ["route"] } },
+      anyOf: [
+        { required: ["route"] },
+        { required: ["model"] },
+        { required: ["family"] },
+        { required: ["intent"] },
+      ],
+      allOf: [
+        { not: { required: ["model", "family"] } },
+        { not: { required: ["route", "model"] } },
+        { not: { required: ["route", "family"] } },
+        { not: { required: ["route", "intent"] } },
+        { if: { required: ["version"] }, then: { required: ["family"] } },
       ],
       additionalProperties: false,
     },

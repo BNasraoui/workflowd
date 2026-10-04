@@ -109,6 +109,7 @@ test("starts and restarts the full live layer with both kernel stores", async ()
         WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
         WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
         WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+        WORKFLOWD_EXECUTION_CAPABILITIES_CLAUDE_ENABLED: "false",
         WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
         OPENCODE_SERVER_URL: "http://127.0.0.1:1",
       },

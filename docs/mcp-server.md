@@ -8,10 +8,10 @@ no workflow state of its own — every tool call reads or writes the same
 database the coordinator and the remote-enqueue CLI use. Capability discovery
 proxies the daemon's live adapter catalogs.
 
-The server targets MCP revision **2025-11-25** using SDK 1.30.0. All seven
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All nine
 tools advertise an `outputSchema` and return the corresponding
 `structuredContent` in addition to a human-readable text rendering. Tool
-names use the SEP-986 canonical character set. The four query tools carry
+names use the SEP-986 canonical character set. The six query tools carry
 `readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
@@ -32,21 +32,24 @@ text only. Agents should match refusal payloads against the refused shape.
 Every write tool returns a **receipt**, never a result. Work runs
 asynchronously in the durable job queue. There is deliberately **no blocking
 wait tool** — an agent that enqueues work should end its turn after the ack
-and read outcomes with `job_status` in a later turn (or be prompted on
-completion once resume wiring lands). The tool descriptions repeat this
+and read legacy job outcomes with `job_status` in a later turn. Agent dispatch
+returns a caller mailbox readable with `read_agent_mailbox`; registered parent
+wakes include its terminal result. The tool descriptions repeat this
 contract so agents learn it from the schema itself.
 
 ## Tools
 
 | Tool | Access | Purpose |
 | --- | --- | --- |
-| `job_status(job_id)` | read | Durable state of one job, plus its recorded result when complete. |
+| `job_status(job_id)` | read; agent runs authenticated | A legacy job or dispatch `run_id` state and terminal result. Agent runs include the immutable selection, execution host, directory/session and caller mailbox. |
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
+| `list_models(host?, harness?, family?)` | authenticated read | Compact live model list with latest family selectors, native harness preference, thinking/speed choices, source health and configured intent defaults. |
+| `read_agent_mailbox(mailbox_id)` | authenticated read | Durable terminal results for a dispatch caller; reading does not consume them. |
 | `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
-| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
+| `dispatch_agent(repository, prompt, family?, intent?, model?, route?, host?, harness?, version?, thinking?, speed?, …)` | write | Resolve a live family/intent/exact selector or legacy route, pre-flight, spawn, verify first output and register custody. Requires the bearer token. See [selection policy](execution-dispatch.md). |
 
 `enqueue_probe` with an explicit `probe_id` is idempotent (the same identity
 maps to the same job); omitting it generates a fresh probe identity per call.
@@ -73,10 +76,10 @@ those guarantees and leaves state the kernel cannot see.
   session id the kernel does not hold is refused with the machine-readable
   reason `missing_parent_session` *before* anything is spawned — that is a
   typed refusal (`status: "refused"`), not a malfunction; drop the parent
-  fields and re-dispatch, then read the outcome later with `job_status`.
+    fields and re-dispatch, retaining the receipt's agent-run and mailbox identities.
 - **Caller is an external session** (your id is not held by workflowd, e.g.
-  you live on a different host or harness): omit `parent_session_id`. You
-  still get the first-token-verified receipt and can poll `job_status`, or
+   you live on a different host or harness): omit `parent_session_id`. You
+   still get the first-token-verified receipt and a durable caller mailbox, or
   have a workflowd-hosted session register the `wait_for_agent` watch on
   your behalf.
 - **One failure is not a broken tool.** Every refusal comes back in-band
@@ -131,7 +134,7 @@ explicitly. Workflow instance payloads are immutable, so reusing a key with a
 different `resume_prompt` or child generation is refused with the
 machine-readable reason `idempotency_conflict` rather than silently rewritten.
 
-**Transport.** Unlike the three read tools, which query SQLite directly, this
+**Transport.** Unlike the store query tools, which query SQLite directly, this
 tool proxies to the workflowd daemon's `POST /workflows/agent-waits` ingress.
 The daemon atomically persists the workflow instance, completion watch, wait,
 and complete custody predicate before acknowledging. Its asynchronous
@@ -148,15 +151,52 @@ A follow-up can expose durable workflow jobs through `tasks/get` and
 `execution.taskSupport: "optional"`. Until then their documented contract is
 the existing receipt plus `job_status` polling.
 
-Two dispatch providers are supported. `opencode` routes run as OpenCode
-server sessions; `codex` routes run the Codex CLI (`codex exec`) directly on
-the daemon host. The store's `claude` provider kind is reserved for the Claude
-wake path and is not dispatchable.
+Three harnesses are supported: OpenCode server sessions, native Codex and native
+Claude Code. All hosts are assumed to share their models and advertised settings;
+`list_models` uses the common catalog, retaining local `catalogHost`/source provenance.
+Host selection is binding. Another host can be previewed or launched through the
+existing durable runner transport. The named host must be execution-allow-listed
+and answer a protocol readiness probe; old/disabled runners refuse before acceptance.
+The runner uses its own repository/workspace policy and native credentials. Native CLI
+children can wake supported OpenCode/Claude parents, including allow-listed remote
+Claude parents; that wake transport does not imply remote child launch support.
 
 ## `dispatch_agent`
 
 This replaces the manual `mint-job` dispatch-then-verify workflow. Callers
 dispatch by **intent** and never touch models, auth, or wedge recovery:
+
+For a family request, use `family="opus"` or `family="sol"`, optionally `host`,
+`harness`, `version`, `thinking` and `speed`. Alternatively use a configured
+`intent="research"`; explicit selectors override its defaults. `list_models`
+shows the available presets and controls. The daemon freezes the concrete choice
+in the receipt, so retrying one idempotency key does not upgrade latest.
+Exact-ID and legacy-route forms remain available:
+
+`run_id` is an agent-run identity. `list_recent_jobs` covers legacy workflow jobs;
+authenticated
+`job_status({job_id: run_id})` also looks up direct agent runs. Use
+`read_agent_mailbox` for terminal results. See
+[remote execution setup](execution-dispatch.md#remote-execution-setup-and-recovery).
+
+### Caller mailbox results
+
+Every accepted dispatch includes `mailbox_id` and `mailbox_tool: "read_agent_mailbox"`.
+Matching duplicate receipts reuse this identity. A post-spawn refusal also includes
+`mailbox_id`, including replay of a failed/operator-required run; a pre-acceptance
+refusal has no terminal mailbox. Read with:
+
+```json
+{ "mailbox_id": "agent-mailbox-opaque-id-from-receipt" }
+```
+
+`read_agent_mailbox` requires the MCP bearer token and returns `{mailbox_id, messages}`.
+Messages contain the durable terminal run/session identities, route/model, status,
+end reason/time, and `final_message` or `final_message_ref`. Reads are non-consuming
+and survive restart; an empty `messages` array means no terminal result is recorded.
+The same terminal result is included in a registered parent's wake as `terminal`.
+
+### Dispatch example
 
 ```
 dispatch_agent(
@@ -245,8 +285,9 @@ receipt: end the turn after it arrives.
 
 ## Authorization
 
-The three store query tools need no credential beyond reaching the transport
-(loopback or your tailnet). Capability discovery and all write tools require a bearer token:
+Legacy job/host queries need no credential beyond reaching the transport
+(loopback or your tailnet). Agent-run status lookup, capability discovery, caller mailbox reads
+and all write tools require a bearer token:
 
 - `WORKFLOWD_MCP_TOKEN` — token value directly (development only).
 - `WORKFLOWD_MCP_TOKEN_FILE` — path to a file containing the token. The
@@ -254,8 +295,9 @@ The three store query tools need no credential beyond reaching the transport
   `WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token`, matching the other workflowd
   units.
 
-When neither is set, the store queries remain available; capability discovery
-and write tools refuse every call. The token is never logged or echoed, including in error text.
+When neither is set, legacy job/host queries remain available; capability discovery,
+caller mailbox reads and write tools refuse every call. The token is never logged
+or echoed, including in error text.
 
 `wait_for_agent` additionally needs to reach the daemon's agent-wait ingress,
 which carries its own token:
@@ -318,7 +360,9 @@ OpenCode (`opencode.json`):
 }
 ```
 
-Agents that only need read tools can omit the Authorization header entirely.
+Agents that only need legacy-job `job_status`, `list_recent_jobs` and `host_health`
+can omit the Authorization header. Agent-run status, catalog and caller mailbox
+reads require it.
 
 ## Coordinator channel
 

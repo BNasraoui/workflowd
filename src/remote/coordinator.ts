@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
+import { RemoteAgentDispatch } from "./agent-services"
+import { RemoteCoordinatorDataError } from "./coordinator-store"
 import { decodeRemoteResult } from "./codec"
 import {
   RemoteCoordinatorStore,
@@ -30,6 +32,16 @@ export const runRemoteDispatchIteration = (options: RemoteDispatchIterationOptio
   Effect.gen(function* () {
     const store = yield* RemoteCoordinatorStore
     const transport = yield* RemoteTransport
+    const agent = yield* Effect.serviceOption(RemoteAgentDispatch)
+    if (Option.isSome(agent))
+      yield* agent.value
+        .flush()
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new RemoteCoordinatorDataError({ key: "agent-outbox", message: String(error) }),
+          ),
+        )
     const preparedAt = options.now()
     yield* runRemoteReconciliationIteration(preparedAt)
     const dispatch = yield* store.prepareNext({
@@ -109,7 +121,24 @@ export const runRemoteResultIteration = (at: Date) =>
               payloadBytes: delivery.data.byteLength,
               receivedAt: at,
             }),
-          onSuccess: (result) => store.acceptDelivery(delivery.deliveryId, result, at),
+          onSuccess: (result) =>
+            Effect.gen(function* () {
+              const agent = yield* Effect.serviceOption(RemoteAgentDispatch)
+              if (
+                Option.isSome(agent) &&
+                (yield* agent.value.receive(result).pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new RemoteCoordinatorDataError({
+                        key: result.resultId,
+                        message: String(error),
+                      }),
+                  ),
+                ))
+              )
+                return "accepted" as const
+              return yield* store.acceptDelivery(delivery.deliveryId, result, at)
+            }),
         }),
         Effect.tap(() => delivery.acknowledge),
       ),

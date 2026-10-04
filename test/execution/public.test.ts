@@ -8,6 +8,7 @@ import { WorkSignalLive } from "../../src/work-signal"
 import { kernelLayer } from "../kernel/job-store-harness"
 import { createMcpFetchHandler } from "../../src/mcp/server"
 import { makeExecutionCapabilities } from "../../src/execution-capabilities"
+import { SqlClient } from "effect/unstable/sql"
 
 const { list: snapshot } = makeExecutionCapabilities({
   host: "box",
@@ -78,6 +79,95 @@ test("daemon discovery is authenticated and lists native capabilities independen
   expect(await response.json()).toMatchObject({
     capabilities: [{ identity: { model: "new-model" } }],
   })
+})
+
+test("compact model discovery targets an execution host and filters harness through HTTP and MCP", async () => {
+  const request = new Request("http://daemon/models?host=remote&harness=fixture", {
+    headers: { authorization: "Bearer daemon-secret" },
+  })
+  const response = await daemonHandler(request)
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    models: [{ host: "remote", catalogHost: "box", harness: "fixture", model: "new-model" }],
+    sources: [{ host: "box", kind: "fixture" }],
+  })
+  const result = await Effect.runPromise(
+    callTool(
+      "list_models",
+      { host: "remote", harness: "fixture" },
+      {
+        writesConfigured: true,
+        writesAuthorized: true,
+        now: () => new Date(),
+        executionCapabilitiesDaemon: {
+          baseUrl: "http://daemon",
+          token: "daemon-secret",
+          send: (url, init) => daemonHandler(new Request(url.toString(), init)),
+        },
+      },
+    ).pipe(Effect.provide(testLayer)),
+  )
+  expect(result.structuredContent).toMatchObject({
+    models: [{ host: "remote", catalogHost: "box", model: "new-model" }],
+    sources: [{ host: "box", kind: "fixture" }],
+  })
+})
+
+test("selection preview resolves without a dispatch or worktree side effect", async () => {
+  const response = await daemonHandler(
+    new Request("http://daemon/execution-selections/resolve", {
+      method: "POST",
+      headers: { authorization: "Bearer daemon-secret", "content-type": "application/json" },
+      body: JSON.stringify({ model: "new-model", executor: "fixture", allowUnknownAccess: true }),
+    }),
+  )
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ reason: "executor_unavailable" })
+})
+
+test("a remote-host family preview uses the common catalog without creating a run", async () => {
+  const discovery = makeExecutionCapabilities({
+    host: "box",
+    refreshMs: 100,
+    timeoutMs: 100,
+    sources: [
+      {
+        executor: "codex:local",
+        kind: "codex",
+        protocol: "fixture",
+        discover: async () => [{ provider: "openai", model: "gpt-6.10-sol" }],
+      },
+    ],
+  })
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const response = yield* routeRequest(
+        new Request("http://daemon/execution-selections/resolve", {
+          method: "POST",
+          headers: { authorization: "Bearer daemon-secret", "content-type": "application/json" },
+          body: JSON.stringify({ family: "sol", host: "remote", allowUnknownAccess: true }),
+        }),
+        {
+          webhookSecret: "unused",
+          now: new Date(),
+          executionCapabilities: {
+            token: "daemon-secret",
+            list: () =>
+              Effect.tryPromise({ try: discovery.list, catch: () => new Error("failed") }),
+          },
+        },
+      )
+      const sql = yield* SqlClient.SqlClient
+      const rows = yield* sql`SELECT run_id FROM kernel_agent_runs`
+      return { response, rows }
+    }).pipe(Effect.provide(testLayer)),
+  )
+  expect(result.response.status).toBe(200)
+  expect(await result.response.json()).toMatchObject({
+    outcome: "resolved",
+    selection: { host: "remote", catalogHost: "box", model: "gpt-6.10-sol", family: "sol" },
+  })
+  expect(result.rows).toHaveLength(0)
 })
 
 test("MCP capability tool proxies the same contract, enforces auth and redacts proxy failures", async () => {

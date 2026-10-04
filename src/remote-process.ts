@@ -9,6 +9,7 @@ import { loadRemoteProcessConfig } from "./remote/config"
 import { runRemoteRunnerLoop } from "./remote/runner"
 import { RemoteRunnerStoreLive } from "./remote/runner-store"
 import { RemoteTransportLive } from "./remote/transport"
+import { runnerAgentLayer } from "./remote/agent-runtime"
 
 type RemoteRunnerProcessOptions = {
   readonly env?: Record<string, string | undefined>
@@ -33,8 +34,13 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
         allowedDirectories: config.claudeDirectories,
       }),
     )
-    const runner = RemoteRunnerStoreLive.pipe(Layer.provide(database), Layer.provide(executor))
     const transport = RemoteTransportLive({ servers: config.servers, auth: config.auth })
+    const agent = runnerAgentLayer(config, database, transport)
+    const runner = RemoteRunnerStoreLive.pipe(
+      Layer.provideMerge(agent),
+      Layer.provide(database),
+      Layer.provide(executor),
+    )
     return yield* runRemoteRunnerLoop(config.hostId).pipe(
       Effect.provide(Layer.merge(runner, transport)),
     )

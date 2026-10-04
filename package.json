@@ -3,11 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "workflowd": "src/cli.ts"
+  },
   "scripts": {
     "dev": "bun --watch src/main.ts",
     "start": "bun src/main.ts",
     "runner": "bun src/remote-runner.ts",
     "mcp": "bun src/mcp-server.ts",
+    "cli": "bun src/cli.ts",
     "mcp:channel": "bun src/mcp-channel.ts",
     "remote:enqueue": "bun src/remote-enqueue.ts",
     "test": "bun test",
@@ -31,6 +35,7 @@
     "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage && bun run crap:check"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.289",
     "@effect/platform-bun": "4.0.0-rc.112",
     "@effect/sql-sqlite-bun": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "^1.30.0",

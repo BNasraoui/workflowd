@@ -1,7 +1,11 @@
 import { canonicalJson } from "./session-store-support"
+import { RemoteAgentDispatch } from "../remote/agent-services"
+import type { RemoteAgentLaunch } from "../remote/agent-contract"
 import { ExecutionDiscovery } from "../execution-capabilities"
+import type { ExecutionPolicy } from "../execution/policy"
 import {
   resolveExecutionSelection,
+  validSelection,
   type RequestedSelection,
   type ResolvedSelection,
   type SelectionRefusal,
@@ -79,6 +83,14 @@ export type AgentRunIngressError =
   | Schema.SchemaError
 
 export type AgentRunIngressPort = {
+  readonly status?: (
+    runId: string,
+  ) => Effect.Effect<Omit<AgentRunRecord, "prompt"> | null, AgentRunIngressError>
+  /** Runner-only boundary. Never exposed by HTTP/MCP. */
+  readonly registerFrozen?: (
+    launch: RemoteAgentLaunch,
+    now: Date,
+  ) => Effect.Effect<AgentRunReceipt, AgentRunIngressError>
   readonly register: (
     input: AgentRunSubmissionType,
     now: Date,
@@ -110,6 +122,10 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 )
 
 export type AgentRunIngressOptions = {
+  /** Runner lifetime owns recovered completion fibers; legacy ingress callers
+   * may intentionally dispose a short registration scope before completion. */
+  readonly scopeNativeCompletions?: boolean
+  readonly executionPolicy?: ExecutionPolicy
   readonly routes: ReadonlyArray<AgentRunRoute>
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
@@ -202,6 +218,9 @@ const choiceForSelection = (
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
+    const completionScope =
+      options.scopeNativeCompletions === true ? yield* Effect.scope : undefined
+    const remote = Option.getOrUndefined(yield* Effect.serviceOption(RemoteAgentDispatch))
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
     const provider = Option.getOrUndefined(providerOption)
@@ -412,6 +431,8 @@ const make = (options: AgentRunIngressOptions) =>
       refuse,
       verifyTimeoutMs: options.verifyTimeoutMs,
       progressWindowMs: options.progressWindowMs,
+      owningHostId: options.identity.owningHostId,
+      ...(completionScope === undefined ? {} : { completionScope }),
       workerPrompt,
     })
     yield* codexRuns.recover
@@ -432,6 +453,8 @@ const make = (options: AgentRunIngressOptions) =>
             refuse,
             verifyTimeoutMs: options.verifyTimeoutMs,
             progressWindowMs: options.progressWindowMs,
+            owningHostId: options.identity.owningHostId,
+            ...(completionScope === undefined ? {} : { completionScope }),
           })
     if (claudeRuns !== undefined) yield* claudeRuns.recover
 
@@ -510,7 +533,10 @@ const make = (options: AgentRunIngressOptions) =>
         } satisfies ResolvedSelection
       })
 
-    const prepareRegistration = (input: Parameters<AgentRunIngressPort["register"]>[0]) =>
+    const prepareRegistration = (
+      input: Parameters<AgentRunIngressPort["register"]>[0],
+      frozen?: RemoteAgentLaunch,
+    ) =>
       Effect.gen(function* () {
         const submission = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(input, {
           onExcessProperty: "error",
@@ -524,8 +550,11 @@ const make = (options: AgentRunIngressOptions) =>
             "parentSessionId and resumePrompt must be provided together or not at all",
           )
         }
-        if ((submission.route === undefined) === (submission.model === undefined))
-          return yield* refuse("invalid_selection", "Provide exactly one of route or model")
+        if (!validSelection(submission))
+          return yield* refuse(
+            "invalid_selection",
+            "Provide a route, model, family or configured intent; version requires family and route excludes explicit qualifiers",
+          )
         if (
           submission.route !== undefined &&
           (submission.provider !== undefined ||
@@ -537,6 +566,12 @@ const make = (options: AgentRunIngressOptions) =>
             "Use model for explicit provider/executor selection; route is a configured alias",
           )
         const requested: RequestedSelection = {
+          ...(submission.host === undefined ? {} : { host: submission.host }),
+          ...(submission.harness === undefined ? {} : { harness: submission.harness }),
+          ...(submission.family === undefined ? {} : { family: submission.family }),
+          ...(submission.version === undefined ? {} : { version: submission.version }),
+          ...(submission.intent === undefined ? {} : { intent: submission.intent }),
+          ...(submission.speed === undefined ? {} : { speed: submission.speed }),
           ...(submission.route === undefined ? {} : { route: submission.route }),
           ...(submission.model === undefined ? {} : { model: submission.model }),
           ...(submission.provider === undefined ? {} : { provider: submission.provider }),
@@ -562,23 +597,24 @@ const make = (options: AgentRunIngressOptions) =>
                 options.claudeRoutes,
               )
         const identityRoute =
-          submission.model === undefined
+          submission.route !== undefined
             ? aliasForIdentity?.outcome === "resolved"
               ? aliasForIdentity.route.name
               : (submission.route ?? "")
             : `selection-${promptSha256(canonicalJson(requested))}`
         const keyed = yield* store.read(
-          agentRunIdentifiers({
-            route: identityRoute,
-            repository: submission.repository,
-            prompt: submission.prompt,
-            parentSessionId:
-              submission.parentSessionId === undefined
-                ? null
-                : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
-            resumePrompt: submission.resumePrompt ?? null,
-            idempotencyKey: submission.idempotencyKey,
-          }).runId,
+          frozen?.runId ??
+            agentRunIdentifiers({
+              route: identityRoute,
+              repository: submission.repository,
+              prompt: submission.prompt,
+              parentSessionId:
+                submission.parentSessionId === undefined
+                  ? null
+                  : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
+              resumePrompt: submission.resumePrompt ?? null,
+              idempotencyKey: submission.idempotencyKey,
+            }).runId,
         )
         if (keyed?.resolvedSelection != null) {
           // Immutable replay needs no current catalog; create still compares the
@@ -588,6 +624,8 @@ const make = (options: AgentRunIngressOptions) =>
         } else if (keyed !== null) {
           if (
             submission.model !== undefined ||
+            submission.family !== undefined ||
+            submission.intent !== undefined ||
             submission.thinking !== undefined ||
             identityRoute !== keyed.route
           )
@@ -597,7 +635,12 @@ const make = (options: AgentRunIngressOptions) =>
             })
           selection = yield* historicalSelection(keyed)
           resolution = choiceForSelection(selection, keyed.route)
-        } else if (submission.model !== undefined) {
+        } else if (frozen !== undefined) {
+          if (frozen.selection.host !== options.identity.owningHostId)
+            return yield* refuse("host_unavailable", "frozen launch targets a different runner")
+          selection = frozen.selection
+          resolution = choiceForSelection(selection, frozen.route)
+        } else if (submission.route === undefined) {
           if (Option.isNone(discovery))
             return yield* refuse("executor_unavailable", "Capability discovery is disabled")
           const catalog = yield* discovery.value
@@ -607,11 +650,11 @@ const make = (options: AgentRunIngressOptions) =>
                 refuse("executor_unavailable", "Capability discovery unavailable"),
               ),
             )
-          const selected = resolveExecutionSelection(catalog, requested)
+          const selected = resolveExecutionSelection(catalog, requested, options.executionPolicy)
           if (selected.outcome === "refused")
             return yield* refuse(
               selected.reason,
-              `Selection refused: ${selected.reason}; consult list_execution_capabilities`,
+              `Selection refused: ${selected.reason}; consult list_models for host/harness/family choices and list_execution_capabilities for exact qualifiers`,
             )
           selection = selected.selection
           resolution = choiceForSelection(selection, identityRoute)
@@ -619,11 +662,11 @@ const make = (options: AgentRunIngressOptions) =>
           const alias = resolveAgentRunRouteChoice(
             options.routes,
             options.codexRoutes,
-            submission.route!,
+            submission.route,
             options.claudeRoutes,
           )
           if (alias.outcome === "refused")
-            return yield* refuse(alias.reason, routeRefusalDetail(submission.route!, alias.reason))
+            return yield* refuse(alias.reason, routeRefusalDetail(submission.route, alias.reason))
           resolution = alias
           selection = {
             host: options.identity.owningHostId,
@@ -689,7 +732,14 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
-        } else if (resolution.provider === "opencode" && submission.model === undefined) {
+        } else if (selection.host !== options.identity.owningHostId) {
+          if (remote === undefined)
+            return yield* refuse("host_unavailable", "remote launch transport is disabled")
+          yield* remote.preflight(selection.host)
+        } else if (
+          resolution.provider === "opencode" &&
+          (submission.route !== undefined || frozen !== undefined)
+        ) {
           yield* preflightRoute(resolution.route)
         } else if (resolution.provider !== "opencode") {
           const readiness = yield* currentReadiness(
@@ -712,10 +762,14 @@ const make = (options: AgentRunIngressOptions) =>
         return { submission, resolution, repository, requested, selection, accepted: keyed }
       })
 
-    const register: AgentRunIngressPort["register"] = (input, now) =>
+    const register = (
+      input: AgentRunSubmissionType,
+      now: Date,
+      frozen?: RemoteAgentLaunch,
+    ): Effect.Effect<AgentRunReceipt, AgentRunIngressError> =>
       Effect.gen(function* () {
         const { submission, resolution, repository, requested, selection, accepted } =
-          yield* prepareRegistration(input)
+          yield* prepareRegistration(input, frozen)
         const providerId =
           accepted?.providerId ??
           (resolution.provider === "opencode"
@@ -728,12 +782,11 @@ const make = (options: AgentRunIngressOptions) =>
         const parentHost = submission.parentHost ?? options.identity.owningHostId
         // The parent is validated before anything external is spawned so a
         // caller naming a dead parent gets a refusal, not an orphaned child.
-        const parentDirectory = yield* resolveWaitParentDirectory(
-          submission,
-          parentKind,
-          parentHost,
-        )
-        const identifiers = agentRunIdentifiers({
+        const parentDirectory =
+          frozen !== undefined
+            ? undefined
+            : yield* resolveWaitParentDirectory(submission, parentKind, parentHost)
+        const computed = agentRunIdentifiers({
           route: resolution.route.name,
           repository: submission.repository,
           prompt: submission.prompt,
@@ -744,6 +797,14 @@ const make = (options: AgentRunIngressOptions) =>
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
         })
+        const identifiers =
+          frozen === undefined
+            ? computed
+            : {
+                runId: frozen.runId,
+                resourceId: `agent-run-resource-${frozen.runId.slice("agent-run-".length)}`,
+                short: frozen.runId.slice("agent-run-".length, "agent-run-".length + 16),
+              }
         const created = yield* store.create({
           runId: identifiers.runId,
           route: resolution.route.name,
@@ -760,22 +821,28 @@ const make = (options: AgentRunIngressOptions) =>
           parentSessionId: submission.parentSessionId ?? null,
           resumePrompt: submission.resumePrompt ?? null,
           maxAttempts: options.maxAttempts,
-          createdAt: now,
+          createdAt: frozen === undefined ? now : new Date(frozen.createdAt),
         })
         const run = yield* store.read(identifiers.runId)
         if (run === null) {
           return yield* refuse("run_conflict", "run row vanished during dispatch")
         }
         if (run.state === "failed" || run.state === "operator_required") {
-          return yield* refuse(
-            "run_conflict",
-            `a previous dispatch of this run ended in ${run.state}` +
+          return yield* new AgentRunRefusalError({
+            reason:
+              run.diagnostic?.includes("selection_mismatch") &&
+              selection.host !== options.identity.owningHostId
+                ? "model_not_available"
+                : "run_conflict",
+            detail:
+              `a previous dispatch of this run ended in ${run.state}` +
               (run.diagnostic === null ? "" : `: ${run.diagnostic}`),
-          )
+            mailboxId: run.callerMailboxId,
+          })
         }
         const immutableReceipt =
           run.state === "completed" ||
-          (resolution.provider !== "opencode" &&
+          ((resolution.provider !== "opencode" || run.resolvedSelection == null) &&
             run.state === "verified" &&
             run.nativeSessionId !== null)
         const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
@@ -794,6 +861,12 @@ const make = (options: AgentRunIngressOptions) =>
             outputTokens: run.lastOutputTokens,
             kind: resolution.provider,
           }
+        } else if (selection.host !== options.identity.owningHostId) {
+          if (remote === undefined)
+            return yield* refuse("host_unavailable", "remote launch transport is disabled")
+          dispatched = yield* remote
+            .dispatch(run, submission, now)
+            .pipe(Effect.mapError(withMailbox))
         } else if (resolution.provider !== "opencode") {
           dispatched = yield* (
             nativeRuns === undefined
@@ -859,6 +932,14 @@ const make = (options: AgentRunIngressOptions) =>
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
         }
+        if (
+          run.resolvedSelection != null &&
+          run.resolvedSelection.host !== options.identity.owningHostId
+        ) {
+          if (remote === undefined)
+            return yield* refuse("host_unavailable", "remote launch transport is disabled")
+          return yield* remote.cancel(run, now)
+        }
         if (agentRunExecutorKind(run) === "codex") {
           yield* codexRuns.cancel(run, now)
           return
@@ -882,7 +963,19 @@ const make = (options: AgentRunIngressOptions) =>
         yield* store.cancel({ runId, now })
       })
 
-    return AgentRunIngress.of({ register, cancel })
+    return AgentRunIngress.of({
+      register,
+      cancel,
+      registerFrozen: (launch, now) => register(launch.submission, now, launch),
+      status: (runId) =>
+        store.read(runId).pipe(
+          Effect.map((run) => {
+            if (run === null) return null
+            const { prompt: _prompt, ...status } = run
+            return status
+          }),
+        ),
+    })
   })
 
 export const AgentRunIngressLive = (options: AgentRunIngressOptions) =>

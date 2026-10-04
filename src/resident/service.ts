@@ -20,6 +20,7 @@ const ThreadResult = Schema.Struct({
   model: Schema.optionalKey(Schema.String),
   modelProvider: Schema.optionalKey(Schema.String),
   reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  serviceTier: Schema.optionalKey(Schema.NullOr(Schema.String)),
 })
 const TurnEvent = Schema.Struct({
   threadId: Schema.String,
@@ -259,6 +260,9 @@ export const ResidentCodexLive = (
               cwd: row.directory,
               model: selection?.model ?? row.model,
               ...(selection?.provider == null ? {} : { modelProvider: selection.provider }),
+              ...(selection?.speed === undefined
+                ? {}
+                : { serviceTier: selection.speed.native ?? null }),
               ...(selection?.thinking.effort === undefined
                 ? {}
                 : { config: { model_reasoning_effort: selection.thinking.effort } }),
@@ -272,6 +276,7 @@ export const ResidentCodexLive = (
                   model: Schema.optionalKey(Schema.String),
                   modelProvider: Schema.optionalKey(Schema.String),
                   reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+                  serviceTier: Schema.optionalKey(Schema.NullOr(Schema.String)),
                 }),
               ),
             ),
@@ -281,7 +286,9 @@ export const ResidentCodexLive = (
             ((selection.thinking.effort !== undefined &&
               resumed.reasoningEffort !== selection.thinking.effort) ||
               (selection.model !== null && resumed.model !== selection.model) ||
-              (selection.provider !== null && resumed.modelProvider !== selection.provider))
+              (selection.provider !== null && resumed.modelProvider !== selection.provider) ||
+              (selection.speed !== undefined &&
+                resumed.serviceTier !== (selection.speed.native ?? null)))
           ) {
             yield* store.uncertain(`selection:${row.thread_id}`, row.thread_id)
             yield* runs.operatorRequired({
@@ -449,6 +456,7 @@ export const ResidentCodexLive = (
                 cwd: input.directory,
                 model: input.model,
                 ...(input.provider == null ? {} : { modelProvider: input.provider }),
+                ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
                 ...(input.effort === undefined
                   ? {}
                   : { config: { model_reasoning_effort: input.effort } }),
@@ -457,7 +465,7 @@ export const ResidentCodexLive = (
               }),
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
             const rejectSelection = (
-              reason: "unsupported_thinking" | "model_not_available",
+              reason: "unsupported_thinking" | "unsupported_speed" | "model_not_available",
               detail: string,
             ) =>
               Effect.gen(function* () {
@@ -470,6 +478,11 @@ export const ResidentCodexLive = (
               return yield* rejectSelection(
                 "unsupported_thinking",
                 "Native Codex did not confirm the requested reasoning effort",
+              )
+            if (input.serviceTier !== undefined && thread.serviceTier !== input.serviceTier)
+              return yield* rejectSelection(
+                "unsupported_speed",
+                "Native Codex did not confirm the requested service tier before launch",
               )
             if (input.model !== null && thread.model !== input.model)
               return yield* rejectSelection(

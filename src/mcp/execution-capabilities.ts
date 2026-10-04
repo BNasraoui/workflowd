@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect"
 import { ExecutionCapabilities } from "../execution-capability-contract"
+import { ModelFilters, ModelListing } from "../execution/models"
 import type { ToolCallContext, ToolResult } from "./tools"
 
 const NoArguments = Schema.Record(Schema.String, Schema.Never)
@@ -43,5 +44,41 @@ export const listExecutionCapabilities = Effect.fn("Mcp.listExecutionCapabilitie
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: { ...value },
+  }
+})
+
+export const listModelsTool = Effect.fn("Mcp.listModels")(function* (
+  args: unknown,
+  context: ToolCallContext,
+) {
+  if (!context.writesConfigured || !context.writesAuthorized)
+    return error("unauthorized: model discovery requires a valid MCP bearer token")
+  const input = yield* Schema.decodeUnknownEffect(ModelFilters)(args ?? {}, {
+    onExcessProperty: "error",
+  }).pipe(Effect.result)
+  if (input._tag === "Failure")
+    return error("invalid arguments: host, harness and family must be non-empty strings")
+  const daemon = context.executionCapabilitiesDaemon
+  if (daemon === undefined) return error("model discovery is not configured on this MCP server")
+  const url = new URL("/models", daemon.baseUrl)
+  for (const [key, value] of Object.entries(input.success))
+    if (value !== undefined) url.searchParams.set(key, value)
+  const result = yield* Effect.tryPromise({
+    try: async (signal) => {
+      const response = await (daemon.send ?? fetch)(url, {
+        headers: { authorization: `Bearer ${daemon.token}` },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(35_000)]),
+      })
+      if (!response.ok) throw new Error("Model discovery refused")
+      const body: unknown = await response.json()
+      return body
+    },
+    catch: () => new Error("Model discovery unavailable"),
+  }).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ModelListing)), Effect.result)
+  if (result._tag === "Failure")
+    return error("model discovery unavailable: daemon refused or returned an unsupported contract")
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(result.success, null, 2) }],
+    structuredContent: { ...result.success },
   }
 })

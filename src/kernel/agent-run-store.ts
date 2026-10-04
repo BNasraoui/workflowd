@@ -184,6 +184,7 @@ export type AgentRunStorePort = {
     /** Executor kinds supervised through native process custody rather than the
      * OpenCode watchdog, including uncertain pre-verification launches. */
     readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
+    readonly owningHostId?: string
   }) => Effect.Effect<AgentRunRecord | null, AgentRunStoreError>
   /** Metadata query for callers explicitly interested in a model provider. */
   readonly listActiveByProvider: (
@@ -514,7 +515,7 @@ const make = Effect.gen(function* () {
           ? sql`1 = 1`
           : sql`executor_kind NOT IN ${sql.in(input.unsupervisedExecutorKinds)}`
       const rows = yield* sql`SELECT * FROM kernel_agent_runs
-        WHERE (${verified}) AND NOT EXISTS (
+         WHERE (${input.owningHostId === undefined ? sql`1 = 1` : sql`(resolved_selection IS NULL OR json_extract(resolved_selection, '$.host') = ${input.owningHostId})`}) AND ((${verified}) AND NOT EXISTS (
           SELECT 1 FROM resident_threads t WHERE t.run_id = kernel_agent_runs.run_id
           AND t.provider_kind = 'opencode' AND (
             EXISTS (SELECT 1 FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
@@ -522,7 +523,7 @@ const make = Effect.gen(function* () {
             OR EXISTS (SELECT 1 FROM resident_inbox m WHERE m.thread_id = t.thread_id AND m.state IN ('prepared','sending'))
           )
         )
-        OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised} AND updated_at < ${staleBefore})
+         OR (state IN ('accepted', 'spawning', 'spawned') AND ${externallySupervised} AND updated_at < ${staleBefore}))
         ORDER BY updated_at, run_id LIMIT 1`
       return rows.length === 0 ? null : yield* toRecord(rows[0]!)
     })

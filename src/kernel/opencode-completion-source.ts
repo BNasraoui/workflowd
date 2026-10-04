@@ -299,8 +299,8 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_sessions AS session ON session.session_id = watch.child_session_id
       JOIN kernel_agent_runs AS run ON run.session_id = watch.child_session_id
       JOIN resident_inbox AS inbox ON inbox.id = 'agent-run-end-' || run.run_id
-      WHERE watch.provider_kind IN ('codex', 'claude')
-        AND watch.owning_host_id = ${options.owningHostId}
+       WHERE (watch.provider_kind IN ('codex', 'claude') OR watch.endpoint_alias = 'remote-agent')
+         AND (watch.owning_host_id = ${options.owningHostId} OR watch.endpoint_alias = 'remote-agent')
         AND watch.state = 'watching'
         AND watch.child_session_generation = session.revision
         AND run.state IN ('completed', 'cancelled', 'failed', 'operator_required')

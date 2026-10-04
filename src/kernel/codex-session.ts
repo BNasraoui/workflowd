@@ -579,6 +579,9 @@ export const makeDurableCliProcess = (
             String(maxOutputBytes),
             ...(input.model === null ? [] : ["--model", input.model]),
             ...(input.effort === undefined ? [] : ["--effort", input.effort]),
+            ...(input.serviceTier === undefined
+              ? []
+              : ["--service-tier", input.serviceTier ?? "standard"]),
             ...(input.provider == null ? [] : ["--provider", input.provider]),
           ]
           // Retain the manifest on every uncertain launch/inspection outcome. A manager

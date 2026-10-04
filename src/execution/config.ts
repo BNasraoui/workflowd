@@ -4,6 +4,8 @@ export type ExecutionCapabilitiesConfig = {
   readonly timeoutMs: number
   readonly codexEnabled: boolean
   readonly codexBinary: string
+  readonly claudeEnabled: boolean
+  readonly claudeBinary: string
 }
 
 function boundedMilliseconds(
@@ -21,7 +23,11 @@ function boundedMilliseconds(
 export async function loadExecutionCapabilitiesConfig(
   env: Record<string, string | undefined>,
   read: (path: string) => Promise<string>,
-  defaults: { readonly token?: string; readonly codexEnabled: boolean },
+  defaults: {
+    readonly token?: string
+    readonly codexEnabled: boolean
+    readonly claudeEnabled: boolean
+  },
 ): Promise<ExecutionCapabilitiesConfig | undefined> {
   const direct = env.WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN
   const file = env.WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN_FILE
@@ -35,6 +41,9 @@ export async function loadExecutionCapabilitiesConfig(
   const codex = env.WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED
   if (codex !== undefined && codex !== "true" && codex !== "false")
     throw new Error("WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED must be true or false")
+  const claude = env.WORKFLOWD_EXECUTION_CAPABILITIES_CLAUDE_ENABLED
+  if (claude !== undefined && claude !== "true" && claude !== "false")
+    throw new Error("WORKFLOWD_EXECUTION_CAPABILITIES_CLAUDE_ENABLED must be true or false")
   return {
     token,
     refreshMs: boundedMilliseconds(
@@ -51,5 +60,7 @@ export async function loadExecutionCapabilitiesConfig(
     ),
     codexEnabled: codex === undefined ? defaults.codexEnabled : codex === "true",
     codexBinary: env.WORKFLOWD_AGENT_RUN_CODEX_BIN ?? "codex",
+    claudeEnabled: claude === undefined ? defaults.claudeEnabled : claude === "true",
+    claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
   }
 }

@@ -11,6 +11,7 @@ export type CliWorkerOptions = {
   readonly model: string | null
   readonly effort?: string
   readonly provider?: string
+  readonly serviceTier?: string | null
 }
 
 const writeResult = async (path: string, exitCode: number) => {
@@ -54,6 +55,12 @@ export async function runCodexWorker(options: CliWorkerOptions): Promise<number>
     ...(options.provider === undefined
       ? []
       : ["-c", `model_provider=${JSON.stringify(options.provider)}`]),
+    ...(options.serviceTier === undefined
+      ? []
+      : [
+          "-c",
+          `service_tier=${JSON.stringify(options.serviceTier === "priority" ? "fast" : (options.serviceTier ?? "default"))}`,
+        ]),
     "-",
   ])
 }
@@ -107,6 +114,12 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
     model: values.get("--model") ?? null,
     ...(values.has("--effort") ? { effort: required("--effort") } : {}),
     ...(values.has("--provider") ? { provider: required("--provider") } : {}),
+    ...(values.has("--service-tier")
+      ? {
+          serviceTier:
+            required("--service-tier") === "standard" ? null : required("--service-tier"),
+        }
+      : {}),
   }
 }
 

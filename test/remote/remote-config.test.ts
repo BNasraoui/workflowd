@@ -1,6 +1,68 @@
 import { expect, test } from "bun:test"
 import { loadRemoteProcessConfig } from "../../src/remote/config"
 
+test("runner OpenCode credential files stay host-local and unsafe execution roots/URLs fail configuration", async () => {
+  const base = {
+    WORKFLOWD_NATS_SERVERS: "nats://localhost:4222",
+    WORKFLOWD_NATS_TOKEN: "fixture",
+    WORKFLOWD_REMOTE_HOST_ID: "runner-b",
+    WORKFLOWD_RUNNER_AGENT_REPOSITORIES: "repo=/srv/runner/repo",
+  }
+  const config = await loadRemoteProcessConfig(
+    {
+      ...base,
+      WORKFLOWD_OPENCODE_PASSWORD_FILE: "/run/credentials/opencode",
+      WORKFLOWD_RUNNER_OPENCODE_URL: "http://127.0.0.1:4096",
+    },
+    { readFile: async () => "host-local-secret\n" },
+  )
+  expect(config.agentExecution?.openCodePassword).toBe("host-local-secret")
+  await expect(
+    loadRemoteProcessConfig({ ...base, WORKFLOWD_RUNNER_AGENT_WORKTREE_ROOT: "relative" }),
+  ).rejects.toThrow("absolute path")
+  await expect(
+    loadRemoteProcessConfig({
+      ...base,
+      WORKFLOWD_RUNNER_OPENCODE_URL: "http://user:secret@localhost:4096",
+    }),
+  ).rejects.toThrow("credential-free")
+  await expect(
+    loadRemoteProcessConfig({
+      ...base,
+      WORKFLOWD_OPENCODE_PASSWORD: "secret",
+      WORKFLOWD_OPENCODE_PASSWORD_FILE: "/secret",
+    }),
+  ).rejects.toThrow("only one")
+})
+
+test("runner execution resolves repository and workspace policy locally without coordinator credentials", async () => {
+  const config = await loadRemoteProcessConfig({
+    WORKFLOWD_NATS_SERVERS: "nats://localhost:4222",
+    WORKFLOWD_NATS_TOKEN: "fixture",
+    WORKFLOWD_REMOTE_HOST_ID: "runner-b",
+    WORKFLOWD_RUNNER_AGENT_REPOSITORIES: "repo=/srv/runner/repo",
+    WORKFLOWD_RUNNER_AGENT_WORKTREE_ROOT: "/srv/runner/worktrees",
+    WORKFLOWD_AGENT_RUN_CODEX_BIN: "/bin/codex",
+    WORKFLOWD_RUNNER_OPENCODE_URL: "http://localhost:4096",
+  })
+  expect(config).toMatchObject({
+    agentExecution: {
+      repositories: [{ name: "repo", directory: "/srv/runner/repo" }],
+      worktreeRoot: "/srv/runner/worktrees",
+      codexBinary: "/bin/codex",
+      openCodeUrl: "http://localhost:4096",
+    },
+  })
+  await expect(
+    loadRemoteProcessConfig({
+      WORKFLOWD_NATS_SERVERS: "nats://localhost:4222",
+      WORKFLOWD_NATS_TOKEN: "fixture",
+      WORKFLOWD_REMOTE_HOST_ID: "runner-b",
+      WORKFLOWD_RUNNER_AGENT_REPOSITORIES: "repo=relative",
+    }),
+  ).rejects.toThrow("absolute path")
+})
+
 test("runner config is explicit and reads its NATS token from a credential file", async () => {
   const config = await loadRemoteProcessConfig(
     {
