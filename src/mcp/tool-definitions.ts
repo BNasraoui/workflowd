@@ -300,6 +300,11 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description: "Logical repository name from the server's dispatch allow-list.",
         },
+        base_ref: {
+          type: "string",
+          description:
+            "Optional branch on origin to start from; defaults to origin's default branch.",
+        },
         prompt: {
           type: "string",
           description: `Task for the agent; maximum ${MAX_AGENT_RUN_PROMPT_BYTES} UTF-8 bytes.`,

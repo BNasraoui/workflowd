@@ -15,6 +15,9 @@ const initRepository = async (directory: string) => {
   await run("git", "config", "user.email", "test@example.invalid")
   await run("git", "config", "user.name", "Test")
   await run("git", "commit", "-q", "--allow-empty", "-m", "seed")
+  await run("git", "init", "--bare", "--initial-branch=main", `${directory}-origin.git`)
+  await run("git", "remote", "add", "origin", `${directory}-origin.git`)
+  await run("git", "push", "origin", "main")
 }
 
 describe("gitAgentRunWorktrees", () => {

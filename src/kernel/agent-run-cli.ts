@@ -296,6 +296,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           repository: target.repositoryDirectory,
           directory: run.directory,
           branch: `agent-run/${target.short}`,
+          ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
         })
         const resourceId = yield* ensureResource({
           resourceId: target.resourceId,

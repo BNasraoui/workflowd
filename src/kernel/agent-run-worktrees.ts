@@ -8,6 +8,7 @@ export type AgentRunWorktreesPort = {
     readonly repository: string
     readonly directory: string
     readonly branch: string
+    readonly base?: string
   }) => Effect.Effect<void, WorkspaceError>
 }
 
@@ -24,6 +25,34 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
   create: (input) =>
     Effect.gen(function* () {
       if (yield* pathExists(input.directory)) return
+      yield* runWorkspaceCommand("fetch agent-run repository", [
+        "git",
+        "-C",
+        input.repository,
+        "fetch",
+        "origin",
+      ])
+      if (input.base === undefined) {
+        yield* runWorkspaceCommand("detect agent-run default branch", [
+          "git",
+          "-C",
+          input.repository,
+          "remote",
+          "set-head",
+          "origin",
+          "-a",
+        ])
+      }
+      const base =
+        input.base ??
+        (yield* runWorkspaceCommand("resolve agent-run default branch", [
+          "git",
+          "-C",
+          input.repository,
+          "symbolic-ref",
+          "--short",
+          "refs/remotes/origin/HEAD",
+        ]))
       yield* runWorkspaceCommand("create agent-run worktree", [
         "git",
         "-C",
@@ -35,7 +64,7 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
         "-B",
         input.branch,
         input.directory,
-        "HEAD",
+        base,
       ])
     }),
 }

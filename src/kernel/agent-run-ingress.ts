@@ -319,6 +319,7 @@ const make = (options: AgentRunIngressOptions) =>
             repository: target.repositoryDirectory,
             directory: run.directory,
             branch: `agent-run/${target.short}`,
+            ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
           })
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
@@ -754,6 +755,7 @@ const make = (options: AgentRunIngressOptions) =>
           resolvedSelection: selection,
           agent: options.agent,
           repository: repository.name,
+          baseRef: submission.baseRef ?? null,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
           prompt: submission.prompt,
           promptSha256: promptSha256(submission.prompt),
