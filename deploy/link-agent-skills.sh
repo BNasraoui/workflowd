@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-[ $# -eq 1 ] || {
+[[ $# -eq 1 ]] || {
 	printf 'usage: link-agent-skills.sh <deploy-checkout>\n' >&2
 	exit 2
 }
@@ -25,21 +25,22 @@ for target in $TARGETS; do
 	mkdir -p "$target"
 
 	for link in "$target"/rpi-*; do
-		[ -L "$link" ] && [ ! -e "$link" ] || continue
+		[[ -L "$link" && ! -e "$link" ]] || continue
 		case "$(readlink "$link")" in
 		"$DEPLOY"/skills/rpi-*)
 			rm -f "$link"
 			log "removed stale $link"
 			;;
+		*) ;; # a dangling link to elsewhere is not ours to remove
 		esac
 	done
 
 	for skill in "$DEPLOY"/skills/rpi-*; do
-		[ -f "$skill/SKILL.md" ] || continue
+		[[ -f "$skill/SKILL.md" ]] || continue
 		link="$target/$(basename "$skill")"
-		if [ -L "$link" ]; then
-			[ "$(readlink "$link")" = "$skill" ] && continue
-		elif [ -e "$link" ]; then
+		if [[ -L "$link" ]]; then
+			[[ "$(readlink "$link")" == "$skill" ]] && continue
+		elif [[ -e "$link" ]]; then
 			log "WARN: $link exists and is not a symlink; leaving it"
 			conflicts=1
 			continue
