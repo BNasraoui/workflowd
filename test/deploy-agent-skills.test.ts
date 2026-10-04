@@ -198,6 +198,7 @@ async function provenanceFixture(withCodegen = true): Promise<string> {
   await mkdir(origin)
   await git(origin, "init", "-q", "-b", "main")
   await writeFile(join(origin, "README.md"), "fixture\n")
+  await writeFile(join(origin, ".gitignore"), "target/\n")
   if (withCodegen) {
     await mkdir(join(origin, "tools", "operation-codegen"), { recursive: true })
     await writeFile(join(origin, "tools", "operation-codegen", "package-lock.json"), "{}\n")
@@ -318,7 +319,7 @@ test("update-dev-infra validates the staged remote binary before adopting it and
       join(home, ".local", "state", "update-dev-infra", "deployed-provenance.rev"),
       "utf8",
     ),
-  ).toBe(`${revision}\n`)
+  ).toBe(`${revision}|ben-arch\n`)
   expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
     "provenance.new --version && install",
   )
@@ -330,6 +331,20 @@ test("update-dev-infra validates the staged remote binary before adopting it and
     "node",
     "cargo",
   ])
+
+  await rm(join(home, ".local", "bin", "provenance"))
+  const repaired = await run(["bash", updater])
+  expect(repaired.status).toBe(0)
+  expect(repaired.stdout).toContain("installed provenance")
+  expect(await Bun.file(join(home, ".local", "bin", "provenance")).exists()).toBe(true)
+
+  environment = { ...environment, PROV_REMOTE_HOSTS: "ben-arch mint" }
+  const expanded = await run(["bash", updater])
+  expect(expanded.status).toBe(0)
+  expect(expanded.stdout).toContain("pushed provenance")
+  expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
+    "ben@mint:.local/bin/provenance.new",
+  )
 })
 
 test("update-dev-infra retries a failed remote push without failing workflowd", async () => {
@@ -363,4 +378,14 @@ test("update-dev-infra refuses a provenance binary without the dogfood feature",
   expect(result.status).toBe(1)
   expect(result.stderr).toContain("provenance dev build lacks the dogfood marker")
   expect(await Bun.file(join(home, ".local", "bin", "provenance")).exists()).toBe(false)
+})
+
+test("update-dev-infra refuses to label a dirty provenance checkout as origin/main", async () => {
+  const checkout = await provenanceFixture()
+  await writeFile(join(checkout, "README.md"), "local change\n")
+  await stubProvenanceBuild(checkout)
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain("provenance checkout is dirty")
+  expect(await Bun.file(join(root, "build-calls.log")).exists()).toBe(false)
 })

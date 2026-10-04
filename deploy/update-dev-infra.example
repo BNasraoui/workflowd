@@ -15,9 +15,9 @@
 #   Persistent=true
 #
 # The deploy checkout is a detached-HEAD clone (or worktree) of this repo that
-# the systemd units run from; see docs/remote-runner.md. The script never
-# force-updates: a dirty or diverged checkout fails loudly instead of being
-# overwritten. Every run links the checkout's skills/rpi-* directories into
+# the systemd units run from; see docs/remote-runner.md. The script does not
+# reset either checkout and refuses to build from a dirty provenance checkout.
+# Every run links the checkout's skills/rpi-* directories into
 # ~/.agents/skills and ~/.claude/skills with deploy/link-agent-skills.sh.
 
 set -euo pipefail
@@ -65,11 +65,13 @@ else
 	prov_new=$(git -C "$PROV_DEPLOY" rev-parse --short origin/main)
 	state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/update-dev-infra"
 	prov_state="$state_dir/deployed-provenance.rev"
-	prov_deployed=$(cat "$prov_state" 2>/dev/null || true)
-	if [ "$prov_deployed" = "$prov_new" ]; then
+	prov_record=$(cat "$prov_state" 2>/dev/null || true)
+	prov_deployed=${prov_record%%|*}
+	if [ "$prov_record" = "$prov_new|$PROV_REMOTE_HOSTS" ] && [ -x "$HOME/.local/bin/provenance" ]; then
 		log "provenance dev build already deployed ($prov_new)"
 	else
 		log "provenance dev build: ${prov_deployed:-none} -> $prov_new"
+		[ -z "$(git -C "$PROV_DEPLOY" status --porcelain)" ] || die "provenance checkout is dirty at $PROV_DEPLOY"
 		git -C "$PROV_DEPLOY" checkout --quiet --detach origin/main
 		if [ ! -f "$PROV_DEPLOY/tools/operation-codegen/package-lock.json" ] || [ ! -f "$PROV_DEPLOY/tools/operation-codegen/ensure-generated.mjs" ]; then
 			log "skipping provenance: operation codegen inputs missing at $PROV_DEPLOY"
@@ -95,7 +97,7 @@ else
 			done
 			mkdir -p "$state_dir"
 			if [ "$all_pushed" = 1 ]; then
-				printf '%s\n' "$prov_new" > "$prov_state"
+				printf '%s|%s\n' "$prov_new" "$PROV_REMOTE_HOSTS" > "$prov_state"
 			fi
 		fi
 	fi
