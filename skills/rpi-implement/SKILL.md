@@ -31,7 +31,10 @@ For each phase, in order:
    files, deleted files, and files from another component are not.
 3. Run the phase's checks and its end-to-end test. A phase is done only when they pass. Do
    not skip, weaken, or mark tests pending to get there.
-4. Commit with a message naming the phase, then push.
+4. Commit with a message naming the phase, then push to `rpi/<id>`. The draft PR is the
+   bead's `pr:` note; if there is none, open a draft PR with
+   `--base <default branch> --head rpi/<id>` before you wait on CI. Never wait on CI for a
+   commit that has no PR.
 
 ## Graph (only with .provenance/)
 
@@ -51,7 +54,7 @@ take it to the human.
 
 1. Update the PR: set its title to the ticket title, mark it ready
    (`gh pr ready rpi/<id>`), and list the phases with their commits in the body.
-2. Watch CI to the end (`gh pr checks <pr> --watch`). Fix failures on the same branch, only
+2. Only after the PR is updated, watch CI to the end (`gh pr checks <pr> --watch`). Fix failures on the same branch, only
    within the plan's files.
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
