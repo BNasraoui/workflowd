@@ -90,6 +90,8 @@ export type PermissionedBroker = {
   readonly serverConfig: string
   /** Coordinator identity: publish commands, full JetStream API, inbox replies. */
   readonly coordinatorCreds: string
+  /** A CI event listener scoped to the CI subject tree. */
+  readonly ciSubscriberCreds: string
   /** Runner identity scoped to one host's consumer and the shared result subject. */
   readonly runnerCreds: (hostId: string) => string
 }
@@ -150,8 +152,17 @@ export const mintPermissionedBroker = (): PermissionedBroker => {
 
   return {
     serverConfig,
+    ciSubscriberCreds: mintUserCreds(applicationAccount, "workflowd-ci-subscriber", {
+      publishAllow: [],
+      subscribeAllow: ["workflowd.v1.ci.>"],
+    }),
     coordinatorCreds: mintUserCreds(applicationAccount, "workflowd-coordinator", {
-      publishAllow: ["workflowd.v1.commands.*", "$JS.API.>", "$JS.ACK.WORKFLOWD_RESULTS_V1.>"],
+      publishAllow: [
+        "workflowd.v1.commands.*",
+        "workflowd.v1.ci.>",
+        "$JS.API.>",
+        "$JS.ACK.WORKFLOWD_RESULTS_V1.>",
+      ],
       subscribeAllow: ["_INBOX.>"],
     }),
     runnerCreds: (hostId: string) =>
