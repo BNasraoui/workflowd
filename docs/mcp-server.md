@@ -320,6 +320,50 @@ OpenCode (`opencode.json`):
 
 Agents that only need read tools can omit the Authorization header entirely.
 
+## Coordinator channel
+
+A live Claude Code coordinator can receive each dispatched child's terminal
+result inside its open session, with no resume call and no waiter script.
+`bun run mcp:channel` (`src/mcp-channel.ts`) is a stdio MCP server named
+`workflowd` that Claude Code spawns per session. It declares
+`experimental['claude/channel']`, serves the same tools as the HTTP server, and
+forwards every call to it with the bearer. After a successful `dispatch_agent`
+it watches that receipt's `mailbox_id` for this session only, polls
+`read_agent_mailbox`, and sends exactly one `notifications/claude/channel`
+event: `content` is the terminal mailbox message as canonical JSON, and `meta`
+is `{run_id, mailbox_id, status}`. Claude shows it as
+`<channel source="workflowd" ...>` and starts a turn if the session is idle.
+The receipt text gains "the result arrives as a channel event; end your turn".
+
+`dispatch_agent` through the channel refuses any `parent_*` field and
+`resume_prompt` in-band (reason `live_session_parent`): the session is live and
+must not be resumed by `claude -p --resume`. Watches live only in the channel
+process; if it exits, the mailbox row stays readable with `read_agent_mailbox`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WORKFLOWD_MCP_URL` | `http://127.0.0.1:8791/mcp` | HTTP MCP server to forward to. |
+| `WORKFLOWD_MCP_TOKEN` / `WORKFLOWD_MCP_TOKEN_FILE` | — | Bearer; set exactly one. |
+| `WORKFLOWD_CHANNEL_POLL_MS` | `10000` | Mailbox poll interval (worst-case added latency). |
+
+Register it under the name `workflowd` in place of the HTTP entry (remove that
+first, e.g. `claude mcp remove workflowd -s user`); the channel then reaches the
+HTTP server for Claude Code. Start the session with the development-channel
+flag:
+
+```sh
+claude mcp add workflowd \
+  -e WORKFLOWD_MCP_URL=https://mint.<tailnet>.ts.net:8791/mcp \
+  -e WORKFLOWD_MCP_TOKEN_FILE=$HOME/.config/workflowd/mcp-token \
+  -- bun /path/to/workflowd/src/mcp-channel.ts
+claude --dangerously-load-development-channels server:workflowd
+```
+
+Channels are a Claude Code research preview; the development flag is required
+until the channel is on an approved allowlist. A session started without it
+keeps the tools but drops the events, even though the receipt still names the
+channel; use `scripts/wait-mailbox.sh` there.
+
 ## HTTP surface: `POST /workflows/agent-waits`
 
 `wait_for_agent` is a thin proxy over this endpoint on the workflowd daemon.
