@@ -93,8 +93,12 @@ describe("agent wait ingress", () => {
         Effect.gen(function* () {
           yield* enterCustody
           const sql = yield* SqlClient.SqlClient
-          yield* sql`UPDATE kernel_sessions SET provider_kind = ${kind}
-          WHERE session_id = 'child-stable'`
+          yield* sql`UPDATE kernel_sessions SET provider_kind = ${kind},
+            provider_id = ${kind + "-cli"},
+            server_id = ${kind === "codex" ? "server-a" : "mint"},
+            endpoint_alias = 'local-cli',
+            endpoint_identity = ${kind + "-cli://mint"}
+            WHERE session_id = 'child-stable'`
           return yield* (yield* AgentWaitIngress).register(submission, at)
         }),
       )

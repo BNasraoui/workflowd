@@ -106,16 +106,20 @@ cannot be observed, the watch flips to `operator_required` instead.
 
 **Custody is mandatory.** Both sessions must already be in kernel custody —
 a row in `kernel_sessions` joined to `kernel_working_resources` — held by the
-`opencode` provider, in state `ready` or `active`, with a `reserved` working
-resource. If either session fails that check the call is refused and the
+`opencode` or `claude` provider for the parent, and `opencode`, `codex`, or
+`claude` for the child. Both must be `ready` or `active`, with a `reserved`
+working resource. If either session fails that check the call is refused and the
 error names the exact missing custody. The tool never writes a watch for a
 session the kernel does not hold, and never creates custody records itself.
 
 **What the parent receives.** The kernel requires the stored prompt text to
 be the canonical JSON encoding of the stored prompt value, so your
-`resume_prompt` string is wrapped in a single-field object. A parent woken
-with `resume_prompt = "Continue."` is prompted with the exact text
-`{"task":"Continue."}` — not a bare quoted string. The parent answers under
+`resume_prompt` string is wrapped as `task` in a JSON object. For an external
+OpenCode child with no dispatch mailbox, `resume_prompt = "Continue."` is
+delivered as `{"task":"Continue."}`. For a dispatched child, the object also
+has `terminal` with `run_id`, `mailbox_id`, `status`, `end_reason`, and
+`final_message` or `final_message_ref`. The mailbox result itself is unchanged.
+The parent answers under
 the trusted `workflowd.agent-wake` contract
 (`{"acknowledged": true, "summary": "..."}`).
 
@@ -217,22 +221,23 @@ With `parent_session_id` + `resume_prompt`, the runner also registers the
 parent's custody (idempotently) and an agent wait in the same dispatch, so
 one call means "run this and wake me when it finishes". Without them the
 receipt carries the child's custody id for a later `wait_for_agent` call.
-Parent pairing is an opencode-child feature: a codex dispatch names no
-parent and is refused `invalid_wait_pairing` when given one, because the
-completion machinery only observes opencode children.
+Parent pairing works for OpenCode, Codex CLI, and Claude CLI children. A
+terminal child run writes its caller mailbox once; the completion watch then
+records the existing handoff event. The parent wake includes the caller's
+`resume_prompt` and the terminal result, and can be recovered after a restart.
 
 Parents come in two kinds (`parent_kind`, default `opencode`):
 
 - `opencode` — a session on the managed OpenCode server, woken via the
   server API by the OpenCode resume worker.
-- `claude` — a Claude Code session on the daemon's host, woken by the
+- `claude` — a Claude Code session on the daemon's host or an allow-listed
+  remote host, woken by the
   Claude resume worker through two `claude -p --resume` turns (the wake
   document, then the structured-ack extraction). Requires
   `parent_directory`, the cwd the session was created in; the session
   transcript must exist under `~/.claude/projects/` for that directory.
-  Waking Claude sessions on *other* hosts is the cross-machine routing
-  slice (workflowd-b3b.23) and is not supported yet; Codex parents are
-  workflowd-b3b.21.
+  Set `parent_host` for a remote parent; the Claude resume worker routes a
+  `claude_resume` job to that host's runner. Codex parents are not supported.
 
 The dispatch call holds its HTTP request open through verification, so it is
 the one write tool that can take a couple of minutes to ack. It is still a
@@ -397,9 +402,8 @@ enables it, the routes and repositories are then required):
   Like transient Codex runs, Claude runs use independent systemd user units
   and durable output capture, reattach after a daemon restart, and support
   explicit cancellation. Receipts carry `providerId: "claude-cli"` and
-  `sessionId: "claude-session-<UUID>"`. Parent wakes are currently supported
-  only for OpenCode children; omit parent session and resume prompt for CLI
-  dispatches.
+  `sessionId: "claude-session-<UUID>"`. These children support parent wakes
+  with `parent_session_id` and `resume_prompt`.
 - `WORKFLOWD_AGENT_RUN_REPOSITORIES` — comma-separated `name=/absolute/path`
   pairs naming the dispatchable repositories. This is a security allow-list:
   dispatch is arbitrary prompt execution in the named directory's worktrees.

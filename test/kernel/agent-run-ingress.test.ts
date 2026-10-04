@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { enqueueNextAgentHandoff } from "../../src/kernel/agent-handoff-reducer"
-import { KernelJobStoreLive } from "../../src/kernel/job-store"
+import { KernelJobStore, KernelJobStoreLive } from "../../src/kernel/job-store"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
 import { runClaudeResumeIteration } from "../../src/kernel/claude-resume-worker"
 import { AGENT_WAKE_CONTRACT, AgentWakeResult } from "../../src/kernel/agent-wait-ingress"
@@ -13,7 +13,6 @@ import {
   OpenCodeCompletionProvider,
   runOpenCodeCompletionSourceIteration,
 } from "../../src/kernel/opencode-completion-source"
-import { WorkSignal } from "../../src/work-signal"
 import {
   at,
   codexNeverStreams,
@@ -234,7 +233,7 @@ describe("agent-run ingress", () => {
             leaseDurationMs: 60_000,
             retryDelayMs: 0,
           }).pipe(Effect.provide(KernelJobStoreLive))
-          const remote = yield* runClaudeResumeIteration({
+          const resumeOptions = {
             owningHostId: "mint",
             workerId: "test:claude-resume",
             leaseDurationMs: 60_000,
@@ -253,7 +252,8 @@ describe("agent-run ingress", () => {
                 maxOutputBytes: 16_384,
               },
             ],
-          }).pipe(
+          }
+          const remote = yield* runClaudeResumeIteration(resumeOptions).pipe(
             Effect.provide(
               ClaudeResumeRemoteProducerLive.pipe(Layer.provideMerge(KernelJobStoreLive)),
             ),
@@ -262,7 +262,47 @@ describe("agent-run ingress", () => {
             input_json: string
           }>`SELECT input_json FROM kernel_workflow_jobs
             WHERE json_extract(input_json, '$.kind') = 'claude_resume'`
-          return { receipt, run, rows, observed, handoff, job, remote, remoteJob }
+          const delivered = yield* Effect.gen(function* () {
+            const jobs = yield* KernelJobStore
+            const claimed = yield* jobs.claimRemote({
+              workerId: "runner-stub",
+              now: at,
+              leaseDurationMs: 60_000,
+            })
+            if (claimed === null) return yield* Effect.die("missing remote job")
+            yield* jobs.complete({
+              jobId: claimed.jobId,
+              workerId: claimed.workerId,
+              attempt: claimed.attempt,
+              claimToken: claimed.claimToken,
+              expectedLeaseUntil: claimed.leaseUntil,
+              now: at,
+              resultId: `${claimed.jobId}:result`,
+              resultVersion: 1,
+              result: {
+                kind: "claude_resume",
+                hostId: "ben-arch",
+                status: "succeeded",
+                output: JSON.stringify({ acknowledged: true, summary: "woken" }),
+              },
+            })
+            return yield* runClaudeResumeIteration(resumeOptions).pipe(
+              Effect.provide(ClaudeResumeRemoteProducerLive),
+            )
+          }).pipe(Effect.provide(KernelJobStoreLive))
+          const requests = yield* sql<{ state: string }>`SELECT state FROM kernel_resume_requests`
+          return {
+            receipt,
+            run,
+            rows,
+            observed,
+            handoff,
+            job,
+            remote,
+            remoteJob,
+            delivered,
+            requests,
+          }
         }).pipe(Effect.provide(layer)),
       )
       expect(result.run?.diagnostic).toContain("SIGTERM")
@@ -276,8 +316,13 @@ describe("agent-run ingress", () => {
       expect(result.handoff.status).toBe("enqueued")
       expect(result.job.status).toBe("completed")
       expect(result.remote.status).toBe("remote_dispatched")
+      expect(result.delivered.status).toBe("completed")
+      expect(result.requests).toEqual([{ state: "completed" }])
       expect(result.remoteJob).toHaveLength(1)
-      const wake = JSON.parse(JSON.parse(result.remoteJob[0]!.input_json).prompt)
+      const remoteInput = Schema.decodeUnknownSync(
+        Schema.fromJsonString(Schema.Struct({ prompt: Schema.String })),
+      )(result.remoteJob[0]!.input_json)
+      const wake = JSON.parse(remoteInput.prompt)
       expect(wake.task).toBe("Continue after child exit.")
       expect(wake.terminal).toMatchObject({
         run_id: result.run!.runId,
@@ -806,9 +851,9 @@ describe("agent-run ingress", () => {
           child_session_id: string
           provider_kind: string
         }>`SELECT child_session_id, provider_kind FROM kernel_agent_completion_watches`
-        yield* (yield* AgentRunStore).read(receipt.runId).pipe(
-          Effect.repeat({ until: (row) => row?.state === "completed" }),
-        )
+        yield* (yield* AgentRunStore)
+          .read(receipt.runId)
+          .pipe(Effect.repeat({ until: (row) => row?.state === "completed" }))
         return { receipt, watches }
       }).pipe(Effect.provide(layer)),
     )
