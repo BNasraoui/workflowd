@@ -26,12 +26,16 @@ describing the code. Your job is to hide the goal and point at the right code.
    - "How does a webhook delivery reach the job store? Trace the call path."
    - "Where is the retry delay for failed jobs decided, and what inputs does it use?"
    - "Which tests exercise `src/worker.ts`, and which end-to-end harnesses run it?"
-4. Check each question against the ticket. Rewrite any that names the new behavior, a
-   proposed design, or a judgement. Never ask "how would we add Z", "where should Z go",
-   "what is wrong with X", or "what is missing from X". If the ticket says "add backoff to
-   retries", ask how retries are scheduled today; do not mention backoff.
-5. Copy the ticket's pointers into a **Pointers** list verbatim: paths, symbols, URLs. Do not
-   copy the ticket's goal, title, or acceptance criteria.
+4. Check each question against the ticket:
+   - Allowed: how existing code behaves, including existing mechanisms near the goal. "How
+     is the retry delay chosen today?" is fine even when the ticket changes that delay.
+   - Not allowed: naming or implying the new behavior, a proposed design, or a judgement.
+     Never ask "how would we add Z", "where should Z go", "what is wrong with X", or "what
+     is missing from X". If the ticket says "add backoff to retries", ask how retries are
+     scheduled today; do not mention backoff, growth, or caps.
+5. Copy the ticket's pointers into a **Pointers** list verbatim: paths, symbols, URLs, and
+   names such as flags, run ids, and external tools. Questions may use these names as
+   pointers. Do not copy the ticket's goal, title, or acceptance criteria.
 6. If the repository has `.provenance/`, add questions about the graph near the area, for
    example: which Requirements and Rules govern `<area>`, which Rules bind `<files>`, and
    which Topics are open under those Requirements.

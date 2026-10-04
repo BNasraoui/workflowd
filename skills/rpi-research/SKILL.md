@@ -26,8 +26,9 @@ command with `-q` (quiet) and read only whether it succeeded.
 ## Steps
 
 1. For each question, read the code and trace the actual path. Cite every claim as
-   `path:line` or `path:start-end` at the commit you read. If you could not confirm
-   something, say so instead of guessing.
+   `path:line` or `path:start-end` at the commit you read. When an answer depends on
+   something you cannot read (an uninstalled dependency, an external tool's behavior),
+   write "not confirmed" and say what would confirm it.
 2. Describe only. Do not write "should", "could be improved", "a better approach", "the
    fix", "we recommend", risks of a change, or next steps. A bug you notice is a fact:
    state what the code does, with evidence, and move on.
@@ -42,6 +43,9 @@ command with `-q` (quiet) and read only whether it succeeded.
    - `provenance traceability <rule-id>` for each Rule that governs the area
    - `provenance topics list` for open Topics
    Report what you found, including "no Rule binds this file".
+5. Runtime evidence (installed units, journals, databases on a host) is allowed, read-only,
+   in its own **Runtime evidence** section that names the host and command. Never change
+   anything on a host.
 
 ## Document
 
@@ -59,6 +63,10 @@ Repository: <owner/repo> at <full commit sha>
 
 Testing: <tests, harnesses, and how to run them>
 
+## Runtime evidence (only if you read a host)
+
+<host, read-only command, what it showed>
+
 ## Graph (only with .provenance/)
 
 <Requirements, Rules, bindings, open Topics for the area>
@@ -73,8 +81,10 @@ Testing: <tests, harnesses, and how to run them>
    `gh api gists/<gist id> --jq '.history[0].version'`; the revision URL is
    `<gist url>/<version>`.
 2. Create branch `rpi/<id>` at the commit you read (`git switch -c rpi/<id>`) and push it. Open a draft PR for the
-   ticket: `gh pr create --draft --head rpi/<id> --title "RPI <id>"` with the
-   gist URL in the body. If the branch has no changes yet, commit with `--allow-empty`.
+   ticket: `gh pr create --draft --base <default branch> --head rpi/<id> --title "RPI <id>"`
+   with the gist URL in the body. If the branch has no changes yet, commit with
+   `--allow-empty`. Without `.provenance/`, the draft PR holds only that empty commit; this
+   is expected.
 3. If `.provenance/` exists, record the questions and research gists as Sources on
    `rpi/<id>`: `provenance sources create --id <id>-rpi-questions --name "RPI questions for <id>" --source-type project_artifact --url <revision url>`,
    then the same for research. Commit only the `.provenance/` changes and push.
