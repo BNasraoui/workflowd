@@ -13,7 +13,7 @@ stage's work yourself.
 | ----- | --------------- | ----------------------------------- | ---------------- |
 | 1     | `rpi-questions` | bead id                             | `questions`      |
 | 2     | `rpi-research`  | questions gist URL only             | `research`       |
-| 3     | `rpi-plan`      | bead id and research gist URL       | `plan-review`    |
+| 3     | `rpi-plan`      | bead id and research gist URL; implement report gist URL on revision | `plan-review` |
 | —     | human           | plan gist URL                       | approval note    |
 | 4     | `rpi-implement` | approved plan gist URL              | `implementing`   |
 | 5     | `rpi-review`    | PR URL, plan gist URL, implement report gist URL when available | `review` |
@@ -87,8 +87,8 @@ prompt. If the human asks for changes, dispatch `rpi-plan` again with their feed
 to the prompt, and wait for approval again.
 
 If implement stops because a runtime fact contradicts the approved plan (including a
-missing file or wrong Rule), dispatch `rpi-plan` again with the implement report gist URL
-and the original research gist URL. Tell the human why the plan needs revision. Do not
+missing file or wrong Rule), dispatch `rpi-plan` again with the bead id, original research
+gist URL, and implement report gist URL. Tell the human why the plan needs revision. Do not
 widen the plan yourself or dispatch review for stopped phases. Show the revised plan to
 the human for approval before another implement run. After a completed implement run,
 dispatch `rpi-review` with the implement report gist URL when present. When review

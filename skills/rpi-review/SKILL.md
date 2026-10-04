@@ -18,8 +18,8 @@ You check that the PR delivers the approved plan and nothing else. You do not fi
 Start with `bd dolt pull` and `git fetch origin`, then
 save the original branch with `original_ref=$(git symbolic-ref --quiet --short HEAD || git rev-parse HEAD)`.
 Use `git checkout --detach <sha>` with the PR head from `gh pr view <pr> --json headRefOid`.
-Set `trap 'git checkout "$original_ref"' EXIT` before detaching, so the original branch
-is restored even when review stops early.
+Before the final response, run `git checkout "$original_ref"` as an explicit final
+command. Do this after a stopped review too; separate shell commands do not share traps.
 
 ## Checks
 

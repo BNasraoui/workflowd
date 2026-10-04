@@ -18,11 +18,15 @@ implement and review stages: they may touch only the files it names.
 
 - The ticket: `bd show <id> --json`.
 - The research document: `gh gist view <url> --raw`.
+- On a revision after implement stops, the implement report: `gh gist view <report url> --raw`.
+  Read its stopped-phase evidence and include the files and checks needed to resolve the
+  reported contradiction. Keep completed phases recorded as completed; obtain fresh human
+  approval for the revised plan before implementation resumes.
 - The draft PR URL: the `pr:` line in the bead's notes.
 
 Do not read the questions document. Ground every claim about current code in the research;
-if the research does not cover something the plan needs, read that code yourself and cite
-it as `path:line`.
+on a revision, also use the implement report's runtime evidence. If neither covers
+something the plan needs, read that code yourself and cite it as `path:line`.
 
 ## Rules for the plan
 

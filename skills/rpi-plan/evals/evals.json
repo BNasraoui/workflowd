@@ -50,6 +50,17 @@
         "The plan's PR line is `https://github.com/BNasraoui/workflowd/pull/120`, taken from the bead's `pr:` note.",
         "The commands start with `bd dolt pull`, `git fetch origin`, and a detached checkout of `9b2e4c7a1d0f3e6b8a5c2d9f4e7a0b3c6d1e8f25`, end with `bd set-state workflowd-z30 rpi=plan-review` and `bd dolt push`, and nothing is implemented."
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-plan skill. Input: bead workflowd-x41, research https://gist.github.com/example/r41, implement report https://gist.github.com/example/i41. Return the revised plan and final message.",
+      "expected_output": "Revise the plan using the stopped implementation report's runtime evidence, including the missing dependency and harness files.",
+      "files": ["evals/fixtures/revise-after-stop.md"],
+      "expectations": [
+        "The implement report is read as a distinct input from the research gist and its stopped-phase contradiction is addressed.",
+        "The revised phase lists src/runtime.ts and test/remote/simulation/harness.ts alongside the worker and corpus scenario.",
+        "The plan retains Phase 1 as completed and seeks fresh human approval before further implementation."
+      ]
     }
   ]
 }

@@ -78,7 +78,7 @@
       "expected_output": "Send the implement report and original research back to rpi-plan, then seek human approval of the revised plan.",
       "files": ["evals/fixtures/implement-stopped.md"],
       "expectations": [
-        "The coordinator dispatches rpi-plan with the implement report gist and original research gist.",
+        "The coordinator dispatches rpi-plan with the bead id, implement report gist, and original research gist.",
         "It explains the runtime contradiction to the human and does not widen the plan itself.",
         "It does not dispatch rpi-review for the stopped Phase 2 or implement the revision before human approval."
       ]
