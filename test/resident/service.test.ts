@@ -736,7 +736,7 @@ test("restart delivers both CI subscribers once after prepared inbox rows are co
           )
           const sql = yield* SqlClient.SqlClient
           expect(
-            yield* sql`SELECT thread_id, state FROM resident_inbox ORDER BY thread_id`,
+            yield* sql`SELECT thread_id, state FROM resident_inbox WHERE thread_id IS NOT NULL ORDER BY thread_id`,
           ).toEqual([
             { thread_id: "thread-1", state: "delivered" },
             { thread_id: "thread-2", state: "delivered" },

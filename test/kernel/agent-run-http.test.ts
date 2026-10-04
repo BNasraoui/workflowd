@@ -52,6 +52,7 @@ const route = (
 
 const receipt: AgentRunReceipt = {
   runId: "agent-run-abc",
+  mailboxId: "agent-mailbox-abc",
   sessionId: "opencode-session-ses_child",
   nativeSessionId: "ses_child",
   providerId: "zai-coding-plan",

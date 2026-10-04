@@ -16,6 +16,23 @@ import {
 } from "./agent-run-ingress-harness"
 
 describe("agent-run ingress", () => {
+  test("gives an idempotent caller one durable mailbox identity", async () => {
+    const layer = makeLayer(makeProvider(defaultState()), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const first = yield* register(submission)
+        const second = yield* register(submission)
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{
+          caller_mailbox_id: string
+        }>`SELECT caller_mailbox_id FROM kernel_agent_runs WHERE run_id = ${first.runId}`
+        return { first, second, rows }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.first.mailboxId).toMatch(/^agent-mailbox-[a-f0-9]{64}$/)
+    expect(result.second.mailboxId).toBe(result.first.mailboxId)
+    expect(result.rows).toEqual([{ caller_mailbox_id: result.first.mailboxId }])
+  })
   test("dispatches Claude CLI directly, registers Claude custody, and completes without OpenCode calls", async () => {
     const state = defaultState()
     state.providers = []
@@ -46,7 +63,10 @@ describe("agent-run ingress", () => {
         const run = yield* store
           .read(receipt.runId)
           .pipe(Effect.repeat({ until: (r) => r?.state === "completed" }))
-        return { receipt, duplicate, custody, run }
+        const inbox = yield* sql<{
+          prompt: string
+        }>`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${receipt.mailboxId}`
+        return { receipt, duplicate, custody, run, inbox }
       }).pipe(Effect.provide(layer)),
     )
     expect(result.receipt.providerId).toBe("claude-cli")
@@ -56,10 +76,69 @@ describe("agent-run ingress", () => {
     expect(result.custody[0]?.provider_kind).toBe("claude")
     expect(result.custody[0]?.endpoint_identity).toBe("claude-cli://mint")
     expect(result.run?.lastOutputTokens).toBe(4)
+    expect(JSON.parse(result.inbox[0]!.prompt).final_message).toBe("OK")
     expect(cli.state.spawned).toHaveLength(1)
     expect(cli.state.spawned[0]?.model).toBe("claude-opus-5-5")
     expect(state.created).toHaveLength(0)
     expect(state.prompted).toHaveLength(0)
+  })
+
+  test("external SIGTERM of a Codex CLI child delivers one terminal mailbox result", async () => {
+    const child = Bun.spawn(["sleep", "60"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    const codex: import("../../src/kernel/codex-session").CodexCliPort = {
+      ownership: "transient-exec",
+      preflight: Effect.void,
+      attach: () => Effect.succeed(null),
+      spawn: () =>
+        Effect.succeed({
+          executionId: "sigterm-test",
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield { type: "thread.started" as const, threadId: "sigterm-child" }
+              yield { type: "agent_message" as const, text: "partial work" }
+              await child.exited
+            },
+          },
+          exited: Effect.promise(async () => ({ exitCode: await child.exited, stderr: "" })),
+          cancel: Effect.sync(() => child.kill()),
+        }),
+    }
+    try {
+      const layer = makeLayer(makeProvider(defaultState()), worktrees([]), codex)
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const receipt = yield* register({
+            route: "scan",
+            repository: "workflowd",
+            prompt: "work",
+          })
+          process.kill(child.pid, "SIGTERM")
+          const store = yield* AgentRunStore
+          const run = yield* store
+            .read(receipt.runId)
+            .pipe(Effect.repeat({ until: (row) => row?.state === "operator_required" }))
+          const sql = yield* SqlClient.SqlClient
+          const rows = yield* sql<{
+            prompt: string
+          }>`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${receipt.mailboxId}`
+          return { run, rows }
+        }).pipe(Effect.provide(layer)),
+      )
+      expect(result.run?.diagnostic).toContain("SIGTERM")
+      expect(result.rows).toHaveLength(1)
+      expect(JSON.parse(result.rows[0]!.prompt)).toMatchObject({
+        status: "operator_required",
+        final_message: "partial work",
+        session_id: "codex-session-sigterm-child",
+      })
+    } finally {
+      child.kill()
+      await child.exited
+    }
   })
 
   test("refuses an unauthenticated Claude CLI before spawning", async () => {
@@ -229,6 +308,7 @@ describe("agent-run ingress", () => {
       Effect.runPromise(register(submission).pipe(Effect.provide(layer))),
     )
     expect(refusal.reason).toBe("no_first_token")
+    expect(refusal.mailboxId).toMatch(/^agent-mailbox-/)
     expect(state.aborted).toEqual(["ses_child"])
   })
 

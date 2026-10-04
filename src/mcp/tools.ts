@@ -14,6 +14,7 @@ import {
 } from "../agent-wait-contract"
 import {
   AgentRunReceipt,
+  AgentRunRefusal,
   MAX_AGENT_RUN_IDEMPOTENCY_KEY_BYTES,
   MAX_AGENT_RUN_PROMPT_BYTES,
   MAX_AGENT_RUN_REPOSITORY_BYTES,
@@ -49,6 +50,7 @@ export type ToolCallContext = {
 }
 
 const JobStatusArguments = Schema.Struct({ job_id: Schema.NonEmptyString })
+const ReadAgentMailboxArguments = Schema.Struct({ mailbox_id: Schema.NonEmptyString })
 const ListRecentJobsArguments = Schema.Struct({
   limit: Schema.optional(
     Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_RECENT_JOBS }))),
@@ -137,6 +139,15 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
         return status === null
           ? failure(`no job found with id ${input.success.job_id}`)
           : json(status)
+      }
+      case "read_agent_mailbox": {
+        if (!context.writesConfigured || !context.writesAuthorized)
+          return failure("unauthorized: read_agent_mailbox requires a valid bearer token")
+        const input = yield* decodeArguments(ReadAgentMailboxArguments, args).pipe(Effect.result)
+        if (input._tag === "Failure") return failure("invalid arguments: mailbox_id is required")
+        const queries = yield* McpQueries
+        const messages = yield* queries.readAgentMailbox(input.success.mailbox_id)
+        return json({ mailbox_id: input.success.mailbox_id, messages })
       }
       case "list_recent_jobs": {
         const queries = yield* McpQueries
@@ -254,7 +265,10 @@ const postToDaemon = (
       }
     }
     if (!response.success.ok) {
-      const refusal = yield* decodeArguments(AgentWaitRefusal, payload.success).pipe(Effect.result)
+      const refusal = yield* decodeArguments(
+        request.path === "/workflows/agent-runs" ? AgentRunRefusal : AgentWaitRefusal,
+        payload.success,
+      ).pipe(Effect.result)
       if (refusal._tag === "Failure") {
         return {
           failure: failure(`${request.subject} was refused: HTTP ${response.success.status}`),
@@ -271,6 +285,9 @@ const postToDaemon = (
           reason: refusal.success.reason ?? refusal.success.error,
           ...(refusal.success.detail === undefined ? {} : { detail: refusal.success.detail }),
           error: refusal.success.error,
+          ...("mailboxId" in refusal.success && refusal.success.mailboxId !== undefined
+            ? { mailbox_id: refusal.success.mailboxId }
+            : {}),
         }),
       }
     }
@@ -419,6 +436,8 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
     return structured(
       {
         run_id: receipt.success.runId,
+        mailbox_id: receipt.success.mailboxId,
+        mailbox_tool: "read_agent_mailbox",
         session_id: receipt.success.sessionId,
         native_session_id: receipt.success.nativeSessionId,
         provider_id: receipt.success.providerId,
@@ -429,11 +448,12 @@ const dispatchAgent = (args: unknown, context: ToolCallContext) =>
         status: receipt.success.status,
         wait: receipt.success.wait === undefined ? null : { ...receipt.success.wait },
       },
-      `${received} This receipt is first-token-verified; the workflowd watchdog now ` +
+      `${received} Terminal results are placed in mailbox ${receipt.success.mailboxId}; ` +
+        "read it with read_agent_mailbox. This receipt is first-token-verified; the workflowd watchdog now " +
         "supervises the run, auto-recovers stalls, and escalates to operator_required. " +
         "End your turn now" +
         (receipt.success.wait === undefined
-          ? " and check back later via your own means; no wait was registered."
+          ? "; no parent wake was registered."
           : "; workflowd will prompt your session when the child completes.") +
         " Do not poll.",
     )

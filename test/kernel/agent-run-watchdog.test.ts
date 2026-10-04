@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { SqlClient } from "effect/unstable/sql"
+import { Effect, Layer, Schema } from "effect"
 import { AgentRunProvider, type AgentRunProviderPort } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { runAgentRunWatchdogIteration } from "../../src/kernel/agent-run-watchdog"
@@ -100,6 +101,19 @@ const seedVerifiedRun = Effect.gen(function* () {
   })
   yield* store.markVerified({ runId: "agent-run-x", outputTokens: 7, now: at })
 })
+
+const mailboxFor = (runId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    const rows = yield* sql<{
+      prompt: string
+    }>`SELECT prompt FROM resident_inbox WHERE id = ${"agent-run-end-" + runId}`
+    return yield* Effect.forEach(rows, (row) =>
+      Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+      )(row.prompt),
+    )
+  })
 
 const iterate = (
   telemetry: OpenCodeSessionTelemetry | undefined,
@@ -228,11 +242,14 @@ describe("agent-run watchdog", () => {
         yield* iterate(observing(7, true, "interrupted"), calls, minutes(15))
         yield* iterate(observing(7, true, "failed"), calls, minutes(30))
         const store = yield* AgentRunStore
-        return yield* store.read("agent-run-x")
+        return { run: yield* store.read("agent-run-x"), messages: yield* mailboxFor("agent-run-x") }
       }),
     )
-    expect(result?.state).toBe("operator_required")
-    expect(result?.diagnostic).toContain("attempts_exhausted")
+    expect(result.run?.state).toBe("operator_required")
+    expect(result.run?.diagnostic).toContain("attempts_exhausted")
+    expect(result.messages).toMatchObject([
+      { status: "operator_required", end_reason: result.run?.diagnostic },
+    ])
     expect(calls.prompted).toHaveLength(1)
   })
 
@@ -245,11 +262,12 @@ describe("agent-run watchdog", () => {
         const status = yield* iterate(observing(50, true, "succeeded"), calls, minutes(20))
         const store = yield* AgentRunStore
         const record = yield* store.read("agent-run-x")
-        return { status, record }
+        return { status, record, messages: yield* mailboxFor("agent-run-x") }
       }),
     )
     expect(result.status).toBe("worked")
     expect(result.record?.state).toBe("completed")
+    expect(result.messages).toMatchObject([{ status: "completed" }])
     expect(wakes).toContain("agent-completion")
   })
 
@@ -260,11 +278,14 @@ describe("agent-run watchdog", () => {
         yield* seedVerifiedRun
         yield* iterate(undefined, calls, minutes(5))
         const store = yield* AgentRunStore
-        return yield* store.read("agent-run-x")
+        return { run: yield* store.read("agent-run-x"), messages: yield* mailboxFor("agent-run-x") }
       }),
     )
-    expect(result?.state).toBe("operator_required")
-    expect(result?.diagnostic).toContain("missing_session")
+    expect(result.run?.state).toBe("operator_required")
+    expect(result.run?.diagnostic).toContain("missing_session")
+    expect(result.messages).toMatchObject([
+      { status: "operator_required", end_reason: result.run?.diagnostic },
+    ])
   })
 
   test("fails a run abandoned before verification once it goes stale", async () => {
@@ -288,11 +309,18 @@ describe("agent-run watchdog", () => {
           createdAt: at,
         })
         const status = yield* iterate(observing(7), calls, minutes(90))
-        return { status, record: yield* store.read("agent-run-y") }
+        return {
+          status,
+          record: yield* store.read("agent-run-y"),
+          messages: yield* mailboxFor("agent-run-y"),
+        }
       }),
     )
     expect(result.status).toBe("worked")
     expect(result.record?.state).toBe("failed")
     expect(result.record?.diagnostic).toContain("dispatch_incomplete")
+    expect(result.messages).toMatchObject([
+      { status: "failed", end_reason: result.record?.diagnostic },
+    ])
   })
 })

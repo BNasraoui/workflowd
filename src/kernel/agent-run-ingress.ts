@@ -66,6 +66,7 @@ export type AgentRunRefusalReason =
 export class AgentRunRefusalError extends Data.TaggedError("AgentRunRefusalError")<{
   readonly reason: AgentRunRefusalReason
   readonly detail: string
+  readonly mailboxId?: string
 }> {}
 
 export type AgentRunIngressError =
@@ -788,6 +789,14 @@ const make = (options: AgentRunIngressOptions) =>
             run.state === "verified" &&
             run.nativeSessionId !== null)
         const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
+        const withMailbox = (error: AgentRunIngressError) =>
+          error instanceof AgentRunRefusalError
+            ? new AgentRunRefusalError({
+                reason: error.reason,
+                detail: error.detail,
+                mailboxId: run.callerMailboxId,
+              })
+            : error
         const dispatched = immutableReceipt
           ? {
               nativeSessionId: run.nativeSessionId ?? "",
@@ -795,18 +804,20 @@ const make = (options: AgentRunIngressOptions) =>
               kind: resolution.provider,
             }
           : resolution.provider !== "opencode"
-            ? yield* nativeRuns === undefined
-                ? refuse("executor_unavailable", "Claude executor is disabled")
-                : nativeRuns.dispatch(
-                    run,
-                    resolution.route,
-                    {
-                      repositoryDirectory: repository.directory,
-                      resourceId: identifiers.resourceId,
-                      short: identifiers.short,
-                    },
-                    now,
-                  )
+            ? yield* (
+                nativeRuns === undefined
+                  ? refuse("executor_unavailable", "Claude executor is disabled")
+                  : nativeRuns.dispatch(
+                      run,
+                      resolution.route,
+                      {
+                        repositoryDirectory: repository.directory,
+                        resourceId: identifiers.resourceId,
+                        short: identifiers.short,
+                      },
+                      now,
+                    )
+              ).pipe(Effect.mapError(withMailbox))
             : yield* dispatch(
                 run,
                 resolution.route,
@@ -816,7 +827,7 @@ const make = (options: AgentRunIngressOptions) =>
                   short: identifiers.short,
                 },
                 now,
-              )
+              ).pipe(Effect.mapError(withMailbox))
         const childSessionId = {
           claude: claudeSessionCustodyId,
           codex: codexSessionCustodyId,
@@ -831,10 +842,11 @@ const make = (options: AgentRunIngressOptions) =>
           childSessionId,
           createdAt: run.createdAt,
           now,
-        })
+        }).pipe(Effect.mapError(withMailbox))
         const resolvedRun = yield* store.read(identifiers.runId)
         return {
           runId: identifiers.runId,
+          mailboxId: run.callerMailboxId,
           sessionId: childSessionId,
           nativeSessionId: dispatched.nativeSessionId,
           providerId,

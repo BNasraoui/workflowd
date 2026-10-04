@@ -190,7 +190,7 @@ for (const late of [false, true])
         expect(fake.prompts[0]?.text).toContain('"conclusion":"success"')
         expect(yield* inbox.pending("opencode")).toHaveLength(0)
         expect(yield* inbox.threads()).toHaveLength(0)
-        expect(yield* sql`SELECT state FROM resident_inbox`).toEqual([
+        expect(yield* sql`SELECT state FROM resident_inbox WHERE thread_id IS NOT NULL`).toEqual([
           { state: "delivered" },
           { state: "delivered" },
         ])
@@ -238,7 +238,7 @@ for (const sending of [false, true])
           yield* mailbox.tick
           expect(fake.prompts).toHaveLength(sending ? 0 : 1)
           const sql = yield* SqlClient.SqlClient
-          expect(yield* sql`SELECT state FROM resident_inbox`).toEqual([
+          expect(yield* sql`SELECT state FROM resident_inbox WHERE thread_id IS NOT NULL`).toEqual([
             { state: sending ? "operator_required" : "delivered" },
           ])
         }).pipe(Effect.provide(layer(filename))),
@@ -266,7 +266,7 @@ for (const mode of ["gone", "refused", "offline"] as const)
         yield* mailbox.tick
         expect(fake.prompts).toHaveLength(0)
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT state FROM resident_inbox`).toEqual([
+        expect(yield* sql`SELECT state FROM resident_inbox WHERE thread_id IS NOT NULL`).toEqual([
           { state: "operator_required" },
         ])
         expect((yield* runs.read("one"))?.state).toBe("operator_required")

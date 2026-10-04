@@ -24,6 +24,7 @@ test("cancellation migration preserves existing runs and indexes and widens stat
           executor_kind: "codex",
           requested_selection: null,
           resolved_selection: null,
+          caller_mailbox_id: expect.stringMatching(/^agent-mailbox-[a-f0-9]{64}$/),
         })),
       )
       yield* sql`UPDATE kernel_agent_runs SET state = 'cancelled'`
