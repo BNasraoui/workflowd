@@ -56,6 +56,7 @@ const diagnostic = (
     return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
   const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
   let detail = `${cliName}_failed: exit ${exitCode}`
+  if (exitCode === 143 || exitCode === -15) detail += " (SIGTERM)"
   if (turnFailed !== null) detail += `; ${turnFailed}`
   if (Exit.isSuccess(exit) && exit.value.stderr !== "")
     detail += `; stderr: ${exit.value.stderr.slice(0, 500)}`
@@ -258,7 +259,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
         }
         yield* store
-          .complete({ runId: input.runId, now: new Date() })
+          .complete({ runId: input.runId, now: new Date(), finalMessage })
           .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
         return
       }
@@ -267,6 +268,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           runId: input.runId,
           diagnostic: diagnostic(stalled, input.stallWindowMs, exit, turnFailed, kind),
           now: new Date(),
+          finalMessage,
         })
         .pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
     })

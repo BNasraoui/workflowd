@@ -1408,6 +1408,27 @@ const residentClosure = Effect.gen(function* () {
   yield* sql`ALTER TABLE resident_threads ADD COLUMN closure_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(closure_confirmed IN (0,1))`
 })
 
+const agentCallerMailbox = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN caller_mailbox_id TEXT`
+  yield* sql`UPDATE kernel_agent_runs SET caller_mailbox_id = 'agent-mailbox-' || lower(hex(randomblob(32)))`
+  yield* sql`CREATE UNIQUE INDEX kernel_agent_runs_caller_mailbox ON kernel_agent_runs(caller_mailbox_id)`
+  yield* sql`CREATE TABLE resident_inbox_next (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT REFERENCES resident_threads(thread_id),
+    mailbox_id TEXT,
+    prompt TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('prepared','sending','delivered','operator_required')),
+    CHECK ((thread_id IS NULL) != (mailbox_id IS NULL))
+  ) STRICT`
+  yield* sql`INSERT INTO resident_inbox_next(id,thread_id,mailbox_id,prompt,state)
+    SELECT id,thread_id,NULL,prompt,state FROM resident_inbox`
+  yield* sql`DROP TABLE resident_inbox`
+  yield* sql`ALTER TABLE resident_inbox_next RENAME TO resident_inbox`
+  yield* sql`CREATE INDEX resident_inbox_pending ON resident_inbox(state)`
+  yield* sql`CREATE INDEX resident_inbox_mailbox ON resident_inbox(mailbox_id,id)`
+})
+
 const migrationsThrough0024 = {
   ...migrationsThrough0019,
   "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
@@ -1425,5 +1446,6 @@ export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
     ...migrationsThrough0024,
     "0025_resident_closure": residentClosure,
+    "0026_agent_caller_mailbox": agentCallerMailbox,
   }),
 })

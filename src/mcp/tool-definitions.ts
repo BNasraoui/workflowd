@@ -40,6 +40,10 @@ const REFUSED_OUTPUT = {
     reason: { type: "string" as const, description: "Machine-readable refusal reason." },
     detail: { type: "string" as const, description: "Human-readable refusal detail." },
     error: { type: "string" as const, description: "The daemon's refusal category." },
+    mailbox_id: {
+      type: "string" as const,
+      description: "Mailbox for a child that spawned before refusal.",
+    },
   },
   required: ["status", "reason"],
   additionalProperties: false,
@@ -243,9 +247,10 @@ export const TOOL_DEFINITIONS = [
       "anything is spawned, so pass your own native OpenCode session id (or a " +
       "Claude Code session UUID with parent_kind 'claude' plus " +
       "parent_directory) only when workflowd actually hosts your session. " +
-      "When you are an external session the kernel does not hold, omit " +
-      "parent_session_id: you still get the first-token-verified receipt and " +
-      "can read the outcome later with job_status. " +
+      "Every accepted dispatch gets a durable caller mailbox by default, including " +
+      "external sessions and every child executor. The receipt gives mailbox_id; " +
+      "read_agent_mailbox reads its one terminal result. When you are an external session " +
+      "the kernel does not hold, omit parent_session_id; the mailbox still works. " +
       "Parent wakes currently require an OpenCode child; omit parent_session_id " +
       "and resume_prompt for Claude CLI and Codex CLI routes. " +
       REFUSAL_CONTRACT +
@@ -340,6 +345,8 @@ export const TOOL_DEFINITIONS = [
       objectSchema(
         {
           run_id: { type: "string" },
+          mailbox_id: { type: "string" },
+          mailbox_tool: { type: "string", enum: ["read_agent_mailbox"] },
           session_id: { type: "string" },
           native_session_id: { type: "string" },
           provider_id: { type: "string" },
@@ -354,6 +361,8 @@ export const TOOL_DEFINITIONS = [
         },
         [
           "run_id",
+          "mailbox_id",
+          "mailbox_tool",
           "session_id",
           "native_session_id",
           "provider_id",
@@ -369,5 +378,23 @@ export const TOOL_DEFINITIONS = [
       idempotentHint: true,
       openWorldHint: false,
     },
+  },
+  {
+    name: "read_agent_mailbox",
+    description:
+      "Read the durable terminal message for a dispatch_agent caller mailbox. " +
+      "Pass the opaque mailbox_id from the dispatch receipt. The result stays available " +
+      "across workflowd restarts; reading does not consume it. Requires the MCP bearer token. " +
+      "Messages include run and session ids, route and model, terminal status, end reason/time, " +
+      "and final message text or a session reference.",
+    inputSchema: objectSchema({ mailbox_id: { type: "string" } }, ["mailbox_id"]),
+    outputSchema: objectSchema(
+      {
+        mailbox_id: { type: "string" },
+        messages: { type: "array", items: { type: "object" } },
+      },
+      ["mailbox_id", "messages"],
+    ),
+    annotations: { ...readAnnotations },
   },
 ] as const

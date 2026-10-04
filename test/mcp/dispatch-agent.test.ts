@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import { Effect } from "effect"
+import { SqlClient } from "effect/unstable/sql"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
 import { now } from "../kernel/job-store-harness"
@@ -29,6 +31,7 @@ const daemon = (respond: () => Response, calls: Array<Call> = []): ToolCallConte
 
 const receipt = {
   runId: "agent-run-abc",
+  mailboxId: "agent-mailbox-abc",
   sessionId: "opencode-session-ses_child",
   nativeSessionId: "ses_child",
   providerId: "zai-coding-plan",
@@ -44,6 +47,79 @@ const args = {
 }
 
 describe("dispatch_agent", () => {
+  test("receipt names the caller mailbox and its reader", async () => {
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        args,
+        daemon(() => json(receipt)),
+      ),
+    )
+    expect(result.structuredContent).toMatchObject({
+      mailbox_id: receipt.mailboxId,
+      mailbox_tool: "read_agent_mailbox",
+    })
+  })
+
+  test("post-spawn refusal still tells the caller which mailbox received the end", async () => {
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        args,
+        daemon(() =>
+          json(
+            {
+              error: "refused",
+              reason: "no_first_token",
+              detail: "child exited before verification",
+              mailboxId: "agent-mailbox-refused",
+            },
+            409,
+          ),
+        ),
+      ),
+    )
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toMatchObject({
+      status: "refused",
+      mailbox_id: "agent-mailbox-refused",
+    })
+    expect(clientValidator("dispatch_agent")(result.structuredContent).valid).toBe(true)
+  })
+
+  test("read_agent_mailbox returns durable messages only with write authorization", async () => {
+    const result = await run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`INSERT INTO resident_inbox(id,thread_id,mailbox_id,prompt,state)
+          VALUES('agent-run-end-test',NULL,'agent-mailbox-test','{"run_id":"test","status":"completed"}','prepared')`
+        const denied = yield* callTool(
+          "read_agent_mailbox",
+          { mailbox_id: "agent-mailbox-test" },
+          {
+            writesConfigured: true,
+            writesAuthorized: false,
+            now: () => now,
+          },
+        )
+        const allowed = yield* callTool(
+          "read_agent_mailbox",
+          { mailbox_id: "agent-mailbox-test" },
+          {
+            writesConfigured: true,
+            writesAuthorized: true,
+            now: () => now,
+          },
+        )
+        return { denied, allowed }
+      }),
+    )
+    expect(result.denied.isError).toBe(true)
+    expect(result.allowed.structuredContent).toMatchObject({
+      mailbox_id: "agent-mailbox-test",
+      messages: [{ run_id: "test", status: "completed" }],
+    })
+  })
   test("schema refusals describe route or model without forwarding malformed explicit input", async () => {
     const calls: Array<Call> = []
     const result = await run(

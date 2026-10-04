@@ -1,4 +1,5 @@
 import { canonicalJson } from "./session-store-support"
+import { randomBytes } from "node:crypto"
 import { SqlClient } from "effect/unstable/sql"
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { RequestedSelection, ResolvedSelection } from "../execution-selection"
@@ -27,6 +28,7 @@ export type AgentRunState =
 
 const AgentRunRow = Schema.Struct({
   run_id: Schema.String,
+  caller_mailbox_id: Schema.String,
   route: Schema.String,
   provider_id: Schema.String,
   model_id: Schema.String,
@@ -66,6 +68,7 @@ export type AgentRunRecord = {
   readonly requestedSelection?: RequestedSelection | null
   readonly resolvedSelection?: ResolvedSelection | null
   readonly runId: string
+  readonly callerMailboxId: string
   readonly route: string
   readonly providerId: string
   readonly modelId: string
@@ -163,15 +166,17 @@ export type AgentRunStorePort = {
   readonly beginAttempt: (
     input: Authority & { readonly attempt: number; readonly diagnostic: string },
   ) => Effect.Effect<void, AgentRunStoreError>
-  readonly complete: (input: Authority) => Effect.Effect<void, AgentRunStoreError>
+  readonly complete: (
+    input: Authority & { readonly finalMessage?: string | null },
+  ) => Effect.Effect<void, AgentRunStoreError>
   readonly fail: (
-    input: Authority & { readonly diagnostic: string },
+    input: Authority & { readonly diagnostic: string; readonly finalMessage?: string | null },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly cancel: (
     input: Authority & { readonly diagnostic?: string },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly operatorRequired: (
-    input: Authority & { readonly diagnostic: string },
+    input: Authority & { readonly diagnostic: string; readonly finalMessage?: string | null },
   ) => Effect.Effect<void, AgentRunStoreError>
   readonly nextWatchable: (input: {
     readonly now: Date
@@ -218,6 +223,7 @@ const toRecord = (row: Record<string, unknown>) =>
           requestedSelection,
           resolvedSelection,
           runId: decoded.run_id,
+          callerMailboxId: decoded.caller_mailbox_id,
           route: decoded.route,
           providerId: decoded.provider_id,
           modelId: decoded.model_id,
@@ -304,10 +310,11 @@ const make = Effect.gen(function* () {
           conflict(input.runId, "run identity exists with different submission fields"),
         )
       }
-      yield* sql`INSERT INTO kernel_agent_runs (run_id, route, provider_id, model_id, agent,
+      const mailboxId = `agent-mailbox-${randomBytes(32).toString("hex")}`
+      yield* sql`INSERT INTO kernel_agent_runs (run_id, caller_mailbox_id, route, provider_id, model_id, agent,
         repository, directory, prompt, prompt_sha256, parent_session_id, resume_prompt, state,
         attempt, max_attempts, created_at, updated_at, executor_kind, requested_selection, resolved_selection)
-        VALUES (${input.runId}, ${input.route}, ${input.providerId}, ${input.modelId},
+        VALUES (${input.runId}, ${mailboxId}, ${input.route}, ${input.providerId}, ${input.modelId},
         ${input.agent}, ${input.repository}, ${input.directory}, ${input.prompt},
         ${input.promptSha256}, ${input.parentSessionId}, ${input.resumePrompt}, 'accepted', 1,
         ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()},
@@ -400,43 +407,98 @@ const make = Effect.gen(function* () {
         AND attempt = ${input.attempt - 1} AND attempt < max_attempts RETURNING run_id`,
     )
 
+  const terminal = (
+    runId: string,
+    now: Date,
+    endReason: string,
+    finalMessage: string | null,
+    change: Effect.Effect<void, AgentRunStoreError>,
+  ) =>
+    sql.withTransaction(
+      Effect.gen(function* () {
+        yield* change
+        const run = yield* readRow(runId)
+        if (run === null) return
+        const prompt = JSON.stringify({
+          run_id: run.runId,
+          session_id: run.sessionId,
+          native_session_id: run.nativeSessionId,
+          route: run.route,
+          model: run.resolvedSelection?.model ?? run.modelId,
+          executor: agentRunExecutorKind(run),
+          status: run.state,
+          end_reason: endReason,
+          ended_at: now.toISOString(),
+          final_message: finalMessage,
+          final_message_ref: finalMessage === null ? run.nativeSessionId : null,
+        })
+        yield* sql`INSERT INTO resident_inbox (id,thread_id,mailbox_id,prompt,state)
+          VALUES (${"agent-run-end-" + runId},NULL,${run.callerMailboxId},${prompt},'prepared')
+          ON CONFLICT(id) DO NOTHING`
+      }),
+    )
+
   const complete: AgentRunStorePort["complete"] = (input) =>
-    transition(
+    terminal(
       input.runId,
-      "run is not in verified state",
-      sql`UPDATE kernel_agent_runs SET state = 'completed',
+      input.now,
+      "completed",
+      input.finalMessage ?? null,
+      transition(
+        input.runId,
+        "run is not in verified state",
+        sql`UPDATE kernel_agent_runs SET state = 'completed',
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND state = 'verified' RETURNING run_id`,
+      ),
     )
 
   const cancel: AgentRunStorePort["cancel"] = (input) =>
-    transition(
+    terminal(
       input.runId,
-      "run is not cancellable",
-      sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
+      input.now,
+      input.diagnostic ?? "cancelled",
+      null,
+      transition(
+        input.runId,
+        "run is not cancellable",
+        sql`UPDATE kernel_agent_runs SET state = 'cancelled', diagnostic = ${input.diagnostic ?? null},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND (state IN ('accepted', 'spawning', 'spawned', 'verified')
           OR (state = 'operator_required' AND executor_kind IN ('codex', 'claude')))
         RETURNING run_id`,
+      ),
     )
 
   const fail: AgentRunStorePort["fail"] = (input) =>
-    transition(
+    terminal(
       input.runId,
-      "run is not in a failable state",
-      sql`UPDATE kernel_agent_runs SET state = 'failed', diagnostic = ${input.diagnostic},
+      input.now,
+      input.diagnostic,
+      input.finalMessage ?? null,
+      transition(
+        input.runId,
+        "run is not in a failable state",
+        sql`UPDATE kernel_agent_runs SET state = 'failed', diagnostic = ${input.diagnostic},
         updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned') RETURNING run_id`,
+      ),
     )
 
   const operatorRequired: AgentRunStorePort["operatorRequired"] = (input) =>
-    transition(
+    terminal(
       input.runId,
-      "run is not active",
-      sql`UPDATE kernel_agent_runs SET state = 'operator_required',
+      input.now,
+      input.diagnostic,
+      input.finalMessage ?? null,
+      transition(
+        input.runId,
+        "run is not active",
+        sql`UPDATE kernel_agent_runs SET state = 'operator_required',
         diagnostic = ${input.diagnostic}, updated_at = ${input.now.toISOString()}
         WHERE run_id = ${input.runId} AND state IN ('accepted', 'spawning', 'spawned', 'verified', 'operator_required')
         RETURNING run_id`,
+      ),
     )
 
   const nextWatchable: AgentRunStorePort["nextWatchable"] = (input) =>

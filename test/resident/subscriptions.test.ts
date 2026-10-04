@@ -89,7 +89,7 @@ for (const alreadyFinished of [false, true]) {
         yield* subscriptions.register("other-thread", selector)
         expect(yield* store.pending()).toHaveLength(0)
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(2)
+        expect(yield* sql`SELECT * FROM resident_inbox WHERE thread_id IS NOT NULL`).toHaveLength(2)
         expect(yield* sql`SELECT state FROM kernel_waits`).toEqual([
           { state: "consumed" },
           { state: "consumed" },
@@ -133,7 +133,9 @@ for (const state of ["completed", "failed", "cancelled", "operator_required"] as
         expect(messages[0]?.prompt).toContain(`"status":"${state}"`)
         expect(messages[0]?.prompt).toContain('"summaryPointer":"child-thread"')
         yield* store.uncertain(messages[0]!.id, "thread")
-        expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
+        expect(
+          (yield* sql`SELECT state FROM resident_inbox WHERE thread_id IS NOT NULL`)[0]?.state,
+        ).toBe("operator_required")
         yield* subscriptions.reconcile()
         expect(yield* store.pending()).toHaveLength(0)
       }).pipe(Effect.provide(layer)),
@@ -184,7 +186,9 @@ test("terminal result for a gone mailbox requires an operator and never queues a
         Date.now(),
       )
       yield* subscriptions.reconcile()
-      expect((yield* sql`SELECT state FROM resident_inbox`)[0]?.state).toBe("operator_required")
+      expect(
+        (yield* sql`SELECT state FROM resident_inbox WHERE thread_id IS NOT NULL`)[0]?.state,
+      ).toBe("operator_required")
       expect(yield* store.pending()).toHaveLength(0)
     }).pipe(Effect.provide(layer)),
   ))
@@ -224,7 +228,7 @@ test("a never-final run keeps its subscription visible and pending without deliv
       expect(yield* sql`SELECT state FROM kernel_waits WHERE wait_id = ${receipt.id}`).toEqual([
         { state: "pending" },
       ])
-      expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(0)
+      expect(yield* sql`SELECT * FROM resident_inbox WHERE thread_id IS NOT NULL`).toHaveLength(0)
       expect(yield* store.pending()).toHaveLength(0)
     }).pipe(Effect.provide(layer)),
   ))
@@ -316,7 +320,7 @@ test("CI deadline expires once and ignores a later real result", () =>
         Date.now(),
       )
       yield* subscriptions.reconcile()
-      expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(1)
+      expect(yield* sql`SELECT * FROM resident_inbox WHERE thread_id IS NOT NULL`).toHaveLength(1)
       expect(yield* store.deliveryState(receipt.id)).toBe("operator_required")
     }).pipe(Effect.provide(layer)),
   ))

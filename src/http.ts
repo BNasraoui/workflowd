@@ -384,7 +384,12 @@ function handleDogfoodSessions(request: Request, dogfood: DogfoodBinding) {
 function agentRunFailure(error: AgentRunIngressError): Response {
   if (error instanceof AgentRunRefusalError) {
     return Response.json(
-      { error: "refused", reason: error.reason, detail: error.detail },
+      {
+        error: "refused",
+        reason: error.reason,
+        detail: error.detail,
+        ...(error.mailboxId === undefined ? {} : { mailboxId: error.mailboxId }),
+      },
       { status: 409 },
     )
   }

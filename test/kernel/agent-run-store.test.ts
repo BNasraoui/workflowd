@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
@@ -73,6 +76,84 @@ const spawn = (store: typeof AgentRunStore.Service) =>
   })
 
 describe("agent-run store", () => {
+  test("a restart retains one terminal result after a repeated terminal update", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-caller-mailbox-"))
+    const filename = join(directory, "store.db")
+    const persistedLayer = () =>
+      Layer.merge(AgentRunStoreLive, KernelSessionStoreLive).pipe(
+        Layer.provideMerge(
+          WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename }))),
+        ),
+      )
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          yield* store.create(input)
+          yield* store.claimSpawn({ runId: input.runId, now: at })
+          yield* store.fail({ runId: input.runId, now: later, diagnostic: "spawn refused" })
+        }).pipe(Effect.provide(persistedLayer())),
+      )
+      const messages = await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient
+          return yield* sql<{
+            prompt: string
+          }>`SELECT prompt FROM resident_inbox WHERE id = ${"agent-run-end-" + input.runId}`
+        }).pipe(Effect.provide(persistedLayer())),
+      )
+      expect(messages).toHaveLength(1)
+      expect(JSON.parse(messages[0]!.prompt).status).toBe("failed")
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+  for (const terminal of ["completed", "failed", "cancelled", "operator_required"] as const) {
+    test(`${terminal} atomically leaves one caller mailbox result`, async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          const sql = yield* SqlClient.SqlClient
+          yield* store.create(input)
+          yield* spawn(store)
+          if (terminal === "completed" || terminal === "operator_required")
+            yield* store.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+          if (terminal === "completed")
+            yield* store.complete({ runId: input.runId, now: later, finalMessage: "finished task" })
+          if (terminal === "failed")
+            yield* store.fail({ runId: input.runId, now: later, diagnostic: "refused after spawn" })
+          if (terminal === "cancelled")
+            yield* store.cancel({ runId: input.runId, now: later, diagnostic: "cancelled" })
+          if (terminal === "operator_required")
+            yield* store.operatorRequired({
+              runId: input.runId,
+              now: later,
+              diagnostic: "lost custody",
+            })
+          yield* store
+            .operatorRequired({ runId: input.runId, now: later, diagnostic: "late retry" })
+            .pipe(Effect.result)
+          return yield* sql<{
+            id: string
+            mailbox_id: string
+            prompt: string
+          }>`SELECT id,mailbox_id,prompt FROM resident_inbox WHERE mailbox_id IS NOT NULL`
+        }),
+      )
+      expect(result).toHaveLength(1)
+      const message = JSON.parse(result[0]!.prompt)
+      expect(message).toMatchObject({
+        run_id: input.runId,
+        session_id: "opencode-session-ses_1",
+        route: "implement",
+        model: "glm-5.3-flash",
+        status: terminal,
+        ended_at: later.toISOString(),
+      })
+      expect(message.end_reason).toBeString()
+      expect(message.final_message).toBe(terminal === "completed" ? "finished task" : null)
+    })
+  }
   test("create is exact-match idempotent and conflicts on divergent identity", async () => {
     const result = await run(
       Effect.gen(function* () {

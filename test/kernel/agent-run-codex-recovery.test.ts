@@ -14,6 +14,7 @@ import type { WorkSignalPort } from "../../src/work-signal"
 
 const record: AgentRunRecord = {
   runId: "agent-run-recover",
+  callerMailboxId: "agent-mailbox-recover",
   route: "scan",
   providerId: "codex-cli",
   modelId: "gpt-5.1-codex",

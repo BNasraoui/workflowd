@@ -27,6 +27,8 @@ const HostDispatchRow = Schema.Struct({
   last_completed_at: NullableTimestamp,
   last_state: Schema.NullOr(Schema.String),
 })
+const MailboxRow = Schema.Struct({ prompt: Schema.String })
+const MailboxMessage = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
 export type JobStatusView = {
   readonly jobId: string
@@ -67,6 +69,9 @@ export type McpQueriesPort = {
     limit: number,
   ) => Effect.Effect<ReadonlyArray<RecentJobView>, McpQueriesError>
   readonly hostHealth: () => Effect.Effect<ReadonlyArray<HostHealthView>, McpQueriesError>
+  readonly readAgentMailbox: (
+    mailboxId: string,
+  ) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, McpQueriesError>
 }
 
 export const McpQueries = Context.Service<McpQueriesPort>("workflowd/mcp/McpQueries")
@@ -155,7 +160,19 @@ const make = Effect.gen(function* () {
       }))
     })
 
-  return McpQueries.of({ jobStatus, listRecentJobs, hostHealth })
+  const readAgentMailbox: McpQueriesPort["readAgentMailbox"] = (mailboxId) =>
+    Effect.gen(function* () {
+      const rows =
+        yield* sql`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${mailboxId} ORDER BY rowid`
+      const decoded = yield* Effect.forEach(rows, (row) =>
+        Schema.decodeUnknownEffect(MailboxRow)(row),
+      )
+      return yield* Effect.forEach(decoded, (row) =>
+        Schema.decodeUnknownEffect(MailboxMessage)(row.prompt),
+      )
+    })
+
+  return McpQueries.of({ jobStatus, listRecentJobs, hostHealth, readAgentMailbox })
 })
 
 export const McpQueriesLive = Layer.effect(McpQueries, make)

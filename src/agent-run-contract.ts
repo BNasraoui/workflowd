@@ -279,6 +279,7 @@ export type AgentRunSubmission = typeof AgentRunSubmission.Type
 
 export const AgentRunReceipt = Schema.Struct({
   runId: Schema.String,
+  mailboxId: Schema.String,
   sessionId: Schema.String,
   nativeSessionId: Schema.String,
   providerId: Schema.String,
@@ -301,5 +302,6 @@ export const AgentRunRefusal = Schema.Struct({
   error: Schema.String,
   reason: Schema.optional(Schema.String),
   detail: Schema.optional(Schema.String),
+  mailboxId: Schema.optional(Schema.String),
 })
 export type AgentRunRefusal = typeof AgentRunRefusal.Type
