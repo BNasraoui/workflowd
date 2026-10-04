@@ -19,21 +19,30 @@ import { WorkSignal, type WorkSignalPort } from "../../src/work-signal"
 const at = new Date("2026-08-14T09:00:00.000Z")
 
 const layer = (() => {
-  const database = SqliteClient.layer({ filename: ":memory:" })
-  const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
-  const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
-  const jobs = KernelJobStoreLive.pipe(Layer.provideMerge(bootstrap))
-  const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(bootstrap))
-  const runs = AgentRunStoreLive.pipe(Layer.provideMerge(bootstrap))
-  const handoffs = AgentHandoffStoreLive.pipe(
-    Layer.provideMerge(events),
-    Layer.provideMerge(bootstrap),
+  const bootstrap = WorkflowStoreLive.pipe(
+    Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
   )
-  return Layer.mergeAll(events, jobs, sessions, handoffs, runs)
+  const kernel = Layer.mergeAll(
+    KernelEventStoreLive,
+    KernelJobStoreLive,
+    KernelSessionStoreLive,
+    AgentRunStoreLive,
+  ).pipe(Layer.provideMerge(bootstrap))
+  return AgentHandoffStoreLive.pipe(Layer.provideMerge(kernel))
 })()
 
 const arrangeDelivery = Effect.gen(function* () {
   const sessions = yield* KernelSessionStore
+  const source = {
+    providerKind: "opencode" as const,
+    providerVersion: 1,
+    providerId: "opencode-primary",
+    serverId: "server-a",
+    owningHostId: "mint",
+    endpointAlias: "local",
+    endpointIdentity: "http://127.0.0.1:4096",
+    createdAt: at,
+  }
   for (const name of ["child", "parent"] as const) {
     yield* sessions.registerResource({
       resourceId: `${name}-resource`,
@@ -43,42 +52,31 @@ const arrangeDelivery = Effect.gen(function* () {
       createdAt: at,
     })
     yield* sessions.registerSession({
+      ...source,
       sessionId: `${name}-stable`,
-      providerKind: "opencode",
-      providerVersion: 1,
-      providerId: "opencode-primary",
-      serverId: "server-a",
-      owningHostId: "mint",
-      endpointAlias: "local",
-      endpointIdentity: "http://127.0.0.1:4096",
       nativeSessionId: `ses_${name}`,
       resourceId: `${name}-resource`,
-      createdAt: at,
     })
   }
   const handoffs = yield* AgentHandoffStore
+  const continuation = {
+    resumePrompt: { task: "Continue exactly." },
+    resumePromptText: '{"task":"Continue exactly."}',
+    outputContract: "test.parent-result",
+    outputContractVersion: 1,
+    retryPolicy: { maxAttempts: 3 },
+  }
   yield* handoffs.register({
     instanceId: "handoff-1",
     waitId: "wait-child",
     workflow: {
+      ...continuation,
       kind: "wait_for_agent",
       childSessionId: "child-stable",
       childSessionGeneration: 1,
       parentSessionId: "parent-stable",
-      resumePrompt: { task: "Continue exactly." },
-      resumePromptText: '{"task":"Continue exactly."}',
-      outputContract: "test.parent-result",
-      outputContractVersion: 1,
-      retryPolicy: { maxAttempts: 3 },
     },
-    completionSource: {
-      owningHostId: "mint",
-      providerId: "opencode-primary",
-      serverId: "server-a",
-      endpointAlias: "local",
-      endpointIdentity: "http://127.0.0.1:4096",
-      providerVersion: 1,
-    },
+    completionSource: source,
     registeredAt: at,
   })
   yield* recordAgentSessionCompletion({

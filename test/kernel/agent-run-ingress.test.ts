@@ -26,6 +26,24 @@ import {
   worktrees,
 } from "./agent-run-ingress-harness"
 
+const observeCliCompletion = runOpenCodeCompletionSourceIteration({
+  owningHostId: "mint",
+  providerId: "opencode-primary",
+  serverId: "opencode-primary",
+  endpointAlias: "local",
+  endpointIdentity: "http://127.0.0.1:4096",
+  providerVersion: 1,
+  observationTimeoutMs: 100,
+  now: () => at,
+}).pipe(
+  Effect.provideService(OpenCodeCompletionProvider, {
+    sessionExists: async () => true,
+    sessionFinished: async () => true,
+    listMessages: async () => [],
+    subscribeEvents: async () => (async function* () {})(),
+  }),
+)
+
 describe("agent-run ingress", () => {
   test("a completed Claude CLI child gives its OpenCode parent the final message", async () => {
     const state = defaultState()
@@ -61,23 +79,7 @@ describe("agent-run ingress", () => {
         yield* store
           .read(receipt.runId)
           .pipe(Effect.repeat({ until: (row) => row?.state === "completed" }))
-        const observed = yield* runOpenCodeCompletionSourceIteration({
-          owningHostId: "mint",
-          providerId: "opencode-primary",
-          serverId: "opencode-primary",
-          endpointAlias: "local",
-          endpointIdentity: "http://127.0.0.1:4096",
-          providerVersion: 1,
-          observationTimeoutMs: 100,
-          now: () => at,
-        }).pipe(
-          Effect.provideService(OpenCodeCompletionProvider, {
-            sessionExists: async () => true,
-            sessionFinished: async () => true,
-            listMessages: async () => [],
-            subscribeEvents: async () => (async function* () {})(),
-          }),
-        )
+        const observed = yield* observeCliCompletion
         const queued = yield* enqueueNextAgentHandoff(at).pipe(Effect.provide(KernelJobStoreLive))
         const sql = yield* SqlClient.SqlClient
         const jobs = yield* sql<{ input_json: string }>`SELECT input_json FROM kernel_workflow_jobs
@@ -207,23 +209,7 @@ describe("agent-run ingress", () => {
           const rows = yield* sql<{
             prompt: string
           }>`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${receipt.mailboxId}`
-          const observed = yield* runOpenCodeCompletionSourceIteration({
-            owningHostId: "mint",
-            providerId: "opencode-primary",
-            serverId: "opencode-primary",
-            endpointAlias: "local",
-            endpointIdentity: "http://127.0.0.1:4096",
-            providerVersion: 1,
-            observationTimeoutMs: 100,
-            now: () => at,
-          }).pipe(
-            Effect.provideService(OpenCodeCompletionProvider, {
-              sessionExists: async () => true,
-              sessionFinished: async () => true,
-              listMessages: async () => [],
-              subscribeEvents: async () => (async function* () {})(),
-            }),
-          )
+          const observed = yield* observeCliCompletion
           const handoff = yield* enqueueNextAgentHandoff(at).pipe(
             Effect.provide(KernelJobStoreLive),
           )

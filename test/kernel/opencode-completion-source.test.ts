@@ -32,8 +32,8 @@ const childAnswer = {
   time: { created: at.getTime(), completed: at.getTime() + 1_000 },
 }
 
-const stores = (() => {
-  const database = SqliteClient.layer({ filename: ":memory:" })
+const makeStores = (filename: string) => {
+  const database = SqliteClient.layer({ filename })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
   const jobs = KernelJobStoreLive.pipe(Layer.provideMerge(bootstrap))
@@ -44,7 +44,9 @@ const stores = (() => {
     Layer.provideMerge(bootstrap),
   )
   return Layer.mergeAll(events, jobs, sessions, handoffs, runs)
-})()
+}
+
+const stores = makeStores(":memory:")
 
 const arrange = Effect.gen(function* () {
   const sessions = yield* KernelSessionStore
@@ -809,6 +811,48 @@ test("a resident OpenCode turn ending does not wake its parent before the run fi
   )
 })
 
+const seedTerminalCliRun = (
+  runId: string,
+  finalMessage: string,
+  parentSessionId: string | null = null,
+) =>
+  Effect.gen(function* () {
+    yield* arrange
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE kernel_sessions SET provider_kind = 'codex' WHERE session_id = 'child-stable'`
+    yield* sql`UPDATE kernel_agent_completion_watches SET provider_kind = 'codex' WHERE instance_id = 'handoff-1'`
+    const runs = yield* AgentRunStore
+    const common = {
+      route: "scan",
+      providerId: "codex-cli",
+      modelId: "model",
+      executorKind: "codex" as const,
+      agent: "build",
+      repository: "o/r",
+      directory: process.cwd(),
+      prompt: "task",
+      promptSha256: "a".repeat(64),
+      maxAttempts: 1,
+      createdAt: at,
+    }
+    yield* runs.create({
+      ...common,
+      runId,
+      parentSessionId,
+      resumePrompt: parentSessionId === null ? null : "Continue.",
+    })
+    yield* runs.claimSpawn({ runId, now: at })
+    yield* runs.markSpawned({
+      runId,
+      resourceId: "child-resource",
+      sessionId: "child-stable",
+      nativeSessionId: "ses_child",
+      now: at,
+    })
+    yield* runs.markVerified({ runId, outputTokens: 1, now: at })
+    yield* runs.complete({ runId, now: at, finalMessage })
+  })
+
 test("a terminal Codex run completes its watch from the persisted mailbox after restart", async () => {
   const provider: OpenCodeCompletionProviderPort = {
     sessionExists: async () => true,
@@ -818,37 +862,8 @@ test("a terminal Codex run completes its watch from the persisted mailbox after 
   }
   await Effect.runPromise(
     Effect.gen(function* () {
-      yield* arrange
+      yield* seedTerminalCliRun("cli-child", "finished")
       const sql = yield* SqlClient.SqlClient
-      yield* sql`UPDATE kernel_sessions SET provider_kind = 'codex' WHERE session_id = 'child-stable'`
-      yield* sql`UPDATE kernel_agent_completion_watches SET provider_kind = 'codex' WHERE instance_id = 'handoff-1'`
-      const runs = yield* AgentRunStore
-      yield* runs.create({
-        runId: "cli-child",
-        route: "scan",
-        providerId: "codex-cli",
-        modelId: "model",
-        executorKind: "codex",
-        agent: "build",
-        repository: "o/r",
-        directory: process.cwd(),
-        prompt: "task",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 1,
-        createdAt: at,
-      })
-      yield* runs.claimSpawn({ runId: "cli-child", now: at })
-      yield* runs.markSpawned({
-        runId: "cli-child",
-        resourceId: "child-resource",
-        sessionId: "child-stable",
-        nativeSessionId: "ses_child",
-        now: at,
-      })
-      yield* runs.markVerified({ runId: "cli-child", outputTokens: 1, now: at })
-      yield* runs.complete({ runId: "cli-child", now: at, finalMessage: "finished" })
       expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("completed")
       expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("idle")
       const events =
@@ -868,18 +883,6 @@ test("a terminal Codex run completes its watch from the persisted mailbox after 
 test("reopening the database after terminal write creates one parent resume", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-cli-wake-"))
   const filename = join(directory, "kernel.db")
-  const persisted = () => {
-    const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
-    const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
-    const jobs = KernelJobStoreLive.pipe(Layer.provideMerge(bootstrap))
-    const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(bootstrap))
-    const runs = AgentRunStoreLive.pipe(Layer.provideMerge(bootstrap))
-    const handoffs = AgentHandoffStoreLive.pipe(
-      Layer.provideMerge(events),
-      Layer.provideMerge(bootstrap),
-    )
-    return Layer.mergeAll(events, jobs, sessions, runs, handoffs)
-  }
   const provider: OpenCodeCompletionProviderPort = {
     sessionExists: async () => true,
     sessionFinished: async () => true,
@@ -893,38 +896,8 @@ test("reopening the database after terminal write creates one parent resume", as
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* arrange
-        const sql = yield* SqlClient.SqlClient
-        yield* sql`UPDATE kernel_sessions SET provider_kind = 'codex' WHERE session_id = 'child-stable'`
-        yield* sql`UPDATE kernel_agent_completion_watches SET provider_kind = 'codex' WHERE instance_id = 'handoff-1'`
-        const runs = yield* AgentRunStore
-        yield* runs.create({
-          runId: "restart-child",
-          route: "scan",
-          providerId: "codex-cli",
-          modelId: "model",
-          executorKind: "codex",
-          agent: "build",
-          repository: "o/r",
-          directory: process.cwd(),
-          prompt: "task",
-          promptSha256: "a".repeat(64),
-          parentSessionId: "parent-stable",
-          resumePrompt: "Continue.",
-          maxAttempts: 1,
-          createdAt: at,
-        })
-        yield* runs.claimSpawn({ runId: "restart-child", now: at })
-        yield* runs.markSpawned({
-          runId: "restart-child",
-          resourceId: "child-resource",
-          sessionId: "child-stable",
-          nativeSessionId: "ses_child",
-          now: at,
-        })
-        yield* runs.markVerified({ runId: "restart-child", outputTokens: 1, now: at })
-        yield* runs.complete({ runId: "restart-child", now: at, finalMessage: "Done." })
-      }).pipe(Effect.provide(persisted())),
+        yield* seedTerminalCliRun("restart-child", "Done.", "parent-stable")
+      }).pipe(Effect.provide(makeStores(filename))),
     )
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -944,7 +917,7 @@ test("reopening the database after terminal write creates one parent resume", as
         WHERE job_id = 'handoff-1:resume-parent'`
         return { first, handoff, delivered, second, replay, resumes, jobs }
       }).pipe(
-        Effect.provide(persisted()),
+        Effect.provide(makeStores(filename)),
         Effect.provideService(OpenCodeCompletionProvider, provider),
         Effect.provideService(WorkSignal, signals),
       ),
