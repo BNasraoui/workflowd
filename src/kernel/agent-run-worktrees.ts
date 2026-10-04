@@ -1,18 +1,32 @@
-import { Context, Effect } from "effect"
+import { Context, Data, Effect } from "effect"
 import { runWorkspaceCommand } from "../workspace/command"
-import type { WorkspaceError } from "../workspace/errors"
+import { WorkspaceError } from "../workspace/errors"
 import { pathExists } from "../workspace/filesystem"
 import { ScopedKeyedLock } from "../workspace/locks"
 
 const repositoryLocks = new ScopedKeyedLock()
 
-export const agentRunWorktreeFailure = (error: WorkspaceError) =>
-  error.operation === "resolve agent-run base"
-    ? ("invalid_base_ref" as const)
-    : error.operation === "fetch agent-run repository" ||
-        error.operation === "detect agent-run default branch"
-      ? ("repository_fetch_failed" as const)
-      : ("worktree_failed" as const)
+const remoteCommand = (operation: string, repository: string, args: string[]) =>
+  runWorkspaceCommand(operation, ["git", "-C", repository, ...args], {
+    env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: "30 seconds",
+      orElse: () =>
+        Effect.fail(new WorkspaceError({ operation, cause: new Error(`${operation} timed out`) })),
+    }),
+  )
+
+export const agentRunWorktreeFailure = (error: WorkspaceError) => {
+  if (error.operation === "resolve agent-run base") return "invalid_base_ref" as const
+  if (
+    error.operation === "fetch agent-run repository" ||
+    error.operation === "detect agent-run default branch"
+  ) {
+    return "repository_fetch_failed" as const
+  }
+  return "worktree_failed" as const
+}
 
 export type AgentRunWorktreesPort = {
   readonly create: (input: {
@@ -27,6 +41,18 @@ export const AgentRunWorktrees = Context.Service<AgentRunWorktreesPort>(
   "workflowd/kernel/AgentRunWorktrees",
 )
 
+export class AgentRunWorktreeSetupError extends Data.TaggedError("AgentRunWorktreeSetupError")<{
+  readonly cause: WorkspaceError
+}> {}
+
+export const createAgentRunWorktree = (
+  worktrees: AgentRunWorktreesPort,
+  input: Parameters<AgentRunWorktreesPort["create"]>[0],
+) =>
+  worktrees
+    .create(input)
+    .pipe(Effect.mapError((cause) => new AgentRunWorktreeSetupError({ cause })))
+
 /**
  * Creates the run's git worktree inside the allow-listed repository. Hooks
  * are disabled the same way the managed PR workspace does it, and an
@@ -38,18 +64,9 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
       Effect.gen(function* () {
         yield* repositoryLocks.acquire(input.repository)
         if (yield* pathExists(input.directory)) return
-        yield* runWorkspaceCommand("fetch agent-run repository", [
-          "git",
-          "-C",
-          input.repository,
-          "fetch",
-          "origin",
-        ])
+        yield* remoteCommand("fetch agent-run repository", input.repository, ["fetch", "origin"])
         if (input.base === undefined) {
-          yield* runWorkspaceCommand("detect agent-run default branch", [
-            "git",
-            "-C",
-            input.repository,
+          yield* remoteCommand("detect agent-run default branch", input.repository, [
             "remote",
             "set-head",
             "origin",
@@ -66,15 +83,11 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
             "--short",
             "refs/remotes/origin/HEAD",
           ]))
-        yield* runWorkspaceCommand("resolve agent-run base", [
-          "git",
-          "-C",
-          input.repository,
-          "rev-parse",
-          "--verify",
-          "--quiet",
-          `${base}^{commit}`,
-        ])
+        yield* runWorkspaceCommand(
+          "resolve agent-run base",
+          ["git", "-C", input.repository, "rev-parse", "--verify", `${base}^{commit}`],
+          { env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" } },
+        )
         yield* runWorkspaceCommand("create agent-run worktree", [
           "git",
           "-C",

@@ -45,17 +45,33 @@ const fixture = async (root: string) => {
   return { origin, repository, oldHead, newHead }
 }
 
+const withFixture = async <A>(
+  run: (
+    context: Awaited<ReturnType<typeof fixture>> & {
+      root: string
+      provider: ReturnType<typeof defaultState>
+      layer: ReturnType<typeof makeLayer>
+    },
+  ) => Promise<A>,
+) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
+  try {
+    const gitFixture = await fixture(root)
+    const provider = defaultState()
+    const layer = makeLayer(makeProvider(provider), gitAgentRunWorktrees, undefined, {
+      repositories: [{ name: "fixture", directory: gitFixture.repository }],
+      worktreeRoot: join(root, "worktrees"),
+    })
+    return await run({ root, ...gitFixture, provider, layer })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 describe("agent-run fresh worktree", () => {
-  test("real ingress uses the fetched origin default without changing the clone branch", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
-    try {
-      const { repository, oldHead, newHead } = await fixture(root)
+  test("real ingress uses the fetched origin default without changing the clone branch", () =>
+    withFixture(async ({ repository, oldHead, newHead, provider, layer }) => {
       expect(await git(repository, "rev-parse", "origin/main")).toBe(oldHead)
-      const provider = defaultState()
-      const layer = makeLayer(makeProvider(provider), gitAgentRunWorktrees, undefined, {
-        repositories: [{ name: "fixture", directory: repository }],
-        worktreeRoot: join(root, "worktrees"),
-      })
       await Effect.runPromise(
         register({ route: "implement", repository: "fixture", prompt: "test" }).pipe(
           Effect.provide(layer),
@@ -65,21 +81,11 @@ describe("agent-run fresh worktree", () => {
       expect(await git(repository, "rev-parse", "origin/main")).toBe(newHead)
       expect(await git(repository, "rev-parse", "HEAD")).toBe(oldHead)
       expect(await git(repository, "branch", "--show-current")).toBe("stale")
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
+    }))
 
-  test("fetch failure refuses dispatch before creating a worktree", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
-    try {
-      const { repository, oldHead } = await fixture(root)
+  test("fetch failure refuses dispatch before creating a worktree", () =>
+    withFixture(async ({ root, repository, oldHead, provider, layer }) => {
       await git(repository, "remote", "set-url", "origin", join(root, "missing-origin"))
-      const provider = defaultState()
-      const layer = makeLayer(makeProvider(provider), gitAgentRunWorktrees, undefined, {
-        repositories: [{ name: "fixture", directory: repository }],
-        worktreeRoot: join(root, "worktrees"),
-      })
       const result = await Effect.runPromise(
         register({ route: "implement", repository: "fixture", prompt: "test" }).pipe(
           Effect.provide(layer),
@@ -89,24 +95,15 @@ describe("agent-run fresh worktree", () => {
       expect(result._tag).toBe("Failure")
       if (result._tag === "Failure") {
         expect(result.failure).toMatchObject({ reason: "repository_fetch_failed" })
+        expect(result.failure).not.toHaveProperty("mailboxId")
       }
       expect(provider.created).toHaveLength(0)
       expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain("agent-runs")
       expect(await git(repository, "rev-parse", "HEAD")).toBe(oldHead)
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
+    }))
 
-  test("an explicit base uses that fetched origin branch", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
-    try {
-      const { repository, oldHead } = await fixture(root)
-      const provider = defaultState()
-      const layer = makeLayer(makeProvider(provider), gitAgentRunWorktrees, undefined, {
-        repositories: [{ name: "fixture", directory: repository }],
-        worktreeRoot: join(root, "worktrees"),
-      })
+  test("an explicit base uses that fetched origin branch", () =>
+    withFixture(async ({ oldHead, provider, layer }) => {
       await Effect.runPromise(
         register({
           route: "implement",
@@ -116,20 +113,10 @@ describe("agent-run fresh worktree", () => {
         }).pipe(Effect.provide(layer)),
       )
       expect(await git(provider.created[0]!.directory, "rev-parse", "HEAD")).toBe(oldHead)
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
+    }))
 
-  test("an unknown explicit base is a typed refusal and a corrected base can use the same prompt", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
-    try {
-      const { repository, oldHead } = await fixture(root)
-      const provider = defaultState()
-      const layer = makeLayer(makeProvider(provider), gitAgentRunWorktrees, undefined, {
-        repositories: [{ name: "fixture", directory: repository }],
-        worktreeRoot: join(root, "worktrees"),
-      })
+  test("an unknown explicit base is a typed refusal and a corrected base can use the same prompt", () =>
+    withFixture(async ({ oldHead, provider, layer }) => {
       const bad = await refusalOf(
         Effect.runPromise(
           register({
@@ -141,6 +128,8 @@ describe("agent-run fresh worktree", () => {
         ),
       )
       expect(bad.reason).toBe("invalid_base_ref")
+      expect(bad.detail).toContain("origin/misspelled")
+      expect(bad).not.toHaveProperty("mailboxId")
       expect(provider.created).toHaveLength(0)
       await Effect.runPromise(
         register({
@@ -151,15 +140,10 @@ describe("agent-run fresh worktree", () => {
         }).pipe(Effect.provide(layer)),
       )
       expect(await git(provider.created[0]!.directory, "rev-parse", "HEAD")).toBe(oldHead)
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
+    }))
 
-  test("parallel dispatch worktrees share a repository without fetch conflicts", async () => {
-    const root = await mkdtemp(join(tmpdir(), "agent-run-ingress-git-"))
-    try {
-      const { repository, newHead } = await fixture(root)
+  test("parallel dispatch worktrees share a repository without fetch conflicts", () =>
+    withFixture(async ({ root, repository, newHead }) => {
       const directories = Array.from({ length: 6 }, (_, index) => join(root, `worktree-${index}`))
       await Promise.all(
         directories.map((directory, index) =>
@@ -171,8 +155,5 @@ describe("agent-run fresh worktree", () => {
       for (const directory of directories) {
         expect(await git(directory, "rev-parse", "HEAD")).toBe(newHead)
       }
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
+    }))
 })

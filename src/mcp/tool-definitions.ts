@@ -234,7 +234,8 @@ export const TOOL_DEFINITIONS = [
       "Pass a configured route name (e.g. 'implement', 'review') or a bare " +
       "model id — never a provider-prefixed id; the workflowd runner resolves " +
       "the route, pre-flights that the provider is authenticated and the model " +
-      "exists, creates a fresh worktree of the named repository, spawns the " +
+      "exists, fetches the repository's origin (required for dispatch), " +
+      "creates a fresh worktree of the named repository, spawns the " +
       "session, registers it into kernel custody, and only returns a receipt " +
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +

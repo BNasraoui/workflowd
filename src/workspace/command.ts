@@ -4,6 +4,7 @@ import { WorkspaceError } from "./errors"
 
 type WorkspaceCommandOptions = {
   readonly cwd?: string
+  readonly env?: Record<string, string>
   /** Written to the child's stdin then closed; stdin is ignored when absent.
    * Lets untrusted text (e.g. agent prompts) reach a command without ever
    * appearing in argv or a shell string. */
@@ -31,7 +32,7 @@ function executeWorkspaceCommand<A>(
       child = Bun.spawn([...command], {
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
         detached: true,
-        env: process.env,
+        env: { ...process.env, ...options.env },
         signal,
         stdin: options.stdin === undefined ? "ignore" : Buffer.from(options.stdin, "utf8"),
         stdout: "pipe",

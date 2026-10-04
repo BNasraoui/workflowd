@@ -13,7 +13,7 @@ import type { AgentRunRefusalError } from "./agent-run-ingress"
 import type { makeAgentRunCustody } from "./agent-run-custody"
 import { codexFailureLooksUnauthenticated } from "./codex-session"
 import type { AgentRunRecord, AgentRunStorePort } from "./agent-run-store"
-import { agentRunWorktreeFailure, type AgentRunWorktreesPort } from "./agent-run-worktrees"
+import { createAgentRunWorktree, type AgentRunWorktreesPort } from "./agent-run-worktrees"
 
 type RefusalReason =
   | "provider_not_authenticated"
@@ -21,9 +21,6 @@ type RefusalReason =
   | "run_conflict"
   | "unsupported_thinking"
   | "model_not_available"
-  | "repository_fetch_failed"
-  | "invalid_base_ref"
-  | "worktree_failed"
 type Custody = ReturnType<typeof makeAgentRunCustody>
 export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSelection">> &
   Pick<
@@ -295,24 +292,12 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       }
       if (run.state === "accepted" || run.nativeSessionId === null) {
         yield* store.claimSpawn({ runId: run.runId, now })
-        yield* worktrees
-          .create({
-            repository: target.repositoryDirectory,
-            directory: run.directory,
-            branch: `agent-run/${target.short}`,
-            ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
-          })
-          .pipe(
-            Effect.catch((error) =>
-              store
-                .abandonLaunch({ runId: run.runId, now: new Date() })
-                .pipe(
-                  Effect.andThen(
-                    Effect.fail(refuse(agentRunWorktreeFailure(error), error.cause.message)),
-                  ),
-                ),
-            ),
-          )
+        yield* createAgentRunWorktree(worktrees, {
+          repository: target.repositoryDirectory,
+          directory: run.directory,
+          branch: `agent-run/${target.short}`,
+          ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
+        })
         const resourceId = yield* ensureResource({
           resourceId: target.resourceId,
           absolutePath: run.directory,
