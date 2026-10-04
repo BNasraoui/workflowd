@@ -632,23 +632,38 @@ describe("agent-run ingress", () => {
     expect(refusal2.detail).toContain("model overloaded")
   })
 
-  test("a codex dispatch with a parent pairing is refused before anything spawns", async () => {
+  test("a codex dispatch with a parent pairing registers its completion watch", async () => {
     const state = defaultState()
+    state.telemetry.set("ses_parent", {
+      directory: "/home/ben/coordination",
+      outputTokens: 1,
+      updatedAtMs: at.getTime(),
+      idle: false,
+    })
     const codex = makeCodexCli([{ type: "agent_message", text: "done" }])
     const layer = makeLayer(makeProvider(state), worktrees([]), codex.port)
-    const refusal = await refusalOf(
-      Effect.runPromise(
-        register({
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({
           route: "scan",
           repository: "workflowd",
           prompt: "x",
           parentSessionId: "ses_parent",
           resumePrompt: "wake me",
-        }).pipe(Effect.provide(layer)),
-      ),
+        })
+        const sql = yield* SqlClient.SqlClient
+        const watches = yield* sql<{
+          child_session_id: string
+          provider_kind: string
+        }>`SELECT child_session_id, provider_kind FROM kernel_agent_completion_watches`
+        return { receipt, watches }
+      }).pipe(Effect.provide(layer)),
     )
-    expect(refusal.reason).toBe("invalid_wait_pairing")
-    expect(codex.state.spawned).toHaveLength(0)
+    expect(result.receipt.wait?.status).toBe("registered")
+    expect(result.watches).toEqual([
+      { child_session_id: result.receipt.sessionId, provider_kind: "codex" },
+    ])
+    expect(codex.state.spawned).toHaveLength(1)
   })
 
   test("a codex route whose CLI is unusable or unauthenticated is refused at preflight", async () => {

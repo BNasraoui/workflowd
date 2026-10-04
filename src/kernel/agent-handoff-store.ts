@@ -117,13 +117,13 @@ const make = Effect.gen(function* () {
         child.revision !== workflow.childSessionGeneration ||
         !["ready", "active"].includes(child.state) ||
         child.resource_state !== "reserved" ||
-        child.provider_kind !== "opencode" ||
-        child.provider_version !== input.completionSource.providerVersion ||
-        child.provider_id !== input.completionSource.providerId ||
-        child.server_id !== input.completionSource.serverId ||
         child.owning_host_id !== input.completionSource.owningHostId ||
-        child.endpoint_alias !== input.completionSource.endpointAlias ||
-        child.endpoint_identity !== input.completionSource.endpointIdentity
+        (child.provider_kind === "opencode" &&
+          (child.provider_version !== input.completionSource.providerVersion ||
+            child.provider_id !== input.completionSource.providerId ||
+            child.server_id !== input.completionSource.serverId ||
+            child.endpoint_alias !== input.completionSource.endpointAlias ||
+            child.endpoint_identity !== input.completionSource.endpointIdentity))
       ) {
         return yield* new AgentHandoffStoreError({
           operation: "validate child session generation",
