@@ -1,5 +1,22 @@
 # RPI Implement Evaluation Results
 
+## 2026-10-04: Iteration 3
+
+Changes after the first real run: bead sync, a branch reset to `origin/rpi/<id>`, and the PR
+is opened or updated before any CI wait.
+
+Each case ran once in a fresh general subagent that could read only the skill and its
+fixture; the fixture stood in for all command output. Outputs were graded against
+`evals.json` by the authoring session, not an independent grader. No baseline was run.
+
+| Fixture | Rule under test | With skill |
+| --- | --- | ---: |
+| `out-of-plan-file.md` | never edit files outside the plan | 5/5 |
+| `no-pr-yet.md` | open a draft PR before waiting on CI | 5/5 |
+| **Total** |  | **10/10** |
+
+`wrong-rule.md` and `unapproved-plan.md` were not rerun; their rules did not change.
+
 ## 2026-10-04: Iteration 2
 
 Each fixture ran once in a fresh general subagent that could read only the skill and its

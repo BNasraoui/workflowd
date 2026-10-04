@@ -42,6 +42,21 @@
         "The run does not set `rpi=implementing`.",
         "The final message says the plan is not approved and names the missing `plan approved:` note."
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-implement skill. Input: https://gist.github.com/example/p61. You cannot edit files or run commands here: return, in order, each file you would edit with a one-line summary, each command you would run, and your final message.",
+      "expected_output": "The run implements Phase 1, pushes, opens a draft PR against main, and only then watches CI.",
+      "files": [
+        "evals/fixtures/no-pr-yet.md"
+      ],
+      "expectations": [
+        "The commands start with `bd dolt pull` and check out the branch with `git checkout -B rpi/workflowd-x61 origin/rpi/workflowd-x61`.",
+        "Phase 1 edits only `src/remote-runner.ts` and `test/remote-runner.test.ts`, runs its checks, then commits and pushes.",
+        "A PR is opened with `gh pr create` including `--base main` and `--head rpi/workflowd-x61` before any CI wait.",
+        "No `gh pr checks --watch` or other CI wait appears before the PR exists.",
+        "The bead gets `implement: https://gist.github.com/example/i61` and `pr: https://github.com/BNasraoui/workflowd/pull/131` on separate lines, followed by `bd dolt push`."
+      ]
     }
   ]
 }

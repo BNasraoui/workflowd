@@ -54,7 +54,8 @@ Checks:
 
 ## Graph
 
-<Without .provenance/: "No .provenance/ in this repository; no Graph section.">
+<Without .provenance/, delete this heading and table and write one line instead: "No
+.provenance/ in this repository, so this plan has no Graph section.">
 
 | Rule | Refines | Statement | Test shape | Verification |
 | ---- | ------- | --------- | ---------- | ------------ |

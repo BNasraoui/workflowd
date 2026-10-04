@@ -13,7 +13,8 @@ sections below as their results. The repository has no `.provenance/` directory.
     "description": "When a pull request carries the `no-review` label, workflowd must not queue Review Work for it, and must post one neutral commit status `workflowd/review: skipped (no-review label)` on the head commit. Removing the label must queue review for the current head as usual.",
     "acceptance_criteria": "1. Labelled PRs get no Review Work. 2. The head commit gets one skipped status. 3. Removing the label queues review for the current head.",
     "status": "open",
-    "issue_type": "feature"
+    "issue_type": "feature",
+    "notes": "questions: https://gist.github.com/example/q52\nresearch: https://gist.github.com/example/r52\npr: https://github.com/BNasraoui/workflowd/pull/91"
   }
 ]
 ```

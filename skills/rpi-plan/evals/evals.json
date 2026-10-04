@@ -9,13 +9,14 @@
         "evals/fixtures/cross-component.md"
       ],
       "expectations": [
-        "The plan is at most 120 lines and 900 words.",
+        "The plan's prose, excluding code blocks, is at most 120 lines and 900 words.",
         "Each phase states one observable result, and phases are vertical slices rather than layers (no phase is only types, only storage, or only API).",
         "Each phase lists the files it changes as a compact tree, and the files are consistent with the research.",
         "Every phase that crosses components names an end-to-end test that drives the real webhook handler, store, worker, or GitHub adapter through `test/ci/github-fixture.ts` or `test/webhook.test.ts`; no phase relies only on mocks or stubs.",
         "Removing the label (the `unlabeled` action) is covered by a phase with its own end-to-end check.",
         "Claims about current code match the research citations.",
-        "The output contains no implementation code beyond shape diffs, and the listed commands end with `bd set-state workflowd-x52 rpi=plan-review` without implementing."
+        "The output contains no implementation code beyond shape diffs, and the listed commands end with `bd set-state workflowd-x52 rpi=plan-review` without implementing.",
+        "The plan drops the Graph section and says in one line that the repository has no `.provenance/`."
       ]
     },
     {
@@ -31,6 +32,23 @@
         "The plan does not link TOPIC-3 as the Topic for this work.",
         "The plan leaves out phases that depend on the missing Requirement, or clearly marks them as blocked on the gap.",
         "The output stops for human review and does not implement."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Do not run ssh. Use the rpi-plan skill. Input: bead workflowd-z30, research https://gist.github.com/example/r30",
+      "expected_output": "A plan that lists session.abort as an unconfirmed fact, probes it first in the phase that relies on it, and gates merge on the fake-opencode harness rather than mint.",
+      "files": [
+        "evals/fixtures/unconfirmed-protocol.md"
+      ],
+      "expectations": [
+        "The plan's prose, excluding code blocks, is at most 120 lines and 900 words.",
+        "An Unconfirmed facts section lists OpenCode's `session.abort` (or the client's abort call) as not confirmed by research.",
+        "The first step of the phase that relies on `session.abort` is a probe task, and the phase states how it is dropped or changed if the probe fails.",
+        "Every end-to-end check that gates the change runs in the repository's harnesses (`test/support/fake-opencode.ts`, `bun run simulate:remote`, or `test/opencode/session.test.ts`); any check on mint is labelled extra evidence, not the gate.",
+        "The plan drops the Graph section and says in one line that the repository has no `.provenance/`.",
+        "The plan's PR line is `https://github.com/BNasraoui/workflowd/pull/120`, taken from the bead's `pr:` note.",
+        "The commands start with `bd dolt pull`, `git fetch origin`, and a detached checkout of `9b2e4c7a1d0f3e6b8a5c2d9f4e7a0b3c6d1e8f25`, end with `bd set-state workflowd-z30 rpi=plan-review` and `bd dolt push`, and nothing is implemented."
       ]
     }
   ]

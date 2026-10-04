@@ -50,8 +50,11 @@ it as `path:line`.
 
 ## Graph (only with .provenance/)
 
-Without `.provenance/`, drop the Graph section and say so in one line. Otherwise use the `provenance-shaping` and `provenance-grounded-writing` skills for this section. For
-each new or changed Rule, give the Requirement it refines, its statement, the test shape,
+Without `.provenance/`, the plan has no Graph heading or table, only the line "No
+.provenance/ in this repository, so this plan has no Graph section."
+
+Otherwise use the `provenance-shaping` and `provenance-grounded-writing` skills for this
+section. For each new or changed Rule, give the Requirement it refines, its statement, the test shape,
 and its verification method. Then make one Topic decision:
 
 - link the existing open Topic that covers this work;
