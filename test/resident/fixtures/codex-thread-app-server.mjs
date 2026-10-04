@@ -9,6 +9,7 @@
 import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
+import { serve } from "bun"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
@@ -24,7 +25,7 @@ const mcpEnvVars = JSON.parse(`[${subscriptions[3]}]`)
 
 const threadId = `thread-${process.pid}`
 const turns = []
-const send = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
+let send = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`)
 const notify = (method, params) => send({ method, params })
 
 const subscribe = async (runId) => {
@@ -94,7 +95,7 @@ const handlers = {
   },
 }
 
-createInterface({ input: process.stdin }).on("line", (line) => {
+const receive = (line) => {
   const frame = JSON.parse(line)
   if (frame.id === undefined) return
   const handler = handlers[frame.method]
@@ -103,4 +104,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return
   }
   send({ id: frame.id, result: handler(frame.params ?? {}) })
-})
+}
+
+const socket = process.argv.find((arg) => arg.startsWith("unix://"))?.slice(7)
+if (socket) {
+  serve({
+    unix: socket,
+    fetch(request, server) {
+      return server.upgrade(request) ? undefined : new Response(null, { status: 400 })
+    },
+    websocket: {
+      open(ws) {
+        send = (frame) => ws.send(JSON.stringify(frame))
+      },
+      message(_ws, message) {
+        receive(String(message))
+      },
+      close() {
+        send = () => {}
+      },
+    },
+  })
+} else createInterface({ input: process.stdin }).on("line", receive)
