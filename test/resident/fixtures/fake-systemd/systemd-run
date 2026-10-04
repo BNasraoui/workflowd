@@ -1,0 +1,32 @@
+#!/usr/bin/env bun
+import { mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+
+const root = process.env.RESIDENT_FAKE_SYSTEMD_ROOT
+if (!root) throw new Error("RESIDENT_FAKE_SYSTEMD_ROOT required")
+const args = process.argv.slice(2)
+const option = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3)
+const unit = option("unit")
+const description = option("description")
+if (!unit || !description) throw new Error("unit and description required")
+const env = { ...process.env }
+for (const arg of args) {
+  if (!arg.startsWith("--setenv=")) continue
+  const pair = arg.slice(9)
+  const separator = pair.indexOf("=")
+  env[pair.slice(0, separator)] = pair.slice(separator + 1)
+}
+const command = args.slice(args.findIndex((arg) => !arg.startsWith("--")))
+await mkdir(root, { recursive: true })
+const child = Bun.spawn(command, {
+  env,
+  detached: true,
+  stdin: "ignore",
+  stdout: Bun.file(join(root, `${unit}.stdout`)),
+  stderr: Bun.file(join(root, `${unit}.stderr`)),
+})
+child.unref()
+await writeFile(
+  join(root, `${unit}.json`),
+  JSON.stringify({ pid: child.pid, description, invocation: crypto.randomUUID() }),
+)

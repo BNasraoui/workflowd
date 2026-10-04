@@ -10,7 +10,17 @@ import { AgentRunStore } from "../kernel/agent-run-store"
 import { makeEventQueue, type CodexCliPort, type CodexExit } from "../kernel/codex-session"
 import { WorkspaceError } from "../workspace/errors"
 import { makeResidentStore } from "./store"
-import { startAppServer } from "./process"
+import {
+  attachAppServer,
+  inspectAppServerUnit,
+  launchAppServer,
+  residentSocket,
+  residentUnitName,
+  stopAppServer,
+  startAppServer,
+  sweepOrphanAppServers,
+} from "./process"
+import { randomUUID } from "node:crypto"
 import { deliverResident } from "./delivery"
 import type { ResidentConfig } from "./config"
 import { ExecutionSelectionError } from "../execution-selection"
@@ -46,7 +56,7 @@ type ResidentPort = {
 export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCodex")
 
 export const ResidentCodexLive = (
-  config: ResidentConfig,
+  config: ResidentConfig & { readonly unitPrefix?: string },
   binary: string,
   ciConfig: CiConfig,
   start: typeof startAppServer = startAppServer,
@@ -65,29 +75,41 @@ export const ResidentCodexLive = (
       }>()
       const identity = yield* Effect.serviceOption(WorkerIdentity)
       const peers = new RunPeers()
+      const unitPrefix = config.unitPrefix ?? "workflowd-resident-"
+      const transientUnits = start === startAppServer
+      type ServerProcess =
+        ReturnType<typeof startAppServer> | Awaited<ReturnType<typeof launchAppServer>>
       const servers = new Map<
         string,
         {
-          process: ReturnType<typeof startAppServer>
+          process: ServerProcess
           disconnected: boolean
           attempts: number
           lastEventAt: number
         }
       >()
       const threadRuns = new Map<string, string>()
+      const notifyFor =
+        (runId: string) => (frame: { readonly method: string; readonly params: unknown }) => {
+          const entry = servers.get(runId)
+          if (entry !== undefined) entry.lastEventAt = Date.now()
+          if (frame.method === "workflowd/disconnected" && entry !== undefined)
+            entry.disconnected = true
+          Queue.offerUnsafe(notifications, frame)
+        }
+      const registerPeer = (runId: string, pid: number) => {
+        peers.register(runId, pid)
+        if (Option.isSome(identity)) identity.value.register(runId, pid)
+      }
       yield* Effect.addFinalizer(() =>
         Effect.forEach(
           [...servers.entries()],
           ([runId, entry]) =>
             Effect.gen(function* () {
               yield* Effect.tryPromise(() => entry.process.close())
+              peers.revoke(runId)
               const row = yield* store.readRun(runId)
-              if (row !== null) {
-                yield* store.recordClosure(row.thread_id, true)
-                const listener = listeners.get(row.thread_id)
-                listener?.queue.close()
-                listener?.finish({ exitCode: 1, stderr: "resident scope closed" })
-              }
+              if (row !== null) listeners.get(row.thread_id)?.queue.close()
             }).pipe(Effect.exit),
           { concurrency: "unbounded" },
         ).pipe(
@@ -106,22 +128,24 @@ export const ResidentCodexLive = (
         }
         const owned = yield* store.readRun(runId)
         if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
-        const process = yield* Effect.try(() =>
-          start({ binary, home: config.home, env }, (frame) => {
-            const current = servers.get(runId)
-            if (current !== undefined) current.lastEventAt = Date.now()
-            if (frame.method === "workflowd/disconnected") {
-              const entry = servers.get(runId)
-              if (entry !== undefined) entry.disconnected = true
-            }
-            Queue.offerUnsafe(notifications, frame)
-          }),
-        )
+        const notify = notifyFor(runId)
+        let process: ServerProcess
+        if (transientUnits) {
+          const unit = residentUnitName(runId, unitPrefix)
+          const socket = residentSocket(config.home, runId)
+          const launchId = randomUUID()
+          yield* store.prepareServer(runId, unit, launchId, socket)
+          const launched = yield* Effect.tryPromise(() =>
+            launchAppServer(
+              { binary, home: config.home, env, runId, unitPrefix, launchId },
+              notify,
+            ),
+          )
+          process = launched
+          yield* store.adoptServer(runId, launched.invocation)
+        } else process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
         servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
-        yield* Effect.try(() => {
-          peers.register(runId, process.pid)
-          if (Option.isSome(identity)) identity.value.register(runId, process.pid)
-        })
+        yield* Effect.try(() => registerPeer(runId, process.pid))
         yield* Effect.tryPromise(() => process.initialize())
         return process
       })
@@ -136,20 +160,37 @@ export const ResidentCodexLive = (
           return Promise.reject(new Error("Resident run process unavailable"))
         return entry.process.rpc.request(method, params)
       }
+      const closeServer = Effect.fn("Resident.closeServer")(function* (
+        runId: string,
+        threadId: string,
+        closureConfirmed: boolean,
+      ) {
+        const entry = servers.get(runId)
+        const custody = transientUnits ? yield* store.readServer(runId) : null
+        if (entry !== undefined)
+          yield* Effect.tryPromise({ try: () => entry.process.close(), catch: normalizeError })
+        if (custody?.state === "active") {
+          const stopped = yield* Effect.tryPromise(() =>
+            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+          )
+          if (!stopped.closed)
+            return yield* Effect.fail(new Error("Resident unit closure unconfirmed"))
+          yield* store.closeServer(runId)
+          yield* store.recordClosure(threadId, true)
+        } else if (entry !== undefined && !transientUnits) {
+          yield* store.recordClosure(threadId, true)
+        } else if (!closureConfirmed) {
+          return yield* Effect.fail(
+            new Error("Resident process closure cannot be confirmed from durable custody"),
+          )
+        }
+      })
       const finish = Effect.fn("Resident.finish")(function* (threadId: string, failed: boolean) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
         if (row !== null) {
           peers.revoke(row.run_id)
-          const entry = servers.get(row.run_id)
-          if (entry !== undefined) {
-            yield* Effect.tryPromise({ try: () => entry.process.close(), catch: normalizeError })
-            yield* store.recordClosure(threadId, true)
-          } else if (row.closure_confirmed !== 1) {
-            return yield* Effect.fail(
-              new Error("Resident process closure cannot be confirmed from durable custody"),
-            )
-          }
+          yield* closeServer(row.run_id, threadId, row.closure_confirmed === 1)
           servers.delete(row.run_id)
           threadRuns.delete(threadId)
           const run = yield* runs.read(row.run_id)
@@ -236,7 +277,8 @@ export const ResidentCodexLive = (
         if (yield* hasCustody(row.thread_id)) return true
         yield* store.uncertain(`restore:${row.thread_id}`, row.thread_id)
         // A prior daemon's unverified execution cannot be declared closed from thread state.
-        if (servers.has(row.run_id)) yield* finish(row.thread_id, true)
+        if (servers.has(row.run_id) || (yield* store.readServer(row.run_id))?.state === "active")
+          yield* finish(row.thread_id, true)
         if (run !== null && ["accepted", "spawning", "spawned"].includes(run.state))
           yield* runs.operatorRequired({
             runId: row.run_id,
@@ -250,7 +292,57 @@ export const ResidentCodexLive = (
           if (onlyThread !== undefined && row.thread_id !== onlyThread) continue
           threadRuns.set(row.thread_id, row.run_id)
           if (!(yield* restoreCustody(row))) continue
-          if (!servers.has(row.run_id)) yield* launch(row.run_id)
+          let reattached = false
+          if (!servers.has(row.run_id)) {
+            const custody = transientUnits ? yield* store.readServer(row.run_id) : null
+            if (custody?.state === "active") {
+              const unit = yield* Effect.tryPromise(() => inspectAppServerUnit(custody.unit))
+              const mismatch =
+                unit.present &&
+                (unit.description !== `workflowd resident launch ${custody.launch_id}` ||
+                  unit.invocation === "" ||
+                  (custody.invocation !== null && unit.invocation !== custody.invocation))
+              if (mismatch) {
+                yield* store.uncertain(`unit:${row.thread_id}`, row.thread_id)
+                yield* runs.operatorRequired({
+                  runId: row.run_id,
+                  diagnostic: "resident_unit_mismatch",
+                  now: new Date(),
+                })
+                continue
+              }
+              if (unit.active) {
+                const attached = yield* Effect.tryPromise(() =>
+                  attachAppServer(
+                    {
+                      socket: custody.socket,
+                      unit: custody.unit,
+                      launchId: custody.launch_id,
+                      invocation: custody.invocation,
+                    },
+                    notifyFor(row.run_id),
+                  ),
+                ).pipe(Effect.option)
+                if (Option.isSome(attached)) {
+                  reattached = true
+                  yield* store.adoptServer(row.run_id, attached.value.invocation)
+                  servers.set(row.run_id, {
+                    process: attached.value,
+                    disconnected: false,
+                    attempts: 0,
+                    lastEventAt: Date.now(),
+                  })
+                  yield* Effect.try(() => registerPeer(row.run_id, attached.value.pid))
+                  yield* Effect.tryPromise(() => attached.value.initialize())
+                } else {
+                  yield* Effect.tryPromise(() =>
+                    stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+                  )
+                }
+              }
+            }
+            if (!servers.has(row.run_id)) yield* launch(row.run_id)
+          }
           const accepted = yield* runs.read(row.run_id)
           const selection = accepted?.resolvedSelection
           const resumed = yield* Effect.tryPromise(() =>
@@ -304,7 +396,11 @@ export const ResidentCodexLive = (
               method: "turn/completed",
               params: { threadId: row.thread_id, turn: last },
             })
-          else if (last !== undefined && last.id !== row.wait_turn)
+          else if (
+            last !== undefined &&
+            (last.status !== "inProgress" || !reattached) &&
+            last.id !== row.wait_turn
+          )
             yield* store.enqueue(
               `restart:${row.thread_id}:${last.id}`,
               row.thread_id,
@@ -312,7 +408,20 @@ export const ResidentCodexLive = (
             )
         }
       })
+      if (transientUnits) {
+        for (const custody of yield* store.activeServers()) {
+          if ((yield* store.readRun(custody.run_id)) !== null) continue
+          const stopped = yield* Effect.tryPromise(() =>
+            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+          )
+          if (stopped.closed) yield* store.closeServer(custody.run_id)
+        }
+      }
       yield* restore()
+      if (transientUnits) {
+        const active = new Set((yield* store.activeServers()).map((row) => row.unit))
+        yield* Effect.tryPromise(() => sweepOrphanAppServers(unitPrefix, active))
+      }
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
         for (const message of yield* store.pending()) {
           const row = yield* store.read(message.thread_id)
@@ -374,30 +483,41 @@ export const ResidentCodexLive = (
           (cause) => new WorkspaceError({ operation: "cancel resident thread", cause }),
         ),
       )
-      const tick = Effect.gen(function* () {
-        for (const row of yield* store.threads()) {
-          const entry = servers.get(row.run_id)
-          if (
-            entry !== undefined &&
-            row.state === "active" &&
-            Date.now() - entry.lastEventAt >= (config.progressWindowMs ?? 20 * 60_000)
-          ) {
-            yield* store.uncertain(`stall:${row.thread_id}`, row.thread_id)
-            yield* finish(row.thread_id, true)
-            continue
-          }
-          if (entry?.disconnected) {
-            if (entry.attempts >= 3) {
-              yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)
-              yield* finish(row.thread_id, true)
-              continue
-            }
-            peers.revoke(row.run_id)
-            yield* Effect.tryPromise(() => entry.process.close())
-            yield* launch(row.run_id, entry.attempts + 1)
-            yield* restore(row.thread_id)
-          }
+      const checkThread = Effect.fn("Resident.checkThread")(function* (row: {
+        readonly run_id: string
+        readonly thread_id: string
+        readonly state: string
+      }) {
+        const entry = servers.get(row.run_id)
+        if (
+          entry !== undefined &&
+          row.state === "active" &&
+          Date.now() - entry.lastEventAt >= (config.progressWindowMs ?? 20 * 60_000)
+        ) {
+          yield* store.uncertain(`stall:${row.thread_id}`, row.thread_id)
+          yield* finish(row.thread_id, true)
+          return
         }
+        if (!entry?.disconnected) return
+        if (entry.attempts >= 3) {
+          yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)
+          yield* finish(row.thread_id, true)
+          return
+        }
+        peers.revoke(row.run_id)
+        yield* Effect.tryPromise(() => entry.process.close())
+        if (transientUnits) {
+          const custody = yield* store.readServer(row.run_id)
+          if (custody !== null)
+            yield* Effect.tryPromise(() =>
+              stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+            )
+        }
+        yield* launch(row.run_id, entry.attempts + 1)
+        yield* restore(row.thread_id)
+      })
+      const tick = Effect.gen(function* () {
+        for (const row of yield* store.threads()) yield* checkThread(row)
         yield* subscriptions.reconcile()
         for (const runId of servers.keys()) {
           const run = yield* runs.read(runId)

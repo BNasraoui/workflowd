@@ -64,3 +64,27 @@ test("closure migration preserves historical resident states without inventing p
       expect((yield* store.read("legacy-thread"))?.closure_confirmed).toBe(0)
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
   ))
+
+test("server custody is recorded before thread creation and adopts one invocation", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      yield* runStoreMigrations
+      const store = yield* makeResidentStore
+      yield* store.prepareServer(
+        "agent-run-a",
+        "workflowd-resident-a.service",
+        "nonce-a",
+        "/tmp/a.sock",
+      )
+      expect(yield* store.readServer("agent-run-a")).toMatchObject({
+        run_id: "agent-run-a",
+        state: "active",
+        invocation: null,
+      })
+      yield* store.adoptServer("agent-run-a", "invocation-a")
+      expect((yield* store.readServer("agent-run-a"))?.invocation).toBe("invocation-a")
+      expect(yield* store.activeServers()).toHaveLength(1)
+      yield* store.closeServer("agent-run-a")
+      expect(yield* store.activeServers()).toHaveLength(0)
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  ))
