@@ -70,3 +70,10 @@ or it gains stateful command support.
 
 Live NATS tests remain unchanged and continue to verify broker and client configuration. The
 simulation requires neither Docker nor NATS.
+
+`cli-child-wakes.test.ts` also uses this harness for the complete agent handoff path. It launches
+fake Codex and Claude CLI children through the durable CLI worker, observes their terminal run and
+caller mailbox, registers the completion watch and parent resume, then delivers a remote Claude
+wake through the real coordinator and the addressed runner. The tests cover external SIGTERM,
+an OpenCode parent, coordinator restart with duplicate and reordered delivery, and a runner
+directory refusal. They create no deploy and use only local SQLite files and processes.
