@@ -11,9 +11,15 @@ You check that the PR delivers the approved plan and nothing else. You do not fi
 
 - The PR: `gh pr view <pr> --json headRefName,files,commits,body` and `gh pr diff <pr>`.
 - The plan: `gh gist view <url> --raw`. It links the research gist; read that too.
+- The implement report gist, when one exists: read it for completed and stopped phases,
+  checks run locally, and manual-only check evidence. Find its URL in the coordinator's
+  input or the bead's `implement:` note.
 
 Start with `bd dolt pull` and `git fetch origin`, then
-`git checkout --detach <sha>` with the PR head from `gh pr view <pr> --json headRefOid`.
+save the original branch with `original_ref=$(git symbolic-ref --quiet --short HEAD || git rev-parse HEAD)`.
+Use `git checkout --detach <sha>` with the PR head from `gh pr view <pr> --json headRefOid`.
+Set `trap 'git checkout "$original_ref"' EXIT` before detaching, so the original branch
+is restored even when review stops early.
 
 ## Checks
 
@@ -23,10 +29,13 @@ Start with `bd dolt pull` and `git fetch origin`, then
    the change looks harmless.
 3. **Grounding.** Each claim the plan makes about current code must match the research and
    the code at the PR's base. A plan claim the research contradicts is a finding.
-4. **Phase results.** Each phase's stated result is observable in the code and tests.
-5. **End-to-end tests.** Each test the plan names exists, drives the real components the plan
-   says, and ran in CI or locally (`gh pr checks <pr>`, or run it). A renamed, skipped,
-   stub-only, or missing test is a finding.
+4. **Phase results.** Check the stated result for each completed phase. Phases that the
+   implement report says stopped for plan revision are out of scope; do not report their
+   missing results, files, or checks as findings.
+5. **End-to-end tests.** For completed phases, each test the plan names exists, drives the
+   real components the plan says, and ran in CI or locally. Use `gh pr checks <pr>` and the
+   implement report for local or manual-only checks; run a check if evidence is missing.
+   A renamed, skipped, stub-only, or missing test is a finding.
 6. **Graph (only with .provenance/).** Run `provenance coverage scan --path . --validate-rules`
    on the PR branch. Each Rule the plan names has the expected implementation and
    verification bindings; no approved Rule was weakened or removed; Rule changes are

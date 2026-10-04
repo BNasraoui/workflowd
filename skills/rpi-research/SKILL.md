@@ -14,12 +14,13 @@ Only the questions document: `gh gist view <url> --raw`. Do not run `bd show`, r
 ticket, or search for the ticket's goal. The document names the ticket id; use it only for
 the branch name and the bead note.
 
-Never run a command that prints the ticket. Some write commands echo it, so run every `bd`
-command with `-q` (quiet) and read only whether it succeeded.
+Never run a command that prints the ticket. Quiet mode alone does not suppress the title
+from `bd note`. Redirect stdout and stderr from every `bd` command to `/dev/null` and
+check only its exit code. Stop if a command fails; do not inspect its output.
 
 ## Start
 
-1. `bd dolt pull -q`.
+1. `bd dolt pull -q >/dev/null 2>&1` (check the exit code).
 2. `git fetch origin`, then `git checkout --detach <sha>` with the full SHA from the
    questions document's `Repository:` line. Read the code at that commit.
 
@@ -88,8 +89,10 @@ Testing: <tests, harnesses, and how to run them>
 3. If `.provenance/` exists, record the questions and research gists as Sources on
    `rpi/<id>`: `provenance sources create --id <id>-rpi-questions --name "RPI questions for <id>" --source-type project_artifact --url <revision url>`,
    then the same for research. Commit only the `.provenance/` changes and push.
-4. Record both URLs, one per line:
-   `printf '%s\n' "research: <gist url>" "pr: <pr url>" | bd -q note <id> --stdin`
-5. `bd -q set-state <id> rpi=research --reason "research published"`, then `bd dolt push -q`.
+4. Record both URLs, one per line with
+   `bd update <id> --append-notes $'research: <gist url>\npr: <pr url>' --json >/dev/null 2>&1`.
+   Check only the exit code.
+5. `bd -q set-state <id> rpi=research --reason "research published" >/dev/null 2>&1`,
+   then `bd dolt push -q >/dev/null 2>&1`. Check each exit code.
 6. Never commit the document itself. Your final message starts with the gist URL on its own
    line, then the draft PR URL.

@@ -75,7 +75,8 @@ the child's caller-mailbox message (`run_id`, `session_id`, `native_session_id`,
 `route`, `model`, `executor`, `status`, `end_reason`, `ended_at`, `final_message`,
 `final_message_ref`), or null for a run that ended before mailboxes existed. A
 final message too large for one kernel event (64 KiB) is replaced by null with
-`final_message_ref` set to the native session ID.
+`final_message_ref` set to the native session ID, or the run ID if there is no
+native session.
 
 Subscriptions reuse `kernel_workflow_instances`, `kernel_waits`, and
 `kernel_wait_event_deliveries`. Consuming a matched wait and inserting its resident

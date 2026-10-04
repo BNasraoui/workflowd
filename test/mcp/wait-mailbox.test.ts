@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -49,18 +49,28 @@ afterAll(async () => {
 
 const wait = async (
   token: string,
-  options: { url?: string; timeout?: string; path?: string; sleepLog?: string } = {},
+  options: {
+    url?: string
+    timeout?: string
+    path?: string
+    sleepLog?: string
+    home?: string
+    useConfigUrl?: boolean
+  } = {},
 ) => {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    WORKFLOWD_MCP_URL: options.url ?? `http://127.0.0.1:${started.port}/mcp`,
+    WORKFLOWD_MCP_TOKEN: token,
+    HOME: options.home ?? process.env.HOME,
+    PATH: options.path ?? process.env.PATH,
+    SLEEP_LOG: options.sleepLog ?? "",
+  }
+  if (options.useConfigUrl) delete env.WORKFLOWD_MCP_URL
   const child = Bun.spawn(
     ["bash", "scripts/wait-mailbox.sh", "mailbox-test", options.timeout ?? "2"],
     {
-      env: {
-        ...process.env,
-        WORKFLOWD_MCP_URL: options.url ?? `http://127.0.0.1:${started.port}/mcp`,
-        WORKFLOWD_MCP_TOKEN: token,
-        PATH: options.path ?? process.env.PATH,
-        SLEEP_LOG: options.sleepLog ?? "",
-      },
+      env,
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -111,6 +121,34 @@ test("prints the flat terminal mailbox message from the real MCP server", async 
   const result = await wait("integration-token")
   expect(result.exitCode).toBe(0)
   expect(JSON.parse(result.stdout)).toEqual(message)
+})
+
+test("reads MCP URL from the user config when the environment is unset", async () => {
+  const home = await mkdtemp(join(tmpdir(), "wait-mailbox-home-"))
+  const config = join(home, ".config", "workflowd")
+  try {
+    await mkdir(config, { recursive: true })
+    await writeFile(join(config, "mcp-url"), `http://127.0.0.1:${started.port}/mcp\n`)
+    const result = await wait("integration-token", { home, useConfigUrl: true })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual(message)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test("environment MCP URL takes precedence over user config", async () => {
+  const home = await mkdtemp(join(tmpdir(), "wait-mailbox-home-"))
+  const config = join(home, ".config", "workflowd")
+  try {
+    await mkdir(config, { recursive: true })
+    await writeFile(join(config, "mcp-url"), "http://127.0.0.1:1/mcp\n")
+    const result = await wait("integration-token", { home })
+    expect(result.exitCode).toBe(0)
+    expect(JSON.parse(result.stdout)).toEqual(message)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 })
 
 test("rejects an invalid MCP bearer token", async () => {
