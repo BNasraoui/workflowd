@@ -409,3 +409,58 @@ test("update-dev-infra defaults an unset remote host list to ben-arch", async ()
     "ben@ben-arch:provenance.new",
   )
 })
+
+test("update-dev-infra rebuilds when provenance origin/main advances", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout)
+  const first = await run(["bash", updater])
+  expect(first.status).toBe(0)
+  const firstRevision = await git(checkout, "rev-parse", "HEAD")
+  const state = join(home, ".local", "state", "update-dev-infra", "deployed-provenance.rev")
+  expect(await readFile(state, "utf8")).toBe(`${firstRevision}|\n`)
+
+  const origin = join(root, "provenance-origin")
+  await writeFile(join(origin, "README.md"), "next revision\n")
+  await git(origin, "add", ".")
+  await git(origin, "commit", "-q", "-m", "next revision")
+  const nextRevision = await git(origin, "rev-parse", "HEAD")
+
+  const second = await run(["bash", updater])
+  expect(second.status).toBe(0)
+  expect(second.stdout).toContain(`provenance dev build: ${firstRevision} -> ${nextRevision}`)
+  expect(await readFile(state, "utf8")).toBe(`${nextRevision}|\n`)
+  expect((await readFile(join(root, "build-calls.log"), "utf8")).trim().split("\n")).toEqual([
+    "npm",
+    "node",
+    "cargo",
+    "npm",
+    "node",
+    "cargo",
+  ])
+})
+
+test("update-dev-infra withholds deployment state after a partial remote push", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout)
+  await stubProvenanceRemote(0)
+  environment = { ...environment, PROV_REMOTE_HOSTS: "ben-arch mint" }
+  const sshStub = join(root, "bin", "ssh")
+  await writeFile(
+    sshStub,
+    `#!/bin/sh\necho "ssh $*" >> '${root}/remote-calls.log'\ncase "$*" in *ben@mint*) exit 1;; esac\nexit 0\n`,
+  )
+  await chmod(sshStub, 0o755)
+
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(0)
+  expect(result.stdout).toContain("pushed provenance")
+  expect(result.stdout).toContain("WARN: could not push provenance to mint")
+  const calls = await readFile(join(root, "remote-calls.log"), "utf8")
+  expect(calls).toContain("ben@ben-arch:provenance.new")
+  expect(calls).toContain("ben@mint:provenance.new")
+  expect(
+    await Bun.file(
+      join(home, ".local", "state", "update-dev-infra", "deployed-provenance.rev"),
+    ).exists(),
+  ).toBe(false)
+})
