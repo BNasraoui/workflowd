@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# update-dev-infra — refresh a workflowd deploy checkout and restart its units.
+# update-dev-infra — refresh a workflowd deploy checkout, restart its units,
+# and link its RPI skills for local agents.
 #
 # Example template: copy it onto the host (e.g. ~/.local/bin/update-dev-infra),
 # adjust the two variables below, and schedule it with a systemd user timer, e.g.
@@ -12,7 +13,8 @@
 # The deploy checkout is a detached-HEAD clone (or worktree) of this repo that
 # the systemd units run from; see docs/remote-runner.md. The script never
 # force-updates: a dirty or diverged checkout fails loudly instead of being
-# overwritten.
+# overwritten. Every run links the checkout's skills/rpi-* directories into
+# ~/.agents/skills and ~/.claude/skills with deploy/link-agent-skills.sh.
 
 set -euo pipefail
 
@@ -30,21 +32,22 @@ new_rev=$(git -C "$DEPLOY" rev-parse --short origin/main)
 
 if [ "$old_rev" = "$new_rev" ]; then
 	log "deploy checkout already at origin/main ($old_rev)"
-	exit 0
+else
+	log "deploy checkout: $old_rev -> $new_rev"
+	git -C "$DEPLOY" checkout --quiet --detach origin/main
+	(cd "$DEPLOY" && bun install --frozen-lockfile)
+
+	units=""
+	for u in $UNITS; do
+		systemctl --user cat "$u" >/dev/null 2>&1 && units="$units $u"
+	done
+	if [ -n "$units" ]; then
+		log "restarting:$units"
+		# shellcheck disable=SC2086
+		systemctl --user restart $units
+	fi
 fi
 
-log "deploy checkout: $old_rev -> $new_rev"
-git -C "$DEPLOY" checkout --quiet --detach origin/main
-(cd "$DEPLOY" && bun install --frozen-lockfile)
-
-units=""
-for u in $UNITS; do
-	systemctl --user cat "$u" >/dev/null 2>&1 && units="$units $u"
-done
-if [ -n "$units" ]; then
-	log "restarting:$units"
-	# shellcheck disable=SC2086
-	systemctl --user restart $units
-fi
+"$DEPLOY/deploy/link-agent-skills.sh" "$DEPLOY"
 
 log "done"

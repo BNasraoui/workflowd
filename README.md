@@ -284,7 +284,7 @@ OpenCode loads agents and configuration only at startup. Restart `opencode-serve
 
 ## Skills
 
-Five model-invoked skills ship in `skills/`. Install any of them through skills.sh:
+Eleven model-invoked skills ship in `skills/`. Install any of them through skills.sh:
 
 ```bash
 npx skills add BNasraoui/workflowd --skill <skill-name> --agent opencode -y
@@ -297,6 +297,17 @@ Confirm discovery with `opencode debug skill`.
 - `design-boundary-reviewer` — trace every material capability in a draft Design to the current ticket and its issue graph before human Design approval. Returns `ScopeClean`, `ReviseDesign`, or `NeedsClarification`; does not replace the post-Structure size and decomposition review.
 - `impact-risk-reviewer` — evidence-backed hazard trace (impact, control, verification, residual risk) for a boundary-clean Design revision, before human Design approval. Read-only; requires Bun for the bundled 5x5 risk calculator.
 - `structure-scope-reviewer` — independent post-Structure size and decomposition review; decides `FeatureFit`, `SplitFeature`, `PromoteToEpic`, `KeepLarge`, or `NeedsResearch`. Read-only.
+
+The `rpi-*` skills are a light loop for one Beads ticket: questions → research → plan → human approval → implement → review. Each stage runs in a fresh session that reads only the previous stage's document, publishes its own document as a secret gist, and records it on the bead with `bd note` and `bd set-state <id> rpi=<stage>`.
+
+- `rpi-questions` — turns a ticket into neutral questions about today's code, without revealing the change.
+- `rpi-research` — answers the questions with `file:line` evidence and testing notes, and opens the draft PR on `rpi/<id>`. Describes only.
+- `rpi-plan` — writes a phased plan of at most two pages with named files, checks, and end-to-end tests, then stops for human approval.
+- `rpi-implement` — implements an approved plan phase by phase, touching only the files it names.
+- `rpi-review` — checks the PR against the plan and research and returns findings, most severe first.
+- `rpi-coordinate` — dispatches each stage through `dispatch_agent` with parent wakes and holds the human approval gate.
+
+`deploy/update-dev-infra.example` runs `deploy/link-agent-skills.sh` on every run. It symlinks each `skills/rpi-*` directory of the deploy checkout into `~/.agents/skills` (Codex, OpenCode) and `~/.claude/skills` (Claude Code), never replaces a path that is not a symlink, and removes links to deleted skills.
 
 ## Units
 
