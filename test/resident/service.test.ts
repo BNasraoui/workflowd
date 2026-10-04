@@ -15,7 +15,7 @@ import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-sto
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import type { startAppServer } from "../../src/resident/process"
 
-function fixture(manualQueue = false, effortOverride?: string) {
+function fixture(manualQueue = false, effortOverride?: string, manualRestart = false) {
   const queued = new Map<string, string[]>()
   let rejectedMethod: string | undefined
   const closed: number[] = []
@@ -118,10 +118,10 @@ function fixture(manualQueue = false, effortOverride?: string) {
           nextCursor: null,
         }
       rpc.receive(JSON.stringify({ id: frame.id, result }))
-      if (frame.method === "thread/queue/add") {
+      if (frame.method === "thread/queue/add" || frame.method === "turn/start") {
         const threadId = frame.params.threadId
         const id = frame.params.clientUserMessageId
-        if (manualQueue) {
+        if (manualQueue && frame.method === "thread/queue/add") {
           const pending = queued.get(String(threadId)) ?? []
           pending.push(String(id))
           queued.set(String(threadId), pending)
@@ -140,6 +140,7 @@ function fixture(manualQueue = false, effortOverride?: string) {
           params: { threadId, item: { type: "agentMessage", text: "model output" } },
         })
         if (
+          (frame.method !== "turn/start" || !manualRestart) &&
           !Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ text: Schema.String })))(
             frame.params.input,
           )[0]?.text.endsWith("hold")
@@ -188,10 +189,10 @@ function fixture(manualQueue = false, effortOverride?: string) {
       notify({ method: "turn/started", params: { threadId, turn: { id, status: "inProgress" } } })
       return id
     },
-    complete: (threadId: string, id: string) => {
+    complete: (threadId: string, id: string, status: "completed" | "interrupted" = "completed") => {
       const turn = history.get(threadId)?.find((turn) => turn.id === id)
-      if (turn !== undefined) turn.status = "completed"
-      notify({ method: "turn/completed", params: { threadId, turn: { id, status: "completed" } } })
+      if (turn !== undefined) turn.status = status
+      notify({ method: "turn/completed", params: { threadId, turn: { id, status } } })
     },
   }
 }
@@ -455,6 +456,39 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         config: { model_reasoning_effort: "xhigh" },
       })
       expect(fake.calls.filter((c) => c.method === "thread/start")).toHaveLength(1)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+test("an interrupted turn starts one continuation and the run completes", async () => {
+  const fake = fixture(false, undefined, true)
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const runs = yield* AgentRunStore
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      fake.complete("thread-1", "dispatch:a", "interrupted")
+      yield* Effect.sync(() => fake.calls.filter((call) => call.method === "turn/start")).pipe(
+        Effect.repeat({
+          while: (calls) => calls.length === 0,
+          schedule: Schedule.spaced("10 millis"),
+        }),
+        Effect.timeout("3 seconds"),
+      )
+      const restart = fake.calls.filter((call) => call.method === "turn/start")
+      expect(restart).toHaveLength(1)
+      expect(restart[0]?.params.clientUserMessageId).toBe("restart:thread-1:dispatch:a")
+      expect((yield* runs.read("a"))?.state).toBe("verified")
+      fake.complete("thread-1", "restart:thread-1:dispatch:a")
+      expect((yield* worker.exited).exitCode).toBe(0)
+      expect((yield* runs.read("a"))?.state).toBe("completed")
     }).pipe(Effect.provide(layer(fake.factory))),
   )
 })

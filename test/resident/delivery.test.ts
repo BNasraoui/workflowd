@@ -21,6 +21,30 @@ test("idle and busy wakes use queue/add with a durable client ID", async () => {
     ],
   ])
 })
+test("restart of an idle thread starts a turn with the same durable client ID", async () => {
+  const calls: unknown[] = []
+  const outcome = await Effect.runPromise(
+    deliverResident(
+      async (method, params) => {
+        calls.push([method, params])
+        return {}
+      },
+      { ...message, id: "restart:thread1:old-turn" },
+      "start",
+    ),
+  )
+  expect(outcome).toBe("delivered")
+  expect(calls).toEqual([
+    [
+      "turn/start",
+      {
+        threadId: "thread1",
+        clientUserMessageId: "restart:thread1:old-turn",
+        input: [{ type: "text", text: "CI done", text_elements: [] }],
+      },
+    ],
+  ])
+})
 test("restart reconciles a lost ack from queue/history; uncertain delivery never duplicates", async () => {
   for (const found of [true, false]) {
     const methods: string[] = []
