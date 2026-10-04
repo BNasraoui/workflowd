@@ -114,23 +114,27 @@ const make = Effect.gen(function* () {
       const child = yield* Schema.decodeUnknownEffect(SessionCustodyRow)(sessionRows[0]).pipe(
         Effect.mapError(decodeError("decode child session custody")),
       )
-      const sourceMatches =
-        child.provider_kind === "opencode"
-          ? child.provider_version === input.completionSource.providerVersion &&
-            child.provider_id === input.completionSource.providerId &&
-            child.server_id === input.completionSource.serverId &&
-            child.endpoint_alias === input.completionSource.endpointAlias &&
-            child.endpoint_identity === input.completionSource.endpointIdentity
-          : child.provider_kind === "codex"
-            ? child.provider_id === CODEX_PROVIDER_ID &&
-              child.server_id === input.completionSource.serverId &&
-              child.endpoint_alias === CODEX_ENDPOINT_ALIAS &&
-              child.endpoint_identity === codexEndpointIdentity(input.completionSource.owningHostId)
-            : child.provider_id === CLAUDE_PROVIDER_ID &&
-              child.server_id === input.completionSource.owningHostId &&
-              child.endpoint_alias === CLAUDE_ENDPOINT_ALIAS &&
-              child.endpoint_identity ===
-                claudeEndpointIdentity(input.completionSource.owningHostId)
+      let sourceMatches: boolean
+      if (child.provider_kind === "opencode") {
+        sourceMatches =
+          child.provider_version === input.completionSource.providerVersion &&
+          child.provider_id === input.completionSource.providerId &&
+          child.server_id === input.completionSource.serverId &&
+          child.endpoint_alias === input.completionSource.endpointAlias &&
+          child.endpoint_identity === input.completionSource.endpointIdentity
+      } else if (child.provider_kind === "codex") {
+        sourceMatches =
+          child.provider_id === CODEX_PROVIDER_ID &&
+          child.server_id === input.completionSource.serverId &&
+          child.endpoint_alias === CODEX_ENDPOINT_ALIAS &&
+          child.endpoint_identity === codexEndpointIdentity(input.completionSource.owningHostId)
+      } else {
+        sourceMatches =
+          child.provider_id === CLAUDE_PROVIDER_ID &&
+          child.server_id === input.completionSource.owningHostId &&
+          child.endpoint_alias === CLAUDE_ENDPOINT_ALIAS &&
+          child.endpoint_identity === claudeEndpointIdentity(input.completionSource.owningHostId)
+      }
       if (
         child.session_id !== workflow.childSessionId ||
         child.revision !== workflow.childSessionGeneration ||
