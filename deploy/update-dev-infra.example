@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # update-dev-infra — refresh a workflowd deploy checkout, restart its units,
-# and link its RPI skills for local agents.
+# link its RPI skills, and install a provenance dev build.
 #
 # Example template: copy it onto the host (e.g. ~/.local/bin/update-dev-infra),
-# adjust the two variables below, and schedule it with a systemd user timer, e.g.
+# set DEPLOY, UNITS, PROV_DEPLOY, and PROV_REMOTE_HOSTS as needed, and schedule
+# it with a systemd user timer. PROV_REMOTE_HOSTS defaults to ben-arch; set it
+# to an empty string to skip remote installs. Remote installs use the ben user.
+#
+# For example:
 #
 #   [Timer]
 #   OnCalendar=*-*-* 04:17:00
@@ -11,15 +15,17 @@
 #   Persistent=true
 #
 # The deploy checkout is a detached-HEAD clone (or worktree) of this repo that
-# the systemd units run from; see docs/remote-runner.md. The script never
-# force-updates: a dirty or diverged checkout fails loudly instead of being
-# overwritten. Every run links the checkout's skills/rpi-* directories into
+# the systemd units run from; see docs/remote-runner.md. The script does not
+# reset either checkout and refuses to build from a dirty provenance checkout.
+# Every run links the checkout's skills/rpi-* directories into
 # ~/.agents/skills and ~/.claude/skills with deploy/link-agent-skills.sh.
 
 set -euo pipefail
 
 DEPLOY="${DEPLOY:-$HOME/Documents/repos/workflowd-deploy}"
 UNITS="${UNITS:-workflowd.service workflowd-mcp.service workflowd-runner.service}"
+PROV_DEPLOY="${PROV_DEPLOY:-$HOME/Documents/repos/provenance-deploy}"
+PROV_REMOTE_HOSTS="${PROV_REMOTE_HOSTS-ben-arch}"
 
 log() { printf '[update-dev-infra] %s\n' "$*"; }
 die() { printf '[update-dev-infra] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -49,5 +55,52 @@ else
 fi
 
 "$DEPLOY/deploy/link-agent-skills.sh" "$DEPLOY"
+
+# Generate provenance's Rust sources before the native build. A maintainer
+# host may route plain cargo through CI, which does not create a local binary.
+if [ ! -e "$PROV_DEPLOY/.git" ]; then
+	log "skipping provenance: no deploy checkout at $PROV_DEPLOY"
+else
+	git -C "$PROV_DEPLOY" fetch origin --prune --quiet
+	prov_new=$(git -C "$PROV_DEPLOY" rev-parse origin/main)
+	state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/update-dev-infra"
+	prov_state="$state_dir/deployed-provenance.rev"
+	prov_record=$(cat "$prov_state" 2>/dev/null || true)
+	prov_deployed=${prov_record%%|*}
+	if [ "$prov_record" = "$prov_new|$PROV_REMOTE_HOSTS" ] && [ -x "$HOME/.local/bin/provenance" ]; then
+		log "provenance dev build already deployed ($prov_new)"
+	else
+		log "provenance dev build: ${prov_deployed:-none} -> $prov_new"
+		[ -z "$(git -C "$PROV_DEPLOY" status --porcelain)" ] || die "provenance checkout is dirty at $PROV_DEPLOY"
+		git -C "$PROV_DEPLOY" checkout --quiet --detach origin/main
+		if [ ! -f "$PROV_DEPLOY/tools/operation-codegen/package-lock.json" ] || [ ! -f "$PROV_DEPLOY/tools/operation-codegen/ensure-generated.mjs" ]; then
+			log "skipping provenance: operation codegen inputs missing at $PROV_DEPLOY"
+		else
+			(cd "$PROV_DEPLOY" && npm ci --prefix tools/operation-codegen && node tools/operation-codegen/ensure-generated.mjs)
+			binary="$PROV_DEPLOY/target/release/provenance"
+			rm -f "$binary"
+			(cd "$PROV_DEPLOY" && PROVENANCE_CI_LOCAL=1 cargo build --release -p provenance-cli --features "scanner dogfood" --quiet)
+			[ -x "$binary" ] || die "provenance dev build produced no binary"
+			grep -q dogfood "$binary" || die "provenance dev build lacks the dogfood marker"
+			install -D -m 755 "$binary" "$HOME/.local/bin/provenance"
+			log "installed provenance $prov_new to ~/.local/bin"
+			all_pushed=1
+			for host in $PROV_REMOTE_HOSTS; do
+				if scp -o BatchMode=yes -o ConnectTimeout=5 -q "$binary" "ben@$host:provenance.new" \
+					&& ssh -o BatchMode=yes -o ConnectTimeout=5 "ben@$host" \
+						'~/provenance.new --version && mkdir -p ~/.local/bin && install -m 755 ~/provenance.new ~/.local/bin/provenance && rm -f ~/provenance.new'; then
+					log "pushed provenance $prov_new to $host"
+				else
+					log "WARN: could not push provenance to $host (will retry next run)"
+					all_pushed=0
+				fi
+			done
+			mkdir -p "$state_dir"
+			if [ "$all_pushed" = 1 ]; then
+				printf '%s|%s\n' "$prov_new" "$PROV_REMOTE_HOSTS" > "$prov_state"
+			fi
+		fi
+	fi
+fi
 
 log "done"
