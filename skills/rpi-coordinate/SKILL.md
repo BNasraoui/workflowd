@@ -47,12 +47,16 @@ bounds the wait in seconds. Do not poll from this session.
 ## When the mailbox message arrives
 
 Read the waiter's JSON output (or call `read_agent_mailbox` with the saved `mailbox_id`). The
-first mailbox message carries the stage's final message in `terminal.final_message` (or a
-reference in `final_message_ref`). Its first line is the stage's gist URL. If the waiter failed,
-read its stderr and report the error.
+first mailbox message is the flat terminal result: `run_id`, `session_id`,
+`native_session_id`, `route`, `model`, `executor`, `status`, `end_reason`, `ended_at`,
+`final_message`, and `final_message_ref`. A completed run has `status == "completed"`.
+The first line of `final_message` is the stage's gist URL. If `final_message` is null,
+`final_message_ref` is the native session id; report that the final text is unavailable and
+give that reference to the human. If the waiter failed, read its stderr and report the error.
 
-1. If `terminal.status` is not a success, or the first line is not a gist URL, report the
-   failure and the stage's message to the human. Stop.
+1. If `status` is not `completed`, or the first line of `final_message` is not a gist URL,
+   report the failure and the stage's message to the human. Stop. When the text is unavailable,
+   report `final_message_ref` instead.
 2. Confirm the bead agrees: `bd dolt pull`, then `bd show <id> --json` has the stage's note and the state from the
    table.
 3. Dispatch the next stage with only the inputs in the table.

@@ -9,14 +9,17 @@ JSON arguments) and commands you would make, then your message.
 
 ```json
 {
-  "task": "RPI plan finished for workflowd-x41. Continue with the rpi-coordinate skill.",
-  "terminal": {
-    "run_id": "run_8c3",
-    "mailbox_id": "mb_33",
-    "status": "succeeded",
-    "end_reason": "completed",
-    "final_message": "https://gist.github.com/example/p41\nPhase 1: retries back off exponentially with a 10 minute cap\nPhase 2: retried jobs back off end to end\nDecisions for the reviewer: jitter source: Math.random vs injected; recommended injected for deterministic simulation."
-  }
+  "run_id": "run_8c3",
+  "session_id": "session_8c3",
+  "native_session_id": "native_8c3",
+  "route": "implement",
+  "model": "claude-opus-5",
+  "executor": "claude:local",
+  "status": "completed",
+  "end_reason": "completed",
+  "ended_at": "2026-10-04T00:00:00.000Z",
+  "final_message": "https://gist.github.com/example/p41\nPhase 1: retries back off exponentially with a 10 minute cap\nPhase 2: retried jobs back off end to end\nDecisions for the reviewer: jitter source: Math.random vs injected; recommended injected for deterministic simulation.",
+  "final_message_ref": null
 }
 ```
 
