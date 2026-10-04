@@ -60,7 +60,17 @@ nsc generate creds --account WORKFLOWD --name runner-gpu-host > runner.creds
 
 Include `broker-auth.conf` from the nats-server configuration alongside the JetStream and listen settings. The subject lists mirror what the transport actually uses — stream and consumer administration, pull fetches, synchronous acks, and inbox replies — and `test/remote/remote-transport-permissions.integration.test.ts` exercises exactly these grants against a real broker, including the denial of a runner credential touching another host's subjects.
 
-For an existing noscope deployment, update the `coordinator` user in the nsc store on the broker host with `nsc edit user --account WORKFLOWD --name coordinator --allow-pub 'workflowd.v1.ci.>'`, preserving its existing command, JetStream API, and acknowledgement grants. Check the resulting permissions with `nsc describe user --account WORKFLOWD --name coordinator`. The noscope NATS provider mints fresh credentials from this user; restart `workflowd.service` after the grant so its current JWT is replaced. This one-time credential rotation does not require a broker configuration change. Run it only during the planned host rollout.
+For an existing noscope deployment, replace the `coordinator` user's publish allow list in the nsc store on the broker host with the complete set of grants:
+
+```sh
+nsc edit user --account WORKFLOWD --name coordinator \
+  --allow-pub 'workflowd.v1.commands.*' \
+  --allow-pub 'workflowd.v1.ci.>' \
+  --allow-pub '$JS.API.>' \
+  --allow-pub '$JS.ACK.WORKFLOWD_RESULTS_V1.>'
+```
+
+Check the resulting permissions with `nsc describe user --account WORKFLOWD --name coordinator`. The noscope NATS provider mints fresh credentials from this user; restart `workflowd.service` after the grant so its current JWT is replaced. This one-time credential rotation does not require a broker configuration change. Run it only during the planned host rollout.
 
 What this still does not enforce, so unattended operation does not over-trust the broker:
 

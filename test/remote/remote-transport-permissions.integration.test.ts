@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Effect, Fiber, Scope } from "effect"
 import { connect } from "@nats-io/transport-node"
+import { jetstream } from "@nats-io/jetstream"
 import { natsAuthOptions } from "../../src/remote/auth"
 import { CiProvider, CiProviderLive } from "../../src/ci/provider"
 import { githubFixture } from "../ci/github-fixture"
@@ -154,11 +155,11 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
     })
     const subject = `workflowd.v1.ci.${Buffer.from("BNasraoui/workflowd").toString("hex")}.${"a".repeat(40)}.completed`
     const subscription = listener.subscribe(subject)
+    const delivery = (async () => {
+      for await (const message of subscription) return new TextDecoder().decode(message.data)
+      throw new Error("CI subscription closed before delivery")
+    })()
     try {
-      const delivery = (async () => {
-        for await (const message of subscription) return new TextDecoder().decode(message.data)
-        throw new Error("CI subscription closed before delivery")
-      })()
       await Effect.runPromise(
         Effect.gen(function* () {
           const provider = yield* CiProvider
@@ -179,9 +180,24 @@ describe.serial("permissioned NATS broker with per-identity creds", () => {
       )
       expect(await delivery).toBe('{"conclusion":"success"}')
     } finally {
+      void delivery.catch(() => undefined)
       subscription.unsubscribe()
       await listener.drain()
       await fixture.close()
+    }
+  }, 30_000)
+
+  test("CI subscriber credential cannot publish CI completions", async () => {
+    const listener = await connect({
+      servers: [server],
+      ...natsAuthOptions({ mode: "creds", creds: broker.ciSubscriberCreds }),
+    })
+    try {
+      await expect(
+        jetstream(listener).publish("workflowd.v1.ci.repo.sha.completed", "forged"),
+      ).rejects.toThrow(/permissions violation/i)
+    } finally {
+      await listener.drain()
     }
   }, 30_000)
 
