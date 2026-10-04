@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
+import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress"
+import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import { gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
 import {
   defaultState,
@@ -100,6 +102,64 @@ describe("agent-run fresh worktree", () => {
       expect(provider.created).toHaveLength(0)
       expect(await git(repository, "worktree", "list", "--porcelain")).not.toContain("agent-runs")
       expect(await git(repository, "rev-parse", "HEAD")).toBe(oldHead)
+    }))
+
+  test("the exact failed submission re-dispatches after a worktree failure", () =>
+    withFixture(async ({ root, repository, provider, layer }) => {
+      const input = {
+        route: "implement",
+        repository: "fixture",
+        prompt: "retry the same submission",
+        baseRef: "release",
+      } as const
+      const identifiers = agentRunIdentifiers({
+        ...input,
+        parentSessionId: null,
+        resumePrompt: null,
+      })
+      const blocker = join(root, "blocking-worktree")
+      await git(repository, "worktree", "add", "-b", `agent-run/${identifiers.short}`, blocker)
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          const first = yield* register(input).pipe(Effect.result)
+          expect(first._tag).toBe("Failure")
+          if (first._tag === "Failure")
+            expect(first.failure).toMatchObject({ reason: "worktree_failed" })
+          expect(yield* store.read(identifiers.runId)).toBeNull()
+          yield* Effect.promise(() => git(repository, "worktree", "remove", blocker))
+          const receipt = yield* register(input)
+          expect(receipt.runId).toBe(identifiers.runId)
+          expect(receipt.status).toBe("dispatched")
+          expect(yield* store.read(identifiers.runId)).not.toBeNull()
+        }).pipe(Effect.provide(layer)),
+      )
+      expect(await git(provider.created[0]!.directory, "rev-parse", "--is-inside-work-tree")).toBe(
+        "true",
+      )
+      expect(provider.created).toHaveLength(1)
+    }))
+
+  test("worktree add failure refuses dispatch without spawning a session", () =>
+    withFixture(async ({ root, repository, newHead, provider, layer }) => {
+      const input = {
+        route: "implement",
+        repository: "fixture",
+        prompt: "blocked worktree",
+      } as const
+      const short = agentRunIdentifiers({
+        ...input,
+        parentSessionId: null,
+        resumePrompt: null,
+      }).short
+      const blocker = join(root, "blocking-worktree")
+      await git(repository, "worktree", "add", "-b", `agent-run/${short}`, blocker)
+      const refusal = await refusalOf(
+        Effect.runPromise(register(input).pipe(Effect.provide(layer))),
+      )
+      expect(refusal.reason).toBe("worktree_failed")
+      expect(provider.created).toHaveLength(0)
+      expect(await git(repository, "rev-parse", "origin/main")).toBe(newHead)
     }))
 
   test("an explicit base uses that fetched origin branch", () =>

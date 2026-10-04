@@ -43,6 +43,7 @@ import {
   AgentRunStoreConflictError,
   agentRunExecutorKind,
   type AgentRunRecord,
+  type AgentRunStorePort,
   type AgentRunStoreError,
 } from "./agent-run-store"
 import type { CliPort, CliPreflightError } from "./cli-process-contract"
@@ -176,6 +177,24 @@ const promptSha256 = (prompt: string) => createHash("sha256").update(prompt, "ut
 
 const refuse = (reason: AgentRunRefusalReason, detail: string) =>
   new AgentRunRefusalError({ reason, detail })
+
+const abandonFailedWorktreeLaunch = (
+  setupError: AgentRunWorktreeSetupError,
+  store: AgentRunStorePort,
+  run: AgentRunRecord,
+) => {
+  const error = setupError.cause
+  const detail =
+    error.operation === "resolve agent-run base" && run.baseRef != null
+      ? `origin/${run.baseRef}: ${error.cause.message}`
+      : error.cause.message
+  return store
+    .abandonLaunch({ runId: run.runId, now: new Date() })
+    .pipe(
+      Effect.ignore,
+      Effect.andThen(Effect.fail(refuse(agentRunWorktreeFailure(error), detail))),
+    )
+}
 
 const routeRefusalDetail = (
   route: string,
@@ -807,19 +826,9 @@ const make = (options: AgentRunIngressOptions) =>
         ) =>
           operation.pipe(
             Effect.mapError(withMailbox),
-            Effect.catchTag("AgentRunWorktreeSetupError", (setupError) => {
-              const error = setupError.cause
-              const detail =
-                error.operation === "resolve agent-run base" && run.baseRef != null
-                  ? `origin/${run.baseRef}: ${error.cause.message}`
-                  : error.cause.message
-              return store
-                .abandonLaunch({ runId: run.runId, now: new Date() })
-                .pipe(
-                  Effect.ignore,
-                  Effect.andThen(Effect.fail(refuse(agentRunWorktreeFailure(error), detail))),
-                )
-            }),
+            Effect.catchTag("AgentRunWorktreeSetupError", (error) =>
+              abandonFailedWorktreeLaunch(error, store, run),
+            ),
           )
         let dispatched
         if (immutableReceipt) {

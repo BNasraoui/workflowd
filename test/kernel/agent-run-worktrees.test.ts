@@ -3,7 +3,8 @@ import { mkdtemp, rm, mkdir, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { agentRunWorktreeFailure, gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { WorkspaceError } from "../../src/workspace/errors"
 
 const initRepository = async (directory: string) => {
   const run = async (...command: Array<string>) => {
@@ -21,6 +22,16 @@ const initRepository = async (directory: string) => {
 }
 
 describe("gitAgentRunWorktrees", () => {
+  test("a derived default-head failure is a repository failure", () => {
+    expect(
+      agentRunWorktreeFailure(
+        new WorkspaceError({
+          operation: "resolve agent-run default head",
+          cause: new Error("missing origin/HEAD commit"),
+        }),
+      ),
+    ).toBe("repository_fetch_failed")
+  })
   test("creates the worktree on the requested branch", async () => {
     const root = await mkdtemp(join(tmpdir(), "agent-run-worktrees-"))
     try {

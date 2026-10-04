@@ -21,7 +21,8 @@ export const agentRunWorktreeFailure = (error: WorkspaceError) => {
   if (error.operation === "resolve agent-run base") return "invalid_base_ref" as const
   if (
     error.operation === "fetch agent-run repository" ||
-    error.operation === "detect agent-run default branch"
+    error.operation === "detect agent-run default branch" ||
+    error.operation === "resolve agent-run default head"
   ) {
     return "repository_fetch_failed" as const
   }
@@ -84,7 +85,7 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
             "refs/remotes/origin/HEAD",
           ]))
         yield* runWorkspaceCommand(
-          "resolve agent-run base",
+          input.base === undefined ? "resolve agent-run default head" : "resolve agent-run base",
           ["git", "-C", input.repository, "rev-parse", "--verify", `${base}^{commit}`],
           { env: { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" } },
         )
