@@ -1,16 +1,22 @@
 # RPI plan template
 
-Keep the filled plan under two pages. Delete sections that do not apply.
+Keep the filled plan's prose under two pages; code blocks do not count. Delete sections that
+do not apply.
 
 ````markdown
 # RPI plan: <id> — <ticket title>
 
-Ticket: <id> Research: <research gist url> PR: <draft PR url>
+Ticket: <id> Research: <research gist url> PR: <the bead's `pr:` note>
 Repository: <owner/repo> at <full commit sha>
 
 ## Outcome
 
 <Two or three sentences: what is true when all phases land.>
+
+## Unconfirmed facts
+
+- <fact the plan relies on that research did not confirm>: probed in Phase <n>; if false,
+  <drop or change that phase>
 
 ## Phase 1: <observable result>
 
@@ -37,6 +43,7 @@ Shape:
 
 Checks:
 
+- Probe (only if an unconfirmed fact applies): <command that confirms the fact>, first.
 - `bun run check`
 - End-to-end: `bun test test/remote/simulation/retry.test.ts` drives a real runner and job
   store through the remote simulation harness (research: <question> section).
@@ -46,6 +53,8 @@ Checks:
 ...
 
 ## Graph
+
+<Without .provenance/: "No .provenance/ in this repository; no Graph section.">
 
 | Rule | Refines | Statement | Test shape | Verification |
 | ---- | ------- | --------- | ---------- | ------------ |

@@ -18,6 +18,7 @@ implement and review stages: they may touch only the files it names.
 
 - The ticket: `bd show <id> --json`.
 - The research document: `gh gist view <url> --raw`.
+- The draft PR URL: the `pr:` line in the bead's notes.
 
 Do not read the questions document. Ground every claim about current code in the research;
 if the research does not cover something the plan needs, read that code yourself and cite
@@ -25,7 +26,8 @@ it as `path:line`.
 
 ## Rules for the plan
 
-- **At most two pages**: about 120 lines or 900 words. Cut prose before cutting checks.
+- **At most two pages**: about 120 prose lines and 900 prose words. Code blocks (file trees,
+  shape diffs) do not count. Cut prose before cutting checks.
 - **Vertical slices.** Each phase delivers one testable result a user or caller can observe.
   Do not split by layer ("types", then "storage", then "API").
 - **Files.** Each phase lists every file it changes as a compact tree. Show changed shapes
@@ -37,13 +39,18 @@ it as `path:line`.
   network, CLI, deploy script) names an end-to-end test that drives the real components
   through a harness the research found: simulations, fixture repositories, containers,
   spawned processes. Tests with only stubs or mocks are not enough. If no harness exists, the
-  first phase that needs one builds it.
+  first phase that needs one builds it. These tests run in the repository's harnesses before
+  merge; a check on a live host is extra evidence, never the gate.
+- **Unconfirmed facts.** List behavior the plan relies on that the research did not confirm
+  (for example an external tool's protocol). Each one gets a probe task as the first step of
+  the phase that relies on it, and the phase says how it is dropped or changed if the probe
+  fails.
 - No open design choices. If one remains, list it under **Decisions for the reviewer** with
   the options and your recommendation.
 
 ## Graph (only with .provenance/)
 
-Use the `provenance-shaping` and `provenance-grounded-writing` skills for this section. For
+Without `.provenance/`, drop the Graph section and say so in one line. Otherwise use the `provenance-shaping` and `provenance-grounded-writing` skills for this section. For
 each new or changed Rule, give the Requirement it refines, its statement, the test shape,
 and its verification method. Then make one Topic decision:
 
