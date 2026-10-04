@@ -57,6 +57,7 @@ let host = null,
   port = null,
   db = null
 let scratchNats = null
+let r2Unit = null
 const log = (label, value) => {
   const item = { at: new Date().toISOString(), label, value }
   entries.push(item)
@@ -215,6 +216,53 @@ const removeUnit = async (unit) => {
   })
   await command(["systemctl", "--user", "reset-failed", unit])
 }
+const startScratchNats = async () => {
+  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+  const natsPort = reservation.port
+  await reservation.stop(true)
+  scratchNats = Bun.spawn(
+    [
+      "nats-server",
+      "-js",
+      "-sd",
+      join(root, "nats"),
+      "-p",
+      String(natsPort),
+      "--auth",
+      env.EVIDENCE_TOKEN,
+    ],
+    { stdout: Bun.file(join(root, "nats.log")), stderr: Bun.file(join(root, "nats.stderr.log")) },
+  )
+  await wait(
+    () =>
+      new Promise((resolve) => {
+        const socket = connect(natsPort, "127.0.0.1")
+        socket.once("connect", () => {
+          socket.destroy()
+          resolve(true)
+        })
+        socket.once("error", () => resolve(false))
+      }),
+  )
+  return natsPort
+}
+const residentEnvironment = (natsPort) => ({
+  WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+  WORKFLOWD_CODEX_RESIDENT_HOME: env.CODEX_HOME,
+  WORKFLOWD_CODEX_RESIDENT_SOCKET: join(root, "resident.sock"),
+  WORKFLOWD_CI_ENABLED: "true",
+  WORKFLOWD_CI_TOKEN: env.EVIDENCE_TOKEN,
+  WORKFLOWD_CI_REPOSITORIES: JSON.stringify([
+    {
+      repository: "scratch/workflowd",
+      dispatchRepository: "scratch",
+      installationId: 1,
+      workflows: ["CI"],
+    },
+  ]),
+  WORKFLOWD_NATS_SERVERS: `nats://127.0.0.1:${natsPort}`,
+  WORKFLOWD_NATS_TOKEN: env.EVIDENCE_TOKEN,
+})
 try {
   log("checkout", await command(["git", "rev-parse", "HEAD"]))
   await command(["git", "init", "-q", join(root, "repo")])
@@ -535,54 +583,11 @@ try {
     assert.ok(binary, "R1 requires EVIDENCE_REAL_CODEX_BINARY")
     await mkdir(join(root, "logs"), { recursive: true })
     await writeFile(join(root, "redactions.json"), JSON.stringify([env.EVIDENCE_TOKEN]))
-    const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
-    const natsPort = reservation.port
-    await reservation.stop(true)
-    scratchNats = Bun.spawn(
-      [
-        "nats-server",
-        "-js",
-        "-sd",
-        join(root, "nats"),
-        "-p",
-        String(natsPort),
-        "--auth",
-        env.EVIDENCE_TOKEN,
-      ],
-      {
-        stdout: Bun.file(join(root, "nats.log")),
-        stderr: Bun.file(join(root, "nats.stderr.log")),
-      },
-    )
-    await wait(
-      () =>
-        new Promise((resolve) => {
-          const socket = connect(natsPort, "127.0.0.1")
-          socket.once("connect", () => {
-            socket.destroy()
-            resolve(true)
-          })
-          socket.once("error", () => resolve(false))
-        }),
-    )
+    const natsPort = await startScratchNats()
     const resident = {
       EVIDENCE_BINARY: resolve("scripts/evidence/codex-recorder.mjs"),
       EVIDENCE_CODEX_BIN: binary,
-      WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
-      WORKFLOWD_CODEX_RESIDENT_HOME: env.CODEX_HOME,
-      WORKFLOWD_CODEX_RESIDENT_SOCKET: join(root, "resident.sock"),
-      WORKFLOWD_CI_ENABLED: "true",
-      WORKFLOWD_CI_TOKEN: env.EVIDENCE_TOKEN,
-      WORKFLOWD_CI_REPOSITORIES: JSON.stringify([
-        {
-          repository: "scratch/workflowd",
-          dispatchRepository: "scratch",
-          installationId: 1,
-          workflows: ["CI"],
-        },
-      ]),
-      WORKFLOWD_NATS_SERVERS: `nats://127.0.0.1:${natsPort}`,
-      WORKFLOWD_NATS_TOKEN: env.EVIDENCE_TOKEN,
+      ...residentEnvironment(natsPort),
     }
     await start(resident)
     const submission = input(
@@ -621,6 +626,62 @@ try {
     )
     log("R1", { runId, before, after, terminal: finished.state, frames: frames.length })
   })
+  await scenario("R2", async () => {
+    assert.ok(full, "R2 requires --full")
+    const binary = process.env.EVIDENCE_REAL_CODEX_BINARY
+    assert.ok(binary, "R2 requires EVIDENCE_REAL_CODEX_BINARY")
+    const natsPort = await startScratchNats()
+    const resident = {
+      PATH: env.PATH,
+      EVIDENCE_BINARY: binary,
+      ...residentEnvironment(natsPort),
+    }
+    await start(resident)
+    const submission = input(
+      "resident-r2",
+      "First say STARTING. Then run sleep 30. Finally reply R2_DONE.",
+    )
+    const runId = id(submission)
+    const pending = post(submission).catch(() => null)
+    const before = await wait(() => {
+      const custody = db.query("SELECT * FROM resident_servers WHERE run_id=?").get(runId)
+      const thread = db.query("SELECT current_turn FROM resident_threads WHERE run_id=?").get(runId)
+      return row(runId)?.state === "verified" && thread?.current_turn && custody?.invocation
+        ? custody
+        : false
+    }, 120000)
+    r2Unit = before.unit
+    assert.ok(r2Unit.startsWith(`${prefix}resident-`))
+    const inspect = () =>
+      command(["systemctl", "--user", "show", r2Unit, "-p", "ActiveState,InvocationID,MainPID"])
+    const live = await inspect()
+    assert.match(live.stdout, /ActiveState=active/)
+    await stop("SIGINT")
+    await pending
+    const down = await inspect()
+    assert.match(down.stdout, /ActiveState=active/)
+    assert.match(down.stdout, new RegExp(`InvocationID=${before.invocation}`))
+    await start(resident)
+    const finished = await terminal(runId)
+    assert.equal(finished.state, "completed")
+    const after = db.query("SELECT * FROM resident_servers WHERE run_id=?").get(runId)
+    assert.equal(after.launch_id, before.launch_id)
+    assert.equal(after.invocation, before.invocation)
+    assert.equal(
+      db
+        .query(
+          "SELECT count(*) AS n FROM resident_inbox WHERE id LIKE 'restart:%' AND thread_id=(SELECT thread_id FROM resident_threads WHERE run_id=?)",
+        )
+        .get(runId).n,
+      0,
+    )
+    assert.equal(
+      db.query("SELECT closure_confirmed FROM resident_threads WHERE run_id=?").get(runId)
+        .closure_confirmed,
+      1,
+    )
+    log("R2", { runId, before, after, down: down.stdout, terminal: finished.state })
+  })
 } catch (error) {
   results.push({ scenario: "Harness", result: "FAIL", detail: String(error) })
   log("harness-error", String(error))
@@ -632,6 +693,13 @@ try {
     await scratchNats.exited
   }
   await fullSetup?.fixture.stop(true)
+  if (r2Unit !== null) {
+    try {
+      await removeUnit(r2Unit)
+    } catch (error) {
+      results.push({ scenario: `Cleanup ${r2Unit}`, result: "FAIL", detail: String(error) })
+    }
+  }
   await rm(env.CODEX_HOME, { recursive: true, force: true })
   log("auth-cleanup", { absent: !(await exists(join(env.CODEX_HOME, "auth.json"))) })
   await Promise.all(

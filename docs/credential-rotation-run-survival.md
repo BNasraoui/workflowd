@@ -60,9 +60,15 @@ startup after seven days, while active run IDs are protected.
 - `transient-exec`: this module owns one-shot `codex exec` launch, recovery,
   bounded observation, and exact-invocation cancellation.
 - `resident-thread`: the resident supervisor owns process recovery and
-  cancellation. Agent-run startup does not attach these threads; cancellation
-  delegates once to `cancelRun`. The resident daemon retains the process root
-  registered for run-bound peer authentication.
+  cancellation. Each resident app-server runs in a transient user unit named
+  `workflowd-resident-<run-hash>.service` by default. Its `launchId` and
+  systemd `InvocationID` are stored before and immediately after launch. The
+  daemon connects to its owner-only Unix WebSocket and registers the unit's
+  `MainPID` for run-bound peer authentication. A daemon restart detaches the
+  socket, leaving the turn running. Startup verifies the unit identities and
+  rejoins the thread; a dead unit triggers the Phase 1 continuation. A reused
+  unit identity requires operator attention. Completion and cancellation stop
+  the unit cgroup before confirming closure.
 
 When rebasing with PR #57, its resident CLI declares
 `ownership: "resident-thread"` and exposes supervisor cancellation as

@@ -393,7 +393,14 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     config.residentCodex === undefined || config.ci === undefined || ciLive === undefined
       ? undefined
       : ResidentCodexLive(
-          { ...config.residentCodex, progressWindowMs: config.agentRuns?.progressWindowMs },
+          {
+            ...config.residentCodex,
+            progressWindowMs: config.agentRuns?.progressWindowMs,
+            unitPrefix:
+              config.agentRuns?.codexUnitPrefix === undefined
+                ? "workflowd-resident-"
+                : `${config.agentRuns.codexUnitPrefix}resident-`,
+          },
           config.agentRuns?.codexBinary ?? "codex",
           config.ci,
         ).pipe(

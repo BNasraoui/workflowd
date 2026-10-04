@@ -154,3 +154,19 @@ and restarts it against the same SQLite database. It requires the run to finish
 `completed` with one durable `restart:` message and a `turn/start` frame.
 The private auth home is removed during cleanup. The run never restarts the
 installed `workflowd.service`.
+
+# Resident unit evidence (R2)
+
+Run the real socket protocol probe first, then R2 against a scratch full daemon:
+
+```sh
+EVIDENCE_COPY_AUTH=1 EVIDENCE_REAL_CODEX_BINARY=/absolute/path/to/codex \
+  bun scripts/evidence/resident-socket-probe.mjs
+EVIDENCE_COPY_AUTH=1 EVIDENCE_REAL_CODEX_BINARY=/absolute/path/to/codex \
+  bun scripts/evidence/credential-rotation.mjs --full --scenario=R2
+```
+
+R2 checks that the resident transient unit stays active while the scratch host
+is down, keeps its launch and invocation IDs after restart, finishes the same
+turn, creates no `restart:` message, and confirms unit closure. The scratch
+unit prefix is unique to the evidence run and is cleaned up afterward.

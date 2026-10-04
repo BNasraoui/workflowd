@@ -21,8 +21,46 @@ const Inbox = Schema.Struct({
   prompt: Schema.String,
   state: Schema.Literals(["prepared", "sending", "delivered", "operator_required"]),
 })
+export const ResidentServer = Schema.Struct({
+  run_id: Schema.String,
+  unit: Schema.String,
+  launch_id: Schema.String,
+  invocation: Schema.NullOr(Schema.String),
+  socket: Schema.String,
+  state: Schema.Literals(["active", "closed"]),
+})
 export const makeResidentStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const prepareServer = Effect.fn("Resident.prepareServer")(function* (
+    runId: string,
+    unit: string,
+    launchId: string,
+    socket: string,
+  ) {
+    yield* sql`INSERT INTO resident_servers(run_id,unit,launch_id,socket,state)
+      VALUES(${runId},${unit},${launchId},${socket},'active')
+      ON CONFLICT(run_id) DO UPDATE SET unit=excluded.unit, launch_id=excluded.launch_id,
+      invocation=NULL, socket=excluded.socket, state='active'`
+  })
+  const readServer = Effect.fn("Resident.readServer")(function* (runId: string) {
+    const rows = yield* sql`SELECT * FROM resident_servers WHERE run_id=${runId}`
+    return rows.length === 0 ? null : yield* Schema.decodeUnknownEffect(ResidentServer)(rows[0])
+  })
+  const activeServers = Effect.fn("Resident.activeServers")(function* () {
+    const rows = yield* sql`SELECT * FROM resident_servers WHERE state='active' ORDER BY run_id`
+    return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(ResidentServer)(row))
+  })
+  const adoptServer = Effect.fn("Resident.adoptServer")(function* (
+    runId: string,
+    invocation: string,
+  ) {
+    const rows = yield* sql`UPDATE resident_servers SET invocation=${invocation}
+      WHERE run_id=${runId} AND state='active' AND (invocation IS NULL OR invocation=${invocation}) RETURNING run_id`
+    if (rows.length !== 1) return yield* Effect.fail(new Error("Resident unit invocation mismatch"))
+  })
+  const closeServer = Effect.fn("Resident.closeServer")(function* (runId: string) {
+    yield* sql`UPDATE resident_servers SET state='closed' WHERE run_id=${runId}`
+  })
   const attach = Effect.fn("Resident.attach")(function* (
     runId: string,
     threadId: string,
@@ -130,6 +168,11 @@ export const makeResidentStore = Effect.gen(function* () {
     )
   })
   return {
+    prepareServer,
+    readServer,
+    activeServers,
+    adoptServer,
+    closeServer,
     park,
     attach,
     threads,

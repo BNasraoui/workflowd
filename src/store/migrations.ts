@@ -1429,6 +1429,15 @@ const agentCallerMailbox = Effect.gen(function* () {
   yield* sql`CREATE INDEX resident_inbox_mailbox ON resident_inbox(mailbox_id,id)`
 })
 
+const residentServerUnit = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE resident_servers (
+    run_id TEXT PRIMARY KEY, unit TEXT NOT NULL, launch_id TEXT NOT NULL,
+    invocation TEXT, socket TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','closed'))
+  ) STRICT`
+})
+
 const migrationsThrough0024 = {
   ...migrationsThrough0019,
   "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
@@ -1447,5 +1456,6 @@ export const runStoreMigrations = Migrator.make({})({
     ...migrationsThrough0024,
     "0025_resident_closure": residentClosure,
     "0026_agent_caller_mailbox": agentCallerMailbox,
+    "0027_resident_server_unit": residentServerUnit,
   }),
 })
