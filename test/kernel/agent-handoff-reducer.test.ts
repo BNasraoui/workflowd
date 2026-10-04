@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import {
   AgentHandoffStore,
@@ -11,6 +12,7 @@ import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelJobStore, KernelJobStoreLive } from "../../src/kernel/job-store"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
+import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignal, type WorkSignalPort } from "../../src/work-signal"
 
@@ -22,11 +24,12 @@ const layer = (() => {
   const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
   const jobs = KernelJobStoreLive.pipe(Layer.provideMerge(bootstrap))
   const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(bootstrap))
+  const runs = AgentRunStoreLive.pipe(Layer.provideMerge(bootstrap))
   const handoffs = AgentHandoffStoreLive.pipe(
     Layer.provideMerge(events),
     Layer.provideMerge(bootstrap),
   )
-  return Layer.mergeAll(events, jobs, sessions, handoffs)
+  return Layer.mergeAll(events, jobs, sessions, handoffs, runs)
 })()
 
 const arrangeDelivery = Effect.gen(function* () {
@@ -89,6 +92,59 @@ const arrangeDelivery = Effect.gen(function* () {
 })
 
 describe("agent handoff reducer", () => {
+  test("passes the terminal mailbox result and caller task to the resume job once", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* arrangeDelivery
+        const runs = yield* AgentRunStore
+        yield* runs.create({
+          runId: "run-child",
+          route: "scan",
+          providerId: "codex-cli",
+          modelId: "model",
+          executorKind: "codex",
+          agent: "build",
+          repository: "o/r",
+          directory: process.cwd(),
+          prompt: "task",
+          promptSha256: "a".repeat(64),
+          parentSessionId: "parent-stable",
+          resumePrompt: "Continue exactly.",
+          maxAttempts: 1,
+          createdAt: at,
+        })
+        yield* runs.claimSpawn({ runId: "run-child", now: at })
+        yield* runs.markSpawned({
+          runId: "run-child",
+          resourceId: "child-resource",
+          sessionId: "child-stable",
+          nativeSessionId: "ses_child",
+          now: at,
+        })
+        yield* runs.markVerified({ runId: "run-child", outputTokens: 1, now: at })
+        yield* runs.complete({ runId: "run-child", now: at, finalMessage: "Finished the patch." })
+        const first = yield* enqueueNextAgentHandoff(at)
+        const second = yield* enqueueNextAgentHandoff(at)
+        const sql = yield* SqlClient.SqlClient
+        const jobs = yield* sql<{
+          input_json: string
+        }>`SELECT input_json FROM kernel_workflow_jobs WHERE job_id = 'handoff-1:resume-parent'`
+        return { first, second, jobs }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.first.status).toBe("enqueued")
+    expect(result.second.status).toBe("idle")
+    const prompt = JSON.parse(result.jobs[0]!.input_json).resumePrompt
+    expect(prompt.task).toBe("Continue exactly.")
+    expect(prompt.terminal).toMatchObject({
+      run_id: "run-child",
+      status: "completed",
+      end_reason: "completed",
+      final_message: "Finished the patch.",
+    })
+    expect(prompt.terminal.mailbox_id).toMatch(/^agent-mailbox-/)
+  })
+
   test("atomically consumes one delivery into one durable parent-resume action", async () => {
     const result = await Effect.runPromise(
       Effect.gen(function* () {

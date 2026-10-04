@@ -2,6 +2,18 @@ import { describe, expect, test } from "bun:test"
 import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer } from "effect"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
+import { enqueueNextAgentHandoff } from "../../src/kernel/agent-handoff-reducer"
+import { KernelJobStoreLive } from "../../src/kernel/job-store"
+import { runKernelJobIteration } from "../../src/kernel/job-runner"
+import { runClaudeResumeIteration } from "../../src/kernel/claude-resume-worker"
+import { AGENT_WAKE_CONTRACT, AgentWakeResult } from "../../src/kernel/agent-wait-ingress"
+import { ClaudeResumeRemoteProducerLive } from "../../src/remote/claude-resume-producer"
+import { toJsonSchemaObject } from "../../src/json"
+import {
+  OpenCodeCompletionProvider,
+  runOpenCodeCompletionSourceIteration,
+} from "../../src/kernel/opencode-completion-source"
+import { WorkSignal } from "../../src/work-signal"
 import {
   at,
   codexNeverStreams,
@@ -16,6 +28,72 @@ import {
 } from "./agent-run-ingress-harness"
 
 describe("agent-run ingress", () => {
+  test("a completed Claude CLI child gives its OpenCode parent the final message", async () => {
+    const state = defaultState()
+    state.telemetry.set("ses_parent", {
+      directory: "/home/ben/coordination",
+      outputTokens: 1,
+      updatedAtMs: at.getTime(),
+      idle: false,
+    })
+    const cli = makeCodexCli([
+      { type: "agent_message", text: "Completed the review." },
+      { type: "turn.completed", outputTokens: 4 },
+    ])
+    const layer = makeLayer(
+      makeProvider(state),
+      worktrees([]),
+      undefined,
+      {
+        claudeRoutes: [{ name: "claude", modelID: "claude-opus-5-5" }],
+      },
+      cli.port,
+    )
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const receipt = yield* register({
+          route: "claude",
+          repository: "workflowd",
+          prompt: "review",
+          parentSessionId: "ses_parent",
+          resumePrompt: "Continue with the review.",
+        })
+        const store = yield* AgentRunStore
+        yield* store
+          .read(receipt.runId)
+          .pipe(Effect.repeat({ until: (row) => row?.state === "completed" }))
+        const observed = yield* runOpenCodeCompletionSourceIteration({
+          owningHostId: "mint",
+          providerId: "opencode-primary",
+          serverId: "opencode-primary",
+          endpointAlias: "local",
+          endpointIdentity: "http://127.0.0.1:4096",
+          providerVersion: 1,
+          observationTimeoutMs: 100,
+          now: () => at,
+        }).pipe(
+          Effect.provideService(OpenCodeCompletionProvider, {
+            sessionExists: async () => true,
+            sessionFinished: async () => true,
+            listMessages: async () => [],
+            subscribeEvents: async () => (async function* () {})(),
+          }),
+        )
+        const queued = yield* enqueueNextAgentHandoff(at).pipe(Effect.provide(KernelJobStoreLive))
+        const sql = yield* SqlClient.SqlClient
+        const jobs = yield* sql<{ input_json: string }>`SELECT input_json FROM kernel_workflow_jobs
+        WHERE job_id = ${receipt.wait!.instanceId + ":resume-parent"}`
+        return { receipt, observed, queued, jobs }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.observed.status).toBe("completed")
+    expect(result.queued.status).toBe("enqueued")
+    const prompt = JSON.parse(result.jobs[0]!.input_json).resumePrompt
+    expect(prompt.task).toBe("Continue with the review.")
+    expect(prompt.terminal.final_message).toBe("Completed the review.")
+    expect(prompt.terminal.mailbox_id).toBe(result.receipt.mailboxId)
+  })
+
   test("gives an idempotent caller one durable mailbox identity", async () => {
     const layer = makeLayer(makeProvider(defaultState()), worktrees([]))
     const result = await Effect.runPromise(
@@ -83,7 +161,7 @@ describe("agent-run ingress", () => {
     expect(state.prompted).toHaveLength(0)
   })
 
-  test("external SIGTERM of a Codex CLI child delivers one terminal mailbox result", async () => {
+  test("external SIGTERM of a Codex CLI child wakes its remote Claude parent", async () => {
     const child = Bun.spawn(["sleep", "60"], {
       stdin: "ignore",
       stdout: "ignore",
@@ -115,6 +193,11 @@ describe("agent-run ingress", () => {
             route: "scan",
             repository: "workflowd",
             prompt: "work",
+            parentSessionId: "remote-claude-parent",
+            parentKind: "claude",
+            parentHost: "ben-arch",
+            parentDirectory: "/home/ben/Documents/repos/workflowd",
+            resumePrompt: "Continue after child exit.",
           })
           process.kill(child.pid, "SIGTERM")
           const store = yield* AgentRunStore
@@ -125,7 +208,61 @@ describe("agent-run ingress", () => {
           const rows = yield* sql<{
             prompt: string
           }>`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${receipt.mailboxId}`
-          return { run, rows }
+          const observed = yield* runOpenCodeCompletionSourceIteration({
+            owningHostId: "mint",
+            providerId: "opencode-primary",
+            serverId: "opencode-primary",
+            endpointAlias: "local",
+            endpointIdentity: "http://127.0.0.1:4096",
+            providerVersion: 1,
+            observationTimeoutMs: 100,
+            now: () => at,
+          }).pipe(
+            Effect.provideService(OpenCodeCompletionProvider, {
+              sessionExists: async () => true,
+              sessionFinished: async () => true,
+              listMessages: async () => [],
+              subscribeEvents: async () => (async function* () {})(),
+            }),
+          )
+          const handoff = yield* enqueueNextAgentHandoff(at).pipe(
+            Effect.provide(KernelJobStoreLive),
+          )
+          const job = yield* runKernelJobIteration({
+            workerId: "test:handoff",
+            now: () => at,
+            leaseDurationMs: 60_000,
+            retryDelayMs: 0,
+          }).pipe(Effect.provide(KernelJobStoreLive))
+          const remote = yield* runClaudeResumeIteration({
+            owningHostId: "mint",
+            workerId: "test:claude-resume",
+            leaseDurationMs: 60_000,
+            heartbeatIntervalMs: 20_000,
+            resumeTimeoutMs: 5_000,
+            retryDelayMs: 1_000,
+            claudeHosts: ["ben-arch"],
+            remoteTurnTimeoutMs: 120_000,
+            now: () => at,
+            contracts: [
+              {
+                name: AGENT_WAKE_CONTRACT.name,
+                version: AGENT_WAKE_CONTRACT.version,
+                schema: AgentWakeResult,
+                jsonSchema: toJsonSchemaObject(AgentWakeResult),
+                maxOutputBytes: 16_384,
+              },
+            ],
+          }).pipe(
+            Effect.provide(
+              ClaudeResumeRemoteProducerLive.pipe(Layer.provideMerge(KernelJobStoreLive)),
+            ),
+          )
+          const remoteJob = yield* sql<{
+            input_json: string
+          }>`SELECT input_json FROM kernel_workflow_jobs
+            WHERE json_extract(input_json, '$.kind') = 'claude_resume'`
+          return { receipt, run, rows, observed, handoff, job, remote, remoteJob }
         }).pipe(Effect.provide(layer)),
       )
       expect(result.run?.diagnostic).toContain("SIGTERM")
@@ -134,6 +271,19 @@ describe("agent-run ingress", () => {
         status: "operator_required",
         final_message: "partial work",
         session_id: "codex-session-sigterm-child",
+      })
+      expect(result.observed.status).toBe("completed")
+      expect(result.handoff.status).toBe("enqueued")
+      expect(result.job.status).toBe("completed")
+      expect(result.remote.status).toBe("remote_dispatched")
+      expect(result.remoteJob).toHaveLength(1)
+      const wake = JSON.parse(JSON.parse(result.remoteJob[0]!.input_json).prompt)
+      expect(wake.task).toBe("Continue after child exit.")
+      expect(wake.terminal).toMatchObject({
+        run_id: result.run!.runId,
+        mailbox_id: result.receipt.mailboxId,
+        status: "operator_required",
+        final_message: "partial work",
       })
     } finally {
       child.kill()
@@ -656,6 +806,9 @@ describe("agent-run ingress", () => {
           child_session_id: string
           provider_kind: string
         }>`SELECT child_session_id, provider_kind FROM kernel_agent_completion_watches`
+        yield* (yield* AgentRunStore).read(receipt.runId).pipe(
+          Effect.repeat({ until: (row) => row?.state === "completed" }),
+        )
         return { receipt, watches }
       }).pipe(Effect.provide(layer)),
     )
