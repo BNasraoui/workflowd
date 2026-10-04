@@ -28,6 +28,7 @@ export const deliverResident = Effect.fn("Resident.deliver")(
       readonly prompt: string
       readonly state: string
     },
+    mode: "queue" | "start" = "queue",
   ) {
     if (message.state === "sending") {
       let cursor: string | null = null
@@ -50,7 +51,7 @@ export const deliverResident = Effect.fn("Resident.deliver")(
         : ("uncertain" as const)
     }
     yield* Effect.tryPromise(() =>
-      request("thread/queue/add", {
+      request(mode === "start" ? "turn/start" : "thread/queue/add", {
         threadId: message.thread_id,
         clientUserMessageId: message.id,
         input: [{ type: "text", text: message.prompt, text_elements: [] }],

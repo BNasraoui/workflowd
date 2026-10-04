@@ -184,6 +184,12 @@ export const ResidentCodexLive = (
           queuedWork =
             last !== undefined && last.id !== event.turn.id && last.status === "inProgress"
         }
+        if (event.turn.status === "interrupted")
+          yield* store.enqueue(
+            `restart:${event.threadId}:${event.turn.id}`,
+            event.threadId,
+            "workflowd app-server restarted. Continue the interrupted task from its durable state. Do not repeat completed external actions.",
+          )
         const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
         if (state === "finished" || event.turn.status === "failed")
           yield* finish(event.threadId, event.turn.status !== "completed")
@@ -319,14 +325,25 @@ export const ResidentCodexLive = (
             yield* finish(message.thread_id, true)
             continue
           }
+          let mode: "queue" | "start" = "queue"
+          if (message.id.startsWith("restart:")) {
+            const history = yield* Effect.tryPromise(() =>
+              request("thread/read", { threadId: message.thread_id, includeTurns: true }),
+            ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
+            if (!history.thread.turns.some((turn) => turn.status === "inProgress")) mode = "start"
+          }
           yield* store.sending(message.id)
-          const outcome = yield* deliverResident((method, params) => {
-            const decoded = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
-              params,
-            )
-            const threadId = Schema.decodeUnknownSync(Schema.String)(decoded.threadId)
-            return request(method, { ...decoded, threadId })
-          }, message)
+          const outcome = yield* deliverResident(
+            (method, params) => {
+              const decoded = Schema.decodeUnknownSync(
+                Schema.Record(Schema.String, Schema.Unknown),
+              )(params)
+              const threadId = Schema.decodeUnknownSync(Schema.String)(decoded.threadId)
+              return request(method, { ...decoded, threadId })
+            },
+            message,
+            mode,
+          )
           if (outcome === "delivered") yield* store.delivered(message.id)
           else {
             yield* store.uncertain(message.id, message.thread_id)

@@ -14,11 +14,13 @@ import {
   utimes,
 } from "node:fs/promises"
 import { resolve, join } from "node:path"
+import { connect } from "node:net"
 import { fullDaemonEnvironment } from "./credential-rotation-full.mjs"
 import { Database } from "bun:sqlite"
 import { agentRunIdentifiers } from "../../src/kernel/agent-run-ingress.ts"
 if (process.env.CI) throw new Error("This manual evidence runner must not run in CI")
 const full = process.argv.includes("--full")
+const selected = process.argv.find((arg) => arg.startsWith("--scenario="))?.slice(11)
 const base = resolve(".scratch/evidence59")
 const root = join(base, `run-${Date.now()}`)
 await mkdir(root, { recursive: true, mode: 0o700 })
@@ -54,6 +56,7 @@ let fullSetup = null
 let host = null,
   port = null,
   db = null
+let scratchNats = null
 const log = (label, value) => {
   const item = { at: new Date().toISOString(), label, value }
   entries.push(item)
@@ -190,6 +193,7 @@ const complete = async (runId) => {
   assert.equal(r.last_output_tokens, 42)
 }
 const scenario = async (name, fn) => {
+  if (selected !== undefined && name !== selected) return
   if (interrupted) throw new Error("evidence run interrupted")
   try {
     await fn()
@@ -525,12 +529,108 @@ try {
     )
     assert.ok(r.last_output_tokens > 0)
   })
+  await scenario("R1", async () => {
+    assert.ok(full, "R1 requires --full")
+    const binary = process.env.EVIDENCE_REAL_CODEX_BINARY
+    assert.ok(binary, "R1 requires EVIDENCE_REAL_CODEX_BINARY")
+    await mkdir(join(root, "logs"), { recursive: true })
+    await writeFile(join(root, "redactions.json"), JSON.stringify([env.EVIDENCE_TOKEN]))
+    const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+    const natsPort = reservation.port
+    await reservation.stop(true)
+    scratchNats = Bun.spawn(
+      [
+        "nats-server",
+        "-js",
+        "-sd",
+        join(root, "nats"),
+        "-p",
+        String(natsPort),
+        "--auth",
+        env.EVIDENCE_TOKEN,
+      ],
+      {
+        stdout: Bun.file(join(root, "nats.log")),
+        stderr: Bun.file(join(root, "nats.stderr.log")),
+      },
+    )
+    await wait(
+      () =>
+        new Promise((resolve) => {
+          const socket = connect(natsPort, "127.0.0.1")
+          socket.once("connect", () => {
+            socket.destroy()
+            resolve(true)
+          })
+          socket.once("error", () => resolve(false))
+        }),
+    )
+    const resident = {
+      EVIDENCE_BINARY: resolve("scripts/evidence/codex-recorder.mjs"),
+      EVIDENCE_CODEX_BIN: binary,
+      WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+      WORKFLOWD_CODEX_RESIDENT_HOME: env.CODEX_HOME,
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: join(root, "resident.sock"),
+      WORKFLOWD_CI_ENABLED: "true",
+      WORKFLOWD_CI_TOKEN: env.EVIDENCE_TOKEN,
+      WORKFLOWD_CI_REPOSITORIES: JSON.stringify([
+        {
+          repository: "scratch/workflowd",
+          dispatchRepository: "scratch",
+          installationId: 1,
+          workflows: ["CI"],
+        },
+      ]),
+      WORKFLOWD_NATS_SERVERS: `nats://127.0.0.1:${natsPort}`,
+      WORKFLOWD_NATS_TOKEN: env.EVIDENCE_TOKEN,
+    }
+    await start(resident)
+    const submission = input(
+      "resident-r1",
+      "First say STARTING. Then run sleep 30. Finally reply R1_DONE.",
+    )
+    const runId = id(submission)
+    const pending = post(submission).catch(() => null)
+    await wait(() => {
+      const run = row(runId)
+      const thread = db.query("SELECT current_turn FROM resident_threads WHERE run_id=?").get(runId)
+      return run?.state === "verified" && thread?.current_turn ? thread : false
+    }, 120000)
+    const before = db
+      .query("SELECT thread_id,current_turn FROM resident_threads WHERE run_id=?")
+      .get(runId)
+    await stop("SIGINT")
+    await pending
+    await start(resident)
+    const finished = await terminal(runId)
+    assert.equal(finished.state, "completed")
+    const after = db.query("SELECT thread_id FROM resident_threads WHERE run_id=?").get(runId)
+    assert.equal(after.thread_id, before.thread_id)
+    assert.equal(
+      db
+        .query("SELECT count(*) AS n FROM resident_inbox WHERE thread_id=? AND id LIKE 'restart:%'")
+        .get(before.thread_id).n,
+      1,
+    )
+    const frames = (await readFile(join(root, "logs", "codex.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    assert.ok(
+      frames.some((frame) => frame.direction === "send" && frame.frame.method === "turn/start"),
+    )
+    log("R1", { runId, before, after, terminal: finished.state, frames: frames.length })
+  })
 } catch (error) {
   results.push({ scenario: "Harness", result: "FAIL", detail: String(error) })
   log("harness-error", String(error))
 } finally {
   interrupted = false
   await stop()
+  if (scratchNats) {
+    scratchNats.kill("SIGTERM")
+    await scratchNats.exited
+  }
   await fullSetup?.fixture.stop(true)
   await rm(env.CODEX_HOME, { recursive: true, force: true })
   log("auth-cleanup", { absent: !(await exists(join(env.CODEX_HOME, "auth.json"))) })
