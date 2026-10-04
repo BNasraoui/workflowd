@@ -45,17 +45,21 @@ re-scope an approved Rule to make code pass. Bind code to the Rules the plan nam
 
 ## Stopping early
 
-When you stop (missing file, wrong Rule, failing check you cannot fix within the plan),
-keep the phases already pushed, leave the PR as a draft, and skip to Finish step 3. The
-report states where you stopped, what is missing, and the evidence, so the coordinator can
-take it to the human.
+When a runtime fact contradicts the approved plan (missing file, wrong Rule, plan gap, or
+a failing check you cannot fix within the plan), stop. Keep the phases already pushed,
+leave the PR as a draft, and publish the report with the conflicting fact and evidence.
+The coordinator sends that report back to `rpi-plan` for a revised plan and human approval.
+Skip to Finish step 3; do not mark the PR ready or watch CI. Do not implement later phases
+under the old plan.
 
 ## Finish
 
 1. Update the PR: set its title to the ticket title, mark it ready
    (`gh pr ready rpi/<id>`), and list the phases with their commits in the body.
 2. Only after the PR is updated, watch CI to the end (`gh pr checks <pr> --watch`). Fix failures on the same branch, only
-   within the plan's files.
+   within the plan's files. A resident worker that must end its turn after pushing instead
+   opens or updates the PR, publishes the report, and ends its turn. It never subscribes
+   to CI; the coordinator handles the next wake.
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can

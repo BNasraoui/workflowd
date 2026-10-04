@@ -34,15 +34,17 @@ const subscribe = async (runId) => {
   await client.connect(new StdioClientTransport({ command: mcpCommand, args: mcpArgs, env }))
   try {
     // The caller becomes verified only after its first agent message is observed.
-    for (let attempt = 0; attempt < 100; attempt++) {
+    const trySubscribe = async (attempt) => {
       const result = await client.callTool({
         name: "subscribe_to_event",
         arguments: { kind: "agent_run", run_id: runId },
       })
       if (result.isError !== true) return
       await new Promise((resolve) => setTimeout(resolve, 50))
+      if (attempt === 99) throw new Error("subscribe_to_event never succeeded")
+      return trySubscribe(attempt + 1)
     }
-    throw new Error("subscribe_to_event never succeeded")
+    await trySubscribe(0)
   } finally {
     await client.close()
   }

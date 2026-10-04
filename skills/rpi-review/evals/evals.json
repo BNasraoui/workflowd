@@ -30,6 +30,18 @@
         "The review confirms the `backoff.json` simulation scenario exists and ran.",
         "The verdict is `approve`."
       ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or tests. Use the rpi-review skill. Input: PR 92, plan https://gist.github.com/example/p70, implement report https://gist.github.com/example/i70. Return the findings document, checkout commands, and final message.",
+      "expected_output": "No findings for the stopped Phase 2; accept the report as evidence of the local Phase 1 check and restore main after review.",
+      "files": ["evals/fixtures/stopped-phase.md"],
+      "expectations": [
+        "The implement report gist is read and used as evidence that the manual-only Phase 1 test passed.",
+        "Phase 2 is treated as stopped for plan revision, so its absent files and end-to-end test are not findings.",
+        "The original main branch is restored after the detached PR-head checkout.",
+        "The verdict is `approve` for the completed scope."
+      ]
     }
   ]
 }

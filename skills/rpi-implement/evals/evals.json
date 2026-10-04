@@ -13,7 +13,8 @@
         "Phase 1 edits only `src/store/jobs.ts` and `test/store/jobs.test.ts`, runs its checks, then commits and pushes.",
         "No edit is made to `src/runtime.ts` or `test/remote/simulation/harness.ts`.",
         "The run stops at Phase 2 and reports that `src/runtime.ts` and `test/remote/simulation/harness.ts` are needed but not named by the plan.",
-        "The run does not skip or weaken tests and does not claim Phase 2 is done."
+        "The run does not skip or weaken tests and does not claim Phase 2 is done.",
+        "The implement report is published with the runtime evidence, and the final message says the coordinator sends it to rpi-plan for a revised plan and human approval."
       ]
     },
     {
@@ -56,6 +57,17 @@
         "A PR is opened with `gh pr create` including `--base main` and `--head rpi/workflowd-x61` before any CI wait.",
         "No `gh pr checks --watch` or other CI wait appears before the PR exists.",
         "The bead gets `implement: https://gist.github.com/example/i61` and `pr: https://github.com/BNasraoui/workflowd/pull/131` on separate lines, followed by `bd dolt push`."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "The fixture stands in for every command's output; do not run commands or edit files. Use the rpi-implement skill for the resident worker described in the fixture. List the final actions after phase checks pass.",
+      "expected_output": "Push, open or update the PR, publish the report, and end the turn without subscribing to CI.",
+      "files": ["evals/fixtures/resident-push.md"],
+      "expectations": [
+        "The worker pushes the checked phase and opens the PR against main.",
+        "It publishes the implement report and ends its turn.",
+        "It does not call subscribe_to_event or run gh pr checks --watch."
       ]
     }
   ]

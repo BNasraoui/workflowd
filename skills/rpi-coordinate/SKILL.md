@@ -13,10 +13,10 @@ stage's work yourself.
 | ----- | --------------- | ----------------------------------- | ---------------- |
 | 1     | `rpi-questions` | bead id                             | `questions`      |
 | 2     | `rpi-research`  | questions gist URL only             | `research`       |
-| 3     | `rpi-plan`      | bead id and research gist URL       | `plan-review`    |
+| 3     | `rpi-plan`      | bead id and research gist URL; implement report gist URL on revision | `plan-review` |
 | —     | human           | plan gist URL                       | approval note    |
 | 4     | `rpi-implement` | approved plan gist URL              | `implementing`   |
-| 5     | `rpi-review`    | PR URL and plan gist URL            | `review`         |
+| 5     | `rpi-review`    | PR URL, plan gist URL, implement report gist URL when available | `review` |
 
 ## Dispatch a stage
 
@@ -54,7 +54,10 @@ nohup /path/to/rpi-coordinate/scripts/wait-mailbox.sh "$mailbox_id" >"$output" 2
 ```
 
 Use the installed skill's actual path in place of `/path/to/rpi-coordinate`. The waiter uses
-`WORKFLOWD_MCP_URL` or defaults to `http://127.0.0.1:8791/mcp`, the repo's loopback MCP endpoint.
+`WORKFLOWD_MCP_URL`, then `~/.config/workflowd/mcp-url`, then
+`http://127.0.0.1:8791/mcp`. A coordinator on another host must set the environment
+variable or config file to a reachable endpoint, such as
+`https://mint.angelfish-celsius.ts.net:8791/mcp` on the tailnet.
 It uses `WORKFLOWD_MCP_TOKEN` or `~/.config/workflowd/mcp-token`. An optional second argument
 bounds the wait in seconds. Do not poll from this session.
 
@@ -83,6 +86,10 @@ approves that plan. Then record the approval first:
 prompt. If the human asks for changes, dispatch `rpi-plan` again with their feedback added
 to the prompt, and wait for approval again.
 
-If implement stops and reports a missing file, a wrong Rule, or a plan gap, bring it to the
-human; do not widen the plan yourself. After implement, dispatch `rpi-review`. When review
+If implement stops because a runtime fact contradicts the approved plan (including a
+missing file or wrong Rule), dispatch `rpi-plan` again with the bead id, original research
+gist URL, and implement report gist URL. Tell the human why the plan needs revision. Do not
+widen the plan yourself or dispatch review for stopped phases. Show the revised plan to
+the human for approval before another implement run. After a completed implement run,
+dispatch `rpi-review` with the implement report gist URL when present. When review
 finishes, give the human the verdict, the findings gist, and the PR URL.

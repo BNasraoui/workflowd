@@ -8,7 +8,11 @@ fi
 
 mailbox_id=$1
 timeout=${2:-0}
-url=${WORKFLOWD_MCP_URL:-http://127.0.0.1:8791/mcp}
+url=${WORKFLOWD_MCP_URL:-}
+if [[ -z "$url" && -f "$HOME/.config/workflowd/mcp-url" ]]; then
+	url=$(<"$HOME/.config/workflowd/mcp-url")
+fi
+url=${url:-http://127.0.0.1:8791/mcp}
 token=${WORKFLOWD_MCP_TOKEN:-}
 if [[ -z "$token" && -f "$HOME/.config/workflowd/mcp-token" ]]; then
 	token=$(<"$HOME/.config/workflowd/mcp-token")
