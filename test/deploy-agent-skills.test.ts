@@ -213,6 +213,29 @@ async function provenanceFixture(withCodegen = true): Promise<string> {
   return checkout
 }
 
+async function stubProvenanceBuild(checkout: string, marker = "dogfood"): Promise<void> {
+  for (const tool of ["npm", "node", "cargo"]) {
+    const stub = join(root, "bin", tool)
+    await writeFile(
+      stub,
+      `#!/bin/sh\necho '${tool}' >> '${root}/build-calls.log'\n${tool === "cargo" ? `mkdir -p '${checkout}/target/release'; printf '${marker}' > '${checkout}/target/release/provenance'; chmod +x '${checkout}/target/release/provenance'` : "exit 0"}\n`,
+    )
+    await chmod(stub, 0o755)
+  }
+}
+
+async function stubProvenanceRemote(sshStatus: number): Promise<void> {
+  for (const tool of ["scp", "ssh"]) {
+    const stub = join(root, "bin", tool)
+    await writeFile(
+      stub,
+      `#!/bin/sh\necho "${tool} $*" >> '${root}/remote-calls.log'\nexit ${tool === "ssh" ? sshStatus : 0}\n`,
+    )
+    await chmod(stub, 0o755)
+  }
+  environment = { ...environment, PROV_REMOTE_HOSTS: "ben-arch" }
+}
+
 test("update-dev-infra generates provenance sources before native cargo and installs its binary", async () => {
   const checkout = await provenanceFixture()
   const bin = join(root, "bin")
@@ -280,4 +303,64 @@ test("update-dev-infra reports when cargo produces no provenance binary", async 
   const result = await run(["bash", updater])
   expect(result.status).toBe(1)
   expect(result.stderr).toContain("provenance dev build produced no binary")
+})
+
+test("update-dev-infra validates the staged remote binary before adopting it and records a completed revision", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout)
+  await stubProvenanceRemote(0)
+  const revision = await git(checkout, "rev-parse", "--short", "HEAD")
+
+  const first = await run(["bash", updater])
+  expect(first.status).toBe(0)
+  expect(
+    await readFile(
+      join(home, ".local", "state", "update-dev-infra", "deployed-provenance.rev"),
+      "utf8",
+    ),
+  ).toBe(`${revision}\n`)
+  expect(await readFile(join(root, "remote-calls.log"), "utf8")).toContain(
+    "provenance.new --version && install",
+  )
+  const second = await run(["bash", updater])
+  expect(second.status).toBe(0)
+  expect(second.stdout).toContain(`provenance dev build already deployed (${revision})`)
+  expect((await readFile(join(root, "build-calls.log"), "utf8")).trim().split("\n")).toEqual([
+    "npm",
+    "node",
+    "cargo",
+  ])
+})
+
+test("update-dev-infra retries a failed remote push without failing workflowd", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout)
+  await stubProvenanceRemote(1)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await run(["bash", updater])
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain("WARN: could not push provenance to ben-arch")
+  }
+  expect(
+    await Bun.file(
+      join(home, ".local", "state", "update-dev-infra", "deployed-provenance.rev"),
+    ).exists(),
+  ).toBe(false)
+  expect((await readFile(join(root, "build-calls.log"), "utf8")).trim().split("\n")).toEqual([
+    "npm",
+    "node",
+    "cargo",
+    "npm",
+    "node",
+    "cargo",
+  ])
+})
+
+test("update-dev-infra refuses a provenance binary without the dogfood feature", async () => {
+  const checkout = await provenanceFixture()
+  await stubProvenanceBuild(checkout, "release")
+  const result = await run(["bash", updater])
+  expect(result.status).toBe(1)
+  expect(result.stderr).toContain("provenance dev build lacks the dogfood marker")
+  expect(await Bun.file(join(home, ".local", "bin", "provenance")).exists()).toBe(false)
 })

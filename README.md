@@ -307,7 +307,7 @@ The `rpi-*` skills are a light loop for one Beads ticket: questions → research
 - `rpi-review` — checks the PR against the plan and research and returns findings, most severe first.
 - `rpi-coordinate` — dispatches each stage through `dispatch_agent` with parent wakes and holds the human approval gate.
 
-`deploy/update-dev-infra.example` runs `deploy/link-agent-skills.sh` on every run. It symlinks each `skills/rpi-*` directory of the deploy checkout into `~/.agents/skills` (Codex, OpenCode) and `~/.claude/skills` (Claude Code), never replaces a path that is not a symlink, and removes links to deleted skills.
+`deploy/update-dev-infra.example` updates the workflowd deploy checkout, links the `rpi-*` skills, and installs a native provenance dev build when its checkout and codegen inputs are present. Set `DEPLOY`, `UNITS`, `PROV_DEPLOY`, and `PROV_REMOTE_HOSTS` for the host. The remote host list defaults to `ben-arch`; set it to an empty string to skip remote installs. The linker symlinks each `skills/rpi-*` directory of the deploy checkout into `~/.agents/skills` (Codex, OpenCode) and `~/.claude/skills` (Claude Code), never replaces a path that is not a symlink, and removes links to deleted skills.
 
 ## Units
 

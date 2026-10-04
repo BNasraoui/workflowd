@@ -3,7 +3,11 @@
 # link its RPI skills, and install a provenance dev build.
 #
 # Example template: copy it onto the host (e.g. ~/.local/bin/update-dev-infra),
-# adjust the two variables below, and schedule it with a systemd user timer, e.g.
+# set DEPLOY, UNITS, PROV_DEPLOY, and PROV_REMOTE_HOSTS as needed, and schedule
+# it with a systemd user timer. PROV_REMOTE_HOSTS defaults to ben-arch; set it
+# to an empty string to skip remote installs. Remote installs use the ben user.
+#
+# For example:
 #
 #   [Timer]
 #   OnCalendar=*-*-* 04:17:00
@@ -82,7 +86,7 @@ else
 			for host in $PROV_REMOTE_HOSTS; do
 				if scp -o BatchMode=yes -o ConnectTimeout=5 -q "$binary" "ben@$host:.local/bin/provenance.new" \
 					&& ssh -o BatchMode=yes -o ConnectTimeout=5 "ben@$host" \
-						'install -m 755 ~/.local/bin/provenance.new ~/.local/bin/provenance && rm -f ~/.local/bin/provenance.new && ~/.local/bin/provenance --version'; then
+						'~/.local/bin/provenance.new --version && install -m 755 ~/.local/bin/provenance.new ~/.local/bin/provenance && rm -f ~/.local/bin/provenance.new'; then
 					log "pushed provenance $prov_new to $host"
 				else
 					log "WARN: could not push provenance to $host (will retry next run)"
