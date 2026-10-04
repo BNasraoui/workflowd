@@ -1,0 +1,55 @@
+{
+  "skill_name": "rpi-questions",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-questions skill for bead workflowd-x41.",
+      "expected_output": "A neutral questions document about how retries are scheduled today, with the bead's pointers verbatim.",
+      "files": [
+        "evals/fixtures/retry-backoff.md"
+      ],
+      "expectations": [
+        "The document has between 2 and 8 numbered questions.",
+        "No question mentions backoff, exponential growth, jitter, a 10 minute cap, or any new delay behavior.",
+        "No question asks how to add, change, fix, or improve something, or what is wrong or missing; every question asks how the code works today.",
+        "The Pointers list contains `src/store/jobs.ts`, `scheduleRetry`, and `https://github.com/BNasraoui/workflowd/issues/41` verbatim.",
+        "The document does not copy the ticket title, description goal, or acceptance criteria.",
+        "At least one question asks which tests and end-to-end harnesses cover the area.",
+        "The final message starts with a gist URL placeholder line and the listed commands include `bd note workflowd-x41` and `bd set-state workflowd-x41 rpi=questions`."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-questions skill for bead kiln-77.",
+      "expected_output": "Neutral questions about the enqueue path plus graph questions for the area.",
+      "files": [
+        "evals/fixtures/provenance-area.md"
+      ],
+      "expectations": [
+        "The document has between 2 and 8 numbered questions.",
+        "No question mentions a 1 MiB limit, 413 responses, rejecting messages, or any size cap to be added.",
+        "A question asks which Requirements and Rules govern enqueue or the area.",
+        "A question asks which Rules bind `crates/api/src/enqueue.rs` (or the named files).",
+        "A question asks which Topics are open near the area.",
+        "The Pointers list contains `crates/api/src/enqueue.rs`, `enqueue_handler`, `crates/consumer/src/decode.rs`, and `https://example.com/kiln/rfcs/0012-message-size` verbatim."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-questions skill for bead workflowd-y12. Return the document, each command you would run in order, and your final message.",
+      "expected_output": "Neutral questions that may ask how connectWithRetry and the enqueue watch behave today, keep the ticket's names as pointers, and never name reconnecting the watch.",
+      "files": [
+        "evals/fixtures/existing-mechanism.md"
+      ],
+      "expectations": [
+        "The document has between 2 and 8 numbered questions.",
+        "At least one question asks how the existing `connectWithRetry` behaves or where it is used today.",
+        "No question names or implies the new behavior: reconnecting `remote:enqueue` or `--watch`, reusing `connectWithRetry` in `src/remote-enqueue.ts`, surviving a restart, or what enqueue should do when NATS drops.",
+        "The Pointers list contains `src/remote/nats-client.ts`, `connectWithRetry`, `src/remote-enqueue.ts`, `--watch`, and `run_7f3a` verbatim.",
+        "The commands start with `bd dolt pull`, then `git fetch origin` and `git checkout --detach origin/main`, before `bd show`; the `Repository:` line uses the full SHA `5e1c0a9d4b7f2e8361a0c5d9e4f7b2a1c8d3e6f0`.",
+        "The run re-reads the document before publishing, treats `https://gist.github.com/example/q12` as published despite exit status 1, and does not run `gh gist create` again.",
+        "The commands run `bd note workflowd-y12 \"questions: https://gist.github.com/example/q12\"`, then `bd set-state workflowd-y12 rpi=questions`, then `bd dolt push`."
+      ]
+    }
+  ]
+}

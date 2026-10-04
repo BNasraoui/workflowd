@@ -1,0 +1,48 @@
+{
+  "skill_name": "rpi-coordinate",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the mailbox message in the fixture.",
+      "expected_output": "Dispatch rpi-research with only the questions gist URL, then start the mailbox waiter.",
+      "files": [
+        "evals/fixtures/woken-after-questions.md"
+      ],
+      "expectations": [
+        "Exactly one `dispatch_agent` call is made, for the rpi-research stage.",
+        "Its prompt names the rpi-research skill and the questions gist URL and contains no ticket title, description, backoff, jitter, or cap.",
+        "It omits `parent_session_id`, `parent_kind`, `parent_directory`, `parent_host`, and `resume_prompt`.",
+        "It sets `repository` to `workflowd`, `route` to `implement`, and an idempotency key naming the bead and stage.",
+        "It saves the receipt's `mailbox_id`, starts the background waiter, and ends the turn."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the mailbox message in the fixture.",
+      "expected_output": "Stop and present the plan for approval; do not dispatch implement.",
+      "files": [
+        "evals/fixtures/woken-after-plan.md"
+      ],
+      "expectations": [
+        "No `dispatch_agent` call is made.",
+        "No `plan approved:` note is written.",
+        "The message gives the plan gist URL, both phase titles, and the jitter decision, and asks the human to approve or request changes.",
+        "The earlier 'run it end to end' instruction is not treated as approval of this plan."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. Handle the human message in the fixture.",
+      "expected_output": "Record the approval note, then dispatch rpi-implement with the plan gist URL.",
+      "files": [
+        "evals/fixtures/human-approved.md"
+      ],
+      "expectations": [
+        "`bd note workflowd-x41 \"plan approved: https://gist.github.com/example/p41\"` runs before any dispatch.",
+        "Exactly one `dispatch_agent` call is made, for rpi-implement, with the plan gist URL as input.",
+        "The dispatch omits parent fields and resume_prompt.",
+        "It saves the receipt's `mailbox_id`, starts the background waiter, and ends the turn."
+      ]
+    }
+  ]
+}

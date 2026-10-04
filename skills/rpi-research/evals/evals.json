@@ -1,0 +1,55 @@
+{
+  "skill_name": "rpi-research",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-research skill. Input: https://gist.github.com/example/9a1",
+      "expected_output": "A descriptive research document with file:line evidence that states the attempt comparison as a fact and recommends nothing.",
+      "files": [
+        "evals/fixtures/questions-with-bug.md"
+      ],
+      "expectations": [
+        "Every answer cites at least one `path:line` or `path:start-end` from the snapshot.",
+        "The answer to question 3 states that `src/store/jobs.ts:43` compares with `>`, so a job is scheduled again when attempts equals maxAttempts, as a fact.",
+        "The document contains no recommendation, fix, improvement, risk of a change, or next step (no 'should', 'recommend', 'consider', 'better', 'fix').",
+        "The document does not mention backoff, exponential delays, or jitter.",
+        "A Testing note names `test/store/jobs.test.ts` and the `test/remote/simulation/corpus.test.ts` harness with `bun run simulate:remote`, and states that no corpus scenario produces a TransientFailure.",
+        "The listed commands open a draft PR with `--base main` on branch `rpi/workflowd-x41`, run every `bd` command with `-q` and never `bd show`, write `research:` and `pr:` on separate note lines, and record `bd -q set-state workflowd-x41 rpi=research` followed by `bd dolt push`; the final message starts with the gist URL."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-research skill. Input: https://gist.github.com/example/c55",
+      "expected_output": "Research with a Graph section reporting REQ-4, RULE-9, its bindings, the open TOPIC-3, and that no Rule binds router.rs.",
+      "files": [
+        "evals/fixtures/provenance-graph.md"
+      ],
+      "expectations": [
+        "The Graph section reports REQ-4, RULE-9 refining REQ-4, its implementation at `crates/api/src/enqueue.rs:21`, and its verification test.",
+        "The Graph section reports that no Rule binds `crates/api/src/router.rs`.",
+        "The Graph section reports TOPIC-3 as open under REQ-4.",
+        "The answer about body limits cites `crates/api/src/router.rs:14` and `DefaultBodyLimit::disable()` as a fact.",
+        "The document does not propose new Rules, Topics, limits, or changes.",
+        "The Testing note names the in-memory test `crates/api/tests/enqueue.rs` and the docker-compose end-to-end harness run by `just e2e`.",
+        "The listed commands record the questions and research gists as Provenance Sources with revision URLs on branch `rpi/kiln-77`."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Do not run ssh. Use the rpi-research skill. Input: https://gist.github.com/example/q30",
+      "expected_output": "Research that reports mint's unit and journal in a labelled read-only Runtime evidence section, marks the external client's event stream as not confirmed, and recommends nothing.",
+      "files": [
+        "evals/fixtures/runtime-and-external.md"
+      ],
+      "expectations": [
+        "Every code answer cites at least one `path:line` or `path:start-end` from the snapshot.",
+        "The mint unit file and journal appear in a separately labelled Runtime evidence section that names the host and the read-only commands; no command changes anything on mint.",
+        "The answer about what `@opencode-ai/client` sends when a session ends says \"not confirmed\" and names what would confirm it (installing or reading the package, or observing a running server).",
+        "The document contains no recommendation, fix, improvement, risk of a change, or next step (no 'should', 'recommend', 'consider', 'better', 'fix').",
+        "`bd dolt pull -q` runs before any other `bd` command and `git fetch origin` with a detached checkout of `9b2e4c7a1d0f3e6b8a5c2d9f4e7a0b3c6d1e8f25` runs before any code is read; the run never runs `bd show` and runs every `bd` command with `-q`.",
+        "The draft PR is opened with `gh pr create --draft --base main --head rpi/workflowd-z30` on an empty commit, and the run or final message says the empty commit is expected without `.provenance/`.",
+        "The bead gets `research: https://gist.github.com/example/r30` and `pr: https://github.com/BNasraoui/workflowd/pull/120` on separate lines, then `bd -q set-state workflowd-z30 rpi=research` and `bd dolt push -q`."
+      ]
+    }
+  ]
+}

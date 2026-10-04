@@ -1,0 +1,35 @@
+{
+  "skill_name": "rpi-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-review skill. Input: PR 91 and plan https://gist.github.com/example/p52. Return the findings document and your final message.",
+      "expected_output": "Changes requested: the Phase 1 end-to-end test is stub-only, and src/http.ts is outside the plan.",
+      "files": [
+        "evals/fixtures/scope-and-e2e.md"
+      ],
+      "expectations": [
+        "A blocking or major finding says the Phase 1 end-to-end test uses mocks and does not run the webhook handler, worker, adapter, or `test/ci/github-fixture.ts`.",
+        "A finding names `src/http.ts` as outside the plan, citing `src/http.ts:14-30` or the 'Tidy http logging' commit.",
+        "Findings are ordered most severe first.",
+        "The verdict is `changes requested`.",
+        "The Phase 2 webhook test is not reported as a problem.",
+        "The review proposes no code edits of its own and does not modify the PR."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-review skill. Input: PR 90 and plan https://gist.github.com/example/p41. Return the findings document and your final message.",
+      "expected_output": "Approve with no blocking or major findings.",
+      "files": [
+        "evals/fixtures/clean-pr.md"
+      ],
+      "expectations": [
+        "Every changed file is mapped to a plan phase.",
+        "No blocking or major finding is reported.",
+        "The review confirms the `backoff.json` simulation scenario exists and ran.",
+        "The verdict is `approve`."
+      ]
+    }
+  ]
+}

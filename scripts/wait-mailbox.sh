@@ -1,0 +1,1 @@
+../skills/rpi-coordinate/scripts/wait-mailbox.sh
