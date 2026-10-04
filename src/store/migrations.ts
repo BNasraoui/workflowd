@@ -1438,6 +1438,11 @@ const residentServerUnit = Effect.gen(function* () {
   ) STRICT`
 })
 
+const agentRunBaseRef = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN base_ref TEXT`
+})
+
 const migrationsThrough0024 = {
   ...migrationsThrough0019,
   "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
@@ -1457,5 +1462,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0025_resident_closure": residentClosure,
     "0026_agent_caller_mailbox": agentCallerMailbox,
     "0027_resident_server_unit": residentServerUnit,
+    "0028_agent_run_base_ref": agentRunBaseRef,
   }),
 })

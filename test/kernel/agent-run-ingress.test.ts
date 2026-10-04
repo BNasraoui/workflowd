@@ -45,6 +45,19 @@ const observeCliCompletion = runOpenCodeCompletionSourceIteration({
 )
 
 describe("agent-run ingress", () => {
+  test("an invalid base ref never reaches the worktree port", async () => {
+    const created: Array<{ repository: string; directory: string; branch: string }> = []
+    const layer = makeLayer(makeProvider(defaultState()), worktrees(created))
+    const result = await Effect.runPromise(
+      register({ ...submission, baseRef: "main/../other" }).pipe(
+        Effect.provide(layer),
+        Effect.result,
+      ),
+    )
+    expect(result._tag).toBe("Failure")
+    expect(created).toHaveLength(0)
+  })
+
   test("a completed Claude CLI child gives its OpenCode parent the final message", async () => {
     const state = defaultState()
     state.telemetry.set("ses_parent", {
@@ -711,7 +724,8 @@ describe("agent-run ingress", () => {
 
   test("a codex route dispatches synchronously, registers codex custody, and completes inline", async () => {
     const state = defaultState()
-    const trees: Array<{ repository: string; directory: string; branch: string }> = []
+    const trees: Array<{ repository: string; directory: string; branch: string; base?: string }> =
+      []
     const codex = makeCodexCli(
       [
         { type: "turn.started" },
@@ -729,6 +743,7 @@ describe("agent-run ingress", () => {
           route: "scan",
           repository: "workflowd",
           prompt: "Scan the fixtures.",
+          baseRef: "release",
         })
         const sql = yield* SqlClient.SqlClient
         const custody = yield* sql<{
@@ -757,6 +772,7 @@ describe("agent-run ingress", () => {
     expect(codex.state.spawned).toHaveLength(1)
     expect(codex.state.spawned[0]!.model).toBe("gpt-5.1-codex")
     expect(codex.state.spawned[0]!.prompt).toBe("Scan the fixtures.")
+    expect(trees[0]!.base).toBe("origin/release")
   })
 
   test("a codex run with no model output inside the budget is refused and killed", async () => {

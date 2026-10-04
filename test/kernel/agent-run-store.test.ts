@@ -158,16 +158,18 @@ describe("agent-run store", () => {
     const result = await run(
       Effect.gen(function* () {
         const store = yield* AgentRunStore
-        const first = yield* store.create(input)
-        const replay = yield* store.create(input)
+        const first = yield* store.create({ ...input, baseRef: "release" })
+        const replay = yield* store.create({ ...input, baseRef: "release" })
+        const differentBase = yield* store.create({ ...input, baseRef: "main" }).pipe(Effect.result)
         const conflict = yield* store
           .create({ ...input, prompt: "different prompt" })
           .pipe(Effect.result)
-        return { first, replay, conflict }
+        return { first, replay, differentBase, conflict }
       }),
     )
     expect(result.first.status).toBe("created")
     expect(result.replay.status).toBe("duplicate")
+    expect(result.differentBase._tag).toBe("Failure")
     expect(result.conflict._tag).toBe("Failure")
     if (result.conflict._tag === "Failure") {
       expect(result.conflict.failure).toBeInstanceOf(AgentRunStoreConflictError)

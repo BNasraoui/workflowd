@@ -133,7 +133,7 @@ const dispatch = (prompt: string) =>
   })
 
 test("a resident Codex coordinator receives its child's terminal message in one thread/queue/add", async () => {
-  const root = await mkdtemp("/tmp/workflowd-coordinator-e2e-")
+  const root = await mkdtemp("/tmp/w-")
   const binary = join(root, "codex")
   await writeFile(
     binary,

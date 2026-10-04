@@ -37,6 +37,7 @@ const AgentRunRow = Schema.Struct({
   resolved_selection: Schema.NullOr(Schema.String),
   agent: Schema.String,
   repository: Schema.String,
+  base_ref: Schema.NullOr(Schema.String),
   directory: Schema.String,
   prompt: Schema.String,
   parent_session_id: Schema.NullOr(Schema.String),
@@ -74,6 +75,7 @@ export type AgentRunRecord = {
   readonly modelId: string
   readonly agent: string
   readonly repository: string
+  readonly baseRef?: string | null
   readonly directory: string
   readonly prompt: string
   readonly parentSessionId: string | null
@@ -101,6 +103,7 @@ export type AgentRunCreateInput = {
   readonly modelId: string
   readonly agent: string
   readonly repository: string
+  readonly baseRef?: string | null
   readonly directory: string
   readonly prompt: string
   readonly promptSha256: string
@@ -229,6 +232,7 @@ const toRecord = (row: Record<string, unknown>) =>
           modelId: decoded.model_id,
           agent: decoded.agent,
           repository: decoded.repository,
+          baseRef: decoded.base_ref,
           directory: decoded.directory,
           prompt: decoded.prompt,
           parentSessionId: decoded.parent_session_id,
@@ -298,6 +302,7 @@ const make = Effect.gen(function* () {
           existing.providerId === input.providerId &&
           existing.modelId === input.modelId &&
           existing.repository === input.repository &&
+          (existing.baseRef ?? null) === (input.baseRef ?? null) &&
           existing.prompt === input.prompt &&
           existing.parentSessionId === input.parentSessionId &&
           existing.resumePrompt === input.resumePrompt &&
@@ -312,10 +317,10 @@ const make = Effect.gen(function* () {
       }
       const mailboxId = `agent-mailbox-${randomBytes(32).toString("hex")}`
       yield* sql`INSERT INTO kernel_agent_runs (run_id, caller_mailbox_id, route, provider_id, model_id, agent,
-        repository, directory, prompt, prompt_sha256, parent_session_id, resume_prompt, state,
+        repository, base_ref, directory, prompt, prompt_sha256, parent_session_id, resume_prompt, state,
         attempt, max_attempts, created_at, updated_at, executor_kind, requested_selection, resolved_selection)
         VALUES (${input.runId}, ${mailboxId}, ${input.route}, ${input.providerId}, ${input.modelId},
-        ${input.agent}, ${input.repository}, ${input.directory}, ${input.prompt},
+        ${input.agent}, ${input.repository}, ${input.baseRef ?? null}, ${input.directory}, ${input.prompt},
         ${input.promptSha256}, ${input.parentSessionId}, ${input.resumePrompt}, 'accepted', 1,
         ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()},
         ${agentRunExecutorKind(input)},

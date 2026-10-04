@@ -3,7 +3,8 @@ import { mkdtemp, rm, mkdir, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { agentRunWorktreeFailure, gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { WorkspaceError } from "../../src/workspace/errors"
 
 const initRepository = async (directory: string) => {
   const run = async (...command: Array<string>) => {
@@ -15,9 +16,32 @@ const initRepository = async (directory: string) => {
   await run("git", "config", "user.email", "test@example.invalid")
   await run("git", "config", "user.name", "Test")
   await run("git", "commit", "-q", "--allow-empty", "-m", "seed")
+  await run("git", "init", "--bare", "--initial-branch=main", `${directory}-origin.git`)
+  await run("git", "remote", "add", "origin", `${directory}-origin.git`)
+  await run("git", "push", "origin", "main")
 }
 
 describe("gitAgentRunWorktrees", () => {
+  test("a derived default-head failure is a repository failure", () => {
+    expect(
+      agentRunWorktreeFailure(
+        new WorkspaceError({
+          operation: "resolve agent-run default head",
+          cause: new Error("missing origin/HEAD commit"),
+        }),
+      ),
+    ).toBe("repository_fetch_failed")
+  })
+  test("a default-branch resolution failure is a repository failure", () => {
+    expect(
+      agentRunWorktreeFailure(
+        new WorkspaceError({
+          operation: "resolve agent-run default branch",
+          cause: new Error("missing origin/HEAD"),
+        }),
+      ),
+    ).toBe("repository_fetch_failed")
+  })
   test("creates the worktree on the requested branch", async () => {
     const root = await mkdtemp(join(tmpdir(), "agent-run-worktrees-"))
     try {
