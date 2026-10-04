@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import { AgentRunSubmission } from "../../src/agent-run-contract"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
-import { callTool, type ToolCallContext } from "../../src/mcp/tools"
+import { callTool, DispatchAgentArguments, type ToolCallContext } from "../../src/mcp/tools"
 import { now } from "../kernel/job-store-harness"
 import { clientValidator, firstText, json, run } from "./harness"
 
@@ -273,6 +274,34 @@ describe("dispatch_agent", () => {
       ),
     )
     expect(JSON.parse(calls[0]!.body)).toMatchObject({ baseRef: "release" })
+  })
+
+  test("rejects unsafe base refs at both dispatch and submission boundaries", async () => {
+    const invalidRefs = [
+      "-main",
+      "../main",
+      "main/../other",
+      "main{other}",
+      "main branch",
+      "a".repeat(129),
+      "",
+    ]
+    const calls: Array<Call> = []
+    for (const baseRef of invalidRefs) {
+      expect(() =>
+        Schema.decodeUnknownSync(DispatchAgentArguments)({ ...args, base_ref: baseRef }),
+      ).toThrow()
+      const result = await run(
+        callTool(
+          "dispatch_agent",
+          { ...args, base_ref: baseRef },
+          daemon(() => json(receipt), calls),
+        ),
+      )
+      expect(result.isError).toBe(true)
+      expect(() => Schema.decodeUnknownSync(AgentRunSubmission)({ ...args, baseRef })).toThrow()
+    }
+    expect(calls).toHaveLength(0)
   })
 
   test("refuses without authorization or configuration and never calls the daemon", async () => {

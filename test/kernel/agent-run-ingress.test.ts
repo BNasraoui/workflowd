@@ -45,6 +45,19 @@ const observeCliCompletion = runOpenCodeCompletionSourceIteration({
 )
 
 describe("agent-run ingress", () => {
+  test("an invalid base ref never reaches the worktree port", async () => {
+    const created: Array<{ repository: string; directory: string; branch: string }> = []
+    const layer = makeLayer(makeProvider(defaultState()), worktrees(created))
+    const result = await Effect.runPromise(
+      register({ ...submission, baseRef: "main/../other" }).pipe(
+        Effect.provide(layer),
+        Effect.result,
+      ),
+    )
+    expect(result._tag).toBe("Failure")
+    expect(created).toHaveLength(0)
+  })
+
   test("a completed Claude CLI child gives its OpenCode parent the final message", async () => {
     const state = defaultState()
     state.telemetry.set("ses_parent", {

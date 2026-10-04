@@ -74,7 +74,7 @@ const WaitForAgentArguments = Schema.Struct({
   idempotency_key: Schema.optional(utf8BoundedText(MAX_AGENT_WAIT_IDEMPOTENCY_KEY_BYTES)),
 })
 
-const DispatchAgentArguments = Schema.Struct({
+export const DispatchAgentArguments = Schema.Struct({
   route: RequestedSelection.fields.route,
   model: RequestedSelection.fields.model,
   provider: RequestedSelection.fields.provider,
