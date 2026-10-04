@@ -18,6 +18,10 @@ import {
   type RemoteProbeProducerPort,
 } from "../../../src/remote/probe-producer"
 import { runRemoteRunnerIteration } from "../../../src/remote/runner"
+import {
+  ClaudeResumeExecutor,
+  type ClaudeResumeExecutorPort,
+} from "../../../src/remote/claude-resume-executor"
 import { RemoteRunnerStoreLive, type RemoteRunnerStorePort } from "../../../src/remote/runner-store"
 import { RemoteTransport, type RemoteTransportPort } from "../../../src/remote/transport"
 import { kernelLayer, removeDatabase } from "../../kernel/job-store-harness"
@@ -84,7 +88,11 @@ export class RemoteSimulation implements AsyncDisposable {
   private constructor(
     readonly seed: number,
     prefix: string,
-    options: { readonly singleMessageBatches?: boolean },
+    options: {
+      readonly singleMessageBatches?: boolean
+      readonly claudeExecutor?: ClaudeResumeExecutorPort
+      readonly startAt?: Date
+    },
   ) {
     this.#centralDatabase = `${prefix}-central.sqlite`
     this.#runnerDatabases = {
@@ -92,9 +100,28 @@ export class RemoteSimulation implements AsyncDisposable {
       "runner-b": `${prefix}-runner-b.sqlite`,
     }
     this.#transport = makeDeterministicTransport(options)
+    this.claudeExecutor = options.claudeExecutor
+    if (options.startAt !== undefined) this.#milliseconds = options.startAt.getTime()
   }
 
-  static async make(seed: number, options: { readonly singleMessageBatches?: boolean } = {}) {
+  readonly claudeExecutor: ClaudeResumeExecutorPort | undefined
+
+  get centralDatabase() {
+    return this.#centralDatabase
+  }
+
+  get now() {
+    return this.#now()
+  }
+
+  static async make(
+    seed: number,
+    options: {
+      readonly singleMessageBatches?: boolean
+      readonly claudeExecutor?: ClaudeResumeExecutorPort
+      readonly startAt?: Date
+    } = {},
+  ) {
     const prefix = `${process.cwd()}/remote-simulation-${process.pid}-${crypto.randomUUID()}`
     return new RemoteSimulation(seed, prefix, options)
   }
@@ -119,6 +146,13 @@ export class RemoteSimulation implements AsyncDisposable {
         Effect.provide(RemoteRunnerStoreLive),
         Effect.provide(SqliteClient.layer({ filename: this.#runnerDatabases[host] })),
         Effect.provideService(RemoteTransport, this.#transport.port),
+        Effect.provideService(
+          ClaudeResumeExecutor,
+          this.claudeExecutor ?? {
+            execute: () =>
+              Effect.succeed({ status: "failed", failureReason: "directory_not_allowed" }),
+          },
+        ),
       ),
     )
 
