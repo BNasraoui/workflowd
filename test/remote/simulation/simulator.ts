@@ -114,7 +114,7 @@ export class RemoteSimulation implements AsyncDisposable {
     return this.#now()
   }
 
-  static async make(
+  static make(
     seed: number,
     options: {
       readonly singleMessageBatches?: boolean
@@ -123,7 +123,7 @@ export class RemoteSimulation implements AsyncDisposable {
     } = {},
   ) {
     const prefix = `${process.cwd()}/remote-simulation-${process.pid}-${crypto.randomUUID()}`
-    return new RemoteSimulation(seed, prefix, options)
+    return Promise.resolve(new RemoteSimulation(seed, prefix, options))
   }
 
   readonly #now = () => new Date(this.#milliseconds)
