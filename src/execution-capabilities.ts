@@ -17,11 +17,13 @@ export type ExecutionModel = {
   readonly defaultEffort?: string
   readonly defaultBudgets?: ExecutionThinking["defaultBudgets"]
   readonly defaultModel?: boolean
+  readonly pickerEligible?: boolean
   readonly tools?: boolean
   readonly responsesWebsockets?: boolean
   readonly limits?: ExecutionCapability["limits"]
   readonly modalities?: ExecutionCapability["modalities"]
   readonly availability?: ExecutionCapability["availability"]
+  readonly speed?: ExecutionCapability["speed"]
 }
 
 export type DiscoverySource = {
@@ -131,6 +133,7 @@ export function makeExecutionCapabilities(options: {
     if (closed) throw new Error("Capability discovery closed")
     return {
       sources: results.map(({ source, observation }) => ({
+        host: options.host,
         executor: source.executor,
         kind: source.kind ?? source.executor,
         protocol: source.protocol ?? "unknown",
@@ -158,6 +161,7 @@ export function makeExecutionCapabilities(options: {
                 model: model.model,
               },
               selectionModel: model.selectionModel ?? model.model,
+              ...(model.speed === undefined ? {} : { speed: model.speed }),
               ...(model.name === undefined ? {} : { name: model.name }),
               thinking: {
                 status:
@@ -177,6 +181,9 @@ export function makeExecutionCapabilities(options: {
                   : { defaultBudgets: model.defaultBudgets }),
               },
               ...(model.defaultModel === undefined ? {} : { defaultModel: model.defaultModel }),
+              ...(model.pickerEligible === undefined
+                ? {}
+                : { pickerEligible: model.pickerEligible }),
               ...(model.tools === undefined ? {} : { tools: model.tools }),
               ...(model.responsesWebsockets === undefined
                 ? {}

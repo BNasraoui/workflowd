@@ -513,6 +513,9 @@ export function startHookService(
                   agentRuns: {
                     token: config.agentRuns.token,
                     register: Option.getOrThrow(agentRuns).register,
+                    ...(Option.getOrThrow(agentRuns).status === undefined
+                      ? {}
+                      : { status: Option.getOrThrow(agentRuns).status }),
                     cancel: Option.getOrThrow(agentRuns).cancel,
                   },
                 }),
@@ -520,6 +523,9 @@ export function startHookService(
               ? {}
               : {
                   executionCapabilities: {
+                    ...(config.executionPolicy === undefined
+                      ? {}
+                      : { policy: config.executionPolicy }),
                     token: config.executionCapabilities.token,
                     list: Option.getOrThrow(executionDiscovery).list,
                   },

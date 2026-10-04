@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv"
 import { TOOL_DEFINITIONS } from "../../src/mcp/tool-definitions"
 import { callTool, type ToolCallContext } from "../../src/mcp/tools"
 import { now } from "../kernel/job-store-harness"
@@ -119,6 +120,72 @@ describe("dispatch_agent", () => {
       mailbox_id: "agent-mailbox-test",
       messages: [{ run_id: "test", status: "completed" }],
     })
+  })
+
+  test("family selection forwards host, harness, version, intent and speed", async () => {
+    const calls: Array<Call> = []
+    const input = {
+      family: "opus",
+      host: "mint",
+      harness: "claude",
+      version: "5.5",
+      intent: "research",
+      speed: "fast",
+      repository: "workflowd",
+      prompt: "Investigate",
+      parent_session_id: "ses_parent",
+      resume_prompt: "Continue research.",
+    }
+    const {
+      parent_session_id,
+      resume_prompt,
+      repository: _repository,
+      prompt: _prompt,
+      ...requestedSelection
+    } = input
+    const resolvedSelection = {
+      host: "mint",
+      catalogHost: "mint",
+      executor: "claude:local",
+      executorKind: "claude",
+      provider: null,
+      model: "claude-opus-5-5",
+      selectionModel: "claude-opus-5-5",
+      family: "opus",
+      version: "5.5",
+      thinking: {},
+      speed: { id: "fast", native: "fastMode" },
+      speedEvidence: "native-unconfirmed",
+      availability: "unknown",
+      evidence: "advertised",
+    }
+    const definition = TOOL_DEFINITIONS.find((tool) => tool.name === "dispatch_agent")
+    expect(definition).toBeDefined()
+    expect(new AjvJsonSchemaValidator().getValidator(definition!.inputSchema)(input).valid).toBe(
+      true,
+    )
+    const result = await run(
+      callTool(
+        "dispatch_agent",
+        input,
+        daemon(() => json({ ...receipt, requestedSelection, resolvedSelection }), calls),
+      ),
+    )
+    expect(result.isError).not.toBe(true)
+    expect(JSON.parse(calls[0]!.body)).toEqual({
+      ...requestedSelection,
+      repository: input.repository,
+      prompt: input.prompt,
+      parentSessionId: parent_session_id,
+      resumePrompt: resume_prompt,
+    })
+    expect(result.structuredContent).toMatchObject({
+      mailbox_id: receipt.mailboxId,
+      mailbox_tool: "read_agent_mailbox",
+      requested_selection: requestedSelection,
+      resolved_selection: resolvedSelection,
+    })
+    expect(clientValidator("dispatch_agent")(result.structuredContent).valid).toBe(true)
   })
   test("schema refusals describe route or model without forwarding malformed explicit input", async () => {
     const calls: Array<Call> = []

@@ -17,6 +17,13 @@ const ModelPage = Schema.Struct({
       defaultReasoningEffort: Schema.String,
       inputModalities: Schema.Array(Schema.String),
       isDefault: Schema.Boolean,
+      hidden: Schema.optionalKey(Schema.Boolean),
+      serviceTiers: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({ id: Schema.String, name: Schema.String, description: Schema.String }),
+        ),
+      ),
+      defaultServiceTier: Schema.optionalKey(Schema.NullOr(Schema.String)),
     }),
   ),
   nextCursor: Schema.NullOr(Schema.String),
@@ -68,6 +75,29 @@ export function makeCodexDiscovery(
               })),
               defaultEffort: model.defaultReasoningEffort,
               defaultModel: model.isDefault,
+              ...(model.hidden === undefined ? {} : { pickerEligible: !model.hidden }),
+              ...(model.serviceTiers === undefined
+                ? {}
+                : {
+                    speed: {
+                      status: "advertised" as const,
+                      tiers: [
+                        { id: "standard" },
+                        ...model.serviceTiers.map((tier) => ({
+                          id: tier.id === "priority" ? "fast" : tier.id,
+                          native: tier.id,
+                        })),
+                      ],
+                      ...(model.defaultServiceTier == null
+                        ? {}
+                        : {
+                            defaultTier:
+                              model.defaultServiceTier === "priority"
+                                ? "fast"
+                                : model.defaultServiceTier,
+                          }),
+                    },
+                  }),
               modalities: { input: model.inputModalities },
               // The native model/list may use a bundled catalog. Authentication
               // and advertisement are observations, not per-model entitlement proof.

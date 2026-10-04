@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto"
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
-import { Context, Data, Effect, Layer } from "effect"
+import { Context, Data, Effect, Layer, Option } from "effect"
+import { RemoteAgentRunner } from "./agent-services"
 import type { RemoteCommand, RemoteHostMessage, RemoteResult } from "./contract"
 import { ClaudeResumeExecutor, type ClaudeResumeOutcome } from "./claude-resume-executor"
 import { decodeRemoteCommand, decodeRemoteResult } from "./codec"
@@ -340,6 +341,10 @@ const make = Effect.gen(function* () {
         kind: "probe",
         status: "succeeded",
         observedAt: at.toISOString(),
+        ...(command.jobId.startsWith("agent-ready-") &&
+        Option.isSome(yield* Effect.serviceOption(RemoteAgentRunner))
+          ? { agentRunVersion: 1 as const }
+          : {}),
       }
       yield* sql`UPDATE remote_runner_inbox SET state = 'result_ready', execution_count = 1
         WHERE command_id = ${command.commandId} AND state = 'received'`

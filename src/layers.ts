@@ -1,4 +1,5 @@
 import { OpenCodeMailboxLive } from "./resident/opencode"
+import { RemoteAgentDispatchLive } from "./remote/agent-coordinator"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
@@ -173,6 +174,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     }),
   )
   const claude =
+    !config.executionCapabilities?.claudeEnabled &&
     (config.agentRuns?.claudeRoutes.length ?? 0) === 0
       ? Layer.empty
       : Layer.succeed(
@@ -191,15 +193,48 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     endpointIdentity: `local://${config.worker.hostId}`,
     providerVersion: 1,
   }
+  const remoteAgents =
+    config.remoteCoordinator === undefined || config.agentRuns === undefined
+      ? Layer.empty
+      : RemoteAgentDispatchLive({
+          hosts: config.agentRuns.remoteHosts ?? [],
+          timeoutMs: config.agentRuns.verifyTimeoutMs,
+        }).pipe(
+          Layer.provideMerge(store),
+          Layer.provideMerge(
+            RemoteTransportLive({
+              servers: config.remoteCoordinator.servers,
+              auth: config.remoteCoordinator.auth,
+            }),
+          ),
+          Layer.provideMerge(signals),
+        )
+  const coordinator =
+    config.remoteCoordinator === undefined
+      ? Layer.empty
+      : RemoteCoordinatorLive(config.remoteCoordinator).pipe(
+          Layer.provideMerge(RemoteCoordinatorStoreLive.pipe(Layer.provideMerge(kernel))),
+          Layer.provideMerge(
+            RemoteTransportLive({
+              servers: config.remoteCoordinator.servers,
+              auth: config.remoteCoordinator.auth,
+            }),
+          ),
+          Layer.provideMerge(remoteAgents),
+        )
   const runs =
     config.agentRuns === undefined
       ? Layer.empty
       : AgentRunIngressLive({
           ...config.agentRuns,
+          ...(config.executionPolicy === undefined
+            ? {}
+            : { executionPolicy: config.executionPolicy }),
           identity,
           worktreeRoot: config.workspace.worktreeRoot,
         }).pipe(
           Layer.provideMerge(store),
+          Layer.provideMerge(remoteAgents),
           Layer.provideMerge(codex),
           Layer.provideMerge(claude),
           Layer.provideMerge(discovery),
@@ -212,6 +247,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     signals,
     discovery,
     runs,
+    coordinator,
     Layer.succeed(WorkflowStart, {
       preflight: Effect.void,
       start: () =>
@@ -490,11 +526,31 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(kernelStoreLayer),
           Layer.provideMerge(claudeCliLayer),
         )
+  const agentRunStoreLayer = AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
+  const remoteAgentLayer =
+    config.remoteCoordinator === undefined || config.agentRuns === undefined
+      ? Layer.empty
+      : RemoteAgentDispatchLive({
+          hosts: config.agentRuns.remoteHosts ?? [],
+          timeoutMs: config.agentRuns.verifyTimeoutMs,
+        }).pipe(
+          Layer.provideMerge(agentRunStoreLayer),
+          Layer.provideMerge(
+            RemoteTransportLive({
+              servers: config.remoteCoordinator.servers,
+              auth: config.remoteCoordinator.auth,
+            }),
+          ),
+          Layer.provideMerge(workSignalLayer),
+        )
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
       : Layer.merge(
           AgentRunIngressLive({
+            ...(config.executionPolicy === undefined
+              ? {}
+              : { executionPolicy: config.executionPolicy }),
             routes: config.agentRuns.routes,
             codexRoutes: config.agentRuns.codexRoutes,
             claudeRoutes: config.agentRuns.claudeRoutes,
@@ -509,6 +565,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             identity: completionSourceOptions,
           }),
           AgentRunWatchdogLive({
+            owningHostId: config.worker.hostId,
             progressWindowMs: config.agentRuns.progressWindowMs,
             // A run stuck before verification for ten verify windows was
             // abandoned by its dispatching request; the watchdog fails it.
@@ -519,7 +576,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             now: () => new Date(),
           }),
         ).pipe(
-          Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
+          Layer.provideMerge(agentRunStoreLayer),
+          Layer.provideMerge(remoteAgentLayer),
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
@@ -624,6 +682,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               auth: config.remoteCoordinator.auth,
             }),
           ),
+          Layer.provideMerge(remoteAgentLayer),
         )
   return Layer.mergeAll(
     executionDiscoveryLayer,

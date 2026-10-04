@@ -12,6 +12,9 @@ export const runClaudeWorker = (options: CliWorkerOptions): Promise<number> =>
     "--dangerously-skip-permissions",
     ...(options.model === null ? [] : ["--model", options.model]),
     ...(options.effort === undefined ? [] : ["--effort", options.effort]),
+    ...(options.serviceTier === undefined
+      ? []
+      : ["--settings", JSON.stringify({ fastMode: options.serviceTier === "fastMode" })]),
   ])
 
 if (import.meta.main) {

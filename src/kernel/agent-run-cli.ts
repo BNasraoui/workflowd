@@ -5,7 +5,7 @@ import {
   type CliRunProcess,
 } from "./cli-process-contract"
 import { ExecutionSelectionError } from "../execution-selection"
-import { Effect, Exit, Fiber, Option } from "effect"
+import { Cause, Effect, Exit, Fiber, Option, type Scope } from "effect"
 import type { AgentRunCliRoute } from "../agent-run-contract"
 import type { WorkspaceError } from "../workspace/errors"
 import type { WorkSignalPort } from "../work-signal"
@@ -20,6 +20,7 @@ type RefusalReason =
   | "no_first_token"
   | "run_conflict"
   | "unsupported_thinking"
+  | "unsupported_speed"
   | "model_not_available"
 type Custody = ReturnType<typeof makeAgentRunCustody>
 export type AgentRunCliStore = Partial<Pick<AgentRunStorePort, "recordResolvedSelection">> &
@@ -199,15 +200,22 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   readonly refuse: (reason: RefusalReason, detail: string) => AgentRunRefusalError
   readonly verifyTimeoutMs: number
   readonly progressWindowMs: number
+  readonly owningHostId?: string
+  readonly completionScope?: Scope.Scope
   readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
 }) => {
   const { cli, store, worktrees, signals, ensureResource, ensureSession, refuse } = dependencies
   const kind = dependencies.executor.kind
   const sessionCustodyId = dependencies.executor.sessionCustodyId
+  const forkCompletion = <A, E>(effect: Effect.Effect<A, E>) =>
+    dependencies.completionScope === undefined
+      ? Effect.forkDetach(effect)
+      : Effect.forkIn(effect, dependencies.completionScope)
 
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
     model === undefined ||
     run.resolvedSelection == null ||
+    run.resolvedSelection.evidence !== "configured" ||
     store.recordResolvedSelection === undefined
       ? Effect.void
       : store.recordResolvedSelection({
@@ -215,6 +223,38 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           now,
           selection: { ...run.resolvedSelection, model, evidence: "runtime" },
         })
+
+  const rejectModelSubstitution = (run: AgentRunRecord, observation: Observation) =>
+    Effect.gen(function* () {
+      const accepted = run.resolvedSelection
+      const actual =
+        observation.result.outcome === "generating" ? observation.result.model : undefined
+      if (
+        accepted == null ||
+        accepted.evidence === "configured" ||
+        actual === undefined ||
+        accepted.model === null ||
+        actual === accepted.model
+      )
+        return false
+      let detail = `selection_mismatch: accepted ${accepted.model}, native initialization reported ${actual}; custody retained`
+      // Session/process custody is established before attempting teardown. A
+      // mismatch cannot rewrite the accepted snapshot or permit a replacement.
+      yield* store.operatorRequired({ runId: run.runId, diagnostic: detail, now: new Date() })
+      const cancelled = yield* observation.cancel.pipe(Effect.result)
+      if (cancelled._tag === "Failure")
+        detail += `; cleanup failed: ${cliFailureDetail(cancelled.failure)}`
+      else {
+        const stopped = yield* Fiber.join(observation.exited).pipe(
+          Effect.result,
+          Effect.timeoutOption(500),
+        )
+        if (Option.isNone(stopped) || stopped.value._tag === "Failure")
+          detail += "; native termination unconfirmed"
+      }
+      yield* store.operatorRequired({ runId: run.runId, diagnostic: detail, now: new Date() })
+      return true
+    })
 
   const complete = (input: {
     readonly runId: string
@@ -318,6 +358,9 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             ...(run.resolvedSelection?.thinking.effort === undefined
               ? {}
               : { effort: run.resolvedSelection.thinking.effort }),
+            ...(run.resolvedSelection?.speed === undefined
+              ? {}
+              : { serviceTier: run.resolvedSelection.speed.native ?? null }),
           })
           .pipe(
             Effect.tapError((error) =>
@@ -356,9 +399,14 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           nativeSessionId: threadId,
           now,
         })
+        if (yield* rejectModelSubstitution(run, observed))
+          return yield* refuse(
+            "model_not_available",
+            "Native initialization substituted the accepted model; selection_mismatch and process custody retained",
+          )
         yield* store.markVerified({ runId: run.runId, outputTokens: 1, now })
         if (cli.ownership === "transient-exec")
-          yield* Effect.forkDetach(
+          yield* forkCompletion(
             complete({
               runId: run.runId,
               iterator: observed.iterator,
@@ -368,7 +416,12 @@ export const makeAgentRunCliDispatcher = (dependencies: {
               stallWindowMs: dependencies.progressWindowMs,
             }).pipe(
               Effect.catchCause((cause) =>
-                Effect.logError(`${kind} inline completion failed`, { runId: run.runId, cause }),
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logError(`${kind} inline completion failed`, {
+                      runId: run.runId,
+                      cause,
+                    }),
               ),
             ),
           )
@@ -390,7 +443,13 @@ export const makeAgentRunCliDispatcher = (dependencies: {
 
   const recover = Effect.gen(function* () {
     if (cli.ownership === "resident-thread") return 0
-    const runs = yield* store.listActiveByExecutor(kind, true)
+    const active = yield* store.listActiveByExecutor(kind, true)
+    const runs = active.filter(
+      (run) =>
+        dependencies.owningHostId === undefined ||
+        run.resolvedSelection == null ||
+        run.resolvedSelection.host === dependencies.owningHostId,
+    )
     yield* cli.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {
@@ -445,6 +504,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           nativeSessionId: observed.result.threadId,
           now: new Date(),
         })
+        if (yield* rejectModelSubstitution(run, observed)) continue
         yield* store.markVerified({ runId: run.runId, outputTokens: 1, now: new Date() })
         iterator = observed.iterator
         exited = observed.exited
@@ -459,7 +519,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           })
         }
       }
-      yield* Effect.forkDetach(
+      yield* forkCompletion(
         complete({
           runId: run.runId,
           iterator,
@@ -469,7 +529,9 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           stallWindowMs: dependencies.progressWindowMs,
         }).pipe(
           Effect.catchCause((cause) =>
-            Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logError(`recovered ${kind} completion failed`, { runId: run.runId, cause }),
           ),
         ),
       )

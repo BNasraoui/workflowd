@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { AgentFragment } from "./agent-contract"
 
 export const MAX_REMOTE_MESSAGE_BYTES = 16_384
 
@@ -77,7 +78,21 @@ export const RemoteClaudeResumeCommand = Schema.Struct({
   kind: Schema.Literal("claude_resume"),
   payload: ClaudeResumeJobV1,
 })
-export const RemoteCommand = Schema.Union([RemoteProbeCommand, RemoteClaudeResumeCommand])
+export const RemoteAgentCommand = Schema.Struct({
+  ...commandBase,
+  kind: Schema.Literal("agent_launch"),
+  fragment: AgentFragment,
+})
+export const RemoteAgentCancel = Schema.Struct({
+  ...commandBase,
+  kind: Schema.Literal("agent_cancel"),
+})
+export const RemoteCommand = Schema.Union([
+  RemoteProbeCommand,
+  RemoteClaudeResumeCommand,
+  RemoteAgentCommand,
+  RemoteAgentCancel,
+])
 export type RemoteCommand = typeof RemoteCommand.Type
 
 export const RemoteFence = Schema.Struct({
@@ -93,6 +108,8 @@ export type RemoteFence = typeof RemoteFence.Type
 export const RemoteHostMessage = Schema.Union([
   RemoteProbeCommand,
   RemoteClaudeResumeCommand,
+  RemoteAgentCommand,
+  RemoteAgentCancel,
   RemoteFence,
 ])
 export type RemoteHostMessage = typeof RemoteHostMessage.Type
@@ -123,6 +140,7 @@ export const RemoteProbeResult = Schema.Struct({
   ...resultBase,
   kind: Schema.Literal("probe"),
   status: Schema.Literal("succeeded"),
+  agentRunVersion: Schema.optionalKey(Schema.Literal(1)),
 })
 export const RemoteClaudeResumeResult = Schema.Struct({
   ...resultBase,
@@ -144,5 +162,15 @@ export const RemoteClaudeResumeResult = Schema.Struct({
     }),
   ),
 )
-export const RemoteResult = Schema.Union([RemoteProbeResult, RemoteClaudeResumeResult])
+export const RemoteAgentResult = Schema.Struct({
+  ...resultBase,
+  kind: Schema.Literal("agent_state"),
+  status: Schema.Literal("succeeded"),
+  fragment: AgentFragment,
+})
+export const RemoteResult = Schema.Union([
+  RemoteProbeResult,
+  RemoteClaudeResumeResult,
+  RemoteAgentResult,
+])
 export type RemoteResult = typeof RemoteResult.Type

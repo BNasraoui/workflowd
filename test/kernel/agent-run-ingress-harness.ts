@@ -120,7 +120,13 @@ const claudeCli: ClaudeCliPort = {
 }
 
 export type CodexState = {
-  spawned: Array<{ directory: string; prompt: string; model: string | null; effort?: string }>
+  spawned: Array<{
+    directory: string
+    prompt: string
+    model: string | null
+    effort?: string
+    serviceTier?: string | null
+  }>
   killed: boolean
 }
 
@@ -146,6 +152,7 @@ export const makeCodexCli = (
           prompt: input.prompt,
           model: input.model,
           ...(input.effort === undefined ? {} : { effort: input.effort }),
+          ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
         })
         const queue: {
           push: (event: import("../../src/kernel/codex-session").CodexExecEvent) => void
@@ -221,6 +228,7 @@ export const codexNeverStreams = () => {
           prompt: input.prompt,
           model: input.model,
           ...(input.effort === undefined ? {} : { effort: input.effort }),
+          ...(input.serviceTier === undefined ? {} : { serviceTier: input.serviceTier }),
         })
         const never: AsyncIterable<import("../../src/kernel/codex-session").CodexExecEvent> = {
           [Symbol.asyncIterator]: () => ({

@@ -2,6 +2,7 @@ import { Effect, Option, Queue } from "effect"
 import { decodeRemoteHostMessage } from "./codec"
 import { RemoteRunnerStore, type RemoteRunnerStorePort } from "./runner-store"
 import { RemoteTransport } from "./transport"
+import { RemoteAgentRunner } from "./agent-services"
 import type { RemoteDelivery } from "./transport"
 
 export type RemoteRunnerIterationOptions = {
@@ -47,7 +48,23 @@ const recordRemoteRunnerDeliveries = (
         }),
       ),
     )
-    const outcomes = yield* store.recordBatch(hostId, decoded, at)
+    const agent = yield* Effect.serviceOption(RemoteAgentRunner)
+    const legacy = []
+    for (const item of decoded) {
+      if (
+        "message" in item &&
+        (item.message.kind === "agent_launch" || item.message.kind === "agent_cancel")
+      ) {
+        if (Option.isSome(agent)) yield* agent.value.receive(item.message)
+        else
+          legacy.push({
+            deliveryId: item.deliveryId,
+            data: item.data,
+            rejection: "malformed" as const,
+          })
+      } else legacy.push(item)
+    }
+    const outcomes = yield* store.recordBatch(hostId, legacy, at)
     if (deliveries.length > 0 && options.afterDurableReceipt !== undefined) {
       yield* options.afterDurableReceipt()
     }
@@ -67,6 +84,8 @@ const executeReceivedAndDrainResults = (at: Date, drainResults = true) =>
       }
     }
     if (drainResults) yield* drainPendingResults(at)
+    const agent = yield* Effect.serviceOption(RemoteAgentRunner)
+    if (Option.isSome(agent)) yield* agent.value.tick()
     return recoverable
   })
 
@@ -114,7 +133,13 @@ export const runRemoteRunnerLoop = (hostId: string, options: RemoteRunnerLoopOpt
     const transport = yield* RemoteTransport
     const outboxRetryIntervalMs = options.outboxRetryIntervalMs ?? 1_000
     yield* Effect.forever(
-      Effect.suspend(() => drainPendingResults(new Date())).pipe(
+      Effect.suspend(() =>
+        Effect.gen(function* () {
+          yield* drainPendingResults(new Date())
+          const agent = yield* Effect.serviceOption(RemoteAgentRunner)
+          if (Option.isSome(agent)) yield* agent.value.tick()
+        }),
+      ).pipe(
         Effect.catchCause((cause) =>
           Effect.logError("Remote runner result outbox drain failed", cause),
         ),

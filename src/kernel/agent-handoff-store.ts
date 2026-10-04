@@ -114,6 +114,14 @@ const make = Effect.gen(function* () {
       const child = yield* Schema.decodeUnknownEffect(SessionCustodyRow)(sessionRows[0]).pipe(
         Effect.mapError(decodeError("decode child session custody")),
       )
+      const remoteRuns =
+        child.endpoint_alias === "remote-agent" &&
+        child.endpoint_identity === `remote-agent://${child.owning_host_id}`
+          ? yield* sql`SELECT run_id FROM kernel_agent_runs WHERE session_id = ${child.session_id}
+          AND json_extract(resolved_selection, '$.host') = ${child.owning_host_id}
+          AND executor_kind = ${child.provider_kind}`
+          : []
+      const remoteSource = remoteRuns.length === 1
       let sourceMatches: boolean
       if (child.provider_kind === "opencode") {
         sourceMatches =
@@ -140,8 +148,8 @@ const make = Effect.gen(function* () {
         child.revision !== workflow.childSessionGeneration ||
         !["ready", "active"].includes(child.state) ||
         child.resource_state !== "reserved" ||
-        child.owning_host_id !== input.completionSource.owningHostId ||
-        !sourceMatches
+        (!remoteSource &&
+          (child.owning_host_id !== input.completionSource.owningHostId || !sourceMatches))
       ) {
         return yield* new AgentHandoffStoreError({
           operation: "validate child session generation",

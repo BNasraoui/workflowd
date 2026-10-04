@@ -3,13 +3,25 @@
 Bead `workflowd-ccw.1` adds an authenticated catalog independent of dispatch route aliases.
 `GET /execution-capabilities` and MCP `list_execution_capabilities({})` return the same
 contract. Discovery reads the enabled local adapters; it does not launch inference.
+`GET /models` and MCP `list_models({host?, harness?, family?})` provide a compact
+view with concrete selectors, family/version, preferred harness, scoped latest,
+thinking/speed choices, intent summaries and policy revision. Empty model filters
+retain relevant source health. See [dispatch and policy](execution-dispatch.md).
+
+All hosts are assumed to share harness/model/settings capabilities. Compact listing
+and advisory resolution reuse the local catalog for any requested execution host.
+Compact `host` is the intended execution target; `catalogHost` and `sources.host`
+retain the actual observation location. The detailed catalog's `identity.host`
+also remains observation provenance. Listing another host does not validate its
+runner, credentials or launch transport. Per-host model advertisements are not a
+prerequisite for family routing.
 
 ## Identity and metadata
 
 Each capability carries:
 
 - `identity.host`: the daemon's stable `WORKFLOWD_HOST_ID`.
-- `identity.executor`: `opencode:<serverId>` or `codex:local`. This identifies the
+- `identity.executor`: `opencode:<serverId>`, `codex:local` or `claude:local`. This identifies the
   executor separately from the model provider.
 - `identity.provider`: the adapter's observed provider ID, or `null` when its
   native protocol does not supply one. A null Codex `config.model_provider` stays null.
@@ -23,6 +35,10 @@ Each capability carries:
 - Optional tool support, input/output modalities, context/output limits, and
   Responses WebSocket support where the adapter advertises them.
 - `observedAt` and `availability`: `available`, `unavailable`, or `unknown`.
+- Optional `speed`: advertised native tiers and translations, or explicit unknown
+  support. A fast reasoning variant is not priority service evidence.
+- Optional `pickerEligible`: native picker visibility; false excludes automatic
+  latest without removing exact-ID discovery.
 
 OpenCode uses the installed Effect SDK's `model.list`, `provider.list` and
 `model.default`. It retains enabled flags, capabilities, variant IDs, safe thinking
@@ -56,13 +72,21 @@ An account requiring OpenAI authentication with no account returns an
 `unauthenticated` source and no capabilities. An unsupported RPC method or an
 incompatible native response returns `unsupported`, without a fallback catalog.
 
-An enabled local Claude resume executor is reported as an `unsupported` source;
-this slice has no supported Claude discovery protocol. `workflowd-5si` owns its
-direct launch implementation.
+Claude uses pinned Agent SDK 0.3.289 `Query.supportedModels()` with the configured
+Claude binary (verified against Claude Code 2.1.286). Streaming prompt input is
+held until teardown: observation emits initialization control requests but no user
+prompt or inference. It closes the Query, terminates the owned detached process
+group and awaits exit, including on timeout. Session persistence is disabled,
+tools are empty and MCP configuration is strict. Native startup can still read
+local configuration; the observation cwd is the daemon user's home.
+Resolved native aliases are projected to concrete IDs; unresolved aliases are
+omitted. Duplicate concrete IDs are coalesced. Effort and fast-mode support are
+catalog observations; absent options remain unknown, and access is `unknown`.
+Strict effective-effort limitations are documented in the dispatch contract.
 
 ## Freshness and failure
 
-`sources` identifies each executor, its kind and discovery protocol, source status,
+`sources` identifies each host + executor, its kind and discovery protocol, source status,
 `checkedAt`, last successful `observedAt`, `freshUntil` and `stale`. Source status
 `available` means discovery succeeded; model availability is a separate observation.
 
@@ -94,6 +118,9 @@ observation output to 8 MB. OpenCode rejects incompatible SDK responses as
 | `WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS` | 10,000; accepted range 1–30,000 ms per source. |
 | `WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED` | True when agent runs or resident Codex is enabled; otherwise false. Explicit true/false overrides discovery composition. |
 | `WORKFLOWD_AGENT_RUN_CODEX_BIN` | `codex`; discovery uses the same configured executable. |
+| `WORKFLOWD_EXECUTION_CAPABILITIES_CLAUDE_ENABLED` | True when agent runs are enabled; otherwise false. Explicit false overrides legacy Claude route/host settings. |
+| `WORKFLOWD_AGENT_RUN_CLAUDE_BIN` | `claude`; SDK discovery and execution use this configured executable. |
+| `WORKFLOWD_EXECUTION_POLICY_FILE` | Optional versioned family/intent policy JSON loaded at startup; see dispatch documentation. |
 
 OpenCode is required for the default automation consumer and absent in explicit
 execution-only mode. See [local dispatch](execution-dispatch.md) for consumer
@@ -116,6 +143,6 @@ outgoing discovery fetch.
 
 `workflowd-ccw.2` consumes this normalized contract for explicit executor/model
 selection, including the native/selection ID distinction, and applies/persists thinking
-settings. [Local dispatch](execution-dispatch.md) documents the interface. `.3` owns
+settings. [Local and remote dispatch](execution-dispatch.md) documents the interface. `.3` owns
 runner registration and remote advertisements. No remote or messaging lifecycle is
 introduced by this local read interface.

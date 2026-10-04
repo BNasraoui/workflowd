@@ -143,7 +143,16 @@ const storedResultJson = (result: RemoteResult, hostId: string): string =>
           ...(result.output === undefined ? {} : { output: result.output }),
           ...(result.failureReason === undefined ? {} : { failureReason: result.failureReason }),
         }
-      : { kind: "remote_probe", hostId, status: result.status },
+      : result.kind === "probe"
+        ? {
+            kind: "remote_probe",
+            hostId,
+            status: result.status,
+            ...(result.agentRunVersion === undefined
+              ? {}
+              : { agentRunVersion: result.agentRunVersion }),
+          }
+        : result,
   )
 
 /** Classifies a result against its dispatch row: either a rejection

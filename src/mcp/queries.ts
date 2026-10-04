@@ -3,6 +3,8 @@ import { Context, Effect, Layer, Schema } from "effect"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { KernelJobStore, type KernelJobStoreError } from "../kernel/job-store"
 import type { JsonValue } from "../json"
+import { JsonValueSchema } from "../json"
+import { RequestedSelection, ResolvedSelection } from "../execution-selection"
 
 const Timestamp = Schema.String
 const NullableTimestamp = Schema.NullOr(Timestamp)
@@ -29,6 +31,20 @@ const HostDispatchRow = Schema.Struct({
 })
 const MailboxRow = Schema.Struct({ prompt: Schema.String })
 const MailboxMessage = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
+const RunStatusRow = Schema.Struct({
+  run_id: Schema.String,
+  caller_mailbox_id: Schema.String,
+  state: Schema.String,
+  attempt: Schema.Int,
+  max_attempts: Schema.Int,
+  created_at: Schema.String,
+  updated_at: Schema.String,
+  directory: Schema.String,
+  native_session_id: Schema.NullOr(Schema.String),
+  session_id: Schema.NullOr(Schema.String),
+  requested_selection: Schema.NullOr(Schema.fromJsonString(RequestedSelection)),
+  resolved_selection: Schema.NullOr(Schema.fromJsonString(ResolvedSelection)),
+})
 
 export type JobStatusView = {
   readonly jobId: string
@@ -37,6 +53,15 @@ export type JobStatusView = {
   readonly maxAttempts: number
   readonly runAt: string
   readonly result: { readonly completedAt: string; readonly result: JsonValue } | null
+  readonly run?: {
+    readonly runId: string
+    readonly mailboxId: string
+    readonly directory: string
+    readonly nativeSessionId: string | null
+    readonly sessionId: string | null
+    readonly requestedSelection: RequestedSelection | null
+    readonly resolvedSelection: ResolvedSelection | null
+  }
 }
 
 export type RecentJobView = {
@@ -96,7 +121,37 @@ const make = Effect.gen(function* () {
   const jobStatus: McpQueriesPort["jobStatus"] = (jobId) =>
     Effect.gen(function* () {
       const job = yield* jobs.readJob(jobId)
-      if (job === null) return null
+      if (job === null) {
+        const rows = yield* sql`SELECT * FROM kernel_agent_runs WHERE run_id = ${jobId}`
+        if (rows[0] === undefined) return null
+        const run = yield* Schema.decodeUnknownEffect(RunStatusRow)(rows[0])
+        const mail = yield* sql<{
+          prompt: string
+        }>`SELECT prompt FROM resident_inbox WHERE id = ${"agent-run-end-" + jobId}`
+        const terminal =
+          mail[0] === undefined
+            ? null
+            : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(JsonValueSchema))(
+                mail[0].prompt,
+              )
+        return {
+          jobId: run.run_id,
+          state: run.state,
+          attempt: run.attempt,
+          maxAttempts: run.max_attempts,
+          runAt: run.created_at,
+          result: terminal === null ? null : { completedAt: run.updated_at, result: terminal },
+          run: {
+            runId: run.run_id,
+            mailboxId: run.caller_mailbox_id,
+            directory: run.directory,
+            nativeSessionId: run.native_session_id,
+            sessionId: run.session_id,
+            requestedSelection: run.requested_selection,
+            resolvedSelection: run.resolved_selection,
+          },
+        }
+      }
       const result = yield* jobs.readResult(jobId)
       return {
         jobId: job.jobId,

@@ -20,6 +20,7 @@ test("Codex supported model/list protocol paginates and retains effort/default a
     identity: { executor: "codex-local", provider: "fixture-provider", model: "first" },
     selectionModel: "picker-first",
     defaultModel: true,
+    pickerEligible: true,
     availability: "unknown",
     thinking: {
       efforts: [
@@ -31,6 +32,24 @@ test("Codex supported model/list protocol paginates and retains effort/default a
   })
   expect(JSON.stringify(result)).not.toContain("credential-secret")
   expect(JSON.stringify(result)).not.toContain("private@example.com")
+})
+
+test("Codex discovery preserves native speed tiers separately from effort", async () => {
+  const source = fixture("tiers")
+  const { list, close } = makeExecutionCapabilities({
+    host: "box",
+    refreshMs: 100,
+    timeoutMs: 1000,
+    sources: [source],
+  })
+  try {
+    expect((await list()).capabilities[0]?.speed).toMatchObject({
+      status: "advertised",
+      tiers: [{ id: "standard" }, { id: "fast", native: "priority" }],
+    })
+  } finally {
+    await close()
+  }
 })
 
 test("Codex discovery reports auth, unsupported and malformed native sources without inventing catalogs", async () => {
