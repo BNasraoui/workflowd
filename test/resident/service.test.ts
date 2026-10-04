@@ -18,6 +18,7 @@ import type { startAppServer } from "../../src/resident/process"
 function fixture(manualQueue = false, effortOverride?: string, manualRestart = false) {
   const queued = new Map<string, string[]>()
   let rejectedMethod: string | undefined
+  let readsBeforeFailure: number | undefined
   const closed: number[] = []
   const pids = new Map<string, number>()
   const probes = new Map<number, (socket: string, targets: string[]) => Promise<string>>()
@@ -73,6 +74,19 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
         }),
       )(JSON.parse(line))
       calls.push(frame)
+      if (frame.method === "thread/read" && readsBeforeFailure !== undefined) {
+        if (readsBeforeFailure === 0) {
+          readsBeforeFailure = undefined
+          rpc.receive(
+            JSON.stringify({
+              id: frame.id,
+              error: { code: -32000, message: "temporary read failure" },
+            }),
+          )
+          return
+        }
+        readsBeforeFailure--
+      }
       if (frame.method === rejectedMethod) {
         rpc.receive(
           JSON.stringify({ id: frame.id, error: { code: -32601, message: "method not found" } }),
@@ -171,6 +185,9 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
     closed,
     reject: (method: string) => {
       rejectedMethod = method
+    },
+    failReadAfter: (successfulReads: number) => {
+      readsBeforeFailure = successfulReads
     },
     pids,
     probe: (thread: string, targets: string[]) =>
@@ -486,6 +503,51 @@ test("an interrupted turn starts one continuation and the run completes", async 
       expect(restart).toHaveLength(1)
       expect(restart[0]?.params.clientUserMessageId).toBe("restart:thread-1:dispatch:a")
       expect((yield* runs.read("a"))?.state).toBe("verified")
+      fake.complete("thread-1", "restart:thread-1:dispatch:a")
+      expect((yield* worker.exited).exitCode).toBe(0)
+      expect((yield* runs.read("a"))?.state).toBe("completed")
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("a transient restart probe failure keeps the inbox prepared until continuation completes", async () => {
+  const fake = fixture(false, undefined, true)
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const runs = yield* AgentRunStore
+      const store = yield* makeResidentStore
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      fake.failReadAfter(1)
+      fake.complete("thread-1", "dispatch:a", "interrupted")
+      yield* Effect.sync(
+        () => fake.calls.filter((call) => call.method === "thread/read").length,
+      ).pipe(
+        Effect.repeat({
+          while: (reads) => reads < 2,
+          schedule: Schedule.spaced("10 millis"),
+        }),
+        Effect.timeout("3 seconds"),
+      )
+      expect((yield* store.pending()).map((message) => message.state)).toEqual(["prepared"])
+      expect(fake.calls.filter((call) => call.method === "turn/start")).toHaveLength(0)
+      yield* Effect.sync(
+        () => fake.calls.filter((call) => call.method === "turn/start").length,
+      ).pipe(
+        Effect.repeat({
+          while: (starts) => starts === 0,
+          schedule: Schedule.spaced("10 millis"),
+        }),
+        Effect.timeout("3 seconds"),
+      )
       fake.complete("thread-1", "restart:thread-1:dispatch:a")
       expect((yield* worker.exited).exitCode).toBe(0)
       expect((yield* runs.read("a"))?.state).toBe("completed")

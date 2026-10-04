@@ -84,23 +84,6 @@ to package scripts or GitHub Actions: **it does not run in CI**.
 
 # Manual PR 59 custody evidence
 
-## Resident restart evidence (R1)
-
-With explicit authorization to copy only the current Codex login file into the
-private scratch home, run the focused real Codex scenario with:
-
-```sh
-EVIDENCE_COPY_AUTH=1 EVIDENCE_REAL_CODEX_BINARY=/absolute/path/to/codex \
-  bun scripts/evidence/credential-rotation.mjs --full --scenario=R1
-```
-
-R1 starts this branch's `src/main.ts` with resident Codex enabled, records real
-app-server protocol frames, interrupts only its scratch daemon during a turn,
-and restarts it against the same SQLite database. It requires the run to finish
-`completed` with one durable `restart:` message and a `turn/start` frame.
-The private auth home is removed during cleanup. The run never restarts the
-installed `workflowd.service`.
-
 Run from the repository root on a Linux host with a working systemd user manager:
 
 ```sh
@@ -154,3 +137,20 @@ remove. Never use a broad workflowd unit glob for cleanup.
 these allow-listed logs after redaction; never upload the Codex home, database,
 environment or arbitrary scratch files. The suite intentionally returns nonzero
 for any failed assertion and continues independent cases so failures stay visible.
+
+# Resident restart evidence (R1)
+
+With explicit authorization to copy only the current Codex login file into the
+private scratch home, run the focused real Codex scenario with:
+
+```sh
+EVIDENCE_COPY_AUTH=1 EVIDENCE_REAL_CODEX_BINARY=/absolute/path/to/codex \
+  bun scripts/evidence/credential-rotation.mjs --full --scenario=R1
+```
+
+R1 starts this branch's `src/main.ts` with resident Codex enabled, records real
+app-server protocol frames, interrupts only its scratch daemon during a turn,
+and restarts it against the same SQLite database. It requires the run to finish
+`completed` with one durable `restart:` message and a `turn/start` frame.
+The private auth home is removed during cleanup. The run never restarts the
+installed `workflowd.service`.

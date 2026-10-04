@@ -325,7 +325,6 @@ export const ResidentCodexLive = (
             yield* finish(message.thread_id, true)
             continue
           }
-          yield* store.sending(message.id)
           let mode: "queue" | "start" = "queue"
           if (message.id.startsWith("restart:")) {
             const history = yield* Effect.tryPromise(() =>
@@ -333,6 +332,7 @@ export const ResidentCodexLive = (
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
             if (!history.thread.turns.some((turn) => turn.status === "inProgress")) mode = "start"
           }
+          yield* store.sending(message.id)
           const outcome = yield* deliverResident(
             (method, params) => {
               const decoded = Schema.decodeUnknownSync(
