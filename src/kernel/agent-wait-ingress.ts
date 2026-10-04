@@ -167,10 +167,7 @@ const readCustody = (role: "parent" | "child", sessionId: string) =>
       })
     }
     const custody = yield* Schema.decodeUnknownEffect(CustodyRow)(rows[0])
-    // Children must be opencode: the completion source only observes that
-    // provider. Parents may also be claude sessions, woken through the
-    // claude CLI by their own resume worker.
-    const supported = role === "child" ? ["opencode"] : ["opencode", "claude"]
+    const supported = role === "child" ? ["opencode", "codex", "claude"] : ["opencode", "claude"]
     if (!supported.includes(custody.provider_kind)) {
       return yield* new AgentWaitCustodyError({
         role,

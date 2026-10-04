@@ -687,16 +687,6 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
-        if (resolution.provider !== "opencode" && submission.parentSessionId !== undefined) {
-          // The completion source only observes opencode children, so a codex
-          // child could never deliver a parent wake; refusing loudly beats
-          // registering a watch that can never complete.
-          return yield* refuse(
-            "invalid_wait_pairing",
-            `${resolution.provider} CLI routes complete inline and support no parent wake yet; ` +
-              "dispatch without parentSessionId/resumePrompt and read the outcome later",
-          )
-        }
         if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
         } else if (resolution.provider === "opencode" && submission.model === undefined) {

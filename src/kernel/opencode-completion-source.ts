@@ -288,6 +288,47 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
     const sql = yield* SqlClient.SqlClient
     const provider = yield* OpenCodeCompletionProvider
     const signals = yield* WorkSignal
+    const terminal = yield* sql<{
+      readonly instance_id: string
+      readonly child_session_id: string
+      readonly child_session_generation: number
+      readonly run_id: string
+    }>`SELECT watch.instance_id, watch.child_session_id,
+        watch.child_session_generation, run.run_id
+      FROM kernel_agent_completion_watches AS watch
+      JOIN kernel_sessions AS session ON session.session_id = watch.child_session_id
+      JOIN kernel_agent_runs AS run ON run.session_id = watch.child_session_id
+      JOIN resident_inbox AS inbox ON inbox.id = 'agent-run-end-' || run.run_id
+      WHERE watch.provider_kind IN ('codex', 'claude')
+        AND watch.owning_host_id = ${options.owningHostId}
+        AND watch.state = 'watching'
+        AND watch.child_session_generation = session.revision
+        AND run.state IN ('completed', 'cancelled', 'failed', 'operator_required')
+      ORDER BY watch.updated_at, watch.instance_id LIMIT 1`
+    if (terminal[0] !== undefined) {
+      const watched = terminal[0]
+      const recorded = yield* Effect.gen(function* () {
+        const result = yield* recordAgentSessionCompletion({
+          source: "agent-run-terminal",
+          sourceEventId: watched.run_id,
+          childSessionId: watched.child_session_id,
+          childSessionGeneration: watched.child_session_generation,
+          completionId: watched.run_id,
+          completedAt: options.now(),
+        })
+        yield* sql`UPDATE kernel_agent_completion_watches SET state = 'completed',
+          completion_event_sequence = ${result.event.sequence},
+          updated_at = ${options.now().toISOString()}
+          WHERE instance_id = ${watched.instance_id} AND state = 'watching'`
+        return result
+      }).pipe(sql.withTransaction)
+      yield* signals.wake("kernel-job")
+      return {
+        status: "completed" as const,
+        childSessionId: watched.child_session_id,
+        eventSequence: recorded.event.sequence,
+      }
+    }
     const rows = yield* sql`SELECT watch.*,
         resource.absolute_path, resource.state AS resource_state,
         session.state AS session_state, session.revision AS session_revision,

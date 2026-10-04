@@ -171,8 +171,11 @@ export const TOOL_DEFINITIONS = [
       " " +
       REFUSAL_CONTRACT +
       " Specifically: the returned wait_id is NOT a result and this tool does " +
-      "NOT block. The workflowd resume worker prompts the parent session with " +
-      "your resume_prompt when the child completes, or flips the watch to " +
+      "NOT block. OpenCode, Codex CLI, and Claude CLI children are supported. " +
+      "The workflowd resume worker prompts the parent session with " +
+      "your resume_prompt and, for a dispatched child, its terminal mailbox " +
+      "result (run_id, mailbox_id, status, end_reason, and final message or " +
+      "session reference) when the child completes, or flips the watch to " +
       "operator_required if the child cannot be observed. Do not poll: register " +
       "the wait, then end your turn. Provide idempotency_key to make " +
       "re-registration safe; the same key always maps to the same wait.",
@@ -190,8 +193,9 @@ export const TOOL_DEFINITIONS = [
         resume_prompt: {
           type: "string",
           description:
-            "Text delivered to the parent session on completion. The parent " +
-            `receives it as the JSON document {"task":"<resume_prompt>"}; maximum ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes.`,
+            "Text delivered to the parent session on completion as the task " +
+            "field of a JSON document. A dispatched child's terminal result " +
+            `is included in its terminal field; maximum ${MAX_RESUME_PROMPT_BYTES} UTF-8 bytes.`,
         },
         idempotency_key: {
           type: "string",
@@ -246,13 +250,15 @@ export const TOOL_DEFINITIONS = [
       "does not hold is refused with reason missing_parent_session BEFORE " +
       "anything is spawned, so pass your own native OpenCode session id (or a " +
       "Claude Code session UUID with parent_kind 'claude' plus " +
-      "parent_directory) only when workflowd actually hosts your session. " +
+      "parent_directory and optional parent_host on an allow-listed host). " +
       "Every accepted dispatch gets a durable caller mailbox by default, including " +
       "external sessions and every child executor. The receipt gives mailbox_id; " +
       "read_agent_mailbox reads its one terminal result. When you are an external session " +
       "the kernel does not hold, omit parent_session_id; the mailbox still works. " +
-      "Parent wakes currently require an OpenCode child; omit parent_session_id " +
-      "and resume_prompt for Claude CLI and Codex CLI routes. " +
+      "OpenCode, Claude CLI, and Codex CLI children can all wake a parent. " +
+      "The wake JSON contains your resume_prompt as task and the unchanged " +
+      "terminal mailbox result as terminal, including run_id, mailbox_id, " +
+      "status, end_reason, and final message or session reference. " +
       REFUSAL_CONTRACT +
       " After the receipt, END YOUR TURN — the runner's watchdog supervises " +
       "progress, auto-recovers stalls, and escalates to operator_required; do " +

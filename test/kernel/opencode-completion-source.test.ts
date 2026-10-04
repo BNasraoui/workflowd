@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer, Schema } from "effect"
@@ -8,6 +11,7 @@ import { enqueueNextAgentHandoff } from "../../src/kernel/agent-handoff-reducer"
 import { KernelJobStoreLive } from "../../src/kernel/job-store"
 import { runKernelJobIteration } from "../../src/kernel/job-runner"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
+import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import {
   OpenCodeResumeProvider,
   runOpenCodeResumeIteration,
@@ -28,18 +32,21 @@ const childAnswer = {
   time: { created: at.getTime(), completed: at.getTime() + 1_000 },
 }
 
-const stores = (() => {
-  const database = SqliteClient.layer({ filename: ":memory:" })
+const makeStores = (filename: string) => {
+  const database = SqliteClient.layer({ filename })
   const bootstrap = WorkflowStoreLive.pipe(Layer.provideMerge(database))
   const events = KernelEventStoreLive.pipe(Layer.provideMerge(bootstrap))
   const jobs = KernelJobStoreLive.pipe(Layer.provideMerge(bootstrap))
   const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(bootstrap))
+  const runs = AgentRunStoreLive.pipe(Layer.provideMerge(bootstrap))
   const handoffs = AgentHandoffStoreLive.pipe(
     Layer.provideMerge(events),
     Layer.provideMerge(bootstrap),
   )
-  return Layer.mergeAll(events, jobs, sessions, handoffs)
-})()
+  return Layer.mergeAll(events, jobs, sessions, handoffs, runs)
+}
+
+const stores = makeStores(":memory:")
 
 const arrange = Effect.gen(function* () {
   const sessions = yield* KernelSessionStore
@@ -802,4 +809,127 @@ test("a resident OpenCode turn ending does not wake its parent before the run fi
       }),
     ),
   )
+})
+
+const seedTerminalCliRun = (
+  runId: string,
+  finalMessage: string,
+  parentSessionId: string | null = null,
+) =>
+  Effect.gen(function* () {
+    yield* arrange
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE kernel_sessions SET provider_kind = 'codex' WHERE session_id = 'child-stable'`
+    yield* sql`UPDATE kernel_agent_completion_watches SET provider_kind = 'codex' WHERE instance_id = 'handoff-1'`
+    const runs = yield* AgentRunStore
+    const common = {
+      route: "scan",
+      providerId: "codex-cli",
+      modelId: "model",
+      executorKind: "codex" as const,
+      agent: "build",
+      repository: "o/r",
+      directory: process.cwd(),
+      prompt: "task",
+      promptSha256: "a".repeat(64),
+      maxAttempts: 1,
+      createdAt: at,
+    }
+    yield* runs.create({
+      ...common,
+      runId,
+      parentSessionId,
+      resumePrompt: parentSessionId === null ? null : "Continue.",
+    })
+    yield* runs.claimSpawn({ runId, now: at })
+    yield* runs.markSpawned({
+      runId,
+      resourceId: "child-resource",
+      sessionId: "child-stable",
+      nativeSessionId: "ses_child",
+      now: at,
+    })
+    yield* runs.markVerified({ runId, outputTokens: 1, now: at })
+    yield* runs.complete({ runId, now: at, finalMessage })
+  })
+
+test("a terminal Codex run completes its watch from the persisted mailbox after restart", async () => {
+  const provider: OpenCodeCompletionProviderPort = {
+    sessionExists: async () => true,
+    sessionFinished: async () => true,
+    listMessages: async () => [],
+    subscribeEvents: async () => (async function* () {})(),
+  }
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* seedTerminalCliRun("cli-child", "finished")
+      const sql = yield* SqlClient.SqlClient
+      expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("completed")
+      expect((yield* runOpenCodeCompletionSourceIteration(options)).status).toBe("idle")
+      const events =
+        yield* sql`SELECT source_event_id FROM kernel_events WHERE source = 'agent-run-terminal'`
+      expect(events).toHaveLength(1)
+    }).pipe(
+      Effect.provide(stores),
+      Effect.provideService(OpenCodeCompletionProvider, provider),
+      Effect.provideService(WorkSignal, {
+        subscribe: () => Effect.die("unused"),
+        wake: () => Effect.void,
+      }),
+    ),
+  )
+})
+
+test("reopening the database after terminal write creates one parent resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-cli-wake-"))
+  const filename = join(directory, "kernel.db")
+  const provider: OpenCodeCompletionProviderPort = {
+    sessionExists: async () => true,
+    sessionFinished: async () => true,
+    listMessages: async () => [],
+    subscribeEvents: async () => (async function* () {})(),
+  }
+  const signals: WorkSignalPort = {
+    subscribe: () => Effect.die("unused"),
+    wake: () => Effect.void,
+  }
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seedTerminalCliRun("restart-child", "Done.", "parent-stable")
+      }).pipe(Effect.provide(makeStores(filename))),
+    )
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const first = yield* runOpenCodeCompletionSourceIteration(options)
+        const handoff = yield* enqueueNextAgentHandoff(at)
+        const delivered = yield* runKernelJobIteration({
+          workerId: "restart-worker",
+          now: () => at,
+          leaseDurationMs: 60_000,
+          retryDelayMs: 0,
+        })
+        const second = yield* runOpenCodeCompletionSourceIteration(options)
+        const replay = yield* enqueueNextAgentHandoff(at)
+        const sql = yield* SqlClient.SqlClient
+        const resumes = yield* sql`SELECT request_id FROM kernel_resume_requests`
+        const jobs = yield* sql`SELECT job_id FROM kernel_workflow_jobs
+        WHERE job_id = 'handoff-1:resume-parent'`
+        return { first, handoff, delivered, second, replay, resumes, jobs }
+      }).pipe(
+        Effect.provide(makeStores(filename)),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, signals),
+      ),
+    )
+    expect(result.first.status).toBe("completed")
+    expect(result.handoff.status).toBe("enqueued")
+    expect(result.delivered.status).toBe("completed")
+    expect(result.second.status).toBe("idle")
+    expect(result.replay.status).toBe("idle")
+    expect(result.resumes).toHaveLength(1)
+    expect(result.jobs).toHaveLength(1)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
