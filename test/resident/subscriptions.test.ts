@@ -3,7 +3,11 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { ConfigProvider, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
-import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
+import {
+  AgentRunStore,
+  AgentRunStoreLive,
+  type AgentRunStorePort,
+} from "../../src/kernel/agent-run-store"
 import { CiService } from "../../src/ci/service"
 import { makeCiStore } from "../../src/ci/store"
 import { WorkflowStoreLive } from "../../src/store"
@@ -22,6 +26,22 @@ const layer = Layer.mergeAll(
   Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
 )
 const target = { repository: "o/r", sha: "a".repeat(40) }
+const createChild = (runs: AgentRunStorePort) =>
+  runs.create({
+    runId: "child",
+    route: "test",
+    providerId: "codex-cli",
+    modelId: "m",
+    agent: "build",
+    repository: "o/r",
+    directory: "/child",
+    prompt: "task",
+    promptSha256: "a".repeat(64),
+    parentSessionId: null,
+    resumePrompt: null,
+    maxAttempts: 1,
+    createdAt: new Date(),
+  })
 for (const alreadyFinished of [false, true]) {
   test(`CI subscription delivers once, including replay and late registration (${alreadyFinished})`, () =>
     Effect.runPromise(
@@ -108,21 +128,7 @@ for (const state of ["completed", "failed", "cancelled", "operator_required"] as
         yield* store.attach("parent", "thread", "/work", null)
         yield* store.started("thread", "turn")
         const runs = yield* AgentRunStore
-        yield* runs.create({
-          runId: "child",
-          route: "test",
-          providerId: "codex-cli",
-          modelId: "m",
-          agent: "build",
-          repository: "o/r",
-          directory: "/child",
-          prompt: "task",
-          promptSha256: "a".repeat(64),
-          parentSessionId: null,
-          resumePrompt: null,
-          maxAttempts: 1,
-          createdAt: new Date(),
-        })
+        yield* createChild(runs)
         yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
         expect(yield* store.pending()).toHaveLength(0)
         yield* sql`UPDATE kernel_agent_runs SET state = ${state}, native_session_id = 'child-thread' WHERE run_id = 'child'`
@@ -202,21 +208,7 @@ test("a never-final run keeps its subscription visible and pending without deliv
       const runs = yield* AgentRunStore
       yield* store.attach("parent", "thread", "/work", null)
       yield* store.started("thread", "turn")
-      yield* runs.create({
-        runId: "child",
-        route: "test",
-        providerId: "codex-cli",
-        modelId: "m",
-        agent: "build",
-        repository: "o/r",
-        directory: "/child",
-        prompt: "task",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 1,
-        createdAt: new Date(),
-      })
+      yield* createChild(runs)
       const receipt = yield* subscriptions.register("thread", {
         kind: "agent_run",
         run_id: "child",
@@ -452,8 +444,10 @@ const completionPayload = (prompt: string | undefined) => {
     Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
   )(json)
 }
+const MailboxRow = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown))
 
-for (const finalMessage of ["child summary", "x".repeat(70_000)]) {
+// "none" ends the run without its caller-mailbox row, as runs that predate mailboxes did.
+for (const finalMessage of ["child summary", "x".repeat(70_000), "none"]) {
   test(`agent run subscription carries the child's caller-mailbox message (${finalMessage.length} chars)`, () =>
     Effect.runPromise(
       Effect.gen(function* () {
@@ -463,71 +457,30 @@ for (const finalMessage of ["child summary", "x".repeat(70_000)]) {
         const runs = yield* AgentRunStore
         yield* store.attach("parent", "thread", "/work", null)
         yield* store.started("thread", "turn")
-        yield* runs.create({
-          runId: "child",
-          route: "test",
-          providerId: "codex-cli",
-          modelId: "m",
-          agent: "build",
-          repository: "o/r",
-          directory: "/child",
-          prompt: "task",
-          promptSha256: "a".repeat(64),
-          parentSessionId: null,
-          resumePrompt: null,
-          maxAttempts: 1,
-          createdAt: new Date(),
-        })
+        yield* createChild(runs)
         yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
-        yield* runs.fail({ runId: "child", now: new Date(), diagnostic: "boom", finalMessage })
+        if (finalMessage === "none")
+          yield* sql`UPDATE kernel_agent_runs SET state = 'failed' WHERE run_id = 'child'`
+        else yield* runs.fail({ runId: "child", now: new Date(), diagnostic: "boom", finalMessage })
         yield* subscriptions.reconcile()
-        const [row] = yield* sql<{ prompt: string }>`SELECT prompt FROM resident_inbox
+        const rows = yield* sql<{ prompt: string }>`SELECT prompt FROM resident_inbox
           WHERE id = 'agent-run-end-child'`
-        const mailbox = Schema.decodeUnknownSync(
-          Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-        )(row?.prompt)
         const messages = yield* store.pending()
         expect(messages).toHaveLength(1)
         const payload = completionPayload(messages[0]?.prompt)
         expect(payload).toMatchObject({ kind: "agent_run", runId: "child", status: "failed" })
+        if (finalMessage === "none") {
+          expect(rows).toHaveLength(0)
+          expect(payload.terminal).toBeNull()
+          return
+        }
+        const mailbox = Schema.decodeUnknownSync(MailboxRow)(rows[0]?.prompt)
+        expect(mailbox.final_message).toBe(finalMessage)
         expect(payload.terminal).toEqual(
           finalMessage.length < 1_000
             ? mailbox
             : { ...mailbox, final_message: null, final_message_ref: "child" },
         )
-        expect(mailbox.final_message).toBe(finalMessage)
       }).pipe(Effect.provide(layer)),
     ))
 }
-
-test("agent run subscription without a caller-mailbox row carries a null terminal", () =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const store = yield* makeResidentStore
-      const subscriptions = yield* makeSubscriptions
-      const sql = yield* SqlClient.SqlClient
-      const runs = yield* AgentRunStore
-      yield* store.attach("parent", "thread", "/work", null)
-      yield* store.started("thread", "turn")
-      yield* runs.create({
-        runId: "child",
-        route: "test",
-        providerId: "codex-cli",
-        modelId: "m",
-        agent: "build",
-        repository: "o/r",
-        directory: "/child",
-        prompt: "task",
-        promptSha256: "a".repeat(64),
-        parentSessionId: null,
-        resumePrompt: null,
-        maxAttempts: 1,
-        createdAt: new Date(),
-      })
-      yield* subscriptions.register("thread", { kind: "agent_run", run_id: "child" })
-      yield* sql`UPDATE kernel_agent_runs SET state = 'completed' WHERE run_id = 'child'`
-      yield* subscriptions.reconcile()
-      const messages = yield* store.pending()
-      expect(completionPayload(messages[0]?.prompt).terminal).toBeNull()
-    }).pipe(Effect.provide(layer)),
-  ))

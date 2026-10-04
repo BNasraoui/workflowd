@@ -172,7 +172,7 @@ test("a resident Codex coordinator receives its child's terminal message in one 
         // Let several resident ticks pass: delivery must not repeat.
         yield* Effect.sleep("2500 millis")
         const adds = yield* Effect.promise(() => queueAdds(root))
-        expect(adds.length).toBe(delivered.length)
+        expect(adds).toHaveLength(delivered.length)
         const completions = adds.filter((add) => add.input[0]?.text.includes(finalMessage))
         expect(completions).toHaveLength(1)
         expect(completions[0]?.threadId).toBe(caller.nativeSessionId)
