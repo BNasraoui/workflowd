@@ -4,6 +4,8 @@ import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
 import { ExecutionCapabilities } from "../execution-capability-contract"
 import { toJsonSchemaObject } from "../json"
+import { DirectorySnapshot } from "../directory/contract"
+import { DirectoryQuery } from "./directory"
 
 const objectSchema = (properties: Record<string, object>, required: ReadonlyArray<string>) => ({
   type: "object" as const,
@@ -55,6 +57,14 @@ type SuccessOutput = ReturnType<typeof objectSchema>
 const withRefusal = (success: SuccessOutput) => ({ anyOf: [success, REFUSED_OUTPUT] })
 
 export const TOOL_DEFINITIONS = [
+  {
+    name: "agent_directory",
+    description:
+      "Discover stable agent recipients, runners and per-host execution catalogs. With no arguments returns the directory; kind selects agents, runners or capabilities. id looks up a recipient, runner or host respectively. Expiry, endpoint verification and catalog access uncertainty are explicit. Requires the MCP bearer token and daemon discovery configuration. This directory is separate from job_status.",
+    inputSchema: { ...toJsonSchemaObject(DirectoryQuery), type: "object" as const },
+    outputSchema: { ...toJsonSchemaObject(DirectorySnapshot), type: "object" as const },
+    annotations: readAnnotations,
+  },
   {
     name: "list_execution_capabilities",
     description:

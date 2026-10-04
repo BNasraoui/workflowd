@@ -67,6 +67,10 @@ export type RemoteTransportPort = {
     hostId: string,
     handle: (delivery: RemoteDelivery) => Effect.Effect<void, E>,
   ) => Effect.Effect<void, E | RemoteTransportError>
+  readonly takeDirectoryReplies?: (
+    hostId: string,
+    expiresMs?: number,
+  ) => Effect.Effect<ReadonlyArray<RemoteDelivery>, RemoteTransportError>
 }
 
 export const RemoteTransport = Context.Service<RemoteTransportPort>(
@@ -328,6 +332,14 @@ const make = (config: RemoteTransportConfig) =>
       takeResults: (expiresMs = 30_000) =>
         collect(RESULT_STREAM, "workflowd-coordinator-v1", RESULT_SUBJECT, expiresMs, 1),
       consumeHost,
+      takeDirectoryReplies: (hostId, expiresMs = 1_000) =>
+        collect(
+          COMMAND_STREAM,
+          `directory-${hostId}`,
+          commandSubject(`directory-${hostId}`),
+          expiresMs,
+          100,
+        ),
     })
   })
 

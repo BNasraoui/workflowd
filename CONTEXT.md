@@ -91,3 +91,18 @@ custody before waking a thread.
 A short-lived authorization bound to one live Agent Run and its configured
 repository/permission policy. It permits obtaining a GitHub App installation token;
 it conveys neither the App private key nor another worker's identity.
+
+**Agent Recipient**:
+A durable logical identity by which an agent can be discovered and addressed across native session changes. Its model, harness and current host are attributes, rather than its identity.
+
+**Endpoint Binding**:
+An observed association between an Agent Recipient and its current native harness transport and session. Verification of a binding grants directory ownership only.
+
+**Managed Custody**:
+Authority over a managed Agent Run's launch, process, session and working-resource lifecycle. External Endpoint Bindings do not confer this authority.
+
+**Runner**:
+A registered host execution authority with its own durable identity, liveness observations and local execution catalogs.
+
+**Capability Advertisement**:
+A runner's bounded observation of its local model and thinking catalogs, including source freshness and access uncertainty. An advertisement is not proof of entitlement or future execution success.

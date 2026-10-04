@@ -24,6 +24,7 @@ import { randomUUID } from "node:crypto"
 import { deliverResident } from "./delivery"
 import type { ResidentConfig } from "./config"
 import { ExecutionSelectionError } from "../execution-selection"
+import { DirectoryStore } from "../directory/store"
 
 const ThreadResult = Schema.Struct({
   thread: Schema.Struct({ id: Schema.String }),
@@ -46,6 +47,7 @@ const Queued = Schema.Struct({
 })
 const History = Schema.Struct({
   thread: Schema.Struct({
+    id: Schema.optionalKey(Schema.String),
     turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
   }),
 })
@@ -56,7 +58,7 @@ type ResidentPort = {
 export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCodex")
 
 export const ResidentCodexLive = (
-  config: ResidentConfig & { readonly unitPrefix?: string },
+  config: ResidentConfig & { readonly unitPrefix?: string; readonly directoryRefreshMs?: number },
   binary: string,
   ciConfig: CiConfig,
   start: typeof startAppServer = startAppServer,
@@ -69,6 +71,13 @@ export const ResidentCodexLive = (
       const runs = yield* AgentRunStore
       const ci = yield* CiService
       const sql = yield* SqlClient.SqlClient
+      const directory = yield* Effect.serviceOption(DirectoryStore)
+      if (Option.isSome(directory)) {
+        yield* directory.value.invalidateResidentBindings()
+        yield* Effect.addFinalizer(() =>
+          directory.value.invalidateResidentBindings().pipe(Effect.orDie),
+        )
+      }
       const notifications = yield* Queue.unbounded<{
         readonly method: string
         readonly params: unknown
@@ -86,6 +95,7 @@ export const ResidentCodexLive = (
           disconnected: boolean
           attempts: number
           lastEventAt: number
+          lastDirectoryCheckAt: number
         }
       >()
       const threadRuns = new Map<string, string>()
@@ -144,7 +154,13 @@ export const ResidentCodexLive = (
           process = launched
           yield* store.adoptServer(runId, launched.invocation)
         } else process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
-        servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
+        servers.set(runId, {
+          process,
+          disconnected: false,
+          attempts,
+          lastEventAt: Date.now(),
+          lastDirectoryCheckAt: 0,
+        })
         yield* Effect.try(() => registerPeer(runId, process.pid))
         yield* Effect.tryPromise(() => process.initialize())
         return process
@@ -331,6 +347,7 @@ export const ResidentCodexLive = (
                     disconnected: false,
                     attempts: 0,
                     lastEventAt: Date.now(),
+                    lastDirectoryCheckAt: 0,
                   })
                   yield* Effect.try(() => registerPeer(row.run_id, attached.value.pid))
                   yield* Effect.tryPromise(() => attached.value.initialize())
@@ -388,6 +405,8 @@ export const ResidentCodexLive = (
           const history = yield* Effect.tryPromise(() =>
             request("thread/read", { threadId: row.thread_id, includeTurns: true }),
           ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
+          if (Option.isSome(directory) && history.thread.id === row.thread_id)
+            yield* directory.value.observeManaged(row.run_id, row.thread_id, new Date())
           const last = history.thread.turns.at(-1)
           if (last !== undefined && last.id !== row.current_turn)
             yield* store.started(row.thread_id, last.id)
@@ -498,7 +517,28 @@ export const ResidentCodexLive = (
           yield* finish(row.thread_id, true)
           return
         }
-        if (!entry?.disconnected) return
+        if (!entry?.disconnected) {
+          if (
+            Option.isSome(directory) &&
+            entry !== undefined &&
+            Date.now() - entry.lastDirectoryCheckAt >= (config.directoryRefreshMs ?? 30_000)
+          ) {
+            entry.lastDirectoryCheckAt = Date.now()
+            yield* Effect.tryPromise(() =>
+              request("thread/read", { threadId: row.thread_id, includeTurns: false }),
+            ).pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(History)),
+              Effect.flatMap((history) =>
+                history.thread.id === row.thread_id
+                  ? directory.value.observeManaged(row.run_id, row.thread_id, new Date())
+                  : directory.value.invalidateResidentBindings(row.run_id),
+              ),
+              Effect.catch(() => directory.value.invalidateResidentBindings(row.run_id)),
+              Effect.ignore,
+            )
+          }
+          return
+        }
         if (entry.attempts >= 3) {
           yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)
           yield* finish(row.thread_id, true)

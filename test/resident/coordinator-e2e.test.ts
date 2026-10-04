@@ -22,6 +22,7 @@ import { CodexCli } from "../../src/kernel/codex-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { ResidentCodex, ResidentCodexLive } from "../../src/resident/service"
+import { startAppServer } from "../../src/resident/process"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignal } from "../../src/work-signal"
 import { defaultState, makeProvider } from "../kernel/agent-run-ingress-harness"
@@ -66,12 +67,17 @@ const daemonLayer = (root: string, binary: string) => {
     Layer.provideMerge(signals),
   )
   const ci = Layer.effect(CiService, makeCiStore).pipe(Layer.provideMerge(bootstrap))
-  const resident = ResidentCodexLive({ socket: join(root, "resident.sock"), home: root }, binary, {
-    token: "fixture",
-    repositories: [],
-    servers: [],
-    auth: { mode: "token", token: "fixture" },
-  }).pipe(Layer.provideMerge(Layer.mergeAll(runs, events, ci)))
+  const resident = ResidentCodexLive(
+    { socket: join(root, "resident.sock"), home: root },
+    binary,
+    {
+      token: "fixture",
+      repositories: [],
+      servers: [],
+      auth: { mode: "token", token: "fixture" },
+    },
+    (options, notify) => startAppServer(options, notify),
+  ).pipe(Layer.provideMerge(Layer.mergeAll(runs, events, ci)))
   return AgentRunIngressLive({
     routes: [],
     codexRoutes: [{ name: "native", modelID: "native" }],

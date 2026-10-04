@@ -9,6 +9,10 @@ import { loadRemoteProcessConfig } from "./remote/config"
 import { runRemoteRunnerLoop } from "./remote/runner"
 import { RemoteRunnerStoreLive } from "./remote/runner-store"
 import { RemoteTransportLive } from "./remote/transport"
+import { DirectoryResponderLive } from "./directory/responder"
+import { DirectoryStoreLive } from "./directory/store"
+import { RunnerDiscoveryLive } from "./directory/runner-discovery"
+import { WorkflowStoreLive } from "./store"
 
 type RemoteRunnerProcessOptions = {
   readonly env?: Record<string, string | undefined>
@@ -35,8 +39,27 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
     )
     const runner = RemoteRunnerStoreLive.pipe(Layer.provide(database), Layer.provide(executor))
     const transport = RemoteTransportLive({ servers: config.servers, auth: config.auth })
+    const directory =
+      config.directory === undefined
+        ? Layer.empty
+        : DirectoryResponderLive(config.hostId, config.directory).pipe(
+            Layer.provide(
+              DirectoryStoreLive.pipe(
+                Layer.provide(WorkflowStoreLive.pipe(Layer.provideMerge(database))),
+              ),
+            ),
+            Layer.provide(
+              RunnerDiscoveryLive(
+                config.hostId,
+                config.directory,
+                config.claudeDirectories.length > 0,
+              ),
+            ),
+            Layer.provide(transport),
+            Layer.provide(database),
+          )
     return yield* runRemoteRunnerLoop(config.hostId).pipe(
-      Effect.provide(Layer.merge(runner, transport)),
+      Effect.provide(Layer.mergeAll(runner, transport, directory)),
     )
   })
   ;(options.runMain ?? BunRuntime.runMain)(

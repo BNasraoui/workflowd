@@ -2,6 +2,12 @@
 
 This plane transports two command kinds: the built-in harmless probe, and `claude_resume` — a request to wake a Claude Code session that lives on the runner's host. SQLite on the coordinator is the workflow authority. JetStream provides bounded, durable, at-least-once transport; runner inbox/outbox tables fence duplicate execution and coordinator result acceptance.
 
+Opted-in runners also handle bounded, authenticated [directory observations](agent-directory.md)
+on the existing command stream. These advertise identity, liveness and local adapter
+catalogs; they add no launch or message-delivery command. The directory documentation
+describes enrollment, proof keys and the additional reply-consumer grants required
+for a planned deployment.
+
 ### `claude_resume` threat model
 
 A `claude_resume` command is no longer harmless: it makes the runner execute `claude -p --resume <session>` in a working directory, with a caller-supplied prompt. The daemon owns the whole resume lifecycle; the runner is a narrow, vetted effector, and the trust is deliberately constrained on the runner's own side, not the sender's:

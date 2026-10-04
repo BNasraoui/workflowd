@@ -3,6 +3,7 @@ import { decodeRemoteHostMessage } from "./codec"
 import { RemoteRunnerStore, type RemoteRunnerStorePort } from "./runner-store"
 import { RemoteTransport } from "./transport"
 import type { RemoteDelivery } from "./transport"
+import { DirectoryResponder } from "../directory/responder"
 
 export type RemoteRunnerIterationOptions = {
   readonly afterDurableReceipt?: () => Effect.Effect<void, Error, RemoteRunnerStorePort>
@@ -31,7 +32,14 @@ const recordRemoteRunnerDeliveries = (
 ) =>
   Effect.gen(function* () {
     const store = yield* RemoteRunnerStore
-    const decoded = yield* Effect.forEach(deliveries, (delivery) =>
+    const directory = yield* Effect.serviceOption(DirectoryResponder)
+    const ordinary: RemoteDelivery[] = []
+    for (const delivery of deliveries) {
+      if (Option.isSome(directory) && (yield* directory.value.handle(delivery.data)))
+        yield* delivery.acknowledge
+      else ordinary.push(delivery)
+    }
+    const decoded = yield* Effect.forEach(ordinary, (delivery) =>
       decodeRemoteHostMessage(delivery.data).pipe(
         Effect.match({
           onFailure: (error) => ({
@@ -51,7 +59,7 @@ const recordRemoteRunnerDeliveries = (
     if (deliveries.length > 0 && options.afterDurableReceipt !== undefined) {
       yield* options.afterDurableReceipt()
     }
-    yield* Effect.forEach(deliveries, (delivery) => delivery.acknowledge, { discard: true })
+    yield* Effect.forEach(ordinary, (delivery) => delivery.acknowledge, { discard: true })
     return outcomes
   })
 

@@ -76,6 +76,10 @@ import { RemoteCoordinatorStoreLive } from "./remote/coordinator-store"
 import { RemoteTransportLive } from "./remote/transport"
 import { ExecutionDiscovery, makeExecutionCapabilities } from "./execution-capabilities"
 import { localDiscoverySources } from "./execution/local"
+import { AgentDirectoryLive } from "./directory/service"
+import { DirectoryStoreLive } from "./directory/store"
+import { DirectoryRemoteStoreLive } from "./directory/remote-store"
+import { DirectoryRemoteLive } from "./directory/remote"
 
 const resumeContract = <A, I>(definition: {
   readonly ref: { readonly name: string; readonly version: number }
@@ -160,7 +164,6 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     DogfoodStoreLive,
     Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
-  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel))
   const signals = WorkSignalLive
   const codex = Layer.succeed(
     CodexCli,
@@ -183,6 +186,27 @@ function makeExecutionOnlyLayer(config: AppConfig) {
           }),
         )
   const discovery = makeDiscoveryLayer(config)
+  const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
+    Layer.provide(kernel),
+  )
+  const directoryTransport =
+    config.directoryRemote === undefined ? Layer.empty : RemoteTransportLive(config.directoryRemote)
+  const directoryObservations =
+    config.directoryRemote === undefined
+      ? Layer.empty
+      : DirectoryRemoteLive(config.worker.hostId, config.directoryRemote).pipe(
+          Layer.provide(directoryStores),
+          Layer.provide(directoryTransport),
+        )
+  const directory =
+    config.executionCapabilities === undefined
+      ? Layer.empty
+      : AgentDirectoryLive(
+          config.worker.hostId,
+          config.directoryRemote?.leaseMs,
+          config.directoryRemote,
+        ).pipe(Layer.provideMerge(directoryStores), Layer.provide(discovery))
+  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel), Layer.provideMerge(directory))
   const identity = {
     owningHostId: config.worker.hostId,
     providerId: "native-local",
@@ -211,6 +235,8 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     store,
     signals,
     discovery,
+    directory,
+    directoryObservations,
     runs,
     Layer.succeed(WorkflowStart, {
       preflight: Effect.void,
@@ -314,6 +340,26 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
   const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
   const storeLayer = Layer.merge(kernelStoreLayer, agentHandoffStoreLayer)
+  const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
+    Layer.provide(kernelStoreLayer),
+  )
+  const directoryTransport =
+    config.directoryRemote === undefined ? Layer.empty : RemoteTransportLive(config.directoryRemote)
+  const directoryObservations =
+    config.directoryRemote === undefined
+      ? Layer.empty
+      : DirectoryRemoteLive(config.worker.hostId, config.directoryRemote).pipe(
+          Layer.provide(directoryStores),
+          Layer.provide(directoryTransport),
+        )
+  const directoryLayer =
+    config.executionCapabilities === undefined
+      ? Layer.empty
+      : AgentDirectoryLive(
+          config.worker.hostId,
+          config.directoryRemote?.leaseMs,
+          config.directoryRemote,
+        ).pipe(Layer.provideMerge(directoryStores), Layer.provide(executionDiscoveryLayer))
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
     Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
@@ -396,6 +442,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           {
             ...config.residentCodex,
             progressWindowMs: config.agentRuns?.progressWindowMs,
+            directoryRefreshMs: config.directoryRemote?.refreshMs ?? 30_000,
             unitPrefix:
               config.agentRuns?.codexUnitPrefix === undefined
                 ? "workflowd-resident-"
@@ -406,6 +453,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         ).pipe(
           Layer.provide(ciLive),
           Layer.provide(workerIdentityLayer),
+          Layer.provide(directoryLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
           Layer.provide(storeLayer),
         )
@@ -526,7 +574,12 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             now: () => new Date(),
           }),
         ).pipe(
-          Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
+          Layer.provideMerge(
+            AgentRunStoreLive.pipe(
+              Layer.provideMerge(kernelStoreLayer),
+              Layer.provideMerge(directoryLayer),
+            ),
+          ),
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
@@ -634,6 +687,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         )
   return Layer.mergeAll(
     executionDiscoveryLayer,
+    directoryLayer,
+    directoryObservations,
     ciLayer,
     residentLayer,
     workerIdentityLayer,
