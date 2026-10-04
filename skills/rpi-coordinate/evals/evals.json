@@ -43,6 +43,34 @@
         "The dispatch omits parent fields and resume_prompt.",
         "It saves the receipt's `mailbox_id`, starts the background waiter, and ends the turn."
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. This session was started with `--dangerously-load-development-channels server:workflowd`, and `dispatch_agent` comes from that `workflowd` channel server. The fixture's mailbox message arrived as a `<channel source=\"workflowd\" run_id=\"run_8c1\" mailbox_id=\"mailbox_8c1\" status=\"completed\">` event holding that JSON. Handle it.",
+      "expected_output": "Dispatch rpi-research through the workflowd channel with only the questions gist URL, then end the turn without starting the mailbox waiter.",
+      "files": [
+        "evals/fixtures/woken-after-questions.md"
+      ],
+      "expectations": [
+        "The channel event body is treated as the stage's terminal mailbox message.",
+        "Exactly one `dispatch_agent` call is made, for the rpi-research stage, with only the questions gist URL as input.",
+        "It omits `parent_session_id`, `parent_kind`, `parent_directory`, `parent_host`, and `resume_prompt`.",
+        "`scripts/wait-mailbox.sh` is not started and `read_agent_mailbox` is not polled.",
+        "The turn ends after the receipt, expecting the result as a channel event."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "The fixture stands in for every command's output; do not run bd, gh, git, or provenance and do not publish anything. Use the rpi-coordinate skill. This session was started with `--dangerously-load-development-channels server:workflowd`, and `dispatch_agent` comes from that `workflowd` channel server. Handle the human message in the fixture.",
+      "expected_output": "Record the approval note, dispatch rpi-implement through the workflowd channel, and end the turn without the waiter.",
+      "files": [
+        "evals/fixtures/human-approved.md"
+      ],
+      "expectations": [
+        "`bd note workflowd-x41 \"plan approved: https://gist.github.com/example/p41\"` runs before any dispatch.",
+        "Exactly one `dispatch_agent` call is made, for rpi-implement, with the plan gist URL as input, and it omits parent fields and resume_prompt.",
+        "`scripts/wait-mailbox.sh` is not started; the turn ends after the receipt."
+      ]
     }
   ]
 }

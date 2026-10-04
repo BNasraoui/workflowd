@@ -3,8 +3,11 @@ import { Config, Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiTarget } from "../ci/event"
 import { CiService } from "../ci/service"
+import { JsonValueSchema, type JsonValue } from "../json"
 import { AgentRunStore } from "../kernel/agent-run-store"
 import { KernelEventStore } from "../kernel/event-store"
+import { MAX_KERNEL_PAYLOAD_BYTES } from "../kernel/event-store-model"
+import { canonicalJson } from "../kernel/session-store-support"
 import { makeResidentStore } from "./store"
 
 export const EventSelector = Schema.Union([
@@ -17,6 +20,7 @@ const Subscription = Schema.Struct({
   selector: EventSelector,
   deadline: Schema.optionalKey(Schema.Number),
 })
+const TerminalMessage = Schema.fromJsonString(Schema.Record(Schema.String, JsonValueSchema))
 const Pending = Schema.Struct({
   instance_id: Schema.String,
   event_cursor: Schema.Number,
@@ -35,12 +39,34 @@ export const makeSubscriptions = Effect.gen(function* () {
   const inbox = yield* makeResidentStore
   const ci = yield* CiService
   const runs = yield* AgentRunStore
+  /**
+   * The child's caller-mailbox message, written with its terminal state in one
+   * transaction. A final message too large for one kernel event is replaced by
+   * its session reference, as the mailbox does when a run ends without one.
+   */
+  const terminalFor = Effect.fn("Subscriptions.terminal")(function* (
+    runId: string,
+    summary: Record<string, JsonValue>,
+  ) {
+    const rows = yield* sql<{ prompt: string }>`SELECT prompt FROM resident_inbox
+      WHERE id = ${"agent-run-end-" + runId} AND thread_id IS NULL`
+    if (rows[0] === undefined) return null
+    const terminal = yield* Schema.decodeUnknownEffect(TerminalMessage)(rows[0].prompt)
+    const size = new TextEncoder().encode(canonicalJson({ ...summary, terminal })).byteLength
+    return size <= MAX_KERNEL_PAYLOAD_BYTES
+      ? terminal
+      : {
+          ...terminal,
+          final_message: null,
+          final_message_ref: terminal.native_session_id ?? runId,
+        }
+  })
   const resultFor = Effect.fn("Subscriptions.result")(function* (
     selector: EventSelector,
     deadline: number | undefined,
   ) {
     let expired = false
-    let result: Record<string, string | number | null | readonly string[]> | null = null
+    let result: Record<string, JsonValue> | null = null
     if (selector.kind === "ci") {
       const state = yield* ci.read(selector)
       if (state !== null && state.conclusion !== "pending")
@@ -59,14 +85,16 @@ export const makeSubscriptions = Effect.gen(function* () {
       if (
         run !== null &&
         ["completed", "failed", "cancelled", "operator_required"].includes(run.state)
-      )
-        result = {
+      ) {
+        const summary = {
           kind: "agent_run",
           runId: run.runId,
           status: run.state,
           summaryPointer: run.nativeSessionId ?? run.runId,
           diagnostic: run.diagnostic,
         }
+        result = { ...summary, terminal: yield* terminalFor(run.runId, summary) }
+      }
     }
     return { result, expired }
   })

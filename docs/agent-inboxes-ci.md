@@ -69,8 +69,13 @@ Subscription identity is the subscriber plus normalized selector. Repeating it,
 including after delivery, never creates another message. Already-final jobs enqueue
 immediately. Each subscription captures one final observation; later reruns of the
 same SHA do not rearm it. CI results include conclusion, failing job names, and
-Actions run links. Agent results include final status and a native-session summary
-pointer (or the durable run ID if the run never acquired a session).
+Actions run links. Agent results include final status, a native-session summary
+pointer (or the durable run ID if the run never acquired a session), and `terminal`:
+the child's caller-mailbox message (`run_id`, `session_id`, `native_session_id`,
+`route`, `model`, `executor`, `status`, `end_reason`, `ended_at`, `final_message`,
+`final_message_ref`), or null for a run that ended before mailboxes existed. A
+final message too large for one kernel event (64 KiB) is replaced by null with
+`final_message_ref` set to the native session ID.
 
 Subscriptions reuse `kernel_workflow_instances`, `kernel_waits`, and
 `kernel_wait_event_deliveries`. Consuming a matched wait and inserting its resident

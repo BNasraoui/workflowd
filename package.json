@@ -8,6 +8,7 @@
     "start": "bun src/main.ts",
     "runner": "bun src/remote-runner.ts",
     "mcp": "bun src/mcp-server.ts",
+    "mcp:channel": "bun src/mcp-channel.ts",
     "remote:enqueue": "bun src/remote-enqueue.ts",
     "test": "bun test",
     "simulate:remote": "bun test test/remote/simulation/corpus.test.ts",

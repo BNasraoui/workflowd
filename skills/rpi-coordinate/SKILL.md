@@ -30,9 +30,23 @@ Call the workflowd `dispatch_agent` MCP tool once per stage:
 - Do not send `parent_session_id`, `parent_kind`, `parent_directory`, `parent_host`, or
   `resume_prompt`. Keep the receipt's `mailbox_id`.
 
-A refusal comes back with a reason; fix that cause and dispatch again. After the receipt,
-start `scripts/wait-mailbox.sh <mailbox_id>` from this skill directory as a background command,
-save its output path, and end your turn. For example:
+A refusal comes back with a reason; fix that cause and dispatch again. Then wait in the way
+your session supports.
+
+### Claude Code with the workflowd channel
+
+Use this path when the session was started with
+`--dangerously-load-development-channels server:workflowd` and `dispatch_agent` comes from
+that `workflowd` server: its receipt ends with "the result arrives as a channel event; end
+your turn". End your turn. The stage's terminal message arrives in this session as
+`<channel source="workflowd" run_id="…" mailbox_id="…" status="…">` whose body is the
+mailbox message JSON. Do not start the waiter and do not poll. The channel refuses
+`parent_*` and `resume_prompt` because this session is live.
+
+### Any other session
+
+After the receipt, start `scripts/wait-mailbox.sh <mailbox_id>` from this skill directory as
+a background command, save its output path, and end your turn. For example:
 
 ```bash
 output=$(mktemp /tmp/rpi-mailbox.XXXXXX)
@@ -46,8 +60,8 @@ bounds the wait in seconds. Do not poll from this session.
 
 ## When the mailbox message arrives
 
-Read the waiter's JSON output (or call `read_agent_mailbox` with the saved `mailbox_id`). The
-first mailbox message is the flat terminal result: `run_id`, `session_id`,
+Read the channel event's body, the waiter's JSON output, or call `read_agent_mailbox` with the
+saved `mailbox_id`. The first mailbox message is the flat terminal result: `run_id`, `session_id`,
 `native_session_id`, `route`, `model`, `executor`, `status`, `end_reason`, `ended_at`,
 `final_message`, and `final_message_ref`. A completed run has `status == "completed"`.
 The first line of `final_message` is the stage's gist URL. If `final_message` is null,
