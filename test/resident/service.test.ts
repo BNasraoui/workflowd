@@ -25,7 +25,11 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
   const calls: Array<{ method: string; params: Record<string, unknown> }> = []
   const history = new Map<
     string,
-    Array<{ id: string; status: string; items: Array<{ type: string; clientId: string }> }>
+    Array<{
+      id: string
+      status: string
+      items: Array<{ type: string; clientId?: string; text?: string; phase?: string }>
+    }>
   >()
   let currentRpc: RpcClient | undefined
   let counter = 0
@@ -206,9 +210,21 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
       notify({ method: "turn/started", params: { threadId, turn: { id, status: "inProgress" } } })
       return id
     },
-    complete: (threadId: string, id: string, status: "completed" | "interrupted" = "completed") => {
+    complete: (
+      threadId: string,
+      id: string,
+      status: "completed" | "interrupted" | "failed" = "completed",
+    ) => {
       const turn = history.get(threadId)?.find((turn) => turn.id === id)
-      if (turn !== undefined) turn.status = status
+      if (turn !== undefined) {
+        turn.status = status
+        turn.items.push({ type: "agentMessage", phase: "commentary", text: "Working..." })
+        turn.items.push({
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "Finished the resident task.\nhttps://example.test/pr",
+        })
+      }
       notify({ method: "turn/completed", params: { threadId, turn: { id, status } } })
     },
   }
@@ -989,3 +1005,38 @@ test.each([false, true])(
     )
   },
 )
+
+for (const status of ["completed", "failed"] as const)
+  test(`resident ${status} mailbox includes the final reply from durable turn history`, async () => {
+    const fake = fixture()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const now = new Date()
+        yield* prepareRun(now)
+        const process = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        const events = process.events[Symbol.asyncIterator]()
+        for (;;) {
+          const next = yield* Effect.promise(() => events.next())
+          if (next.value?.type === "agent_message") break
+        }
+        yield* verifyRun(now)
+        fake.complete("thread-1", "dispatch:a", status)
+        yield* process.exited
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{
+          prompt: string
+        }>`SELECT prompt FROM resident_inbox WHERE id = 'agent-run-end-a'`
+        expect(JSON.parse(rows[0]!.prompt)).toMatchObject({
+          status: status === "completed" ? "completed" : "operator_required",
+          final_message: "Finished the resident task.\nhttps://example.test/pr",
+          final_message_ref: null,
+        })
+      }).pipe(Effect.provide(layer(fake.factory))),
+    )
+  })

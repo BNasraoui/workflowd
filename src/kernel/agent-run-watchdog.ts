@@ -102,7 +102,11 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
 
     if (observed.idle) {
       if (observed.outcome === "succeeded" || observed.outcome === undefined) {
-        yield* store.complete({ runId: run.runId, now })
+        yield* store.complete({
+          runId: run.runId,
+          now,
+          finalMessage: observed.finalMessage ?? null,
+        })
         yield* signals.wake("agent-completion")
         return "worked" as const
       }
@@ -113,6 +117,7 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
             `attempts_exhausted: session ${run.nativeSessionId} ended ${observed.outcome} ` +
             `on attempt ${run.attempt} of ${run.maxAttempts}`,
           now,
+          finalMessage: observed.finalMessage ?? null,
         })
         return "worked" as const
       }

@@ -26,7 +26,12 @@ import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
 import { WorkspaceError } from "../workspace/errors"
 import { WorkSignal } from "../work-signal"
 import { AgentWaitIngress, type AgentWaitIngressError } from "./agent-wait-ingress"
-import { AgentRunWorktrees } from "./agent-run-worktrees"
+import {
+  AgentRunWorktrees,
+  agentRunWorktreeFailure,
+  createAgentRunWorktree,
+  type AgentRunWorktreeSetupError,
+} from "./agent-run-worktrees"
 import { CLAUDE_PROVIDER_ID, ClaudeCli, claudeSessionCustodyId } from "./claude-session"
 import { ClaudeDispatchCli } from "./claude-dispatch"
 import { makeAgentRunCliDispatcher } from "./agent-run-cli"
@@ -38,6 +43,7 @@ import {
   AgentRunStoreConflictError,
   agentRunExecutorKind,
   type AgentRunRecord,
+  type AgentRunStorePort,
   type AgentRunStoreError,
 } from "./agent-run-store"
 import type { CliPort, CliPreflightError } from "./cli-process-contract"
@@ -56,6 +62,10 @@ export type AgentRunRefusalReason =
   | "no_first_token"
   | "run_conflict"
   | "invalid_selection"
+  | "repository_fetch_failed"
+  | "repository_busy"
+  | "invalid_base_ref"
+  | "worktree_failed"
   | SelectionRefusal
 
 /**
@@ -75,6 +85,7 @@ export type AgentRunIngressError =
   | KernelSessionStoreError
   | OpenCodeAdapterError
   | WorkspaceError
+  | AgentRunWorktreeSetupError
   | AgentWaitIngressError
   | Schema.SchemaError
 
@@ -138,6 +149,7 @@ export const agentRunIdentifiers = (input: {
   readonly parentSessionId: string | null
   readonly resumePrompt: string | null
   readonly idempotencyKey?: string | undefined
+  readonly baseRef?: string | null | undefined
 }) => {
   const identity =
     input.idempotencyKey ??
@@ -147,6 +159,7 @@ export const agentRunIdentifiers = (input: {
       input.prompt,
       input.parentSessionId ?? "",
       input.resumePrompt ?? "",
+      ...(input.baseRef == null ? [] : [input.baseRef]),
     ].join("\0")
   const digest = createHash("sha256").update(identity, "utf8").digest("hex")
   return {
@@ -165,6 +178,47 @@ const promptSha256 = (prompt: string) => createHash("sha256").update(prompt, "ut
 
 const refuse = (reason: AgentRunRefusalReason, detail: string) =>
   new AgentRunRefusalError({ reason, detail })
+
+const abandonFailedWorktreeLaunch = (
+  setupError: AgentRunWorktreeSetupError,
+  store: AgentRunStorePort,
+  run: AgentRunRecord,
+) => {
+  const error = setupError.cause
+  const detail =
+    error.operation === "resolve agent-run base" && run.baseRef != null
+      ? `origin/${run.baseRef}: ${error.cause.message}`
+      : error.cause.message
+  return store
+    .abandonLaunch({ runId: run.runId, now: new Date() })
+    .pipe(
+      Effect.ignore,
+      Effect.andThen(Effect.fail(refuse(agentRunWorktreeFailure(error), detail))),
+    )
+}
+
+const mailboxErrorMapper = (run: AgentRunRecord) => (error: AgentRunIngressError) =>
+  error instanceof AgentRunRefusalError
+    ? new AgentRunRefusalError({
+        reason: error.reason,
+        detail: error.detail,
+        mailboxId: run.callerMailboxId,
+      })
+    : error
+
+const worktreeFailureRecovery =
+  (
+    store: AgentRunStorePort,
+    run: AgentRunRecord,
+    withMailbox: (error: AgentRunIngressError) => AgentRunIngressError,
+  ) =>
+  <A, E extends AgentRunIngressError, R>(operation: Effect.Effect<A, E, R>) =>
+    operation.pipe(
+      Effect.mapError(withMailbox),
+      Effect.catchTag("AgentRunWorktreeSetupError", (error) =>
+        abandonFailedWorktreeLaunch(error, store, run),
+      ),
+    )
 
 const routeRefusalDetail = (
   route: string,
@@ -315,10 +369,11 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (run.state === "accepted" || nativeSessionId === null) {
           yield* store.claimSpawn({ runId: run.runId, now })
-          yield* worktrees.create({
+          yield* createAgentRunWorktree(worktrees, {
             repository: target.repositoryDirectory,
             directory: run.directory,
             branch: `agent-run/${target.short}`,
+            ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
           })
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
@@ -578,6 +633,7 @@ const make = (options: AgentRunIngressOptions) =>
                 : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
             resumePrompt: submission.resumePrompt ?? null,
             idempotencyKey: submission.idempotencyKey,
+            baseRef: submission.baseRef,
           }).runId,
         )
         if (keyed?.resolvedSelection != null) {
@@ -743,6 +799,7 @@ const make = (options: AgentRunIngressOptions) =>
               : `${parentKind}@${parentHost}:${submission.parentSessionId}`,
           resumePrompt: submission.resumePrompt ?? null,
           idempotencyKey: submission.idempotencyKey,
+          baseRef: submission.baseRef,
         })
         const created = yield* store.create({
           runId: identifiers.runId,
@@ -754,6 +811,7 @@ const make = (options: AgentRunIngressOptions) =>
           resolvedSelection: selection,
           agent: options.agent,
           repository: repository.name,
+          baseRef: submission.baseRef ?? null,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
           prompt: submission.prompt,
           promptSha256: promptSha256(submission.prompt),
@@ -779,14 +837,8 @@ const make = (options: AgentRunIngressOptions) =>
             run.state === "verified" &&
             run.nativeSessionId !== null)
         const nativeRuns = resolution.provider === "claude" ? claudeRuns : codexRuns
-        const withMailbox = (error: AgentRunIngressError) =>
-          error instanceof AgentRunRefusalError
-            ? new AgentRunRefusalError({
-                reason: error.reason,
-                detail: error.detail,
-                mailboxId: run.callerMailboxId,
-              })
-            : error
+        const withMailbox = mailboxErrorMapper(run)
+        const recoverWorktreeFailure = worktreeFailureRecovery(store, run, withMailbox)
         let dispatched
         if (immutableReceipt) {
           dispatched = {
@@ -795,31 +847,33 @@ const make = (options: AgentRunIngressOptions) =>
             kind: resolution.provider,
           }
         } else if (resolution.provider !== "opencode") {
-          dispatched = yield* (
-            nativeRuns === undefined
-              ? refuse("executor_unavailable", "Claude executor is disabled")
-              : nativeRuns.dispatch(
-                  run,
-                  resolution.route,
-                  {
-                    repositoryDirectory: repository.directory,
-                    resourceId: identifiers.resourceId,
-                    short: identifiers.short,
-                  },
-                  now,
-                )
-          ).pipe(Effect.mapError(withMailbox))
+          if (nativeRuns === undefined)
+            return yield* refuse("executor_unavailable", "Claude executor is disabled")
+          dispatched = yield* recoverWorktreeFailure(
+            nativeRuns.dispatch(
+              run,
+              resolution.route,
+              {
+                repositoryDirectory: repository.directory,
+                resourceId: identifiers.resourceId,
+                short: identifiers.short,
+              },
+              now,
+            ),
+          )
         } else {
-          dispatched = yield* dispatch(
-            run,
-            resolution.route,
-            {
-              repositoryDirectory: repository.directory,
-              resourceId: identifiers.resourceId,
-              short: identifiers.short,
-            },
-            now,
-          ).pipe(Effect.mapError(withMailbox))
+          dispatched = yield* recoverWorktreeFailure(
+            dispatch(
+              run,
+              resolution.route,
+              {
+                repositoryDirectory: repository.directory,
+                resourceId: identifiers.resourceId,
+                short: identifiers.short,
+              },
+              now,
+            ),
+          )
         }
         const childSessionId = {
           claude: claudeSessionCustodyId,

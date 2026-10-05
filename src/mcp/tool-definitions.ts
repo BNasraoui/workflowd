@@ -244,11 +244,14 @@ export const TOOL_DEFINITIONS = [
       "Pass a configured route name (e.g. 'implement', 'review') or a bare " +
       "model id — never a provider-prefixed id; the workflowd runner resolves " +
       "the route, pre-flights that the provider is authenticated and the model " +
-      "exists, creates a fresh worktree of the named repository, spawns the " +
+      "exists, fetches the repository's origin (required for dispatch), " +
+      "creates a fresh worktree of the named repository, spawns the " +
       "session, registers it into kernel custody, and only returns a receipt " +
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +
       "reason — no silent hangs. Requires bearer-token authorization. " +
+      "A dispatch waiting too long for another run to finish preparing the " +
+      "same repository is refused with reason repository_busy. " +
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +
       "using its own credentials and model selection; Claude CLI routes never " +
       "use an OpenCode provider. CLI runs have durable process custody and " +
@@ -309,6 +312,11 @@ export const TOOL_DEFINITIONS = [
         repository: {
           type: "string",
           description: "Logical repository name from the server's dispatch allow-list.",
+        },
+        base_ref: {
+          type: "string",
+          description:
+            "Optional branch on origin to start from; defaults to origin's default branch.",
         },
         prompt: {
           type: "string",

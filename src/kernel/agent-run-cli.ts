@@ -13,7 +13,7 @@ import type { AgentRunRefusalError } from "./agent-run-ingress"
 import type { makeAgentRunCustody } from "./agent-run-custody"
 import { codexFailureLooksUnauthenticated } from "./codex-session"
 import type { AgentRunRecord, AgentRunStorePort } from "./agent-run-store"
-import type { AgentRunWorktreesPort } from "./agent-run-worktrees"
+import { createAgentRunWorktree, type AgentRunWorktreesPort } from "./agent-run-worktrees"
 
 type RefusalReason =
   | "provider_not_authenticated"
@@ -292,10 +292,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       }
       if (run.state === "accepted" || run.nativeSessionId === null) {
         yield* store.claimSpawn({ runId: run.runId, now })
-        yield* worktrees.create({
+        yield* createAgentRunWorktree(worktrees, {
           repository: target.repositoryDirectory,
           directory: run.directory,
           branch: `agent-run/${target.short}`,
+          ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
         })
         const resourceId = yield* ensureResource({
           resourceId: target.resourceId,

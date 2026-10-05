@@ -1,3 +1,4 @@
+import { workerEnvironment } from "./environment"
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import { Context, Effect, Layer, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
@@ -65,6 +66,8 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
       yield* provider.setSessionEnvironment({
         sessionID: run.nativeSessionId,
         variables: {
+          // OpenCode v2 replaces the shell environment; these are not additive overrides.
+          ...workerEnvironment(),
           WORKFLOWD_RUN_ID: runId,
           WORKFLOWD_OPENCODE_RESIDENT_SOCKET: options.socket,
           WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,

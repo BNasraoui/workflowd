@@ -1,6 +1,6 @@
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
-import { agentDirectory } from "./0028-agent-directory"
+import { agentDirectory } from "./0029-agent-directory"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
@@ -1439,6 +1439,11 @@ const residentServerUnit = Effect.gen(function* () {
   ) STRICT`
 })
 
+const agentRunBaseRef = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN base_ref TEXT`
+})
+
 const migrationsThrough0024 = {
   ...migrationsThrough0019,
   "0020_kernel_agent_run_cancellation": kernelAgentRunCancellation,
@@ -1458,6 +1463,7 @@ export const runStoreMigrations = Migrator.make({})({
     "0025_resident_closure": residentClosure,
     "0026_agent_caller_mailbox": agentCallerMailbox,
     "0027_resident_server_unit": residentServerUnit,
-    "0028_agent_directory": agentDirectory,
+    "0028_agent_run_base_ref": agentRunBaseRef,
+    "0029_agent_directory": agentDirectory,
   }),
 })

@@ -1,6 +1,6 @@
 import { expect, setDefaultTimeout, test } from "bun:test"
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlClient } from "effect/unstable/sql"
 import { Effect, Layer, Schedule, Schema } from "effect"
@@ -21,8 +21,14 @@ import { ClaudeCli } from "../../src/kernel/claude-session"
 import { CodexCli } from "../../src/kernel/codex-session"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
+import {
+  inspectAppServerUnit,
+  launchAppServer,
+  residentUnitName,
+  stopAppServer,
+  sweepOrphanAppServers,
+} from "../../src/resident/process"
 import { ResidentCodex, ResidentCodexLive } from "../../src/resident/service"
-import { startAppServer } from "../../src/resident/process"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignal } from "../../src/work-signal"
 import { defaultState, makeProvider } from "../kernel/agent-run-ingress-harness"
@@ -68,7 +74,12 @@ const daemonLayer = (root: string, binary: string) => {
   )
   const ci = Layer.effect(CiService, makeCiStore).pipe(Layer.provideMerge(bootstrap))
   const resident = ResidentCodexLive(
-    { socket: join(root, "resident.sock"), home: root },
+    {
+      socket: join(root, "resident.sock"),
+      home: root,
+      // Startup sweeps this namespace; it must not overlap live resident units.
+      unitPrefix: `workflowd-test-resident-${basename(root)}-`,
+    },
     binary,
     {
       token: "fixture",
@@ -76,7 +87,6 @@ const daemonLayer = (root: string, binary: string) => {
       servers: [],
       auth: { mode: "token", token: "fixture" },
     },
-    (options, notify) => startAppServer(options, notify),
   ).pipe(Layer.provideMerge(Layer.mergeAll(runs, events, ci)))
   return AgentRunIngressLive({
     routes: [],
@@ -139,7 +149,7 @@ const dispatch = (prompt: string) =>
   })
 
 test("a resident Codex coordinator receives its child's terminal message in one thread/queue/add", async () => {
-  const root = await mkdtemp("/tmp/workflowd-coordinator-e2e-")
+  const root = await mkdtemp("/tmp/w-")
   const binary = join(root, "codex")
   await writeFile(
     binary,
@@ -149,12 +159,50 @@ test("a resident Codex coordinator receives its child's terminal message in one 
   )
   await chmod(binary, 0o755)
   const finalMessage = "child finished: CHILD-FINAL-7f3a"
+  const unitPrefix = `workflowd-test-resident-${basename(root)}-`
+  const foreignRunId = `agent-run-foreign-${basename(root)}`
+  const foreignUnit = residentUnitName(foreignRunId)
+  const foreignLaunchId = crypto.randomUUID()
+  const orphanUnit = residentUnitName("agent-run-orphan", unitPrefix)
+  let foreign: Awaited<ReturnType<typeof launchAppServer>> | undefined
+  let orphan: Awaited<ReturnType<typeof launchAppServer>> | undefined
   try {
+    // This canary is ours to stop by exact identity, but foreign to the fixture's sweep.
+    foreign = await launchAppServer(
+      {
+        binary,
+        home: root,
+        runId: foreignRunId,
+        unitPrefix: "workflowd-resident-",
+        launchId: foreignLaunchId,
+      },
+      () => {},
+    )
+    await foreign.initialize()
+    const foreignBefore = await inspectAppServerUnit(foreignUnit)
+    expect(foreignBefore.active).toBe(true)
+    orphan = await launchAppServer(
+      { binary, home: root, runId: "agent-run-orphan", unitPrefix },
+      () => {},
+    )
+    await orphan.initialize()
+    expect((await inspectAppServerUnit(orphanUnit)).active).toBe(true)
+    await orphan.detach()
     await Effect.runPromise(
       Effect.gen(function* () {
+        // Constructing the layer must sweep the orphan without touching the canary.
+        expect((yield* Effect.tryPromise(() => inspectAppServerUnit(orphanUnit))).active).toBe(
+          false,
+        )
+        expect(yield* Effect.tryPromise(() => inspectAppServerUnit(foreignUnit))).toEqual(
+          foreignBefore,
+        )
         const child = yield* dispatch("Do the child task. HOLD_TURN")
         const caller = yield* dispatch(`Coordinate the child. SUBSCRIBE_AGENT_RUN ${child.runId}`)
         const sql = yield* SqlClient.SqlClient
+        const servers = yield* sql<{ unit: string }>`SELECT unit FROM resident_servers`
+        expect(servers).toHaveLength(2)
+        for (const server of servers) expect(server.unit.startsWith(unitPrefix)).toBe(true)
         // The scripted turn subscribed and ended; the thread waits for its one completion.
         yield* sql<{ state: string }>`SELECT state FROM resident_threads
           WHERE thread_id = ${caller.nativeSessionId}`.pipe(
@@ -201,7 +249,12 @@ test("a resident Codex coordinator receives its child's terminal message in one 
         })
       }).pipe(Effect.scoped, Effect.provide(daemonLayer(root, binary))),
     )
+    expect(await inspectAppServerUnit(foreignUnit)).toEqual(foreignBefore)
   } finally {
+    await foreign?.detach()
+    await stopAppServer(foreignUnit, foreignLaunchId, foreign?.invocation ?? null)
+    await orphan?.detach()
+    await sweepOrphanAppServers(unitPrefix, new Set())
     await rm(root, { recursive: true, force: true })
   }
 })
