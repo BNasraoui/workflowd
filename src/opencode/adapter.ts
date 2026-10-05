@@ -117,6 +117,7 @@ export type OpenCodeSessionTelemetry = {
   readonly updatedAtMs: number
   readonly idle: boolean
   readonly outcome?: "succeeded" | "failed" | "interrupted"
+  readonly finalMessage?: string | null
 }
 
 type SdkCall<Input, Output> = (input: Input) => Effect.Effect<Output, Error>
@@ -670,23 +671,40 @@ export function makeOpenCodeSdkClient(
                 }
               }
               let outputTokens = session.tokens.output + session.tokens.reasoning
+              let finalMessage: string | null = null
               // Session totals settle at execution end. Streamed assistant steps
               // already prove generation while the worker is still using tools.
-              if (outputTokens === 0 && !idle) {
+              if (idle || outputTokens === 0) {
                 const messages = yield* client.message.list({
                   sessionID: toSessionID(input.sessionID),
                   limit: 20,
                   order: "desc",
                 })
-                for (const message of messages.data)
-                  if (message.type === "assistant" && message.tokens !== undefined)
-                    outputTokens += message.tokens.output + message.tokens.reasoning
+                for (const message of messages.data) {
+                  if (!idle) {
+                    if (message.type === "assistant" && message.tokens !== undefined)
+                      outputTokens += message.tokens.output + message.tokens.reasoning
+                    continue
+                  }
+                  // Do not reuse a reply from before the latest user turn.
+                  if (message.type === "user") break
+                  if (message.type !== "assistant") continue
+                  const text = message.content
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text)
+                    .join("\n")
+                  if (text.trim() !== "") {
+                    finalMessage = text
+                    break
+                  }
+                }
               }
               return {
                 directory: session.location.directory,
                 outputTokens,
                 updatedAtMs: toEpochMillis(session.time.updated) ?? 0,
                 idle,
+                ...(idle ? { finalMessage } : {}),
                 ...(session.outcome === undefined ? {} : { outcome: session.outcome }),
               }
             }),

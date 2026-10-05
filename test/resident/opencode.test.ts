@@ -1,6 +1,6 @@
 import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -312,6 +312,52 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
       }).pipe(Effect.provide(live)),
     )
   } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("OpenCode session shells retain the worker PATH and HOME without daemon credentials", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-opencode-env-"))
+  const previous = { ...process.env }
+  try {
+    const bin = join(directory, "bin")
+    await mkdir(bin)
+    await writeFile(join(bin, "bd"), "#!/bin/sh\nprintf 'beads-ok'", { mode: 0o755 })
+    process.env.PATH = `${bin}:/usr/bin:/bin`
+    process.env.HOME = directory
+    process.env.GITHUB_TOKEN = "daemon-only"
+    const fake = fixture()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* seed("env")
+        const mailbox = yield* makeOpenCodeMailbox(options, fake.provider)
+        const prompt = yield* mailbox.prepare("env")
+        const variables = fake.environments.get("ses_env")!
+        expect(variables.PATH).toBe(process.env.PATH)
+        expect(variables.HOME).toBe(directory)
+        expect(variables.GITHUB_TOKEN).toBeUndefined()
+        expect(prompt).not.toContain(variables.WORKFLOWD_SUBSCRIPTION_CAPABILITY!)
+        const output = yield* Effect.tryPromise(async () => {
+          const child = Bun.spawn(
+            ["/bin/bash", "--noprofile", "--norc", "-c", 'bd; printf "\\n%s" "$HOME"'],
+            {
+              env: variables,
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          )
+          const text = await new Response(child.stdout).text()
+          expect(await child.exited).toBe(0)
+          return text
+        })
+        expect(output).toBe(`beads-ok\n${directory}`)
+      }).pipe(Effect.provide(layer())),
+    )
+  } finally {
+    for (const key of ["PATH", "HOME", "GITHUB_TOKEN"]) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
     await rm(directory, { recursive: true, force: true })
   }
 })
