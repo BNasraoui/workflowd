@@ -384,7 +384,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
               TailscaleIPs: ["100.64.0.1"],
               Online: true,
               Tags: ["tag:agent-runner"],
-              SSH_HostKeys: [key],
+              sshHostKeys: [key],
             },
           },
         })

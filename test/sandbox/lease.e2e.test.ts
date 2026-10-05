@@ -194,15 +194,17 @@ test("peer binding rejects a different authenticated node even when its address 
     TailscaleIPs: [expected.address],
     Tags: ["tag:agent-runner"],
     Online: true,
-    SSH_HostKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture"],
+    sshHostKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture"],
   }
-  expect(bindSandboxPeer(expected, { Peer: { key: peer } })).toEqual(peer.SSH_HostKeys)
+  expect(bindSandboxPeer(expected, { Peer: { key: peer } })).toEqual(peer.sshHostKeys)
   for (const mutation of [
     { ID: "peer-2" },
     { Tags: [] },
     { Online: false },
     { TailscaleIPs: ["100.64.0.2"] },
-    { SSH_HostKeys: ["bad\nssh-rsa bad"] },
+    { sshHostKeys: ["bad\nssh-rsa bad"] },
+    { sshHostKeys: undefined },
+    { sshHostKeys: [] },
   ]) {
     expect(() => bindSandboxPeer(expected, { Peer: { key: { ...peer, ...mutation } } })).toThrow()
   }
@@ -437,3 +439,30 @@ test("lease acquisition initializes through SSH and retries a lost initializatio
     await runner.close()
   }
 }, 120000)
+
+test("live probe releases its lease when acquisition fails in the Effect error channel", async () => {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--eval",
+      `
+    import { Effect } from "effect"
+    import { probeLease } from "./scripts/evidence/agent-sandbox.mjs"
+    let released = false
+    const leases = {
+      acquire: () => Effect.fail(new Error("peer binding refused")),
+      release: () => Effect.sync(() => { released = true }),
+    }
+    const store = { read: () => Effect.succeed({state: released ? "released" : "starting"}) }
+    const result = await Effect.runPromise(Effect.result(probeLease(leases, store, "probe")))
+    console.log(JSON.stringify({released, result: result._tag}))
+  `,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  const stdout = await new Response(child.stdout).text()
+  const stderr = await new Response(child.stderr).text()
+  expect(await child.exited).toBe(0)
+  expect(stderr).toBe("")
+  expect(JSON.parse(stdout)).toEqual({ released: true, result: "Failure" })
+})

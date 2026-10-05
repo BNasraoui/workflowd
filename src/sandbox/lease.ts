@@ -16,7 +16,7 @@ const PeerStatus = Schema.Struct({
       TailscaleIPs: Schema.Array(Schema.String),
       Tags: Schema.optionalKey(Schema.Array(Schema.String)),
       Online: Schema.Boolean,
-      SSH_HostKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+      sshHostKeys: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
 })
@@ -35,13 +35,13 @@ export function bindSandboxPeer(
     peer === undefined ||
     !peer.Online ||
     !peer.Tags?.includes("tag:agent-runner") ||
-    !peer.SSH_HostKeys?.length ||
-    peer.SSH_HostKeys.some(
+    !peer.sshHostKeys?.length ||
+    peer.sshHostKeys.some(
       (key) => !/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/=]+$/.test(key),
     )
   )
     throw new SandboxError({ message: "Sandbox authenticated Tailscale peer mismatch" })
-  return peer.SSH_HostKeys
+  return peer.sshHostKeys
 }
 
 async function controlCommand(

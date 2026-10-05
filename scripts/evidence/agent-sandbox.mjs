@@ -16,6 +16,49 @@ import { runStoreMigrations } from "../../src/store/migrations.ts"
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
 let output
+export function probeLease(leases, store, runId) {
+  const acquire = Effect.gen(function* () {
+    stage = "live lease acquisition"
+    const deadline = Date.now() + 300000
+    let row
+    do {
+      row = yield* leases.acquire(runId)
+      if (row.state === "ready") break
+      yield* Effect.sleep("2 seconds")
+    } while (Date.now() < deadline)
+    assert.equal(row.state, "ready", "Lease did not become ready within five minutes")
+    evidence.observations.push({
+      state: row.state,
+      actionsRunId: row.actions_run_id,
+      attempt: row.actions_attempt,
+      peerId: row.peer_id,
+      sourceSha: row.source_sha,
+      workflowSha: row.policy.workflowSha,
+    })
+    return row
+  })
+  const release = Effect.gen(function* () {
+    const previousStage = stage
+    stage = "confirmed lease release"
+    const deadline = Date.now() + 300000
+    let row
+    do {
+      yield* leases.release(runId)
+      row = yield* store.read(runId)
+      if (row?.state === "released") break
+      yield* Effect.sleep("2 seconds")
+    } while (Date.now() < deadline)
+    assert.equal(
+      row?.state,
+      "released",
+      "Release unconfirmed; preserve the SQLite custody record and reconcile",
+    )
+    evidence.observations.push({ state: row.state })
+    stage = previousStage
+  })
+  return acquire.pipe(Effect.ensuring(release))
+}
+
 async function probe() {
   assert.ok(
     ["--probe-lease", "--check-policy"].includes(process.argv[2]),
@@ -94,42 +137,8 @@ async function probe() {
         process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "main",
       )
       yield* store.request({ runId, leaseId: runId, policy, sourceSha, now: Date.now() })
-      stage = "live lease acquisition"
-      try {
-        const deadline = Date.now() + 300000
-        let row
-        do {
-          row = yield* leases.acquire(runId)
-          if (row.state === "ready") break
-          yield* Effect.sleep("2 seconds")
-        } while (Date.now() < deadline)
-        assert.equal(row.state, "ready", "Lease did not become ready within five minutes")
-        evidence.observations.push({
-          state: row.state,
-          actionsRunId: row.actions_run_id,
-          attempt: row.actions_attempt,
-          peerId: row.peer_id,
-          sourceSha: row.source_sha,
-          workflowSha: row.policy.workflowSha,
-        })
-        evidence.runUrl = `https://github.com/${policy.repository}/actions/runs/${row.actions_run_id}`
-      } finally {
-        stage = "confirmed lease release"
-        const deadline = Date.now() + 300000
-        let row
-        do {
-          yield* leases.release(runId)
-          row = yield* store.read(runId)
-          if (row?.state === "released") break
-          yield* Effect.sleep("2 seconds")
-        } while (Date.now() < deadline)
-        assert.equal(
-          row?.state,
-          "released",
-          "Release unconfirmed; preserve the SQLite custody record and reconcile",
-        )
-        evidence.observations.push({ state: row.state })
-      }
+      const row = yield* probeLease(leases, store, runId)
+      evidence.runUrl = `https://github.com/${policy.repository}/actions/runs/${row.actions_run_id}`
     }).pipe(Effect.provide(layer)),
   )
   evidence.result = "passed"
@@ -137,18 +146,21 @@ async function probe() {
     JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
   )
 }
-try {
-  await probe()
-} catch (error) {
-  evidence.result = "stopped"
-  evidence.stage = stage
-  // Only prerequisite assertions are printed. SDK/process errors may carry secrets.
-  const detail = stage.startsWith("operator") && error instanceof Error ? `: ${error.message}` : ""
-  console.error(`Sandbox probe stopped at ${stage}${detail}`)
-  process.exitCode = 1
-} finally {
-  if (output !== undefined)
-    await writeFile(join(output, "probe.json"), JSON.stringify(evidence, null, 2) + "\n", {
-      mode: 0o600,
-    })
+if (import.meta.main) {
+  try {
+    await probe()
+  } catch (error) {
+    evidence.result = "stopped"
+    evidence.stage = stage
+    // Only prerequisite assertions are printed. SDK/process errors may carry secrets.
+    const detail =
+      stage.startsWith("operator") && error instanceof Error ? `: ${error.message}` : ""
+    console.error(`Sandbox probe stopped at ${stage}${detail}`)
+    process.exitCode = 1
+  } finally {
+    if (output !== undefined)
+      await writeFile(join(output, "probe.json"), JSON.stringify(evidence, null, 2) + "\n", {
+        mode: 0o600,
+      })
+  }
 }
