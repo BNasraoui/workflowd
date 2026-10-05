@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { tmpdir } from "node:os"
 import { existsSync } from "node:fs"
 import { Schema } from "effect"
@@ -87,6 +87,7 @@ test.each(["survives", "unit-killed", "invocation-mismatch"])(
       const before = Schema.decodeUnknownSync(UnitRow)(
         db.query("SELECT unit, invocation FROM resident_servers").get(),
       )
+      expect(before.unit.startsWith(`workflowd-test-resident-${basename(root)}-`)).toBe(true)
       expect(before.invocation).toBeTruthy()
       const unitPath = join(root, "units", `${before.unit}.json`)
       const unitState = Schema.decodeUnknownSync(UnitState)(
