@@ -11,6 +11,16 @@ import { externalRecipientId } from "./proof"
 import { canonicalJson } from "../kernel/session-store-support"
 import { claimExternalOwner } from "./ownership"
 
+export type ManagedNativeObservation = {
+  readonly nativeSessionId: string
+  readonly directory: string
+}
+const OpenCodeBinding = Schema.Struct({
+  runId: Schema.String,
+  nativeSessionId: Schema.String,
+  directory: Schema.String,
+})
+
 export const DirectoryStore = Context.Service<{
   readonly bindLocalHost: (hostId: string) => Effect.Effect<void, DirectoryError>
   readonly unavailableManaged: (
@@ -20,9 +30,13 @@ export const DirectoryStore = Context.Service<{
   readonly invalidateResidentBindings: (runId?: string) => Effect.Effect<void, DirectoryError>
   readonly observeManaged: (
     runId: string,
-    nativeSessionId: string,
+    observation: ManagedNativeObservation,
     now: Date,
+    leaseMs?: number,
   ) => Effect.Effect<void, DirectoryError>
+  readonly openCodeBindings: (
+    endpointIdentity: string,
+  ) => Effect.Effect<ReadonlyArray<typeof OpenCodeBinding.Type>, DirectoryError>
   readonly managed: (
     now: Date,
     leaseMs: number,
@@ -88,6 +102,8 @@ export const DirectoryStoreLive = Layer.effect(
                 updated_at: Schema.String,
                 last_progress_at: Schema.NullOr(Schema.String),
                 endpoint_observed_at: Schema.NullOr(Schema.String),
+                endpoint_expires_at: Schema.NullOr(Schema.String),
+                observed_directory: Schema.NullOr(Schema.String),
                 verified_native_session_id: Schema.NullOr(Schema.String),
                 binding_version: Schema.Int,
                 endpoint_identity: Schema.NullOr(Schema.String),
@@ -101,7 +117,8 @@ export const DirectoryStoreLive = Layer.effect(
             )(row)
             const observedAt =
               value.endpoint_observed_at !== null ? value.endpoint_observed_at : value.updated_at
-            const expiresAt = new Date(Date.parse(observedAt) + leaseMs).toISOString()
+            const expiresAt =
+              value.endpoint_expires_at ?? new Date(Date.parse(observedAt) + leaseMs).toISOString()
             const verifiedBinding =
               value.native_session_id !== null &&
               value.native_session_id === value.verified_native_session_id &&
@@ -109,6 +126,7 @@ export const DirectoryStoreLive = Layer.effect(
               value.executor_kind === value.provider_kind &&
               value.resource_id === value.custody_resource_id &&
               value.directory === value.absolute_path &&
+              value.observed_directory === value.directory &&
               (value.executor_kind !== "codex" ||
                 value.thread_id === null ||
                 value.thread_id === value.native_session_id) &&
@@ -168,24 +186,44 @@ export const DirectoryStoreLive = Layer.effect(
       (effect) => effect.pipe(Effect.mapError(() => new DirectoryError({ reason: "unavailable" }))),
     )
     const observeManaged = Effect.fn("DirectoryStore.observeManaged")(
-      function* (runId: string, nativeSessionId: string, now: Date) {
-        yield* sql`UPDATE directory_managed SET verified_native_session_id = ${nativeSessionId}, endpoint_observed_at = ${now.toISOString()}
+      function* (
+        runId: string,
+        observation: ManagedNativeObservation,
+        now: Date,
+        leaseMs: number = 90_000,
+      ) {
+        const nativeSessionId = observation.nativeSessionId
+        yield* sql`UPDATE directory_managed SET verified_native_session_id = ${nativeSessionId}, observed_directory = ${observation.directory}, endpoint_observed_at = ${now.toISOString()}, endpoint_expires_at = ${new Date(now.getTime() + leaseMs).toISOString()}
           WHERE run_id = ${runId} AND (endpoint_observed_at IS NULL OR endpoint_observed_at <= ${now.toISOString()}) AND EXISTS (
             SELECT 1 FROM kernel_agent_runs r
             JOIN kernel_sessions s ON s.session_id = r.session_id AND s.native_session_id = r.native_session_id AND s.owning_host_id = directory_managed.host_id
             JOIN kernel_working_resources w ON w.resource_id = s.resource_id AND w.owning_host_id = directory_managed.host_id
             LEFT JOIN resident_threads t ON t.run_id = r.run_id
             WHERE r.run_id = directory_managed.run_id AND r.native_session_id = ${nativeSessionId} AND r.state = 'verified'
-              AND r.executor_kind = s.provider_kind AND r.resource_id = s.resource_id AND r.directory = w.absolute_path
+              AND r.executor_kind = s.provider_kind AND r.resource_id = s.resource_id AND r.directory = w.absolute_path AND r.directory = ${observation.directory}
               AND s.state IN ('ready','active') AND w.state = 'reserved'
               AND (r.executor_kind = 'opencode' OR (t.provider_kind = 'codex' AND t.thread_id = ${nativeSessionId} AND t.closure_confirmed = 0 AND t.state IN ('active','waiting')))
           )`
       },
       (effect) => effect.pipe(Effect.mapError(() => new DirectoryError({ reason: "unavailable" }))),
     )
+    const openCodeBindings = Effect.fn("DirectoryStore.openCodeBindings")(
+      (endpointIdentity: string) =>
+        sql`SELECT r.run_id AS runId, r.native_session_id AS nativeSessionId, r.directory
+          FROM directory_managed d JOIN kernel_agent_runs r ON r.run_id = d.run_id
+          JOIN kernel_sessions s ON s.session_id = r.session_id AND s.owning_host_id = d.host_id AND s.native_session_id = r.native_session_id
+          JOIN kernel_working_resources w ON w.resource_id = s.resource_id AND w.owning_host_id = d.host_id
+          WHERE r.state = 'verified' AND r.executor_kind = 'opencode' AND s.provider_kind = 'opencode'
+            AND s.endpoint_identity = ${endpointIdentity} AND s.state IN ('ready','active') AND w.state = 'reserved'
+            AND r.resource_id = s.resource_id AND r.directory = w.absolute_path
+          ORDER BY d.recipient_id`.pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(OpenCodeBinding))),
+        ),
+      (effect) => effect.pipe(Effect.mapError(() => new DirectoryError({ reason: "unavailable" }))),
+    )
     const invalidateResidentBindings = Effect.fn("DirectoryStore.invalidateResidentBindings")(
       (runId?: string) =>
-        sql`UPDATE directory_managed SET verified_native_session_id = NULL, endpoint_observed_at = NULL WHERE run_id IN (SELECT run_id FROM resident_threads WHERE provider_kind = 'codex') AND (${runId ?? null} IS NULL OR run_id = ${runId ?? null})`.pipe(
+        sql`UPDATE directory_managed SET verified_native_session_id = NULL WHERE run_id IN (SELECT run_id FROM resident_threads WHERE provider_kind = 'codex') AND (${runId ?? null} IS NULL OR run_id = ${runId ?? null})`.pipe(
           Effect.asVoid,
         ),
       (effect) => effect.pipe(Effect.mapError(() => new DirectoryError({ reason: "unavailable" }))),
@@ -291,6 +329,7 @@ export const DirectoryStoreLive = Layer.effect(
         ),
     )
     return DirectoryStore.of({
+      openCodeBindings,
       observeManaged,
       unavailableManaged,
       invalidateResidentBindings,

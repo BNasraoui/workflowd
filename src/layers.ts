@@ -25,6 +25,7 @@ import {
 } from "./kernel/agent-wait-ingress"
 import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
+import { ManagedDirectoryObservationsLive } from "./directory/managed-observations"
 import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
@@ -360,6 +361,19 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           config.directoryRemote?.leaseMs,
           config.directoryRemote,
         ).pipe(Layer.provideMerge(directoryStores), Layer.provide(executionDiscoveryLayer))
+  const managedDirectoryObservations =
+    config.executionCapabilities === undefined
+      ? Layer.empty
+      : ManagedDirectoryObservationsLive({
+          hostId: config.worker.hostId,
+          endpointIdentity: config.openCode.baseUrl,
+          refreshMs: config.directoryRemote?.refreshMs ?? 30_000,
+          leaseMs: config.directoryRemote?.leaseMs ?? 90_000,
+          now: () => new Date(),
+        }).pipe(
+          Layer.provide(directoryStores),
+          Layer.provide(Layer.succeed(AgentRunProvider, openCodeAdapter)),
+        )
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
     Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
@@ -443,6 +457,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             ...config.residentCodex,
             progressWindowMs: config.agentRuns?.progressWindowMs,
             directoryRefreshMs: config.directoryRemote?.refreshMs ?? 30_000,
+            directoryLeaseMs: config.directoryRemote?.leaseMs ?? 90_000,
             unitPrefix:
               config.agentRuns?.codexUnitPrefix === undefined
                 ? "workflowd-resident-"
@@ -568,6 +583,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             // A run stuck before verification for ten verify windows was
             // abandoned by its dispatching request; the watchdog fails it.
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
+            directoryLeaseMs: config.directoryRemote?.leaseMs ?? 90_000,
             // Codex runs complete inline in the dispatching request; their
             // verified rows are invisible to the watchdog.
             unsupervisedExecutorKinds: ["codex", "claude"],
@@ -688,6 +704,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   return Layer.mergeAll(
     executionDiscoveryLayer,
     directoryLayer,
+    managedDirectoryObservations,
     directoryObservations,
     ciLayer,
     residentLayer,

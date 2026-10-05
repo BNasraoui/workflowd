@@ -48,21 +48,21 @@ export const DirectoryResponderLive = (hostId: string, config: DirectoryRunnerCo
               Schema.fromJsonString(Schema.Array(DirectoryPage)),
             )(previous.response_json)
           }
-          const leaseMs = Math.min(
+          const replyLeaseMs = Math.min(
             90_000,
             Date.parse(command.expiresAt) - Date.parse(command.issuedAt),
           )
           const catalog = yield* discovery.list()
           const at = new Date()
           const snapshot = {
-            agents: [...(yield* store.managed(at, leaseMs)), ...(yield* store.external(at))],
+            agents: [...(yield* store.managed(at, 90_000)), ...(yield* store.external(at))],
             runners: [
               {
                 runnerId: runnerIdForHost(hostId),
                 hostId,
                 status: "active" as const,
                 observedAt: at.toISOString(),
-                expiresAt: new Date(at.getTime() + leaseMs).toISOString(),
+                expiresAt: new Date(at.getTime() + replyLeaseMs).toISOString(),
                 catalog,
               },
             ],

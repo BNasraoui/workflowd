@@ -15,6 +15,11 @@ import { JsonValueSchema } from "../../src/json"
 import { externalRecipientId } from "../../src/directory/proof"
 import { DirectoryRunner, DirectorySnapshot } from "../../src/directory/contract"
 import { startDirectoryDaemon } from "./harness"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { FetchHttpClient } from "effect/unstable/http"
+import { SdkOpenCodeAdapter, makeOpenCodeSdkClient } from "../../src/opencode/adapter"
+import { AgentRunProvider } from "../../src/kernel/agent-run-ingress"
+import { runManagedDirectoryObservation } from "../../src/directory/managed-observations"
 
 test("two-host directory uses authenticated NATS observations and installed Codex discovery without leaking source secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "ccw3-directory-"))
@@ -71,6 +76,46 @@ test("two-host directory uses authenticated NATS observations and installed Code
       WORKFLOWD_AGENT_RUN_CODEX_BIN: binary,
     })
     hostB = await startDirectoryDaemon("host-b", join(root, "host-b.db"))
+    const nativeFor = () => {
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: (request) =>
+          Response.json({
+            data: {
+              id: new URL(request.url).pathname.split("/").at(-1),
+              projectID: "fixture",
+              cost: 0,
+              tokens: { input: 0, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+              time: { created: 1, updated: 1 },
+              location: { directory: "/tmp/owned" },
+            },
+          }),
+      })
+      relays.push(server)
+      return server
+    }
+    const nativeA = nativeFor()
+    const nativeB = nativeFor()
+    const observeNative = (host: NonNullable<typeof daemon>, native: Bun.Server<undefined>) =>
+      host.runtime.runPromise(
+        runManagedDirectoryObservation({
+          endpointIdentity: native.url.toString(),
+          leaseMs: 90_000,
+          now: () => new Date(),
+        }).pipe(
+          Effect.provideService(
+            AgentRunProvider,
+            new SdkOpenCodeAdapter(
+              makeOpenCodeSdkClient(
+                OpenCode.make({ baseUrl: native.url.toString() }).pipe(
+                  Effect.provide(FetchHttpClient.layer),
+                ),
+              ),
+            ),
+          ),
+        ),
+      )
     const seed = (host: NonNullable<typeof daemon>, hostId: string) =>
       host.runtime.runPromise(
         Effect.gen(function* () {
@@ -104,14 +149,14 @@ test("two-host directory uses authenticated NATS observations and installed Code
           })
           yield* sessions.registerSession({
             sessionId: "opencode-session-same",
-            nativeSessionId: "same",
+            nativeSessionId: "ses_same",
             providerKind: "opencode",
             providerVersion: 1,
             providerId: "fixture",
             serverId: "fixture",
             owningHostId: hostId,
             endpointAlias: "local",
-            endpointIdentity: "http://127.0.0.1:4096",
+            endpointIdentity: (hostId === "host-a" ? nativeA : nativeB).url.toString(),
             resourceId: "owned",
             createdAt: now,
           })
@@ -119,7 +164,7 @@ test("two-host directory uses authenticated NATS observations and installed Code
             runId,
             resourceId: "owned",
             sessionId: "opencode-session-same",
-            nativeSessionId: "same",
+            nativeSessionId: "ses_same",
             now,
           })
           yield* runs.markVerified({ runId, outputTokens: 1, now })
@@ -127,6 +172,8 @@ test("two-host directory uses authenticated NATS observations and installed Code
       )
     await seed(daemon, "host-a")
     await seed(hostB, "host-b")
+    await observeNative(daemon, nativeA)
+    await observeNative(hostB, nativeB)
     const enroll = async (host: NonNullable<typeof daemon>, hostId: string) => {
       const owner = generateKeyPairSync("ed25519")
       const publicKey = owner.publicKey.export({ type: "spki", format: "der" }).toString("base64")
@@ -380,22 +427,23 @@ test("two-host directory uses authenticated NATS observations and installed Code
         const sessions = yield* KernelSessionStore
         yield* sessions.registerSession({
           sessionId: "opencode-session-reconnected",
-          nativeSessionId: "reconnected-session",
+          nativeSessionId: "ses_reconnected",
           providerKind: "opencode",
           providerVersion: 1,
           providerId: "fixture",
           serverId: "fixture",
           owningHostId: "host-b",
           endpointAlias: "local",
-          endpointIdentity: "http://127.0.0.1:4096",
+          endpointIdentity: nativeB.url.toString(),
           resourceId: "owned",
           createdAt: new Date(),
         })
-        yield* sql`UPDATE kernel_agent_runs SET session_id = 'opencode-session-reconnected', native_session_id = 'reconnected-session', updated_at = ${new Date().toISOString()} WHERE run_id = 'agent-run-two-host'`
+        yield* sql`UPDATE kernel_agent_runs SET session_id = 'opencode-session-reconnected', native_session_id = 'ses_reconnected', updated_at = ${new Date().toISOString()} WHERE run_id = 'agent-run-two-host'`
         const runs = yield* AgentRunStore
         yield* runs.markVerified({ runId: "agent-run-two-host", outputTokens: 2, now: new Date() })
       }),
     )
+    await observeNative(hostB, nativeB)
     startRunner()
     await Effect.runPromise(
       Effect.tryPromise(async () => {
@@ -405,7 +453,7 @@ test("two-host directory uses authenticated NATS observations and installed Code
         if (
           observed.runners.find((r) => r.hostId === "host-b")?.status !== "active" ||
           observed.agents.find((a) => a.recipientId === "managed:host-b:agent-run-two-host")
-            ?.endpoint?.nativeSessionId !== "reconnected-session"
+            ?.endpoint?.nativeSessionId !== "ses_reconnected"
         )
           throw new Error("Waiting for runner reconnect")
       }).pipe(Effect.retry({ schedule: Schedule.spaced("25 millis"), times: 160 })),

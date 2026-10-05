@@ -23,6 +23,7 @@ import { AgentRunStore, type AgentRunRecord } from "./agent-run-store"
 export type AgentRunWatchdogOptions = {
   readonly progressWindowMs: number
   readonly staleAfterMs: number
+  readonly directoryLeaseMs?: number
   /** Providers whose verified runs complete outside the watchdog (inline
    * subprocess execution like codex-cli); those rows are never watchable. */
   readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
@@ -97,8 +98,20 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
       return "worked" as const
     }
     const observed = telemetry.value
-    if (Option.isSome(directory))
-      yield* directory.value.observeManaged(run.runId, run.nativeSessionId, now).pipe(Effect.ignore)
+    if (Option.isSome(directory)) {
+      const matches =
+        observed.sessionID === run.nativeSessionId && observed.directory === run.directory
+      yield* (
+        matches
+          ? directory.value.observeManaged(
+              run.runId,
+              { nativeSessionId: run.nativeSessionId, directory: observed.directory },
+              now,
+              options.directoryLeaseMs,
+            )
+          : directory.value.unavailableManaged(run.runId, run.nativeSessionId)
+      ).pipe(Effect.ignore)
+    }
 
     if (observed.idle) {
       if (observed.outcome === "succeeded" || observed.outcome === undefined) {

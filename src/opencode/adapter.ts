@@ -112,6 +112,8 @@ type OpenCodeAvailabilityInput = {
  * compare successive observations of `outputTokens`.
  */
 export type OpenCodeSessionTelemetry = {
+  /** Actual native response identity; absent on legacy adapter implementations. */
+  readonly sessionID?: string
   readonly directory: string
   readonly outputTokens: number
   readonly updatedAtMs: number
@@ -700,6 +702,7 @@ export function makeOpenCodeSdkClient(
                 }
               }
               return {
+                sessionID: String(session.id),
                 directory: session.location.directory,
                 outputTokens,
                 updatedAtMs: toEpochMillis(session.time.updated) ?? 0,

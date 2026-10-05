@@ -19,21 +19,32 @@ Model, provider, executor and native session are attributes, not recipient IDs.
 Native bindings carry a separate monotonic `bindingVersion`. A changed native
 session or custody session clears endpoint proof and increments the version.
 Accepted runs report `accepted`; spawning/spawned runs report `launching`. Neither
-has a deliverable endpoint. Only actual first-output verification or a successful
-native observation of matching, locally owned session/resource custody can make
-a verified binding active. Administrative run timestamps and retry bookkeeping
-cannot renew that proof.
+has a deliverable endpoint. First-output verification establishes run lifecycle
+state, not reusable endpoint proof. A native observation must confirm the returned
+session ID and resource path against locally owned session/resource custody before
+a verified binding becomes active. Administrative timestamps, output counters and
+retry bookkeeping cannot create or renew that proof.
 Terminal, operator-required or inconsistent custody is unavailable. Old observations
 expire; their timestamps are retained. One-shot CLI sessions are informative
 bindings and always have `deliverable: false`.
 
-Successful OpenCode watchdog telemetry renews endpoint observations independently
-of output progress; an unreachable observation invalidates endpoint proof without
-renewing its last successful timestamp. Resident Codex acquisition/reacquisition clears old proof;
-native resume/read must confirm the thread before it becomes deliverable again.
+OpenCode has a scoped read-only directory pass, independent of the one-run watchdog.
+Every pass observes all verified local bindings on the configured native endpoint,
+including residents parked on durable waits. It runs immediately and every 30 seconds
+after the preceding pass (or the configured refresh interval), with concurrency eight
+and a two-second deadline per native read. It does not touch run progress, complete,
+interrupt or prompt a parked session. Watchdog observations also use the actual
+returned session ID and path. Failed or mismatched observations invalidate proof
+without renewing the last successful timestamp.
+Resident Codex acquisition/reacquisition clears old proof. Native resume must confirm
+the thread's identity/path and actual runtime `cwd`; native read must confirm the
+same identity/path, loaded `idle`/`active` status and `canAcceptDirectInput: true`.
+`notLoaded`, disabled input, absent metadata and null input availability remain
+unavailable. These are installed Codex 0.159.1 protocol fields, not inferred from
+stored custody or requested resume parameters.
 The owned resident periodically reads its thread, using the directory refresh
 interval (30 seconds by default, checked by the existing one-second resident pass).
-A failed read clears directory proof. Disposing the resident invalidates its
+A failed, mismatched or unavailable read clears directory proof. Disposing the resident invalidates its
 directory observations without changing unit/process custody or restart behavior.
 Native thread metadata alone, a launch manifest, or an unconfirmed close is never
 endpoint proof. Existing launch uncertainty, cancellation and closure fencing remain
@@ -82,9 +93,12 @@ Exact signed duplicates reverify the live endpoint and refresh its lease, return
 higher owner-signed revision. Equal-revision conflicting bindings and old revisions
 are refused. Owner revision fences survive lease expiry and restart, including an
 owner-authorized move between hosts; stale host observations are filtered from
-inventory. Different owners cannot claim the same local endpoint address.
+inventory. Different owners cannot claim the same local endpoint address, even after
+expiry; there is no address release/unregister policy in this slice.
 Unreachable current relays become unavailable on failed re-registration and expire
 when they stop renewing. There is no background external-endpoint probe.
+Overlapping re-registrations can conservatively invalidate a later successful
+duplicate if an earlier callback fails; another verified registration reacquires proof.
 
 Registration writes only directory records. It creates no Agent Run, native custody,
 working resource, launch record, process ownership or cleanup permission. It cannot
@@ -117,8 +131,10 @@ Request generations, partial assemblies, completed observations, runner response
 cache and external owner fences persist in SQLite. Exact duplicates replay the
 original response without rediscovery or lease extension. Old/out-of-order requests,
 conflicting pages and late concurrent discovery cannot replace newer responses.
-An old managed binding version cannot replace the currently observed binding even
-under a new challenge. The observer validates managed host namespaces and external
+An old managed binding version cannot replace a binding present in the immediately
+previous complete snapshot, even under a new challenge. Omission removes this managed
+fence; there is no managed tombstone history. The ordinary managed producer includes
+its stored runs. The observer validates managed host namespaces and external
 owner signatures. A remote host attests its own native verification; the coordinator
 does not remotely attach to the native harness.
 
@@ -126,6 +142,12 @@ Transport leases are measured from the coordinator's request time, so delayed or
 replayed replies cannot renew liveness. Configured peers start `unavailable` with
 no fabricated catalog. During partitions, the last complete observation remains
 readable with explicit expiry; expired runners and endpoint leases become unusable.
+Native proof has its own persisted observation timestamp and expiry (90 seconds by
+default), separate from the signed challenge's maximum 35-second validity. Catalog
+responses preserve both native proof timestamps unchanged; they cannot renew proof
+or shorten it to the challenge window. Transport freshness separately caps remote
+usability. Ordinary restart preserves generations; database loss/reprovision has no
+incarnation recovery protocol and may require generation catch-up.
 Source `checkedAt`, `observedAt`, `freshUntil`, stale/access status, selection IDs
 and native thinking metadata survive advertisement unchanged. Stale source or runner
 observations mask model availability as unavailable. Fresh runner liveness does not
@@ -143,8 +165,8 @@ CI consumer or resident subscription.
 | Setting | Meaning |
 | --- | --- |
 | `WORKFLOWD_DIRECTORY_PEERS` | Optional coordinator JSON object mapping other host IDs to proof-key file paths; 1–64 distinct hosts/keys. |
-| `WORKFLOWD_DIRECTORY_REFRESH_MS` | Coordinator refresh, default 30,000 ms; range 10–30,000. |
-| `WORKFLOWD_DIRECTORY_LEASE_MS` | Coordinator/local directory lease, default 90,000 ms; range 100–300,000 and greater than refresh. |
+| `WORKFLOWD_DIRECTORY_REFRESH_MS` | Opted-in coordinator and managed native refresh, default 30,000 ms; range 10–30,000. |
+| `WORKFLOWD_DIRECTORY_LEASE_MS` | Coordinator/local source-proof lease, default 90,000 ms; range 100–300,000 and greater than refresh. |
 | `WORKFLOWD_NATS_SERVERS` and existing NATS credential settings | Required when peers are configured; reuse existing authenticated transport. |
 | `WORKFLOWD_DIRECTORY_CREDENTIAL_FILE` | Runner's enrolled proof-key file; never returned by inventory. |
 | `WORKFLOWD_DIRECTORY_COORDINATOR_HOST` | Runner's authorized coordinator; required together with the proof key. |
@@ -162,11 +184,13 @@ coordinators need command-stream consumer create/info/fetch/ack permissions for
 No live configuration, credentials, broker permissions or services are changed by
 this implementation.
 
-Migration `0028_agent_directory` is additive after current main's `0026` caller
-mailbox and `0027` resident-unit migrations. It adds directory identity, managed
+Migration `0029_agent_directory` is additive after main's `0026` caller mailbox,
+`0027` resident-unit and `0028_agent_run_base_ref` migrations. It adds directory identity, managed
 bindings, external registrations, owner fences, peer observations/page assemblies
 and runner response cache, plus directory-only lifecycle observation triggers.
-It changes no existing custody rows or migration `0025` closure semantics.
+It persists native proof path/timestamps/expiry and changes no existing custody
+rows or migration `0025` closure semantics. Historical verified runs remain
+unavailable until a matching native read reacquires proof.
 
 ## Public inventory and integration limits
 

@@ -84,6 +84,13 @@ test("managed directory waits for verification, expires observations and preserv
         deliverable: false,
       })
       yield* runs.markVerified({ runId: input.runId, outputTokens: 1, now: at })
+      expect((yield* directory.managed(at, 1000))[0]?.deliverable).toBe(false)
+      yield* directory.observeManaged(
+        input.runId,
+        { nativeSessionId: "one", directory: "/tmp/owned" },
+        at,
+        1000,
+      )
       const first = (yield* directory.managed(at, 1000))[0]!
       expect(first).toMatchObject({
         status: "active",
@@ -113,6 +120,13 @@ test("managed directory waits for verification, expires observations and preserv
       yield* sql`UPDATE kernel_agent_runs SET session_id = 'opencode-session-two', native_session_id = 'two' WHERE run_id = ${input.runId}`
       expect((yield* directory.managed(at, 1000))[0]?.deliverable).toBe(false)
       yield* runs.markVerified({ runId: input.runId, outputTokens: 2, now: at })
+      expect((yield* directory.managed(at, 1000))[0]?.deliverable).toBe(false)
+      yield* directory.observeManaged(
+        input.runId,
+        { nativeSessionId: "two", directory: "/tmp/owned" },
+        at,
+        1000,
+      )
       const rebound = (yield* directory.managed(at, 1000))[0]!
       expect(rebound.recipientId).toBe(first.recipientId)
       expect(rebound.bindingVersion).toBeGreaterThan(first.bindingVersion)
@@ -129,6 +143,7 @@ test("managed directory waits for verification, expires observations and preserv
         runAgentRunWatchdogIteration({
           progressWindowMs: 60_000,
           staleAfterMs: 1,
+          directoryLeaseMs: 1000,
           unsupervisedExecutorKinds: [],
           now: () => now,
         }).pipe(
@@ -137,6 +152,7 @@ test("managed directory waits for verification, expires observations and preserv
               sessionTelemetry: () =>
                 reachable
                   ? Effect.succeed({
+                      sessionID: "two",
                       directory: "/tmp/owned",
                       outputTokens: 2,
                       idle: false,
@@ -251,7 +267,12 @@ test("historical run backfill requires a current native observation despite rece
         deliverable: false,
         endpoint: null,
       })
-      yield* directory.observeManaged(runId, "one", now)
+      yield* directory.observeManaged(
+        runId,
+        { nativeSessionId: "one", directory: "/tmp/owned" },
+        now,
+        1000,
+      )
       expect((yield* directory.managed(now, 1000))[0]).toMatchObject({
         recipientId: `managed:host-a:${runId}`,
         status: "active",
@@ -317,6 +338,12 @@ test("resident reacquisition invalidates old native proof until its custody owne
         now: at,
       })
       yield* runs.markVerified({ runId: "resident", outputTokens: 1, now: at })
+      yield* directory.observeManaged(
+        "resident",
+        { nativeSessionId: "thread", directory: "/tmp/resident" },
+        at,
+        1000,
+      )
       const first = (yield* directory.managed(at, 1000))[0]!
       expect(first.deliverable).toBe(true)
       yield* resident.recordClosure("thread", false)
@@ -325,17 +352,32 @@ test("resident reacquisition invalidates old native proof until its custody owne
         deliverable: false,
         endpoint: null,
       })
-      yield* directory.observeManaged("resident", "wrong-session", at)
+      yield* directory.observeManaged(
+        "resident",
+        { nativeSessionId: "wrong-session", directory: "/tmp/resident" },
+        at,
+        1000,
+      )
       expect((yield* directory.managed(at, 1000))[0]?.deliverable).toBe(false)
       const later = new Date(at.getTime() + 1500)
-      yield* directory.observeManaged("resident", "thread", later)
+      yield* directory.observeManaged(
+        "resident",
+        { nativeSessionId: "thread", directory: "/tmp/resident" },
+        later,
+        1000,
+      )
       expect((yield* directory.managed(later, 1000))[0]).toMatchObject({
         recipientId: first.recipientId,
         deliverable: true,
         observedAt: later.toISOString(),
       })
       yield* resident.recordClosure("thread", true)
-      yield* directory.observeManaged("resident", "thread", later)
+      yield* directory.observeManaged(
+        "resident",
+        { nativeSessionId: "thread", directory: "/tmp/resident" },
+        later,
+        1000,
+      )
       expect((yield* directory.managed(later, 1000))[0]?.deliverable).toBe(false)
     }).pipe(Effect.provide(layer)),
   )
