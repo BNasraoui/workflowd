@@ -46,7 +46,21 @@ const Queued = Schema.Struct({
 })
 const History = Schema.Struct({
   thread: Schema.Struct({
-    turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
+    turns: Schema.Array(
+      Schema.Struct({
+        id: Schema.String,
+        status: Schema.String,
+        items: Schema.optional(
+          Schema.Array(
+            Schema.Struct({
+              type: Schema.String,
+              text: Schema.optional(Schema.String),
+              phase: Schema.optional(Schema.NullOr(Schema.String)),
+            }),
+          ),
+        ),
+      }),
+    ),
   }),
 })
 type ResidentPort = {
@@ -185,7 +199,11 @@ export const ResidentCodexLive = (
           )
         }
       })
-      const finish = Effect.fn("Resident.finish")(function* (threadId: string, failed: boolean) {
+      const finish = Effect.fn("Resident.finish")(function* (
+        threadId: string,
+        failed: boolean,
+        finalMessage: string | null = null,
+      ) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
         if (row !== null) {
@@ -200,8 +218,9 @@ export const ResidentCodexLive = (
                   runId: row.run_id,
                   diagnostic: "resident_turn_failed",
                   now: new Date(),
+                  finalMessage,
                 })
-              : runs.complete({ runId: row.run_id, now: new Date() })
+              : runs.complete({ runId: row.run_id, now: new Date(), finalMessage })
           }
         }
         listener?.queue.close()
@@ -216,13 +235,22 @@ export const ResidentCodexLive = (
           request("thread/queue/list", { threadId: event.threadId, cursor: null, limit: 1 }),
         ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Queued)))
         let queuedWork = queued.data.length > 0 || queued.nextCursor !== null
-        if (!queuedWork) {
+        let finalMessage: string | null = null
+        if (!queuedWork || event.turn.status === "failed") {
           // The next submission may have left the queue before its started notification is handled.
           const history = yield* Effect.tryPromise(() =>
             request("thread/read", { threadId: event.threadId, includeTurns: true }),
           ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
+          // Read durable history so completion also survives missed item notifications or a restart.
+          finalMessage =
+            history.thread.turns
+              .find((turn) => turn.id === event.turn.id)
+              ?.items?.findLast(
+                (item) =>
+                  item.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim(),
+              )?.text ?? null
           const last = history.thread.turns.at(-1)
-          queuedWork =
+          queuedWork ||=
             last !== undefined && last.id !== event.turn.id && last.status === "inProgress"
         }
         if (event.turn.status === "interrupted")
@@ -233,7 +261,7 @@ export const ResidentCodexLive = (
           )
         const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
         if (state === "finished" || event.turn.status === "failed")
-          yield* finish(event.threadId, event.turn.status !== "completed")
+          yield* finish(event.threadId, event.turn.status !== "completed", finalMessage)
       })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string

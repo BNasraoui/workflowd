@@ -259,7 +259,14 @@ describe("agent-run watchdog", () => {
     const result = await run(
       Effect.gen(function* () {
         yield* seedVerifiedRun
-        const status = yield* iterate(observing(50, true, "succeeded"), calls, minutes(20))
+        const status = yield* iterate(
+          {
+            ...observing(50, true, "succeeded"),
+            finalMessage: "Fixed the flaky test.\nPR: https://example.test/1",
+          },
+          calls,
+          minutes(20),
+        )
         const store = yield* AgentRunStore
         const record = yield* store.read("agent-run-x")
         return { status, record, messages: yield* mailboxFor("agent-run-x") }
@@ -267,7 +274,13 @@ describe("agent-run watchdog", () => {
     )
     expect(result.status).toBe("worked")
     expect(result.record?.state).toBe("completed")
-    expect(result.messages).toMatchObject([{ status: "completed" }])
+    expect(result.messages).toMatchObject([
+      {
+        status: "completed",
+        final_message: "Fixed the flaky test.\nPR: https://example.test/1",
+        final_message_ref: null,
+      },
+    ])
     expect(wakes).toContain("agent-completion")
   })
 
