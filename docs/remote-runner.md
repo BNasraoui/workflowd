@@ -97,3 +97,51 @@ bun run remote:enqueue --probe smoke-1 --host this-host
 The enqueue command creates a versioned kernel job through workflow instance, wait, event, and delivery state. The coordinator claims that job under the normal kernel lease, stores the exact attempt/worker/token/lease authority in a dispatch row, and republishes prepared rows after restart. Once prepared, ordinary kernel reclamation excludes the uncertain external effect. This post-lease custody is deliberate but finite: the dispatch expiry is the authority bound, after which coordinator reconciliation advances the generation, publishes a cancellation fence for externally uncertain work, and either creates a fresh kernel attempt or terminally fails an exhausted job. Result acceptance checks the published command, host, generation, attempt, observation time, and stored claim authority in the same transaction that completes the kernel job result.
 
 A runner commits every receipt or rejection before confirmed acknowledgement, applies per-job generation fences before queued commands, and recovers received work and result outbox rows after restart. Broker messages may still be duplicated or redelivered; operational guarantees are at-least-once transport plus durable fencing, not a single-delivery guarantee.
+
+## Agent sandbox base image
+
+The separate container-use sandbox plane has an `x86_64-linux` base image built
+with Nix. `flake.lock` pins all general tools through nixpkgs; repositories select
+their own Rust toolchain through rustup and `rust-toolchain.toml`. The image runs
+as `agent` (UID/GID 1000) with a writable `/home/agent`, UTF-8 locale,
+and a CA bundle. Nix builds the image on the host; Nix is not needed inside it.
+
+On Linux with Nix (flakes enabled) and Docker:
+
+```sh
+nix build .#agent-image --no-update-lock-file
+./result > /tmp/agent-image.tar
+docker load -i /tmp/agent-image.tar
+timeout 900 bash test/agent-image/e2e.sh
+```
+
+The `Agent base image` workflow builds and tests every PR without registry write
+permissions. After a push to main it publishes the same tested image to
+`ghcr.io/bnasraoui/workflowd-agent-base:<full-commit-sha>` and `:main`, using
+`GITHUB_TOKEN` with `packages: write` confined to the publish job. It reports the
+image and compressed archive sizes in its build summary. The owner must make
+the initially private GHCR package public for anonymous sandbox pulls. If a
+package with this name already exists, link it to this repository and grant
+the repository Actions access before publishing.
+
+In a target repository, container-use v0.4.2 selects the image with:
+
+```sh
+container-use config base-image set ghcr.io/bnasraoui/workflowd-agent-base:<full-commit-sha>
+git add .container-use/environment.json
+```
+
+This writes `base_image` in `.container-use/environment.json`, read when creating
+a new environment ([v0.4.2 configuration source](https://github.com/dagger/container-use/blob/v0.4.2/environment/config.go#L13-L31),
+[CLI setter](https://github.com/dagger/container-use/blob/v0.4.2/cmd/container-use/config.go#L204-L216)).
+The E2E uses that CLI against a disposable fixture repository and a loopback-only
+registry containing the locally built image, then runs real MCP calls through
+container-use and Dagger. It checks every listed tool as UID 1000 in writable HOME,
+and compiles C and repository-selected Rust. Rust 1.85.0 is only a test
+fixture downloaded at runtime; no Rust toolchain is baked into the image. Runner
+lease integration remains a follow-up to PR #76.
+
+container-use v0.4.2 preserves the image user but copies imported `/workdir` as
+root, overriding the image directory's ownership ([source copy](https://github.com/dagger/container-use/blob/v0.4.2/environment/environment.go#L210)).
+The later runner integration must address workspace permissions for non-root
+shell edits and in-repository build output; tool installation in HOME works today.
