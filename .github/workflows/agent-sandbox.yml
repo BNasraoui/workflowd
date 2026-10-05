@@ -45,10 +45,14 @@ jobs:
           audience: ${{ inputs.tailscale-audience }}
           tags: tag:agent-runner
           version: 1.94.2
-          args: --ssh --accept-routes=false
+          args: --ssh
           hostname: lease-${{ github.run_id }}-${{ github.run_attempt }}
           use-cache: "false"
           log-mode: quiet
+      # The pinned action supplies --accept-routes itself; repeating it in args
+      # fails the join. Disable routes before any tooling or task can start.
+      - name: Disable advertised routes
+        run: sudo tailscale set --accept-routes=false
       - name: Prepare the disposable tooling
         env:
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
@@ -64,4 +68,4 @@ jobs:
         run: /usr/local/bin/container-use hold
       - name: Release disposable containers
         if: always()
-        run: /usr/local/bin/container-use stop
+        run: bash deploy/sandbox/runner.sh stop

@@ -4,6 +4,7 @@ import { Schema } from "effect"
 
 const Step = Schema.Struct({
   uses: Schema.optionalKey(Schema.String),
+  run: Schema.optionalKey(Schema.String),
   with: Schema.optionalKey(Schema.Record(Schema.String, Schema.Json)),
 })
 const Workflow = Schema.Struct({
@@ -70,4 +71,19 @@ test("runner rejects malformed source requests before invoking Docker", async ()
   const stderr = await new Response(child.stderr).text()
   expect(await child.exited).toBe(1)
   expect(stderr).toContain("Invalid sandbox source request")
+})
+
+test("runner disables routes after the action joins and before preparing tooling", async () => {
+  const workflow = Schema.decodeUnknownSync(Workflow)(
+    Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
+  )
+  const steps = workflow.jobs.runner?.steps
+  if (steps === undefined) throw new Error("Missing runner steps")
+  const join = steps.findIndex((step) => step.uses?.startsWith("tailscale/github-action@"))
+  // The pinned action always supplies --accept-routes to `tailscale up`.
+  // Passing the flag again makes the CLI reject the whole join command.
+  expect(steps[join]?.with?.args).toBe("--ssh")
+  expect(steps[join + 1]?.run).toBe("sudo tailscale set --accept-routes=false")
+  expect(steps[join + 2]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
+  expect(steps.at(-1)?.run).toBe("bash deploy/sandbox/runner.sh stop")
 })

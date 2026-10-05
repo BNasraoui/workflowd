@@ -29,6 +29,28 @@ test("SSH rejects an address that could introduce remote command arguments", () 
   expect(() => sandboxSshArguments({ ...transport, address: "peer -oProxyCommand=bad" })).toThrow()
 })
 
+test("tooling and the SSH fixture run without root defaults", async () => {
+  const runner = await runnerFixture()
+  try {
+    const toolingUid = await runner.docker(
+      "run",
+      "--rm",
+      "--memory=64m",
+      "--memory-swap=64m",
+      "workflowd-sandbox-tooling:fixture",
+      "id",
+      "-u",
+    )
+    expect(Number(toolingUid)).toBeGreaterThan(0)
+    const daemon = await runner.docker("exec", `${runner.name}-runner`, "cat", "/proc/1/status")
+    const ids = daemon.match(/^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m)
+    expect(ids).not.toBeNull()
+    expect(ids?.slice(1).every((id) => Number(id) > 0)).toBe(true)
+  } finally {
+    await runner.close()
+  }
+}, 120_000)
+
 test("container-use creates, executes and commits entirely through runner SSH", async () => {
   const runner = await runnerFixture()
   const client = bridgeClient(runner.transport)

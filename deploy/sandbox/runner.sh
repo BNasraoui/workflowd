@@ -17,10 +17,11 @@ boot() {
 }
 
 clone_source() {
+  local repository="$1" source_sha="$2"
   docker exec workflowd-sandbox-tooling git init -b sandbox
-  docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$1.git"
-  docker exec workflowd-sandbox-tooling git -c credential.helper= fetch --depth=1 origin "$2"
-  docker exec workflowd-sandbox-tooling git checkout --detach "$2"
+  docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$repository.git"
+  docker exec workflowd-sandbox-tooling git -c credential.helper= fetch --depth=1 origin "$source_sha"
+  docker exec workflowd-sandbox-tooling git checkout --detach "$source_sha"
 }
 
 case "${1:-}" in
@@ -114,13 +115,19 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
     ;;
   stdio)
     exec docker exec -i workflowd-sandbox-tooling \
-      env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/root \
+      env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner \
       _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 \
       /usr/local/bin/container-use stdio
     ;;
   stop)
-    docker rm -f workflowd-sandbox-tooling workflowd-sandbox-engine >/dev/null
-    docker network rm workflowd-sandbox >/dev/null
+    for container in workflowd-sandbox-tooling workflowd-sandbox-engine; do
+      if docker container inspect "$container" >/dev/null 2>&1; then
+        docker rm -f "$container" >/dev/null
+      fi
+    done
+    if docker network inspect workflowd-sandbox >/dev/null 2>&1; then
+      docker network rm workflowd-sandbox >/dev/null
+    fi
     ;;
   *)
     printf 'Unknown sandbox operation\n' >&2

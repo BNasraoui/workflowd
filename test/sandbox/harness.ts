@@ -82,6 +82,8 @@ export async function runnerFixture() {
     await docker("cp", join(root, "key.pub"), `${name}-runner:/home/runner/.ssh/authorized_keys`)
     await docker(
       "exec",
+      "-u",
+      "root",
       `${name}-runner`,
       "chown",
       "runner:runner",
@@ -313,13 +315,6 @@ export async function sandboxGithubFixture(policy: {
 export async function leaseRunnerFixture(repositoryName: string) {
   const runner = await runnerFixture()
   try {
-    await runner.docker(
-      "exec",
-      `${runner.name}-runner`,
-      "bash",
-      "-c",
-      "apt-get update >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 >/dev/null",
-    )
     const sourceSha = await runner.docker(
       "exec",
       "-u",
@@ -354,6 +349,8 @@ export async function leaseRunnerFixture(repositoryName: string) {
     )
     await runner.docker(
       "exec",
+      "-u",
+      "root",
       `${runner.name}-runner`,
       "bash",
       "-c",
