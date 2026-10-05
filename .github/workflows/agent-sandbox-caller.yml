@@ -1,0 +1,24 @@
+name: Agent sandbox lease
+
+on:
+  push:
+    branches: [workflowd/leases/**]
+
+permissions: {}
+
+jobs:
+  sandbox:
+    if: >-
+      github.event.deleted == false &&
+      github.actor_id == '306741873' &&
+      github.repository_id == '1306107007' &&
+      github.event.repository.fork == false
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/agent-sandbox.yml
+    with:
+      repository-id: "1306107007"
+      app-actor-id: "306741873"
+      tailscale-client-id: ${{ vars.TS_AGENT_CLIENT_ID }}
+      tailscale-audience: ${{ vars.TS_AGENT_AUDIENCE }}

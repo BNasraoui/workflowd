@@ -131,7 +131,7 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases'
           )
           ORDER BY name
         `
@@ -173,8 +173,9 @@ describe("strict initial store schema", () => {
       { migration_id: 26, name: "agent_caller_mailbox" },
       { migration_id: 27, name: "resident_server_unit" },
       { migration_id: 28, name: "agent_run_base_ref" },
+      { migration_id: 29, name: "sandbox_leases" },
     ])
-    expect(result.tables).toHaveLength(32)
+    expect(result.tables).toHaveLength(33)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

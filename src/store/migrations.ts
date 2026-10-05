@@ -1,3 +1,4 @@
+import { sandboxMigration } from "../sandbox/migration"
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
@@ -1463,5 +1464,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0026_agent_caller_mailbox": agentCallerMailbox,
     "0027_resident_server_unit": residentServerUnit,
     "0028_agent_run_base_ref": agentRunBaseRef,
+    "0029_sandbox_leases": sandboxMigration,
   }),
 })
