@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { startAppServer } from "../../src/resident/process"
 import {
   launchAppServer,
@@ -125,7 +125,7 @@ test("launches a detached unit and reattaches through its WebSocket", async () =
   const root = await mkdtemp(join(tmpdir(), "workflowd-resident-unit-"))
   const fakeBin = join(import.meta.dir, "fixtures/fake-systemd")
   const binary = join(import.meta.dir, "fixtures/fake-codex-app-server.ts")
-  const unitPrefix = `workflowd-resident-test-${process.pid}-`
+  const unitPrefix = `workflowd-test-resident-${basename(root)}-`
   const runId = "agent-run-process-test"
   const unit = residentUnitName(runId, unitPrefix)
   const env = {

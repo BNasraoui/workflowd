@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import {
@@ -39,7 +39,12 @@ const sessions = KernelSessionStoreLive.pipe(Layer.provideMerge(store))
 const events = KernelEventStoreLive.pipe(Layer.provideMerge(store))
 const ci = Layer.effect(CiService, makeCiStore).pipe(Layer.provideMerge(store))
 const resident = ResidentCodexLive(
-  { home: join(root, "codex-home"), socket: join(root, "resident.sock") },
+  {
+    home: join(root, "codex-home"),
+    socket: join(root, "resident.sock"),
+    // Keep the same isolated namespace when the host restarts against this database.
+    unitPrefix: `workflowd-test-resident-${basename(root)}-`,
+  },
   binary,
   ciConfig,
 ).pipe(Layer.provideMerge(Layer.mergeAll(runs, events, ci)), Layer.provideMerge(store))
