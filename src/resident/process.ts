@@ -1,3 +1,4 @@
+import { workerEnvironment } from "./environment"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
 import { Readable } from "node:stream"
@@ -94,19 +95,6 @@ export function startAppServer(
     close: () => (closing ??= stop()),
   }
 }
-
-const forwarded = [
-  "HOME",
-  "PATH",
-  "CLAUDE_CONFIG_DIR",
-  "SSH_AUTH_SOCK",
-  "GIT_CONFIG_GLOBAL",
-  "GIT_SSH_COMMAND",
-  "XDG_CONFIG_HOME",
-  "XDG_DATA_HOME",
-  "XDG_STATE_HOME",
-  "XDG_CACHE_HOME",
-] as const
 
 export const residentUnitName = (runId: string, prefix = "workflowd-resident-") => {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(prefix)) throw new Error("invalid resident unit prefix")
@@ -322,12 +310,7 @@ export const launchAppServer = async (
   if (previous.present) await command(["systemctl", "--user", "reset-failed", unit])
   await rm(socket, { force: true })
   const environment: Record<string, string> = {
-    ...Object.fromEntries(
-      forwarded.flatMap((key) => {
-        const value = process.env[key]
-        return value === undefined ? [] : [[key, value]]
-      }),
-    ),
+    ...workerEnvironment(),
     ...options.env,
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),

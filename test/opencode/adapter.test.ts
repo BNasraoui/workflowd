@@ -514,6 +514,7 @@ test("v2 first-token telemetry observes generated steps before session totals se
   let total = 0
   let idle = false
   let generated = true
+  let newUserTurn = false
   let queued = 0
   let startWhileInspecting = false
   let rejectInbox = false
@@ -542,12 +543,25 @@ test("v2 first-token telemetry observes generated steps before session totals se
         return Response.json({
           data: generated
             ? [
+                ...(newUserTurn
+                  ? [
+                      {
+                        id: "msg_user",
+                        type: "user",
+                        time: { created: 5 },
+                        text: "Next task",
+                      },
+                    ]
+                  : []),
                 {
                   id: "msg_step",
                   type: "assistant",
                   agent: "build",
                   model: { id: "fixture", providerID: "fixture" },
-                  content: [],
+                  content: [
+                    { type: "reasoning", text: "private reasoning" },
+                    { type: "text", text: "Final answer.\nPR ready." },
+                  ],
                   tokens: { ...zero, output: 150, reasoning: 207 },
                   time: { created: 2, streamed: 3 },
                 },
@@ -587,7 +601,17 @@ test("v2 first-token telemetry observes generated steps before session totals se
     total = 0
     idle = true
     generated = true
-    expect(await telemetry()).toMatchObject({ outputTokens: 0, idle: true })
+    expect(await telemetry()).toMatchObject({
+      outputTokens: 0,
+      idle: true,
+      finalMessage: "Final answer.\nPR ready.",
+    })
+    generated = false
+    expect(await telemetry()).toMatchObject({ idle: true, finalMessage: null })
+    generated = true
+    newUserTurn = true
+    expect(await telemetry()).toMatchObject({ idle: true, finalMessage: null })
+    newUserTurn = false
     queued = 2
     expect(await telemetry()).toMatchObject({ idle: false })
     queued = 1
