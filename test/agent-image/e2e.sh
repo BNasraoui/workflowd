@@ -16,23 +16,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-curl -fsSL https://github.com/dagger/container-use/releases/download/v0.4.2/container-use_v0.4.2_linux_amd64.tar.gz -o "$root/cu.tgz"
+curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/dagger/container-use/releases/download/v0.4.2/container-use_v0.4.2_linux_amd64.tar.gz -o "$root/cu.tgz"
 echo "3fa52b5833ae4aed2be4b86f7cf42671fdf4bca8c211fe5fff08cc19553d409b  $root/cu.tgz" | sha256sum -c -
 tar -xzf "$root/cu.tgz" -C "$root" container-use
 
 docker network create "$name" >/dev/null
 docker run -d --name "$name-registry" --memory=128m --memory-swap=128m \
-  --network "$name" --network-alias registry \
+  --network "$name" \
   -p 127.0.0.1::5000 \
   registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
 port=$(docker port "$name-registry" 5000/tcp | cut -d: -f2)
 local_image="localhost:$port/workflowd-agent-base:test"
 docker tag "$image" "$local_image"
 docker push --quiet "$local_image"
-base=registry:5000/workflowd-agent-base:test
+# Lazy image reads can happen in Dagger's inner network, whose DNS does not
+# know Docker network aliases. Use the registry's private IP in both contexts.
+registry_address=$(docker inspect "$name-registry" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+base="$registry_address:5000/workflowd-agent-base:test"
 
 # Allow HTTP only for the registry on this disposable Docker network.
-printf '[registry."registry:5000"]\n  http = true\n' > "$root/engine.toml"
+printf '[registry."%s:5000"]\n  http = true\n' "$registry_address" > "$root/engine.toml"
 docker run -d --name "$name-engine" --privileged --network "$name" \
   -v "$root/engine.toml:/etc/dagger/engine.toml:ro" \
   --memory=2g --memory-swap=2g \

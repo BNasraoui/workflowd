@@ -30,8 +30,8 @@ git -c user.name=fixture -c user.email=fixture@example.invalid add original
 git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
 [[ $(git show HEAD:original) == 'agent tools' ]]
 gh --version
-curl --fail --silent --show-error https://example.com > page
-test -s page
+curl --proto '=https' --fail --silent --show-error https://example.com > page
+[[ -s page ]]
 [[ $(printf '{"tool":"jq"}' | jq -r .tool) == jq ]]
 node -e 'if (Number(process.versions.node.split(".")[0]) !== 24) process.exit(1)'
 npm init -y > /dev/null
