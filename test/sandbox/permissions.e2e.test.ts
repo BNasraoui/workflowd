@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { realpath, writeFile } from "node:fs/promises"
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startSandboxOpenCode } from "../../src/sandbox/opencode"
 import { command, runnerFixture } from "./harness"
@@ -168,9 +169,52 @@ test("isolated OpenCode completes a remote task and denies native tools and impo
     expect(properties).toContain("PrivateUsers=yes")
     expect(properties).toContain("MemoryMax=2147483648")
     expect(properties).toContain("MemorySwapMax=0")
+    // The service can disappear before its owner releases it (for example, on
+    // startup failure or external cancellation). Release must still confirm closure.
+    await command(["systemctl", "--user", "stop", server.unit])
+    await server.close()
   } finally {
     await server?.close()
     await model.stop(true)
     await runner.close()
   }
 }, 300_000)
+
+test("namespace setup failure preserves its cause and releases the failed unit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-preflight-"))
+  const leaseId = `preflight-${process.pid}-${root.split("-").at(-1) ?? "fixture"}`
+  const unit = `workflowd-sandbox-${leaseId}`
+  const authFile = join(root, "auth.json")
+  await writeFile(authFile, "{}", { mode: 0o600 })
+  try {
+    await expect(
+      startSandboxOpenCode({
+        directory: root,
+        binary: await realpath(Bun.which("opencode2") ?? "opencode2"),
+        authFile,
+        providers: {},
+        transport: {
+          leaseId,
+          peerId: leaseId,
+          repositoryPath: "/workspace/repository",
+          address: "127.0.0.1",
+          port: 22,
+          identityFile: join(root, "missing-key"),
+          knownHostsFile: join(root, "missing-hosts"),
+        },
+      }),
+    ).rejects.toThrow(/Sandbox namespace preflight failed:[\s\S]*ExecMainStatus=226/)
+    const state = Bun.spawnSync([
+      "systemctl",
+      "--user",
+      "show",
+      unit,
+      "--property=ActiveState",
+      "--value",
+    ])
+    expect(state.stdout.toString().trim()).toBe("inactive")
+  } finally {
+    Bun.spawnSync(["systemctl", "--user", "stop", unit])
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)

@@ -113,9 +113,18 @@ jobs:
           printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
       - name: Prepare sandbox user namespaces
         run: |
+          # This disposable Ubuntu VM must permit systemd's unprivileged namespaces.
+          # PrivateUsers and filesystem isolation remain required by the E2E tests.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo loginctl enable-linger "$USER"
           sudo systemctl start "user@$(id -u).service"
-          printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' "$(id -u)" "$(id -u)" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=%s\n' "$XDG_RUNTIME_DIR" "$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          systemd-run --user --wait --pipe --collect \
+            -p PrivateUsers=yes -p PrivateTmp=yes -p ProtectSystem=strict \
+            -p ProtectHome=tmpfs -p NoNewPrivileges=yes \
+            -p MemoryMax=256M -p MemorySwapMax=0 /usr/bin/true
       - name: Generate Bun LCOV
         run: bun run test:coverage
       - name: Require 80% changed executable line coverage

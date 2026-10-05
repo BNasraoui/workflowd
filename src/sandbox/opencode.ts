@@ -125,22 +125,32 @@ export async function startSandboxOpenCode(input: SandboxOpenCodeInput): Promise
   const password = randomBytes(32).toString("hex")
   const unit = `workflowd-sandbox-${input.transport.leaseId}`
   const url = `http://127.0.0.1:${port}`
-  const close = async () => {
-    await command(["systemctl", "--user", "stop", unit])
-    const state = await command([
+  const inspect = () =>
+    command([
       "systemctl",
       "--user",
       "show",
       unit,
       "--property=ActiveState",
-      "--value",
+      "--property=Result",
+      "--property=ExecMainStatus",
     ])
-    if (state !== "inactive" && state !== "failed") throw new Error("Sandbox unit has not stopped")
+  const stopped = async () => /^ActiveState=(inactive|failed)$/m.test(await inspect())
+  const close = async () => {
+    try {
+      await command(["systemctl", "--user", "stop", unit])
+    } catch (error) {
+      // An already collected unit is closed, but a failed stop of a live unit is not.
+      if (!(await stopped())) throw error
+    }
+    // Keep startup failures available for inspection until this owner releases them.
+    if (/^ActiveState=failed$/m.test(await inspect()))
+      await command(["systemctl", "--user", "reset-failed", unit])
+    if (!(await stopped())) throw new Error("Sandbox unit has not stopped")
   }
   await command([
     "systemd-run",
     "--user",
-    "--collect",
     `--unit=${unit}`,
     "-p",
     "PrivateTmp=yes",
@@ -186,16 +196,9 @@ export async function startSandboxOpenCode(input: SandboxOpenCodeInput): Promise
     const deadline = Date.now() + 300_000
     const location = new URLSearchParams({ "location[directory]": directory })
     for (;;) {
-      const state = await command([
-        "systemctl",
-        "--user",
-        "show",
-        unit,
-        "--property=ActiveState",
-        "--value",
-      ])
-      if (state !== "active" && state !== "activating")
-        throw new Error("Sandbox namespace preflight failed")
+      const state = await inspect()
+      if (!/^ActiveState=(active|activating)$/m.test(state))
+        throw new Error(`Sandbox namespace preflight failed: ${state}`)
       const health = await fetch(`${url}/api/health`, {
         headers,
         signal: AbortSignal.timeout(1000),
@@ -245,7 +248,13 @@ export async function startSandboxOpenCode(input: SandboxOpenCodeInput): Promise
     ])
     return { url, password, unit, invocationId, close }
   } catch (error) {
-    await close()
+    try {
+      await close()
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Sandbox startup and cleanup failed", {
+        cause: cleanupError,
+      })
+    }
     throw error
   }
 }
