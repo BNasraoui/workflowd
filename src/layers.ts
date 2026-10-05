@@ -157,6 +157,20 @@ function makeDiscoveryLayer(
       )
 }
 
+function makeManagedDirectoryObservationLayer(
+  config: Extract<AppConfig, { readonly mode?: "automation" }>,
+) {
+  return config.executionCapabilities === undefined
+    ? Layer.empty
+    : ManagedDirectoryObservationsLive({
+        hostId: config.worker.hostId,
+        endpointIdentity: config.openCode.baseUrl,
+        refreshMs: config.directoryRemote?.refreshMs ?? 30_000,
+        leaseMs: config.directoryRemote?.leaseMs ?? 90_000,
+        now: () => new Date(),
+      })
+}
+
 function makeExecutionOnlyLayer(config: AppConfig) {
   const kernel = Layer.mergeAll(
     KernelEventStoreLive,
@@ -361,19 +375,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           config.directoryRemote?.leaseMs,
           config.directoryRemote,
         ).pipe(Layer.provideMerge(directoryStores), Layer.provide(executionDiscoveryLayer))
-  const managedDirectoryObservations =
-    config.executionCapabilities === undefined
-      ? Layer.empty
-      : ManagedDirectoryObservationsLive({
-          hostId: config.worker.hostId,
-          endpointIdentity: config.openCode.baseUrl,
-          refreshMs: config.directoryRemote?.refreshMs ?? 30_000,
-          leaseMs: config.directoryRemote?.leaseMs ?? 90_000,
-          now: () => new Date(),
-        }).pipe(
-          Layer.provide(directoryStores),
-          Layer.provide(Layer.succeed(AgentRunProvider, openCodeAdapter)),
-        )
+  const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
+    Layer.provide(directoryStores),
+    Layer.provide(Layer.succeed(AgentRunProvider, openCodeAdapter)),
+  )
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
     Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
