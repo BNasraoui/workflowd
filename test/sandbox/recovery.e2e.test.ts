@@ -1,4 +1,5 @@
 import { legacySandboxUnit } from "./opencode-fixture"
+import { Session } from "@opencode-ai/client/effect"
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
@@ -17,6 +18,132 @@ import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/ses
 import { WorkflowStoreLive } from "../../src/store"
 import { stopSandboxOpenCode } from "../../src/sandbox/opencode"
 
+test("missing run records retain shared session custody instead of releasing its runner", async () => {
+  const { sharedOpenCodeFixture } = await import("./opencode-fixture")
+  const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
+  const shared = await sharedOpenCodeFixture("missing-record")
+  const fixture = await sandboxGithubFixture(policy)
+  const layer = AgentRunStoreLive.pipe(
+    Layer.provideMerge(
+      WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" }))),
+    ),
+  )
+  try {
+    const sessionId = await shared.create(join(shared.root, "owned"), "sandbox")
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github)
+        yield* store.request({
+          runId: "missing",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: Date.now(),
+        })
+        yield* store.beginStart("missing")
+        yield* store.recordRun("missing", 41, 1)
+        yield* store.attachSession("missing", sessionId)
+        const dispatch = yield* makeSandboxDispatch({
+          policies: [policy],
+          github,
+          leases,
+          executor: shared.executor,
+          client: shared.client,
+          executorId: "opencode:opencode-primary",
+          endpointIdentity: shared.url,
+        })
+        yield* dispatch.iteration
+        expect((yield* store.read("missing"))?.state).toBe("operator_required")
+        expect((yield* store.read("missing"))?.release_error).not.toBeNull()
+        expect(fixture.cancellations).toEqual([])
+        expect(fixture.refDeletes).toBe(0)
+        expect(
+          String(
+            (yield* shared.client.session.get({ sessionID: Session.ID.make(sessionId) })).agent,
+          ),
+        ).toBe("sandbox")
+      }).pipe(Effect.provide(layer)),
+    )
+  } finally {
+    await fixture.close()
+    await shared.close()
+  }
+})
+
+test("stalled executor cleanup is bounded and revokes its bridge", async () => {
+  const { OpenCode } = await import("@opencode-ai/client/effect")
+  const { FetchHttpClient } = await import("effect/unstable/http")
+  const { TestClock } = await import("effect/testing")
+  const { Fiber } = await import("effect")
+  const { makeSandboxOpenCode } = await import("../../src/sandbox/opencode")
+  const { writeSandboxBinding, readSandboxBinding } = await import("../../src/sandbox/binding")
+  const { SdkOpenCodeAdapter, makeOpenCodeSdkClient } = await import("../../src/opencode/adapter")
+  const root = await mkdtemp(join(tmpdir(), "sandbox-stalled-cleanup-"))
+  const directory = join(root, "location")
+  await mkdir(directory)
+  const binding = {
+    runId: "run",
+    leaseId: "lease",
+    sessionId: "ses_stalled",
+    executorId: "opencode:fixture",
+    endpointIdentity: "http://127.0.0.1:1",
+    directory,
+    locationIdentity: "project",
+    bridgeServerName: "workflowd_sandbox_lease",
+    repositoryId: 1,
+    sourceSha: "a".repeat(40),
+    policyHash: "b".repeat(64),
+    transportHash: "c".repeat(64),
+    deadline: Date.now() + 60000,
+    state: "active" as const,
+  }
+  const entered = Promise.withResolvers<void>()
+  let aborted = false
+  const stalled: typeof fetch = Object.assign(
+    (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        entered.resolve()
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true
+            reject(new Error("aborted"))
+          },
+          { once: true },
+        )
+      }),
+    { preconnect: fetch.preconnect },
+  )
+  try {
+    await writeSandboxBinding(binding, true)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* OpenCode.make({ baseUrl: binding.endpointIdentity }).pipe(
+          Effect.provide(
+            FetchHttpClient.layer.pipe(
+              Layer.provide(Layer.succeed(FetchHttpClient.Fetch, stalled)),
+            ),
+          ),
+        )
+        const executor = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client)))
+        const fiber = yield* makeSandboxOpenCode(client, executor)
+          .stop(binding)
+          .pipe(Effect.result, Effect.forkChild)
+        yield* Effect.promise(() => entered.promise)
+        yield* TestClock.adjust("31 seconds")
+        // Check cancellation before joining so an unbounded request fails instead of hanging.
+        expect(aborted).toBe(true)
+        expect((yield* Fiber.join(fiber))._tag).toBe("Failure")
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+    )
+    expect((await readSandboxBinding(directory)).state).toBe("revoked")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 const policy = {
   alias: "workflowd",
   repository: "BNasraoui/workflowd",
@@ -27,6 +154,57 @@ const policy = {
   tailscaleClientId: "fixture",
   tailscaleAudience: "fixture",
 }
+
+test("reconciliation clears only a successful policy's inventory errors despite a foreign failure", async () => {
+  const fixture = await sandboxGithubFixture(policy)
+  const foreign = { ...policy, repository: "owner/other", repositoryId: 2 }
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* sandboxMigration
+        yield* sandboxCleanupMigration
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github)
+        yield* store.request({
+          runId: "healthy",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: Date.now(),
+        })
+        yield* store.beginStart("healthy")
+        yield* store.recordRun("healthy", 41, 1)
+        yield* store.bind("healthy", 41, 1, {
+          leaseId: "lease-1",
+          peerId: "peer",
+          address: "127.0.0.1",
+          port: 22,
+          repositoryPath: "/workspace/repository",
+          knownHostsFile: "/tmp/key",
+          identityFile: "/dev/null",
+        })
+        yield* store.adopt(
+          foreign,
+          { leaseId: "foreign", run: { id: 42, run_attempt: 1 } },
+          Date.now(),
+        )
+        yield* store.inventoryError(policy)
+        yield* store.inventoryError(foreign)
+        expect((yield* Effect.result(leases.reconcile([foreign, policy])))._tag).toBe("Failure")
+        expect((yield* store.read("healthy"))?.release_error).toBeNull()
+        const rows = yield* store.cleanupRuns()
+        expect(rows.find((row) => row.repository_id === policy.repositoryId)?.last_error).toBeNull()
+        expect(
+          rows.find((row) => row.repository_id === foreign.repositoryId)?.last_error,
+        ).not.toBeNull()
+        expect(fixture.cancellations).toEqual([])
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
 
 test("lease sends heartbeats while a slow source initialization is still in progress", async () => {
   const fixture = await sandboxGithubFixture(policy)
@@ -726,3 +904,399 @@ test("direct release only cleans the repository policy whose inventory it confir
     await fixture.close()
   }
 })
+
+for (const fault of [
+  "create",
+  "add",
+  "abort",
+  "remove",
+  "server",
+  "binding",
+  "ENOSPC",
+  "cancel",
+  "queued",
+]) {
+  test(`shared coordinator retains custody after ${fault} uncertainty and recovers on restart`, async () => {
+    const { sharedOpenCodeFixture } = await import("./opencode-fixture")
+    const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
+    const { bindingDirectory, readSandboxBinding } = await import("../../src/sandbox/binding")
+    const runner = await dispatchRunnerFixture()
+    const githubFixture = await sandboxGithubFixture(policy, runner.name)
+    const shared = await sharedOpenCodeFixture("recovery")
+    const database = join(runner.root, "shared.sqlite")
+    const directory = join(shared.root, "owned")
+    const layer = Layer.merge(AgentRunStoreLive, KernelSessionStoreLive).pipe(
+      Layer.provideMerge(
+        WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename: database }))),
+      ),
+    )
+    const controlDirectory = join(shared.root, "ordinary")
+    const control = await shared.create(controlDirectory, "build")
+    let coordinator: Awaited<ReturnType<typeof sandboxCoordinatorProcess>> | undefined
+    let sessionId = ""
+    let bridgeName = ""
+    let releaseModel: (() => void) | undefined
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* makeSandboxStore
+          const runs = yield* AgentRunStore
+          const github = yield* makeSandboxGithub(githubFixture.github, githubFixture.OctokitClass)
+          const leases = yield* makeSandboxLeaseService(github, runner.root)
+          const service = yield* makeSandboxDispatch({
+            policies: [policy],
+            github,
+            leases,
+            executor: shared.executor,
+            client: shared.client,
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+          })
+          yield* runs.create({
+            runId: "shared",
+            route: "sandbox",
+            providerId: "openai",
+            modelId: "gpt-6-astra-fixture",
+            agent: "sandbox",
+            repository: policy.alias,
+            directory,
+            prompt: "Recover this task",
+            promptSha256: "b".repeat(64),
+            parentSessionId: null,
+            resumePrompt: null,
+            maxAttempts: 1,
+            createdAt: new Date(),
+          })
+          yield* runs.claimSpawn({ runId: "shared", now: new Date() })
+          yield* store.request({
+            runId: "shared",
+            leaseId: runner.name,
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          yield* store.beginStart("shared")
+          yield* store.recordRun("shared", 41, 1)
+          yield* store.bind("shared", 41, 1, runner.transport)
+          bridgeName = `workflowd_sandbox_${runner.name.replaceAll("-", "_")}`
+          if (fault === "create" || fault === "add")
+            shared.reject({
+              path: fault === "create" ? "/session" : `/mcp/${bridgeName}`,
+              method: fault === "create" ? "POST" : "PUT",
+              status: 502,
+              after: true,
+            })
+          const run = (yield* runs.read("shared"))!
+          const launched = yield* Effect.result(
+            service.launch(run, { providerID: "openai", modelID: "gpt-6-astra-fixture" }),
+          )
+          shared.reject()
+          expect(launched._tag).toBe(fault === "create" || fault === "add" ? "Failure" : "Success")
+          sessionId = (yield* store.read("shared"))?.session_id ?? ""
+          expect(sessionId).not.toBe("")
+          if (launched._tag === "Success") {
+            const sessions = yield* KernelSessionStore
+            yield* sessions.registerResource({
+              resourceId: "shared-resource",
+              owningHostId: "mint",
+              absolutePath: directory,
+              kind: "workspace",
+              createdAt: new Date(),
+            })
+            yield* sessions.registerSession({
+              sessionId: "shared-session",
+              nativeSessionId: sessionId,
+              resourceId: "shared-resource",
+              providerKind: "opencode",
+              providerVersion: 1,
+              providerId: "opencode-primary",
+              serverId: "opencode-primary",
+              endpointAlias: "local",
+              endpointIdentity: shared.url,
+              owningHostId: "mint",
+              createdAt: new Date(),
+            })
+            yield* runs.markSpawned({
+              runId: "shared",
+              sessionId: "shared-session",
+              nativeSessionId: sessionId,
+              resourceId: "shared-resource",
+              now: new Date(),
+            })
+            yield* runs.markVerified({ runId: "shared", outputTokens: 1, now: new Date() })
+          }
+        }).pipe(Effect.provide(layer)),
+      )
+      const bindingFile = join(bindingDirectory(directory), "binding.json")
+      const savedBinding = await Bun.file(bindingFile).text()
+      if (fault === "binding") await rm(bindingFile)
+      if (fault === "queued") {
+        releaseModel = shared.holdModel()
+        await shared.api(`session/${sessionId}/prompt`, { text: "Active sandbox turn" })
+        const { Schedule } = await import("effect")
+        const active = await Effect.runPromise(
+          shared.client.session.active().pipe(
+            Effect.repeat({
+              until: (active) => active[Session.ID.make(sessionId)] !== undefined,
+              schedule: Schedule.spaced("50 millis").pipe(Schedule.upTo({ times: 100 })),
+            }),
+          ),
+        )
+        expect(active[Session.ID.make(sessionId)]).toBeDefined()
+        await shared.api(`session/${sessionId}/prompt`, {
+          text: "Queued sandbox turn",
+          resume: false,
+        })
+        await shared.api(`session/${control}/prompt`, {
+          text: "Queued ordinary turn",
+          resume: false,
+        })
+      }
+      const input = {
+        database,
+        policy,
+        github: githubFixture.github,
+        apiUrl: githubFixture.apiUrl,
+        openCodeUrl: shared.url,
+      }
+      const localFault =
+        fault === "abort"
+          ? { path: "/interrupt", method: "POST", after: true }
+          : fault === "remove"
+            ? { path: `/mcp/${bridgeName}`, method: "DELETE", after: true }
+            : fault === "server"
+              ? { path: "" }
+              : undefined
+      if (fault === "cancel") githubFixture.failCancellation(502)
+      coordinator = await sandboxCoordinatorProcess({
+        ...input,
+        ...(localFault ? { openCodeFault: localFault } : {}),
+        ...(fault === "ENOSPC"
+          ? {
+              fullControlDirectory: bindingDirectory(directory),
+              fullControlFiles: { "binding.json": savedBinding },
+            }
+          : {}),
+      })
+      await coordinator.stop()
+      coordinator = undefined
+      releaseModel?.()
+      if (["abort", "remove", "server", "binding", "ENOSPC"].includes(fault)) {
+        expect(githubFixture.cancellations).toEqual([])
+        expect(githubFixture.refDeletes).toBe(0)
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const store = yield* makeSandboxStore
+            expect((yield* store.read("shared"))?.state).toBe("operator_required")
+            expect((yield* store.read("shared"))?.release_error).not.toBeNull()
+            const runs = yield* AgentRunStore
+            expect((yield* runs.read("shared"))?.state).toBe("verified")
+          }).pipe(Effect.provide(layer)),
+        )
+      }
+      if (fault === "binding") await Bun.write(bindingFile, savedBinding)
+      if (fault === "server") await shared.restart()
+      githubFixture.failCancellation(202)
+      githubFixture.listRuns([])
+      githubFixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+      coordinator = await sandboxCoordinatorProcess(input)
+      await coordinator.stop()
+      coordinator = undefined
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* makeSandboxStore
+          const runs = yield* AgentRunStore
+          expect((yield* store.read("shared"))?.state).toBe("released")
+          expect((yield* runs.read("shared"))?.state).toBe("operator_required")
+        }).pipe(Effect.provide(layer)),
+      )
+      expect((await readSandboxBinding(directory)).state).toBe("revoked")
+      expect(
+        String(
+          (
+            await Effect.runPromise(
+              shared.client.session.get({ sessionID: Session.ID.make(sessionId) }),
+            )
+          ).agent,
+        ),
+      ).toBe("sandbox")
+      const catalog = await shared.api(
+        `mcp?${new URLSearchParams({ "location[directory]": directory }).toString()}`,
+      )
+      expect(JSON.stringify(catalog)).not.toContain(bridgeName)
+      if (fault === "queued") {
+        expect(
+          await Effect.runPromise(
+            shared.client.session.inbox.list({ sessionID: Session.ID.make(sessionId) }),
+          ),
+        ).toEqual([])
+        expect(
+          await Effect.runPromise(
+            shared.client.session.inbox.list({ sessionID: Session.ID.make(control) }),
+          ),
+        ).toHaveLength(1)
+      }
+      shared.script([
+        {
+          name: "shell",
+          arguments: JSON.stringify({
+            command: "printf survived > control",
+            description: "Ordinary session survives sandbox recovery",
+          }),
+        },
+      ])
+      await shared.prompt(control, "Run the ordinary control")
+      expect(await Bun.file(join(controlDirectory, "control")).text()).toBe("survived")
+    } finally {
+      releaseModel?.()
+      await coordinator?.stop()
+      await githubFixture.close()
+      await shared.close()
+      await runner.close()
+    }
+  }, 120000)
+}
+
+test("revocation survives a delayed active binding write and denies bridge reconnection", async () => {
+  const {
+    bindingDirectory,
+    writeSandboxBinding,
+    readSandboxBinding,
+    assertBridgeBinding,
+    transportHash,
+  } = await import("../../src/sandbox/binding")
+  const root = await mkdtemp(join(tmpdir(), "sandbox-tombstone-"))
+  const directory = join(root, "location")
+  await mkdir(directory)
+  const transport = {
+    leaseId: "lease",
+    peerId: "peer",
+    address: "127.0.0.1",
+    port: 22,
+    repositoryPath: "/workspace/repository" as const,
+    identityFile: "/dev/null",
+    knownHostsFile: "/tmp/hosts",
+  }
+  const active = {
+    runId: "run",
+    leaseId: "lease",
+    sessionId: "ses_test",
+    executorId: "opencode:fixture",
+    endpointIdentity: "http://127.0.0.1:1",
+    directory,
+    locationIdentity: "project",
+    bridgeServerName: "workflowd_sandbox_lease",
+    repositoryId: 1,
+    sourceSha: "a".repeat(40),
+    policyHash: "b".repeat(64),
+    transportHash: transportHash(transport),
+    deadline: Date.now() + 60000,
+    state: "active" as const,
+  }
+  try {
+    await writeSandboxBinding(active, true)
+    await writeSandboxBinding({ ...active, state: "revoked" })
+    const file = join(bindingDirectory(directory), "binding.json")
+    // An in-flight writer read active custody before revocation and renamed late.
+    await Bun.write(file, JSON.stringify(active))
+    expect((await readSandboxBinding(directory)).state).toBe("revoked")
+    await expect(assertBridgeBinding(file, transport)).rejects.toThrow("revoked")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("revoking a binding terminates an in-flight SSH tool call before its response", async () => {
+  const { runnerFixture, bridgeClient } = await import("./harness")
+  const { bindingDirectory, writeSandboxBinding, transportHash } =
+    await import("../../src/sandbox/binding")
+  const runner = await runnerFixture()
+  const directory = join(runner.root, "location")
+  await mkdir(directory)
+  const active = {
+    runId: "run",
+    leaseId: runner.transport.leaseId,
+    sessionId: "ses_test",
+    executorId: "opencode:fixture",
+    endpointIdentity: "http://127.0.0.1:1",
+    directory,
+    locationIdentity: "project",
+    bridgeServerName: "workflowd_sandbox_lease",
+    repositoryId: 1,
+    sourceSha: "a".repeat(40),
+    policyHash: "b".repeat(64),
+    transportHash: transportHash(runner.transport),
+    deadline: Date.now() + 120000,
+    state: "active" as const,
+  }
+  let bridge: ReturnType<typeof bridgeClient> | undefined
+  try {
+    const wrapper = join(runner.root, "observed-container-use")
+    await Bun.write(
+      wrapper,
+      '#!/bin/sh\ncd /workspace/repository\ntee /tmp/bridge-requests | env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"\n',
+    )
+    await runner.docker("cp", wrapper, `${runner.name}-runner:/usr/local/bin/container-use`)
+    await runner.docker(
+      "exec",
+      "-u",
+      "root",
+      `${runner.name}-runner`,
+      "chmod",
+      "755",
+      "/usr/local/bin/container-use",
+    )
+    await writeSandboxBinding(active, true)
+    bridge = bridgeClient(runner.transport, join(bindingDirectory(directory), "binding.json"))
+    await bridge.initialize()
+    await bridge.request("tools/list")
+    const created = await bridge.request("tools/call", {
+      name: "environment_create",
+      arguments: { environment_source: "/workspace/repository", title: "Revocation" },
+    })
+    const { Schema, Schedule } = await import("effect")
+    const content = Schema.decodeUnknownSync(
+      Schema.Struct({ content: Schema.Array(Schema.Struct({ text: Schema.String })) }),
+    )(created)
+    const environment = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+      JSON.parse(content.content[0]!.text),
+    )
+    const pending = bridge
+      .request("tools/call", {
+        name: "environment_run_cmd",
+        arguments: {
+          environment_source: "/workspace/repository",
+          environment_id: environment.id,
+          command: "sleep 20; printf revocation-inflight",
+        },
+      })
+      .then(
+        () => "completed",
+        () => "refused",
+      )
+    const observed = await Effect.runPromise(
+      Effect.tryPromise(() =>
+        runner.docker("exec", `${runner.name}-runner`, "cat", "/tmp/bridge-requests"),
+      ).pipe(
+        Effect.repeat({
+          until: (text) => text.includes("revocation-inflight"),
+          schedule: Schedule.spaced("50 millis").pipe(Schedule.upTo({ times: 100 })),
+        }),
+      ),
+    )
+    expect(observed).toContain("revocation-inflight")
+    await writeSandboxBinding({ ...active, state: "revoked" })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const deadline = new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), 2000)
+      })
+      expect(await Promise.race([pending, deadline])).toBe("refused")
+    } finally {
+      clearTimeout(timer)
+    }
+  } finally {
+    await bridge?.close()
+    await runner.close()
+  }
+}, 60000)

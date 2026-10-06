@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
-import { makeSandboxStore, SandboxError } from "./store"
+import { makeSandboxStore, SandboxError, sessionCleanupUnconfirmed } from "./store"
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
@@ -244,6 +244,7 @@ export const makeSandboxLeaseService = (
         yield* inventory(lease.policy)
         yield* discover(lease)
         yield* cleanup(lease.policy)
+        yield* store.clearPolicyErrors(lease.policy)
       }).pipe(Effect.tapError(() => store.recordError(runId)))
     })
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
@@ -298,18 +299,34 @@ export const makeSandboxLeaseService = (
           ...saved.map((row) => row.policy),
         ].map((policy) => [JSON.stringify(policy), policy] as const),
       )
-      for (const policy of snapshots.values()) yield* inventory(policy)
-      for (const lease of leases) {
-        if (lease.deadline <= Date.now()) yield* store.beginRelease(lease.run_id)
-        if (lease.state === "releasing" || lease.deadline <= Date.now())
-          yield* discover(lease).pipe(Effect.tapError(() => store.recordError(lease.run_id)))
-        else yield* acquire(lease.run_id)
+      let failed = false
+      for (const policy of snapshots.values()) {
+        const selected = leases.filter(
+          (lease) => JSON.stringify(lease.policy) === JSON.stringify(policy),
+        )
+        const result = yield* Effect.gen(function* () {
+          yield* inventory(policy)
+          for (const lease of selected) {
+            // Shared sessions must cross their local cleanup barrier before runner release,
+            // including after deadline expiry or a lost executor acknowledgement.
+            if (
+              lease.release_error === sessionCleanupUnconfirmed ||
+              (lease.session_id !== null && lease.unit === null && lease.state !== "releasing")
+            )
+              continue
+            if (lease.deadline <= Date.now()) yield* store.beginRelease(lease.run_id)
+            if (lease.state === "releasing" || lease.deadline <= Date.now()) yield* discover(lease)
+            else yield* acquire(lease.run_id)
+          }
+          yield* cleanup(policy)
+          yield* store.clearPolicyErrors(policy)
+        }).pipe(Effect.result)
+        if (result._tag === "Failure") failed = true
       }
-      yield* cleanup().pipe(
-        Effect.tapError(() =>
-          Effect.forEach(leases, (lease) => store.recordError(lease.run_id), { discard: true }),
-        ),
-      )
+      if (failed)
+        return yield* Effect.fail(
+          new SandboxError({ message: "Sandbox policy reconciliation incomplete; retry required" }),
+        )
     })
     const remote = (runId: string, operation: string, limit = 1048576) =>
       Effect.gen(function* () {
@@ -340,5 +357,31 @@ export const makeSandboxLeaseService = (
         `exec docker exec workflowd-sandbox-tooling sh -c 'git for-each-ref --format="%(refname)" refs/remotes/container-use/ | while IFS= read -r ref; do git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --binary HEAD "$ref" -- || exit; done'`,
         8 * 1048576,
       )
-    return { acquire, release, reconcile, heartbeat, artifact }
+    const revalidateReleased = Effect.fn("SandboxLease.revalidateReleased")(function* () {
+      const saved = yield* store.cleanupRuns(true)
+      const active = yield* store.active()
+      if (
+        active.some(
+          (row) => row.state !== "releasing" || row.session_id !== null || row.unit !== null,
+        )
+      )
+        return yield* Effect.fail(
+          new SandboxError({
+            message: "Custody revalidation requires inactive lease-only records",
+          }),
+        )
+      for (const row of saved) {
+        const lease = yield* store.cleanupLease(row)
+        if (lease?.session_id != null || lease?.unit != null)
+          return yield* Effect.fail(
+            new SandboxError({
+              message: "Session custody requires coordinator cleanup before revalidation",
+            }),
+          )
+      }
+      const policies = new Map(saved.map((row) => [JSON.stringify(row.policy), row.policy]))
+      for (const policy of policies.values()) yield* store.reopenReleased(policy)
+      yield* reconcile([...policies.values()])
+    })
+    return { acquire, release, reconcile, heartbeat, artifact, revalidateReleased }
   })

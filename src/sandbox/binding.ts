@@ -37,6 +37,9 @@ export async function readSandboxBinding(directory: string) {
   )
   if (binding.directory !== directory || (await realpath(directory)) !== directory)
     throw new Error("Sandbox binding location changed")
+  // A separate durable tombstone wins even over an already in-flight active-file rename.
+  if (await Bun.file(join(bindingDirectory(directory), "revoked")).exists())
+    return { ...binding, state: "revoked" as const }
   return binding
 }
 
@@ -52,13 +55,15 @@ export async function writeSandboxBinding(binding: SandboxSessionBinding, reserv
     )
       throw new Error("Sandbox binding is immutable or revoked")
   }
+  if (binding.state === "revoked") await saveSandboxFile(root, "revoked", "", true)
   await saveSandboxFile(root, "binding.json", JSON.stringify(binding))
 }
 
 export async function assertBridgeBinding(file: string, transport: SandboxTransport) {
-  const binding = Schema.decodeUnknownSync(SandboxSessionBinding)(
+  const saved = Schema.decodeUnknownSync(SandboxSessionBinding)(
     JSON.parse(await readFile(file, "utf8")),
   )
+  const binding = await readSandboxBinding(saved.directory)
   if (
     file !== join(bindingDirectory(binding.directory), "binding.json") ||
     binding.state !== "active" ||

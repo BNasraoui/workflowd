@@ -34,15 +34,17 @@ export async function sharedOpenCodeFixture(
   const unit = `workflowd-sandbox-fixture-${crypto.randomUUID()}`
   const requests: Array<typeof ModelRequest.Type> = []
   const credentials: Array<string | null> = []
-  let rejection: { path: string; status: number; method?: string } | undefined
+  let rejection: { path: string; status: number; method?: string; after?: boolean } | undefined
   let actions: FixtureAction[] = []
   let answer = "fixture complete"
+  let modelGate: Promise<void> | undefined
   const model = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       credentials.push(request.headers.get("authorization"))
       const body = Schema.decodeUnknownSync(ModelRequest)(await request.json())
+      await modelGate
       requests.push(body)
       let action: FixtureAction | undefined =
         body.tools?.length === 0 || body.tools === undefined
@@ -285,13 +287,17 @@ export async function sharedOpenCodeFixture(
           `Basic ${Buffer.from("opencode:fixture-server-password").toString("base64")}`,
         )
         const path = new URL(input instanceof Request ? input.url : input).pathname
-        if (
+        const rejected =
           rejection !== undefined &&
           path.endsWith(rejection.path) &&
           (rejection.method === undefined || rejection.method === init?.method)
-        )
+        if (rejected && rejection !== undefined && !rejection.after)
           return new Response(null, { status: rejection.status })
         const response = await fetch(input, { ...init, headers })
+        if (rejected && rejection?.after) {
+          await response.arrayBuffer()
+          return new Response(null, { status: rejection.status })
+        }
         return response
       },
       { preconnect: fetch.preconnect },
@@ -307,7 +313,7 @@ export async function sharedOpenCodeFixture(
     return {
       client,
       executor,
-      reject: (next?: { path: string; status: number; method?: string }) => {
+      reject: (next?: { path: string; status: number; method?: string; after?: boolean }) => {
         rejection = next
       },
       root,
@@ -316,6 +322,14 @@ export async function sharedOpenCodeFixture(
       close,
       requests,
       credentials,
+      holdModel: () => {
+        const gate = Promise.withResolvers<void>()
+        modelGate = gate.promise
+        return () => {
+          modelGate = undefined
+          gate.resolve()
+        }
+      },
       script: (next: FixtureAction[], text = "fixture complete") => {
         actions = [...next]
         answer = text

@@ -120,14 +120,17 @@ export async function runnerFixture() {
   }
 }
 
-export function bridgeClient(transport: SandboxTransport) {
+export function bridgeClient(transport: SandboxTransport, bindingFile?: string) {
   const incoming = new TransformStream<Uint8Array, Uint8Array>()
   const outgoing = new TransformStream<string, string>()
   const input = incoming.writable.getWriter()
   const output = outgoing.writable.getWriter()
   const reader = outgoing.readable.getReader()
-  const settled = runSandboxBridge(transport, incoming.readable, (frame) =>
-    output.write(frame),
+  const settled = runSandboxBridge(
+    transport,
+    incoming.readable,
+    (frame) => output.write(frame),
+    bindingFile,
   ).then(
     () => undefined,
     (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
@@ -416,6 +419,9 @@ export async function sandboxCoordinatorProcess(input: {
   github: { appId: number; privateKeyPath: string }
   apiUrl: string
   fullControlDirectory?: string
+  fullControlFiles?: Record<string, string>
+  openCodeUrl?: string
+  openCodeFault?: { path: string; method?: string; after?: boolean }
 }) {
   const source = `
     import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -431,6 +437,7 @@ export async function sandboxCoordinatorProcess(input: {
     import { SdkOpenCodeAdapter, makeOpenCodeSdkClient } from "./src/opencode/adapter.ts"
     const input = JSON.parse(process.env.SANDBOX_FIXTURE_OPTIONS)
     if (input.fullControlDirectory) {
+      for (const [name, contents] of Object.entries(input.fullControlFiles ?? {})) await Bun.write(input.fullControlDirectory + "/" + name, contents)
       try { await Bun.write(input.fullControlDirectory + "/fill", new Uint8Array(131072)); throw new Error("Expected ENOSPC") }
       catch (error) { if (error.code !== "ENOSPC") throw error }
       console.log("disk exhaustion verified")
@@ -440,9 +447,20 @@ export async function sandboxCoordinatorProcess(input: {
     await Effect.runPromise(Effect.gen(function* () {
       const github = yield* makeSandboxGithub(input.github, Octokit.defaults({ baseUrl: input.apiUrl, log: { debug() {}, info() {}, warn() {}, error() {} } }))
       const leases = yield* makeSandboxLeaseService(github)
-      const client = yield* OpenCode.make({baseUrl:"http://127.0.0.1:1"}).pipe(Effect.provide(FetchHttpClient.layer))
+      const url = input.openCodeUrl ?? "http://127.0.0.1:1"
+      const sdkFetch = Object.assign(async (target, init) => {
+        const headers = new Headers(init?.headers)
+        headers.set("Authorization", "Basic " + Buffer.from("opencode:fixture-server-password").toString("base64"))
+        const fault = input.openCodeFault
+        const reject = fault && new URL(target instanceof Request ? target.url : target).pathname.endsWith(fault.path) && (!fault.method || fault.method === init?.method)
+        if (reject && !fault.after) return new Response(null, {status:502})
+        const response = await fetch(target, {...init,headers})
+        if (reject && fault.after) { await response.arrayBuffer(); return new Response(null, {status:502}) }
+        return response
+      }, {preconnect:fetch.preconnect})
+      const client = yield* OpenCode.make({baseUrl:url}).pipe(Effect.provide(FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch,sdkFetch)))))
       const executor = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client)))
-      const service = yield* makeSandboxDispatch({ policies: [input.policy], github, leases, client, executor, executorId: "opencode:opencode-primary", endpointIdentity: "http://127.0.0.1:1" })
+      const service = yield* makeSandboxDispatch({ policies: [input.policy], github, leases, client, executor, executorId: "opencode:opencode-primary", endpointIdentity: url })
       console.log("coordinator ready")
       yield* service.iteration.pipe(Effect.ignore, Effect.repeat(Schedule.spaced("30 seconds")))
     }).pipe(Effect.provide(layer)))

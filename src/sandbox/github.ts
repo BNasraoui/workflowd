@@ -314,7 +314,7 @@ export const makeSandboxGithub = (
       const client = yield* scoped(policy)
       const path = `/repos/${policy.repository}/git/refs/heads/${leaseBranch(leaseId)}`
       const removed = yield* request(client, "DELETE", path)
-      if (![204, 404].includes(removed.status)) return yield* Effect.fail(githubFailure())
+      if (![204, 404, 422].includes(removed.status)) return yield* Effect.fail(githubFailure())
       const read = yield* request(
         client,
         "GET",

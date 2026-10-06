@@ -2,7 +2,7 @@
 // Opt-in real lease probe. Operator trust settings are read, never provisioned.
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -392,8 +392,97 @@ export function probeLease(leases, store, runId) {
   return acquire.pipe(Effect.ensuring(release))
 }
 
+const custodyIdentity = (rows) =>
+  JSON.stringify(
+    rows.map(
+      ({ repository_id, actions_run_id, actions_attempt, lease_id, policy, observed_at }) => ({
+        repository_id,
+        actions_run_id,
+        actions_attempt,
+        lease_id,
+        policy,
+        observed_at,
+      }),
+    ),
+  )
+
+export function assertCustodyPreserved(before, after) {
+  const retained = before.map((saved) =>
+    after.find(
+      (row) =>
+        row.repository_id === saved.repository_id &&
+        row.actions_run_id === saved.actions_run_id &&
+        row.actions_attempt === saved.actions_attempt,
+    ),
+  )
+  assert.ok(retained.every(Boolean), "Immutable cleanup custody changed")
+  assert.equal(
+    custodyIdentity(retained),
+    custodyIdentity(before),
+    "Immutable cleanup custody changed",
+  )
+}
+
+async function reconcileCustody() {
+  stage = "operator custody path"
+  const supplied = process.argv[3]
+  assert.ok(
+    supplied &&
+      (await stat(supplied).then(
+        (file) => file.isFile(),
+        () => false,
+      )),
+    "Existing SQLite custody path is required",
+  )
+  const database = await realpath(supplied)
+  output =
+    process.env.EVIDENCE_SANDBOX_ROOT ??
+    join(homedir(), ".local/state", `workflowd-custody-revalidation-${randomUUID()}`)
+  await mkdir(output, { recursive: true, mode: 0o700 })
+  stage = "App credentials"
+  const config = join(homedir(), ".config/workflowd")
+  const env = await readFile(join(config, "env"), "utf8")
+  const appId = Number(env.match(/^GITHUB_APP_ID=["']?(\d+)/m)?.[1])
+  assert.ok(appId > 0, "App ID unavailable")
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* makeSandboxStore
+      const before = yield* store.cleanupRuns(true)
+      assert.ok(before.length > 0, "Saved cleanup custody is empty")
+      evidence.database = database
+      evidence.identitiesSha256 = createHash("sha256").update(custodyIdentity(before)).digest("hex")
+      const github = yield* makeSandboxGithub({
+        appId,
+        privateKeyPath: join(config, "github-app.pem"),
+      })
+      const leases = yield* makeSandboxLeaseService(github)
+      stage = "saved run and absent-ref reconciliation"
+      const result = yield* Effect.result(leases.revalidateReleased())
+      const after = yield* store.cleanupRuns(true)
+      evidence.rows = after.map((row) => ({
+        repositoryId: row.repository_id,
+        runId: row.actions_run_id,
+        attempt: row.actions_attempt,
+        leaseId: row.lease_id,
+        state: row.state,
+        error: row.last_error,
+        runUrl: `https://github.com/${row.policy.repository}/actions/runs/${row.actions_run_id}`,
+      }))
+      assertCustodyPreserved(before, after)
+      if (result._tag === "Failure") return yield* Effect.fail(result.failure)
+      assert.ok(
+        after.every((row) => row.state === "released" && row.last_error === null),
+        "Custody remains unconfirmed",
+      )
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: database }))),
+  )
+  evidence.result = "passed"
+  console.log(JSON.stringify({ result: evidence.result, evidence: output, rows: evidence.rows }))
+}
+
 async function probe() {
   if (process.argv[2] === "--probe-session-policy") return sessionPolicyProbe()
+  if (process.argv[2] === "--reconcile-custody") return reconcileCustody()
   assert.ok(
     ["--probe-lease", "--check-policy"].includes(process.argv[2]),
     "Expected --probe-lease or --check-policy",

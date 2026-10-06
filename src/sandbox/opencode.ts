@@ -196,26 +196,39 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
     )
     return active
   })
-  const stop = Effect.fn("SandboxOpenCode.stop")(function* (binding: SandboxSessionBinding) {
-    const sessionID = Session.ID.make(binding.sessionId)
-    const session = yield* client.session
-      .get({ sessionID })
-      .pipe(Effect.catchTag("SessionNotFoundError", () => Effect.succeed(undefined)))
-    if (session !== undefined) {
-      yield* checkSession(binding)
-      yield* client.session.interrupt({ sessionID })
-      const active = yield* client.session.active()
-      const inbox = yield* client.session.inbox.list({ sessionID })
-      if (active[sessionID] !== undefined || inbox.length !== 0)
-        return yield* Effect.fail(new Error("Sandbox session quiescence unconfirmed"))
-    }
-    yield* Effect.tryPromise(() => writeSandboxBinding({ ...binding, state: "revoked" }))
-    yield* client.mcp
-      .remove({ location: { directory: binding.directory }, server: binding.bridgeServerName })
-      .pipe(Effect.catchTag("McpServerNotFoundError", () => Effect.void))
-    const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
-    if (catalog.data.some((entry) => entry.name === binding.bridgeServerName))
-      return yield* Effect.fail(new Error("Sandbox bridge revocation unconfirmed"))
-  })
+  const stop = Effect.fn("SandboxOpenCode.stop")(
+    function* (binding: SandboxSessionBinding) {
+      const sessionID = Session.ID.make(binding.sessionId)
+      const session = yield* client.session
+        .get({ sessionID })
+        .pipe(Effect.catchTag("SessionNotFoundError", () => Effect.succeed(undefined)))
+      if (session !== undefined) {
+        yield* checkSession(binding)
+        yield* client.session.interrupt({ sessionID })
+        for (const item of yield* client.session.inbox.list({ sessionID }))
+          yield* client.session.inbox.cancel({ sessionID, inboxID: item.id })
+        const active = yield* client.session.active()
+        const inbox = yield* client.session.inbox.list({ sessionID })
+        if (active[sessionID] !== undefined || inbox.length !== 0)
+          return yield* Effect.fail(new Error("Sandbox session quiescence unconfirmed"))
+      }
+      yield* Effect.tryPromise(() => writeSandboxBinding({ ...binding, state: "revoked" }))
+      yield* client.mcp
+        .remove({ location: { directory: binding.directory }, server: binding.bridgeServerName })
+        .pipe(Effect.catchTag("McpServerNotFoundError", () => Effect.void))
+      const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
+      if (catalog.data.some((entry) => entry.name === binding.bridgeServerName))
+        return yield* Effect.fail(new Error("Sandbox bridge revocation unconfirmed"))
+    },
+    (effect, binding) =>
+      effect.pipe(
+        Effect.timeout("30 seconds"),
+        Effect.onError(() =>
+          Effect.tryPromise(() => writeSandboxBinding({ ...binding, state: "revoked" })).pipe(
+            Effect.ignore,
+          ),
+        ),
+      ),
+  )
   return { reserve, preflight, check, start, stop }
 }

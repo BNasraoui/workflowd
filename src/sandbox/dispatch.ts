@@ -134,7 +134,8 @@ export const makeSandboxDispatch = (options: {
           if (
             binding.runId !== run.runId ||
             binding.leaseId !== lease.lease_id ||
-            binding.sessionId !== lease.session_id ||
+            (binding.sessionId !== lease.session_id &&
+              !(lease.session_id === null && binding.state === "reserved")) ||
             binding.endpointIdentity !== options.endpointIdentity ||
             binding.executorId !== options.executorId
           )
@@ -151,7 +152,7 @@ export const makeSandboxDispatch = (options: {
           Bun.file(join(run.directory, "endpoint.json")).exists(),
         )
         if (!exists) {
-          if (lease.unit !== null) return yield* Effect.fail(failure())
+          if (lease.unit !== null || lease.session_id !== null) return yield* Effect.fail(failure())
           return
         }
         const endpoint = yield* Effect.tryPromise(() => readSandboxEndpoint(run.directory))
@@ -161,7 +162,10 @@ export const makeSandboxDispatch = (options: {
         )
           return yield* Effect.fail(failure())
         yield* Effect.tryPromise(() => stopSandboxOpenCode(endpoint))
-      })
+      }).pipe(
+        Effect.tap(() => store.sessionCleanupConfirmed(run.runId)),
+        Effect.tapError(() => store.sessionCleanupError(run.runId)),
+      )
     const publish = (run: AgentRunRecord) =>
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
@@ -198,6 +202,7 @@ export const makeSandboxDispatch = (options: {
         const current = yield* runs.read(run.runId)
         if (current === null || current.nativeSessionId !== run.nativeSessionId)
           return yield* Effect.fail(failure())
+        yield* stop(run)
         const pending = yield* Effect.tryPromise(() =>
           Bun.file(join(run.directory, "terminal.json")).exists(),
         )
@@ -237,8 +242,8 @@ export const makeSandboxDispatch = (options: {
       }).pipe(
         Effect.onError(() =>
           stop(run).pipe(
-            Effect.ignore,
             Effect.andThen(leases.release(run.runId).pipe(Effect.ignore)),
+            Effect.ignore,
           ),
         ),
         Effect.tapError(() => store.recordError(run.runId)),
@@ -398,6 +403,8 @@ export const makeSandboxDispatch = (options: {
           finalMessage: null,
           diagnostic: "Sandbox coordinator restarted",
         }).pipe(Effect.ignore)
+      else if (lease.session_id !== null || lease.unit !== null)
+        yield* store.sessionCleanupError(lease.run_id)
       else yield* store.beginRelease(lease.run_id)
     }
     const heartbeat = Effect.gen(function* () {

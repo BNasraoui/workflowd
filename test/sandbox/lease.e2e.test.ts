@@ -188,6 +188,29 @@ test("readiness metadata must match the repository, lease, run and OIDC claims",
   }
 })
 
+test.each([204, 404, 422])(
+  "DELETE %s requires an exact absent-ref confirmation",
+  async (status) => {
+    const { sandboxGithubFixture } = await import("./harness")
+    const { makeSandboxGithub } = await import("../../src/sandbox/github")
+    const fixture = await sandboxGithubFixture(policy)
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          yield* github.ensureRef(policy, "lease-1")
+          fixture.deleteResponse(status, true)
+          expect((yield* Effect.result(github.deleteRef(policy, "lease-1")))._tag).toBe("Failure")
+          fixture.deleteResponse(status)
+          expect((yield* Effect.result(github.deleteRef(policy, "lease-1")))._tag).toBe("Success")
+        }),
+      )
+    } finally {
+      await fixture.close()
+    }
+  },
+)
+
 test("peer binding rejects a different authenticated node even when its address matches", async () => {
   const { bindSandboxPeer } = await import("../../src/sandbox/lease")
   const expected = { peerId: "peer-1", address: "100.64.0.1", leaseId: "lease-1" }
@@ -473,4 +496,129 @@ test("live probe releases its lease when acquisition fails in the Effect error c
   expect(await child.exited).toBe(0)
   expect(stderr).toBe("")
   expect(JSON.parse(stdout)).toEqual({ released: true, result: "Failure" })
+})
+
+test("released custody is revalidated through direct saved runs and absent refs without acquisition", async () => {
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+  const fixture = await sandboxGithubFixture(policy)
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* sandboxMigration
+        yield* sandboxCleanupMigration
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github)
+        yield* store.request({
+          runId: "old",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: Date.now(),
+        })
+        yield* leases.acquire("old")
+        fixture.listRuns([{ id: 41 }, { id: 42 }])
+        fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+        fixture.savedRun(42, { status: "completed", conclusion: "cancelled" })
+        yield* leases.release("old")
+        const before = yield* store.read("old")
+        expect(before?.state).toBe("released")
+        fixture.listRuns([])
+        fixture.deleteResponse(422)
+        const created = fixture.refCreates
+        const reads = fixture.savedRunRequests.length
+        yield* leases.revalidateReleased()
+        expect(fixture.refCreates).toBe(created)
+        expect(fixture.savedRunRequests.slice(reads)).toEqual([41, 42])
+        expect(yield* store.read("old")).toEqual(before)
+        fixture.savedRun(42, { run_attempt: 2 })
+        expect((yield* Effect.result(leases.revalidateReleased()))._tag).toBe("Failure")
+        expect((yield* store.read("old"))?.state).toBe("releasing")
+        expect((yield* store.cleanupRuns()).map((row) => row.actions_run_id)).toEqual([41, 42])
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test("custody reconciliation requires an existing SQLite path before any credentials or effects", async () => {
+  const child = Bun.spawn(
+    [process.execPath, "scripts/evidence/agent-sandbox.mjs", "--reconcile-custody"],
+    { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" },
+  )
+  expect(await child.exited).toBe(1)
+  expect(await new Response(child.stderr).text()).toContain(
+    "Existing SQLite custody path is required",
+  )
+})
+
+test("custody evidence permits discovered runs but rejects changes to saved identities", async () => {
+  const source = `
+    import assert from "node:assert/strict"
+    import { assertCustodyPreserved } from "./scripts/evidence/agent-sandbox.mjs"
+    const saved = { repository_id: 1, actions_run_id: 41, actions_attempt: 1, lease_id: "saved", policy: ${JSON.stringify(policy)}, observed_at: 1, state: "pending", last_error: "old" }
+    const discovered = { ...saved, actions_run_id: 42, lease_id: "discovered" }
+    assertCustodyPreserved([saved], [discovered, { ...saved, state: "released", last_error: null }])
+    assert.throws(() => assertCustodyPreserved([saved], [discovered]), /Immutable cleanup custody changed/)
+    for (const mutation of [{ lease_id: "foreign" }, { policy: { ...saved.policy, workflowSha: "c".repeat(40) } }, { actions_attempt: 2 }, { observed_at: 2 }])
+      assert.throws(() => assertCustodyPreserved([saved], [{ ...saved, ...mutation }]), /Immutable cleanup custody changed/)
+  `
+  const child = Bun.spawn([process.execPath, "--eval", source], { stdout: "pipe", stderr: "pipe" })
+  expect(await new Response(child.stderr).text()).toBe("")
+  expect(await child.exited).toBe(0)
+})
+
+test("session cleanup uncertainty fences release despite deadline expiry and inventory failure", async () => {
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+  const fixture = await sandboxGithubFixture(policy)
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* sandboxMigration
+        yield* sandboxCleanupMigration
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github)
+        yield* store.request({
+          runId: "owned",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: 1,
+        })
+        yield* store.beginStart("owned")
+        yield* store.recordRun("owned", 41, 1)
+        yield* store.bind("owned", 41, 1, {
+          leaseId: "lease-1",
+          peerId: "peer",
+          address: "127.0.0.1",
+          port: 22,
+          repositoryPath: "/workspace/repository",
+          knownHostsFile: "/tmp/key",
+          identityFile: "/dev/null",
+        })
+        yield* store.attachSession("owned", "ses_owned")
+        yield* store.sessionCleanupError("owned")
+        fixture.inventoryPages([{ status: 503, total: 0, runs: [] }])
+        expect((yield* Effect.result(leases.reconcile([policy])))._tag).toBe("Failure")
+        expect((yield* store.read("owned"))?.release_error).toContain("session cleanup")
+        fixture.inventoryPages([{ total: 1, runs: [{ id: 41 }] }])
+        expect((yield* Effect.result(leases.release("owned")))._tag).toBe("Failure")
+        yield* leases.reconcile([policy])
+        expect((yield* store.read("owned"))?.state).toBe("operator_required")
+        expect((yield* store.read("owned"))?.release_error).toContain("session cleanup")
+        expect(fixture.cancellations).toEqual([])
+        yield* store.sessionCleanupConfirmed("owned")
+        yield* leases.release("owned")
+        expect(fixture.cancellations).toEqual([41])
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
 })

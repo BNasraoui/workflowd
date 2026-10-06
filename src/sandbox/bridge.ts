@@ -1,4 +1,6 @@
 import { assertBridgeBinding } from "./binding"
+import { watch } from "node:fs/promises"
+import { dirname } from "node:path"
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
 import { SandboxTransport, sandboxSshArguments } from "./transport"
@@ -26,6 +28,20 @@ const Output = Schema.Struct({
   content: Schema.Array(Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })),
   isError: Schema.optionalKey(Schema.Boolean),
 })
+
+async function watchBinding(file: string, transport: SandboxTransport, signal: AbortSignal) {
+  const changes = watch(dirname(file), { signal })[Symbol.asyncIterator]()
+  try {
+    await assertBridgeBinding(file, transport)
+    while (!(await changes.next()).done) {
+      await assertBridgeBinding(file, transport)
+    }
+  } catch (error) {
+    if (!signal.aborted) throw error
+  } finally {
+    await changes.return?.()
+  }
+}
 
 async function* frames(reader: {
   read(): Promise<
@@ -176,13 +192,17 @@ export async function runSandboxBridge(
   }
   const forwarding = forward()
   const diagnostics = monitor()
+  const closed = new AbortController()
+  const custody =
+    bindingFile === undefined ? [] : [watchBinding(bindingFile, transport, closed.signal)]
   try {
-    await Promise.race([forwarding, diagnostics])
+    await Promise.race([forwarding, diagnostics, ...custody])
   } finally {
+    closed.abort()
     child.kill()
     await input.cancel()
     await child.exited
-    await Promise.allSettled([forwarding, diagnostics])
+    await Promise.allSettled([forwarding, diagnostics, ...custody])
     process.removeListener("SIGTERM", stop)
     process.removeListener("SIGINT", stop)
   }
