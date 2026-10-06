@@ -178,3 +178,27 @@ systemctl --user daemon-reload
 systemctl --user restart opencode2-server.service
 systemctl --user is-active opencode2-server.service
 ```
+
+## Runner bootstrap pin (coordinator/operator only)
+
+The runner fetches complete history for the exact requested source SHA. A shallow
+checkout fails when container-use pushes it into its internal repository. Both
+the startup source helper and the `initialize` operation use the full fetch;
+repository validation, the initialization lock, the saved SHA and the five-minute
+initialization timeout remain in place.
+
+The initializer regression uses real Docker, Git, SSH and container-use/Dagger.
+It first reproduces the shallow failure, then requests an older commit from a
+multi-commit origin, checks complete ancestry and runs the fixture's tests in the
+created environment. Its private `/run` mount holds only fixture custody. The
+test changes neither the host's runner state nor production configuration.
+
+Changes to `deploy/sandbox/runner.sh` require a new workflow pin. After the worker
+publishes its bootstrap candidate and exact-head CI passes, review the candidate
+and its implementation report. The coordinator/operator must update the sandbox
+repository policy's `workflowSha` from
+`5a4da56f5829e4fb3a5f64385cb164ec73f432d1` to that complete reviewed commit SHA,
+keeping the repository, App and tailnet trust unchanged, then resume the worker
+with the verified pin. Workers do not change the production pin or acquire a live
+lease before that confirmation. This bootstrap gate does not complete phase 4D's
+remaining security and authenticated live verification; dispatch stays disabled.

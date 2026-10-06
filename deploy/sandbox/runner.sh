@@ -20,7 +20,7 @@ clone_source() {
   local repository="$1" source_sha="$2"
   docker exec workflowd-sandbox-tooling git init -b sandbox
   docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$repository.git"
-  docker exec workflowd-sandbox-tooling git -c credential.helper= fetch --depth=1 origin "$source_sha"
+  docker exec workflowd-sandbox-tooling git -c credential.helper= fetch origin "$source_sha"
   docker exec workflowd-sandbox-tooling git checkout --detach "$source_sha"
 }
 
@@ -99,7 +99,7 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
     if [[ -f /run/workflowd-sandbox/source.sha ]]; then
       [[ "$(cat /run/workflowd-sandbox/source.sha)" == "$source_sha" ]]
     else
-      timeout 300 bash -c 'set -euo pipefail; docker exec workflowd-sandbox-tooling git init -b sandbox; docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$1.git"; docker exec workflowd-sandbox-tooling git -c credential.helper= fetch --depth=1 origin "$2"; docker exec workflowd-sandbox-tooling git checkout --detach "$2"' _ "$repository" "$source_sha" >/run/workflowd-sandbox/clone.log 2>&1
+      timeout 300 bash -c 'set -euo pipefail; docker exec workflowd-sandbox-tooling git init -b sandbox; docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$1.git"; docker exec workflowd-sandbox-tooling git -c credential.helper= fetch origin "$2"; docker exec workflowd-sandbox-tooling git checkout --detach "$2"' _ "$repository" "$source_sha" >/run/workflowd-sandbox/clone.log 2>&1
       printf '%s\n' "$source_sha" > /run/workflowd-sandbox/source.sha
     fi
     printf '%s\n' "$source_sha"
