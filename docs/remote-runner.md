@@ -105,6 +105,10 @@ with Nix. `flake.lock` pins all general tools through nixpkgs; repositories sele
 their own Rust toolchain through rustup and `rust-toolchain.toml`. The image runs
 as `agent` (UID/GID 1000) with a writable `/home/agent`, UTF-8 locale,
 and a CA bundle. Nix builds the image on the host; Nix is not needed inside it.
+Archive tools (tar, gzip, xz, unzip), which, procps, the OpenSSH client, less,
+and Python 3 with pip are included. The conventional ELF loader uses nix-ld for
+downloaded binaries, with `NIX_LD` and `NIX_LD_LIBRARY_PATH`; no image-wide
+`LD_LIBRARY_PATH` overrides the libraries used by Nix-packaged tools.
 
 On Linux with Nix (flakes enabled) and Docker:
 
@@ -115,8 +119,11 @@ docker load -i /tmp/agent-image.tar
 timeout 900 bash test/agent-image/e2e.sh
 ```
 
-The `Agent base image` workflow builds and tests every PR without registry write
-permissions. After a push to main it publishes the same tested image to
+The `Agent base image` PR workflow (`agent-image-pr.yml`) calls the reusable
+`agent-image.yml` build and container-use E2E with only `contents: read`.
+Every PR job runs; publication has no job in that workflow. The separate
+`agent-image-publish.yml` workflow runs only on pushes to main, calls the same
+reusable build, and then loads its tested artifact to publish to
 `ghcr.io/bnasraoui/workflowd-agent-base:<full-commit-sha>` and `:main`, using
 `GITHUB_TOKEN` with `packages: write` confined to the publish job. It reports the
 image and compressed archive sizes in its build summary. The owner must make
@@ -136,9 +143,11 @@ a new environment ([v0.4.2 configuration source](https://github.com/dagger/conta
 [CLI setter](https://github.com/dagger/container-use/blob/v0.4.2/cmd/container-use/config.go#L204-L216)).
 The E2E uses that CLI against a disposable fixture repository and a loopback-only
 registry containing the locally built image, then runs real MCP calls through
-container-use and Dagger. It checks every listed tool as UID 1000 in writable HOME,
-and compiles C and repository-selected Rust. Rust 1.85.0 is only a test
-fixture downloaded at runtime; no Rust toolchain is baked into the image. Runner
+container-use and Dagger, waiting for the registry's `/v2/` endpoint before
+pushing, with a bounded timeout. It checks every listed tool as UID 1000 in
+writable HOME, installs a local Python wheel with pip, and compiles C and a
+dependency-free Cargo crate with repository-selected Rust. Rust 1.85.0 is only a
+test fixture downloaded at runtime; no Rust toolchain is baked into the image. Runner
 lease integration remains a follow-up to PR #76.
 
 container-use v0.4.2 preserves the image user but copies imported `/workdir` as

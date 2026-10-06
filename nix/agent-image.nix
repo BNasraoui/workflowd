@@ -4,7 +4,9 @@ let
     name = "agent-tools";
     paths = with pkgs; [
       bashInteractive coreutils findutils gnugrep gnused gawk diffutils
-      git gh curl cacert jq ripgrep fd nodejs_24 bun python3 rustup
+      gnutar gzip xz unzip which procps openssh less
+      git gh curl cacert jq ripgrep fd nodejs_24 bun
+      (python3.withPackages (ps: [ ps.pip ])) rustup
       gcc gnumake binutils pkg-config
     ];
     pathsToLink = [ "/bin" ];
@@ -25,7 +27,7 @@ pkgs.dockerTools.streamLayeredImage {
     printf '/bin/sh\n/bin/bash\n' > etc/shells
     ln -s ${pkgs.coreutils}/bin/env usr/bin/env
     # rustup downloads upstream ELF binaries with the conventional loader path.
-    ln -s ${pkgs.glibc}/lib/ld-linux-x86-64.so.2 lib64/ld-linux-x86-64.so.2
+    ln -s ${pkgs.nix-ld}/libexec/nix-ld lib64/ld-linux-x86-64.so.2
     chmod 1777 tmp
   '';
   fakeRootCommands = ''
@@ -44,7 +46,8 @@ pkgs.dockerTools.streamLayeredImage {
       "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       "RUSTUP_HOME=/home/agent/.rustup"
       "CARGO_HOME=/home/agent/.cargo"
-      "LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}"
+      "NIX_LD=${pkgs.stdenv.cc.bintools.dynamicLinker}"
+      "NIX_LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}"
     ];
     Labels = {
       "org.opencontainers.image.source" = "https://github.com/BNasraoui/workflowd";

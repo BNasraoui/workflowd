@@ -26,6 +26,16 @@ docker run -d --name "$name-registry" --memory=128m --memory-swap=128m \
   -p 127.0.0.1::5000 \
   registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 >/dev/null
 port=$(docker port "$name-registry" 5000/tcp | cut -d: -f2)
+deadline=$((SECONDS + 30))
+until curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+  "http://127.0.0.1:$port/v2/" >/dev/null 2>&1; do
+  if (( SECONDS >= deadline )); then
+    printf 'Disposable registry at port %s did not become ready within 30 seconds\n' "$port" >&2
+    docker logs --tail 60 "$name-registry" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
 local_image="localhost:$port/workflowd-agent-base:test"
 docker tag "$image" "$local_image"
 docker push --quiet "$local_image"
