@@ -102,6 +102,14 @@ inconclusive, not a passing confinement result. Native denial is requested throu
 the advertised `execute` tool: separate `tools.shell`, `tools.read` and `tools.write`
 calls must each produce a nested execution error, zero completed native calls and
 an untouched host canary. Direct forced native calls remain covered by the fixture.
+Each negative prompt asks for one exact call, with failure expected and no search
+or retry. Evidence is paginated newest-first, checked for ordering and duplicates,
+and bounded by that prompt's message ID; recorded calls are chronological. Missing
+boundaries stop verification. Completed nested Code Mode `search` is discovery
+only and is permitted, as are calls to the session's own bridge. Any other
+completed nested or top-level call fails verification. Discovery cannot replace
+the exact-code denial: it must still complete with `metadata.error` and no nested
+calls. The fixture includes a denial followed by 22 discovery calls across pages.
 
 ```sh
 systemd-run --user --wait --pipe --collect \

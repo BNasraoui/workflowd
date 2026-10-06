@@ -18,6 +18,20 @@ let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
 let output
 
+export function assertSandboxCalls(calls, ownBridge) {
+  const own = (name) => typeof name === "string" && name.startsWith(`${ownBridge}.`)
+  assert.ok(
+    calls.every(
+      (part) =>
+        (part.state.status !== "completed" || part.name === "execute" || own(part.name)) &&
+        (part.state.metadata?.toolCalls ?? []).every(
+          (call) => call.status !== "completed" || call.tool === "search" || own(call.tool),
+        ),
+    ),
+    "Sandbox probe completed an unexpected tool call",
+  )
+}
+
 // Run against either the scripted disposable executor or the operator's shared executor.
 // The production probe uses its existing model selection and authentication unchanged.
 async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand }) {
@@ -28,6 +42,7 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
     health: await api("health"),
     locations: [],
     sessionsRemoved: 0,
+    turns: [],
   }
   assert.equal(report.health.version, "0.0.0-beta-19242")
   const sessions = []
@@ -50,19 +65,54 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
       ) + "\n",
       { mode: 0o600 },
     )
-  const run = async (session, action) => {
-    await api(`session/${session}/prompt`, {
+  const run = async (session, action, negative = false) => {
+    const prompt = await api(`session/${session}/prompt`, {
       text:
-        "Execute exactly this tool call for an authorized disposable confinement probe, then stop. Do not substitute another tool.\n" +
+        (negative
+          ? "This is an authorized disposable negative confinement test. The exact call below is expected to fail; that error is the required result. Make exactly one call, then stop. Do not search, retry, substitute tools, or try to make it succeed.\n"
+          : "Execute exactly this tool call for an authorized disposable confinement probe, then stop. Do not substitute another tool.\n") +
         JSON.stringify(action),
     })
+    assert.equal(prompt.data.type, "user")
+    assert.equal(typeof prompt.data.id, "string")
     await api(`session/${session}/wait`, {})
-    const messages = await api(`session/${session}/message`)
-    const boundary = messages.data.findIndex((entry) => entry.type === "user")
-    return messages.data
-      .slice(0, boundary + 1)
+    const turn = { session, promptMessageId: prompt.data.id, messageIds: [], pages: 0 }
+    report.turns.push(turn)
+    const messages = []
+    const cursors = new Set()
+    let query = new URLSearchParams({ limit: "20", order: "desc" })
+    let previousTime = Infinity
+    capture: for (;;) {
+      assert.ok(turn.pages++ < 100, "Probe turn exceeds capture bound")
+      const page = await api(`session/${session}/message?${query}`)
+      assert.ok(page.data.length > 0, "Probe prompt missing from transcript")
+      for (const entry of page.data) {
+        assert.ok(
+          Number.isFinite(entry.time?.created) && entry.time.created <= previousTime,
+          "Probe transcript is not newest first",
+        )
+        assert.ok(!turn.messageIds.includes(entry.id), "Probe transcript repeated a message")
+        previousTime = entry.time.created
+        turn.messageIds.push(entry.id)
+        if (entry.id === prompt.data.id) {
+          assert.equal(entry.type, "user")
+          break capture
+        }
+        assert.notEqual(entry.type, "user", "Unexpected user message inside probe turn")
+        messages.push(entry)
+      }
+      const next = page.cursor?.next
+      assert.ok(typeof next === "string" && !cursors.has(next), "Probe prompt not reached")
+      cursors.add(next)
+      query = new URLSearchParams({ limit: "20", cursor: next })
+    }
+    const calls = messages
+      .reverse()
       .flatMap((entry) => entry.content ?? [])
       .filter((part) => part.type === "tool")
+    turn.calls = calls
+    if (session !== sessions[2]) assertSandboxCalls(calls, names[sessions.indexOf(session)])
+    return calls
   }
   const execute = (code) => ({ name: "execute", arguments: JSON.stringify({ code }) })
   let failure
@@ -144,21 +194,14 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
       ["write", { filePath: join(root, "a", "canary"), content: "escaped" }],
     ]) {
       const code = `return await tools.${tool}(${JSON.stringify(input)})`
-      const calls = await run(sessions[0], execute(code))
+      const calls = await run(sessions[0], execute(code), true)
       report.native.push({ tool, calls })
       assert.equal(await readFile(join(root, "a", "canary"), "utf8"), "untouched")
-      assert.ok(
-        calls.every(
-          (part) =>
-            (part.name === "execute" || part.state.status !== "completed") &&
-            (part.state.metadata?.toolCalls ?? []).every((call) => call.status !== "completed"),
-        ),
-        "Native probe completed an unexpected tool call",
-      )
       assert.ok(
         calls.some(
           (part) =>
             part.name === "execute" &&
+            part.state.status === "completed" &&
             part.state.input?.code === code &&
             part.state.metadata?.error === true &&
             part.state.metadata.toolCalls?.length === 0,
@@ -185,6 +228,7 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
       execute(
         `return await tools.${names[1]}.environment_list({environment_source:"/workspace/repository"})`,
       ),
+      true,
     )
     assert.ok(
       report.foreign.some(
@@ -198,7 +242,7 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
       (message) => message.type === "compaction",
     )
     assert.equal(report.compaction?.status, "completed")
-    report.continuation = await run(sessions[0], execute('return await import("node:fs")'))
+    report.continuation = await run(sessions[0], execute('return await import("node:fs")'), true)
     assert.ok(
       report.continuation.some((part) => part.state.metadata?.error === true),
       "Import denial was not executed",

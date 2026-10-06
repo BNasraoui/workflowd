@@ -5,15 +5,40 @@ import { join } from "node:path"
 import { startSandboxOpenCode } from "../../src/sandbox/opencode"
 import { command, runnerFixture } from "./harness"
 import { Schema } from "effect"
-import { sharedOpenCodeFixture } from "./opencode-fixture"
+import { compactionSummary, sharedOpenCodeFixture } from "./opencode-fixture"
 import { compileSandboxBridge } from "../../src/sandbox/bridge"
 
-test.each([true, false])(
-  "operator policy probe uses advertised tools and cleans up after native attempt or refusal (%s)",
-  async (successful) => {
-    const fixture = await sharedOpenCodeFixture(`operator-${String(successful)}`, {
+test.each([
+  ["execute", "search", true],
+  ["execute", "workflowd_sandbox_a.environment_list", true],
+  ["workflowd_sandbox_a.environment_list", "", true],
+  ["execute", "shell", false],
+  ["execute", "workflowd_sandbox_b.environment_list", false],
+  ["shell", "", false],
+  ["search", "", false],
+] as const)("probe checks completed top-level %s and nested %s", async (name, tool, permitted) => {
+  const metadata = { toolCalls: tool ? [{ tool, status: "completed" }] : [] }
+  const calls = [{ name, state: { status: "completed", metadata } }]
+  const result = command([
+    process.execPath,
+    "--eval",
+    `
+    import { assertSandboxCalls } from "./scripts/evidence/agent-sandbox.mjs"
+    assertSandboxCalls(${JSON.stringify(calls)}, "workflowd_sandbox_a")
+  `,
+  ])
+  if (permitted) expect(await result).toBe("")
+  else await expect(result).rejects.toThrow("unexpected tool call")
+})
+
+test.each(["exact", "discovery", "refusal"])(
+  "operator policy probe captures the whole native turn and cleans up (%s)",
+  async (mode) => {
+    const successful = mode !== "refusal"
+    const fixture = await sharedOpenCodeFixture(`operator-${mode}`, {
       summary: compactionSummary,
       refuseNative: !successful,
+      discoverAfterNative: mode === "discovery",
     })
     const output = join(fixture.root, "operator")
     try {
@@ -36,6 +61,13 @@ test.each([true, false])(
           result: Schema.String,
           sessionsRemoved: Schema.Number,
           cleanupConfirmed: Schema.Boolean,
+          turns: Schema.Array(
+            Schema.Struct({
+              pages: Schema.Number,
+              promptMessageId: Schema.String,
+              messageIds: Schema.Array(Schema.String),
+            }),
+          ),
           native: Schema.Array(
             Schema.Struct({ tool: Schema.String, calls: Schema.Array(Schema.Json) }),
           ),
@@ -44,15 +76,23 @@ test.each([true, false])(
       expect(report.result).toBe(successful ? "passed" : "stopped")
       expect(report.sessionsRemoved).toBe(3)
       expect(report.cleanupConfirmed).toBe(true)
+      for (const turn of report.turns) expect(turn.messageIds.at(-1)).toBe(turn.promptMessageId)
+      if (mode === "discovery")
+        expect(report.turns.filter((turn) => turn.pages > 1)).toHaveLength(3)
       expect(await Bun.file(join(output, "a/canary")).text()).toBe("untouched")
       if (successful) {
         expect(report.native.map((entry) => entry.tool)).toEqual(["shell", "read", "write"])
         for (const entry of report.native) {
-          expect(entry.calls).toHaveLength(1)
+          expect(entry.calls).toHaveLength(mode === "discovery" ? 23 : 1)
           expect(entry.calls[0]).toMatchObject({
             name: "execute",
             state: { metadata: { error: true, toolCalls: [] } },
           })
+          for (const call of entry.calls.slice(1))
+            expect(call).toMatchObject({
+              name: "execute",
+              state: { metadata: { toolCalls: [{ tool: "search", status: "completed" }] } },
+            })
         }
       } else expect(report.native).toEqual([{ tool: "shell", calls: [] }])
     } finally {
@@ -61,24 +101,6 @@ test.each([true, false])(
   },
   180_000,
 )
-
-const compactionSummary = `## Objective
-- Confinement fixture.
-## Requirements
-- Keep the sandbox canary untouched.
-## Decisions
-- Use the sandbox agent.
-## Work State
-### Completed
-- Compaction complete
-### Active
-- Confinement verification.
-### Blocked
-- (none)
-## Next Move
-1. Continue the sandbox fixture.
-## Relevant Files
-- (none)`
 
 test("global sandbox agent confines native execution through completed compaction", async () => {
   const fixture = await sharedOpenCodeFixture("native")

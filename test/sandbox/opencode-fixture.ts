@@ -17,7 +17,7 @@ export type FixtureAction = { name: string; arguments: string; text?: string }
 // The fixture home isolates configuration, not tool execution: its canaries are writable.
 export async function sharedOpenCodeFixture(
   label: string,
-  policy?: { summary: string; refuseNative?: boolean },
+  policy?: { summary: string; refuseNative?: boolean; discoverAfterNative?: boolean },
 ) {
   const artifact = await readFile(resolve("deploy/opencode/sandbox.json"), "utf8")
   const binary = await realpath(Bun.which("opencode2") ?? "opencode2")
@@ -53,7 +53,10 @@ export async function sharedOpenCodeFixture(
       const last = body.messages.at(-1)
       let text = answer
       if (policy !== undefined && last?.role === "user" && typeof last.content === "string") {
-        if (last.content.startsWith("Execute exactly this tool call")) {
+        if (
+          last.content.startsWith("Execute exactly this tool call") ||
+          last.content.startsWith("This is an authorized disposable negative confinement test.")
+        ) {
           action = Schema.decodeUnknownSync(
             Schema.Struct({ name: Schema.String, arguments: Schema.String }),
           )(JSON.parse(last.content.split("\n").at(-1) ?? ""))
@@ -62,6 +65,19 @@ export async function sharedOpenCodeFixture(
             (policy.refuseNative && /tools\.(shell|read|write)\(/.test(action.arguments))
           )
             action = undefined
+          if (
+            policy.discoverAfterNative &&
+            action &&
+            /tools\.(shell|read|write)\(/.test(action.arguments)
+          )
+            actions.push(
+              ...Array.from({ length: 22 }, () => ({
+                name: "execute",
+                arguments: JSON.stringify({
+                  code: 'return await search({ query: "shell command execution" })',
+                }),
+              })),
+            )
         }
         if (last.content.includes("You MUST summarize the conversation")) text = policy.summary
       }
@@ -276,3 +292,21 @@ export async function sharedOpenCodeFixture(
     throw error
   }
 }
+
+export const compactionSummary = `## Objective
+- Confinement fixture.
+## Requirements
+- Keep the sandbox canary untouched.
+## Decisions
+- Use the sandbox agent.
+## Work State
+### Completed
+- Compaction complete
+### Active
+- Confinement verification.
+### Blocked
+- (none)
+## Next Move
+1. Continue the sandbox fixture.
+## Relevant Files
+- (none)`
