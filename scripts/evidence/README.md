@@ -170,3 +170,12 @@ R2 checks that the resident transient unit stays active while the scratch host
 is down, keeps its launch and invocation IDs after restart, finishes the same
 turn, creates no `restart:` message, and confirms unit closure. The scratch
 unit prefix is unique to the evidence run and is cleaned up afterward.
+
+## Agent sandbox evidence
+
+See [the sandbox runbook](../../docs/agent-sandboxes.md#phase-4d-evidence) for the
+operator-pinned runner, capped fixture commands, external denial/credential
+inventory and authenticated live prototype. The `agent-sandbox.mjs` verifier uses
+the selected normal OpenCode executor and existing authentication. It never copies
+AI credentials or changes production configuration. Preserve each evidence root
+and its SQLite custody until confirmed release.

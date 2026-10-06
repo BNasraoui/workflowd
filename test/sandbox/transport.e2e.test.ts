@@ -6,7 +6,7 @@ import { bridgeClient, runnerFixture } from "./harness"
 import { Schema } from "effect"
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { assertBridgeBinding } from "../../src/sandbox/binding"
+import { assertBridgeBinding, readSandboxBinding } from "../../src/sandbox/binding"
 import { compileSandboxBridge } from "../../src/sandbox/bridge"
 
 const transport: SandboxTransport = {
@@ -212,3 +212,14 @@ test("the shipped bridge refuses a missing binding before connecting to SSH", as
     await runner.close()
   }
 }, 120_000)
+
+test("binding readers reject unsafe locations before accessing their files", async () => {
+  for (const directory of [
+    "relative",
+    "/tmp/../outside",
+    "/tmp//location",
+    "/tmp/percent%2f",
+    "/tmp/null\0",
+  ])
+    await expect(readSandboxBinding(directory)).rejects.toThrow("Sandbox binding location")
+})

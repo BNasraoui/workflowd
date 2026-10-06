@@ -11,7 +11,14 @@ import { command } from "./harness"
 const ModelRequest = Schema.Struct({
   messages: Schema.Array(Schema.Struct({ role: Schema.String, content: Schema.Json })),
   tools: Schema.optional(
-    Schema.Array(Schema.Struct({ function: Schema.Struct({ name: Schema.String }) })),
+    Schema.Array(
+      Schema.Struct({
+        function: Schema.Struct({
+          name: Schema.String,
+          description: Schema.optionalKey(Schema.String),
+        }),
+      }),
+    ),
   ),
 })
 export type FixtureAction = { name: string; arguments: string; text?: string }
@@ -263,15 +270,20 @@ export async function sharedOpenCodeFixture(
       if (Date.now() >= deadline) throw new Error("Global sandbox agent did not load")
       await Bun.sleep(100)
     }
-    if (!sandboxAgent) {
-      for (;;) {
-        const models = Schema.decodeUnknownSync(
-          Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }),
-        )(await api(`model?${location.toString()}`))
-        if (models.data.some((model) => model.id === "gpt-6-astra-fixture")) break
-        if (Date.now() >= deadline) throw new Error("Fixture provider config did not load")
-        await Bun.sleep(100)
-      }
+    // Agent and provider catalogs load independently; wait for both fake providers
+    // before registering their credentials instead of racing configuration discovery.
+    for (;;) {
+      const models = Schema.decodeUnknownSync(
+        Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+      )(await api(`model?${location.toString()}`))
+      if (
+        ["gpt-6-astra-fixture", "second-model"].every((id) =>
+          models.data.some((model) => model.id === id),
+        )
+      )
+        break
+      if (Date.now() >= deadline) throw new Error("Fixture provider config did not load")
+      await Bun.sleep(100)
     }
     await api(`integration/openai/connect/key?${location.toString()}`, {
       key: "fixture-model-canary",

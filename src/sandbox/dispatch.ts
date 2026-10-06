@@ -13,6 +13,7 @@ import { OpenCodeAdapterError } from "../opencode/adapter"
 import {
   saveSandboxFile,
   bindingDirectory,
+  sandboxBridgeName,
   readSandboxBinding,
   writeSandboxBinding,
   sandboxPolicyHash,
@@ -291,7 +292,7 @@ export const makeSandboxDispatch = (options: {
           endpointIdentity: options.endpointIdentity,
           directory: run.directory,
           locationIdentity,
-          bridgeServerName: `workflowd_sandbox_${lease.lease_id.replaceAll("-", "_")}`,
+          bridgeServerName: sandboxBridgeName(lease.lease_id),
           repositoryId: policy.repositoryId,
           sourceSha,
           policyHash: sandboxPolicyHash,

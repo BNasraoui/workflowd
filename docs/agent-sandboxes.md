@@ -38,7 +38,7 @@ fall back to private per-run model credentials.
 
 Set `REVIEWED_COMMIT` to the complete commit from the implementation handoff.
 Review its fixture report and checks before running these commands. The current
-runner-workflow pin is `5a4da56f5829e4fb3a5f64385cb164ec73f432d1`; this
+runner-workflow pin is `737c977da6abb95507bca70f00d746ff505120f2`; this
 agent-only installation does not change that pin.
 
 The v1 service also reads `~/.config/opencode/opencode.json` and rejects v2 agent
@@ -196,25 +196,68 @@ test changes neither the host's runner state nor production configuration.
 Changes to `deploy/sandbox/runner.sh` require a new workflow pin. After the worker
 publishes its bootstrap candidate and exact-head CI passes, review the candidate
 and its implementation report. The coordinator/operator must update the sandbox
-repository policy's `workflowSha` from
-`5a4da56f5829e4fb3a5f64385cb164ec73f432d1` to that complete reviewed commit SHA,
+repository policy's `workflowSha` to that complete reviewed commit SHA,
 keeping the repository, App and tailnet trust unchanged, then resume the worker
 with the verified pin. Workers do not change the production pin or acquire a live
 lease before that confirmation. This bootstrap gate does not complete phase 4D's
 remaining security and authenticated live verification; dispatch stays disabled.
 
-The bridge requires its immutable binding file even when launched directly. It
-validates the absolute, normalized `.sandbox/binding.json` path and canonical
-filesystem location before reading the binding, then enforces active custody on
-startup, each exchange and filesystem changes. Missing bindings and symlinked
-binding paths fail closed. Disposable fixtures use real bindings too.
+## Phase 4D evidence
 
-`test/sandbox/security.e2e.test.ts` exercises hostile SSH frames and tool
-metadata, oversized output, resource payloads, opaque hook/symlink patches, and
-credential canaries in controller environment/configuration. The credential test
-checks the runner environment, bounded fixture disk contents, logs and a real
-container-use command. It uses generated fake credentials only. A separate
-controller network namespace enforces outbound denial after a reachable control,
-confirms controller-initiated SSH replies, and restores the reachable control.
-These fixture results complement the live tailnet denial and authenticated
-prototype evidence; they do not establish those live results.
+The coordinator recorded `737c977da6abb95507bca70f00d746ff505120f2` as the
+operator pin after its required checks passed. App 4337845 creates lease refs at
+that exact SHA. Any further change under `deploy/sandbox/` or to either sandbox
+workflow requires publication, passing checks and another coordinator re-pin
+before acquisition. Evidence commands use a disposable coordinator database;
+production sandbox configuration and the installed agent/drop-in stay unchanged.
+
+Every shipped bridge invocation requires an active binding, including the compiled
+entrypoint. Missing bindings fail before SSH starts. The binding filename must be
+absolute, normalized and the exact `.sandbox/binding.json` path for its controller
+location before it is read. Symlinked binding paths and controller locations are
+rejected. The fixture also creates bindings; there is no unbound
+production mode. New bridge namespaces use a bounded SHA-256 digest of the lease
+ID: full production run IDs exceed the executor's namespace limit and silently
+lose their tools despite a connected MCP status. The regression inspects the
+model-facing catalog and executes a tool for both short and full lease IDs. The
+full lease identity remains in the binding. Revocation terminates in-flight calls
+and blocks reconnection.
+
+Set `WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES` to the operator's single-policy JSON
+array and `EVIDENCE_TAILSCALE_TRUST_FILE` to the nonsecret operator trust record.
+Use separate, private `EVIDENCE_SANDBOX_ROOT` directories for denial and live runs.
+Run both commands in a transient user unit with `MemoryMax=6G` and
+`MemorySwapMax=0`, as in the fixture gate:
+
+```sh
+bun scripts/evidence/agent-sandbox.mjs --probe-denials
+bun scripts/evidence/agent-sandbox.mjs --live \
+  --model zai-coding-plan/glm-5.3-flash --executor opencode:opencode-primary
+```
+
+The live command additionally accepts `EVIDENCE_OPENCODE_URL` and
+`EVIDENCE_OPENCODE_PASSWORD` for the existing normal executor's HTTP endpoint.
+The Verify wrapper above demonstrates reading that HTTP password from the service
+process without printing or persisting it. It is not a model credential. The model
+is selected by the command, and the server uses its existing provider authentication.
+Never copy an AI authentication file or register a real provider credential.
+
+`--probe-denials` requires reachable controls before/after timeout denials from
+the real runner and successful replies over controller-initiated SSH. It inventories
+readable runner process environments, tooling environment/mounts/git configuration,
+known credential paths in runner/root/tooling homes, and setup log credential
+patterns. After confirmed release it checks the actual Actions log's GITHUB_TOKEN
+permissions and credential patterns. The disposable network fixture additionally
+proves that runner root cannot remove the externally installed denial rule.
+These inventories have explicit scopes; they are not a claim to detect arbitrary
+encoded secrets anywhere on disk. Synthetic controller canaries, hostile callbacks,
+metadata, symlinks/hooks and bounded frames are covered by the fixtures.
+
+`--live` dispatches through authenticated MCP and real ingress on a disposable
+coordinator using the normal shared executor. It captures all transcript pages,
+requires completed remote test-command output, saves the patch as inert bytes, and
+checks the durable terminal mailbox after lease release, binding revocation,
+bridge removal and session quiescence. Retained sessions stay `sandbox`. A verifier
+restart reuses the receipt in the same evidence directory. Parent-wake ordering is
+covered by the dispatch fixture. A model's success statement alone cannot pass the
+live gate. Leave dispatch disabled if confinement or cleanup cannot be confirmed.

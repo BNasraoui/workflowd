@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import { mkdir, readFile, realpath, open, rename, link, rm } from "node:fs/promises"
-import { isAbsolute, join, normalize } from "node:path"
+import { join, normalize } from "node:path"
 import { Schema } from "effect"
 import artifact from "../../deploy/opencode/sandbox.json"
 import { SandboxTransport } from "./transport"
@@ -8,6 +8,10 @@ import { SandboxTransport } from "./transport"
 export const sandboxRules = artifact.agents.sandbox.permissions
 export const sandboxPolicyHash = createHash("sha256").update(JSON.stringify(artifact)).digest("hex")
 export const bindingDirectory = (directory: string) => `${directory}.sandbox`
+// Keep the lease namespace within the executor's tool-name limit. The full lease
+// identity remains in the immutable binding; location isolation is unchanged.
+export const sandboxBridgeName = (leaseId: string) =>
+  `workflowd_sandbox_${createHash("sha256").update(leaseId).digest("hex").slice(0, 40)}`
 export const transportHash = (transport: SandboxTransport) =>
   createHash("sha256")
     .update(JSON.stringify(Schema.decodeUnknownSync(SandboxTransport)(transport)))
@@ -32,11 +36,18 @@ export const SandboxSessionBinding = Schema.Struct({
 export type SandboxSessionBinding = typeof SandboxSessionBinding.Type
 
 export async function readSandboxBinding(directory: string) {
-  const binding = Schema.decodeUnknownSync(SandboxSessionBinding)(
-    JSON.parse(await readFile(join(bindingDirectory(directory), "binding.json"), "utf8")),
+  if (
+    !/^\/[a-zA-Z0-9/_.@-]+$/.test(directory) ||
+    normalize(directory) !== directory ||
+    (await realpath(directory)) !== directory
   )
-  if (binding.directory !== directory || (await realpath(directory)) !== directory)
-    throw new Error("Sandbox binding location changed")
+    throw new Error("Sandbox binding location is invalid")
+  const file = join(bindingDirectory(directory), "binding.json")
+  if ((await realpath(file)) !== file) throw new Error("Sandbox binding path is not canonical")
+  const binding = Schema.decodeUnknownSync(SandboxSessionBinding)(
+    JSON.parse(await readFile(file, "utf8")),
+  )
+  if (binding.directory !== directory) throw new Error("Sandbox binding location changed")
   // A separate durable tombstone wins even over an already in-flight active-file rename.
   if (await Bun.file(join(bindingDirectory(directory), "revoked")).exists())
     return { ...binding, state: "revoked" as const }
@@ -61,7 +72,11 @@ export async function writeSandboxBinding(binding: SandboxSessionBinding, reserv
 
 export async function assertBridgeBinding(file: string, transport: SandboxTransport) {
   const suffix = ".sandbox/binding.json"
-  if (!isAbsolute(file) || normalize(file) !== file || !file.endsWith(suffix))
+  if (
+    !/^\/[a-zA-Z0-9/_.@-]+\.sandbox\/binding\.json$/.test(file) ||
+    normalize(file) !== file ||
+    !file.endsWith(suffix)
+  )
     throw new Error("Sandbox binding path is invalid")
   const directory = file.slice(0, -suffix.length)
   if (file !== join(bindingDirectory(directory), "binding.json") || (await realpath(file)) !== file)

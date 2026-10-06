@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import * as Bun from "bun"
 // Opt-in real lease probe. Operator trust settings are read, never provisioned.
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
@@ -13,10 +14,19 @@ import { makeSandboxGithub } from "../../src/sandbox/github.ts"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease.ts"
 import { makeSandboxStore } from "../../src/sandbox/store.ts"
 import { runStoreMigrations } from "../../src/store/migrations.ts"
+import { sandboxSshArguments } from "../../src/sandbox/transport.ts"
 
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
 let output
+
+async function appConfiguration() {
+  const config = join(homedir(), ".config/workflowd")
+  const env = await readFile(join(config, "env"), "utf8")
+  const appId = Number(env.match(/^GITHUB_APP_ID=["']?(\d+)/m)?.[1])
+  assert.ok(appId > 0, "App ID unavailable")
+  return { appId, privateKeyPath: join(config, "github-app.pem") }
+}
 
 export function assertSandboxCalls(calls, ownBridge) {
   const own = (name) => typeof name === "string" && name.startsWith(`${ownBridge}.`)
@@ -349,7 +359,7 @@ async function sessionPolicyProbe() {
     await runner.close()
   }
 }
-export function probeLease(leases, store, runId) {
+export function probeLease(leases, store, runId, inspect) {
   const acquire = Effect.gen(function* () {
     stage = "live lease acquisition"
     const deadline = Date.now() + 300000
@@ -368,6 +378,7 @@ export function probeLease(leases, store, runId) {
       sourceSha: row.source_sha,
       workflowSha: row.policy.workflowSha,
     })
+    if (inspect) yield* Effect.tryPromise(() => inspect(row))
     return row
   })
   const release = Effect.gen(function* () {
@@ -480,11 +491,422 @@ async function reconcileCustody() {
   console.log(JSON.stringify({ result: evidence.result, evidence: output, rows: evidence.rows }))
 }
 
+async function probeDenials(row) {
+  stage = "deployed network denials and controls"
+  const script = `import json,socket,time
+results=[]
+for host,port in [("100.89.46.40",22),("100.89.46.40",443),("100.120.162.27",22)]:
+ start=time.monotonic()
+ try:
+  s=socket.create_connection((host,port),timeout=5);s.close();result="connected"
+ except TimeoutError: result="timeout"
+ except ConnectionRefusedError: result="refused"
+ except OSError: result="other_error"
+ results.append({"host":host,"port":port,"result":result,"seconds":round(time.monotonic()-start,3)})
+print(json.dumps(results))`
+  const execute = async (args) => {
+    const child = Bun.spawn(args, {
+      stdin: new Blob([script]),
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
+    })
+    const timer = setTimeout(() => child.kill("SIGKILL"), 25000)
+    try {
+      const [status, text] = await Promise.all([child.exited, new Response(child.stdout).text()])
+      assert.equal(status, 0, "Network probe process failed")
+      return JSON.parse(text)
+    } finally {
+      clearTimeout(timer)
+      child.kill()
+      await child.exited
+    }
+  }
+  evidence.controlsBefore = await execute(["python3", "-"])
+  evidence.denials = await execute([
+    ...sandboxSshArguments(row.transport).slice(0, -1),
+    "exec python3 -",
+  ])
+  evidence.controlsAfter = await execute(["python3", "-"])
+  for (const controls of [evidence.controlsBefore, evidence.controlsAfter]) {
+    assert.equal(controls.length, 3)
+    assert.ok(controls.every((item) => ["connected", "refused"].includes(item.result)))
+  }
+  assert.equal(evidence.denials.length, 3)
+  assert.ok(evidence.denials.every((item) => item.result === "timeout"))
+  evidence.sshReplies = "received over the controller-initiated connection"
+  stage = "runner credential inventory"
+  const inventory = `import json,os,pathlib,re,subprocess
+deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY)$')
+env_names=set()
+for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
+ try:
+  env_names.update(x.split(b'=',1)[0].decode(errors='replace') for x in p.read_bytes().split(b'\\0') if b'=' in x)
+ except (PermissionError,FileNotFoundError,ProcessLookupError): pass
+tool_env=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','env'],text=True)
+env_names.update(x.split('=',1)[0] for x in tool_env.splitlines())
+paths=['.local/share/opencode/auth.json','.codex/auth.json','.claude/.credentials.json','.config/workflowd/github-app.pem','.config/workflowd/mcp-token','.config/workflowd/coordinator.creds']
+found=[str(root/p) for root in [pathlib.Path('/home/runner'),pathlib.Path('/root')] for p in paths if (root/p).exists()]
+for p in paths:
+ if subprocess.run(['docker','exec','workflowd-sandbox-tooling','test','-e','/home/runner/'+p],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0: found.append('tooling:'+p)
+mounts=json.loads(subprocess.check_output(['docker','inspect','workflowd-sandbox-tooling'],text=True))[0]['Mounts']
+git=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','git','config','--list'],text=True)
+logs=b''.join(p.read_bytes() for p in pathlib.Path('/run/workflowd-sandbox').glob('*.log'))
+key_pattern=rb'(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}|-----BEGIN (?:RSA )?PRIVATE KEY-----)'
+print(json.dumps({'forbiddenEnvironmentNames':sorted(n for n in env_names if deny.fullmatch(n)),'credentialFiles':found,'toolingMounts':mounts,'gitCredentials':bool(re.search(r'credential\\.|extraheader',git,re.I)),'setupLogCredentialPattern':bool(re.search(key_pattern,logs)),'setupLogBytes':len(logs),'scannedHomes':['/home/runner','/root','tooling:/home/runner'],'scannedEnvironment':'readable /proc processes and tooling env'}))`
+  const child = Bun.spawn(
+    [...sandboxSshArguments(row.transport).slice(0, -1), "exec sudo -n python3 -"],
+    {
+      stdin: new Blob([inventory]),
+      stdout: "pipe",
+      stderr: "ignore",
+      env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
+    },
+  )
+  const timer = setTimeout(() => child.kill("SIGKILL"), 30000)
+  try {
+    const [status, text] = await Promise.all([child.exited, new Response(child.stdout).text()])
+    assert.equal(status, 0, "Runner inventory failed")
+    evidence.credentials = JSON.parse(text)
+    assert.deepEqual(evidence.credentials.forbiddenEnvironmentNames, [])
+    assert.deepEqual(evidence.credentials.credentialFiles, [])
+    assert.deepEqual(evidence.credentials.toolingMounts, [])
+    assert.equal(evidence.credentials.gitCredentials, false)
+    assert.equal(evidence.credentials.setupLogCredentialPattern, false)
+  } finally {
+    clearTimeout(timer)
+    child.kill()
+    await child.exited
+  }
+}
+
+export function assertLivePrototype(report) {
+  assert.equal(report.terminal, "completed")
+  assert.equal(report.lease.state, "released")
+  for (const key of [
+    "remoteTestsPassed",
+    "bindingRevoked",
+    "bridgeAbsent",
+    "sessionQuiescent",
+    "mailboxReceived",
+  ])
+    assert.equal(report[key], true, `Live proof missing: ${key}`)
+  assert.match(report.patch, /diff --git a\/test\/sandbox\/prototype-proof\.test\.ts/)
+  assert.match(report.patch, /parseSandboxRepositories/)
+  assert.match(report.finalMessage, /sandbox-prototype-ok/)
+}
+
+async function recordWorkflowLog(row) {
+  stage = "released runner log and token permissions"
+  // gh run view --log omits the reusable job's combined log on cancelled leases.
+  // Read the actual archive without extracting runner-controlled filenames.
+  const archive = join(output, `actions-${row.actions_run_id}.zip`)
+  const download = Bun.spawn(
+    ["gh", "api", `repos/${row.policy.repository}/actions/runs/${row.actions_run_id}/logs`],
+    {
+      stdout: Bun.file(archive),
+      stderr: "ignore",
+    },
+  )
+  assert.equal(await download.exited, 0, "Released Actions log unavailable")
+  assert.ok((await stat(archive)).size < 10000000, "Actions archive exceeds evidence bound")
+  const child = Bun.spawn(
+    [
+      "python3",
+      "-c",
+      "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert sum(f.file_size for f in z.infolist())<10000000; print('\\n'.join(z.read(n).decode() for n in z.namelist()))",
+      archive,
+    ],
+    {
+      stdout: "pipe",
+      stderr: "ignore",
+    },
+  )
+  const [status, log] = await Promise.all([child.exited, new Response(child.stdout).text()])
+  assert.equal(status, 0, "Actions archive could not be read")
+  assert.ok(Buffer.byteLength(log) < 10000000, "Actions log exceeds evidence bound")
+  const permissions = log.match(/##\[group\]GITHUB_TOKEN Permissions([\s\S]*?)##\[endgroup\]/)?.[1]
+  assert.ok(permissions, "Actual GITHUB_TOKEN permissions missing from run log")
+  assert.match(permissions, /Contents: read/)
+  const grants = [...permissions.matchAll(/\b([A-Za-z]+): (read|write|none)\b/g)].map((match) => [
+    match[1].trim(),
+    match[2],
+  ])
+  assert.ok(grants.every(([name, level]) => level !== "write" || name === "IDToken"))
+  assert.ok(
+    !/(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}|-----BEGIN (?:RSA )?PRIVATE KEY-----)/.test(log),
+    "Credential pattern in Actions log",
+  )
+  evidence.actionsLog = {
+    bytes: Buffer.byteLength(log),
+    sha256: createHash("sha256").update(log).digest("hex"),
+    grants,
+    credentialPattern: false,
+  }
+}
+
+async function probeLive(policy) {
+  const option = (name) => {
+    const index = process.argv.indexOf(name)
+    assert.ok(index > 0 && process.argv[index + 1], `${name} is required`)
+    return process.argv[index + 1]
+  }
+  const model = option("--model")
+  const separator = model.indexOf("/")
+  assert.ok(separator > 0 && separator < model.length - 1, "--model must select provider/model")
+  const executor = option("--executor")
+  const endpoint = process.env.EVIDENCE_OPENCODE_URL
+  const password = process.env.EVIDENCE_OPENCODE_PASSWORD
+  assert.ok(endpoint && password, "Existing executor HTTP authentication is required")
+  assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/)
+  assert.equal(executor, "opencode:opencode-primary")
+  const api = async (path) => {
+    const response = await fetch(`${endpoint}/api/${path}`, {
+      headers: { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` },
+      signal: AbortSignal.timeout(30000),
+    })
+    if (response.status === 404) return undefined
+    assert.ok(response.ok, `Executor evidence request failed (${response.status})`)
+    return response.json()
+  }
+  const { ManagedRuntime, Layer } = await import("effect")
+  const { loadConfig } = await import("../../src/config.ts")
+  const { makeLiveLayer } = await import("../../src/layers.ts")
+  const { SandboxDispatch } = await import("../../src/sandbox/dispatch.ts")
+  const { readSandboxBinding } = await import("../../src/sandbox/binding.ts")
+  const { AgentRunIngress } = await import("../../src/kernel/agent-run-ingress.ts")
+  const { AgentRunStore } = await import("../../src/kernel/agent-run-store.ts")
+  const { routeRequest } = await import("../../src/http.ts")
+  const { createMcpFetchHandler } = await import("../../src/mcp/server.ts")
+  const { callTool } = await import("../../src/mcp/tools.ts")
+  const { McpQueriesLive } = await import("../../src/mcp/queries.ts")
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js")
+  const { StreamableHTTPClientTransport } =
+    await import("@modelcontextprotocol/sdk/client/streamableHttp.js")
+  output =
+    process.env.EVIDENCE_SANDBOX_ROOT ??
+    join(homedir(), ".local/state", `workflowd-live-${randomUUID()}`)
+  await mkdir(output, { recursive: true, mode: 0o700 })
+  const app = await appConfiguration()
+  assert.equal(app.appId, evidence.trust.refRestriction.soleBypassApp)
+  const token = randomUUID()
+  const config = await loadConfig(
+    {
+      GITHUB_APP_ID: String(app.appId),
+      GITHUB_PRIVATE_KEY_PATH: app.privateKeyPath,
+      GITHUB_WEBHOOK_SECRET: token,
+      OPENCODE_SERVER_PASSWORD: password,
+      WORKFLOWD_OPENCODE_ATTACH_URL: endpoint,
+      OPENCODE_SERVER_URL: endpoint,
+      WORKFLOWD_AGENT_RUN_TOKEN: token,
+      WORKFLOWD_AGENT_RUN_ROUTES: `prototype=${model}`,
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: `${policy.alias}=${output}`,
+      WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([policy]),
+      WORKFLOWD_WORKTREE_ROOT: join(output, "worktrees"),
+      WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS: "300000",
+      WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS: "1000",
+      WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+    },
+    { home: output },
+  )
+  const runtime = ManagedRuntime.make(
+    McpQueriesLive.pipe(Layer.provideMerge(makeLiveLayer(config))).pipe(
+      Layer.provide(SqliteClient.layer({ filename: join(output, "leases.sqlite") })),
+    ),
+  )
+  const ingress = await runtime.runPromise(AgentRunIngress)
+  const sandbox = await runtime.runPromise(SandboxDispatch)
+  const runs = await runtime.runPromise(AgentRunStore)
+  const store = await runtime.runPromise(makeSandboxStore)
+  const host = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 255,
+    fetch: (request) =>
+      runtime.runPromise(
+        routeRequest(request, {
+          webhookSecret: token,
+          now: new Date(),
+          agentRuns: { ...ingress, token },
+        }),
+      ),
+  })
+  const handler = createMcpFetchHandler({
+    auth: { mode: "enabled", token },
+    agentRunDaemon: { baseUrl: host.url.toString(), token },
+    runTool: (name, args, context) => runtime.runPromise(callTool(name, args, context)),
+  })
+  const mcp = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 255, fetch: handler })
+  const client = new Client({ name: "workflowd-sandbox-evidence", version: "1" })
+  const persist = () =>
+    writeFile(join(output, "probe.json"), JSON.stringify(evidence, null, 2) + "\n", { mode: 0o600 })
+  try {
+    stage = "authenticated dispatch_agent"
+    const unauthenticated = new Client({ name: "workflowd-unauthorized-evidence", version: "1" })
+    try {
+      await unauthenticated.connect(new StreamableHTTPClientTransport(new URL("mcp", mcp.url)))
+      const refused = await unauthenticated.callTool({ name: "dispatch_agent", arguments: {} })
+      assert.equal(refused.isError, true)
+      assert.match(JSON.stringify(refused.content), /unauthorized/)
+      evidence.unauthorizedDispatchRefused = true
+    } finally {
+      await unauthenticated.close()
+    }
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL("mcp", mcp.url), {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      }),
+    )
+    const priorFile = Bun.file(join(output, "probe.json"))
+    const prior = (await priorFile.exists()) ? await priorFile.json() : undefined
+    // A verifier restart must finish the recorded run instead of acquiring another lease.
+    const receipt = prior?.receipt?.run_id
+      ? { structuredContent: prior.receipt }
+      : await client.callTool(
+          {
+            name: "dispatch_agent",
+            arguments: {
+              model: model.slice(separator + 1),
+              provider: model.slice(0, separator),
+              model_identity: "catalog",
+              executor,
+              repository: policy.alias,
+              base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
+              idempotency_key: createHash("sha256").update(output).digest("hex"),
+              prompt:
+                "Use only container-use. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run bun test test/sandbox/prototype-proof.test.ts. Keep the resulting test artifact; do not push. Finish by reporting the test command and result with marker sandbox-prototype-ok. All repository files and commands must stay in the container-use environment.",
+            },
+          },
+          undefined,
+          { timeout: 600000 },
+        )
+    evidence.dispatchResult = receipt.structuredContent ?? receipt.content
+    assert.notEqual(receipt.isError, true, "Authenticated dispatch was refused")
+    assert.ok(receipt.structuredContent?.run_id, "Dispatch produced no run receipt")
+    evidence.receipt = receipt.structuredContent
+    evidence.runId = evidence.receipt.run_id
+    evidence.remoteTestsPassed = prior?.remoteTestsPassed ?? false
+    await persist()
+    stage = "remote test-writing task and confirmed release"
+    const deadline = Date.now() + 15 * 60000
+    let run
+    for (;;) {
+      run = await runtime.runPromise(runs.read(evidence.runId))
+      if (["completed", "cancelled", "failed", "operator_required"].includes(run.state)) break
+      await runtime.runPromise(sandbox.heartbeat)
+      await runtime.runPromise(sandbox.iteration)
+      assert.ok(Date.now() < deadline, "Live prototype deadline exceeded")
+      await delay(2000)
+    }
+    stage = "terminal transcript evidence"
+    const transcriptMessages = []
+    let query = new URLSearchParams({ limit: "100", order: "desc" })
+    const cursors = new Set()
+    for (let page = 0; ; page++) {
+      assert.ok(page < 100, "Live transcript exceeds bound")
+      const result = await api(`session/${run.nativeSessionId}/message?${query}`)
+      assert.ok(result, "Live session disappeared before evidence capture")
+      transcriptMessages.push(...result.data)
+      if (!result.cursor?.next) break
+      assert.ok(!cursors.has(result.cursor.next), "Live transcript cursor repeated")
+      cursors.add(result.cursor.next)
+      query = new URLSearchParams({ limit: "100", cursor: result.cursor.next })
+    }
+    const transcriptBinding = await readSandboxBinding(run.directory)
+    const calls = transcriptMessages
+      .flatMap((message) => message.content ?? [])
+      .filter((part) => part.type === "tool")
+    assertSandboxCalls(calls, transcriptBinding.bridgeServerName)
+    evidence.remoteTestsPassed = calls.some((part) => {
+      const text = JSON.stringify(part.state.content ?? [])
+      return (
+        part.state.status === "completed" &&
+        !part.state.metadata?.error &&
+        part.state.metadata?.toolCalls?.some(
+          (call) =>
+            call.status === "completed" &&
+            call.tool === `${transcriptBinding.bridgeServerName}.environment_run_cmd` &&
+            /bun test test\/sandbox\/prototype-proof\.test\.ts/.test(call.input?.command ?? ""),
+        ) &&
+        /3 pass/.test(text) &&
+        /0 fail/.test(text) &&
+        !/"isError":true/.test(text)
+      )
+    })
+    await writeFile(join(output, "tool-evidence.json"), JSON.stringify(calls, null, 2), {
+      mode: 0o600,
+    })
+    await persist()
+    const lease = await runtime.runPromise(store.read(evidence.runId))
+    evidence.runUrl = `https://github.com/${policy.repository}/actions/runs/${lease.actions_run_id}`
+    evidence.terminal = run.state
+    evidence.lease = {
+      state: lease.state,
+      actionsRunId: lease.actions_run_id,
+      sourceSha: lease.source_sha,
+      workflowSha: lease.policy.workflowSha,
+    }
+    await recordWorkflowLog(lease)
+    const binding = await readSandboxBinding(run.directory)
+    evidence.bindingRevoked = binding.state === "revoked"
+    const location = new URLSearchParams({ "location[directory]": run.directory })
+    evidence.bridgeAbsent = !(await api(`mcp?${location}`)).data.some(
+      (entry) => entry.name === binding.bridgeServerName,
+    )
+    const session = await api(`session/${run.nativeSessionId}`)
+    const active = await api("session/active")
+    const inbox = await api(`session/${run.nativeSessionId}/inbox`)
+    evidence.sessionQuiescent =
+      session?.data.agent === "sandbox" &&
+      active.data[run.nativeSessionId] === undefined &&
+      inbox.data.length === 0
+    const patch = await readFile(join(run.directory, "result.patch"), "utf8")
+    const finalMessage = await readFile(join(run.directory, "final.txt"), "utf8")
+    const mailbox = await client.callTool({
+      name: "read_agent_mailbox",
+      arguments: { mailbox_id: evidence.receipt.mailbox_id },
+    })
+    assert.notEqual(mailbox.isError, true)
+    const messages = mailbox.structuredContent?.messages
+    evidence.mailboxReceived =
+      messages?.length === 1 &&
+      messages[0].run_id === evidence.runId &&
+      messages[0].status === "completed" &&
+      messages[0].native_session_id === run.nativeSessionId &&
+      messages[0].final_message === finalMessage
+    evidence.mailbox = mailbox.structuredContent
+    evidence.patchBytes = Buffer.byteLength(patch)
+    evidence.patchSha256 = createHash("sha256").update(patch).digest("hex")
+    stage = "live prototype assertions"
+    assertLivePrototype({ ...evidence, patch, finalMessage })
+    evidence.result = "passed"
+    console.log(
+      JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
+    )
+  } finally {
+    for (const lease of await runtime.runPromise(store.active())) {
+      const run = await runtime.runPromise(runs.read(lease.run_id))
+      if (run && !["completed", "cancelled", "failed", "operator_required"].includes(run.state))
+        await runtime.runPromise(ingress.cancel(run.runId, new Date()))
+      const deadline = Date.now() + 300000
+      while ((await runtime.runPromise(store.read(lease.run_id)))?.state !== "released") {
+        await runtime.runPromise(sandbox.iteration)
+        assert.ok(Date.now() < deadline, "Live cleanup unconfirmed; retain custody")
+        await delay(2000)
+      }
+    }
+    await client.close()
+    await mcp.stop(true)
+    await host.stop(true)
+    await runtime.dispose()
+  }
+}
+
 async function probe() {
   if (process.argv[2] === "--probe-session-policy") return sessionPolicyProbe()
   if (process.argv[2] === "--reconcile-custody") return reconcileCustody()
   assert.ok(
-    ["--probe-lease", "--check-policy"].includes(process.argv[2]),
+    ["--probe-lease", "--probe-denials", "--live", "--check-policy"].includes(process.argv[2]),
     "Expected --probe-lease or --check-policy",
   )
   const value = process.env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES
@@ -530,11 +952,9 @@ async function probe() {
     console.log("Sandbox operator policy is compatible; enforcement remains unverified")
     return
   }
+  if (process.argv[2] === "--live") return probeLive(policy)
   stage = "App credentials"
-  const config = join(homedir(), ".config/workflowd")
-  const env = await readFile(join(config, "env"), "utf8")
-  const appId = Number(env.match(/^GITHUB_APP_ID=["']?(\d+)/m)?.[1])
-  assert.ok(appId > 0, "App ID unavailable")
+  const { appId, privateKeyPath } = await appConfiguration()
   assert.equal(appId, trust.refRestriction.soleBypassApp)
   output =
     process.env.EVIDENCE_SANDBOX_ROOT ??
@@ -547,10 +967,7 @@ async function probe() {
     Effect.gen(function* () {
       yield* runStoreMigrations
       const store = yield* makeSandboxStore
-      const github = yield* makeSandboxGithub({
-        appId,
-        privateKeyPath: join(config, "github-app.pem"),
-      })
+      const github = yield* makeSandboxGithub({ appId, privateKeyPath })
       const leases = yield* makeSandboxLeaseService(github, join(output, "control"))
       stage = "published operator-pinned workflow"
       yield* github.verifyWorkflow(policy)
@@ -560,7 +977,14 @@ async function probe() {
         process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "main",
       )
       yield* store.request({ runId, leaseId: runId, policy, sourceSha, now: Date.now() })
-      const row = yield* probeLease(leases, store, runId)
+      const row = yield* probeLease(
+        leases,
+        store,
+        runId,
+        process.argv[2] === "--probe-denials" ? probeDenials : undefined,
+      )
+      if (process.argv[2] === "--probe-denials")
+        yield* Effect.tryPromise(() => recordWorkflowLog(row))
       evidence.runUrl = `https://github.com/${policy.repository}/actions/runs/${row.actions_run_id}`
     }).pipe(Effect.provide(layer)),
   )

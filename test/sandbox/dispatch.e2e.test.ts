@@ -20,6 +20,7 @@ import { dispatchRunnerFixture, sandboxGithubFixture, sandboxIngressFixtureLayer
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { sharedOpenCodeFixture } from "./opencode-fixture"
 import {
+  sandboxBridgeName,
   readSandboxBinding,
   bindingDirectory,
   assertBridgeBinding,
@@ -432,7 +433,7 @@ test("shared executor session captures an inert patch and releases before publis
             {
               name: "execute",
               arguments: JSON.stringify({
-                code: `const env = JSON.parse(await tools["workflowd_sandbox_${runner.name.replaceAll("-", "_")}"].environment_create({ environment_source: "/workspace/repository", title: "Dispatch fixture" })); return await tools["workflowd_sandbox_${runner.name.replaceAll("-", "_")}"].environment_run_cmd({environment_source: "/workspace/repository", environment_id: env.id, command: "printf dispatch-proof > proof.txt"});`,
+                code: `const env = JSON.parse(await tools["${sandboxBridgeName(runner.name)}"].environment_create({ environment_source: "/workspace/repository", title: "Dispatch fixture" })); return await tools["${sandboxBridgeName(runner.name)}"].environment_run_cmd({environment_source: "/workspace/repository", environment_id: env.id, command: "printf dispatch-proof > proof.txt"});`,
               }),
             },
           ],

@@ -155,26 +155,33 @@ const policy = {
   tailscaleAudience: "fixture",
 }
 
+// These cases start from the same saved primary run; each test controls its failure.
+const recoveryLease = (fixture: Awaited<ReturnType<typeof sandboxGithubFixture>>, runId: string) =>
+  Effect.gen(function* () {
+    yield* sandboxMigration
+    yield* sandboxCleanupMigration
+    const store = yield* makeSandboxStore
+    const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+    const leases = yield* makeSandboxLeaseService(github)
+    yield* store.request({
+      runId,
+      leaseId: "lease-1",
+      policy,
+      sourceSha: "b".repeat(40),
+      now: Date.now(),
+    })
+    yield* store.beginStart(runId)
+    yield* store.recordRun(runId, 41, 1)
+    return { store, leases }
+  })
+
 test("reconciliation clears only a successful policy's inventory errors despite a foreign failure", async () => {
   const fixture = await sandboxGithubFixture(policy)
   const foreign = { ...policy, repository: "owner/other", repositoryId: 2 }
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github)
-        yield* store.request({
-          runId: "healthy",
-          leaseId: "lease-1",
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("healthy")
-        yield* store.recordRun("healthy", 41, 1)
+        const { store, leases } = yield* recoveryLease(fixture, "healthy")
         yield* store.bind("healthy", 41, 1, {
           leaseId: "lease-1",
           peerId: "peer",
@@ -412,20 +419,7 @@ test("incomplete inventory preserves custody and errors without cancelling a par
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github)
-        yield* store.request({
-          runId: "active",
-          leaseId: "lease-1",
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("active")
-        yield* store.recordRun("active", 41, 1)
+        const { store, leases } = yield* recoveryLease(fixture, "active")
         for (const pages of [
           [{ total: 1001, runs: full }],
           [
@@ -505,20 +499,7 @@ test("inventory never replaces active session or source custody", async () => {
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github)
-        yield* store.request({
-          runId: "active",
-          leaseId: "lease-1",
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("active")
-        yield* store.recordRun("active", 41, 1)
+        const { store, leases } = yield* recoveryLease(fixture, "active")
         yield* store.bind("active", 41, 1, {
           leaseId: "lease-1",
           peerId: "peer",
@@ -700,20 +681,7 @@ test("active primary survives duplicate cleanup, then all saved runs gate releas
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github)
-        yield* store.request({
-          runId: "active",
-          leaseId: "lease-1",
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("active")
-        yield* store.recordRun("active", 41, 1)
+        const { store, leases } = yield* recoveryLease(fixture, "active")
         yield* store.bind("active", 41, 1, {
           leaseId: "lease-1",
           peerId: "peer",
@@ -875,20 +843,7 @@ test("direct release only cleans the repository policy whose inventory it confir
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github)
-        yield* store.request({
-          runId: "run-1",
-          leaseId: "lease-1",
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("run-1")
-        yield* store.recordRun("run-1", 41, 1)
+        const { store, leases } = yield* recoveryLease(fixture, "run-1")
         yield* store.adopt(
           { ...policy, repository: "owner/other", repositoryId: 2 },
           { leaseId: "lease-2", run: { id: 42, run_attempt: 1 } },
@@ -919,7 +874,8 @@ for (const fault of [
   test(`shared coordinator retains custody after ${fault} uncertainty and recovers on restart`, async () => {
     const { sharedOpenCodeFixture } = await import("./opencode-fixture")
     const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
-    const { bindingDirectory, readSandboxBinding } = await import("../../src/sandbox/binding")
+    const { bindingDirectory, readSandboxBinding, sandboxBridgeName } =
+      await import("../../src/sandbox/binding")
     const runner = await dispatchRunnerFixture()
     const githubFixture = await sandboxGithubFixture(policy, runner.name)
     const shared = await sharedOpenCodeFixture("recovery")
@@ -978,7 +934,7 @@ for (const fault of [
           yield* store.beginStart("shared")
           yield* store.recordRun("shared", 41, 1)
           yield* store.bind("shared", 41, 1, runner.transport)
-          bridgeName = `workflowd_sandbox_${runner.name.replaceAll("-", "_")}`
+          bridgeName = sandboxBridgeName(runner.name)
           if (fault === "create" || fault === "add")
             shared.reject({
               path: fault === "create" ? "/session" : `/mcp/${bridgeName}`,
