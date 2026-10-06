@@ -47,3 +47,41 @@ export const sandboxCleanupMigration = Effect.gen(function* () {
     SELECT json_extract(policy,'$.repositoryId'),actions_run_id,actions_attempt,lease_id,policy,'pending',created_at,heartbeat_at
     FROM sandbox_leases WHERE state != 'released' AND actions_run_id IS NOT NULL`
 })
+
+// Separate from lease rows so orphan Actions runs have the same durable fence.
+export const sandboxOperationMigration = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE sandbox_lease_operations (
+    repository_id INTEGER NOT NULL CHECK(repository_id > 0),
+    lease_id TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0 CHECK(generation >= 0),
+    owner TEXT,
+    expires_at INTEGER,
+    PRIMARY KEY(repository_id,lease_id),
+    CHECK((owner IS NULL) = (expires_at IS NULL))
+  ) STRICT`
+  yield* sql`INSERT INTO sandbox_lease_operations(repository_id,lease_id)
+    SELECT json_extract(policy,'$.repositoryId'),lease_id FROM sandbox_leases
+    UNION SELECT repository_id,lease_id FROM sandbox_cleanup_runs`
+  yield* sql`CREATE TRIGGER sandbox_cleanup_adoption_fence AFTER INSERT ON sandbox_cleanup_runs
+    BEGIN
+      INSERT INTO sandbox_lease_operations(repository_id,lease_id,generation)
+      VALUES(NEW.repository_id,NEW.lease_id,1)
+      ON CONFLICT(repository_id,lease_id) DO UPDATE SET generation=generation+1;
+    END`
+  yield* sql`CREATE TRIGGER sandbox_cleanup_state_fence AFTER UPDATE OF state ON sandbox_cleanup_runs
+    WHEN NEW.state != OLD.state
+    BEGIN
+      UPDATE sandbox_lease_operations SET generation=generation+1
+      WHERE repository_id=NEW.repository_id AND lease_id=NEW.lease_id;
+    END`
+  yield* sql`CREATE TRIGGER sandbox_lease_custody_fence AFTER UPDATE ON sandbox_leases
+    WHEN NEW.state != OLD.state OR NEW.actions_run_id IS NOT OLD.actions_run_id
+      OR NEW.session_id IS NOT OLD.session_id
+      OR (NEW.release_error IS 'Sandbox session cleanup unconfirmed; retry required')
+        IS NOT (OLD.release_error IS 'Sandbox session cleanup unconfirmed; retry required')
+    BEGIN
+      UPDATE sandbox_lease_operations SET generation=generation+1
+      WHERE repository_id=json_extract(NEW.policy,'$.repositoryId') AND lease_id=NEW.lease_id;
+    END`
+})

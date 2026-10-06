@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import type { SqlError } from "effect/unstable/sql/SqlError"
 import { SandboxPolicy } from "./config"
 import { SandboxTransport } from "./transport"
 import type { OwnedLeaseRun } from "./github"
@@ -51,8 +53,61 @@ const CleanupRun = Schema.Struct({
   last_error: Schema.NullOr(Schema.String),
 })
 
+const Operation = Schema.Struct({ generation: Schema.Int })
+type LeaseOperation = {
+  repositoryId: number
+  leaseId: string
+  owner: string
+  generation: number
+}
+
 export const makeSandboxStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const currentOperation = (operation: LeaseOperation, checkGeneration = true) =>
+    sql`SELECT 1 FROM sandbox_lease_operations
+      WHERE repository_id=${operation.repositoryId} AND lease_id=${operation.leaseId}
+      AND owner=${operation.owner} AND expires_at>${Date.now()}
+      AND (${checkGeneration ? 1 : 0}=0 OR generation=${operation.generation})`.pipe(
+      Effect.map((rows) => rows.length === 1),
+    )
+  const withOperation = Effect.fn("SandboxStore.withOperation")(function* <E, E2>(
+    repositoryId: number,
+    leaseId: string,
+    eligible: Effect.Effect<boolean, E>,
+    use: (operation: LeaseOperation) => Effect.Effect<void, E2>,
+  ) {
+    // The owner serializes external operations for just this lease. Custody
+    // mutations advance generation without blocking adoption or other leases.
+    const claim = sql.withTransaction(
+      Effect.gen(function* () {
+        if (!(yield* eligible)) return null
+        const owner = randomUUID()
+        yield* sql`INSERT INTO sandbox_lease_operations(repository_id,lease_id)
+        VALUES(${repositoryId},${leaseId}) ON CONFLICT DO NOTHING`
+        const rows = yield* sql`UPDATE sandbox_lease_operations
+        SET owner=${owner},expires_at=${Date.now() + 10 * 60000},generation=generation+1
+        WHERE repository_id=${repositoryId} AND lease_id=${leaseId}
+        AND (owner IS NULL OR expires_at<=${Date.now()}) RETURNING generation`
+        if (rows.length === 0) return null
+        const { generation } = yield* Schema.decodeUnknownEffect(Operation)(rows[0])
+        return { repositoryId, leaseId, owner, generation }
+      }),
+    )
+    yield* Effect.acquireUseRelease(
+      claim,
+      // Bound live work below the durable expiry; a crashed owner can be
+      // replaced, and its late completion cannot commit or clear a new owner.
+      (operation) =>
+        operation === null ? Effect.void : use(operation).pipe(Effect.timeout("9 minutes")),
+      (operation) =>
+        operation === null
+          ? Effect.void
+          : sql`UPDATE sandbox_lease_operations SET owner=NULL,expires_at=NULL
+          WHERE repository_id=${repositoryId} AND lease_id=${leaseId} AND owner=${operation.owner}`.pipe(
+              Effect.orDie,
+            ),
+    )
+  })
   const read = Effect.fn("SandboxStore.read")(function* (runId: string) {
     const rows = yield* sql`SELECT * FROM sandbox_leases WHERE run_id=${runId}`
     return rows.length === 0 ? null : yield* Schema.decodeUnknownEffect(Lease)(rows[0])
@@ -133,33 +188,72 @@ export const makeSandboxStore = Effect.gen(function* () {
     discoverRuns: Effect.Effect<void, E>,
     removeRef: Effect.Effect<void, E>,
   ) {
-    // Fence acquisition/adoption while removing a ref without a saved Actions identity.
-    yield* sql.withTransaction(
+    const lease = yield* read(runId)
+    if (lease === null) return
+    const eligible = Effect.gen(function* () {
+      const saved = yield* read(runId)
+      if (saved?.state !== "releasing" || saved.actions_run_id !== null) return false
+      const runs = yield* sql`SELECT 1 FROM sandbox_cleanup_runs WHERE lease_id=${lease.lease_id}
+        AND repository_id=${lease.policy.repositoryId}`
+      return runs.length === 0
+    })
+    yield* withOperation(lease.policy.repositoryId, lease.lease_id, eligible, (operation) =>
       Effect.gen(function* () {
-        yield* sql`UPDATE sandbox_leases SET heartbeat_at=heartbeat_at WHERE run_id=${runId}`
-        const lease = yield* read(runId)
-        if (lease === null || lease.state !== "releasing" || lease.actions_run_id !== null) return
-        const hasRun = sql`SELECT 1 FROM sandbox_cleanup_runs WHERE lease_id=${lease.lease_id}
-        AND repository_id=${lease.policy.repositoryId}`.pipe(Effect.map((rows) => rows.length > 0))
-        if (yield* hasRun) return
         const result = yield* Effect.gen(function* () {
           yield* discoverRuns
-          if (yield* hasRun) return
+          const remove = yield* sql.withTransaction(
+            Effect.gen(function* () {
+              return (yield* currentOperation(operation)) && (yield* eligible)
+            }),
+          )
+          if (!remove) return
           yield* removeRef
-          // Ref deletion does not cancel an already queued push. Adopt late runs before returning.
+          // A queued push can become visible after deletion; retain that identity.
           yield* discoverRuns
         }).pipe(Effect.result)
-        // Keep any adopted identity even if a subsequent inventory request failed.
-        if (yield* hasRun) return
-        const confirmation =
-          result._tag === "Success"
-            ? "Exact ref absence confirmed; empty inventory does not prove run termination."
-            : "Exact ref absence or run inventory unconfirmed; retry reconciliation."
-        const diagnostic = `${unobservedRun} ${confirmation} Inspect ${lease.policy.repository} refs/heads/workflowd/leases/${lease.lease_id} at ${lease.policy.workflowSha} in Actions; restore API visibility and reconcile any delayed run. Do not discard custody.`
-        yield* sql`UPDATE sandbox_leases SET state='operator_required',release_error=${diagnostic} WHERE run_id=${runId}`
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            if (!(yield* currentOperation(operation)) || !(yield* eligible)) return
+            const confirmation =
+              result._tag === "Success"
+                ? "Exact ref absence confirmed; empty inventory does not prove run termination."
+                : "Exact ref absence or run inventory unconfirmed; retry reconciliation."
+            const diagnostic = `${unobservedRun} ${confirmation} Inspect ${lease.policy.repository} refs/heads/workflowd/leases/${lease.lease_id} at ${lease.policy.workflowSha} in Actions; restore API visibility and reconcile any delayed run. Do not discard custody.`
+            yield* sql`UPDATE sandbox_leases SET state='operator_required',release_error=${diagnostic} WHERE run_id=${runId}`
+          }),
+        )
       }),
     )
   })
+  const withAcquisition = Effect.fn("SandboxStore.withAcquisition")(function* <E>(
+    runId: string,
+    use: (
+      commit: <A, E2>(
+        effect: Effect.Effect<A, E2>,
+      ) => Effect.Effect<A, E2 | SandboxError | SqlError>,
+    ) => Effect.Effect<void, E>,
+  ) {
+    const lease = yield* read(runId)
+    if (lease === null) return
+    yield* withOperation(
+      lease.policy.repositoryId,
+      lease.lease_id,
+      read(runId).pipe(Effect.map((saved) => saved?.state === "starting")),
+      (operation) =>
+        use((effect) =>
+          sql.withTransaction(
+            Effect.gen(function* () {
+              if (!(yield* currentOperation(operation, false)))
+                return yield* Effect.fail(
+                  new SandboxError({ message: "Sandbox acquisition operation changed" }),
+                )
+              return yield* effect
+            }),
+          ),
+        ),
+    )
+  })
+
   const active = Effect.fn("SandboxStore.active")(function* () {
     const rows =
       yield* sql`SELECT * FROM sandbox_leases WHERE state != 'released' ORDER BY created_at`
@@ -292,30 +386,34 @@ export const makeSandboxStore = Effect.gen(function* () {
     row: typeof CleanupRun.Type,
     removeRef: Effect.Effect<void, E>,
   ) {
-    // Take the SQLite write fence before checking custody. Keep it until the
-    // bounded ref deletion is confirmed, so concurrent adoption cannot pass
-    // between the all-terminated check and the external deletion.
-    return yield* sql.withTransaction(
+    const eligible = Effect.gen(function* () {
+      const saved = yield* sql`SELECT state FROM sandbox_cleanup_runs
+        WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
+      if (
+        saved.length === 0 ||
+        saved.some((run) => run.state === "pending") ||
+        saved.every((run) => run.state === "released")
+      )
+        return false
+      const lease = yield* cleanupLease(row)
+      return lease === null || lease.state === "releasing" || lease.state === "released"
+    })
+    yield* withOperation(row.repository_id, row.lease_id, eligible, (operation) =>
       Effect.gen(function* () {
-        yield* sql`UPDATE sandbox_cleanup_runs SET updated_at=updated_at
-        WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
-        const saved = yield* sql`SELECT state FROM sandbox_cleanup_runs
-        WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
-        if (
-          saved.length === 0 ||
-          saved.some((run) => run.state === "pending") ||
-          saved.every((run) => run.state === "released")
-        )
-          return
-        const lease = yield* cleanupLease(row)
-        if (lease !== null && lease.state !== "releasing" && lease.state !== "released") return
         yield* removeRef
-        yield* sql`UPDATE sandbox_cleanup_runs SET state='released',last_error=NULL,updated_at=${Date.now()}
-        WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
-        if (lease?.state === "releasing") yield* confirmReleased(lease.run_id)
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            if (!(yield* currentOperation(operation)) || !(yield* eligible)) return
+            yield* sql`UPDATE sandbox_cleanup_runs SET state='released',last_error=NULL,updated_at=${Date.now()}
+            WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
+            const lease = yield* cleanupLease(row)
+            if (lease?.state === "releasing") yield* confirmReleased(lease.run_id)
+          }),
+        )
       }),
     )
   })
+
   const attachUnit = Effect.fn("SandboxStore.attachUnit")(function* (
     runId: string,
     unit: string,
@@ -349,6 +447,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     request,
     confirmReleased,
     beginStart,
+    withAcquisition,
     recordRun,
     beginRelease,
     reconcileUnobserved,

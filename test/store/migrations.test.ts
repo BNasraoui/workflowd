@@ -135,7 +135,7 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations'
           )
           ORDER BY name
         `
@@ -179,8 +179,9 @@ describe("strict initial store schema", () => {
       { migration_id: 28, name: "agent_run_base_ref" },
       { migration_id: 29, name: "sandbox_leases" },
       { migration_id: 30, name: "sandbox_cleanup_runs" },
+      { migration_id: 31, name: "sandbox_lease_operations" },
     ])
-    expect(result.tables).toHaveLength(34)
+    expect(result.tables).toHaveLength(35)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -893,6 +894,15 @@ test("migration 30 preserves lease authority, backfills cleanup pairs and is rep
       const before = yield* sql`SELECT * FROM sandbox_leases ORDER BY run_id`
       yield* runStoreMigrations
       expect(yield* sql`SELECT * FROM sandbox_leases ORDER BY run_id`).toEqual(before)
+      expect(yield* sql`SELECT * FROM sandbox_lease_operations ORDER BY lease_id`).toEqual(
+        ["active", "released", "requested"].map((lease_id) => ({
+          repository_id: 7,
+          lease_id,
+          generation: 0,
+          owner: null,
+          expires_at: null,
+        })),
+      )
       expect(yield* sql`SELECT * FROM sandbox_cleanup_runs`).toEqual([
         {
           repository_id: 7,

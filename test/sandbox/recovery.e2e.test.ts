@@ -2,12 +2,16 @@ import { legacySandboxUnit } from "./opencode-fixture"
 import { Session } from "@opencode-ai/client/effect"
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { Database } from "bun:sqlite"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
-import { sandboxMigration, sandboxCleanupMigration } from "../../src/sandbox/migration"
+import {
+  sandboxMigration,
+  sandboxCleanupMigration,
+  sandboxOperationMigration,
+} from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { sandboxGithubFixture, dispatchRunnerFixture, sandboxCoordinatorProcess } from "./harness"
 import { mkdtemp, rm, mkdir } from "node:fs/promises"
@@ -160,6 +164,7 @@ const recoveryLease = (fixture: Awaited<ReturnType<typeof sandboxGithubFixture>>
   Effect.gen(function* () {
     yield* sandboxMigration
     yield* sandboxCleanupMigration
+    yield* sandboxOperationMigration
     const store = yield* makeSandboxStore
     const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
     const leases = yield* makeSandboxLeaseService(github)
@@ -249,6 +254,7 @@ test("lease sends heartbeats while a slow source initialization is still in prog
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github, root, async (args) => {
@@ -297,6 +303,7 @@ test("empty custody adopts owned runner for cancellation, never acquisition", as
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -336,6 +343,7 @@ test("every observed owned run remains in custody when duplicate runs share a le
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -465,6 +473,7 @@ test("file SQLite retains adopted custody across lost cancellation acknowledgeme
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
         expect((yield* Effect.result(leases.reconcile([policy])))._tag).toBe("Failure")
@@ -656,6 +665,7 @@ test("cleanup adoption is atomic, immutable and independent across repositories"
     Effect.gen(function* () {
       yield* sandboxMigration
       yield* sandboxCleanupMigration
+      yield* sandboxOperationMigration
       const store = yield* makeSandboxStore
       const first = { leaseId: "lease-1", run: { id: 41, run_attempt: 1 } }
       yield* store.adopt(policy, first, 100)
@@ -747,6 +757,7 @@ test("ref deletion requires confirmation and retries lost replies with retained 
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -770,50 +781,155 @@ test("ref deletion requires confirmation and retries lost replies with retained 
   }
 })
 
-test("ref deletion fences concurrent adoption through the SQLite write transaction", async () => {
-  const root = await mkdtemp(join(tmpdir(), "sandbox-fence-"))
-  const file = join(root, "custody.sqlite")
-  try {
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* sandboxMigration
-        yield* sandboxCleanupMigration
-        const sql = yield* SqlClient.SqlClient
-        const store = yield* makeSandboxStore
-        yield* store.adopt(policy, { leaseId: "lease-1", run: { id: 41, run_attempt: 1 } }, 100)
-        const [row] = yield* store.cleanupRuns()
-        if (!row) throw new Error("missing custody")
-        yield* store.cleanupState(row, "terminated")
-        const contender = new Database(file)
-        try {
-          yield* store.finishCleanup(
-            row,
-            Effect.sync(() => {
-              expect(() =>
-                contender
-                  .query(
-                    "INSERT INTO sandbox_cleanup_runs SELECT repository_id,42,1,lease_id,policy,'pending',200,200,NULL FROM sandbox_cleanup_runs LIMIT 1",
-                  )
-                  .run(),
-              ).toThrow("locked")
-            }),
-          )
-          yield* store.adopt(policy, { leaseId: "lease-1", run: { id: 42, run_attempt: 1 } }, 200)
-          expect(
-            yield* sql`SELECT actions_run_id,state FROM sandbox_cleanup_runs ORDER BY actions_run_id`,
-          ).toEqual([
-            { actions_run_id: 41, state: "released" },
-            { actions_run_id: 42, state: "pending" },
-          ])
-        } finally {
-          contender.close()
-        }
-      }).pipe(Effect.provide(SqliteClient.layer({ filename: file }))),
+test.each(["inventory", "DELETE", "acquisition"])(
+  "pending GitHub %s leaves shared kernel and other lease operations available",
+  async (stage) => {
+    const root = await mkdtemp(join(tmpdir(), "sandbox-fence-"))
+    const file = join(root, "custody.sqlite")
+    const fixture = await sandboxGithubFixture(policy)
+    const entered = Promise.withResolvers<void>()
+    const response = Promise.withResolvers<void>()
+    let armed = false
+    const client = fixture.OctokitClass.defaults({
+      request: {
+        fetch: async (input: string | Request | URL, init?: RequestInit) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (
+            armed &&
+            (stage === "inventory"
+              ? url.pathname.endsWith("/actions/runs")
+              : stage === "DELETE"
+                ? init?.method === "DELETE"
+                : init?.method === "POST" && url.pathname.endsWith("/git/refs"))
+          ) {
+            armed = false
+            entered.resolve()
+            await response.promise
+          }
+          return fetch(input, init)
+        },
+      },
+    })
+    const runtime = ManagedRuntime.make(
+      AgentRunStoreLive.pipe(
+        Layer.provideMerge(
+          WorkflowStoreLive.pipe(Layer.provideMerge(SqliteClient.layer({ filename: file }))),
+        ),
+      ),
     )
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-})
+    const other = ManagedRuntime.make(SqliteClient.layer({ filename: file }))
+    let releasing: Promise<unknown> | undefined
+    try {
+      const { store, leases, runs, sql } = await runtime.runPromise(
+        Effect.gen(function* () {
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, client)
+          const leases = yield* makeSandboxLeaseService(github)
+          const runs = yield* AgentRunStore
+          const sql = yield* SqlClient.SqlClient
+          for (const [runId, leaseId] of [
+            ["a", "lease-1"],
+            ["b", "lease-2"],
+          ] as const)
+            yield* store.request({
+              runId,
+              leaseId,
+              policy,
+              sourceSha: "b".repeat(40),
+              now: Date.now(),
+            })
+          if (stage !== "DELETE") fixture.listRuns([])
+          if (stage !== "acquisition") yield* leases.acquire("a")
+          yield* store.beginStart("b")
+          yield* store.recordRun("b", 77, 1)
+          yield* store.bind("b", 77, 1, {
+            leaseId: "lease-2",
+            peerId: "peer",
+            address: "127.0.0.1",
+            port: 22,
+            repositoryPath: "/workspace/repository",
+            knownHostsFile: "/tmp/key",
+            identityFile: "/dev/null",
+          })
+          yield* runs.create({
+            runId: "ordinary",
+            route: "ordinary",
+            providerId: "fixture",
+            modelId: "fixture",
+            agent: "build",
+            repository: "fixture",
+            directory: root,
+            prompt: "fixture",
+            promptSha256: "c".repeat(64),
+            parentSessionId: null,
+            resumePrompt: null,
+            maxAttempts: 1,
+            createdAt: new Date(),
+          })
+          return { store, leases, runs, sql }
+        }),
+      )
+      if (stage === "DELETE") fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+      armed = true
+      releasing = runtime.runPromise(
+        Effect.result(stage === "acquisition" ? leases.acquire("a") : leases.release("a")),
+      )
+      await entered.promise
+      // These must finish while the HTTP response is still suspended, on the
+      // same SQL client the daemon shares with its ordinary agent kernel.
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* runs.claimSpawn({ runId: "ordinary", now: new Date() })
+          yield* store.heartbeat("b", 12345)
+          expect((yield* store.read("b"))?.heartbeat_at).toBe(12345)
+          expect(yield* sql`SELECT run_id FROM kernel_agent_runs`).toEqual([{ run_id: "ordinary" }])
+        }).pipe(Effect.timeout("2 seconds")),
+      )
+      const contender = new Database(file)
+      try {
+        contender.run("PRAGMA busy_timeout = 30")
+        expect(() =>
+          contender.run(
+            "UPDATE kernel_agent_runs SET diagnostic='independent' WHERE run_id='ordinary'",
+          ),
+        ).not.toThrow()
+      } finally {
+        contender.close()
+      }
+      const deletes = fixture.refDeletes
+      const competing = await other.runPromise(
+        Effect.gen(function* () {
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          return { leases: yield* makeSandboxLeaseService(github), store: yield* makeSandboxStore }
+        }),
+      )
+      await other.runPromise(competing.leases.release("a").pipe(Effect.timeout("2 seconds")))
+      expect(fixture.refDeletes).toBe(deletes)
+      fixture.savedRun(42, { status: "in_progress" })
+      await other.runPromise(
+        competing.store
+          .adopt(policy, { leaseId: "lease-1", run: { id: 42, run_attempt: 1 } }, Date.now())
+          .pipe(Effect.timeout("2 seconds")),
+      )
+      response.resolve()
+      expect(await releasing).toMatchObject({ _tag: "Success" })
+      const saved = await runtime.runPromise(store.cleanupRuns(true))
+      expect(saved.find((row) => row.actions_run_id === 42)?.state).toBe("pending")
+      expect((await runtime.runPromise(store.read("a")))?.state).toBe("releasing")
+      expect((await runtime.runPromise(Effect.result(leases.acquire("a"))))._tag).toBe("Failure")
+      fixture.savedRun(42, { status: "completed", conclusion: "cancelled" })
+      await runtime.runPromise(leases.release("a"))
+      expect((await runtime.runPromise(store.read("a")))?.state).toBe("released")
+    } finally {
+      response.resolve()
+      await releasing
+      await other.dispose()
+      await runtime.dispose()
+      await fixture.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)
 
 test("a failed direct read retains its run without preventing cancellation of the other saved run", async () => {
   const fixture = await sandboxGithubFixture(policy)
@@ -822,6 +938,7 @@ test("a failed direct read retains its run without preventing cancellation of th
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -1256,3 +1373,118 @@ test("revoking a binding terminates an in-flight SSH tool call before its respon
     await runner.close()
   }
 }, 60000)
+
+test.each(["cleanup", "acquisition"])(
+  "expired %s owner cannot commit or clear its replacement after restart",
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), "sandbox-operation-"))
+    const file = join(root, "custody.sqlite")
+    const runtime = ManagedRuntime.make(SqliteClient.layer({ filename: file }))
+    const restarted = ManagedRuntime.make(SqliteClient.layer({ filename: file }))
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()] as const
+    const responses = [Promise.withResolvers<void>(), Promise.withResolvers<void>()] as const
+    const pending: Promise<unknown>[] = []
+    try {
+      const { store, row } = await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* sandboxMigration
+          yield* sandboxCleanupMigration
+          yield* sandboxOperationMigration
+          const store = yield* makeSandboxStore
+          yield* store.request({
+            runId: "run",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          yield* store.beginStart("run")
+          yield* store.recordRun("run", 41, 1)
+          const [row] = yield* store.cleanupRuns()
+          if (!row) throw new Error("missing custody")
+          if (kind === "cleanup") {
+            yield* store.beginRelease("run")
+            yield* store.cleanupState(row, "terminated")
+          }
+          return { store, row }
+        }),
+      )
+      const { store: other, sql: otherSql } = await restarted.runPromise(
+        Effect.gen(function* () {
+          return { store: yield* makeSandboxStore, sql: yield* SqlClient.SqlClient }
+        }),
+      )
+      const operation = (target: typeof store, index: 0 | 1) => {
+        const io = Effect.promise(() => {
+          entered[index].resolve()
+          return responses[index].promise
+        })
+        return kind === "cleanup"
+          ? target.finishCleanup(row, io)
+          : target.withAcquisition("run", (commit) =>
+              io.pipe(Effect.andThen(commit(target.recordRun("run", 41, 1)))),
+            )
+      }
+      pending.push(runtime.runPromise(Effect.result(operation(store, 0))))
+      await entered[0].promise
+      // Simulate a persisted owner whose process died and recovery horizon elapsed.
+      await restarted.runPromise(otherSql`UPDATE sandbox_lease_operations SET expires_at=0`)
+      pending.push(restarted.runPromise(Effect.result(operation(other, 1))))
+      await entered[1].promise
+      const replacement = await restarted.runPromise(
+        otherSql`SELECT * FROM sandbox_lease_operations`,
+      )
+      responses[0].resolve()
+      expect(await pending[0]).toMatchObject({ _tag: kind === "cleanup" ? "Success" : "Failure" })
+      expect(await restarted.runPromise(otherSql`SELECT * FROM sandbox_lease_operations`)).toEqual(
+        replacement,
+      )
+      expect((await restarted.runPromise(other.read("run")))?.state).toBe(
+        kind === "cleanup" ? "releasing" : "starting",
+      )
+      responses[1].resolve()
+      expect(await pending[1]).toMatchObject({ _tag: "Success" })
+      expect(
+        await restarted.runPromise(otherSql`SELECT owner,expires_at FROM sandbox_lease_operations`),
+      ).toEqual([{ owner: null, expires_at: null }])
+      expect((await restarted.runPromise(other.read("run")))?.state).toBe(
+        kind === "cleanup" ? "released" : "starting",
+      )
+    } finally {
+      for (const response of responses) response.resolve()
+      await Promise.all(pending)
+      await restarted.dispose()
+      await runtime.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test("interrupted ref cleanup drops only its operation owner and retains custody for retry", async () => {
+  const { Fiber } = await import("effect")
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* sandboxMigration
+      yield* sandboxCleanupMigration
+      yield* sandboxOperationMigration
+      const store = yield* makeSandboxStore
+      const sql = yield* SqlClient.SqlClient
+      yield* store.adopt(policy, { leaseId: "orphan", run: { id: 41, run_attempt: 1 } }, Date.now())
+      const [row] = yield* store.cleanupRuns()
+      if (!row) throw new Error("missing custody")
+      yield* store.cleanupState(row, "terminated")
+      const entered = Promise.withResolvers<void>()
+      const fiber = yield* store
+        .finishCleanup(row, Effect.sync(() => entered.resolve()).pipe(Effect.andThen(Effect.never)))
+        .pipe(Effect.forkScoped)
+      yield* Effect.promise(() => entered.promise)
+      yield* Fiber.interrupt(fiber)
+      expect(yield* sql`SELECT owner,expires_at FROM sandbox_lease_operations`).toEqual([
+        { owner: null, expires_at: null },
+      ])
+      expect((yield* store.cleanupRuns())[0]?.state).toBe("terminated")
+      yield* store.finishCleanup(row, Effect.void)
+      expect(yield* store.cleanupRuns()).toEqual([])
+    }).pipe(Effect.scoped, Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+})

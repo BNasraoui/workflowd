@@ -5,7 +5,11 @@ import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import { parseSandboxRepositories } from "../../src/sandbox/config"
-import { sandboxMigration, sandboxCleanupMigration } from "../../src/sandbox/migration"
+import {
+  sandboxMigration,
+  sandboxCleanupMigration,
+  sandboxOperationMigration,
+} from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
 
 const policy = {
@@ -64,6 +68,7 @@ test("SQLite preserves immutable lease intent and refuses premature release", as
     Effect.gen(function* () {
       yield* sandboxMigration
       yield* sandboxCleanupMigration
+      yield* sandboxOperationMigration
       const store = yield* makeSandboxStore
       const input = {
         runId: "run-1",
@@ -131,6 +136,7 @@ test("release stays pending until the correlated Actions run is confirmed comple
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const service = yield* makeSandboxLeaseService(github)
@@ -178,6 +184,7 @@ test.each([
         Effect.gen(function* () {
           yield* sandboxMigration
           yield* sandboxCleanupMigration
+          yield* sandboxOperationMigration
           const store = yield* makeSandboxStore
           const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
           const leases = yield* makeSandboxLeaseService(github)
@@ -380,6 +387,7 @@ test("restart release checks the saved run even when listings contain only a com
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -506,6 +514,7 @@ test("lease acquisition initializes through SSH and retries a lost initializatio
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github, join(runner.root, "control"), control)
@@ -598,6 +607,7 @@ test("released custody is revalidated through direct saved runs and absent refs 
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -671,6 +681,7 @@ test("session cleanup uncertainty fences release despite deadline expiry and inv
       Effect.gen(function* () {
         yield* sandboxMigration
         yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)

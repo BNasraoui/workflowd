@@ -265,33 +265,41 @@ export const makeSandboxLeaseService = (
         return yield* Effect.fail(
           new SandboxError({ message: "Sandbox lease cannot be acquired in its current state" }),
         )
-      yield* github.ensureRef(lease.policy, lease.lease_id)
-      const runs = yield* github.runs(lease.policy, lease.lease_id)
-      yield* store.adoptAll(
-        lease.policy,
-        runs.map((run) => ({ leaseId: lease.lease_id, run })),
-      )
-      if (runs.length > 1)
-        return yield* Effect.fail(
-          new SandboxError({ message: "Multiple Actions runs claimed the sandbox lease" }),
-        )
-      const run = runs[0]
-      if (run !== undefined) {
-        yield* store.recordRun(runId, run.id, run.run_attempt)
-        if (run.status === "completed") yield* release(runId)
-        else {
-          const ready = yield* github.readiness(
-            lease.policy,
-            lease.lease_id,
-            run.id,
-            run.run_attempt,
+      let completed = false
+      yield* store.withAcquisition(runId, (commit) =>
+        Effect.gen(function* () {
+          yield* github.ensureRef(lease.policy, lease.lease_id)
+          const runs = yield* github.runs(lease.policy, lease.lease_id)
+          yield* commit(
+            store.adoptAll(
+              lease.policy,
+              runs.map((run) => ({ leaseId: lease.lease_id, run })),
+            ),
           )
-          if (ready !== null) {
-            const transport = yield* connectPeer(lease, ready, controlRoot, command)
-            yield* store.bind(runId, run.id, run.run_attempt, transport)
+          if (runs.length > 1)
+            return yield* Effect.fail(
+              new SandboxError({ message: "Multiple Actions runs claimed the sandbox lease" }),
+            )
+          const run = runs[0]
+          completed = run?.status === "completed"
+          if (run !== undefined) {
+            yield* commit(store.recordRun(runId, run.id, run.run_attempt))
+            if (run.status !== "completed") {
+              const ready = yield* github.readiness(
+                lease.policy,
+                lease.lease_id,
+                run.id,
+                run.run_attempt,
+              )
+              if (ready !== null) {
+                const transport = yield* connectPeer(lease, ready, controlRoot, command)
+                yield* commit(store.bind(runId, run.id, run.run_attempt, transport))
+              }
+            }
           }
-        }
-      }
+        }),
+      )
+      if (completed) yield* release(runId)
       return yield* required(runId)
     })
     const reconcile = Effect.fn("SandboxLease.reconcile")(function* (
