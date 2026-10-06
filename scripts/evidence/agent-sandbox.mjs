@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 // Opt-in real lease probe. Operator trust settings are read, never provisioned.
 import assert from "node:assert/strict"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { parseSandboxRepositories } from "../../src/sandbox/config.ts"
@@ -16,6 +17,276 @@ import { runStoreMigrations } from "../../src/store/migrations.ts"
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
 let output
+
+// Run against either the scripted disposable executor or the operator's shared executor.
+// The production probe uses its existing model selection and authentication unchanged.
+async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand }) {
+  assert.deepEqual(Object.keys(artifact), ["agents"])
+  assert.deepEqual(Object.keys(artifact.agents), ["sandbox"])
+  const report = {
+    result: "running",
+    health: await api("health"),
+    locations: [],
+    sessionsRemoved: 0,
+  }
+  assert.equal(report.health.version, "0.0.0-beta-19242")
+  const sessions = []
+  const bridges = []
+  const identity = randomUUID().replaceAll("-", "")
+  const names = [`workflowd_sandbox_${identity}_a`, `workflowd_sandbox_${identity}_b`]
+  const recordOwned = () =>
+    writeFile(
+      join(root, "owned.json"),
+      JSON.stringify(
+        {
+          sessions,
+          bridges: bridges.map(({ server, location }) => ({
+            server,
+            location: location.toString(),
+          })),
+        },
+        null,
+        2,
+      ) + "\n",
+      { mode: 0o600 },
+    )
+  const run = async (session, action) => {
+    await api(`session/${session}/prompt`, {
+      text:
+        "Execute exactly this tool call for an authorized disposable confinement probe, then stop. Do not substitute another tool.\n" +
+        JSON.stringify(action),
+    })
+    await api(`session/${session}/wait`, {})
+    const messages = await api(`session/${session}/message`)
+    const boundary = messages.data.findIndex((entry) => entry.type === "user")
+    return messages.data
+      .slice(0, boundary + 1)
+      .flatMap((entry) => entry.content ?? [])
+      .filter((part) => part.type === "tool")
+  }
+  const execute = (code) => ({ name: "execute", arguments: JSON.stringify({ code }) })
+  let failure
+  const cleanupErrors = []
+  try {
+    for (const [index, name] of ["a", "b", "control"].entries()) {
+      const directory = join(root, name)
+      await mkdir(directory, { recursive: true, mode: 0o700 })
+      const location = new URLSearchParams({ "location[directory]": directory })
+      const resolved = await api(`location?${location}`)
+      let catalog = await api(`agent?${location}`)
+      const deadline = Date.now() + 30000
+      while (!catalog.data.some((agent) => agent.id === "sandbox") && Date.now() < deadline) {
+        await delay(100)
+        catalog = await api(`agent?${location}`)
+      }
+      const sandbox = catalog.data.find((agent) => agent.id === "sandbox")
+      assert.ok(sandbox, "Global sandbox agent is absent")
+      assert.deepEqual(
+        sandbox.permissions.slice(-artifact.agents.sandbox.permissions.length),
+        artifact.agents.sandbox.permissions,
+      )
+      report.locations.push({ directory, resolved, rules: sandbox.permissions })
+      const agent = name === "control" ? "build" : "sandbox"
+      const id = `ses_${randomUUID().replaceAll("-", "")}`
+      sessions.push(id)
+      await recordOwned()
+      const session = await api("session", {
+        id,
+        agent,
+        title: "workflowd policy probe",
+        model,
+        location: { directory },
+      })
+      assert.equal(session.data.agent, agent)
+      assert.equal(session.data.location.directory, directory)
+      assert.equal(session.data.id, id)
+      if (name !== "control") {
+        const server = names[index]
+        // Record intent before mutating the executor so a lost reply still cleans up.
+        bridges.push({ server, location })
+        await recordOwned()
+        await api(
+          `mcp/${server}?${location}`,
+          {
+            config: {
+              type: "local",
+              command: bridgeCommand,
+              timeout: { startup: 120000, execution: 120000 },
+            },
+          },
+          "PUT",
+        )
+      }
+    }
+    assert.equal(new Set(report.locations.map((entry) => entry.resolved.project.id)).size, 3)
+    const control = async (phase) => {
+      const marker = `control-${phase}`
+      const tools = await run(sessions[2], {
+        name: "shell",
+        arguments: JSON.stringify({
+          command: `printf ${marker} > ${marker}`,
+          description: "Ordinary tool control",
+        }),
+      })
+      assert.ok(
+        tools.some((part) => part.name === "shell" && part.state.status === "completed"),
+        "Ordinary shell control did not execute",
+      )
+      assert.equal(await readFile(join(root, "control", marker), "utf8"), marker)
+      return tools
+    }
+    report.controlBefore = await control("before")
+    await writeFile(join(root, "a", "canary"), "untouched")
+    report.native = await run(sessions[0], {
+      name: "shell",
+      arguments: JSON.stringify({
+        command: "printf escaped > canary",
+        description: "Sandbox native denial",
+      }),
+    })
+    assert.ok(
+      report.native.some((part) => part.name === "shell" && part.state.status === "error"),
+      "Native denial was not executed; do not infer confinement from model refusal",
+    )
+    report.own = await run(
+      sessions[0],
+      execute(
+        `return await tools.${names[0]}.environment_list({environment_source:"/workspace/repository"})`,
+      ),
+    )
+    assert.ok(
+      report.own.some((part) =>
+        part.state.metadata?.toolCalls?.some(
+          (call) => call.tool === `${names[0]}.environment_list` && call.status === "completed",
+        ),
+      ),
+      "Own bridge did not execute",
+    )
+    report.foreign = await run(
+      sessions[0],
+      execute(
+        `return await tools.${names[1]}.environment_list({environment_source:"/workspace/repository"})`,
+      ),
+    )
+    assert.ok(
+      report.foreign.some(
+        (part) => part.state.metadata?.error === true && part.state.metadata.toolCalls.length === 0,
+      ),
+      "Foreign bridge was not refused",
+    )
+    await api(`session/${sessions[0]}/compact`, {})
+    await api(`session/${sessions[0]}/wait`, {})
+    report.compaction = (await api(`session/${sessions[0]}/message`)).data.find(
+      (message) => message.type === "compaction",
+    )
+    assert.equal(report.compaction?.status, "completed")
+    report.continuation = await run(sessions[0], execute('return await import("node:fs")'))
+    assert.ok(
+      report.continuation.some((part) => part.state.metadata?.error === true),
+      "Import denial was not executed",
+    )
+    assert.equal((await api(`session/${sessions[0]}`)).data.agent, "sandbox")
+    assert.equal(await readFile(join(root, "a", "canary"), "utf8"), "untouched")
+    report.controlAfter = await control("after")
+    report.result = "passed"
+  } catch (error) {
+    report.result = "stopped"
+    failure = error
+  } finally {
+    for (const session of sessions) {
+      try {
+        await api(`session/${session}/interrupt`, {})
+        await api(`session/${session}/wait`, {})
+        await api(`session/${session}`, undefined, "DELETE")
+        report.sessionsRemoved++
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    if (cleanupErrors.length === 0) {
+      for (const { server, location } of bridges) {
+        try {
+          await api(`mcp/${server}?${location}`, undefined, "DELETE")
+          assert.ok(
+            !(await api(`mcp?${location}`)).data.some((entry) => entry.name === server),
+            "Bridge revocation unconfirmed",
+          )
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+    }
+    report.cleanupConfirmed = cleanupErrors.length === 0
+    if (!report.cleanupConfirmed) report.result = "stopped"
+    await writeFile(join(root, "session-policy.json"), JSON.stringify(report, null, 2) + "\n", {
+      mode: 0o600,
+    })
+  }
+  if (cleanupErrors.length)
+    throw new AggregateError(cleanupErrors, "Owned probe cleanup unconfirmed; preserve owned.json")
+  if (failure !== undefined) throw failure
+  return report
+}
+
+async function sessionPolicyProbe() {
+  stage = "operator session policy"
+  const argument = process.argv.indexOf("--expected-artifact")
+  assert.ok(argument > 0 && process.argv[argument + 1], "--expected-artifact is required")
+  const source = await readFile(process.argv[argument + 1], "utf8")
+  const endpoint = process.env.EVIDENCE_OPENCODE_URL
+  const password = process.env.EVIDENCE_OPENCODE_PASSWORD
+  const selection = process.env.EVIDENCE_OPENCODE_MODEL
+  assert.ok(
+    endpoint && password && selection,
+    "EVIDENCE_OPENCODE_URL, EVIDENCE_OPENCODE_PASSWORD and EVIDENCE_OPENCODE_MODEL are required",
+  )
+  assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/)
+  output =
+    process.env.EVIDENCE_SANDBOX_ROOT ??
+    join(homedir(), ".local/state", `workflowd-policy-probe-${randomUUID()}`)
+  await mkdir(output, { recursive: true, mode: 0o700 })
+  const api = async (path, body, method = body === undefined ? "GET" : "POST") => {
+    const response = await fetch(`${endpoint}/api/${path}`, {
+      method,
+      headers: {
+        Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+        "Content-Type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(120000),
+    })
+    assert.ok(response.ok, `Executor request failed (${response.status})`)
+    const text = await response.text()
+    return text === "" ? undefined : JSON.parse(text)
+  }
+  const { runnerFixture } = await import("../../test/sandbox/harness.ts")
+  const { compileSandboxBridge } = await import("../../src/sandbox/bridge.ts")
+  const runner = await runnerFixture()
+  try {
+    const bridge = join(runner.root, "bridge")
+    await compileSandboxBridge(bridge)
+    const separator = selection.indexOf("/")
+    assert.ok(separator > 0)
+    const report = await probeSessionPolicy({
+      api,
+      root: output,
+      artifact: JSON.parse(source),
+      model: { providerID: selection.slice(0, separator), id: selection.slice(separator + 1) },
+      bridgeCommand: [bridge, join(runner.root, "transport.json")],
+    })
+    evidence.result = report.result
+    evidence.artifactSha256 = createHash("sha256").update(source).digest("hex")
+    console.log(
+      JSON.stringify({
+        result: report.result,
+        evidence: output,
+        artifactSha256: evidence.artifactSha256,
+      }),
+    )
+  } finally {
+    await runner.close()
+  }
+}
 export function probeLease(leases, store, runId) {
   const acquire = Effect.gen(function* () {
     stage = "live lease acquisition"
@@ -60,6 +331,7 @@ export function probeLease(leases, store, runId) {
 }
 
 async function probe() {
+  if (process.argv[2] === "--probe-session-policy") return sessionPolicyProbe()
   assert.ok(
     ["--probe-lease", "--check-policy"].includes(process.argv[2]),
     "Expected --probe-lease or --check-policy",
