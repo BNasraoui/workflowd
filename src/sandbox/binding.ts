@@ -23,7 +23,9 @@ export const transportHash = (transport: SandboxTransport) =>
 export const SandboxSessionBinding = Schema.Struct({
   runId: Schema.NonEmptyString,
   leaseId: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,80}$/)),
-  sessionId: Schema.String.check(Schema.isPattern(/^ses_[a-zA-Z0-9]+$/)),
+  sessionId: Schema.String.check(
+    Schema.isPattern(/^(?:ses_[a-zA-Z0-9]+|[a-zA-Z0-9_-]{1,100}[a-f0-9]{24}\.service)$/),
+  ),
   executorId: Schema.NonEmptyString,
   endpointIdentity: Schema.NonEmptyString,
   directory: Schema.String.check(Schema.isPattern(/^\/[a-zA-Z0-9/_.@-]+$/)),

@@ -7,7 +7,8 @@ import {
 import { ExecutionSelectionError } from "../execution-selection"
 import { Effect, Exit, Fiber, Option } from "effect"
 import type { AgentRunCliRoute } from "../agent-run-contract"
-import type { WorkspaceError } from "../workspace/errors"
+import { WorkspaceError } from "../workspace/errors"
+import type { SandboxDispatchPort } from "../sandbox/dispatch"
 import type { WorkSignalPort } from "../work-signal"
 import type { AgentRunRefusalError } from "./agent-run-ingress"
 import type { makeAgentRunCustody } from "./agent-run-custody"
@@ -200,10 +201,29 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   readonly verifyTimeoutMs: number
   readonly progressWindowMs: number
   readonly workerPrompt?: (run: AgentRunRecord) => Effect.Effect<string, WorkspaceError>
+  readonly sandbox?: SandboxDispatchPort
 }) => {
   const { cli, store, worktrees, signals, ensureResource, ensureSession, refuse } = dependencies
   const kind = dependencies.executor.kind
   const sessionCustodyId = dependencies.executor.sessionCustodyId
+  const sandboxFailure = (cause: unknown) =>
+    new WorkspaceError({
+      operation: "native sandbox custody",
+      cause: cause instanceof Error ? cause : new Error(String(cause)),
+    })
+  const finishSandbox = (
+    run: AgentRunRecord,
+    terminal: {
+      state: "completed" | "operator_required"
+      finalMessage: string | null
+      diagnostic: string
+    },
+  ) => {
+    const finish = dependencies.sandbox?.finishNative
+    return finish === undefined
+      ? Effect.fail(sandboxFailure("Native sandbox settlement unavailable"))
+      : finish(run, terminal).pipe(Effect.mapError(sandboxFailure))
+  }
 
   const recordModelEvidence = (run: AgentRunRecord, model: string | undefined, now: Date) =>
     model === undefined ||
@@ -223,6 +243,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
     readonly cancel: Effect.Effect<void, WorkspaceError>
     readonly initialFinalMessage: string | null
     readonly stallWindowMs: number
+    readonly sandboxRun?: AgentRunRecord
   }) =>
     Effect.gen(function* () {
       let finalMessage: string | null = input.initialFinalMessage
@@ -246,6 +267,21 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       }
       if (stalled) yield* input.cancel.pipe(Effect.ignore)
       const exit: Exit.Exit<CliExit, WorkspaceError> = yield* Effect.exit(Fiber.join(input.exited))
+      if (input.sandboxRun !== undefined) {
+        yield* finishSandbox(input.sandboxRun, {
+          state:
+            !stalled &&
+            turnFailed === null &&
+            Exit.isSuccess(exit) &&
+            exit.value.exitCode === 0 &&
+            finalMessage !== null
+              ? "completed"
+              : "operator_required",
+          finalMessage,
+          diagnostic: diagnostic(stalled, input.stallWindowMs, exit, turnFailed, kind),
+        })
+        return
+      }
       if (
         !stalled &&
         turnFailed === null &&
@@ -283,109 +319,146 @@ export const makeAgentRunCliDispatcher = (dependencies: {
     },
     now: Date,
   ) =>
-    Effect.gen(function* () {
-      if (run.state === "spawning") {
+    Effect.suspend(() => {
+      let claimed = false
+      return Effect.gen(function* () {
+        if (run.state === "spawning") {
+          return yield* refuse(
+            "run_conflict",
+            "an identical dispatch is already spawning this run; retry after it settles",
+          )
+        }
+        if (run.state === "accepted" || run.nativeSessionId === null) {
+          yield* store.claimSpawn({ runId: run.runId, now })
+          claimed = true
+          const isolated = run.agent === "sandbox"
+          const prepare = dependencies.sandbox?.prepareNative
+          if (isolated && prepare === undefined)
+            return yield* refuse("run_conflict", "Native sandbox preparation unavailable")
+          const attachment = isolated
+            ? yield* prepare!(run).pipe(Effect.mapError(sandboxFailure))
+            : undefined
+          const execution = attachment?.cli ?? cli
+          if (!isolated)
+            yield* createAgentRunWorktree(worktrees, {
+              repository: target.repositoryDirectory,
+              directory: run.directory,
+              branch: `agent-run/${target.short}`,
+              ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
+            })
+          const resourceId = yield* ensureResource({
+            resourceId: target.resourceId,
+            absolutePath: run.directory,
+            kind: isolated ? "workspace" : "worktree",
+            createdAt: run.createdAt,
+          })
+          const process = yield* execution
+            .spawn({
+              runId: run.runId,
+              directory: run.directory,
+              prompt:
+                isolated || dependencies.workerPrompt === undefined
+                  ? run.prompt
+                  : yield* dependencies.workerPrompt(run),
+              model: run.resolvedSelection?.model ?? route.modelID,
+              ...(attachment === undefined
+                ? {}
+                : { sandboxBindingFile: attachment.sandboxBindingFile }),
+              ...(run.resolvedSelection?.provider == null
+                ? {}
+                : { provider: run.resolvedSelection.provider }),
+              ...(run.resolvedSelection?.thinking.effort === undefined
+                ? {}
+                : { effort: run.resolvedSelection.thinking.effort }),
+            })
+            .pipe(
+              (effect) => (isolated ? Effect.uninterruptible(effect) : effect),
+              Effect.tapError((error) =>
+                error instanceof ExecutionSelectionError
+                  ? store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(Effect.ignore)
+                  : Effect.logError(`${kind} launch result uncertain; spawning custody retained`, {
+                      runId: run.runId,
+                      cause: error,
+                    }),
+              ),
+              Effect.mapError((error) =>
+                error instanceof ExecutionSelectionError
+                  ? refuse(error.reason, error.detail)
+                  : error,
+              ),
+            )
+          const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
+          if (observed.result.outcome === "refused") {
+            if (isolated)
+              yield* finishSandbox(run, {
+                state: "operator_required",
+                finalMessage: null,
+                diagnostic: observed.result.detail,
+              })
+            else
+              yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
+                runId: run.runId,
+                diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
+                now,
+              }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
+            return yield* refuse(observed.result.reason, observed.result.detail)
+          }
+          const threadId = observed.result.threadId
+          yield* recordModelEvidence(run, observed.result.model, now)
+          yield* ensureSession({
+            nativeSessionId: threadId,
+            resourceId,
+            createdAt: run.createdAt,
+            kind,
+          })
+          yield* store.markSpawned({
+            runId: run.runId,
+            resourceId,
+            sessionId: sessionCustodyId(threadId),
+            nativeSessionId: threadId,
+            now,
+          })
+          yield* store.markVerified({ runId: run.runId, outputTokens: 1, now })
+          if (execution.ownership === "transient-exec")
+            yield* Effect.forkDetach(
+              complete({
+                runId: run.runId,
+                iterator: observed.iterator,
+                exited: observed.exited,
+                cancel: observed.cancel,
+                initialFinalMessage: observed.result.firstMessage,
+                stallWindowMs: dependencies.progressWindowMs,
+                ...(isolated ? { sandboxRun: run } : {}),
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logError(`${kind} inline completion failed`, { runId: run.runId, cause }),
+                ),
+              ),
+            )
+          yield* signals.wake("agent-run")
+          return { nativeSessionId: threadId, outputTokens: 1, kind }
+        }
+        if (run.state === "verified" && run.nativeSessionId !== null) {
+          return {
+            nativeSessionId: run.nativeSessionId,
+            outputTokens: run.lastOutputTokens,
+            kind,
+          }
+        }
         return yield* refuse(
           "run_conflict",
-          "an identical dispatch is already spawning this run; retry after it settles",
+          `a previous dispatch left this run ${run.state}; ${kind} processes cannot be re-observed`,
         )
-      }
-      if (run.state === "accepted" || run.nativeSessionId === null) {
-        yield* store.claimSpawn({ runId: run.runId, now })
-        yield* createAgentRunWorktree(worktrees, {
-          repository: target.repositoryDirectory,
-          directory: run.directory,
-          branch: `agent-run/${target.short}`,
-          ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
-        })
-        const resourceId = yield* ensureResource({
-          resourceId: target.resourceId,
-          absolutePath: run.directory,
-          kind: "worktree",
-          createdAt: run.createdAt,
-        })
-        const process = yield* cli
-          .spawn({
-            runId: run.runId,
-            directory: run.directory,
-            prompt:
-              dependencies.workerPrompt === undefined
-                ? run.prompt
-                : yield* dependencies.workerPrompt(run),
-            model: run.resolvedSelection?.model ?? route.modelID,
-            ...(run.resolvedSelection?.provider == null
-              ? {}
-              : { provider: run.resolvedSelection.provider }),
-            ...(run.resolvedSelection?.thinking.effort === undefined
-              ? {}
-              : { effort: run.resolvedSelection.thinking.effort }),
-          })
-          .pipe(
-            Effect.tapError((error) =>
-              error instanceof ExecutionSelectionError
-                ? store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(Effect.ignore)
-                : Effect.logError(`${kind} launch result uncertain; spawning custody retained`, {
-                    runId: run.runId,
-                    cause: error,
-                  }),
-            ),
-            Effect.mapError((error) =>
-              error instanceof ExecutionSelectionError ? refuse(error.reason, error.detail) : error,
-            ),
-          )
-        const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)
-        if (observed.result.outcome === "refused") {
-          yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
-            runId: run.runId,
-            diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
-            now,
-          }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
-          return yield* refuse(observed.result.reason, observed.result.detail)
-        }
-        const threadId = observed.result.threadId
-        yield* recordModelEvidence(run, observed.result.model, now)
-        yield* ensureSession({
-          nativeSessionId: threadId,
-          resourceId,
-          createdAt: run.createdAt,
-          kind,
-        })
-        yield* store.markSpawned({
-          runId: run.runId,
-          resourceId,
-          sessionId: sessionCustodyId(threadId),
-          nativeSessionId: threadId,
-          now,
-        })
-        yield* store.markVerified({ runId: run.runId, outputTokens: 1, now })
-        if (cli.ownership === "transient-exec")
-          yield* Effect.forkDetach(
-            complete({
-              runId: run.runId,
-              iterator: observed.iterator,
-              exited: observed.exited,
-              cancel: observed.cancel,
-              initialFinalMessage: observed.result.firstMessage,
-              stallWindowMs: dependencies.progressWindowMs,
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError(`${kind} inline completion failed`, { runId: run.runId, cause }),
-              ),
-            ),
-          )
-        yield* signals.wake("agent-run")
-        return { nativeSessionId: threadId, outputTokens: 1, kind }
-      }
-      if (run.state === "verified" && run.nativeSessionId !== null) {
-        return {
-          nativeSessionId: run.nativeSessionId,
-          outputTokens: run.lastOutputTokens,
-          kind,
-        }
-      }
-      return yield* refuse(
-        "run_conflict",
-        `a previous dispatch left this run ${run.state}; ${kind} processes cannot be re-observed`,
+      }).pipe(
+        Effect.onError(() =>
+          claimed && run.agent === "sandbox"
+            ? finishSandbox(run, {
+                state: "operator_required",
+                finalMessage: null,
+                diagnostic: "Native sandbox startup failed",
+              }).pipe(Effect.ignore)
+            : Effect.void,
+        ),
       )
     })
 
@@ -395,6 +468,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
     yield* cli.cleanup?.(runs.map((run) => run.runId)) ?? Effect.succeed(0)
     let attached = 0
     for (const run of runs) {
+      if (run.agent === "sandbox") continue
       const attachment = yield* cli.attach({ runId: run.runId }).pipe(Effect.result)
       if (attachment._tag === "Failure") {
         yield* store.operatorRequired({

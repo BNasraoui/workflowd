@@ -1,6 +1,6 @@
 import { Context, Effect, Schedule, Schema } from "effect"
 import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
 import type { OpenCodeModel, OpenCodeAdapter } from "../opencode/adapter"
 import { makeSandboxStore, SandboxError, isUnobservedRun } from "./store"
@@ -20,8 +20,25 @@ import {
   transportHash,
 } from "./binding"
 import { readSandboxEndpoint, makeSandboxOpenCode, stopSandboxOpenCode } from "./opencode"
+import type { CliPort } from "../kernel/cli-process-contract"
+import { compileSandboxBridge } from "./bridge"
 
 export type SandboxDispatchPort = {
+  readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
+    {
+      readonly cli: CliPort
+      readonly sandboxBindingFile: string
+    },
+    SandboxError
+  >
+  readonly finishNative?: (
+    run: AgentRunRecord,
+    terminal: {
+      readonly state: "completed" | "operator_required"
+      readonly finalMessage: string | null
+      readonly diagnostic: string
+    },
+  ) => Effect.Effect<void, SandboxError>
   readonly launch: (
     run: AgentRunRecord,
     model: OpenCodeModel,
@@ -58,12 +75,23 @@ export const makeSandboxDispatch = (options: {
   readonly client: OpenCodeClient
   readonly executorId: string
   readonly endpointIdentity: string
+  readonly nativeExecutors?: Partial<Record<"codex" | "claude", CliPort>>
 }) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const runs = yield* AgentRunStore
     const { github, leases } = options
+    const cancelling = new Set<string>()
     const executor = makeSandboxOpenCode(options.client, options.executor)
+    const nativeCli = (run: AgentRunRecord) => {
+      const kind = run.executorKind
+      const cli =
+        kind === "codex" || kind === "claude" ? options.nativeExecutors?.[kind] : undefined
+      if (cli?.ownership !== "transient-exec" || cli.executionId === undefined) throw failure()
+      return cli
+    }
+    const nativeEndpoint = (run: AgentRunRecord) =>
+      `${run.executorKind}-cli://${run.resolvedSelection?.host ?? "local"}`
     const bindingFor = Effect.fn("SandboxDispatch.binding")(function* (sessionId: string) {
       const lease = yield* store.bySession(sessionId)
       if (lease === null || lease.state !== "ready" || lease.transport === null)
@@ -126,6 +154,38 @@ export const makeSandboxDispatch = (options: {
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
         if (lease === null) return
+        if (run.executorKind === "codex" || run.executorKind === "claude") {
+          const cli = yield* Effect.try(() => nativeCli(run))
+          if (
+            yield* Effect.tryPromise(() =>
+              Bun.file(join(bindingDirectory(run.directory), "binding.json")).exists(),
+            )
+          ) {
+            const binding = yield* Effect.tryPromise(() => readSandboxBinding(run.directory))
+            if (
+              binding.runId !== run.runId ||
+              binding.leaseId !== lease.lease_id ||
+              binding.sessionId !== cli.executionId!(run.runId) ||
+              (lease.session_id !== null && lease.session_id !== binding.sessionId) ||
+              binding.executorId !== `${run.executorKind}:local` ||
+              binding.endpointIdentity !== nativeEndpoint(run) ||
+              binding.repositoryId !== lease.policy.repositoryId ||
+              binding.sourceSha !== lease.source_sha ||
+              binding.policyHash !== sandboxPolicyHash ||
+              lease.transport === null ||
+              binding.transportHash !== transportHash(lease.transport) ||
+              binding.deadline !== lease.deadline
+            )
+              return yield* Effect.fail(failure())
+            yield* Effect.tryPromise(() => writeSandboxBinding({ ...binding, state: "revoked" }))
+          }
+          const process = yield* cli.attach({ runId: run.runId })
+          if (process !== null) {
+            yield* process.cancel
+            yield* process.exited
+          }
+          return
+        }
         if (
           yield* Effect.tryPromise(() =>
             Bun.file(join(bindingDirectory(run.directory), "binding.json")).exists(),
@@ -254,12 +314,81 @@ export const makeSandboxDispatch = (options: {
         Effect.mapError(failure),
       )
     const cancel = (run: AgentRunRecord) =>
-      settle(run, {
-        state: "cancelled",
-        sessionId: run.nativeSessionId,
-        finalMessage: null,
-        diagnostic: "Sandbox cancellation requested",
+      Effect.suspend(() => {
+        cancelling.add(run.runId)
+        return settle(run, {
+          state: "cancelled",
+          sessionId: run.nativeSessionId,
+          finalMessage: null,
+          diagnostic: "Sandbox cancellation requested",
+        }).pipe(Effect.ensuring(Effect.sync(() => cancelling.delete(run.runId))))
       })
+    const finishNative: NonNullable<SandboxDispatchPort["finishNative"]> = (run, terminal) =>
+      Effect.gen(function* () {
+        // Stopping a CLI also wakes its exit observer. The cancellation caller owns
+        // settlement until its terminal record is saved or custody reports failure.
+        if (cancelling.has(run.runId)) return
+        const current = yield* runs.read(run.runId)
+        if (current === null) return yield* Effect.fail(failure())
+        yield* settle(current, { ...terminal, sessionId: current.nativeSessionId })
+      }).pipe(Effect.mapError(failure))
+    const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
+      Effect.gen(function* () {
+        const cli = yield* Effect.try(() => nativeCli(run))
+        const policy = options.policies.find((entry) => entry.alias === run.repository)
+        if (
+          policy === undefined ||
+          run.agent !== "sandbox" ||
+          (run.resolvedSelection != null &&
+            run.resolvedSelection.executor !== `${run.executorKind}:local`)
+        )
+          return yield* Effect.fail(failure())
+        yield* Effect.tryPromise(async () => {
+          await mkdir(dirname(run.directory), { recursive: true, mode: 0o700 })
+          await mkdir(run.directory, { mode: 0o700 })
+        })
+        yield* github.verifyWorkflow(policy)
+        const sourceSha = yield* github.resolveSource(policy, run.baseRef ?? "HEAD")
+        yield* store.request({
+          runId: run.runId,
+          leaseId: run.runId,
+          policy,
+          sourceSha,
+          now: Date.now(),
+        })
+        const lease = yield* leases.acquire(run.runId).pipe(
+          Effect.repeat({
+            until: (lease) => lease.state === "ready",
+            schedule: Schedule.spaced("2 seconds"),
+          }),
+        )
+        if (lease.transport === null) return yield* Effect.fail(failure())
+        const binding = {
+          runId: run.runId,
+          leaseId: lease.lease_id,
+          sessionId: cli.executionId!(run.runId),
+          executorId: `${run.executorKind}:local`,
+          endpointIdentity: nativeEndpoint(run),
+          directory: run.directory,
+          locationIdentity: run.directory,
+          bridgeServerName: sandboxBridgeName(lease.lease_id),
+          repositoryId: policy.repositoryId,
+          sourceSha,
+          policyHash: sandboxPolicyHash,
+          transportHash: transportHash(lease.transport),
+          deadline: lease.deadline,
+          state: "reserved" as const,
+        }
+        yield* Effect.tryPromise(() => writeSandboxBinding(binding, true))
+        yield* store.attachSession(run.runId, binding.sessionId)
+        const root = bindingDirectory(run.directory)
+        yield* Effect.tryPromise(async () => {
+          await compileSandboxBridge(join(root, "bridge"))
+          await saveSandboxFile(root, "transport.json", JSON.stringify(lease.transport), true)
+          await writeSandboxBinding({ ...binding, state: "active" })
+        })
+        return { cli, sandboxBindingFile: join(root, "binding.json") }
+      }).pipe(Effect.timeout("5 minutes"), Effect.mapError(failure))
     const launch = (run: AgentRunRecord, model: OpenCodeModel) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
@@ -368,6 +497,9 @@ export const makeSandboxDispatch = (options: {
             finalMessage: null,
             diagnostic: "Sandbox deadline exceeded",
           })
+        // Native workers settle through their durable process observer. On restart the
+        // startup sweep below revokes and stops them before releasing their lease.
+        if (run.executorKind === "codex" || run.executorKind === "claude") return
         if (run.nativeSessionId === null) return
         const sessionId = run.nativeSessionId
         const result = yield* Effect.result(
@@ -428,12 +560,14 @@ export const makeSandboxDispatch = (options: {
       }
       yield* leases.reconcile(options.policies)
       // Release confirmation may have arrived during reconciliation.
-      const activeRuns = yield* runs.listActiveByExecutor("opencode")
-      for (const run of activeRuns)
-        if ((yield* store.read(run.runId))?.state === "released") yield* observe(run)
+      for (const kind of ["opencode", "codex", "claude"] as const)
+        for (const run of yield* runs.listActiveByExecutor(kind))
+          if ((yield* store.read(run.runId))?.state === "released") yield* observe(run)
     }).pipe(Effect.mapError(failure))
     return {
       launch,
+      prepareNative,
+      finishNative,
       cancel,
       observe,
       provider,

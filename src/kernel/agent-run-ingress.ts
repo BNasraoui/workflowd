@@ -496,6 +496,7 @@ const make = (options: AgentRunIngressOptions) =>
 
     const codexRuns = makeAgentRunCliDispatcher({
       cli: codex,
+      ...(sandbox === undefined ? {} : { sandbox }),
       executor: {
         kind: "codex",
         sessionCustodyId: codexSessionCustodyId,
@@ -516,6 +517,7 @@ const make = (options: AgentRunIngressOptions) =>
         ? undefined
         : makeAgentRunCliDispatcher({
             cli: claudeDispatch,
+            ...(sandbox === undefined ? {} : { sandbox }),
             executor: {
               kind: "claude",
               sessionCustodyId: claudeSessionCustodyId,
@@ -785,11 +787,6 @@ const make = (options: AgentRunIngressOptions) =>
           )
         }
         if (options.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
-          if (resolution.provider !== "opencode")
-            return yield* refuse(
-              "executor_unavailable",
-              "This repository requires an isolated OpenCode sandbox",
-            )
           if (sandbox === undefined)
             return yield* refuse(
               "executor_unavailable",

@@ -521,6 +521,24 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               client: yield* openCodeClientEffect,
               executorId: `opencode:${completionSourceOptions.providerId}`,
               endpointIdentity: completionSourceOptions.endpointIdentity,
+              nativeExecutors: {
+                codex: makeCodexCli({
+                  binary: config.agentRuns?.codexBinary ?? "codex",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-codex-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-codex-",
+                }),
+                claude: makeClaudeDispatchCli({
+                  binary: config.agentRuns?.claudeBinary ?? "claude",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-claude-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-claude-",
+                }),
+              },
             })
           }),
         ).pipe(Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))))

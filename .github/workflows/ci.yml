@@ -111,6 +111,11 @@ jobs:
         run: |
           bun add --global --trust @opencode-ai/cli@0.0.0-beta-19242
           printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
+      - name: Install pinned native sandbox CLIs
+        run: |
+          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.289
+          test "$(codex --version)" = 'codex-cli 0.159.1'
+          test "$(claude --version)" = '2.1.289 (Claude Code)'
       - name: Prepare sandbox user namespaces
         run: |
           # This disposable Ubuntu VM must permit systemd's unprivileged namespaces.

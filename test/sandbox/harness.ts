@@ -588,7 +588,16 @@ export async function sandboxIngressFixtureLayer(
     | import("../../src/kernel/agent-run-store").AgentRunStorePort
   >,
   policy: import("../../src/sandbox/config").SandboxPolicy,
-  options?: { root: string; providerID: string; modelID: string },
+  options?: {
+    root: string
+    providerID: string
+    modelID: string
+    native?: {
+      kind: "codex" | "claude"
+      cli: import("../../src/kernel/cli-process-contract").CliPort
+    }
+    database?: string
+  },
 ) {
   const { Effect, Layer } = await import("effect")
   const { SqliteClient } = await import("@effect/sql-sqlite-bun")
@@ -603,12 +612,13 @@ export async function sandboxIngressFixtureLayer(
     await import("../../src/kernel/agent-run-ingress")
   const { AgentRunWorktrees } = await import("../../src/kernel/agent-run-worktrees")
   const { CodexCli } = await import("../../src/kernel/codex-session")
+  const { ClaudeDispatchCli } = await import("../../src/kernel/claude-dispatch")
   const { SandboxDispatch } = await import("../../src/sandbox/dispatch")
   const { routeSandboxHandoffs, routeSandboxProvider } = await import("../../src/sandbox/provider")
   const { WorkSignal } = await import("../../src/work-signal")
   const { makeCodexCli } = await import("../kernel/agent-run-ingress-harness")
   const base = WorkflowStoreLive.pipe(
-    Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
+    Layer.provideMerge(SqliteClient.layer({ filename: options?.database ?? ":memory:" })),
   )
   const stores = Layer.mergeAll(
     KernelSessionStoreLive,
@@ -652,7 +662,10 @@ export async function sandboxIngressFixtureLayer(
         modelID: options?.modelID ?? "gpt-6-astra-fixture",
       },
     ],
-    codexRoutes: [],
+    codexRoutes:
+      options?.native?.kind === "codex" ? [{ name: "native", modelID: options.modelID }] : [],
+    claudeRoutes:
+      options?.native?.kind === "claude" ? [{ name: "native", modelID: options.modelID }] : [],
     repositories: [{ name: policy.alias, directory: "/unused/repository" }],
     sandboxRepositories: [policy],
     agent: "sandbox",
@@ -672,7 +685,17 @@ export async function sandboxIngressFixtureLayer(
         create: () => Effect.die("Sandbox attempted a local worktree"),
       }),
     ),
-    Layer.provideMerge(Layer.succeed(CodexCli, makeCodexCli([]).port)),
+    Layer.provideMerge(
+      Layer.succeed(
+        CodexCli,
+        options?.native?.kind === "codex" ? options.native.cli : makeCodexCli([]).port,
+      ),
+    ),
+    Layer.provideMerge(
+      options?.native?.kind === "claude"
+        ? Layer.succeed(ClaudeDispatchCli, options.native.cli)
+        : Layer.empty,
+    ),
   )
 }
 
