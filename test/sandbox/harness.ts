@@ -1,8 +1,14 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import type { SandboxTransport } from "../../src/sandbox/transport"
 import { runSandboxBridge } from "../../src/sandbox/bridge"
+import {
+  bindingDirectory,
+  sandboxPolicyHash,
+  transportHash,
+  writeSandboxBinding,
+} from "../../src/sandbox/binding"
 import { Schema } from "effect"
 
 const repository = resolve(import.meta.dir, "../..")
@@ -107,7 +113,30 @@ export async function runnerFixture() {
       knownHostsFile: join(root, "known_hosts"),
     }
     await writeFile(join(root, "transport.json"), JSON.stringify(transport))
+    const directory = join(root, "bridge-session")
+    await mkdir(directory)
+    await writeSandboxBinding(
+      {
+        runId: name,
+        leaseId: transport.leaseId,
+        sessionId: "ses_fixture",
+        executorId: "fixture",
+        endpointIdentity: "fixture",
+        directory,
+        locationIdentity: "fixture",
+        bridgeServerName: "workflowd_sandbox_fixture",
+        repositoryId: 1,
+        sourceSha: "a".repeat(40),
+        policyHash: sandboxPolicyHash,
+        transportHash: transportHash(transport),
+        deadline: Date.now() + 3600000,
+        state: "active",
+      },
+      true,
+    )
+    const bindingFile = join(bindingDirectory(directory), "binding.json")
     return {
+      bindingFile,
       root,
       name,
       transport,
@@ -120,7 +149,13 @@ export async function runnerFixture() {
   }
 }
 
-export function bridgeClient(transport: SandboxTransport, bindingFile?: string) {
+export function bridgeClient(
+  transport: SandboxTransport,
+  bindingFile = join(
+    bindingDirectory(join(dirname(transport.knownHostsFile), "bridge-session")),
+    "binding.json",
+  ),
+) {
   const incoming = new TransformStream<Uint8Array, Uint8Array>()
   const outgoing = new TransformStream<string, string>()
   const input = incoming.writable.getWriter()

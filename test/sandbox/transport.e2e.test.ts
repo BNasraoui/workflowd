@@ -4,7 +4,10 @@ import { join } from "node:path"
 import { hostname } from "node:os"
 import { bridgeClient, runnerFixture } from "./harness"
 import { Schema } from "effect"
-import { writeFile } from "node:fs/promises"
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { assertBridgeBinding } from "../../src/sandbox/binding"
+import { compileSandboxBridge } from "../../src/sandbox/bridge"
 
 const transport: SandboxTransport = {
   leaseId: "fixture-lease",
@@ -161,6 +164,50 @@ test("bridge refuses malformed frames, foreign repositories, and an unpinned SSH
     } finally {
       await impostor.close()
     }
+  } finally {
+    await runner.close()
+  }
+}, 120_000)
+
+test("binding paths are validated before reading arbitrary files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-binding-path-"))
+  try {
+    const file = join(root, "untrusted.json")
+    await writeFile(file, "not binding JSON")
+    const link = join(root, "alias.sandbox")
+    await symlink(root, link)
+    await writeFile(join(root, "binding.json"), "not binding JSON")
+    for (const path of [
+      file,
+      "relative.sandbox/binding.json",
+      `${root}/../outside.sandbox/binding.json`,
+      `${root}//control.sandbox/binding.json`,
+      `${link}/binding.json`,
+    ])
+      await expect(assertBridgeBinding(path, transport)).rejects.toThrow("Sandbox binding path")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("the shipped bridge refuses a missing binding before connecting to SSH", async () => {
+  const runner = await runnerFixture()
+  try {
+    const binary = join(runner.root, "bridge")
+    await compileSandboxBridge(binary)
+    const child = Bun.spawn([binary, join(runner.root, "transport.json")], {
+      stdin: new Response('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect(stdout).toBe("")
+    expect(status).toBe(1)
+    expect(stderr).toContain("Sandbox MCP bridge refused")
   } finally {
     await runner.close()
   }

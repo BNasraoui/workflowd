@@ -1,7 +1,7 @@
 FROM workflowd-sandbox-tooling:fixture
 USER root
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server python3 \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server python3 iptables \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd && passwd -d runner \
     && mkdir -p /home/runner/.ssh && chmod 700 /home/runner/.ssh \

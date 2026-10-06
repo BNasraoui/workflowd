@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import { mkdir, readFile, realpath, open, rename, link, rm } from "node:fs/promises"
-import { join } from "node:path"
+import { isAbsolute, join, normalize } from "node:path"
 import { Schema } from "effect"
 import artifact from "../../deploy/opencode/sandbox.json"
 import { SandboxTransport } from "./transport"
@@ -60,12 +60,14 @@ export async function writeSandboxBinding(binding: SandboxSessionBinding, reserv
 }
 
 export async function assertBridgeBinding(file: string, transport: SandboxTransport) {
-  const saved = Schema.decodeUnknownSync(SandboxSessionBinding)(
-    JSON.parse(await readFile(file, "utf8")),
-  )
-  const binding = await readSandboxBinding(saved.directory)
+  const suffix = ".sandbox/binding.json"
+  if (!isAbsolute(file) || normalize(file) !== file || !file.endsWith(suffix))
+    throw new Error("Sandbox binding path is invalid")
+  const directory = file.slice(0, -suffix.length)
+  if (file !== join(bindingDirectory(directory), "binding.json") || (await realpath(file)) !== file)
+    throw new Error("Sandbox binding path is not canonical")
+  const binding = await readSandboxBinding(directory)
   if (
-    file !== join(bindingDirectory(binding.directory), "binding.json") ||
     binding.state !== "active" ||
     binding.leaseId !== transport.leaseId ||
     binding.transportHash !== transportHash(transport) ||

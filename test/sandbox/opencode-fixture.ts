@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -407,7 +407,12 @@ export async function legacySandboxUnit(directory: string, leaseId: string) {
     "--property=InvocationID",
     "--value",
   ])
-  const endpoint = { url: "http://127.0.0.1:1", password: "unused-fixture", unit, invocationId }
+  const endpoint = {
+    url: "http://127.0.0.1:1",
+    password: randomBytes(24).toString("hex"),
+    unit,
+    invocationId,
+  }
   await writeFile(join(directory, "endpoint.json"), JSON.stringify(endpoint))
   const { stopSandboxOpenCode } = await import("../../src/sandbox/opencode")
   return { ...endpoint, close: () => stopSandboxOpenCode(endpoint) }

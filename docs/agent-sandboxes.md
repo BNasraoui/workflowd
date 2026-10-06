@@ -202,3 +202,19 @@ keeping the repository, App and tailnet trust unchanged, then resume the worker
 with the verified pin. Workers do not change the production pin or acquire a live
 lease before that confirmation. This bootstrap gate does not complete phase 4D's
 remaining security and authenticated live verification; dispatch stays disabled.
+
+The bridge requires its immutable binding file even when launched directly. It
+validates the absolute, normalized `.sandbox/binding.json` path and canonical
+filesystem location before reading the binding, then enforces active custody on
+startup, each exchange and filesystem changes. Missing bindings and symlinked
+binding paths fail closed. Disposable fixtures use real bindings too.
+
+`test/sandbox/security.e2e.test.ts` exercises hostile SSH frames and tool
+metadata, oversized output, resource payloads, opaque hook/symlink patches, and
+credential canaries in controller environment/configuration. The credential test
+checks the runner environment, bounded fixture disk contents, logs and a real
+container-use command. It uses generated fake credentials only. A separate
+controller network namespace enforces outbound denial after a reachable control,
+confirms controller-initiated SSH replies, and restores the reachable control.
+These fixture results complement the live tailnet denial and authenticated
+prototype evidence; they do not establish those live results.

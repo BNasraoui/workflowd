@@ -51,6 +51,22 @@ const policy = {
   tailscaleAudience: "fixture",
 }
 
+const sandboxRun = (directory: string, modelId: string, prompt: string) => ({
+  runId: "run-1",
+  route: "sandbox",
+  providerId: "openai",
+  modelId,
+  agent: "sandbox",
+  repository: policy.alias,
+  directory,
+  prompt,
+  promptSha256: "a".repeat(64),
+  parentSessionId: null,
+  resumePrompt: null,
+  maxAttempts: 1,
+  createdAt: new Date(),
+})
+
 test("sandbox aliases fail closed before local worktrees or shared provider sessions", async () => {
   const created: Array<{ repository: string; directory: string; branch: string }> = []
   const state = defaultState()
@@ -330,21 +346,7 @@ test("shared executor session captures an inert patch and releases before publis
           executorId: "opencode:opencode-primary",
           endpointIdentity: shared.url,
         })
-        yield* runs.create({
-          runId: "run-1",
-          route: "sandbox",
-          providerId: "openai",
-          modelId: "gpt-6-astra-fixture",
-          agent: "sandbox",
-          repository: "workflowd",
-          directory,
-          prompt: "Write a proof file",
-          promptSha256: "a".repeat(64),
-          parentSessionId: null,
-          resumePrompt: null,
-          maxAttempts: 1,
-          createdAt: new Date(),
-        })
+        yield* runs.create(sandboxRun(directory, "gpt-6-astra-fixture", "Write a proof file"))
         yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
         yield* store.request({
           runId: "run-1",
@@ -530,21 +532,7 @@ for (const reason of ["missing endpoint", "deadline", "cancel"])
             executorId: "opencode:opencode-primary",
             endpointIdentity: shared.url,
           })
-          yield* runs.create({
-            runId: "run-1",
-            route: "sandbox",
-            providerId: "openai",
-            modelId: "fixture",
-            agent: "sandbox",
-            repository: policy.alias,
-            directory,
-            prompt: "Task",
-            promptSha256: "a".repeat(64),
-            parentSessionId: null,
-            resumePrompt: null,
-            maxAttempts: 1,
-            createdAt: new Date(),
-          })
+          yield* runs.create(sandboxRun(directory, "fixture", "Task"))
           yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
           const sessions = yield* KernelSessionStore
           yield* sessions.registerResource({

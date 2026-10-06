@@ -48,6 +48,11 @@ test("runner workflow grants only read/OIDC and pins third-party actions", async
   expect(job["runs-on"]).toBe("ubuntu-24.04")
   expect(job["timeout-minutes"]).toBe(300)
   expect(job.permissions).toEqual({ contents: "read", "id-token": "write" })
+  expect(job.if).toContain("github.event_name == 'push'")
+  expect(job.if).toContain("startsWith(github.ref, 'refs/heads/workflowd/leases/')")
+  expect(job.if).toContain("github.repository_id == inputs.repository-id")
+  expect(job.if).toContain("github.actor_id == inputs.app-actor-id")
+  expect(job.if).toContain("github.event.repository.fork == false")
   for (const step of job.steps) {
     if (step.uses) expect(step.uses).toMatch(/@[a-f0-9]{40}$/)
   }

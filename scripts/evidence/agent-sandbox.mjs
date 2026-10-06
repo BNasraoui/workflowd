@@ -334,7 +334,7 @@ async function sessionPolicyProbe() {
       root: output,
       artifact: JSON.parse(source),
       model: { providerID: selection.slice(0, separator), id: selection.slice(separator + 1) },
-      bridgeCommand: [bridge, join(runner.root, "transport.json")],
+      bridgeCommand: [bridge, join(runner.root, "transport.json"), runner.bindingFile],
     })
     evidence.result = report.result
     evidence.artifactSha256 = createHash("sha256").update(source).digest("hex")

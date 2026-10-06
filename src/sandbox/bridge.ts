@@ -81,9 +81,9 @@ export async function runSandboxBridge(
   transport: SandboxTransport,
   incoming: ReadableStream<Uint8Array>,
   send: (frame: string) => Promise<void>,
-  bindingFile?: string,
+  bindingFile: string,
 ) {
-  if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
+  await assertBridgeBinding(bindingFile, transport)
   const child = Bun.spawn([...sandboxSshArguments(transport)], {
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
     stdin: "pipe",
@@ -105,7 +105,7 @@ export async function runSandboxBridge(
     let initialized = false
     let allowed = new Set<string>()
     for await (const frame of frames(input)) {
-      if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
+      await assertBridgeBinding(bindingFile, transport)
       if (frame.method === "notifications/initialized" && initialized && frame.id === undefined) {
         child.stdin.write(JSON.stringify(frame) + "\n")
         await child.stdin.flush()
@@ -183,7 +183,7 @@ export async function runSandboxBridge(
         } else {
           result = Schema.decodeUnknownSync(Output)(result)
         }
-        if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
+        await assertBridgeBinding(bindingFile, transport)
         await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
       } finally {
         clearTimeout(timer)
@@ -193,16 +193,15 @@ export async function runSandboxBridge(
   const forwarding = forward()
   const diagnostics = monitor()
   const closed = new AbortController()
-  const custody =
-    bindingFile === undefined ? [] : [watchBinding(bindingFile, transport, closed.signal)]
+  const custody = watchBinding(bindingFile, transport, closed.signal)
   try {
-    await Promise.race([forwarding, diagnostics, ...custody])
+    await Promise.race([forwarding, diagnostics, custody])
   } finally {
     closed.abort()
     child.kill()
     await input.cancel()
     await child.exited
-    await Promise.allSettled([forwarding, diagnostics, ...custody])
+    await Promise.allSettled([forwarding, diagnostics, custody])
     process.removeListener("SIGTERM", stop)
     process.removeListener("SIGINT", stop)
   }
@@ -211,7 +210,9 @@ export async function runSandboxBridge(
 if (import.meta.main) {
   const run = async () => {
     const file = process.argv[2]
-    if (file === undefined) throw new Error("Sandbox transport file is required")
+    const bindingFile = process.argv[3]
+    if (file === undefined || bindingFile === undefined)
+      throw new Error("Sandbox transport and binding files are required")
     const input: unknown = await Bun.file(file).json()
     await runSandboxBridge(
       Schema.decodeUnknownSync(SandboxTransport)(input),
@@ -219,7 +220,7 @@ if (import.meta.main) {
       async (frame) => {
         await Bun.write(Bun.stdout, frame)
       },
-      process.argv[3],
+      bindingFile,
     )
   }
   await run().catch(() => {
