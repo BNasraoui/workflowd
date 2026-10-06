@@ -8,6 +8,7 @@ set -euo pipefail
 [[ -s $SSL_CERT_FILE ]]
 [[ ! -w /etc/passwd && ! -w /nix/store ]]
 [[ ! ${LD_LIBRARY_PATH+x} ]]
+[[ -x /lib64/ld-linux-x86-64.so.2 ]]
 if command -v nix; then
   printf 'Nix must remain a host build dependency\n' >&2
   exit 1
@@ -16,23 +17,24 @@ fi
 scratch=$(mktemp -d "$HOME/tool-test.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 cd "$scratch"
-printf 'agent tools\n' > original
+sample='agent tools'
+printf '%s\n' "$sample" > original
 cp original copy
 diff original copy
 tar -cf tools.tar original
-[[ $(tar -xOf tools.tar original) == 'agent tools' ]]
+[[ $(tar -xOf tools.tar original) == "$sample" ]]
 gzip -c original > original.gz
-[[ $(gzip -dc original.gz) == 'agent tools' ]]
+[[ $(gzip -dc original.gz) == "$sample" ]]
 xz -c original > original.xz
-[[ $(xz -dc original.xz) == 'agent tools' ]]
+[[ $(xz -dc original.xz) == "$sample" ]]
 python3 -c 'import zipfile; zipfile.ZipFile("tools.zip", "w").write("original")'
-[[ $(unzip -p tools.zip original) == 'agent tools' ]]
+[[ $(unzip -p tools.zip original) == "$sample" ]]
 [[ $(which bash) == /bin/bash ]]
 [[ $(ps -o uid= -p $$ | tr -d ' ') == 1000 ]]
 ssh -V
 ssh-keygen -q -t ed25519 -N '' -f fixture-key
 ssh-keygen -lf fixture-key.pub
-[[ $(LESSSECURE=1 less -F original) == 'agent tools' ]]
+[[ $(LESSSECURE=1 less -F original) == "$sample" ]]
 [[ $(find . -name copy) == ./copy ]]
 grep -q 'agent' copy
 [[ $(sed 's/agent/shared/' copy) == 'shared tools' ]]
@@ -43,7 +45,7 @@ bash -c 'test "$BASH_VERSION"'
 git init -q
 git -c user.name=fixture -c user.email=fixture@example.invalid add original
 git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
-[[ $(git show HEAD:original) == 'agent tools' ]]
+[[ $(git show HEAD:original) == "$sample" ]]
 gh --version
 curl --proto '=https' --fail --silent --show-error https://example.com > page
 [[ -s page ]]

@@ -6,7 +6,7 @@ let
       bashInteractive coreutils findutils gnugrep gnused gawk diffutils
       gnutar gzip xz unzip which procps openssh less
       git gh curl cacert jq ripgrep fd nodejs_24 bun
-      (python3.withPackages (ps: [ ps.pip ])) rustup
+      (python3.withPackages (ps: [ ps.pip ])) rustup nix-ld
       gcc gnumake binutils pkg-config
     ];
     pathsToLink = [ "/bin" ];
