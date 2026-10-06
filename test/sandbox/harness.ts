@@ -124,7 +124,7 @@ export async function runnerFixture() {
         endpointIdentity: "fixture",
         directory,
         locationIdentity: "fixture",
-        bridgeServerName: "workflowd_sandbox_fixture",
+        bridgeServerName: "wfdlease_fixture",
         repositoryId: 1,
         sourceSha: "a".repeat(40),
         policyHash: sandboxPolicyHash,
@@ -242,6 +242,7 @@ export async function sandboxGithubFixture(
   const savedRuns = new Map<number, { status: number; value: unknown }>()
   const savedRunRequests: number[] = []
   let beforeCancel: ((id: number) => Promise<void>) | undefined
+  let afterRefDelete: (() => void) | undefined
   let deleteStatus = 204
   let retainRef = false
   let listedRuns: ReadonlyArray<unknown> | undefined
@@ -305,6 +306,7 @@ export async function sandboxGithubFixture(
       if (path.includes("/git/refs/heads/") && request.method === "DELETE") {
         refDeletes++
         if (!retainRef) ref = null
+        afterRefDelete?.()
         return new Response(null, { status: deleteStatus })
       }
       if (path.endsWith("/artifacts"))
@@ -363,6 +365,9 @@ export async function sandboxGithubFixture(
     savedRunRequests,
     beforeCancel: (check: (id: number) => Promise<void>) => {
       beforeCancel = check
+    },
+    afterRefDelete: (effect: () => void) => {
+      afterRefDelete = effect
     },
     deleteResponse: (status: number, retain = false) => {
       deleteStatus = status

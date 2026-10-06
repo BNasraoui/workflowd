@@ -6,7 +6,7 @@
       "permissions": [
         { "action": "*", "resource": "*", "effect": "deny" },
         { "action": "execute", "resource": "*", "effect": "allow" },
-        { "action": "workflowd_sandbox_*", "resource": "*", "effect": "allow" }
+        { "action": "wfdlease_*", "resource": "*", "effect": "allow" }
       ]
     }
   }

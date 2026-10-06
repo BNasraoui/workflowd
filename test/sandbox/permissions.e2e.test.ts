@@ -12,14 +12,34 @@ import { expect, test } from "bun:test"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { command, runnerFixture } from "./harness"
-import { Effect, Schema } from "effect"
-import { compactionSummary, sharedOpenCodeFixture } from "./opencode-fixture"
+import { Effect, Schedule, Schema } from "effect"
+import {
+  compactionSummary,
+  sharedOpenCodeFixture,
+  installGlobalWorkflowdProbe,
+} from "./opencode-fixture"
 
 test.each(["short", "full"])(
   "production prompts advertise and execute the lease bridge namespace (%s)",
   async (mode) => {
     const runner = await runnerFixture()
     const fixture = await sharedOpenCodeFixture("production-catalog")
+    const marker = await installGlobalWorkflowdProbe(fixture)
+    const waitGlobal = async (directory: string) => {
+      await Effect.runPromise(
+        fixture.client.mcp.list({ location: { directory } }).pipe(
+          Effect.repeat({
+            until: (catalog) =>
+              catalog.data.some(
+                (entry) => entry.name === "workflowd" && entry.status.status === "connected",
+              ),
+            schedule: Schedule.spaced("100 millis"),
+          }),
+          Effect.timeout("30 seconds"),
+        ),
+      )
+      await Bun.sleep(200)
+    }
     const executor = makeSandboxOpenCode(fixture.client, fixture.executor)
     const directory = join(fixture.root, "production")
     const leaseId = mode === "short" ? "short" : `agent-run-${"a".repeat(64)}`
@@ -44,6 +64,18 @@ test.each(["short", "full"])(
       await writeSandboxBinding(binding, true)
       const model = { providerID: "openai", modelID: "gpt-6-astra-fixture" }
       await Effect.runPromise(executor.start(binding, transport, model))
+      await waitGlobal(directory)
+      const probe = {
+        name: "execute",
+        arguments: JSON.stringify({ code: "return await tools.workflowd.sandbox_probe({})" }),
+      }
+      fixture.script([probe])
+      const collision = await fixture.prompt(
+        binding.sessionId,
+        "Attempt the global workflowd probe",
+      )
+      expect(JSON.stringify(collision)).toContain("Unknown tool 'workflowd.sandbox_probe'")
+      expect(await Bun.file(marker).exists()).toBe(false)
       fixture.script([
         {
           name: "execute",
@@ -66,7 +98,14 @@ test.each(["short", "full"])(
       expect(JSON.stringify(transcript)).toContain(
         `"tool":"${binding.bridgeServerName}.environment_list","status":"completed"`,
       )
-      expect(JSON.stringify(fixture.requests[0]?.messages)).toContain(binding.bridgeServerName)
+      expect(JSON.stringify(fixture.requests.at(-1)?.messages)).toContain(binding.bridgeServerName)
+      const control = await fixture.create(join(fixture.root, "control"), "build")
+      await waitGlobal(join(fixture.root, "control"))
+      fixture.script([probe])
+      expect(
+        JSON.stringify(await fixture.prompt(control, "Use the ordinary global probe")),
+      ).toContain('"tool":"workflowd.sandbox_probe","status":"completed"')
+      expect(await Bun.file(marker).text()).toBe("called")
     } finally {
       await Effect.runPromise(executor.stop(binding))
       await fixture.close()
@@ -78,10 +117,10 @@ test.each(["short", "full"])(
 
 test.each([
   ["execute", "search", true],
-  ["execute", "workflowd_sandbox_a.environment_list", true],
-  ["workflowd_sandbox_a.environment_list", "", true],
+  ["execute", "wfdlease_a.environment_list", true],
+  ["wfdlease_a.environment_list", "", true],
   ["execute", "shell", false],
-  ["execute", "workflowd_sandbox_b.environment_list", false],
+  ["execute", "wfdlease_b.environment_list", false],
   ["shell", "", false],
   ["search", "", false],
 ] as const)("probe checks completed top-level %s and nested %s", async (name, tool, permitted) => {
@@ -92,7 +131,7 @@ test.each([
     "--eval",
     `
     import { assertSandboxCalls } from "./scripts/evidence/agent-sandbox.mjs"
-    assertSandboxCalls(${JSON.stringify(calls)}, "workflowd_sandbox_a")
+    assertSandboxCalls(${JSON.stringify(calls)}, "wfdlease_a")
   `,
   ])
   if (permitted) expect(await result).toBe("")
@@ -305,7 +344,7 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
         endpointIdentity: fixture!.url,
         directory,
         locationIdentity,
-        bridgeServerName: `workflowd_sandbox_${suffix}`,
+        bridgeServerName: `wfdlease_${suffix}`,
         repositoryId: 1,
         sourceSha: "b".repeat(40),
         policyHash: sandboxPolicyHash,
@@ -385,7 +424,7 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'return await tools.workflowd_sandbox_a.environment_list({ environment_source: "/workspace/repository" })',
+          code: 'return await tools.wfdlease_a.environment_list({ environment_source: "/workspace/repository" })',
         }),
       },
     ])
@@ -394,7 +433,7 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'return await tools.workflowd_sandbox_b.environment_list({ environment_source: "/workspace/repository" })',
+          code: 'return await tools.wfdlease_b.environment_list({ environment_source: "/workspace/repository" })',
         }),
       },
     ])
@@ -402,17 +441,17 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
     evidence.sessionA = await fixture.api(`session/${sessionA}`)
     evidence.sessionB = await fixture.api(`session/${sessionB}`)
     expect(JSON.stringify(evidence.ownCall)).toContain('"status":"completed"')
-    expect(JSON.stringify(evidence.catalogA)).not.toContain("workflowd_sandbox_b")
-    expect(JSON.stringify(evidence.catalogB)).not.toContain("workflowd_sandbox_a")
+    expect(JSON.stringify(evidence.catalogA)).not.toContain("wfdlease_b")
+    expect(JSON.stringify(evidence.catalogB)).not.toContain("wfdlease_a")
     expect(JSON.stringify(evidence.foreignCall)).toContain(
-      "Unknown tool 'workflowd_sandbox_b.environment_list'",
+      "Unknown tool 'wfdlease_b.environment_list'",
     )
     expect(JSON.stringify(evidence.foreignCall)).toContain('"toolCalls":[],"error":true')
     fixture.script([
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'const env = JSON.parse(await tools.workflowd_sandbox_a.environment_create({environment_source:"/workspace/repository",title:"Lease A"})); return await tools.workflowd_sandbox_a.environment_run_cmd({environment_source:"/workspace/repository",environment_id:env.id,command:"printf remote-a > proof.txt; cat proof.txt; pwd"})',
+          code: 'const env = JSON.parse(await tools.wfdlease_a.environment_create({environment_source:"/workspace/repository",title:"Lease A"})); return await tools.wfdlease_a.environment_run_cmd({environment_source:"/workspace/repository",environment_id:env.id,command:"printf remote-a > proof.txt; cat proof.txt; pwd"})',
         }),
       },
     ])
@@ -423,19 +462,21 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'return await tools.workflowd_sandbox_b.environment_list({ environment_source: "/workspace/repository" })',
+          code: 'return await tools.wfdlease_b.environment_list({ environment_source: "/workspace/repository" })',
         }),
       },
     ])
     evidence.ownCallB = await fixture.prompt(sessionB, "Use the second runner")
     expect(JSON.stringify(evidence.ownCallB)).toContain(
-      '"tool":"workflowd_sandbox_b.environment_list","status":"completed"',
+      '"tool":"wfdlease_b.environment_list","status":"completed"',
     )
-    await fixture.api(`mcp/workflowd_sandbox_intruder?${locationA.toString()}`, { config }, "PUT")
-    await expect(
-      Effect.runPromise(executor.check(await readSandboxBinding(directoryA))),
-    ).rejects.toThrow("bridge binding changed")
-    await fixture.api(`mcp/workflowd_sandbox_intruder?${locationA.toString()}`, undefined, "DELETE")
+    for (const intruder of ["wfdlease_intruder", "wfdlease-intruder", "wfdlease"]) {
+      await fixture.api(`mcp/${intruder}?${locationA.toString()}`, { config }, "PUT")
+      await expect(
+        Effect.runPromise(executor.check(await readSandboxBinding(directoryA))),
+      ).rejects.toThrow("bridge binding changed")
+      await fixture.api(`mcp/${intruder}?${locationA.toString()}`, undefined, "DELETE")
+    }
     await Effect.runPromise(
       Effect.all([executor.stop(bindingA), executor.stop(bindingB)], { concurrency: 2 }),
     )
@@ -447,14 +488,12 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'return await tools.workflowd_sandbox_a.environment_list({ environment_source: "/workspace/repository" })',
+          code: 'return await tools.wfdlease_a.environment_list({ environment_source: "/workspace/repository" })',
         }),
       },
     ])
     evidence.revoked = await fixture.prompt(sessionA, "Attempt revoked bridge")
-    expect(JSON.stringify(evidence.revoked)).toContain(
-      "Unknown tool 'workflowd_sandbox_a.environment_list'",
-    )
+    expect(JSON.stringify(evidence.revoked)).toContain("Unknown tool 'wfdlease_a.environment_list'")
     expect(JSON.stringify(evidence.revoked)).toContain('"toolCalls":[]')
     expect(JSON.stringify(evidence.revoked)).toContain('"error":true')
     await fixture.restart()
@@ -470,19 +509,19 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
     }
     evidence.restartedCatalogA = await fixture.api(`mcp?${locationA.toString()}`)
     evidence.restartedCatalogB = await fixture.api(`mcp?${locationB.toString()}`)
-    expect(JSON.stringify(evidence.restartedCatalogA)).not.toContain("workflowd_sandbox_")
-    expect(JSON.stringify(evidence.restartedCatalogB)).not.toContain("workflowd_sandbox_")
+    expect(JSON.stringify(evidence.restartedCatalogA)).not.toContain("wfdlease_")
+    expect(JSON.stringify(evidence.restartedCatalogB)).not.toContain("wfdlease_")
     fixture.script([
       {
         name: "execute",
         arguments: JSON.stringify({
-          code: 'return await tools.workflowd_sandbox_a.environment_list({ environment_source: "/workspace/repository" })',
+          code: 'return await tools.wfdlease_a.environment_list({ environment_source: "/workspace/repository" })',
         }),
       },
     ])
     evidence.restartedCall = await fixture.prompt(sessionA, "Attempt bridge after restart")
     expect(JSON.stringify(evidence.restartedCall)).toContain(
-      "Unknown tool 'workflowd_sandbox_a.environment_list'",
+      "Unknown tool 'wfdlease_a.environment_list'",
     )
     fixture.script([
       {

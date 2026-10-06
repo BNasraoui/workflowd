@@ -9,6 +9,9 @@ export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxErr
 }) {}
 
 export const sessionCleanupUnconfirmed = "Sandbox session cleanup unconfirmed; retry required"
+const unobservedRun = "Sandbox Actions run unobserved; custody retained."
+export const isUnobservedRun = (lease: { release_error: string | null }) =>
+  lease.release_error?.startsWith(unobservedRun) === true
 
 const Lease = Schema.Struct({
   run_id: Schema.String,
@@ -125,6 +128,38 @@ export const makeSandboxStore = Effect.gen(function* () {
         new SandboxError({ message: "Sandbox local cleanup must be confirmed before release" }),
       )
   })
+  const reconcileUnobserved = Effect.fn("SandboxStore.reconcileUnobserved")(function* <E>(
+    runId: string,
+    discoverRuns: Effect.Effect<void, E>,
+    removeRef: Effect.Effect<void, E>,
+  ) {
+    // Fence acquisition/adoption while removing a ref without a saved Actions identity.
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE sandbox_leases SET heartbeat_at=heartbeat_at WHERE run_id=${runId}`
+        const lease = yield* read(runId)
+        if (lease === null || lease.state !== "releasing" || lease.actions_run_id !== null) return
+        const hasRun = sql`SELECT 1 FROM sandbox_cleanup_runs WHERE lease_id=${lease.lease_id}
+        AND repository_id=${lease.policy.repositoryId}`.pipe(Effect.map((rows) => rows.length > 0))
+        if (yield* hasRun) return
+        const result = yield* Effect.gen(function* () {
+          yield* discoverRuns
+          if (yield* hasRun) return
+          yield* removeRef
+          // Ref deletion does not cancel an already queued push. Adopt late runs before returning.
+          yield* discoverRuns
+        }).pipe(Effect.result)
+        // Keep any adopted identity even if a subsequent inventory request failed.
+        if (yield* hasRun) return
+        const confirmation =
+          result._tag === "Success"
+            ? "Exact ref absence confirmed; empty inventory does not prove run termination."
+            : "Exact ref absence or run inventory unconfirmed; retry reconciliation."
+        const diagnostic = `${unobservedRun} ${confirmation} Inspect ${lease.policy.repository} refs/heads/workflowd/leases/${lease.lease_id} at ${lease.policy.workflowSha} in Actions; restore API visibility and reconcile any delayed run. Do not discard custody.`
+        yield* sql`UPDATE sandbox_leases SET state='operator_required',release_error=${diagnostic} WHERE run_id=${runId}`
+      }),
+    )
+  })
   const active = Effect.fn("SandboxStore.active")(function* () {
     const rows =
       yield* sql`SELECT * FROM sandbox_leases WHERE state != 'released' ORDER BY created_at`
@@ -132,7 +167,7 @@ export const makeSandboxStore = Effect.gen(function* () {
   })
   const recordError = Effect.fn("SandboxStore.recordError")(function* (runId: string) {
     yield* sql`UPDATE sandbox_leases SET release_error='Sandbox reconciliation failed; retry required' WHERE run_id=${runId}
-      AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed}`
+      AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
   const sessionCleanupError = Effect.fn("SandboxStore.sessionCleanupError")(function* (
     runId: string,
@@ -243,7 +278,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       WHERE repository_id=${policy.repositoryId} AND state != 'released'`
     yield* sql`UPDATE sandbox_leases SET release_error='Sandbox inventory incomplete; retry required'
       WHERE json_extract(policy,'$.repositoryId')=${policy.repositoryId} AND state != 'released'
-      AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed}`
+      AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
   const clearPolicyErrors = Effect.fn("SandboxStore.clearPolicyErrors")(function* (
     policy: SandboxPolicy,
@@ -251,7 +286,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxPolicy))(policy)
     yield* sql`UPDATE sandbox_cleanup_runs SET last_error=NULL WHERE policy=${encoded}`
     yield* sql`UPDATE sandbox_leases SET release_error=NULL WHERE policy=${encoded}
-      AND release_error != ${sessionCleanupUnconfirmed}`
+      AND release_error != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
   const finishCleanup = Effect.fn("SandboxStore.finishCleanup")(function* <E>(
     row: typeof CleanupRun.Type,
@@ -316,6 +351,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     beginStart,
     recordRun,
     beginRelease,
+    reconcileUnobserved,
     active,
     recordError,
     sessionCleanupError,

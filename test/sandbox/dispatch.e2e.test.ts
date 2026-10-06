@@ -68,6 +68,99 @@ const sandboxRun = (directory: string, modelId: string, prompt: string) => ({
   createdAt: new Date(),
 })
 
+test.each(["before-ref", "without-run", "late-run"])(
+  "no observed Actions run produces a durable operator mailbox and retains custody (%s)",
+  async (mode) => {
+    const shared = await sharedOpenCodeFixture("no-run-mailbox")
+    const fixture = await sandboxGithubFixture(policy)
+    fixture.listRuns([])
+    const directory = join(shared.root, "no-run")
+    const stores = AgentRunStoreLive.pipe(
+      Layer.provideMerge(
+        WorkflowStoreLive.pipe(
+          Layer.provideMerge(SqliteClient.layer({ filename: join(shared.root, "custody.sqlite") })),
+        ),
+      ),
+    )
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const runs = yield* AgentRunStore
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          const leases = yield* makeSandboxLeaseService(github)
+          const service = yield* makeSandboxDispatch({
+            policies: [policy],
+            github,
+            leases,
+            executor: shared.executor,
+            client: shared.client,
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+          })
+          yield* runs.create(
+            sandboxRun(directory, "gpt-6-astra-fixture", "Cancelled before startup"),
+          )
+          yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
+          yield* store.request({
+            runId: "run-1",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          if (mode !== "before-ref") yield* leases.acquire("run-1")
+          yield* service.cancel((yield* runs.read("run-1"))!)
+          expect((yield* runs.read("run-1"))?.state).toBe("operator_required")
+          expect((yield* store.read("run-1"))?.state).toBe("operator_required")
+          const sql = yield* SqlClient.SqlClient
+          const mailbox =
+            yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
+          expect(mailbox).toHaveLength(1)
+          expect(String(mailbox[0]?.prompt)).toContain("Actions run unobserved")
+          expect(String(mailbox[0]?.prompt)).toContain("refs/heads/workflowd/leases/lease-1")
+          const restarted = yield* makeSandboxDispatch({
+            policies: [policy],
+            github,
+            leases,
+            executor: shared.executor,
+            client: shared.client,
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+          })
+          if (mode === "late-run") {
+            fixture.listRuns([{}])
+            yield* restarted.iteration
+            expect(fixture.cancellations).toContain(41)
+            fixture.listRuns([])
+            fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+            yield* restarted.iteration
+            expect((yield* store.read("run-1"))?.state).toBe("released")
+          } else {
+            yield* restarted.iteration
+            expect((yield* store.read("run-1"))?.state).toBe("operator_required")
+          }
+          expect(
+            yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`,
+          ).toEqual(mailbox)
+          const response = yield* Effect.tryPromise(() =>
+            fetch(
+              `${fixture.apiUrl}repos/${policy.repository}/git/ref/heads/workflowd/leases/lease-1`,
+              { headers: { Authorization: "Bearer fixture-token" } },
+            ),
+          )
+          expect(response.status).toBe(404)
+          expect(fixture.refCreates).toBe(mode === "before-ref" ? 0 : 1)
+        }).pipe(Effect.provide(stores)),
+      )
+    } finally {
+      await fixture.close()
+      await shared.close()
+    }
+  },
+  30000,
+)
+
 test("sandbox aliases fail closed before local worktrees or shared provider sessions", async () => {
   const created: Array<{ repository: string; directory: string; branch: string }> = []
   const state = defaultState()

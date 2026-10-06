@@ -9,6 +9,11 @@ The reviewed fragment is `deploy/opencode/sandbox.json`. It adds only
 permissions, MCP servers, or auxiliary-agent overrides. Project configuration
 must remain disabled. Each future lease owns a distinct controller location and
 one runtime bridge; the wildcard permission alone does not separate leases.
+The reserved server namespace is `wfdlease_<digest>` and its permission is
+`wfdlease_*`. OpenCode flattens MCP actions as `<server>_<tool>`; using a
+`workflowd_` prefix would also authorize global `workflowd.sandbox_*` tools.
+Reservation and binding checks reject foreign servers whose normalized names
+enter the reserved namespace, including the bare name `wfdlease`.
 
 ## Fixture gate
 
@@ -28,7 +33,9 @@ compaction/title/transient-summary turns, and continue the
 sandbox afterwards. Two location bridges reach separate SSH/Dagger runners;
 foreign calls and calls after removal/restart must fail. The production probe's
 own orchestration is also tested against this real executor with scripted model
-responses. Tests do not change the production server.
+responses. The global `workflowd.sandbox_probe` canary must be denied in sandbox
+sessions while the owned bridge executes and ordinary sessions retain access.
+Tests do not change the production server.
 
 If confinement fails, retain its evidence and stop before installation. Do not
 restrict ordinary auxiliary agents globally, enable project configuration, or
@@ -46,12 +53,14 @@ permissions. **Never edit that shared file for this installation.** Install the
 fragment separately and select it only for `opencode2-server.service` through a
 systemd drop-in. The pinned v2 server merges this file over its global config.
 
-The coordinator already installed the byte-identical artifact from
-`ac63e62829a18b2843fd4902b0441ebfa2b7d812`. For probe-only revisions, reuse
-`~/.local/state/workflowd-sandbox-install-ac63e62829a18b2843fd4902b0441ebfa2b7d812`
-as `SANDBOX_INSTALL_RECORD` and proceed to Verify from the new reviewed checkout;
-do not reinstall or overwrite the original record. The commands below are for a
-fresh installation and refuse to overwrite existing files.
+The B1 revision changes the artifact previously installed from
+`ac63e62829a18b2843fd4902b0441ebfa2b7d812`. After candidate CI and SonarCloud pass,
+the coordinator must back up the installed fragment, replace it with the exact
+reviewed bytes through the existing v2-only drop-in, and run Verify again. Keep
+the original installation record and shared global configuration intact. Dispatch
+remains disabled. Resume the implementation worker for a fresh authenticated live
+prototype only after Verify passes. The commands below describe a fresh
+installation and deliberately refuse to overwrite an existing installation.
 
 ```sh
 set -eu
@@ -178,6 +187,27 @@ systemctl --user daemon-reload
 systemctl --user restart opencode2-server.service
 systemctl --user is-active opencode2-server.service
 ```
+
+## Cleanup without an observed Actions run
+
+Cancellation or startup failure can leave a persisted intent before Actions
+exposes a run. Cleanup inventories the pinned workflow and exact lease branch,
+removes the exact ref, confirms its absence with GET 404, and inventories again.
+An empty inventory never proves termination: a queued push may appear later.
+
+With no observed run, the lease stays in `operator_required` custody and the
+caller receives one durable `operator_required` mailbox after local session
+cleanup. Its diagnostic names the repository, exact ref and workflow SHA, and
+states whether ref absence was confirmed. This is an uncertainty notification;
+it is not a successful or cancelled execution result. Inspect the named Actions
+history, restore API visibility if needed, and keep reconciliation running.
+Never delete the custody row or invent an Actions run to unblock it. This
+conservative outcome also applies to cancellation before ref creation.
+
+Reconciliation continues after mailbox delivery and across coordinator restart.
+Any late run is adopted, cancelled and checked directly even if later listings
+omit it. Only confirmed termination of every saved run plus exact-ref absence
+releases that custody. The original operator mailbox is not replaced or duplicated.
 
 ## Runner bootstrap pin (coordinator/operator only)
 

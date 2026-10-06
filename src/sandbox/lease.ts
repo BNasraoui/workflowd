@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
-import { makeSandboxStore, SandboxError, sessionCleanupUnconfirmed } from "./store"
+import { makeSandboxStore, SandboxError, sessionCleanupUnconfirmed, isUnobservedRun } from "./store"
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
@@ -241,12 +241,19 @@ export const makeSandboxLeaseService = (
       const lease = yield* required(runId)
       yield* store.beginRelease(runId)
       yield* Effect.gen(function* () {
+        yield* cleanupUnobserved(lease)
         yield* inventory(lease.policy)
         yield* discover(lease)
         yield* cleanup(lease.policy)
         yield* store.clearPolicyErrors(lease.policy)
       }).pipe(Effect.tapError(() => store.recordError(runId)))
     })
+    const cleanupUnobserved = (lease: Effect.Success<ReturnType<typeof required>>) =>
+      store.reconcileUnobserved(
+        lease.run_id,
+        inventory(lease.policy).pipe(Effect.andThen(discover(lease))),
+        github.deleteRef(lease.policy, lease.lease_id),
+      )
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
       let lease = yield* required(runId)
       if (lease.state === "ready") return lease
@@ -314,9 +321,16 @@ export const makeSandboxLeaseService = (
               (lease.session_id !== null && lease.unit === null && lease.state !== "releasing")
             )
               continue
-            if (lease.deadline <= Date.now()) yield* store.beginRelease(lease.run_id)
-            if (lease.state === "releasing" || lease.deadline <= Date.now()) yield* discover(lease)
-            else yield* acquire(lease.run_id)
+            if (lease.deadline <= Date.now() || isUnobservedRun(lease))
+              yield* store.beginRelease(lease.run_id)
+            if (
+              lease.state === "releasing" ||
+              lease.deadline <= Date.now() ||
+              isUnobservedRun(lease)
+            ) {
+              yield* cleanupUnobserved(lease)
+              yield* discover(lease)
+            } else yield* acquire(lease.run_id)
           }
           yield* cleanup(policy)
           yield* store.clearPolicyErrors(policy)

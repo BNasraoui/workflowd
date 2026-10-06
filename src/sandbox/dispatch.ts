@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
 import type { OpenCodeModel, OpenCodeAdapter } from "../opencode/adapter"
-import { makeSandboxStore, SandboxError } from "./store"
+import { makeSandboxStore, SandboxError, isUnobservedRun } from "./store"
 import type { SandboxPolicy } from "./config"
 import type { makeSandboxGithub } from "./github"
 import type { makeSandboxLeaseService } from "./lease"
@@ -170,7 +170,8 @@ export const makeSandboxDispatch = (options: {
     const publish = (run: AgentRunRecord) =>
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
-        if (lease !== null && lease.state !== "released") return
+        const unobserved = lease?.state === "operator_required" && isUnobservedRun(lease)
+        if (lease !== null && lease.state !== "released" && !unobserved) return
         yield* stop(run)
         const terminal = yield* Effect.tryPromise(async () =>
           Schema.decodeUnknownSync(Terminal)(
@@ -185,7 +186,9 @@ export const makeSandboxDispatch = (options: {
           return
         if (terminal.sessionId !== current.nativeSessionId) return yield* Effect.fail(failure())
         const now = new Date()
-        if (terminal.state === "completed")
+        if (unobserved)
+          yield* runs.operatorRequired({ runId: run.runId, diagnostic: lease.release_error!, now })
+        else if (terminal.state === "completed")
           yield* runs.complete({ runId: run.runId, finalMessage: terminal.finalMessage, now })
         else if (terminal.state === "cancelled")
           yield* runs.cancel({ runId: run.runId, diagnostic: terminal.diagnostic, now })
@@ -320,6 +323,11 @@ export const makeSandboxDispatch = (options: {
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
         if (lease === null) return
+        // Notify the caller of uncertain remote custody; reconciliation continues after delivery.
+        if (lease.state === "operator_required" && isUnobservedRun(lease)) {
+          yield* publish(run)
+          return
+        }
         if (run.state !== "verified" && lease.state !== "releasing" && lease.state !== "released") {
           if (Date.now() - run.createdAt.getTime() > 7 * 60000) yield* cancel(run)
           return

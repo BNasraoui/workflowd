@@ -15,6 +15,7 @@ import { makeSandboxLeaseService } from "../../src/sandbox/lease.ts"
 import { makeSandboxStore } from "../../src/sandbox/store.ts"
 import { runStoreMigrations } from "../../src/store/migrations.ts"
 import { sandboxSshArguments } from "../../src/sandbox/transport.ts"
+import { sandboxBridgeName, isSandboxBridgeNamespace } from "../../src/sandbox/binding.ts"
 
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
@@ -58,7 +59,7 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
   const sessions = []
   const bridges = []
   const identity = randomUUID().replaceAll("-", "")
-  const names = [`workflowd_sandbox_${identity}_a`, `workflowd_sandbox_${identity}_b`]
+  const names = [sandboxBridgeName(`${identity}-a`), sandboxBridgeName(`${identity}-b`)]
   const recordOwned = () =>
     writeFile(
       join(root, "owned.json"),
@@ -146,6 +147,10 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
         artifact.agents.sandbox.permissions,
       )
       report.locations.push({ directory, resolved, rules: sandbox.permissions })
+      assert.ok(
+        (await api(`mcp?${location}`)).data.every((entry) => !isSandboxBridgeNamespace(entry.name)),
+        "Foreign server occupies the reserved bridge namespace",
+      )
       const agent = name === "control" ? "build" : "sandbox"
       const id = `ses_${randomUUID().replaceAll("-", "")}`
       sessions.push(id)
@@ -175,6 +180,13 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
             },
           },
           "PUT",
+        )
+        assert.deepEqual(
+          (await api(`mcp?${location}`)).data
+            .filter((entry) => isSandboxBridgeNamespace(entry.name))
+            .map((entry) => entry.name),
+          [server],
+          "Reserved bridge namespace changed",
         )
       }
     }
@@ -232,6 +244,18 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
         ),
       ),
       "Own bridge did not execute",
+    )
+    const collisionCode = "return await tools.workflowd.sandbox_probe({})"
+    report.globalWorkflowd = await run(sessions[0], execute(collisionCode), true)
+    assert.ok(
+      report.globalWorkflowd.some(
+        (part) =>
+          part.name === "execute" &&
+          part.state.input?.code === collisionCode &&
+          part.state.metadata?.error === true &&
+          part.state.metadata.toolCalls?.length === 0,
+      ),
+      "Global workflowd denial was not executed",
     )
     report.foreign = await run(
       sessions[0],

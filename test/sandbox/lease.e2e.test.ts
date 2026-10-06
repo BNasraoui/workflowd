@@ -158,6 +158,96 @@ test("release stays pending until the correlated Actions run is confirmed comple
   }
 })
 
+test.each([
+  "before-ref",
+  "without-run",
+  "late-run",
+  "late-on-delete",
+  "ref-retained",
+  "partial-inventory",
+])(
+  "unobserved run cleanup retains actionable custody and removes the exact ref (%s)",
+  async (mode) => {
+    const { sandboxGithubFixture } = await import("./harness")
+    const { makeSandboxGithub } = await import("../../src/sandbox/github")
+    const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+    const fixture = await sandboxGithubFixture(policy)
+    fixture.listRuns([])
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* sandboxMigration
+          yield* sandboxCleanupMigration
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          const leases = yield* makeSandboxLeaseService(github)
+          yield* store.request({
+            runId: "no-run",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          if (mode !== "before-ref") yield* leases.acquire("no-run")
+          if (mode === "ref-retained") fixture.deleteResponse(422, true)
+          if (mode === "partial-inventory") fixture.inventoryPages([{ total: 1, runs: [] }])
+          expect((yield* Effect.result(leases.release("no-run")))._tag).toBe(
+            mode === "partial-inventory" ? "Failure" : "Success",
+          )
+          for (let i = 0; i < 3; i++) {
+            expect((yield* Effect.result(leases.reconcile([policy])))._tag).toBe(
+              mode === "partial-inventory" ? "Failure" : "Success",
+            )
+          }
+          const lease = yield* store.read("no-run")
+          expect(lease?.state).toBe("operator_required")
+          expect(lease?.release_error).toContain("Actions run unobserved")
+          expect(lease?.release_error).toContain("refs/heads/workflowd/leases/lease-1")
+          expect(lease?.release_error).toContain(policy.repository)
+          expect(lease?.actions_run_id).toBeNull()
+          expect(yield* store.cleanupRuns(true)).toHaveLength(0)
+          expect(fixture.refCreates).toBe(mode === "before-ref" ? 0 : 1)
+          if (mode === "partial-inventory") expect(fixture.refDeletes).toBe(0)
+          else expect(fixture.refDeletes).toBeGreaterThan(0)
+          const response = yield* Effect.tryPromise(() =>
+            fetch(
+              `${fixture.apiUrl}repos/${policy.repository}/git/ref/heads/workflowd/leases/lease-1`,
+              { headers: { Authorization: "Bearer fixture-token" } },
+            ),
+          )
+          const uncertain = mode === "ref-retained" || mode === "partial-inventory"
+          expect(response.status).toBe(uncertain ? 200 : 404)
+          expect(lease?.release_error).toContain(uncertain ? "unconfirmed" : "absence confirmed")
+          expect((yield* Effect.result(leases.acquire("no-run")))._tag).toBe("Failure")
+          if (mode === "late-run" || mode === "late-on-delete") {
+            if (mode === "late-on-delete") fixture.afterRefDelete(() => fixture.listRuns([{}]))
+            else fixture.listRuns([{}])
+            yield* leases.reconcile([policy])
+            expect(fixture.cancellations).toContain(41)
+            expect((yield* store.read("no-run"))?.state).toBe("releasing")
+            fixture.afterRefDelete(() => {})
+            fixture.listRuns([])
+            fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+            yield* leases.reconcile([policy])
+            expect((yield* store.read("no-run"))?.state).toBe("released")
+            expect(fixture.savedRunRequests).toContain(41)
+            expect((yield* store.cleanupRuns(true))[0]?.state).toBe("released")
+            expect(fixture.refCreates).toBe(1)
+          }
+          if (uncertain) {
+            fixture.deleteResponse(204)
+            fixture.inventoryPages([{ total: 0, runs: [] }])
+            yield* leases.reconcile([policy])
+            expect((yield* store.read("no-run"))?.release_error).toContain("absence confirmed")
+          }
+        }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+      )
+    } finally {
+      await fixture.close()
+    }
+  },
+)
+
 test("readiness metadata must match the repository, lease, run and OIDC claims", async () => {
   const { sandboxGithubFixture } = await import("./harness")
   const { makeSandboxGithub } = await import("../../src/sandbox/github")

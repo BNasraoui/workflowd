@@ -11,7 +11,10 @@ export const bindingDirectory = (directory: string) => `${directory}.sandbox`
 // Keep the lease namespace within the executor's tool-name limit. The full lease
 // identity remains in the immutable binding; location isolation is unchanged.
 export const sandboxBridgeName = (leaseId: string) =>
-  `workflowd_sandbox_${createHash("sha256").update(leaseId).digest("hex").slice(0, 40)}`
+  `wfdlease_${createHash("sha256").update(leaseId).digest("hex").slice(0, 40)}`
+// MCP permission actions flatten server and tool names with underscore normalization.
+export const isSandboxBridgeNamespace = (server: string) =>
+  `${server.replace(/[^a-zA-Z0-9_]/g, "_")}_`.startsWith("wfdlease_")
 export const transportHash = (transport: SandboxTransport) =>
   createHash("sha256")
     .update(JSON.stringify(Schema.decodeUnknownSync(SandboxTransport)(transport)))
@@ -25,7 +28,7 @@ export const SandboxSessionBinding = Schema.Struct({
   endpointIdentity: Schema.NonEmptyString,
   directory: Schema.String.check(Schema.isPattern(/^\/[a-zA-Z0-9/_.@-]+$/)),
   locationIdentity: Schema.NonEmptyString,
-  bridgeServerName: Schema.String.check(Schema.isPattern(/^workflowd_sandbox_[a-zA-Z0-9_]+$/)),
+  bridgeServerName: Schema.String.check(Schema.isPattern(/^wfdlease_[a-zA-Z0-9_]+$/)),
   repositoryId: Schema.Int.check(Schema.isGreaterThan(0)),
   sourceSha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
   policyHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),

@@ -191,7 +191,11 @@ export const makeSandboxGithub = (
       const page = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
       )(result.data)
-      if (page.total_count > 100)
+      if (
+        page.total_count < 0 ||
+        page.total_count > 100 ||
+        page.workflow_runs.length !== page.total_count
+      )
         return yield* Effect.fail(
           new SandboxError({ message: "Sandbox run correlation exceeded its bound" }),
         )

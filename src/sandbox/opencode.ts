@@ -8,6 +8,7 @@ import {
   bindingDirectory,
   sandboxPolicyHash,
   sandboxRules,
+  isSandboxBridgeNamespace,
   readSandboxBinding,
   writeSandboxBinding,
   type SandboxSessionBinding,
@@ -118,7 +119,7 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
       return yield* Effect.fail(new Error("Sandbox location changed"))
     yield* checkSession(binding)
     const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
-    const bridges = catalog.data.filter((entry) => entry.name.startsWith("workflowd_sandbox_"))
+    const bridges = catalog.data.filter((entry) => isSandboxBridgeNamespace(entry.name))
     if (
       bridges.length !== 1 ||
       bridges[0]?.name !== binding.bridgeServerName ||
@@ -141,7 +142,7 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
     const catalog = yield* client.mcp.list({ location: { directory } })
     if (
       sessions.data.length !== 0 ||
-      catalog.data.some((entry) => entry.name.startsWith("workflowd_sandbox_"))
+      catalog.data.some((entry) => isSandboxBridgeNamespace(entry.name))
     )
       return yield* Effect.fail(new Error("Sandbox location is already in use"))
     return identity

@@ -397,6 +397,60 @@ export const compactionSummary = `## Objective
 ## Relevant Files
 - (none)`
 
+export async function installGlobalWorkflowdProbe(
+  fixture: Awaited<ReturnType<typeof sharedOpenCodeFixture>>,
+) {
+  const marker = join(fixture.root, "global-workflowd-canary")
+  const script = join(fixture.root, "global-workflowd.mjs")
+  await writeFile(
+    script,
+    `
+    let pending = "";
+    for await (const chunk of Bun.stdin.stream()) {
+      pending += new TextDecoder().decode(chunk);
+      for (let end; (end = pending.indexOf("\\n")) !== -1;) {
+        const frame = JSON.parse(pending.slice(0, end)); pending = pending.slice(end + 1);
+        if (frame.id === undefined) continue;
+        let result = {};
+        if (frame.method === "initialize") result = {protocolVersion:"2024-11-05",capabilities:{tools:{}},serverInfo:{name:"fixture",version:"1"}};
+        if (frame.method === "tools/list") result = {tools:[{name:"sandbox_probe",description:"Harmless global collision canary",inputSchema:{type:"object",properties:{}}}]};
+        if (frame.method === "tools/call") {
+          await Bun.write(process.argv[2], "called");
+          result = {content:[{type:"text",text:"global probe executed"}]};
+        }
+        process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:frame.id,result}) + "\\n");
+      }
+    }
+  `,
+  )
+  const file = join(fixture.root, "home/.config/opencode/opencode.json")
+  const config = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
+    await Bun.file(file).json(),
+  )
+  await writeFile(
+    file,
+    JSON.stringify({
+      ...config,
+      mcp: {
+        servers: {
+          workflowd: { type: "local", command: [process.execPath, script, marker] },
+        },
+      },
+    }),
+  )
+  await fixture.restart()
+  const deadline = Date.now() + 30000
+  for (;;) {
+    try {
+      await fixture.api("health")
+      return marker
+    } catch (error) {
+      if (Date.now() >= deadline) throw error
+      await Bun.sleep(100)
+    }
+  }
+}
+
 // Exercise cleanup of historical invocation custody without recreating the removed launcher.
 export async function legacySandboxUnit(directory: string, leaseId: string) {
   const unit = `workflowd-sandbox-${leaseId}`
