@@ -85,3 +85,13 @@ export const sandboxOperationMigration = Effect.gen(function* () {
       WHERE repository_id=json_extract(NEW.policy,'$.repositoryId') AND lease_id=NEW.lease_id;
     END`
 })
+
+export const sandboxCreationMigration = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`ALTER TABLE sandbox_lease_operations ADD COLUMN creation_pending INTEGER NOT NULL DEFAULT 0 CHECK(creation_pending IN (0,1))`
+  // An existing in-flight acquisition may already have submitted a POST.
+  yield* sql`UPDATE sandbox_lease_operations SET creation_pending=1
+    WHERE owner IS NOT NULL AND EXISTS (SELECT 1 FROM sandbox_leases l
+      WHERE l.lease_id=sandbox_lease_operations.lease_id AND l.state='starting'
+      AND json_extract(l.policy,'$.repositoryId')=sandbox_lease_operations.repository_id)`
+})

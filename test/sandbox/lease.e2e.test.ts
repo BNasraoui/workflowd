@@ -9,6 +9,7 @@ import {
   sandboxMigration,
   sandboxCleanupMigration,
   sandboxOperationMigration,
+  sandboxCreationMigration,
 } from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
 
@@ -69,6 +70,7 @@ test("SQLite preserves immutable lease intent and refuses premature release", as
       yield* sandboxMigration
       yield* sandboxCleanupMigration
       yield* sandboxOperationMigration
+      yield* sandboxCreationMigration
       const store = yield* makeSandboxStore
       const input = {
         runId: "run-1",
@@ -126,6 +128,52 @@ test("GitHub acquisition scopes the token, reconciles a lost ref response, and f
   }
 })
 
+test.each([
+  "/access_tokens",
+  `/repos/${policy.repository}`,
+  "/git/ref/heads/workflowd/leases/lease-1",
+])("GitHub request deadline aborts the transport at %s", async (path) => {
+  const { Fiber } = await import("effect")
+  const { TestClock } = await import("effect/testing")
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const fixture = await sandboxGithubFixture(policy)
+  const entered = Promise.withResolvers<void>()
+  const response = Promise.withResolvers<Response>()
+  let signal: AbortSignal | null | undefined
+  const client = fixture.OctokitClass.defaults({
+    request: {
+      fetch: (input: string | Request | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname.endsWith(path)) {
+          signal = init?.signal
+          entered.resolve()
+          return response.promise
+        }
+        return fetch(input, init)
+      },
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const github = yield* makeSandboxGithub(fixture.github, client)
+        const fiber = yield* github
+          .ensureRef(policy, "lease-1")
+          .pipe(Effect.timeout("11 seconds"), Effect.result, Effect.forkChild)
+        yield* Effect.promise(() => entered.promise)
+        yield* TestClock.adjust("10 seconds")
+        expect(signal?.aborted).toBe(true)
+        expect((yield* Fiber.join(fiber))._tag).toBe("Failure")
+        expect(fixture.refCreates).toBe(0)
+      }).pipe(Effect.provide(TestClock.layer())),
+    )
+  } finally {
+    response.resolve(new Response(null, { status: 503 }))
+    await fixture.close()
+  }
+})
+
 test("release stays pending until the correlated Actions run is confirmed completed", async () => {
   const { sandboxGithubFixture } = await import("./harness")
   const { makeSandboxGithub } = await import("../../src/sandbox/github")
@@ -137,6 +185,7 @@ test("release stays pending until the correlated Actions run is confirmed comple
         yield* sandboxMigration
         yield* sandboxCleanupMigration
         yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const service = yield* makeSandboxLeaseService(github)
@@ -185,6 +234,7 @@ test.each([
           yield* sandboxMigration
           yield* sandboxCleanupMigration
           yield* sandboxOperationMigration
+          yield* sandboxCreationMigration
           const store = yield* makeSandboxStore
           const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
           const leases = yield* makeSandboxLeaseService(github)
@@ -388,6 +438,7 @@ test("restart release checks the saved run even when listings contain only a com
         yield* sandboxMigration
         yield* sandboxCleanupMigration
         yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -515,6 +566,7 @@ test("lease acquisition initializes through SSH and retries a lost initializatio
         yield* sandboxMigration
         yield* sandboxCleanupMigration
         yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github, join(runner.root, "control"), control)
@@ -608,6 +660,7 @@ test("released custody is revalidated through direct saved runs and absent refs 
         yield* sandboxMigration
         yield* sandboxCleanupMigration
         yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -682,6 +735,7 @@ test("session cleanup uncertainty fences release despite deadline expiry and inv
         yield* sandboxMigration
         yield* sandboxCleanupMigration
         yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)

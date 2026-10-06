@@ -319,7 +319,7 @@ test("sandbox parent watches consume durable terminal mailboxes and fence stale 
       const [cleanup] = yield* store.cleanupRuns()
       if (!cleanup) throw new Error("Missing sandbox cleanup custody")
       yield* store.cleanupState(cleanup, "terminated")
-      yield* store.finishCleanup(cleanup, Effect.void)
+      yield* store.finishCleanup(cleanup, Effect.void, Effect.void)
       yield* runs.complete({
         runId: receipt.runId,
         finalMessage: "saved sandbox answer",

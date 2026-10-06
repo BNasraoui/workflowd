@@ -26,6 +26,13 @@ const Ref = Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Sch
 export type OwnedLeaseRun = { readonly leaseId: string; readonly run: typeof Run.Type }
 const leaseBranch = (leaseId: string) => `workflowd/leases/${leaseId}`
 const githubFailure = () => new SandboxError({ message: "Sandbox GitHub request failed" })
+const http = <A>(send: (signal: AbortSignal) => Promise<A>) =>
+  Effect.tryPromise({ try: send, catch: githubFailure }).pipe(
+    Effect.timeout("10 seconds"),
+    Effect.mapError(
+      () => new SandboxError({ message: "Sandbox GitHub request uncertain", uncertain: true }),
+    ),
+  )
 
 const Ready = Schema.Struct({
   leaseId: Schema.String,
@@ -91,22 +98,18 @@ export const makeSandboxGithub = (
     })
     const app = new App({ appId: github.appId, privateKey: key, Octokit: OctokitClass })
     const scoped = Effect.fn("SandboxGithub.scoped")(function* (policy: SandboxPolicy) {
-      const response = yield* Effect.tryPromise({
-        try: () =>
-          app.octokit.request("POST /app/installations/{installation_id}/access_tokens", {
-            installation_id: policy.installationId,
-            repository_ids: [policy.repositoryId],
-            permissions: { contents: "write", actions: "write" },
-            request: { timeout: 10000 },
-          }),
-        catch: githubFailure,
-      })
+      const response = yield* http((signal) =>
+        app.octokit.request("POST /app/installations/{installation_id}/access_tokens", {
+          installation_id: policy.installationId,
+          repository_ids: [policy.repositoryId],
+          permissions: { contents: "write", actions: "write" },
+          request: { signal },
+        }),
+      )
       const client = new OctokitClass({ auth: response.data.token })
-      const repository = yield* Effect.tryPromise({
-        try: () =>
-          client.request(`GET /repos/${policy.repository}`, { request: { timeout: 10000 } }),
-        catch: githubFailure,
-      })
+      const repository = yield* http((signal) =>
+        client.request(`GET /repos/${policy.repository}`, { request: { signal } }),
+      )
       const actual = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ ...Repository.fields, full_name: Schema.String, private: Schema.Boolean }),
       )(repository.data)
@@ -127,33 +130,31 @@ export const makeSandboxGithub = (
       path: string,
       body: Record<string, unknown> = {},
     ) {
-      return yield* Effect.tryPromise({
-        try: async () => {
-          try {
-            const result = await client.request(`${method} ${path}`, {
-              ...body,
-              request: { timeout: 10000 },
-            })
-            const data: unknown = result.data
-            return { status: result.status, data }
-          } catch (error) {
-            // Retain only the HTTP status; Octokit exceptions can contain credentials.
-            if (
-              typeof error === "object" &&
-              error !== null &&
-              "status" in error &&
-              typeof error.status === "number"
-            )
-              return { status: error.status, data: null }
-            throw githubFailure()
-          }
-        },
-        catch: githubFailure,
+      return yield* http(async (signal) => {
+        try {
+          const result = await client.request(`${method} ${path}`, {
+            ...body,
+            request: { signal },
+          })
+          const data: unknown = result.data
+          return { status: result.status, data }
+        } catch (error) {
+          // Retain only the HTTP status; Octokit exceptions can contain credentials.
+          if (
+            typeof error === "object" &&
+            error !== null &&
+            "status" in error &&
+            typeof error.status === "number"
+          )
+            return { status: error.status, data: null }
+          throw githubFailure()
+        }
       })
     })
     const ensureRef = Effect.fn("SandboxGithub.ensureRef")(function* (
       policy: SandboxPolicy,
       leaseId: string,
+      create = true,
     ) {
       yield* Schema.decodeUnknownEffect(
         Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,80}$/)),
@@ -161,7 +162,7 @@ export const makeSandboxGithub = (
       const client = yield* scoped(policy)
       const path = `/repos/${policy.repository}/git/ref/heads/${leaseBranch(leaseId)}`
       let result = yield* request(client, "GET", path)
-      if (result.status === 404) {
+      if (result.status === 404 && create) {
         // A lost reply is reconciled by reading the single immutable lease ref.
         yield* request(client, "POST", `/repos/${policy.repository}/git/refs`, {
           ref: `refs/heads/${leaseBranch(leaseId)}`,

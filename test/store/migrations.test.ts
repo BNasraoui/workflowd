@@ -33,6 +33,49 @@ const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.result, Effect.map(Result.isFailure))
 
+test("migration 32 retains uncertain creation for an acquisition already in flight", async () => {
+  const {
+    sandboxMigration,
+    sandboxCleanupMigration,
+    sandboxOperationMigration,
+    sandboxCreationMigration,
+  } = await import("../../src/sandbox/migration")
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sandboxMigration
+      yield* sandboxCleanupMigration
+      yield* sandboxOperationMigration
+      yield* sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,created_at,heartbeat_at,deadline)
+      VALUES('run','lease','{"repositoryId":7}',${"a".repeat(40)},'starting',100,100,1000)`
+      yield* sql`INSERT INTO sandbox_lease_operations(repository_id,lease_id,owner,expires_at,generation)
+      VALUES(7,'lease','saved-owner',900,3),(7,'orphan',NULL,NULL,0)`
+      yield* sandboxCreationMigration
+      expect(yield* sql`SELECT * FROM sandbox_lease_operations ORDER BY lease_id`).toEqual([
+        {
+          repository_id: 7,
+          lease_id: "lease",
+          owner: "saved-owner",
+          expires_at: 900,
+          generation: 3,
+          creation_pending: 1,
+        },
+        {
+          repository_id: 7,
+          lease_id: "orphan",
+          owner: null,
+          expires_at: null,
+          generation: 0,
+          creation_pending: 0,
+        },
+      ])
+      expect(yield* rejected(sql`UPDATE sandbox_lease_operations SET creation_pending=2`)).toBe(
+        true,
+      )
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+})
+
 const seedSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
   yield* sql`
@@ -180,6 +223,7 @@ describe("strict initial store schema", () => {
       { migration_id: 29, name: "sandbox_leases" },
       { migration_id: 30, name: "sandbox_cleanup_runs" },
       { migration_id: 31, name: "sandbox_lease_operations" },
+      { migration_id: 32, name: "sandbox_ref_creation" },
     ])
     expect(result.tables).toHaveLength(35)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
@@ -901,6 +945,7 @@ test("migration 30 preserves lease authority, backfills cleanup pairs and is rep
           generation: 0,
           owner: null,
           expires_at: null,
+          creation_pending: 0,
         })),
       )
       expect(yield* sql`SELECT * FROM sandbox_cleanup_runs`).toEqual([
