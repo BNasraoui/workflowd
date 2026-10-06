@@ -6,6 +6,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: agent-image-publish
+  cancel-in-progress: true
+
 jobs:
   build:
     permissions:
