@@ -35,7 +35,7 @@ export const makeAgentRunCustody = (dependencies: {
   const ensureResource = (input: {
     readonly resourceId: string
     readonly absolutePath: string
-    readonly kind: "worktree" | "checkout"
+    readonly kind: "workspace" | "worktree" | "checkout"
     readonly createdAt: Date
   }) =>
     Effect.gen(function* () {
@@ -60,6 +60,7 @@ export const makeAgentRunCustody = (dependencies: {
     readonly createdAt: Date
     readonly kind?: "opencode" | "claude" | "codex"
     readonly host?: string
+    readonly sandboxEndpoint?: string
   }) =>
     Effect.gen(function* () {
       const kind = input.kind ?? "opencode"
@@ -82,9 +83,13 @@ export const makeAgentRunCustody = (dependencies: {
         opencode: {
           sessionId: `opencode-session-${input.nativeSessionId}`,
           providerId: options.identity.providerId,
-          serverId: options.identity.serverId,
-          endpointAlias: options.identity.endpointAlias,
-          endpointIdentity: options.identity.endpointIdentity,
+          serverId:
+            input.sandboxEndpoint === undefined
+              ? options.identity.serverId
+              : `sandbox:${input.nativeSessionId}`,
+          endpointAlias:
+            input.sandboxEndpoint === undefined ? options.identity.endpointAlias : "sandbox",
+          endpointIdentity: input.sandboxEndpoint ?? options.identity.endpointIdentity,
         },
       }[kind]
       const { sessionId } = providerConfig

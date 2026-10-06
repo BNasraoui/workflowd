@@ -5,6 +5,7 @@ import { Effect, Schema } from "effect"
 import { makeSandboxStore, SandboxError } from "./store"
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
+import type { SandboxPolicy } from "./config"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
 
@@ -48,7 +49,8 @@ async function controlCommand(
   args: ReadonlyArray<string>,
   input: string,
   signal: AbortSignal,
-): Promise<string> {
+  limit = 1048576,
+): Promise<string | Uint8Array> {
   const child = Bun.spawn([...args], {
     stdin: new Blob([input]),
     stdout: "pipe",
@@ -68,13 +70,13 @@ async function controlCommand(
       const item = await reader.read()
       if (item.done) break
       length += item.value.length
-      if (length > 1048576)
+      if (length > limit)
         throw new SandboxError({ message: "Sandbox control output exceeded its bound" })
       chunks.push(item.value)
     }
     if ((await child.exited) !== 0)
       throw new SandboxError({ message: "Sandbox control command failed" })
-    return Buffer.concat(chunks).toString().trim()
+    return Buffer.concat(chunks)
   } finally {
     clearTimeout(timer)
     signal.removeEventListener("abort", stop)
@@ -82,6 +84,9 @@ async function controlCommand(
     await child.exited
   }
 }
+
+const controlText = (value: string | Uint8Array) =>
+  typeof value === "string" ? value : new TextDecoder("utf-8", { fatal: true }).decode(value)
 
 const connectPeer = (
   lease: { lease_id: string; source_sha: string; policy: { repository: string } },
@@ -92,7 +97,7 @@ const connectPeer = (
   Effect.tryPromise({
     try: async (signal) => {
       const status: unknown = JSON.parse(
-        await command(["/usr/bin/tailscale", "status", "--json"], "", signal),
+        controlText(await command(["/usr/bin/tailscale", "status", "--json"], "", signal)),
       )
       const keys = bindSandboxPeer(ready, status)
       await mkdir(root, { recursive: true, mode: 0o700 })
@@ -113,13 +118,34 @@ const connectPeer = (
         }
         const args = sandboxSshArguments(transport).slice(0, -1)
         await command([...args, "exec /usr/local/bin/container-use heartbeat"], "", signal)
-        const source = await command(
-          [...args, "exec /usr/local/bin/container-use initialize"],
-          JSON.stringify({ repository: lease.policy.repository, sourceSha: lease.source_sha }),
-          signal,
-        )
-        if (source !== lease.source_sha)
-          throw new SandboxError({ message: "Sandbox source checkout unconfirmed" })
+        const keepalive = new AbortController()
+        const initializing = AbortSignal.any([signal, keepalive.signal])
+        let pulse = Promise.resolve()
+        const timer = setInterval(() => {
+          pulse = command(
+            [...args, "exec /usr/local/bin/container-use heartbeat"],
+            "",
+            AbortSignal.any([initializing, AbortSignal.timeout(10000)]),
+          ).then(
+            () => undefined,
+            () => {
+              keepalive.abort()
+            },
+          )
+        }, 30000)
+        try {
+          const source = await command(
+            [...args, "exec /usr/local/bin/container-use initialize"],
+            JSON.stringify({ repository: lease.policy.repository, sourceSha: lease.source_sha }),
+            initializing,
+          )
+          if (controlText(source).trim() !== lease.source_sha || keepalive.signal.aborted)
+            throw new SandboxError({ message: "Sandbox source checkout unconfirmed" })
+        } finally {
+          clearInterval(timer)
+          keepalive.abort()
+          await pulse
+        }
         return transport
       } catch (error) {
         await rm(directory, { recursive: true, force: true })
@@ -144,32 +170,80 @@ export const makeSandboxLeaseService = (
         )
       return lease
     })
+    const cleanup = Effect.fn("SandboxLease.cleanup")(function* (policy?: SandboxPolicy) {
+      const retained = (yield* store.cleanupRuns()).filter(
+        (row) => policy === undefined || JSON.stringify(row.policy) === JSON.stringify(policy),
+      )
+      let failed = false
+      for (const row of retained) {
+        const lease = yield* store.cleanupLease(row)
+        if (
+          lease !== null &&
+          !["releasing", "released"].includes(lease.state) &&
+          (lease.actions_run_id === null ||
+            (lease.actions_run_id === row.actions_run_id &&
+              lease.actions_attempt === row.actions_attempt))
+        )
+          continue
+        const result = yield* Effect.gen(function* () {
+          const run = yield* github.savedRun(
+            row.policy,
+            row.lease_id,
+            row.actions_run_id,
+            row.actions_attempt,
+          )
+          yield* store.cleanupState(row, run.status === "completed" ? "terminated" : "pending")
+          if (run.status !== "completed") yield* github.cancel(row.policy, row.actions_run_id)
+        }).pipe(
+          Effect.tapError(() =>
+            store.cleanupState(row, "pending", "Sandbox run confirmation failed; retry required"),
+          ),
+          Effect.result,
+        )
+        if (result._tag === "Failure") failed = true
+      }
+      for (const row of retained) {
+        const result = yield* store
+          .finishCleanup(row, github.deleteRef(row.policy, row.lease_id))
+          .pipe(
+            Effect.tapError(() =>
+              store.cleanupState(
+                row,
+                "terminated",
+                "Sandbox ref deletion unconfirmed; retry required",
+              ),
+            ),
+            Effect.result,
+          )
+        if (result._tag === "Failure") failed = true
+      }
+      if (failed)
+        return yield* Effect.fail(
+          new SandboxError({ message: "Sandbox cleanup incomplete; retry required" }),
+        )
+    })
+    const discover = (lease: Effect.Success<ReturnType<typeof required>>) =>
+      github.runs(lease.policy, lease.lease_id).pipe(
+        Effect.flatMap((runs) =>
+          store.adoptAll(
+            lease.policy,
+            runs.map((run) => ({ leaseId: lease.lease_id, run })),
+          ),
+        ),
+      )
+    const inventory = Effect.fn("SandboxLease.inventory")(function* (policy: SandboxPolicy) {
+      const owned = yield* github
+        .inventory(policy)
+        .pipe(Effect.tapError(() => store.inventoryError(policy)))
+      yield* store.adoptAll(policy, owned)
+    })
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
       const lease = yield* required(runId)
-      if (lease.state === "released") return
       yield* store.beginRelease(runId)
       yield* Effect.gen(function* () {
-        const runs = yield* github.runs(lease.policy, lease.lease_id)
-        if (lease.actions_run_id !== null && lease.actions_attempt !== null) {
-          const saved = yield* github.savedRun(
-            lease.policy,
-            lease.lease_id,
-            lease.actions_run_id,
-            lease.actions_attempt,
-          )
-          const index = runs.findIndex((run) => run.id === saved.id)
-          if (index === -1) runs.push(saved)
-          else runs[index] = saved
-        }
-        // The GitHub run can appear after a lost ref-creation response. Absence
-        // is not termination; reconciliation retains custody until it is observed.
-        if (runs.length === 0) return
-        for (const run of runs) {
-          if (run.status !== "completed") yield* github.cancel(lease.policy, run.id)
-        }
-        if (runs.some((run) => run.status !== "completed")) return
-        yield* github.deleteRef(lease.policy, lease.lease_id)
-        yield* store.confirmReleased(runId)
+        yield* inventory(lease.policy)
+        yield* discover(lease)
+        yield* cleanup(lease.policy)
       }).pipe(Effect.tapError(() => store.recordError(runId)))
     })
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
@@ -185,6 +259,10 @@ export const makeSandboxLeaseService = (
         )
       yield* github.ensureRef(lease.policy, lease.lease_id)
       const runs = yield* github.runs(lease.policy, lease.lease_id)
+      yield* store.adoptAll(
+        lease.policy,
+        runs.map((run) => ({ leaseId: lease.lease_id, run })),
+      )
       if (runs.length > 1)
         return yield* Effect.fail(
           new SandboxError({ message: "Multiple Actions runs claimed the sandbox lease" }),
@@ -208,16 +286,59 @@ export const makeSandboxLeaseService = (
       }
       return yield* required(runId)
     })
-    const reconcile = Effect.fn("SandboxLease.reconcile")(function* () {
+    const reconcile = Effect.fn("SandboxLease.reconcile")(function* (
+      policies: ReadonlyArray<SandboxPolicy> = [],
+    ) {
       const leases = yield* store.active()
-      yield* Effect.forEach(
-        leases,
-        (lease) =>
-          lease.state === "releasing" || lease.deadline <= Date.now()
-            ? release(lease.run_id)
-            : acquire(lease.run_id),
-        { discard: true },
+      const saved = yield* store.cleanupRuns()
+      const snapshots = new Map(
+        [
+          ...policies,
+          ...leases.map((lease) => lease.policy),
+          ...saved.map((row) => row.policy),
+        ].map((policy) => [JSON.stringify(policy), policy] as const),
+      )
+      for (const policy of snapshots.values()) yield* inventory(policy)
+      for (const lease of leases) {
+        if (lease.deadline <= Date.now()) yield* store.beginRelease(lease.run_id)
+        if (lease.state === "releasing" || lease.deadline <= Date.now())
+          yield* discover(lease).pipe(Effect.tapError(() => store.recordError(lease.run_id)))
+        else yield* acquire(lease.run_id)
+      }
+      yield* cleanup().pipe(
+        Effect.tapError(() =>
+          Effect.forEach(leases, (lease) => store.recordError(lease.run_id), { discard: true }),
+        ),
       )
     })
-    return { acquire, release, reconcile }
+    const remote = (runId: string, operation: string, limit = 1048576) =>
+      Effect.gen(function* () {
+        const lease = yield* required(runId)
+        if (lease.transport === null)
+          return yield* Effect.fail(new SandboxError({ message: "Sandbox transport is not bound" }))
+        return yield* Effect.tryPromise({
+          try: (signal) =>
+            command(
+              [...sandboxSshArguments(lease.transport!).slice(0, -1), operation],
+              "",
+              signal,
+              limit,
+            ),
+          catch: () => new SandboxError({ message: "Sandbox control operation failed" }),
+        })
+      })
+    const heartbeat = (runId: string) =>
+      remote(runId, "exec /usr/local/bin/container-use heartbeat").pipe(
+        Effect.timeout("10 seconds"),
+        Effect.andThen(store.heartbeat(runId, Date.now())),
+      )
+    // A fixed command executes only on the runner. Ref names and patch paths
+    // remain remote; the returned bytes are never parsed as mint paths or code.
+    const artifact = (runId: string) =>
+      remote(
+        runId,
+        `exec docker exec workflowd-sandbox-tooling sh -c 'git for-each-ref --format="%(refname)" refs/remotes/container-use/ | while IFS= read -r ref; do git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --binary HEAD "$ref" -- || exit; done'`,
+        8 * 1048576,
+      )
+    return { acquire, release, reconcile, heartbeat, artifact }
   })

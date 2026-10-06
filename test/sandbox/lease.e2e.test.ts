@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import { parseSandboxRepositories } from "../../src/sandbox/config"
-import { sandboxMigration } from "../../src/sandbox/migration"
+import { sandboxMigration, sandboxCleanupMigration } from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
 
 const policy = {
@@ -63,6 +63,7 @@ test("SQLite preserves immutable lease intent and refuses premature release", as
   await Effect.runPromise(
     Effect.gen(function* () {
       yield* sandboxMigration
+      yield* sandboxCleanupMigration
       const store = yield* makeSandboxStore
       const input = {
         runId: "run-1",
@@ -129,6 +130,7 @@ test("release stays pending until the correlated Actions run is confirmed comple
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* sandboxMigration
+        yield* sandboxCleanupMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const service = yield* makeSandboxLeaseService(github)
@@ -264,6 +266,7 @@ test("restart release checks the saved run even when listings contain only a com
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* sandboxMigration
+        yield* sandboxCleanupMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github)
@@ -389,6 +392,7 @@ test("lease acquisition initializes through SSH and retries a lost initializatio
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* sandboxMigration
+        yield* sandboxCleanupMigration
         const store = yield* makeSandboxStore
         const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
         const leases = yield* makeSandboxLeaseService(github, join(runner.root, "control"), control)
@@ -419,6 +423,10 @@ test("lease acquisition initializes through SSH and retries a lost initializatio
         yield* leases.release("run-1")
         expect((yield* store.read("run-1"))?.state).toBe("releasing")
         fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+        yield* leases.reconcile()
+        expect((yield* store.read("run-1"))?.state).toBe("releasing")
+        expect(fixture.cancellations).toContain(42)
+        fixture.savedRun(42, { status: "completed", conclusion: "cancelled" })
         yield* leases.reconcile()
         expect((yield* store.read("run-1"))?.state).toBe("released")
       }).pipe(Effect.provide(SqliteClient.layer({ filename: join(runner.root, "leases.sqlite") }))),

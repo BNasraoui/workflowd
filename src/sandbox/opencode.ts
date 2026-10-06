@@ -1,6 +1,6 @@
 import type { SandboxTransport } from "./transport"
 import { createHash, randomBytes } from "node:crypto"
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises"
+import { mkdir, readFile, realpath, writeFile, open, rename, link, rm } from "node:fs/promises"
 import { createServer } from "node:net"
 import { join } from "node:path"
 import { Schema } from "effect"
@@ -12,6 +12,83 @@ export type SandboxOpenCodeInput = {
   readonly transport: SandboxTransport
   readonly authFile: string
   readonly providers: Readonly<Record<string, unknown>>
+  readonly signal?: AbortSignal
+  readonly onStarted?: (endpoint: SandboxEndpoint) => Promise<void>
+}
+
+export const SandboxEndpoint = Schema.Struct({
+  url: Schema.String.check(Schema.isPattern(/^http:\/\/127\.0\.0\.1:\d+$/)),
+  password: Schema.NonEmptyString,
+  unit: Schema.String.check(Schema.isPattern(/^workflowd-sandbox-[a-zA-Z0-9-]{1,80}$/)),
+  invocationId: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
+})
+export type SandboxEndpoint = typeof SandboxEndpoint.Type
+
+export async function saveSandboxFile(
+  directory: string,
+  name: string,
+  value: string | Uint8Array,
+  exclusive = false,
+) {
+  const temporary = join(directory, `${name}-${randomBytes(8).toString("hex")}`)
+  const file = await open(temporary, "wx", 0o600)
+  try {
+    await file.writeFile(value)
+    await file.sync()
+  } finally {
+    await file.close()
+  }
+  if (exclusive) {
+    try {
+      await link(temporary, join(directory, name))
+    } catch (error) {
+      if (!(
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "EEXIST"
+      ))
+        throw error
+    } finally {
+      await rm(temporary, { force: true })
+    }
+  } else await rename(temporary, join(directory, name))
+  const parent = await open(directory, "r")
+  try {
+    await parent.sync()
+  } finally {
+    await parent.close()
+  }
+}
+
+export async function readSandboxEndpoint(directory: string): Promise<SandboxEndpoint> {
+  return Schema.decodeUnknownSync(SandboxEndpoint)(
+    JSON.parse(await readFile(join(directory, "endpoint.json"), "utf8")),
+  )
+}
+
+export async function stopSandboxOpenCode(
+  endpoint: Pick<SandboxEndpoint, "unit" | "invocationId">,
+) {
+  const state = await command([
+    "systemctl",
+    "--user",
+    "show",
+    endpoint.unit,
+    "-p",
+    "ActiveState",
+    "-p",
+    "InvocationID",
+  ])
+  if (/^ActiveState=inactive$/m.test(state)) return
+  if (!state.includes(`InvocationID=${endpoint.invocationId}`))
+    throw new Error("Sandbox unit generation changed")
+  await command(["systemctl", "--user", "stop", endpoint.unit])
+  const after = await command(["systemctl", "--user", "show", endpoint.unit, "-p", "ActiveState"])
+  if (!/^ActiveState=(inactive|failed)$/m.test(after))
+    throw new Error("Sandbox unit stop unconfirmed")
+  if (/^ActiveState=failed$/m.test(after))
+    await command(["systemctl", "--user", "reset-failed", endpoint.unit])
 }
 
 const version = "0.0.0-beta-19242"
@@ -190,12 +267,24 @@ export async function startSandboxOpenCode(input: SandboxOpenCodeInput): Promise
     String(port),
   ])
   try {
+    const invocationId = await command([
+      "systemctl",
+      "--user",
+      "show",
+      unit,
+      "--property=InvocationID",
+      "--value",
+    ])
+    const endpoint = { url, password, unit, invocationId }
+    await saveSandboxFile(input.directory, "endpoint.json", JSON.stringify(endpoint))
+    await input.onStarted?.(endpoint)
     const headers = {
       Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
     }
     const deadline = Date.now() + 300_000
     const location = new URLSearchParams({ "location[directory]": directory })
     for (;;) {
+      input.signal?.throwIfAborted()
       const state = await inspect()
       if (!/^ActiveState=(active|activating)$/m.test(state))
         throw new Error(`Sandbox namespace preflight failed: ${state}`)
@@ -238,14 +327,6 @@ export async function startSandboxOpenCode(input: SandboxOpenCodeInput): Promise
     }
     // This pinned OpenCode version debounces MCP catalog registration by 100ms.
     await new Promise((resolve) => setTimeout(resolve, 200))
-    const invocationId = await command([
-      "systemctl",
-      "--user",
-      "show",
-      unit,
-      "--property=InvocationID",
-      "--value",
-    ])
     return { url, password, unit, invocationId, close }
   } catch (error) {
     try {

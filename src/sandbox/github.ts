@@ -23,6 +23,7 @@ const Run = Schema.Struct({
   conclusion: Schema.NullOr(Schema.String),
 })
 const Ref = Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) })
+export type OwnedLeaseRun = { readonly leaseId: string; readonly run: typeof Run.Type }
 const leaseBranch = (leaseId: string) => `workflowd/leases/${leaseId}`
 const githubFailure = () => new SandboxError({ message: "Sandbox GitHub request failed" })
 
@@ -243,6 +244,57 @@ export const makeSandboxGithub = (
         )
       return run
     })
+    const inventory = Effect.fn("SandboxGithub.inventory")(function* (policy: SandboxPolicy) {
+      return yield* Effect.gen(function* () {
+        const client = yield* scoped(policy)
+        const owned: OwnedLeaseRun[] = []
+        const seen = new Set<number>()
+        let total: number | undefined
+        for (let number = 1; number <= 10; number++) {
+          const response = yield* request(
+            client,
+            "GET",
+            `/repos/${policy.repository}/actions/runs`,
+            {
+              head_sha: policy.workflowSha,
+              event: "push",
+              per_page: 100,
+              page: number,
+            },
+          )
+          if (response.status !== 200) return yield* Effect.fail(githubFailure())
+          const page = yield* Schema.decodeUnknownEffect(
+            Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
+          )(response.data)
+          total ??= page.total_count
+          if (
+            total < 0 ||
+            total > 1000 ||
+            total !== page.total_count ||
+            page.workflow_runs.length !== Math.min(100, total - seen.size)
+          )
+            return yield* Effect.fail(githubFailure())
+          for (const run of page.workflow_runs) {
+            if (seen.has(run.id)) return yield* Effect.fail(githubFailure())
+            seen.add(run.id)
+            const leaseId = /^workflowd\/leases\/([a-zA-Z0-9-]{1,80})$/.exec(run.head_branch)?.[1]
+            if (leaseId === undefined) continue
+            const validated = yield* Effect.result(validateRun(policy, leaseId, run))
+            if (validated._tag === "Success") owned.push({ leaseId, run: validated.success })
+          }
+          if (seen.size === total) return owned
+        }
+        return yield* Effect.fail(githubFailure())
+      }).pipe(
+        Effect.timeout("60 seconds"),
+        Effect.mapError(
+          () =>
+            new SandboxError({
+              message: "Sandbox repository inventory incomplete; retry required",
+            }),
+        ),
+      )
+    })
     const cancel = Effect.fn("SandboxGithub.cancel")(function* (
       policy: SandboxPolicy,
       runId: number,
@@ -389,6 +441,7 @@ export const makeSandboxGithub = (
       ensureRef,
       runs,
       savedRun,
+      inventory,
       cancel,
       deleteRef,
       readiness,

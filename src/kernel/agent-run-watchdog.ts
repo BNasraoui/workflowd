@@ -1,4 +1,5 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
+import { SandboxDispatch } from "../sandbox/dispatch"
 import { WorkSignal } from "../work-signal"
 import { AgentRunProvider } from "./agent-run-ingress"
 import { AgentRunStore, type AgentRunRecord } from "./agent-run-store"
@@ -54,6 +55,11 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
       unsupervisedExecutorKinds: options.unsupervisedExecutorKinds,
     })
     if (run === null) return "idle" as const
+    const sandbox = yield* Effect.serviceOption(SandboxDispatch)
+    if (Option.isSome(sandbox) && (yield* sandbox.value.owns(run.runId))) {
+      yield* sandbox.value.observe(run)
+      return "worked" as const
+    }
 
     if (run.state !== "verified" || run.nativeSessionId === null) {
       // The dispatching request died before verification. When it got far
