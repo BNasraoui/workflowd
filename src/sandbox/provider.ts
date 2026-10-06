@@ -1,74 +1,14 @@
-import { OpenCode } from "@opencode-ai/client/effect"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
   AgentHandoffStore,
   AgentHandoffStoreError,
   type AgentHandoffStorePort,
 } from "../kernel/agent-handoff-store"
-import { FetchHttpClient } from "effect/unstable/http"
-import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../opencode/adapter"
 import { OpenCodeAdapterError } from "../opencode/adapter"
 import type { AgentRunProviderPort } from "../kernel/agent-run-ingress"
 import type { SandboxDispatchPort } from "./dispatch"
 import { makeSandboxStore } from "./store"
-
-export function createSandboxProvider(endpoint: {
-  readonly url: string
-  readonly password: string
-}) {
-  const origin = new URL(endpoint.url).origin
-  if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error("Invalid sandbox endpoint")
-  const boundedFetch = Object.assign(
-    async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input instanceof Request ? input.url : input)
-      if (url.origin !== origin) throw new Error("Sandbox endpoint changed")
-      const headers = new Headers(init?.headers)
-      headers.set(
-        "authorization",
-        `Basic ${Buffer.from(`opencode:${endpoint.password}`).toString("base64")}`,
-      )
-      const response = await fetch(input, {
-        ...init,
-        headers,
-        redirect: "error",
-        signal: AbortSignal.any([
-          ...(init?.signal == null ? [] : [init.signal]),
-          AbortSignal.timeout(20000),
-        ]),
-      })
-      const chunks: Uint8Array[] = []
-      let size = 0
-      const reader = response.body?.getReader()
-      if (reader !== undefined) {
-        try {
-          for (;;) {
-            const chunk = await reader.read()
-            if (chunk.done) break
-            const bytes: unknown = chunk.value
-            if (!(bytes instanceof Uint8Array)) throw new Error("Invalid sandbox response bytes")
-            size += bytes.byteLength
-            if (size > 1048576) throw new Error("Sandbox API output exceeds 1 MiB")
-            chunks.push(bytes)
-          }
-        } finally {
-          await reader.cancel()
-        }
-      }
-      return new Response(response.status === 204 ? null : Buffer.concat(chunks), {
-        status: response.status,
-        headers: response.headers,
-      })
-    },
-    { preconnect: fetch.preconnect },
-  )
-  const http = FetchHttpClient.layer.pipe(
-    Layer.provide(Layer.succeed(FetchHttpClient.Fetch, boundedFetch)),
-  )
-  return new SdkOpenCodeAdapter(
-    makeOpenCodeSdkClient(OpenCode.make({ baseUrl: endpoint.url }).pipe(Effect.provide(http))),
-  )
-}
 
 export const routeSandboxProvider = (shared: AgentRunProviderPort, sandbox: SandboxDispatchPort) =>
   Effect.gen(function* () {
@@ -82,7 +22,7 @@ export const routeSandboxProvider = (shared: AgentRunProviderPort, sandbox: Sand
           () =>
             new OpenCodeAdapterError({
               operation: "route saved sandbox session",
-              cause: new Error("Sandbox endpoint unavailable"),
+              cause: new Error("Sandbox session binding unavailable"),
             }),
         ),
       )

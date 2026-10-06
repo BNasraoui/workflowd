@@ -2,7 +2,10 @@ import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { FetchHttpClient } from "effect/unstable/http"
+import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../../src/opencode/adapter"
 import { command } from "./harness"
 
 const ModelRequest = Schema.Struct({
@@ -18,6 +21,7 @@ export type FixtureAction = { name: string; arguments: string; text?: string }
 export async function sharedOpenCodeFixture(
   label: string,
   policy?: { summary: string; refuseNative?: boolean; discoverAfterNative?: boolean },
+  sandboxAgent = true,
 ) {
   const artifact = await readFile(resolve("deploy/opencode/sandbox.json"), "utf8")
   const binary = await realpath(Bun.which("opencode2") ?? "opencode2")
@@ -30,6 +34,7 @@ export async function sharedOpenCodeFixture(
   const unit = `workflowd-sandbox-fixture-${crypto.randomUUID()}`
   const requests: Array<typeof ModelRequest.Type> = []
   const credentials: Array<string | null> = []
+  let rejection: { path: string; status: number; method?: string } | undefined
   let actions: FixtureAction[] = []
   let answer = "fixture complete"
   const model = Bun.serve({
@@ -173,7 +178,7 @@ export async function sharedOpenCodeFixture(
     await mkdir(configDirectory, { recursive: true })
     const sandboxConfig = join(root, "home/.config/workflowd/opencode2-sandbox-agent.json")
     await mkdir(join(root, "home/.config/workflowd"), { recursive: true })
-    await writeFile(sandboxConfig, artifact)
+    await writeFile(sandboxConfig, sandboxAgent ? artifact : "{}")
     await writeFile(
       join(configDirectory, "opencode.json"),
       JSON.stringify({
@@ -183,6 +188,16 @@ export async function sharedOpenCodeFixture(
         formatter: false,
         lsp: false,
         providers: {
+          "fixture-second": {
+            package: "aisdk:@ai-sdk/openai-compatible",
+            settings: { baseURL: `http://127.0.0.1:${model.port}/v1` },
+            models: {
+              "second-model": {
+                capabilities: { tools: true, input: ["text"], output: ["text"] },
+                limit: { context: 100000, output: 1024 },
+              },
+            },
+          },
           openai: {
             package: "aisdk:@ai-sdk/openai-compatible",
             settings: { baseURL: `http://127.0.0.1:${model.port}/v1` },
@@ -242,14 +257,59 @@ export async function sharedOpenCodeFixture(
     const agents = Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) })
     for (;;) {
       const catalog = Schema.decodeUnknownSync(agents)(await api(`agent?${location.toString()}`))
-      if (catalog.data.some((agent) => agent.id === "sandbox")) break
+      if (!sandboxAgent || catalog.data.some((agent) => agent.id === "sandbox")) break
       if (Date.now() >= deadline) throw new Error("Global sandbox agent did not load")
       await Bun.sleep(100)
+    }
+    if (!sandboxAgent) {
+      for (;;) {
+        const models = Schema.decodeUnknownSync(
+          Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+        )(await api(`model?${location.toString()}`))
+        if (models.data.some((model) => model.id === "gpt-6-astra-fixture")) break
+        if (Date.now() >= deadline) throw new Error("Fixture provider config did not load")
+        await Bun.sleep(100)
+      }
     }
     await api(`integration/openai/connect/key?${location.toString()}`, {
       key: "fixture-model-canary",
     })
+    await api(`integration/fixture-second/connect/key?${location.toString()}`, {
+      key: "second-fixture-canary",
+    })
+    const sdkFetch = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        headers.set(
+          "Authorization",
+          `Basic ${Buffer.from("opencode:fixture-server-password").toString("base64")}`,
+        )
+        const path = new URL(input instanceof Request ? input.url : input).pathname
+        if (
+          rejection !== undefined &&
+          path.endsWith(rejection.path) &&
+          (rejection.method === undefined || rejection.method === init?.method)
+        )
+          return new Response(null, { status: rejection.status })
+        const response = await fetch(input, { ...init, headers })
+        return response
+      },
+      { preconnect: fetch.preconnect },
+    )
+    const client = await Effect.runPromise(
+      OpenCode.make({ baseUrl: url }).pipe(
+        Effect.provide(
+          FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, sdkFetch))),
+        ),
+      ),
+    )
+    const executor = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client)))
     return {
+      client,
+      executor,
+      reject: (next?: { path: string; status: number; method?: string }) => {
+        rejection = next
+      },
       root,
       url,
       api,
@@ -310,3 +370,31 @@ export const compactionSummary = `## Objective
 1. Continue the sandbox fixture.
 ## Relevant Files
 - (none)`
+
+// Exercise cleanup of historical invocation custody without recreating the removed launcher.
+export async function legacySandboxUnit(directory: string, leaseId: string) {
+  const unit = `workflowd-sandbox-${leaseId}`
+  await command([
+    "systemd-run",
+    "--user",
+    `--unit=${unit}`,
+    "-p",
+    "MemoryMax=64M",
+    "-p",
+    "MemorySwapMax=0",
+    "/usr/bin/sleep",
+    "300",
+  ])
+  const invocationId = await command([
+    "systemctl",
+    "--user",
+    "show",
+    unit,
+    "--property=InvocationID",
+    "--value",
+  ])
+  const endpoint = { url: "http://127.0.0.1:1", password: "unused-fixture", unit, invocationId }
+  await writeFile(join(directory, "endpoint.json"), JSON.stringify(endpoint))
+  const { stopSandboxOpenCode } = await import("../../src/sandbox/opencode")
+  return { ...endpoint, close: () => stopSandboxOpenCode(endpoint) }
+}

@@ -7,13 +7,18 @@ import { makeSandboxStore, SandboxError } from "./store"
 import type { SandboxPolicy } from "./config"
 import type { makeSandboxGithub } from "./github"
 import type { makeSandboxLeaseService } from "./lease"
-import { createSandboxProvider } from "./provider"
+import { Session, type OpenCodeClient } from "@opencode-ai/client/effect"
+import type { AgentRunProviderPort } from "../kernel/agent-run-ingress"
+import { OpenCodeAdapterError } from "../opencode/adapter"
 import {
-  readSandboxEndpoint,
   saveSandboxFile,
-  startSandboxOpenCode,
-  stopSandboxOpenCode,
-} from "./opencode"
+  bindingDirectory,
+  readSandboxBinding,
+  writeSandboxBinding,
+  sandboxPolicyHash,
+  transportHash,
+} from "./binding"
+import { readSandboxEndpoint, makeSandboxOpenCode, stopSandboxOpenCode } from "./opencode"
 
 export type SandboxDispatchPort = {
   readonly launch: (
@@ -22,14 +27,13 @@ export type SandboxDispatchPort = {
   ) => Effect.Effect<
     {
       readonly nativeSessionId: string
-      readonly endpoint: string
     },
     SandboxError
   >
   readonly cancel: (run: AgentRunRecord) => Effect.Effect<void, SandboxError>
   readonly observe: (run: AgentRunRecord) => Effect.Effect<void, SandboxError>
   readonly owns: (runId: string) => Effect.Effect<boolean, SandboxError>
-  readonly provider: (sessionId: string) => Effect.Effect<OpenCodeAdapter, SandboxError>
+  readonly provider: (sessionId: string) => Effect.Effect<AgentRunProviderPort, SandboxError>
   readonly heartbeat: Effect.Effect<void, SandboxError>
   readonly iteration: Effect.Effect<void, SandboxError>
 }
@@ -49,29 +53,95 @@ export const makeSandboxDispatch = (options: {
   readonly policies: ReadonlyArray<SandboxPolicy>
   readonly github: Effect.Success<ReturnType<typeof makeSandboxGithub>>
   readonly leases: Effect.Success<ReturnType<typeof makeSandboxLeaseService>>
-  readonly binary: string
-  readonly authFile: string
-  readonly providers: Readonly<Record<string, unknown>>
+  readonly executor: OpenCodeAdapter
+  readonly client: OpenCodeClient
+  readonly executorId: string
+  readonly endpointIdentity: string
 }) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
     const runs = yield* AgentRunStore
     const { github, leases } = options
+    const executor = makeSandboxOpenCode(options.client, options.executor)
+    const bindingFor = Effect.fn("SandboxDispatch.binding")(function* (sessionId: string) {
+      const lease = yield* store.bySession(sessionId)
+      if (lease === null || lease.state !== "ready" || lease.transport === null)
+        return yield* Effect.fail(failure())
+      const run = yield* runs.read(lease.run_id)
+      if (run === null || run.agent !== "sandbox") return yield* Effect.fail(failure())
+      const binding = yield* Effect.tryPromise(() => readSandboxBinding(run.directory))
+      if (
+        binding.runId !== run.runId ||
+        binding.leaseId !== lease.lease_id ||
+        binding.sessionId !== sessionId ||
+        binding.repositoryId !== lease.policy.repositoryId ||
+        binding.sourceSha !== lease.source_sha ||
+        binding.executorId !== options.executorId ||
+        binding.endpointIdentity !== options.endpointIdentity ||
+        binding.transportHash !== transportHash(lease.transport) ||
+        binding.deadline !== lease.deadline
+      )
+        return yield* Effect.fail(failure())
+      yield* executor.check(binding)
+      return binding
+    })
     const provider = (sessionId: string) =>
       Effect.gen(function* () {
-        const lease = yield* store.bySession(sessionId)
-        if (lease === null || lease.state !== "ready") return yield* Effect.fail(failure())
-        const run = yield* runs.read(lease.run_id)
-        if (run === null) return yield* Effect.fail(failure())
-        const endpoint = yield* Effect.tryPromise(() => readSandboxEndpoint(run.directory))
-        if (endpoint.unit !== lease.unit || endpoint.invocationId !== lease.invocation)
-          return yield* Effect.fail(failure())
-        return createSandboxProvider(endpoint)
+        yield* bindingFor(sessionId)
+        const guard = <A, E>(
+          input: { sessionID: string; directory?: string; agent?: string },
+          effect: Effect.Effect<A, E>,
+        ) =>
+          Effect.gen(function* () {
+            const binding = yield* bindingFor(sessionId)
+            if (
+              input.sessionID !== sessionId ||
+              (input.directory !== undefined && input.directory !== binding.directory) ||
+              (input.agent !== undefined && input.agent !== "sandbox")
+            )
+              return yield* Effect.fail(failure())
+            return yield* effect
+          }).pipe(
+            Effect.mapError(
+              (cause) => new OpenCodeAdapterError({ operation: "guard sandbox session", cause }),
+            ),
+          )
+        return {
+          createSession: () =>
+            Effect.fail(
+              new OpenCodeAdapterError({
+                operation: "create sandbox session",
+                cause: new Error("Session already reserved"),
+              }),
+            ),
+          listModels: options.executor.listModels,
+          listProviders: options.executor.listProviders,
+          promptSession: (input) => guard(input, options.executor.promptSession(input)),
+          abortSession: (input) => guard(input, options.executor.abortSession(input)),
+          sessionTelemetry: (input) => guard(input, options.executor.sessionTelemetry(input)),
+        } satisfies AgentRunProviderPort
       }).pipe(Effect.mapError(failure))
     const stop = (run: AgentRunRecord) =>
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
         if (lease === null) return
+        if (
+          yield* Effect.tryPromise(() =>
+            Bun.file(join(bindingDirectory(run.directory), "binding.json")).exists(),
+          )
+        ) {
+          const binding = yield* Effect.tryPromise(() => readSandboxBinding(run.directory))
+          if (
+            binding.runId !== run.runId ||
+            binding.leaseId !== lease.lease_id ||
+            binding.sessionId !== lease.session_id ||
+            binding.endpointIdentity !== options.endpointIdentity ||
+            binding.executorId !== options.executorId
+          )
+            return yield* Effect.fail(failure())
+          yield* executor.stop(binding)
+          return
+        }
         const { unit, invocation } = lease
         if (unit !== null && invocation !== null) {
           yield* Effect.tryPromise(() => stopSandboxOpenCode({ unit, invocationId: invocation }))
@@ -185,7 +255,12 @@ export const makeSandboxDispatch = (options: {
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
         if (policy === undefined) return yield* Effect.fail(failure())
-        yield* Effect.tryPromise(() => mkdir(run.directory, { recursive: true, mode: 0o700 }))
+        if (
+          run.agent !== "sandbox" ||
+          (run.resolvedSelection != null && run.resolvedSelection.executor !== options.executorId)
+        )
+          return yield* Effect.fail(failure())
+        const locationIdentity = yield* executor.reserve(run.directory)
         yield* github.verifyWorkflow(policy)
         const sourceSha = yield* github.resolveSource(policy, run.baseRef ?? "HEAD")
         yield* store.request({
@@ -203,41 +278,26 @@ export const makeSandboxDispatch = (options: {
         )
         const lease = yield* acquire
         if (lease.transport === null) return yield* Effect.fail(failure())
-        const server = yield* Effect.tryPromise({
-          try: (signal) =>
-            startSandboxOpenCode({
-              directory: run.directory,
-              binary: options.binary,
-              authFile: options.authFile,
-              providers: { [model.providerID]: options.providers[model.providerID] ?? {} },
-              transport: lease.transport!,
-              signal,
-              onStarted: (endpoint) =>
-                Effect.runPromise(
-                  store.attachUnit(run.runId, endpoint.unit, endpoint.invocationId),
-                ),
-            }),
-          catch: failure,
-        })
-        const dedicated = createSandboxProvider(server)
-        const models = yield* dedicated.listModels({
-          directory: join(run.directory, "home/.config/opencode"),
-        })
-        if (
-          !models.some(
-            (candidate) =>
-              candidate.providerID === model.providerID && candidate.id === model.modelID,
-          )
-        )
-          return yield* Effect.fail(failure())
-        const session = yield* dedicated.createSession({
-          directory: join(run.directory, "home/.config/opencode"),
-          title: `workflowd ${run.runId}`,
-          agent: "sandbox",
-          model,
-        })
-        yield* store.attachSession(run.runId, session.id)
-        return { nativeSessionId: session.id, endpoint: server.url }
+        const binding = {
+          runId: run.runId,
+          leaseId: lease.lease_id,
+          sessionId: Session.ID.create(),
+          executorId: options.executorId,
+          endpointIdentity: options.endpointIdentity,
+          directory: run.directory,
+          locationIdentity,
+          bridgeServerName: `workflowd_sandbox_${lease.lease_id.replaceAll("-", "_")}`,
+          repositoryId: policy.repositoryId,
+          sourceSha,
+          policyHash: sandboxPolicyHash,
+          transportHash: transportHash(lease.transport),
+          deadline: lease.deadline,
+          state: "reserved" as const,
+        }
+        yield* Effect.tryPromise(() => writeSandboxBinding(binding, true))
+        yield* store.attachSession(run.runId, binding.sessionId)
+        yield* executor.start(binding, lease.transport, model)
+        return { nativeSessionId: binding.sessionId }
       }).pipe(
         Effect.timeout("5 minutes"),
         Effect.onError(() =>

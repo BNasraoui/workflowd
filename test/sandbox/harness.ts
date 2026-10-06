@@ -384,65 +384,6 @@ export async function sandboxGithubFixture(
   }
 }
 
-export async function sandboxModelFixture() {
-  const requests: unknown[] = []
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      requests.push(await request.json())
-      const action =
-        requests.length === 1
-          ? {
-              name: "execute",
-              arguments: JSON.stringify({
-                code: 'const env = JSON.parse(await tools["container-use"].environment_create({ environment_source: "/workspace/repository", title: "Dispatch fixture" })); return await tools["container-use"].environment_run_cmd({environment_source: "/workspace/repository", environment_id: env.id, command: "printf dispatch-proof > proof.txt"});',
-              }),
-            }
-          : undefined
-      const delta =
-        action === undefined
-          ? { role: "assistant", content: "sandbox dispatch complete" }
-          : {
-              role: "assistant",
-              tool_calls: [{ index: 0, id: "call_fixture", type: "function", function: action }],
-            }
-      const chunk = (delta: unknown, finish_reason: string | null) =>
-        "data: " +
-        JSON.stringify({
-          id: "fixture",
-          object: "chat.completion.chunk",
-          model: "gpt-6-astra-fixture",
-          choices: [{ index: 0, delta, finish_reason }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        }) +
-        "\n\n"
-      return new Response(
-        chunk(delta, null) +
-          chunk({}, action === undefined ? "stop" : "tool_calls") +
-          "data: [DONE]\n\n",
-        { headers: { "Content-Type": "text/event-stream" } },
-      )
-    },
-  })
-  return {
-    requests,
-    close: () => server.stop(true),
-    providers: {
-      openai: {
-        package: "aisdk:@ai-sdk/openai-compatible",
-        settings: { baseURL: `http://127.0.0.1:${server.port}/v1` },
-        models: {
-          "gpt-6-astra-fixture": {
-            capabilities: { tools: true, input: ["text"], output: ["text"] },
-            limit: { context: 100000, output: 1024 },
-          },
-        },
-      },
-    },
-  }
-}
-
 export async function dispatchRunnerFixture() {
   const runner = await runnerFixture()
   try {
@@ -485,6 +426,9 @@ export async function sandboxCoordinatorProcess(input: {
     import { makeSandboxGithub } from "./src/sandbox/github.ts"
     import { makeSandboxLeaseService } from "./src/sandbox/lease.ts"
     import { makeSandboxDispatch } from "./src/sandbox/dispatch.ts"
+    import { OpenCode } from "@opencode-ai/client/effect"
+    import { FetchHttpClient } from "effect/unstable/http"
+    import { SdkOpenCodeAdapter, makeOpenCodeSdkClient } from "./src/opencode/adapter.ts"
     const input = JSON.parse(process.env.SANDBOX_FIXTURE_OPTIONS)
     if (input.fullControlDirectory) {
       try { await Bun.write(input.fullControlDirectory + "/fill", new Uint8Array(131072)); throw new Error("Expected ENOSPC") }
@@ -496,7 +440,9 @@ export async function sandboxCoordinatorProcess(input: {
     await Effect.runPromise(Effect.gen(function* () {
       const github = yield* makeSandboxGithub(input.github, Octokit.defaults({ baseUrl: input.apiUrl, log: { debug() {}, info() {}, warn() {}, error() {} } }))
       const leases = yield* makeSandboxLeaseService(github)
-      const service = yield* makeSandboxDispatch({ policies: [input.policy], github, leases, binary: process.execPath, authFile: "/unused", providers: {} })
+      const client = yield* OpenCode.make({baseUrl:"http://127.0.0.1:1"}).pipe(Effect.provide(FetchHttpClient.layer))
+      const executor = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(Effect.succeed(client)))
+      const service = yield* makeSandboxDispatch({ policies: [input.policy], github, leases, client, executor, executorId: "opencode:opencode-primary", endpointIdentity: "http://127.0.0.1:1" })
       console.log("coordinator ready")
       yield* service.iteration.pipe(Effect.ignore, Effect.repeat(Schedule.spaced("30 seconds")))
     }).pipe(Effect.provide(layer)))
@@ -580,9 +526,11 @@ export async function sandboxIngressFixtureLayer(
   sandbox: import("effect").Effect.Effect<
     import("../../src/sandbox/dispatch").SandboxDispatchPort,
     never,
-    import("effect/unstable/sql/SqlClient").SqlClient
+    | import("effect/unstable/sql/SqlClient").SqlClient
+    | import("../../src/kernel/agent-run-store").AgentRunStorePort
   >,
   policy: import("../../src/sandbox/config").SandboxPolicy,
+  options?: { root: string; providerID: string; modelID: string },
 ) {
   const { Effect, Layer } = await import("effect")
   const { SqliteClient } = await import("@effect/sql-sqlite-bun")
@@ -598,7 +546,7 @@ export async function sandboxIngressFixtureLayer(
   const { AgentRunWorktrees } = await import("../../src/kernel/agent-run-worktrees")
   const { CodexCli } = await import("../../src/kernel/codex-session")
   const { SandboxDispatch } = await import("../../src/sandbox/dispatch")
-  const { routeSandboxHandoffs } = await import("../../src/sandbox/provider")
+  const { routeSandboxHandoffs, routeSandboxProvider } = await import("../../src/sandbox/provider")
   const { WorkSignal } = await import("../../src/work-signal")
   const { makeCodexCli } = await import("../kernel/agent-run-ingress-harness")
   const base = WorkflowStoreLive.pipe(
@@ -628,14 +576,30 @@ export async function sandboxIngressFixtureLayer(
     Layer.provideMerge(stores),
     Layer.provideMerge(signals),
   )
+  const sandboxLayer = Layer.effect(SandboxDispatch, sandbox).pipe(Layer.provide(stores))
+  const providerLayer =
+    options === undefined
+      ? Layer.succeed(AgentRunProvider, provider)
+      : Layer.effect(
+          AgentRunProvider,
+          Effect.gen(function* () {
+            return yield* routeSandboxProvider(provider, yield* SandboxDispatch)
+          }),
+        ).pipe(Layer.provide(sandboxLayer), Layer.provide(stores))
   return AgentRunIngressLive({
-    routes: [{ name: "implement", providerID: "openai", modelID: "gpt-6-astra-fixture" }],
+    routes: [
+      {
+        name: "implement",
+        providerID: options?.providerID ?? "openai",
+        modelID: options?.modelID ?? "gpt-6-astra-fixture",
+      },
+    ],
     codexRoutes: [],
     repositories: [{ name: policy.alias, directory: "/unused/repository" }],
     sandboxRepositories: [policy],
     agent: "sandbox",
-    worktreeRoot: "/var/lib/workflowd-test",
-    verifyTimeoutMs: 50,
+    worktreeRoot: options?.root ?? "/var/lib/workflowd-test",
+    verifyTimeoutMs: options === undefined ? 50 : 10000,
     verifyPollIntervalMs: 10,
     progressWindowMs: 600000,
     maxAttempts: 1,
@@ -643,8 +607,8 @@ export async function sandboxIngressFixtureLayer(
     identity,
   }).pipe(
     Layer.provideMerge(waits),
-    Layer.provideMerge(Layer.succeed(AgentRunProvider, provider)),
-    Layer.provideMerge(Layer.effect(SandboxDispatch, sandbox).pipe(Layer.provide(stores))),
+    Layer.provideMerge(providerLayer),
+    Layer.provideMerge(sandboxLayer),
     Layer.provideMerge(
       Layer.succeed(AgentRunWorktrees, {
         create: () => Effect.die("Sandbox attempted a local worktree"),

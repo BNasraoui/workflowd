@@ -1,3 +1,4 @@
+import { legacySandboxUnit } from "./opencode-fixture"
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
@@ -7,19 +8,14 @@ import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { sandboxMigration, sandboxCleanupMigration } from "../../src/sandbox/migration"
 import { makeSandboxStore } from "../../src/sandbox/store"
-import {
-  sandboxGithubFixture,
-  dispatchRunnerFixture,
-  sandboxModelFixture,
-  sandboxCoordinatorProcess,
-} from "./harness"
-import { mkdtemp, rm, mkdir, writeFile, realpath } from "node:fs/promises"
+import { sandboxGithubFixture, dispatchRunnerFixture, sandboxCoordinatorProcess } from "./harness"
+import { mkdtemp, rm, mkdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { WorkflowStoreLive } from "../../src/store"
-import { startSandboxOpenCode, stopSandboxOpenCode } from "../../src/sandbox/opencode"
+import { stopSandboxOpenCode } from "../../src/sandbox/opencode"
 
 const policy = {
   alias: "workflowd",
@@ -371,16 +367,10 @@ for (const scenario of ["lost cancellation acknowledgement", "ENOSPC", "lost end
     const fullControlDirectory = scenario === "ENOSPC"
     const runner = await dispatchRunnerFixture()
     const fixture = await sandboxGithubFixture(policy, runner.name)
-    const model = await sandboxModelFixture()
     const database = join(runner.root, "coordinator.sqlite")
     const directory = join(runner.root, "control")
-    const authFile = join(runner.root, "auth.json")
     await mkdir(directory, { mode: 0o700 })
-    await writeFile(
-      authFile,
-      JSON.stringify({ openai: { type: "api", key: "fixture-model-canary" } }),
-    )
-    let server: Awaited<ReturnType<typeof startSandboxOpenCode>> | undefined
+    let server: Awaited<ReturnType<typeof legacySandboxUnit>> | undefined
     let coordinator: Awaited<ReturnType<typeof sandboxCoordinatorProcess>> | undefined
     const base = WorkflowStoreLive.pipe(
       Layer.provideMerge(SqliteClient.layer({ filename: database })),
@@ -389,13 +379,7 @@ for (const scenario of ["lost cancellation acknowledgement", "ENOSPC", "lost end
       Layer.provideMerge(base),
     )
     try {
-      server = await startSandboxOpenCode({
-        directory,
-        binary: await realpath(Bun.which("opencode2")!),
-        authFile,
-        transport: runner.transport,
-        providers: model.providers,
-      })
+      server = await legacySandboxUnit(directory, runner.name)
       const endpoint = server
       await expect(
         stopSandboxOpenCode({ ...endpoint, invocationId: "0".repeat(32) }),
@@ -503,7 +487,6 @@ for (const scenario of ["lost cancellation acknowledgement", "ENOSPC", "lost end
     } finally {
       await coordinator?.stop()
       await server?.close()
-      await model.close()
       await fixture.close()
       await runner.close()
     }

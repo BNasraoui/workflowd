@@ -429,7 +429,6 @@ const make = (options: AgentRunIngressOptions) =>
             nativeSessionId,
             resourceId,
             createdAt: run.createdAt,
-            ...(sandboxSession === undefined ? {} : { sandboxEndpoint: sandboxSession.endpoint }),
           })
           yield* store.markSpawned({
             runId: run.runId,
@@ -799,11 +798,7 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
-        } else if (
-          resolution.provider === "opencode" &&
-          submission.model === undefined &&
-          !requiresSandbox(repository.name)
-        ) {
+        } else if (resolution.provider === "opencode" && submission.model === undefined) {
           yield* preflightRoute(resolution.route)
         } else if (resolution.provider !== "opencode") {
           const readiness = yield* currentReadiness(
@@ -867,7 +862,7 @@ const make = (options: AgentRunIngressOptions) =>
           executorKind: selection.executorKind,
           requestedSelection: requested,
           resolvedSelection: selection,
-          agent: options.agent,
+          agent: requiresSandbox(repository.name) ? "sandbox" : options.agent,
           repository: repository.name,
           baseRef: submission.baseRef ?? null,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),

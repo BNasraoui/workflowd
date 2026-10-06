@@ -2,8 +2,7 @@ import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
-import { readFile, realpath } from "node:fs/promises"
-import { homedir } from "node:os"
+import { readFile } from "node:fs/promises"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
 import { makeSandboxGithub } from "./sandbox/github"
 import { makeSandboxLeaseService } from "./sandbox/lease"
@@ -514,28 +513,14 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Effect.gen(function* () {
             const github = yield* makeSandboxGithub(config.github)
             const leases = yield* makeSandboxLeaseService(github)
-            const settings = yield* Effect.tryPromise(async () => {
-              const file = Bun.file(join(homedir(), ".config/opencode/opencode.json"))
-              const value: unknown = (await file.exists()) ? await file.json() : {}
-              return Schema.decodeUnknownSync(
-                Schema.Struct({
-                  providers: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-                }),
-              )(value)
-            })
-            const binary = yield* Effect.tryPromise(() =>
-              realpath(Bun.which("opencode2") ?? "opencode2"),
-            )
-            const authFile = yield* Effect.tryPromise(() =>
-              realpath(join(homedir(), ".local/share/opencode/auth.json")),
-            )
             return yield* makeSandboxDispatch({
               policies: sandboxPolicies,
               github,
               leases,
-              binary,
-              authFile,
-              providers: settings.providers ?? {},
+              executor: openCodeAdapter,
+              client: yield* openCodeClientEffect,
+              executorId: `opencode:${completionSourceOptions.providerId}`,
+              endpointIdentity: completionSourceOptions.endpointIdentity,
             })
           }),
         ).pipe(Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))))

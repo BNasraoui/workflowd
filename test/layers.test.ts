@@ -8,6 +8,7 @@ import { Cause, Effect, Layer, Option } from "effect"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
+import { SandboxDispatch } from "../src/sandbox/dispatch"
 import { AgentRunIngress } from "../src/kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "../src/kernel/agent-run-watchdog"
 import { ClaudeResumeWorker } from "../src/kernel/claude-resume-worker"
@@ -83,98 +84,118 @@ const sixStageDefinition = {
   })),
 }
 
-test("starts and restarts the full live layer with both kernel stores", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
-  try {
-    const privateKeyPath = join(directory, "github.pem")
-    const databasePath = join(directory, "workflowd.db")
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
-    await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_DATABASE_PATH: databasePath,
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-        WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
-        WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
-        WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
-        WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
-        WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
-        OPENCODE_SERVER_URL: "http://127.0.0.1:1",
-      },
-      { home: directory },
-    )
-
-    const start = () =>
-      Effect.runPromise(
-        Effect.gen(function* () {
-          const events = yield* KernelEventStore
-          const jobs = yield* KernelJobStore
-          yield* WorkflowStore
-          yield* WorkflowStart
-          const testJobs = yield* TestJobCanary
-          const agentRuns = yield* AgentRunIngress
-          const watchdog = yield* AgentRunWatchdog
-          const claudeResume = yield* ClaudeResumeWorker
-          const dogfood = yield* DogfoodStore
-          const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
-          if (Option.isNone(discovery))
-            return yield* Effect.die(new Error("expected configured discovery module"))
-          const catalog = yield* discovery.value.list()
-          if (
-            catalog.sources.length !== 1 ||
-            catalog.sources[0]?.kind !== "opencode" ||
-            catalog.sources[0]?.status !== "unavailable"
-          ) {
-            return yield* Effect.die(
-              new Error("expected only the enabled, unavailable OpenCode discovery source"),
-            )
-          }
-          // Both supervised iterations run once against the empty store so
-          // the composed worker pipelines execute, not just resolve.
-          const watchdogStatus = yield* watchdog.iteration
-          const claudeStatus = yield* claudeResume.iteration
-          if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
-            return yield* Effect.die(new Error("expected idle iterations on an empty store"))
-          }
-          const dogfoodContract = (yield* dogfood.sessions()).contract
-          return {
-            methods: [
-              events.readReadyDeliveries,
-              jobs.readRecoverable,
-              testJobs.submit,
-              agentRuns.register,
-              dogfood.sessions,
-            ],
-            dogfoodContract,
-          }
-        }).pipe(
-          Effect.provide(
-            makeLiveLayer(config).pipe(
-              Layer.provide(SqliteClient.layer({ filename: databasePath })),
-            ),
-          ),
-        ),
+test.each([false, true])(
+  "starts and restarts the full live layer with both kernel stores (sandbox %s)",
+  async (sandbox) => {
+    const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-kernel-stores-"))
+    try {
+      const privateKeyPath = join(directory, "github.pem")
+      const databasePath = join(directory, "workflowd.db")
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+      await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
+      const config = await loadConfig(
+        {
+          GITHUB_APP_ID: "123",
+          GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
+          GITHUB_WEBHOOK_SECRET: "secret",
+          OPENCODE_SERVER_PASSWORD: "password",
+          WORKFLOWD_DATABASE_PATH: databasePath,
+          WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+          WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+          WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+          WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+          WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+          WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+          WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+          WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+          WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
+          ...(sandbox
+            ? {
+                WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+                  {
+                    alias: "workflowd",
+                    repository: "BNasraoui/workflowd",
+                    repositoryId: 1306107007,
+                    installationId: 147573449,
+                    workflowSha: "a".repeat(40),
+                    appActorId: 306741873,
+                    tailscaleClientId: "fixture",
+                    tailscaleAudience: "fixture",
+                  },
+                ]),
+              }
+            : {}),
+          WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+          WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
+          OPENCODE_SERVER_URL: "http://127.0.0.1:1",
+        },
+        { home: directory },
       )
 
-    const first = await start()
-    expect(first.methods.every((method) => typeof method === "function")).toBe(true)
-    expect(first.dogfoodContract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
-    expect((await start()).methods.every((method) => typeof method === "function")).toBe(true)
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
-})
+      const start = () =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const events = yield* KernelEventStore
+            const jobs = yield* KernelJobStore
+            yield* WorkflowStore
+            yield* WorkflowStart
+            const testJobs = yield* TestJobCanary
+            const agentRuns = yield* AgentRunIngress
+            expect(Option.isSome(yield* Effect.serviceOption(SandboxDispatch))).toBe(sandbox)
+            const watchdog = yield* AgentRunWatchdog
+            const claudeResume = yield* ClaudeResumeWorker
+            const dogfood = yield* DogfoodStore
+            const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
+            if (Option.isNone(discovery))
+              return yield* Effect.die(new Error("expected configured discovery module"))
+            const catalog = yield* discovery.value.list()
+            if (
+              catalog.sources.length !== 1 ||
+              catalog.sources[0]?.kind !== "opencode" ||
+              catalog.sources[0]?.status !== "unavailable"
+            ) {
+              return yield* Effect.die(
+                new Error("expected only the enabled, unavailable OpenCode discovery source"),
+              )
+            }
+            // Both supervised iterations run once against the empty store so
+            // the composed worker pipelines execute, not just resolve.
+            const watchdogStatus = yield* watchdog.iteration
+            const claudeStatus = yield* claudeResume.iteration
+            if (watchdogStatus !== "idle" || claudeStatus !== "idle") {
+              return yield* Effect.die(new Error("expected idle iterations on an empty store"))
+            }
+            const dogfoodContract = (yield* dogfood.sessions()).contract
+            return {
+              methods: [
+                events.readReadyDeliveries,
+                jobs.readRecoverable,
+                testJobs.submit,
+                agentRuns.register,
+                dogfood.sessions,
+              ],
+              dogfoodContract,
+            }
+          }).pipe(
+            Effect.provide(
+              makeLiveLayer(config).pipe(
+                Layer.provide(SqliteClient.layer({ filename: databasePath })),
+              ),
+            ),
+          ),
+        )
+
+      const first = await start()
+      expect(first.methods.every((method) => typeof method === "function")).toBe(true)
+      expect(first.dogfoodContract).toBe(DOGFOOD_ENRICHMENT_CONTRACT)
+      expect((await start()).methods.every((method) => typeof method === "function")).toBe(true)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  },
+)
 
 test("composes the reusable agent harness with the live ports", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-"))

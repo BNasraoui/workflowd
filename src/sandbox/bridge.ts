@@ -1,3 +1,4 @@
+import { assertBridgeBinding } from "./binding"
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
 import { SandboxTransport, sandboxSshArguments } from "./transport"
@@ -64,7 +65,9 @@ export async function runSandboxBridge(
   transport: SandboxTransport,
   incoming: ReadableStream<Uint8Array>,
   send: (frame: string) => Promise<void>,
+  bindingFile?: string,
 ) {
+  if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
   const child = Bun.spawn([...sandboxSshArguments(transport)], {
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
     stdin: "pipe",
@@ -86,6 +89,7 @@ export async function runSandboxBridge(
     let initialized = false
     let allowed = new Set<string>()
     for await (const frame of frames(input)) {
+      if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
       if (frame.method === "notifications/initialized" && initialized && frame.id === undefined) {
         child.stdin.write(JSON.stringify(frame) + "\n")
         await child.stdin.flush()
@@ -163,6 +167,7 @@ export async function runSandboxBridge(
         } else {
           result = Schema.decodeUnknownSync(Output)(result)
         }
+        if (bindingFile !== undefined) await assertBridgeBinding(bindingFile, transport)
         await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
       } finally {
         clearTimeout(timer)
@@ -194,6 +199,7 @@ if (import.meta.main) {
       async (frame) => {
         await Bun.write(Bun.stdout, frame)
       },
+      process.argv[3],
     )
   }
   await run().catch(() => {

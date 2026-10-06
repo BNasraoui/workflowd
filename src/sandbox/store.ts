@@ -252,7 +252,9 @@ export const makeSandboxStore = Effect.gen(function* () {
     sessionId: string,
   ) {
     const rows =
-      yield* sql`UPDATE sandbox_leases SET session_id=${sessionId} WHERE run_id=${runId} AND state='ready' AND session_id IS NULL AND invocation IS NOT NULL RETURNING run_id`
+      yield* sql`UPDATE sandbox_leases SET session_id=${sessionId} WHERE run_id=${runId} AND state IN ('requested','starting','ready')
+      AND (session_id IS NULL OR session_id=${sessionId})
+      AND NOT EXISTS (SELECT 1 FROM sandbox_leases other WHERE other.session_id=${sessionId} AND other.run_id != ${runId}) RETURNING run_id`
     if (rows.length !== 1)
       return yield* Effect.fail(new SandboxError({ message: "Sandbox session custody changed" }))
   })
