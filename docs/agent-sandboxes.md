@@ -21,9 +21,10 @@ systemd-run --user --wait --pipe --collect \
   "$(command -v bun)" test test/sandbox/permissions.e2e.test.ts
 ```
 
-The disposable shared server uses the exact artifact globally and fake model
-credentials. Tests execute ordinary shell controls, force denied native and Code
-Mode calls, finish compaction/title/transient-summary turns, and continue the
+The disposable shared server loads the exact artifact through `OPENCODE_CONFIG`
+over its global configuration and uses fake model credentials. Tests execute
+ordinary shell controls, force denied native and Code Mode calls, finish
+compaction/title/transient-summary turns, and continue the
 sandbox afterwards. Two location bridges reach separate SSH/Dagger runners;
 foreign calls and calls after removal/restart must fail. The production probe's
 own orchestration is also tested against this real executor with scripted model
@@ -40,36 +41,53 @@ Review its fixture report and checks before running these commands. The current
 runner-workflow pin is `5a4da56f5829e4fb3a5f64385cb164ec73f432d1`; this
 agent-only installation does not change that pin.
 
+The v1 service also reads `~/.config/opencode/opencode.json` and rejects v2 agent
+permissions. **Never edit that shared file for this installation.** Install the
+fragment separately and select it only for `opencode2-server.service` through a
+systemd drop-in. The pinned v2 server merges this file over its global config.
+
+The coordinator already installed the byte-identical artifact from
+`ac63e62829a18b2843fd4902b0441ebfa2b7d812`. For probe-only revisions, reuse
+`~/.local/state/workflowd-sandbox-install-ac63e62829a18b2843fd4902b0441ebfa2b7d812`
+as `SANDBOX_INSTALL_RECORD` and proceed to Verify from the new reviewed checkout;
+do not reinstall or overwrite the original record. The commands below are for a
+fresh installation and refuse to overwrite existing files.
+
 ```sh
+set -eu
 test -n "$REVIEWED_COMMIT"
 test "$(git rev-parse HEAD)" = "$REVIEWED_COMMIT"
 git diff --exit-code -- deploy/opencode/sandbox.json
 export SANDBOX_INSTALL_RECORD="$HOME/.local/state/workflowd-sandbox-install-$REVIEWED_COMMIT"
-mkdir -p "$SANDBOX_INSTALL_RECORD"
+mkdir -m 700 "$SANDBOX_INSTALL_RECORD"
 git show "$REVIEWED_COMMIT:deploy/opencode/sandbox.json" > "$SANDBOX_INSTALL_RECORD/sandbox.json"
 sha256sum "$SANDBOX_INSTALL_RECORD/sandbox.json"
 python3 - <<'PY'
-import json, os, pathlib, shutil
+import hashlib, json, os, pathlib, shutil
 record = pathlib.Path(os.environ['SANDBOX_INSTALL_RECORD'])
-target = pathlib.Path.home() / '.config/opencode/opencode.json'
+shared = pathlib.Path.home() / '.config/opencode/opencode.json'
+target = pathlib.Path.home() / '.config/workflowd/opencode2-sandbox-agent.json'
+dropin = pathlib.Path.home() / '.config/systemd/user/opencode2-server.service.d/workflowd-sandbox.conf'
 backup = record / 'opencode.before.json'
 assert not backup.exists(), 'Use the existing installation record; do not overwrite its backup'
+assert not target.exists() and not dropin.exists(), 'Existing installation requires operator review'
 fragment = json.loads((record / 'sandbox.json').read_text())
 assert list(fragment) == ['agents'] and list(fragment['agents']) == ['sandbox']
-before = json.loads(target.read_text())
+before = json.loads(shared.read_text())
 assert 'sandbox' not in before.get('agents', {}), 'An existing sandbox definition requires operator review'
-shutil.copy2(target, backup)
+shutil.copy2(shared, backup)
 backup.chmod(0o600)
-after = json.loads(json.dumps(before))
-after.setdefault('agents', {})['sandbox'] = fragment['agents']['sandbox']
-temporary = target.with_name('opencode.workflowd-install.json')
-with temporary.open('x') as f:
-    os.chmod(temporary, target.stat().st_mode & 0o777)
-    f.write(json.dumps(after, indent=2) + '\n')
-    f.flush()
-    os.fsync(f.fileno())
-temporary.replace(target)
+(record / 'global-config.before.sha256').write_text(hashlib.sha256(shared.read_bytes()).hexdigest() + '\n')
+target.parent.mkdir(parents=True, exist_ok=True)
+with target.open('xb') as f:
+    os.chmod(target, 0o600)
+    f.write((record / 'sandbox.json').read_bytes())
+dropin.parent.mkdir(parents=True, exist_ok=True)
+with dropin.open('x') as f:
+    f.write('[Service]\nEnvironment=OPENCODE_CONFIG=%h/.config/workflowd/opencode2-sandbox-agent.json\n')
+assert shared.read_bytes() == backup.read_bytes(), 'Shared global config changed'
 PY
+systemctl --user daemon-reload
 systemctl --user restart opencode2-server.service
 ```
 
@@ -80,7 +98,10 @@ its process environment. It uses the selected provider's existing authentication
 it does not load or register model credentials. It creates three disposable
 sessions, two location bridges and a local SSH/Dagger fixture, then removes them.
 It acquires no GitHub Actions lease. Model refusal to attempt a requested tool is
-an inconclusive failure, not a passing confinement result.
+inconclusive, not a passing confinement result. Native denial is requested through
+the advertised `execute` tool: separate `tools.shell`, `tools.read` and `tools.write`
+calls must each produce a nested execution error, zero completed native calls and
+an untouched host canary. Direct forced native calls remain covered by the fixture.
 
 ```sh
 systemd-run --user --wait --pipe --collect \
@@ -88,7 +109,7 @@ systemd-run --user --wait --pipe --collect \
   --working-directory="$PWD" --setenv="PATH=$PATH" \
   --setenv="SANDBOX_INSTALL_RECORD=$SANDBOX_INSTALL_RECORD" \
   /usr/bin/python3 - <<'PY'
-import hashlib, json, os, pathlib, subprocess
+import hashlib, os, pathlib, subprocess, uuid
 unit = 'opencode2-server.service'
 pid = subprocess.check_output(['systemctl', '--user', 'show', unit, '-p', 'MainPID', '--value'], text=True).strip()
 env = dict(item.split('=', 1) for item in pathlib.Path(f'/proc/{pid}/environ').read_text().split('\0') if '=' in item)
@@ -96,23 +117,25 @@ assert env.get('OPENCODE_DISABLE_PROJECT_CONFIG') in ('1', 'true')
 binary = pathlib.Path(f'/proc/{pid}/exe')
 assert hashlib.sha256(binary.read_bytes()).hexdigest() == '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c'
 record = pathlib.Path(os.environ['SANDBOX_INSTALL_RECORD'])
-before = json.loads((record / 'opencode.before.json').read_text())
-loaded = json.loads((pathlib.Path.home() / '.config/opencode/opencode.json').read_text())
-installed = loaded['agents'].pop('sandbox')
-assert installed == json.loads((record / 'sandbox.json').read_text())['agents']['sandbox']
-if not loaded['agents'] and 'agents' not in before:
-    del loaded['agents']
-assert loaded == before, 'Configuration other than agents.sandbox changed'
+fragment = pathlib.Path.home() / '.config/workflowd/opencode2-sandbox-agent.json'
+assert env.get('OPENCODE_CONFIG') == str(fragment), 'Executor did not select the v2-only fragment'
+assert fragment.read_bytes() == (record / 'sandbox.json').read_bytes(), 'Installed fragment differs from reviewed artifact'
+assert pathlib.Path('deploy/opencode/sandbox.json').read_bytes() == fragment.read_bytes(), 'Checkout artifact differs from installation'
+shared = pathlib.Path.home() / '.config/opencode/opencode.json'
+assert shared.read_bytes() == (record / 'opencode.before.json').read_bytes(), 'Shared global config changed'
+verification = record / ('verification-' + uuid.uuid4().hex)
+print('Probe evidence: ' + str(verification), flush=True)
 probe_env = dict(os.environ, EVIDENCE_OPENCODE_URL='http://127.0.0.1:4097',
     EVIDENCE_OPENCODE_PASSWORD=env['OPENCODE_SERVER_PASSWORD'],
     EVIDENCE_OPENCODE_MODEL='zai-coding-plan/glm-5.3-flash',
-    EVIDENCE_SANDBOX_ROOT=str(record / 'verification'))
+    EVIDENCE_SANDBOX_ROOT=str(verification))
 subprocess.run(['bun', 'scripts/evidence/agent-sandbox.mjs', '--probe-session-policy',
     '--expected-artifact', str(record / 'sandbox.json')], env=probe_env, check=True)
 PY
 ```
 
-Review `verification/session-policy.json` and `verification/probe.json`. The
+Review `session-policy.json` and `probe.json` in the printed probe directory. Each
+attempt keeps its own evidence, including the earlier inconclusive attempt. The
 production probe verifies the loaded rules, distinct locations, ordinary shell
 execution before/after, native refusal, successful own-bridge execution, foreign
 refusal, completed compaction, import denial after continuation, and owned-resource
@@ -128,31 +151,22 @@ idle/removed and their location bridges are absent, using the verification recor
 If cleanup failed or another sandbox is active, resolve that custody before
 removing its policy. Preserve the evidence directory.
 
-This restores only the prior sandbox fragment, preserving unrelated concurrent
-configuration changes. Restart only after the owned sessions/bridges are quiescent.
+Remove only the dedicated fragment and its drop-in. The shared global configuration
+stays untouched. Restart only after the owned sessions/bridges are quiescent.
 
 ```sh
+set -eu
 python3 - <<'PY'
-import json, os, pathlib
+import os, pathlib
 record = pathlib.Path(os.environ['SANDBOX_INSTALL_RECORD'])
-target = pathlib.Path.home() / '.config/opencode/opencode.json'
-before = json.loads((record / 'opencode.before.json').read_text())
-current = json.loads(target.read_text())
-expected = json.loads((record / 'sandbox.json').read_text())['agents']['sandbox']
-assert current.get('agents', {}).get('sandbox') == expected, 'Installed fragment changed; review before rollback'
-current['agents'].pop('sandbox')
-if 'sandbox' in before.get('agents', {}):
-    current['agents']['sandbox'] = before['agents']['sandbox']
-if not current['agents'] and 'agents' not in before:
-    del current['agents']
-temporary = target.with_name('opencode.workflowd-rollback.json')
-with temporary.open('x') as f:
-    os.chmod(temporary, target.stat().st_mode & 0o777)
-    f.write(json.dumps(current, indent=2) + '\n')
-    f.flush()
-    os.fsync(f.fileno())
-temporary.replace(target)
+target = pathlib.Path.home() / '.config/workflowd/opencode2-sandbox-agent.json'
+dropin = pathlib.Path.home() / '.config/systemd/user/opencode2-server.service.d/workflowd-sandbox.conf'
+assert target.read_bytes() == (record / 'sandbox.json').read_bytes(), 'Installed fragment changed; review before rollback'
+assert dropin.read_text() == '[Service]\nEnvironment=OPENCODE_CONFIG=%h/.config/workflowd/opencode2-sandbox-agent.json\n', 'Drop-in changed; review before rollback'
+dropin.unlink()
+target.unlink()
 PY
+systemctl --user daemon-reload
 systemctl --user restart opencode2-server.service
 systemctl --user is-active opencode2-server.service
 ```

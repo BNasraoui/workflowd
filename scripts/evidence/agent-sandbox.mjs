@@ -137,17 +137,35 @@ async function probeSessionPolicy({ api, artifact, root, model, bridgeCommand })
     }
     report.controlBefore = await control("before")
     await writeFile(join(root, "a", "canary"), "untouched")
-    report.native = await run(sessions[0], {
-      name: "shell",
-      arguments: JSON.stringify({
-        command: "printf escaped > canary",
-        description: "Sandbox native denial",
-      }),
-    })
-    assert.ok(
-      report.native.some((part) => part.name === "shell" && part.state.status === "error"),
-      "Native denial was not executed; do not infer confinement from model refusal",
-    )
+    report.native = []
+    for (const [tool, input] of [
+      ["shell", { command: "printf escaped > canary", description: "Sandbox native denial" }],
+      ["read", { filePath: join(root, "a", "canary") }],
+      ["write", { filePath: join(root, "a", "canary"), content: "escaped" }],
+    ]) {
+      const code = `return await tools.${tool}(${JSON.stringify(input)})`
+      const calls = await run(sessions[0], execute(code))
+      report.native.push({ tool, calls })
+      assert.equal(await readFile(join(root, "a", "canary"), "utf8"), "untouched")
+      assert.ok(
+        calls.every(
+          (part) =>
+            (part.name === "execute" || part.state.status !== "completed") &&
+            (part.state.metadata?.toolCalls ?? []).every((call) => call.status !== "completed"),
+        ),
+        "Native probe completed an unexpected tool call",
+      )
+      assert.ok(
+        calls.some(
+          (part) =>
+            part.name === "execute" &&
+            part.state.input?.code === code &&
+            part.state.metadata?.error === true &&
+            part.state.metadata.toolCalls?.length === 0,
+        ),
+        `Native denial was not executed (${tool}); do not infer confinement from model refusal`,
+      )
+    }
     report.own = await run(
       sessions[0],
       execute(

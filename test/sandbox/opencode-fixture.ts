@@ -15,11 +15,11 @@ export type FixtureAction = { name: string; arguments: string; text?: string }
 
 // A disposable shared server with ordinary built-ins and only fake model credentials.
 // The fixture home isolates configuration, not tool execution: its canaries are writable.
-export async function sharedOpenCodeFixture(label: string, policySummary?: string) {
+export async function sharedOpenCodeFixture(
+  label: string,
+  policy?: { summary: string; refuseNative?: boolean },
+) {
   const artifact = await readFile(resolve("deploy/opencode/sandbox.json"), "utf8")
-  const fragment = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
-    JSON.parse(artifact),
-  )
   const binary = await realpath(Bun.which("opencode2") ?? "opencode2")
   const binaryHash = createHash("sha256")
     .update(await readFile(binary))
@@ -52,16 +52,18 @@ export async function sharedOpenCodeFixture(label: string, policySummary?: strin
           : actions.shift()
       const last = body.messages.at(-1)
       let text = answer
-      if (
-        policySummary !== undefined &&
-        last?.role === "user" &&
-        typeof last.content === "string"
-      ) {
-        if (last.content.startsWith("Execute exactly this tool call"))
+      if (policy !== undefined && last?.role === "user" && typeof last.content === "string") {
+        if (last.content.startsWith("Execute exactly this tool call")) {
           action = Schema.decodeUnknownSync(
             Schema.Struct({ name: Schema.String, arguments: Schema.String }),
           )(JSON.parse(last.content.split("\n").at(-1) ?? ""))
-        if (last.content.includes("You MUST summarize the conversation")) text = policySummary
+          if (
+            !body.tools?.some((tool) => tool.function.name === action?.name) ||
+            (policy.refuseNative && /tools\.(shell|read|write)\(/.test(action.arguments))
+          )
+            action = undefined
+        }
+        if (last.content.includes("You MUST summarize the conversation")) text = policy.summary
       }
       const delta =
         action === undefined
@@ -153,6 +155,9 @@ export async function sharedOpenCodeFixture(label: string, policySummary?: strin
   try {
     const configDirectory = join(root, "home/.config/opencode")
     await mkdir(configDirectory, { recursive: true })
+    const sandboxConfig = join(root, "home/.config/workflowd/opencode2-sandbox-agent.json")
+    await mkdir(join(root, "home/.config/workflowd"), { recursive: true })
+    await writeFile(sandboxConfig, artifact)
     await writeFile(
       join(configDirectory, "opencode.json"),
       JSON.stringify({
@@ -161,7 +166,6 @@ export async function sharedOpenCodeFixture(label: string, policySummary?: strin
         snapshots: false,
         formatter: false,
         lsp: false,
-        ...fragment,
         providers: {
           openai: {
             package: "aisdk:@ai-sdk/openai-compatible",
@@ -194,6 +198,7 @@ export async function sharedOpenCodeFixture(label: string, policySummary?: strin
       `HOME=${join(root, "home")}`,
       "PATH=/usr/bin:/bin",
       "OPENCODE_DISABLE_PROJECT_CONFIG=1",
+      `OPENCODE_CONFIG=${sandboxConfig}`,
       "OPENCODE_SERVER_PASSWORD=fixture-server-password",
       binary,
       "serve",

@@ -9,12 +9,12 @@ import { sharedOpenCodeFixture } from "./opencode-fixture"
 import { compileSandboxBridge } from "../../src/sandbox/bridge"
 
 test.each([true, false])(
-  "operator policy probe confirms cleanup after model execution or refusal (%s)",
+  "operator policy probe uses advertised tools and cleans up after native attempt or refusal (%s)",
   async (successful) => {
-    const fixture = await sharedOpenCodeFixture(
-      `operator-${String(successful)}`,
-      successful ? compactionSummary : undefined,
-    )
+    const fixture = await sharedOpenCodeFixture(`operator-${String(successful)}`, {
+      summary: compactionSummary,
+      refuseNative: !successful,
+    })
     const output = join(fixture.root, "operator")
     try {
       const result = command([
@@ -30,12 +30,31 @@ test.each([true, false])(
         "deploy/opencode/sandbox.json",
       ])
       if (successful) expect(await result).toContain('"result":"passed"')
-      else await expect(result).rejects.toThrow("Ordinary shell control did not execute")
+      else await expect(result).rejects.toThrow("Native denial was not executed")
       const report = Schema.decodeUnknownSync(
-        Schema.Struct({ result: Schema.String, sessionsRemoved: Schema.Number }),
+        Schema.Struct({
+          result: Schema.String,
+          sessionsRemoved: Schema.Number,
+          cleanupConfirmed: Schema.Boolean,
+          native: Schema.Array(
+            Schema.Struct({ tool: Schema.String, calls: Schema.Array(Schema.Json) }),
+          ),
+        }),
       )(await Bun.file(join(output, "session-policy.json")).json())
       expect(report.result).toBe(successful ? "passed" : "stopped")
       expect(report.sessionsRemoved).toBe(3)
+      expect(report.cleanupConfirmed).toBe(true)
+      expect(await Bun.file(join(output, "a/canary")).text()).toBe("untouched")
+      if (successful) {
+        expect(report.native.map((entry) => entry.tool)).toEqual(["shell", "read", "write"])
+        for (const entry of report.native) {
+          expect(entry.calls).toHaveLength(1)
+          expect(entry.calls[0]).toMatchObject({
+            name: "execute",
+            state: { metadata: { error: true, toolCalls: [] } },
+          })
+        }
+      } else expect(report.native).toEqual([{ tool: "shell", calls: [] }])
     } finally {
       await fixture.close()
     }
