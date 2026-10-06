@@ -5,7 +5,7 @@ import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { Effect, Schema } from "effect"
 import type { SandboxPolicy } from "./config"
-import { SandboxError } from "./store"
+import { SandboxError, SandboxRefAbsent } from "./store"
 
 const Repository = Schema.Struct({ id: Schema.Int, fork: Schema.Boolean })
 const Run = Schema.Struct({
@@ -170,6 +170,7 @@ export const makeSandboxGithub = (
         })
         result = yield* request(client, "GET", path)
       }
+      if (result.status === 404 && !create) return yield* Effect.fail(new SandboxRefAbsent())
       if (result.status !== 200) return yield* Effect.fail(githubFailure())
       const ref = yield* Schema.decodeUnknownEffect(Ref)(result.data)
       if (ref.ref !== `refs/heads/${leaseBranch(leaseId)}` || ref.object.sha !== policy.workflowSha)

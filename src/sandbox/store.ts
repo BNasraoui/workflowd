@@ -11,6 +11,11 @@ export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxErr
   uncertain: Schema.optionalKey(Schema.Boolean),
 }) {}
 
+export class SandboxRefAbsent extends Schema.TaggedError<SandboxRefAbsent>()(
+  "SandboxRefAbsent",
+  {},
+) {}
+
 export const sessionCleanupUnconfirmed = "Sandbox session cleanup unconfirmed; retry required"
 const unobservedRun = "Sandbox Actions run unobserved; custody retained."
 export const isUnobservedRun = (lease: { release_error: string | null }) =>
@@ -79,6 +84,24 @@ export const makeSandboxStore = Effect.gen(function* () {
     sql`UPDATE sandbox_lease_operations SET creation_pending=0
       WHERE repository_id=${operation.repositoryId} AND lease_id=${operation.leaseId}
       AND owner=${operation.owner} AND expires_at>${Date.now()}`
+  const escalateCreation = (operation: LeaseOperation) =>
+    sql.withTransaction(
+      Effect.gen(function* () {
+        if (!(yield* currentOperation(operation))) return false
+        const rows = yield* sql`SELECT * FROM sandbox_leases WHERE lease_id=${operation.leaseId}
+        AND json_extract(policy,'$.repositoryId')=${operation.repositoryId}`
+        if (rows.length === 0) return false
+        const lease = yield* Schema.decodeUnknownEffect(Lease)(rows[0])
+        if (
+          lease.state !== "releasing" &&
+          !(lease.state === "operator_required" && isUnobservedRun(lease))
+        )
+          return false
+        const diagnostic = `${unobservedRun} Ref creation remains uncertain after the request deadline and grace period; exact ref is absent. Inspect ${lease.policy.repository} refs/heads/workflowd/leases/${lease.lease_id} at ${lease.policy.workflowSha} in Actions; restore API visibility and reconcile any delayed ref or run. Do not recreate the ref or discard custody.`
+        yield* sql`UPDATE sandbox_leases SET state='operator_required',release_error=${diagnostic} WHERE run_id=${lease.run_id}`
+        return true
+      }),
+    )
   const withOperation = Effect.fn("SandboxStore.withOperation")(function* <E, E2, E3>(
     repositoryId: number,
     leaseId: string,
@@ -114,7 +137,19 @@ export const makeSandboxStore = Effect.gen(function* () {
           ? Effect.void
           : Effect.gen(function* () {
               if (operation.creationPending) {
-                yield* confirmRef
+                const result = yield* Effect.result(confirmRef)
+                if (result._tag === "Failure") {
+                  // Only an expired owner can reach this read: the ten-minute
+                  // horizon covers the nine-minute operation, ten-second HTTP
+                  // deadline and fifty seconds of grace. Absence escalates but
+                  // never clears creation uncertainty or permits the callback.
+                  if (
+                    result.failure instanceof SandboxRefAbsent &&
+                    (yield* escalateCreation(operation))
+                  )
+                    return
+                  return yield* Effect.fail(result.failure)
+                }
                 yield* confirmCreation(operation)
               }
               yield* use(operation)
@@ -203,25 +238,34 @@ export const makeSandboxStore = Effect.gen(function* () {
     )
   })
   const beginRelease = Effect.fn("SandboxStore.beginRelease")(function* (runId: string) {
-    const rows =
-      yield* sql`UPDATE sandbox_leases SET state='releasing' WHERE run_id=${runId} AND state != 'released'
+    const rows = yield* sql`UPDATE sandbox_leases SET state=CASE WHEN state='operator_required'
+        AND release_error LIKE ${unobservedRun + "%"}
+        AND EXISTS (SELECT 1 FROM sandbox_lease_operations o WHERE o.lease_id=sandbox_leases.lease_id
+          AND o.repository_id=json_extract(sandbox_leases.policy,'$.repositoryId') AND o.creation_pending=1)
+        THEN state ELSE 'releasing' END WHERE run_id=${runId} AND state != 'released'
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} RETURNING run_id`
     if (rows.length === 0 && (yield* read(runId))?.state !== "released")
       return yield* Effect.fail(
         new SandboxError({ message: "Sandbox local cleanup must be confirmed before release" }),
       )
   })
-  const reconcileUnobserved = Effect.fn("SandboxStore.reconcileUnobserved")(function* <E>(
+  const reconcileUnobserved = Effect.fn("SandboxStore.reconcileUnobserved")(function* <E, E2>(
     runId: string,
     discoverRuns: Effect.Effect<void, E>,
     removeRef: Effect.Effect<void, E>,
-    confirmRef: Effect.Effect<void, E>,
+    confirmRef: Effect.Effect<void, E2>,
   ) {
     const lease = yield* read(runId)
     if (lease === null) return
     const eligible = Effect.gen(function* () {
       const saved = yield* read(runId)
-      if (saved?.state !== "releasing" || saved.actions_run_id !== null) return false
+      if (
+        saved === null ||
+        (saved.state !== "releasing" &&
+          !(saved.state === "operator_required" && isUnobservedRun(saved))) ||
+        saved.actions_run_id !== null
+      )
+        return false
       const runs = yield* sql`SELECT 1 FROM sandbox_cleanup_runs WHERE lease_id=${lease.lease_id}
         AND repository_id=${lease.policy.repositoryId}`
       return runs.length === 0
@@ -448,7 +492,12 @@ export const makeSandboxStore = Effect.gen(function* () {
       )
         return false
       const lease = yield* cleanupLease(row)
-      return lease === null || lease.state === "releasing" || lease.state === "released"
+      return (
+        lease === null ||
+        lease.state === "releasing" ||
+        lease.state === "released" ||
+        (lease.state === "operator_required" && isUnobservedRun(lease))
+      )
     })
     yield* withOperation(row.repository_id, row.lease_id, eligible, confirmRef, (operation) =>
       Effect.gen(function* () {
@@ -459,7 +508,10 @@ export const makeSandboxStore = Effect.gen(function* () {
             yield* sql`UPDATE sandbox_cleanup_runs SET state='released',last_error=NULL,updated_at=${Date.now()}
             WHERE repository_id=${row.repository_id} AND lease_id=${row.lease_id}`
             const lease = yield* cleanupLease(row)
-            if (lease?.state === "releasing") yield* confirmReleased(lease.run_id)
+            if (lease !== null && lease.state !== "released") {
+              if (lease.state === "operator_required") yield* beginRelease(lease.run_id)
+              yield* confirmReleased(lease.run_id)
+            }
           }),
         )
       }),

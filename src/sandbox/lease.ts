@@ -180,6 +180,7 @@ export const makeSandboxLeaseService = (
         if (
           lease !== null &&
           !["releasing", "released"].includes(lease.state) &&
+          !isUnobservedRun(lease) &&
           (lease.actions_run_id === null ||
             (lease.actions_run_id === row.actions_run_id &&
               lease.actions_attempt === row.actions_attempt))

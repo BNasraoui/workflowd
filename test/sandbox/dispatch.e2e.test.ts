@@ -1,6 +1,6 @@
 import { Session } from "@opencode-ai/client/effect"
 import { expect, test } from "bun:test"
-import { Effect, Layer, Schedule } from "effect"
+import { Effect, Fiber, Layer, ManagedRuntime, Schedule } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
   SandboxDispatch,
@@ -67,6 +67,191 @@ const sandboxRun = (directory: string, modelId: string, prompt: string) => ({
   maxAttempts: 1,
   createdAt: new Date(),
 })
+
+test.each(["before-post", "absent-post", "delayed-post"])(
+  "uncertain ref absence escalates once across coordinator restart (%s)",
+  async (mode) => {
+    const shared = await sharedOpenCodeFixture("uncertain-ref")
+    const fixture = await sandboxGithubFixture(policy)
+    fixture.listRuns([])
+    const entered = Promise.withResolvers<void>()
+    let delayed: (() => Promise<Response>) | undefined
+    let armed = true
+    let posts = 0
+    const client = fixture.OctokitClass.defaults({
+      request: {
+        fetch: (input: string | Request | URL, init?: RequestInit) => {
+          const path = new URL(input instanceof Request ? input.url : String(input)).pathname
+          if (init?.method === "POST" && path.endsWith("/git/refs")) posts++
+          if (
+            armed &&
+            (mode === "before-post"
+              ? path.includes("/git/ref/heads/")
+              : init?.method === "POST" && path.endsWith("/git/refs"))
+          ) {
+            armed = false
+            delayed = () => fetch(input, { ...init, signal: null })
+            entered.resolve()
+            return new Promise<Response>((_, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(new Error("interrupted")), {
+                once: true,
+              })
+            })
+          }
+          return fetch(input, init)
+        },
+      },
+    })
+    const layers = () =>
+      AgentRunStoreLive.pipe(
+        Layer.provideMerge(
+          WorkflowStoreLive.pipe(
+            Layer.provideMerge(
+              SqliteClient.layer({ filename: join(shared.root, "custody.sqlite") }),
+            ),
+          ),
+        ),
+      )
+    let runtime = ManagedRuntime.make(layers())
+    const coordinator = Effect.gen(function* () {
+      const github = yield* makeSandboxGithub(fixture.github, client)
+      const leases = yield* makeSandboxLeaseService(github)
+      const service = yield* makeSandboxDispatch({
+        policies: [policy],
+        github,
+        leases,
+        executor: shared.executor,
+        client: shared.client,
+        executorId: "opencode:opencode-primary",
+        endpointIdentity: shared.url,
+      })
+      return {
+        leases,
+        service,
+        store: yield* makeSandboxStore,
+        runs: yield* AgentRunStore,
+        sql: yield* SqlClient.SqlClient,
+      }
+    })
+    try {
+      let c = await runtime.runPromise(coordinator)
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          yield* c.runs.create(
+            sandboxRun(
+              join(shared.root, "uncertain"),
+              "gpt-6-astra-fixture",
+              "Interrupted startup",
+            ),
+          )
+          yield* c.runs.claimSpawn({ runId: "run-1", now: new Date() })
+          yield* c.store.request({
+            runId: "run-1",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          const first = yield* Effect.forkChild(c.leases.acquire("run-1"))
+          yield* Effect.promise(() => entered.promise)
+          yield* Fiber.interrupt(first)
+          yield* c.service.cancel((yield* c.runs.read("run-1"))!)
+          expect((yield* c.store.read("run-1"))?.state).toBe("releasing")
+          expect(
+            yield* c.sql`SELECT * FROM resident_inbox WHERE id='agent-run-end-run-1'`,
+          ).toHaveLength(0)
+          const [operation] =
+            yield* c.sql`SELECT expires_at,creation_pending FROM sandbox_lease_operations`
+          expect(Number(operation?.expires_at)).toBeGreaterThan(Date.now() + 9 * 60000)
+          expect(operation?.creation_pending).toBe(1)
+        }),
+      )
+      await runtime.dispose()
+      runtime = ManagedRuntime.make(layers())
+      c = await runtime.runPromise(coordinator)
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          // The persisted ten-minute ownership horizon exceeds the nine-minute
+          // operation limit, ten-second HTTP deadline and a fifty-second grace.
+          yield* c.sql`UPDATE sandbox_lease_operations SET expires_at=0`
+          yield* c.service.iteration
+          const escalated = yield* c.store.read("run-1")
+          expect(escalated?.state).toBe("operator_required")
+          expect(escalated?.release_error).toContain("creation remains uncertain")
+          for (const identity of [
+            policy.repository,
+            "refs/heads/workflowd/leases/lease-1",
+            policy.workflowSha,
+          ])
+            expect(escalated?.release_error).toContain(identity)
+          yield* c.service.iteration
+          const mailbox =
+            yield* c.sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
+          expect(mailbox).toHaveLength(1)
+          expect(String(mailbox[0]?.prompt)).toContain(escalated!.release_error!)
+          expect((yield* c.runs.read("run-1"))?.state).toBe("operator_required")
+          yield* c.service.iteration
+          expect(yield* c.store.read("run-1")).toEqual(escalated)
+          expect(
+            (yield* c.sql`SELECT creation_pending FROM sandbox_lease_operations`)[0]
+              ?.creation_pending,
+          ).toBe(1)
+          expect(fixture.refCreates).toBe(0)
+          expect(fixture.refDeletes).toBe(0)
+        }),
+      )
+      await runtime.dispose()
+      runtime = ManagedRuntime.make(layers())
+      c = await runtime.runPromise(coordinator)
+      await runtime.runPromise(
+        Effect.gen(function* () {
+          const mailbox =
+            yield* c.sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
+          yield* c.service.iteration
+          expect((yield* c.store.read("run-1"))?.state).toBe("operator_required")
+          if (mode === "delayed-post") {
+            // Accepted remote work can finish after cancellation and escalation.
+            yield* Effect.promise(() => delayed!())
+            fixture.listRuns([{}])
+            yield* c.sql`UPDATE sandbox_lease_operations SET expires_at=0`
+            yield* c.service.iteration
+            expect(fixture.cancellations).toContain(41)
+            fixture.listRuns([])
+            fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+            yield* c.service.iteration
+            expect((yield* c.store.read("run-1"))?.state).toBe("released")
+            expect(
+              yield* c.sql`SELECT owner,creation_pending FROM sandbox_lease_operations`,
+            ).toEqual([{ owner: null, creation_pending: 0 }])
+            expect(fixture.refCreates).toBe(1)
+          } else {
+            yield* c.sql`UPDATE sandbox_lease_operations SET expires_at=0`
+            yield* c.service.iteration
+            expect((yield* c.store.read("run-1"))?.state).toBe("operator_required")
+            expect(fixture.refCreates).toBe(0)
+            expect(fixture.refDeletes).toBe(0)
+          }
+          expect(posts).toBe(mode === "before-post" ? 0 : 1)
+          expect(
+            yield* c.sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`,
+          ).toEqual(mailbox)
+          const exact = yield* Effect.promise(() =>
+            fetch(
+              `${fixture.apiUrl}repos/${policy.repository}/git/ref/heads/workflowd/leases/lease-1`,
+              { headers: { Authorization: "Bearer fixture-token" } },
+            ),
+          )
+          expect(exact.status).toBe(404)
+        }),
+      )
+    } finally {
+      await runtime.dispose()
+      await fixture.close()
+      await shared.close()
+    }
+  },
+  30000,
+)
 
 test.each(["before-ref", "without-run", "late-run"])(
   "no observed Actions run produces a durable operator mailbox and retains custody (%s)",
