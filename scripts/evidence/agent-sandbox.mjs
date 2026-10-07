@@ -620,6 +620,79 @@ export function assertLivePrototype(report) {
   assert.match(report.finalMessage, /sandbox-prototype-ok/)
 }
 
+// Normalize completed tool telemetry, never the model's final prose.
+export function prototypeToolEvidence(kind, frames, bridge) {
+  if (kind === "opencode") {
+    const parts = frames.filter((part) => part.type === "tool")
+    assertSandboxCalls(parts, bridge)
+    return parts.flatMap((part) =>
+      (part.state.metadata?.toolCalls ?? []).map((call) => ({
+        name: call.tool,
+        input: call.input,
+        result: part.state.content,
+        owned: call.tool.startsWith(`${bridge}.`),
+        completed:
+          part.state.status === "completed" &&
+          call.status === "completed" &&
+          !part.state.metadata?.error,
+      })),
+    )
+  }
+  if (kind === "codex")
+    return frames.flatMap((frame) => {
+      const item = frame.item
+      return frame.type === "item.completed" && item?.type === "mcp_tool_call"
+        ? [
+            {
+              name: item.tool,
+              input: item.arguments,
+              result: item.result,
+              owned: item.server === bridge,
+              completed: item.status === "completed" && !item.error && !item.result?.isError,
+            },
+          ]
+        : []
+    })
+  const results = new Map(
+    frames
+      .filter((frame) => frame.type === "user")
+      .flatMap((frame) =>
+        (frame.message?.content ?? [])
+          .filter((part) => part.type === "tool_result")
+          .map((part) => [part.tool_use_id, part]),
+      ),
+  )
+  return frames
+    .filter((frame) => frame.type === "assistant")
+    .flatMap((frame) =>
+      (frame.message?.content ?? [])
+        .filter((part) => part.type === "tool_use")
+        .map((part) => ({
+          name: part.name,
+          input: part.input,
+          result: results.get(part.id)?.content,
+          owned: part.name.startsWith(`mcp__${bridge}__`),
+          completed: results.has(part.id) && !results.get(part.id).is_error,
+        })),
+    )
+}
+
+export function remotePrototypePassed(calls) {
+  return calls.some((call) => {
+    const result = JSON.stringify(call.result ?? "")
+    return (
+      call.owned &&
+      call.completed &&
+      call.name.endsWith("environment_run_cmd") &&
+      /bun test test\/sandbox\/prototype-proof\.test\.ts/.test(call.input?.command ?? "") &&
+      /3 pass/.test(result) &&
+      /0 fail/.test(result) &&
+      /workflowd-test-exit=0/.test(result) &&
+      !/"isError":true/.test(result)
+    )
+  })
+}
+
 async function recordWorkflowLog(row) {
   stage = "released runner log and token permissions"
   // gh run view --log omits the reusable job's combined log on cancelled leases.
@@ -677,13 +750,16 @@ async function probeLive(policy) {
   }
   const model = option("--model")
   const separator = model.indexOf("/")
-  assert.ok(separator > 0 && separator < model.length - 1, "--model must select provider/model")
   const executor = option("--executor")
+  assert.ok(["opencode:opencode-primary", "codex:local", "claude:local"].includes(executor))
+  const kind = executor.split(":")[0]
+  if (kind === "opencode")
+    assert.ok(separator > 0 && separator < model.length - 1, "--model must select provider/model")
   const endpoint = process.env.EVIDENCE_OPENCODE_URL
   const password = process.env.EVIDENCE_OPENCODE_PASSWORD
   assert.ok(endpoint && password, "Existing executor HTTP authentication is required")
   assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/)
-  assert.equal(executor, "opencode:opencode-primary")
+
   const api = async (path) => {
     const response = await fetch(`${endpoint}/api/${path}`, {
       headers: { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}` },
@@ -723,13 +799,15 @@ async function probeLive(policy) {
       WORKFLOWD_OPENCODE_ATTACH_URL: endpoint,
       OPENCODE_SERVER_URL: endpoint,
       WORKFLOWD_AGENT_RUN_TOKEN: token,
-      WORKFLOWD_AGENT_RUN_ROUTES: `prototype=${model}`,
+      WORKFLOWD_DATABASE_PATH: join(output, "leases.sqlite"),
+      WORKFLOWD_AGENT_RUN_ROUTES: kind === "opencode" ? `prototype=${model}` : undefined,
+      WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX: `workflowd-evidence-${randomUUID()}-`,
       WORKFLOWD_AGENT_RUN_REPOSITORIES: `${policy.alias}=${output}`,
       WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([policy]),
       WORKFLOWD_WORKTREE_ROOT: join(output, "worktrees"),
       WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS: "300000",
       WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS: "1000",
-      WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+      WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: kind === "codex" ? "true" : "false",
     },
     { home: output },
   )
@@ -790,15 +868,17 @@ async function probeLive(policy) {
           {
             name: "dispatch_agent",
             arguments: {
-              model: model.slice(separator + 1),
-              provider: model.slice(0, separator),
-              model_identity: "catalog",
+              model: kind === "opencode" ? model.slice(separator + 1) : model,
+              ...(kind === "opencode" ? { provider: model.slice(0, separator) } : {}),
+              model_identity: kind === "opencode" ? "catalog" : "native",
+              // Native catalogs advertise models without proving subscription entitlement.
+              allow_unknown_access: kind !== "opencode",
               executor,
               repository: policy.alias,
               base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
               idempotency_key: createHash("sha256").update(output).digest("hex"),
               prompt:
-                "Use only container-use. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run bun test test/sandbox/prototype-proof.test.ts. Keep the resulting test artifact; do not push. Finish by reporting the test command and result with marker sandbox-prototype-ok. All repository files and commands must stay in the container-use environment.",
+                'Use only container-use. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Finish by reporting the test command and result with marker sandbox-prototype-ok. All repository files and commands must stay in the container-use environment.',
             },
           },
           undefined,
@@ -817,46 +897,76 @@ async function probeLive(policy) {
     for (;;) {
       run = await runtime.runPromise(runs.read(evidence.runId))
       if (["completed", "cancelled", "failed", "operator_required"].includes(run.state)) break
+      const activeLease = await runtime.runPromise(store.read(evidence.runId))
+      if (!evidence.credentials && activeLease?.transport) {
+        await probeDenials(activeLease)
+        stage = "remote test-writing task and confirmed release"
+        await persist()
+      }
       await runtime.runPromise(sandbox.heartbeat)
       await runtime.runPromise(sandbox.iteration)
       assert.ok(Date.now() < deadline, "Live prototype deadline exceeded")
       await delay(2000)
     }
     stage = "terminal transcript evidence"
-    const transcriptMessages = []
-    let query = new URLSearchParams({ limit: "100", order: "desc" })
-    const cursors = new Set()
-    for (let page = 0; ; page++) {
-      assert.ok(page < 100, "Live transcript exceeds bound")
-      const result = await api(`session/${run.nativeSessionId}/message?${query}`)
-      assert.ok(result, "Live session disappeared before evidence capture")
-      transcriptMessages.push(...result.data)
-      if (!result.cursor?.next) break
-      assert.ok(!cursors.has(result.cursor.next), "Live transcript cursor repeated")
-      cursors.add(result.cursor.next)
-      query = new URLSearchParams({ limit: "100", cursor: result.cursor.next })
-    }
-    const transcriptBinding = await readSandboxBinding(run.directory)
-    const calls = transcriptMessages
-      .flatMap((message) => message.content ?? [])
-      .filter((part) => part.type === "tool")
-    assertSandboxCalls(calls, transcriptBinding.bridgeServerName)
-    evidence.remoteTestsPassed = calls.some((part) => {
-      const text = JSON.stringify(part.state.content ?? [])
-      return (
-        part.state.status === "completed" &&
-        !part.state.metadata?.error &&
-        part.state.metadata?.toolCalls?.some(
-          (call) =>
-            call.status === "completed" &&
-            call.tool === `${transcriptBinding.bridgeServerName}.environment_run_cmd` &&
-            /bun test test\/sandbox\/prototype-proof\.test\.ts/.test(call.input?.command ?? ""),
-        ) &&
-        /3 pass/.test(text) &&
-        /0 fail/.test(text) &&
-        !/"isError":true/.test(text)
+    const binding = await readSandboxBinding(run.directory)
+    let frames
+    if (kind === "opencode") {
+      const messages = []
+      let query = new URLSearchParams({ limit: "100", order: "desc" })
+      const cursors = new Set()
+      for (let page = 0; ; page++) {
+        assert.ok(page < 100, "Live transcript exceeds bound")
+        const result = await api(`session/${run.nativeSessionId}/message?${query}`)
+        assert.ok(result, "Live session disappeared before evidence capture")
+        messages.push(...result.data)
+        if (!result.cursor?.next) break
+        assert.ok(!cursors.has(result.cursor.next), "Live transcript cursor repeated")
+        cursors.add(result.cursor.next)
+        query = new URLSearchParams({ limit: "100", cursor: result.cursor.next })
+      }
+      frames = messages
+        .flatMap((message) => message.content ?? [])
+        .filter((part) => part.type === "tool")
+      evidence.executorVersion = (await api("health")).version
+    } else {
+      const custody = join(output, `sandbox-${kind}-processes`, run.runId)
+      const manifest = JSON.parse(await readFile(join(custody, "manifest.json"), "utf8"))
+      assert.equal(manifest.executionId, binding.sessionId)
+      assert.equal(manifest.runId, run.runId)
+      frames = (await readFile(manifest.eventsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(JSON.parse)
+      const child = Bun.spawn(
+        ["systemctl", "--user", "show", binding.sessionId, "-p", "ActiveState", "-p", "MainPID"],
+        { stdout: "pipe", stderr: "ignore" },
       )
-    })
+      const [status, state] = await Promise.all([child.exited, new Response(child.stdout).text()])
+      assert.equal(status, 0)
+      evidence.sessionQuiescent =
+        /ActiveState=(inactive|failed)/.test(state) && /MainPID=0/.test(state)
+      evidence.bridgeAbsent = evidence.sessionQuiescent
+      evidence.process = { executionId: binding.sessionId, state }
+      const version = Bun.spawn([kind, "--version"], { stdout: "pipe", stderr: "ignore" })
+      evidence.executorVersion = (await new Response(version.stdout).text()).trim()
+      assert.equal(await version.exited, 0)
+      evidence.advertisedTools = frames
+        .filter((frame) => frame.type === "system" && frame.subtype === "init")
+        .flatMap((frame) => frame.tools ?? [])
+      evidence.observedItemTypes = frames
+        .filter((frame) => frame.type === "item.completed")
+        .map((frame) => frame.item?.type)
+        .filter(Boolean)
+      if (kind === "codex")
+        evidence.capabilityEvidence =
+          "Codex JSONL does not expose its full tool catalog; residual capabilities are recorded by the installed-CLI fixture in the runbook."
+    }
+    const calls = prototypeToolEvidence(kind, frames, binding.bridgeServerName)
+    evidence.executor = executor
+    evidence.model = model
+    evidence.remoteTestsPassed = remotePrototypePassed(calls)
     await writeFile(join(output, "tool-evidence.json"), JSON.stringify(calls, null, 2), {
       mode: 0o600,
     })
@@ -871,19 +981,20 @@ async function probeLive(policy) {
       workflowSha: lease.policy.workflowSha,
     }
     await recordWorkflowLog(lease)
-    const binding = await readSandboxBinding(run.directory)
     evidence.bindingRevoked = binding.state === "revoked"
-    const location = new URLSearchParams({ "location[directory]": run.directory })
-    evidence.bridgeAbsent = !(await api(`mcp?${location}`)).data.some(
-      (entry) => entry.name === binding.bridgeServerName,
-    )
-    const session = await api(`session/${run.nativeSessionId}`)
-    const active = await api("session/active")
-    const inbox = await api(`session/${run.nativeSessionId}/inbox`)
-    evidence.sessionQuiescent =
-      session?.data.agent === "sandbox" &&
-      active.data[run.nativeSessionId] === undefined &&
-      inbox.data.length === 0
+    if (kind === "opencode") {
+      const location = new URLSearchParams({ "location[directory]": run.directory })
+      evidence.bridgeAbsent = !(await api(`mcp?${location}`)).data.some(
+        (entry) => entry.name === binding.bridgeServerName,
+      )
+      const session = await api(`session/${run.nativeSessionId}`)
+      const active = await api("session/active")
+      const inbox = await api(`session/${run.nativeSessionId}/inbox`)
+      evidence.sessionQuiescent =
+        session?.data.agent === "sandbox" &&
+        active.data[run.nativeSessionId] === undefined &&
+        inbox.data.length === 0
+    }
     const patch = await readFile(join(run.directory, "result.patch"), "utf8")
     const finalMessage = await readFile(join(run.directory, "final.txt"), "utf8")
     const mailbox = await client.callTool({
@@ -908,21 +1019,36 @@ async function probeLive(policy) {
       JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
     )
   } finally {
-    for (const lease of await runtime.runPromise(store.active())) {
-      const run = await runtime.runPromise(runs.read(lease.run_id))
-      if (run && !["completed", "cancelled", "failed", "operator_required"].includes(run.state))
-        await runtime.runPromise(ingress.cancel(run.runId, new Date()))
-      const deadline = Date.now() + 300000
-      while ((await runtime.runPromise(store.read(lease.run_id)))?.state !== "released") {
-        await runtime.runPromise(sandbox.iteration)
-        assert.ok(Date.now() < deadline, "Live cleanup unconfirmed; retain custody")
-        await delay(2000)
+    try {
+      for (const lease of await runtime.runPromise(store.active())) {
+        const run = await runtime.runPromise(runs.read(lease.run_id))
+        if (run && !["completed", "cancelled", "failed", "operator_required"].includes(run.state))
+          await runtime.runPromise(ingress.cancel(run.runId, new Date()))
+        const deadline = Date.now() + 300000
+        for (;;) {
+          const current = await runtime.runPromise(store.read(lease.run_id))
+          if (current?.state === "released") break
+          evidence.cleanup = {
+            leaseId: lease.lease_id,
+            state: current?.state,
+            error: current?.release_error,
+          }
+          assert.notEqual(
+            current?.state,
+            "operator_required",
+            "Live cleanup requires an operator; retain custody",
+          )
+          await runtime.runPromise(sandbox.iteration)
+          assert.ok(Date.now() < deadline, "Live cleanup unconfirmed; retain custody")
+          await delay(2000)
+        }
       }
+    } finally {
+      await client.close()
+      await mcp.stop(true)
+      await host.stop(true)
+      await runtime.dispose()
     }
-    await client.close()
-    await mcp.stop(true)
-    await host.stop(true)
-    await runtime.dispose()
   }
 }
 

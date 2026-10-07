@@ -176,6 +176,9 @@ unit prefix is unique to the evidence run and is cleaned up afterward.
 See [the sandbox runbook](../../docs/agent-sandboxes.md#phase-4d-evidence) for the
 operator-pinned runner, capped fixture commands, external denial/credential
 inventory and authenticated live prototype. The `agent-sandbox.mjs` verifier uses
-the selected normal OpenCode executor and existing authentication. It never copies
+the selected OpenCode, Codex or Claude executor and its existing mint authentication.
+Select both `--executor` and `--model` explicitly, and give each executor a separate
+`EVIDENCE_SANDBOX_ROOT`. Native telemetry and confirmed process shutdown are recorded
+alongside the shared lease, patch and remote-test evidence. It never copies
 AI credentials or changes production configuration. Preserve each evidence root
 and its SQLite custody until confirmed release.

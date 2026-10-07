@@ -190,6 +190,15 @@ systemctl --user is-active opencode2-server.service
 
 ## Cleanup without an observed Actions run
 
+A definitive HTTP 4xx response to the ref-creation POST settles that attempt as
+rejected: creation uncertainty clears, the unused lease is released, and dispatch
+reports failure. Interruption, timeout, transport loss, and an unconfirmed 5xx
+retain uncertainty. Older misclassified records can be reconciled through
+`SandboxLease.reconcileRejectedCreation(runId, status)` using the retained POST
+rejection receipt. Recovery waits for operation ownership to expire and checks
+exact-ref absence and Actions custody; a GET 404 alone is insufficient evidence.
+Previously delivered terminal mailboxes remain part of the audit history.
+
 Cancellation or startup failure can leave a persisted intent before Actions
 exposes a run. Cleanup inventories the pinned workflow and exact lease branch,
 removes the exact ref, confirms its absence with GET 404, and inventories again.
@@ -234,11 +243,13 @@ remaining security and authenticated live verification; dispatch stays disabled.
 
 ## Phase 4D evidence
 
-The coordinator recorded `737c977da6abb95507bca70f00d746ff505120f2` as the
-operator pin after its required checks passed. App 4337845 creates lease refs at
-that exact SHA. Any further change under `deploy/sandbox/` or to either sandbox
-workflow requires publication, passing checks and another coordinator re-pin
-before acquisition. Evidence commands use a disposable coordinator database;
+The coordinator recorded `1dfc34c2742ede3d1499b8bcd303fd487c2a3f7d` as the
+operator pin, superseding `737c977da6abb95507bca70f00d746ff505120f2` with identical
+sandbox workflow/bootstrap files. App 4337845 creates lease refs at that exact SHA.
+It deliberately lacks Workflows permission, so the pin's workflow files must match
+an existing branch tip. Any change under `.github/workflows/` or `deploy/sandbox/`
+requires publication, passing checks and another coordinator re-pin before
+acquisition. Evidence commands use a disposable coordinator database;
 production sandbox configuration and the installed agent/drop-in stay unchanged.
 
 Every shipped bridge invocation requires an active binding, including the compiled
@@ -262,7 +273,7 @@ Run both commands in a transient user unit with `MemoryMax=6G` and
 ```sh
 bun scripts/evidence/agent-sandbox.mjs --probe-denials
 bun scripts/evidence/agent-sandbox.mjs --live \
-  --model zai-coding-plan/glm-5.3-flash --executor opencode:opencode-primary
+  --model "$SELECTED_MODEL" --executor "$SELECTED_EXECUTOR"
 ```
 
 The live command additionally accepts `EVIDENCE_OPENCODE_URL` and
@@ -291,3 +302,41 @@ bridge removal and session quiescence. Retained sessions stay `sandbox`. A verif
 restart reuses the receipt in the same evidence directory. Parent-wake ordering is
 covered by the dispatch fixture. A model's success statement alone cannot pass the
 live gate. Leave dispatch disabled if confinement or cleanup cannot be confirmed.
+
+## Native CLI prototypes
+
+The live verifier accepts `opencode:opencode-primary`, `codex:local` and
+`claude:local`. Select an accessible model explicitly for each invocation:
+OpenCode takes `provider/model`; native CLIs take their native model ID. Use a
+separate evidence root for each executor. All commands, including native workers,
+run in transient user services capped at 6 GiB with no swap. Existing mint
+credentials stay in their existing homes; none are copied into evidence or runners.
+Before the Claude live gate, verify actual inference with a trivial `claude --print`
+using the selected model. A positive `claude auth status` alone is insufficient.
+Expired OAuth requires the operator to run `claude auth login` on mint.
+
+Native sandbox dispatch uses the configured transient CLI even when ordinary
+Codex work uses a resident thread. The binding names its durable execution before
+MCP startup; normal session custody retains the CLI's native UUID. Each run starts
+in an empty controller directory and receives only its owned bridge configuration.
+Settlement revokes that binding, stops the owned process group, captures an inert
+patch and confirms Actions termination and ref absence before terminal delivery.
+
+Claude 2.1.289 is tested with strict MCP configuration, zero built-in tools and
+an exact bridge allow rule. Codex 0.159.1 disables inherited MCP servers, shell,
+web search, apps, plugins, subagents, browser/computer/image tools and hooks, with
+read-only sandboxing and bridge-scoped approval. Installed-CLI fixtures still
+advertise `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`,
+`request_user_input`, `get_goal`, `create_goal`, and `update_goal`. These residual
+capabilities do not cause dispatch refusal. The fixtures force unsupported native
+shell attempts and inspect the actual model-facing catalog. This is a record of
+supported restrictions and observed behavior, not a claim that native capabilities
+have disappeared completely.
+
+The verifier reads OpenCode's paginated transcript, Codex's durable JSONL MCP
+results, or Claude's paired tool-use/tool-result frames. The remote test command
+must return three passing tests, zero failures and `workflowd-test-exit=0` from a
+successful `&& printf` suffix. Final model prose cannot satisfy this check. Native
+completion additionally records the exact systemd unit's inactive state and zero
+MainPID. Live runs repeat runner network denials and credential inventory; fixture
+success never substitutes for authenticated live evidence.

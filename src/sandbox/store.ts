@@ -16,6 +16,11 @@ export class SandboxRefAbsent extends Schema.TaggedError<SandboxRefAbsent>()(
   {},
 ) {}
 
+export class SandboxRefRejected extends Schema.TaggedError<SandboxRefRejected>()(
+  "SandboxRefRejected",
+  { status: Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 499 })) },
+) {}
+
 export const sessionCleanupUnconfirmed = "Sandbox session cleanup unconfirmed; retry required"
 const unobservedRun = "Sandbox Actions run unobserved; custody retained."
 export const isUnobservedRun = (lease: { release_error: string | null }) =>
@@ -84,6 +89,18 @@ export const makeSandboxStore = Effect.gen(function* () {
     sql`UPDATE sandbox_lease_operations SET creation_pending=0
       WHERE repository_id=${operation.repositoryId} AND lease_id=${operation.leaseId}
       AND owner=${operation.owner} AND expires_at>${Date.now()}`
+  const rejectCreation = (operation: LeaseOperation) =>
+    sql.withTransaction(
+      Effect.gen(function* () {
+        if (!(yield* currentOperation(operation))) return
+        yield* confirmCreation(operation)
+        yield* sql`UPDATE sandbox_leases SET state='released',release_error=NULL
+          WHERE lease_id=${operation.leaseId} AND json_extract(policy,'$.repositoryId')=${operation.repositoryId}
+          AND actions_run_id IS NULL AND session_id IS NULL AND unit IS NULL
+          AND NOT EXISTS (SELECT 1 FROM sandbox_cleanup_runs WHERE lease_id=${operation.leaseId}
+            AND repository_id=${operation.repositoryId})`
+      }),
+    )
   const escalateCreation = (operation: LeaseOperation) =>
     sql.withTransaction(
       Effect.gen(function* () {
@@ -331,7 +348,11 @@ export const makeSandboxStore = Effect.gen(function* () {
               return yield* Effect.fail(
                 new SandboxError({ message: "Sandbox acquisition operation changed" }),
               )
-            yield* ensureRef(true)
+            yield* ensureRef(true).pipe(
+              Effect.tapError((error) =>
+                error instanceof SandboxRefRejected ? rejectCreation(operation) : Effect.void,
+              ),
+            )
             yield* confirmCreation(operation)
           }
           yield* use((effect) =>
@@ -346,6 +367,31 @@ export const makeSandboxStore = Effect.gen(function* () {
             ),
           )
         }),
+    )
+  })
+
+  const reconcileRejectedCreation = Effect.fn("SandboxStore.reconcileRejectedCreation")(function* <
+    E,
+  >(runId: string, confirmAbsent: Effect.Effect<void, E>) {
+    const lease = yield* read(runId)
+    if (lease === null) return
+    const eligible = read(runId).pipe(
+      Effect.map(
+        (saved) =>
+          saved !== null &&
+          saved.state === "operator_required" &&
+          isUnobservedRun(saved) &&
+          saved.actions_run_id === null &&
+          saved.session_id === null &&
+          saved.unit === null,
+      ),
+    )
+    yield* withOperation(
+      lease.policy.repositoryId,
+      lease.lease_id,
+      eligible,
+      confirmAbsent,
+      (operation) => confirmAbsent.pipe(Effect.andThen(rejectCreation(operation))),
     )
   })
 
@@ -552,6 +598,7 @@ export const makeSandboxStore = Effect.gen(function* () {
     confirmReleased,
     beginStart,
     withAcquisition,
+    reconcileRejectedCreation,
     recordRun,
     beginRelease,
     reconcileUnobserved,

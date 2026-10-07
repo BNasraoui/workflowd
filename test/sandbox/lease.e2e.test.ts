@@ -174,6 +174,76 @@ test.each([
   }
 })
 
+test.each([403, 422, 503])(
+  "ref creation HTTP %s preserves only uncertain custody",
+  async (status) => {
+    const { SqlClient } = await import("effect/unstable/sql")
+    const { sandboxGithubFixture } = await import("./harness")
+    const { makeSandboxGithub } = await import("../../src/sandbox/github")
+    const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+    const fixture = await sandboxGithubFixture(policy)
+    fixture.listRuns([])
+    let posts = 0
+    const client = fixture.OctokitClass.defaults({
+      request: {
+        fetch: (input: string | Request | URL, init?: RequestInit) => {
+          if (
+            init?.method === "POST" &&
+            new URL(input instanceof Request ? input.url : String(input)).pathname.endsWith(
+              "/git/refs",
+            )
+          ) {
+            posts++
+            return Promise.resolve(new Response(null, { status }))
+          }
+          return fetch(input, init)
+        },
+      },
+    })
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* sandboxMigration
+          yield* sandboxCleanupMigration
+          yield* sandboxOperationMigration
+          yield* sandboxCreationMigration
+          const sql = yield* SqlClient.SqlClient
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, client)
+          const leases = yield* makeSandboxLeaseService(github)
+          yield* store.request({
+            runId: "run-1",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: "b".repeat(40),
+            now: Date.now(),
+          })
+          expect((yield* Effect.result(leases.acquire("run-1")))._tag).toBe("Failure")
+          const [operation] =
+            yield* sql`SELECT owner,creation_pending FROM sandbox_lease_operations`
+          expect(operation?.creation_pending).toBe(status < 500 ? 0 : 1)
+          if (status < 500) {
+            expect(operation?.owner).toBeNull()
+            yield* leases.release("run-1")
+            yield* leases.reconcile([policy])
+            expect((yield* store.read("run-1"))?.state).toBe("released")
+            expect((yield* store.read("run-1"))?.release_error).toBeNull()
+          } else {
+            expect(operation?.owner).not.toBeNull()
+            yield* leases.release("run-1")
+            expect((yield* store.read("run-1"))?.state).toBe("releasing")
+          }
+          expect(posts).toBe(1)
+          expect(fixture.refCreates).toBe(0)
+          expect(fixture.refDeletes).toBe(0)
+        }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+      )
+    } finally {
+      await fixture.close()
+    }
+  },
+)
+
 test("release stays pending until the correlated Actions run is confirmed completed", async () => {
   const { sandboxGithubFixture } = await import("./harness")
   const { makeSandboxGithub } = await import("../../src/sandbox/github")
@@ -206,6 +276,58 @@ test("release stays pending until the correlated Actions run is confirmed comple
         expect((yield* store.read("run-1"))?.state).toBe("released")
         expect(fixture.refDeletes).toBe(1)
         expect((yield* Effect.result(service.acquire("run-1")))._tag).toBe("Failure")
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test("operator reconciliation uses a retained rejection receipt without recreating the ref", async () => {
+  const { SqlClient } = await import("effect/unstable/sql")
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+  const fixture = await sandboxGithubFixture(policy)
+  fixture.listRuns([])
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* sandboxMigration
+        yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
+        const sql = yield* SqlClient.SqlClient
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github)
+        yield* store.request({
+          runId: "run-1",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: Date.now(),
+        })
+        // Persist the old implementation's incorrectly classified HTTP 403 outcome.
+        yield* sql`UPDATE sandbox_leases SET state='operator_required',release_error='Sandbox Actions run unobserved; custody retained.'`
+        yield* sql`INSERT INTO sandbox_lease_operations(repository_id,lease_id,owner,expires_at,creation_pending)
+          VALUES(${policy.repositoryId},'lease-1','old-owner',${Date.now() + 600000},1)`
+        yield* leases.reconcileRejectedCreation("run-1", 403)
+        expect((yield* store.read("run-1"))?.state).toBe("operator_required")
+        yield* sql`UPDATE sandbox_lease_operations SET expires_at=0`
+        expect((yield* Effect.result(leases.reconcileRejectedCreation("run-1", 503)))._tag).toBe(
+          "Failure",
+        )
+        expect((yield* store.read("run-1"))?.state).toBe("operator_required")
+        yield* leases.reconcileRejectedCreation("run-1", 403)
+        yield* leases.reconcile([policy])
+        expect((yield* store.read("run-1"))?.state).toBe("released")
+        expect((yield* store.read("run-1"))?.release_error).toBeNull()
+        expect(yield* sql`SELECT owner,creation_pending FROM sandbox_lease_operations`).toEqual([
+          { owner: null, creation_pending: 0 },
+        ])
+        expect(fixture.refCreates).toBe(0)
+        expect(fixture.refDeletes).toBe(0)
       }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
     )
   } finally {

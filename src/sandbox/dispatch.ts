@@ -61,7 +61,7 @@ export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/S
 const failure = () =>
   new SandboxError({ message: "Sandbox custody operation failed; reconciliation required" })
 const Terminal = Schema.Struct({
-  state: Schema.Literals(["completed", "cancelled", "operator_required"]),
+  state: Schema.Literals(["completed", "cancelled", "failed", "operator_required"]),
   sessionId: Schema.NullOr(Schema.String),
   finalMessage: Schema.NullOr(Schema.String),
   diagnostic: Schema.String,
@@ -252,6 +252,8 @@ export const makeSandboxDispatch = (options: {
           yield* runs.complete({ runId: run.runId, finalMessage: terminal.finalMessage, now })
         else if (terminal.state === "cancelled")
           yield* runs.cancel({ runId: run.runId, diagnostic: terminal.diagnostic, now })
+        else if (terminal.state === "failed")
+          yield* runs.fail({ runId: run.runId, diagnostic: terminal.diagnostic, now })
         else
           yield* runs.operatorRequired({
             runId: run.runId,
@@ -273,6 +275,12 @@ export const makeSandboxDispatch = (options: {
         if (!pending) {
           yield* Effect.tryPromise(() => mkdir(run.directory, { recursive: true, mode: 0o700 }))
           let result = terminal
+          if (
+            terminal.state === "operator_required" &&
+            lease?.state === "released" &&
+            lease.actions_run_id === null
+          )
+            result = { ...terminal, state: "failed", diagnostic: "Sandbox ref creation rejected" }
           if (lease?.transport != null && lease.state !== "released") {
             const patch = yield* Effect.result(leases.artifact(run.runId))
             if (patch._tag === "Success")

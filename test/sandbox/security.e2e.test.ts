@@ -42,7 +42,119 @@ test("live verification requires remote tests, an inert patch and confirmed clea
   }
 })
 
+test("prototype telemetry requires a successful owned bridge command for each harness", async () => {
+  await command([
+    process.execPath,
+    "--eval",
+    `
+    import assert from "node:assert/strict"
+    import { prototypeToolEvidence, remotePrototypePassed } from "./scripts/evidence/agent-sandbox.mjs"
+    const bridge = "wfdlease_fixture"
+    const input = {command: "bun test test/sandbox/prototype-proof.test.ts && printf 'workflowd-test-exit=0'"}
+    const result = {content: [{type: "text", text: "3 pass\\n0 fail\\nworkflowd-test-exit=0"}]}
+    const samples = {
+      codex: [{type: "item.completed", item: {type: "mcp_tool_call", server: bridge, tool: "environment_run_cmd", arguments: input, status: "completed", result}}],
+      claude: [{type: "assistant", message: {content: [{type: "tool_use", id: "call", name: "mcp__"+bridge+"__environment_run_cmd", input}]}}, {type: "user", message: {content: [{type: "tool_result", tool_use_id: "call", content: result.content}]}}],
+      opencode: [{type: "tool", name: "execute", state: {status: "completed", content: result.content, metadata: {toolCalls: [{tool: bridge+".environment_run_cmd", status: "completed", input}]}}}],
+    }
+    for (const [kind, frames] of Object.entries(samples)) {
+      const calls = prototypeToolEvidence(kind, frames, bridge)
+      assert.equal(remotePrototypePassed(calls), true, kind)
+      if (kind === "opencode") assert.throws(() => prototypeToolEvidence(kind, frames, "foreign"))
+      else assert.equal(remotePrototypePassed(prototypeToolEvidence(kind, frames, "foreign")), false)
+      assert.equal(remotePrototypePassed(calls.map(c => ({...c, completed: false}))), false)
+      assert.equal(remotePrototypePassed(calls.map(c => ({...c, result: "3 pass 0 fail"}))), false)
+      assert.equal(remotePrototypePassed(prototypeToolEvidence(kind, [{type: "assistant", text: JSON.stringify(result)}], bridge)), false)
+    }
+    `,
+  ])
+})
+
 // Only the remote peer is adversarial; Git, SSH, the bridge and its binding are real.
+for (const kind of ["codex", "claude"] as const) {
+  test(`live verifier accepts actual ${kind} bridge telemetry and remote test exit`, async () => {
+    const { nativeModelFixture, remoteEnvironment } = await import("./native-fixture")
+    const { compileSandboxBridge } = await import("../../src/sandbox/bridge")
+    const { bindingDirectory, readSandboxBinding, writeSandboxBinding } =
+      await import("../../src/sandbox/binding")
+    const { runCodexWorker } = await import("../../src/kernel/codex-worker")
+    const { runClaudeWorker } = await import("../../src/kernel/claude-worker")
+    const runner = await runnerFixture()
+    const model = await nativeModelFixture(kind, runner.root)
+    try {
+      const directory = join(runner.root, "native-verifier")
+      await mkdir(directory)
+      const binding = await readSandboxBinding(join(runner.root, "bridge-session"))
+      await writeSandboxBinding(
+        { ...binding, directory, locationIdentity: directory, executorId: `${kind}:local` },
+        true,
+      )
+      const root = bindingDirectory(directory)
+      await compileSandboxBridge(join(root, "bridge"))
+      await writeFile(join(root, "transport.json"), JSON.stringify(runner.transport))
+      await writeFile(join(root, "prompt"), "Create and test the remote proof")
+      const testSource =
+        'import {test,expect} from "bun:test"; for(const n of [1,2,3]) test(String(n),()=>expect(n).toBeGreaterThan(0))'
+      model.actions.push(
+        {
+          name: "environment_create",
+          arguments: {
+            environment_source: "/workspace/repository",
+            title: "Verifier proof",
+          },
+        },
+        (request) => ({
+          name: "environment_config",
+          arguments: {
+            environment_source: "/workspace/repository",
+            environment_id: remoteEnvironment(request),
+            config: { base_image: "oven/bun:1.3.14" },
+          },
+        }),
+        (request) => ({
+          name: "environment_run_cmd",
+          arguments: {
+            environment_source: "/workspace/repository",
+            environment_id: remoteEnvironment(request),
+            command: `mkdir -p test/sandbox && printf '%s' '${testSource}' > test/sandbox/prototype-proof.test.ts && bun test test/sandbox/prototype-proof.test.ts && printf '\nworkflowd-test-exit=0\n'`,
+          },
+        }),
+      )
+      const eventsFile = join(root, "events")
+      expect(
+        await (kind === "codex" ? runCodexWorker : runClaudeWorker)({
+          binary: model.binary,
+          directory,
+          model: "dispatch-selected-fixture",
+          promptFile: join(root, "prompt"),
+          eventsFile,
+          resultFile: join(root, "result"),
+          stderrFile: join(root, "stderr"),
+          maxOutputBytes: 1000000,
+          sandboxBindingFile: join(root, "binding.json"),
+        }),
+      ).toBe(0)
+      await command([
+        process.execPath,
+        "--eval",
+        `
+        import assert from "node:assert/strict"
+        import {prototypeToolEvidence,remotePrototypePassed} from "./scripts/evidence/agent-sandbox.mjs"
+        const frames=(await Bun.file(${JSON.stringify(eventsFile)}).text()).trim().split("\\n").map(JSON.parse)
+        const calls=prototypeToolEvidence(${JSON.stringify(kind)},frames,"wfdlease_fixture")
+        assert.ok(remotePrototypePassed(calls),JSON.stringify(calls))
+      `,
+      ])
+      expect(await Bun.file(join(directory, "test/sandbox/prototype-proof.test.ts")).exists()).toBe(
+        false,
+      )
+    } finally {
+      await model.close()
+      await runner.close()
+    }
+  }, 180000)
+}
+
 test("hostile runner frames and metadata cannot become controller capabilities", async () => {
   const runner = await runnerFixture()
   const canary = join(runner.root, "controller-canary")

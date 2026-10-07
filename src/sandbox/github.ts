@@ -5,7 +5,7 @@ import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { Effect, Schema } from "effect"
 import type { SandboxPolicy } from "./config"
-import { SandboxError, SandboxRefAbsent } from "./store"
+import { SandboxError, SandboxRefAbsent, SandboxRefRejected } from "./store"
 
 const Repository = Schema.Struct({ id: Schema.Int, fork: Schema.Boolean })
 const Run = Schema.Struct({
@@ -164,10 +164,12 @@ export const makeSandboxGithub = (
       let result = yield* request(client, "GET", path)
       if (result.status === 404 && create) {
         // A lost reply is reconciled by reading the single immutable lease ref.
-        yield* request(client, "POST", `/repos/${policy.repository}/git/refs`, {
+        const created = yield* request(client, "POST", `/repos/${policy.repository}/git/refs`, {
           ref: `refs/heads/${leaseBranch(leaseId)}`,
           sha: policy.workflowSha,
         })
+        if (created.status >= 400 && created.status < 500)
+          return yield* Effect.fail(new SandboxRefRejected({ status: created.status }))
         result = yield* request(client, "GET", path)
       }
       if (result.status === 404 && !create) return yield* Effect.fail(new SandboxRefAbsent())

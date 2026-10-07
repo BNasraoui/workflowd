@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
-import { makeSandboxStore, SandboxError, sessionCleanupUnconfirmed, isUnobservedRun } from "./store"
+import {
+  makeSandboxStore,
+  SandboxError,
+  SandboxRefAbsent,
+  SandboxRefRejected,
+  sessionCleanupUnconfirmed,
+  isUnobservedRun,
+} from "./store"
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
@@ -310,6 +317,37 @@ export const makeSandboxLeaseService = (
       if (completed) yield* release(runId)
       return yield* required(runId)
     })
+    // Operator recovery for older records whose definitive POST rejection was
+    // incorrectly persisted as uncertain. The status must come from its receipt;
+    // a current GET 404 alone never establishes that the POST was rejected.
+    const reconcileRejectedCreation = Effect.fn("SandboxLease.reconcileRejectedCreation")(
+      function* (runId: string, status: number) {
+        yield* Schema.decodeUnknownEffect(SandboxRefRejected.fields.status)(status)
+        const lease = yield* required(runId)
+        yield* store.reconcileRejectedCreation(
+          runId,
+          Effect.gen(function* () {
+            yield* inventory(lease.policy)
+            yield* discover(lease)
+            const ref = yield* Effect.result(github.ensureRef(lease.policy, lease.lease_id, false))
+            if (ref._tag !== "Failure" || !(ref.failure instanceof SandboxRefAbsent))
+              return yield* Effect.fail(
+                new SandboxError({ message: "Rejected ref absence unconfirmed" }),
+              )
+            if (
+              (yield* store.cleanupRuns(true)).some(
+                (row) =>
+                  row.repository_id === lease.policy.repositoryId &&
+                  row.lease_id === lease.lease_id,
+              )
+            )
+              return yield* Effect.fail(
+                new SandboxError({ message: "Rejected ref has observed Actions custody" }),
+              )
+          }),
+        )
+      },
+    )
     const reconcile = Effect.fn("SandboxLease.reconcile")(function* (
       policies: ReadonlyArray<SandboxPolicy> = [],
     ) {
@@ -413,5 +451,13 @@ export const makeSandboxLeaseService = (
       for (const policy of policies.values()) yield* store.reopenReleased(policy)
       yield* reconcile([...policies.values()])
     })
-    return { acquire, release, reconcile, heartbeat, artifact, revalidateReleased }
+    return {
+      acquire,
+      release,
+      reconcile,
+      reconcileRejectedCreation,
+      heartbeat,
+      artifact,
+      revalidateReleased,
+    }
   })

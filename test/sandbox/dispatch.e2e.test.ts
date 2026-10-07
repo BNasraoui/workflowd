@@ -68,6 +68,74 @@ const sandboxRun = (directory: string, modelId: string, prompt: string) => ({
   createdAt: new Date(),
 })
 
+test("definitive ref rejection publishes a failed run after settling lease custody", async () => {
+  const shared = await sharedOpenCodeFixture("rejected-ref")
+  const fixture = await sandboxGithubFixture(policy)
+  fixture.listRuns([])
+  const client = fixture.OctokitClass.defaults({
+    request: {
+      fetch: (input: string | Request | URL, init?: RequestInit) =>
+        init?.method === "POST" &&
+        new URL(input instanceof Request ? input.url : String(input)).pathname.endsWith("/git/refs")
+          ? Promise.resolve(new Response(null, { status: 403 }))
+          : fetch(input, init),
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const github = yield* makeSandboxGithub(fixture.github, client)
+        const leases = yield* makeSandboxLeaseService(github)
+        const service = yield* makeSandboxDispatch({
+          policies: [policy],
+          github,
+          leases,
+          executor: shared.executor,
+          client: shared.client,
+          executorId: "opencode:opencode-primary",
+          endpointIdentity: shared.url,
+        })
+        const runs = yield* AgentRunStore
+        const store = yield* makeSandboxStore
+        const sql = yield* SqlClient.SqlClient
+        yield* runs.create(sandboxRun(join(shared.root, "rejected"), "fixture", "Task"))
+        yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
+        const run = (yield* runs.read("run-1"))!
+        expect(
+          (yield* Effect.result(service.launch(run, { providerID: "openai", modelID: "fixture" })))
+            ._tag,
+        ).toBe("Failure")
+        expect((yield* store.read("run-1"))?.state).toBe("released")
+        expect((yield* runs.read("run-1"))?.state).toBe("failed")
+        expect(
+          (yield* Effect.promise(() => Bun.file(join(run.directory, "terminal.json")).json()))
+            .state,
+        ).toBe("failed")
+        yield* service.iteration
+        const mailbox = yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
+        expect(mailbox).toHaveLength(1)
+        expect(String(mailbox[0]?.prompt)).toContain("failed")
+        expect(fixture.refCreates).toBe(0)
+      }).pipe(
+        Effect.provide(
+          AgentRunStoreLive.pipe(
+            Layer.provideMerge(
+              WorkflowStoreLive.pipe(
+                Layer.provideMerge(
+                  SqliteClient.layer({ filename: join(shared.root, "custody.sqlite") }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    )
+  } finally {
+    await fixture.close()
+    await shared.close()
+  }
+}, 30000)
+
 test.each(["before-post", "absent-post", "delayed-post"])(
   "uncertain ref absence escalates once across coordinator restart (%s)",
   async (mode) => {
