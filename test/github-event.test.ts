@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { decodeGitHubEvent, InvalidGitHubEvent } from "../src/github-event"
 
+const repositories = [{ repository: "example-owner/example", installationId: 91 }]
+const decodeEvent = (event: string, payload: unknown) =>
+  decodeGitHubEvent(event, payload, repositories)
+
 const baseSha = "d".repeat(40)
 const headSha = "a".repeat(40)
 
@@ -45,7 +49,7 @@ const issueCommentPayload = {
 
 describe("decodeGitHubEvent", () => {
   test("normalizes an eligible pull request event", async () => {
-    const event = await Effect.runPromise(decodeGitHubEvent("pull_request", pullRequestPayload))
+    const event = await Effect.runPromise(decodeEvent("pull_request", pullRequestPayload))
 
     expect(JSON.parse(JSON.stringify(event))).toEqual({
       _tag: "PullRequest",
@@ -74,7 +78,7 @@ describe("decodeGitHubEvent", () => {
   test("defaults an absent pull request draft flag to false", async () => {
     const { draft: _draft, ...pullRequest } = pullRequestPayload.pull_request
     const event = await Effect.runPromise(
-      decodeGitHubEvent("pull_request", {
+      decodeEvent("pull_request", {
         ...pullRequestPayload,
         pull_request: pullRequest,
       }),
@@ -119,7 +123,7 @@ describe("decodeGitHubEvent", () => {
       ...override,
     }
 
-    const error = await Effect.runPromise(Effect.flip(decodeGitHubEvent("pull_request", malformed)))
+    const error = await Effect.runPromise(Effect.flip(decodeEvent("pull_request", malformed)))
 
     expect(error).toBeInstanceOf(InvalidGitHubEvent)
   })
@@ -145,7 +149,7 @@ describe("decodeGitHubEvent", () => {
               },
             }
 
-      await expect(Effect.runPromise(decodeGitHubEvent(eventName, payload))).resolves.toEqual({
+      await expect(Effect.runPromise(decodeEvent(eventName, payload))).resolves.toEqual({
         _tag: "Ignored",
         reason: "missing-installation",
       })
@@ -154,7 +158,7 @@ describe("decodeGitHubEvent", () => {
 
   test("normalizes an agent command from a PR conversation comment", async () => {
     const event = await Effect.runPromise(
-      decodeGitHubEvent("issue_comment", {
+      decodeEvent("issue_comment", {
         ...issueCommentPayload,
         comment: {
           ...issueCommentPayload.comment,
@@ -238,9 +242,7 @@ describe("decodeGitHubEvent", () => {
       },
     ],
   ])("rejects a malformed command %s at ingress", async (_description, malformed) => {
-    const error = await Effect.runPromise(
-      Effect.flip(decodeGitHubEvent("issue_comment", malformed)),
-    )
+    const error = await Effect.runPromise(Effect.flip(decodeEvent("issue_comment", malformed)))
 
     expect(error).toBeInstanceOf(InvalidGitHubEvent)
   })

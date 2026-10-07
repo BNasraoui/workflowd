@@ -1,3 +1,4 @@
+import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
 import {
   loadOpenCodeResidentSocket,
   loadResidentConfig,
@@ -34,6 +35,7 @@ interface HttpConfig {
 }
 
 interface GitHubConfig {
+  readonly prRepositories: PrRepositories
   readonly appId: number
   readonly privateKeyPath: string
   readonly webhookSecret: string
@@ -549,6 +551,7 @@ function githubSection(
 ): GitHubConfig {
   return {
     appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
+    prRepositories: loadPrRepositories(env.WORKFLOWD_PR_REPOSITORIES),
     privateKeyPath: required(env, "GITHUB_PRIVATE_KEY_PATH"),
     webhookSecret,
   }

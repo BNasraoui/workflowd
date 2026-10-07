@@ -71,6 +71,7 @@ describe("handleGitHubWebhook", () => {
       Effect.gen(function* () {
         const response = yield* handleGitHubWebhook(request, {
           webhookSecret: secret,
+          prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
           now: new Date("2026-07-19T12:00:00.000Z"),
         })
         const store = yield* WorkflowStore
@@ -112,6 +113,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
         maxBodyBytes: 100,
       }).pipe(Effect.provide(TestLayer)),
@@ -175,6 +177,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(TestLayer)),
     )
@@ -212,6 +215,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(TestLayer)),
     )
@@ -242,6 +246,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(layer)),
     )
@@ -281,11 +286,19 @@ describe("handleGitHubWebhook", () => {
         Effect.gen(function* () {
           yield* handleGitHubWebhook(
             signedRequest("pull_request", initialPayload, "rearm-initial", secret),
-            { webhookSecret: secret, now: new Date("2026-07-19T12:00:00.000Z") },
+            {
+              webhookSecret: secret,
+              prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
+              now: new Date("2026-07-19T12:00:00.000Z"),
+            },
           )
           yield* handleGitHubWebhook(
             signedRequest("pull_request", ambiguousPayload, "rearm-ambiguous", secret),
-            { webhookSecret: secret, now: new Date("2026-07-19T12:00:01.000Z") },
+            {
+              webhookSecret: secret,
+              prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
+              now: new Date("2026-07-19T12:00:01.000Z"),
+            },
           )
           const store = yield* WorkflowStore
           const first = yield* store.claimNextReconciliation({
@@ -298,7 +311,11 @@ describe("handleGitHubWebhook", () => {
           const wake = yield* signals.subscribe("reconciliation")
           const response = yield* handleGitHubWebhook(
             signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
-            { webhookSecret: secret, now: new Date("2026-07-19T12:01:01.000Z") },
+            {
+              webhookSecret: secret,
+              prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
+              now: new Date("2026-07-19T12:01:01.000Z"),
+            },
           )
           yield* PubSub.take(wake)
           const rearmed = yield* store.claimNextReconciliation({
@@ -343,6 +360,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(layer)),
     )

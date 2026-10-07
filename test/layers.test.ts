@@ -93,6 +93,7 @@ test("starts and restarts the full live layer with both kernel stores", async ()
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -185,6 +186,7 @@ test("composes the reusable agent harness with the live ports", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -237,6 +239,7 @@ test("composes the explicit six-contract catalog by default", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -278,6 +281,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -314,6 +318,7 @@ test("keeps unrelated services available when configured QRSPI is closed", async
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -381,6 +386,7 @@ test("fails live composition when the configured GitHub key cannot be read", asy
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
