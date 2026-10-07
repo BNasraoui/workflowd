@@ -70,6 +70,25 @@ test("prototype telemetry requires a successful owned bridge command for each ha
   ])
 })
 
+test("the Claude live verifier resolves the selected model through its configured CLI route", async () => {
+  await command([
+    process.execPath,
+    "--eval",
+    `
+    import assert from "node:assert/strict"
+    import {prototypeSelection} from "./scripts/evidence/agent-sandbox.mjs"
+    import {parseAgentRunClaudeRoutes,resolveAgentRunRouteChoice} from "./src/agent-run-contract"
+    const selected=prototypeSelection("claude:local","dispatch-selected-claude")
+    const routes=parseAgentRunClaudeRoutes(selected.environment.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES)
+    const choice=resolveAgentRunRouteChoice([],[],selected.arguments.route,routes)
+    assert.equal(choice.outcome,"resolved")
+    assert.equal(choice.provider,"claude")
+    assert.equal(choice.route.modelID,"dispatch-selected-claude")
+    assert.equal(selected.arguments.model,undefined)
+    `,
+  ])
+})
+
 // Only the remote peer is adversarial; Git, SSH, the bridge and its binding are real.
 for (const kind of ["codex", "claude"] as const) {
   test(`live verifier accepts actual ${kind} bridge telemetry and remote test exit`, async () => {

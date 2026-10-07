@@ -742,6 +742,27 @@ async function recordWorkflowLog(row) {
   }
 }
 
+export function prototypeSelection(executor, model) {
+  if (executor === "claude:local")
+    return {
+      environment: { WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES: `prototype=${model}` },
+      arguments: { route: "prototype" },
+    }
+  const opencode = executor === "opencode:opencode-primary"
+  const separator = model.indexOf("/")
+  return {
+    environment: { WORKFLOWD_AGENT_RUN_ROUTES: opencode ? `prototype=${model}` : undefined },
+    arguments: {
+      model: opencode ? model.slice(separator + 1) : model,
+      ...(opencode ? { provider: model.slice(0, separator) } : {}),
+      model_identity: opencode ? "catalog" : "native",
+      // Native catalogs advertise models without proving subscription entitlement.
+      allow_unknown_access: !opencode,
+      executor,
+    },
+  }
+}
+
 async function probeLive(policy) {
   const option = (name) => {
     const index = process.argv.indexOf(name)
@@ -755,6 +776,7 @@ async function probeLive(policy) {
   const kind = executor.split(":")[0]
   if (kind === "opencode")
     assert.ok(separator > 0 && separator < model.length - 1, "--model must select provider/model")
+  const selection = prototypeSelection(executor, model)
   const endpoint = process.env.EVIDENCE_OPENCODE_URL
   const password = process.env.EVIDENCE_OPENCODE_PASSWORD
   assert.ok(endpoint && password, "Existing executor HTTP authentication is required")
@@ -800,7 +822,7 @@ async function probeLive(policy) {
       OPENCODE_SERVER_URL: endpoint,
       WORKFLOWD_AGENT_RUN_TOKEN: token,
       WORKFLOWD_DATABASE_PATH: join(output, "leases.sqlite"),
-      WORKFLOWD_AGENT_RUN_ROUTES: kind === "opencode" ? `prototype=${model}` : undefined,
+      ...selection.environment,
       WORKFLOWD_AGENT_RUN_CODEX_UNIT_PREFIX: `workflowd-evidence-${randomUUID()}-`,
       WORKFLOWD_AGENT_RUN_REPOSITORIES: `${policy.alias}=${output}`,
       WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([policy]),
@@ -868,12 +890,7 @@ async function probeLive(policy) {
           {
             name: "dispatch_agent",
             arguments: {
-              model: kind === "opencode" ? model.slice(separator + 1) : model,
-              ...(kind === "opencode" ? { provider: model.slice(0, separator) } : {}),
-              model_identity: kind === "opencode" ? "catalog" : "native",
-              // Native catalogs advertise models without proving subscription entitlement.
-              allow_unknown_access: kind !== "opencode",
-              executor,
+              ...selection.arguments,
               repository: policy.alias,
               base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
               idempotency_key: createHash("sha256").update(output).digest("hex"),
