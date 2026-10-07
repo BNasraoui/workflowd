@@ -294,6 +294,15 @@ export const makeSandboxDispatch = (options: {
                 diagnostic: "Sandbox artifact capture failed",
               }
           }
+          if (lease?.transport != null && lease.state !== "released") {
+            const audited = yield* Effect.result(leases.audit(run.runId, run.directory))
+            if (audited._tag === "Failure")
+              result = {
+                ...result,
+                state: "operator_required",
+                diagnostic: "Sandbox audit drain unconfirmed",
+              }
+          }
           const message =
             result.finalMessage === null
               ? null

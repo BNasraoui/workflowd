@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Only fixed control data leaves this process through Actions artifacts/logs.
+# Only bounded control and audit data reaches Actions artifacts/logs.
 # Task output stays on the SSH/container-use stream.
 boot() {
   local image_id
@@ -74,6 +74,7 @@ PY
     # Suppress setup output: only the fixed metadata artifact is published.
     boot >/run/workflowd-sandbox/setup.log 2>&1
     sudo install -m 755 "$0" /usr/local/bin/container-use
+    sudo install -m 755 "$0" /usr/local/bin/runner-control
     cp -f /run/workflowd-sandbox/identity.json /run/workflowd-sandbox/ready.json
     ;;
   initialize)
@@ -107,11 +108,83 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
   heartbeat)
     date +%s > /run/workflowd-sandbox/heartbeat
     ;;
-  hold)
-    date +%s > /run/workflowd-sandbox/heartbeat
-    while (( $(date +%s) - $(cat /run/workflowd-sandbox/heartbeat) < 120 )); do
-      sleep 5
-    done
+  audit|hold)
+    # The hold process owns Actions stdout. SSH only queues data and reads receipts.
+    python3 -c '
+import fcntl, json, os, sys, time
+from pathlib import Path
+root = Path("/run/workflowd-sandbox")
+mode = sys.argv[1]
+limit = 4096
+capacity = 1024
+path = root / "audit.json"
+lock = root / "audit.lock"
+def state():
+    if not path.exists(): return {"records": {}, "emittedThrough": 0}
+    if path.stat().st_size > limit * capacity: raise ValueError("audit capacity")
+    return json.loads(path.read_text())
+def save(data):
+    temporary = root / "audit.tmp"
+    encoded = json.dumps(data, ensure_ascii=True, separators=(",", ":"))
+    assert len(encoded) <= limit * capacity
+    temporary.write_text(encoded)
+    temporary.replace(path)
+def validate(record):
+    assert set(record) == {"runId", "leaseId", "sequence", "callId", "tool", "command", "commandSha256", "exitCode", "outcome", "complete"}
+    assert all(isinstance(record[k], str) and len(record[k]) <= 512 for k in ["runId", "leaseId", "callId", "tool"])
+    assert type(record["sequence"]) is int and 1 <= record["sequence"] <= capacity
+    assert record["command"] is None or isinstance(record["command"], str) and len(record["command"]) <= 512
+    assert record["commandSha256"] is None or isinstance(record["commandSha256"], str) and len(record["commandSha256"]) == 64
+    assert record["exitCode"] is None or type(record["exitCode"]) is int and 0 <= record["exitCode"] <= 255
+    assert record["outcome"] in ["ok", "error", "unknown"] and type(record["complete"]) is bool
+    assert len(json.dumps(record, ensure_ascii=True)) <= limit
+    identity = root / "identity.json"
+    if identity.exists():
+        expected = json.loads(identity.read_text()).get("leaseId")
+        assert expected is None or record["leaseId"] == expected
+if mode == "audit":
+    raw = sys.stdin.buffer.read(limit + 1)
+    assert len(raw) <= limit
+    record = json.loads(raw)
+    validate(record)
+    with lock.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        data = state()
+        key = str(record["sequence"])
+        previous = data["records"].get(key)
+        assert previous is None or previous == record
+        if data["records"]:
+            owner = next(iter(data["records"].values()))
+            assert (owner["runId"], owner["leaseId"]) == (record["runId"], record["leaseId"])
+        data["records"][key] = record
+        save(data)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with lock.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_SH)
+            receipt = state()["emittedThrough"]
+        if receipt >= record["sequence"]:
+            print(json.dumps({"emittedThrough": receipt}), flush=True)
+            break
+        time.sleep(0.05)
+    else: sys.exit("Sandbox audit emission unconfirmed")
+else:
+    heartbeat = root / "heartbeat"
+    heartbeat.write_text(str(int(time.time())))
+    while time.time() - int(heartbeat.read_text()) < 120:
+        with lock.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            data = state()
+            changed = False
+            while str(data["emittedThrough"] + 1) in data["records"]:
+                record = data["records"][str(data["emittedThrough"] + 1)]
+                validate(record)
+                print("workflowd.audit " + json.dumps(record, ensure_ascii=True, separators=(",", ":")), flush=True)
+                data["emittedThrough"] += 1
+                changed = True
+            if changed: save(data)
+        time.sleep(0.05)
+' "$1"
     ;;
   stdio)
     exec docker exec -i workflowd-sandbox-tooling \

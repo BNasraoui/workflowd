@@ -1,3 +1,4 @@
+import { auditedOutput, beginToolAudit, sendToolAudit, wrapAuditedCommand } from "./audit"
 import { assertBridgeBinding } from "./binding"
 import { watch } from "node:fs/promises"
 import { dirname } from "node:path"
@@ -23,10 +24,6 @@ const Catalog = Schema.Struct({ tools: Schema.Array(Schema.Json) })
 const Call = Schema.Struct({
   name: Schema.String,
   arguments: Schema.Record(Schema.String, Schema.Json),
-})
-const Output = Schema.Struct({
-  content: Schema.Array(Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })),
-  isError: Schema.optionalKey(Schema.Boolean),
 })
 
 async function watchBinding(file: string, transport: SandboxTransport, signal: AbortSignal) {
@@ -119,74 +116,104 @@ export async function runSandboxBridge(
       ) {
         throw new Error("Unexpected sandbox client frame")
       }
-      let request = frame
-      switch (frame.method) {
-        case "initialize":
-          if (initialized) throw new Error("Sandbox MCP already initialized")
-          request = {
-            ...frame,
-            params: {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              clientInfo: { name: "workflowd-sandbox", version: "1" },
-            },
-          }
-          break
-        case "tools/list":
-          if (!initialized) throw new Error("Sandbox MCP is not initialized")
-          request = { ...frame, params: {} }
-          break
-        case "tools/call": {
-          const call = Schema.decodeUnknownSync(Call)(frame.params)
-          if (
-            !allowed.has(call.name) ||
-            call.arguments.environment_source !== transport.repositoryPath
-          ) {
-            throw new Error("Sandbox tool or repository is not allowed")
-          }
-          break
-        }
-        default:
-          throw new Error("Sandbox MCP method is not allowed")
+      const audit =
+        frame.method === "tools/call"
+          ? await beginToolAudit(bindingFile, frame.id, frame.params)
+          : undefined
+      let exitCode: number | null = null
+      let outcome: "ok" | "error" | "unknown" = "error"
+      let nonce: string | null = null
+      let commandTool = false
+      let finished = false
+      const finish = async () => {
+        if (audit === undefined || finished) return
+        finished = true
+        const record = await audit.finish(exitCode, outcome)
+        await sendToolAudit(transport, record)
       }
-      const timer = setTimeout(() => child.kill(), timeoutMs)
       try {
-        child.stdin.write(JSON.stringify(request) + "\n")
-        await child.stdin.flush()
-        const next = await replies.next()
-        if (
-          next.done ||
-          next.value.method !== undefined ||
-          next.value.id !== frame.id ||
-          next.value.error !== undefined
-        ) {
-          throw new Error("Unexpected sandbox server frame")
-        }
-        let result = next.value.result
-        if (frame.method === "initialize") {
-          initialized = true
-          result = {
-            protocolVersion: "2024-11-05",
-            capabilities: { tools: {} },
-            serverInfo: { name: "workflowd-container-use", version: "0.4.2" },
+        let request = frame
+        switch (frame.method) {
+          case "initialize":
+            if (initialized) throw new Error("Sandbox MCP already initialized")
+            request = {
+              ...frame,
+              params: {
+                protocolVersion: "2024-11-05",
+                capabilities: {},
+                clientInfo: { name: "workflowd-sandbox", version: "1" },
+              },
+            }
+            break
+          case "tools/list":
+            if (!initialized) throw new Error("Sandbox MCP is not initialized")
+            request = { ...frame, params: {} }
+            break
+          case "tools/call": {
+            const call = Schema.decodeUnknownSync(Call)(frame.params)
+            if (
+              !allowed.has(call.name) ||
+              call.arguments.environment_source !== transport.repositoryPath
+            ) {
+              throw new Error("Sandbox tool or repository is not allowed")
+            }
+            commandTool = call.name === "environment_run_cmd"
+            const wrapped = wrapAuditedCommand(call)
+            nonce = wrapped.nonce
+            request = { ...frame, params: wrapped.call }
+            break
           }
-        } else if (frame.method === "tools/list") {
-          const catalog = Schema.decodeUnknownSync(Catalog)(result)
+          default:
+            throw new Error("Sandbox MCP method is not allowed")
+        }
+        const timer = setTimeout(() => child.kill(), timeoutMs)
+        try {
+          outcome = "unknown"
+          child.stdin.write(JSON.stringify(request) + "\n")
+          await child.stdin.flush()
+          const next = await replies.next()
           if (
-            createHash("sha256").update(JSON.stringify(catalog.tools)).digest("hex") !==
-            manifestHash
+            next.done ||
+            next.value.method !== undefined ||
+            next.value.id !== frame.id ||
+            next.value.error !== undefined
           ) {
-            throw new Error("Sandbox tool manifest differs from pinned container-use")
+            throw new Error("Unexpected sandbox server frame")
           }
-          allowed = new Set(catalog.tools.map((tool) => Schema.decodeUnknownSync(Tool)(tool).name))
-          result = catalog
-        } else {
-          result = Schema.decodeUnknownSync(Output)(result)
+          let result = next.value.result
+          if (frame.method === "initialize") {
+            initialized = true
+            result = {
+              protocolVersion: "2024-11-05",
+              capabilities: { tools: {} },
+              serverInfo: { name: "workflowd-container-use", version: "0.4.2" },
+            }
+          } else if (frame.method === "tools/list") {
+            const catalog = Schema.decodeUnknownSync(Catalog)(result)
+            if (
+              createHash("sha256").update(JSON.stringify(catalog.tools)).digest("hex") !==
+              manifestHash
+            ) {
+              throw new Error("Sandbox tool manifest differs from pinned container-use")
+            }
+            allowed = new Set(
+              catalog.tools.map((tool) => Schema.decodeUnknownSync(Tool)(tool).name),
+            )
+            result = catalog
+          } else {
+            const audited = auditedOutput(result, nonce, commandTool)
+            result = audited.result
+            exitCode = audited.exitCode
+            outcome = audited.outcome
+          }
+          await assertBridgeBinding(bindingFile, transport)
+          await finish()
+          await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
+        } finally {
+          clearTimeout(timer)
         }
-        await assertBridgeBinding(bindingFile, transport)
-        await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
       } finally {
-        clearTimeout(timer)
+        await finish()
       }
     }
   }

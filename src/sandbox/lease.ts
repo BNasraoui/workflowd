@@ -1,3 +1,4 @@
+import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -425,6 +426,31 @@ export const makeSandboxLeaseService = (
         `exec docker exec workflowd-sandbox-tooling sh -c 'git for-each-ref --format="%(refname)" refs/remotes/container-use/ | while IFS= read -r ref; do git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --binary HEAD "$ref" -- || exit; done'`,
         8 * 1048576,
       )
+    const audit = (runId: string, directory: string) =>
+      Effect.gen(function* () {
+        const lease = yield* required(runId)
+        const transport = lease.transport
+        if (transport === null)
+          return yield* Effect.fail(
+            new SandboxError({ message: "Sandbox audit transport missing" }),
+          )
+        yield* Effect.tryPromise({
+          try: (signal) =>
+            drainToolAudit(directory, async (record) => {
+              const result = await command(
+                [
+                  ...sandboxSshArguments(transport).slice(0, -1),
+                  "exec /usr/local/bin/runner-control audit",
+                ],
+                JSON.stringify(record),
+                signal,
+                4096,
+              )
+              return Schema.decodeUnknownSync(AuditReceipt)(JSON.parse(controlText(result)))
+            }),
+          catch: () => new SandboxError({ message: "Sandbox audit drain unconfirmed" }),
+        }).pipe(Effect.timeout("30 seconds"))
+      })
     const revalidateReleased = Effect.fn("SandboxLease.revalidateReleased")(function* () {
       const saved = yield* store.cleanupRuns(true)
       const active = yield* store.active()
@@ -458,6 +484,7 @@ export const makeSandboxLeaseService = (
       reconcileRejectedCreation,
       heartbeat,
       artifact,
+      audit,
       revalidateReleased,
     }
   })

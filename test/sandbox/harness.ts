@@ -28,7 +28,11 @@ export async function runnerFixture() {
   const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-"))
   const name = `workflowd-sandbox-${process.pid}-${root.split("-").at(-1) ?? "fixture"}`
   const docker = (...args: string[]) => command(["env", "DOCKER_BUILDKIT=0", "docker", ...args])
+  let hold: ReturnType<typeof Bun.spawn> | undefined
+  let holdLog = Promise.resolve("")
   const close = async () => {
+    hold?.kill("SIGKILL")
+    await hold?.exited
     await docker("rm", "-f", `${name}-runner`, `${name}-engine`)
     await docker("network", "rm", name)
     await rm(root, { recursive: true, force: true })
@@ -113,6 +117,33 @@ export async function runnerFixture() {
       knownHostsFile: join(root, "known_hosts"),
     }
     await writeFile(join(root, "transport.json"), JSON.stringify(transport))
+    await docker("cp", "deploy/sandbox/runner.sh", `${name}-runner:/usr/local/bin/runner-control`)
+    const wrapper = join(root, "container-use")
+    await writeFile(
+      wrapper,
+      `#!/bin/sh
+cd /workspace/repository
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"
+`,
+      { mode: 0o755 },
+    )
+    await docker("cp", wrapper, `${name}-runner:/usr/local/bin/container-use`)
+    await docker(
+      "exec",
+      "-u",
+      "root",
+      `${name}-runner`,
+      "bash",
+      "-c",
+      "mkdir -p /run/workflowd-sandbox && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
+    )
+    const holding = Bun.spawn(
+      ["docker", "exec", `${name}-runner`, "bash", "/usr/local/bin/runner-control", "hold"],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    hold = holding
+    holdLog = new Response(holding.stdout).text()
+    void new Response(holding.stderr).text()
     const directory = join(root, "bridge-session")
     await mkdir(directory)
     await writeSandboxBinding(
@@ -137,6 +168,17 @@ export async function runnerFixture() {
     const bindingFile = join(bindingDirectory(directory), "binding.json")
     return {
       bindingFile,
+      holdLog: async () => {
+        await docker(
+          "exec",
+          `${name}-runner`,
+          "bash",
+          "-c",
+          "printf 0 > /run/workflowd-sandbox/heartbeat",
+        )
+        await hold?.exited
+        return holdLog
+      },
       root,
       name,
       transport,
