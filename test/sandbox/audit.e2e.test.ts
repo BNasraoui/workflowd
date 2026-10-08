@@ -13,6 +13,154 @@ import { bridgeClient, runnerFixture } from "./harness"
 
 const Output = Schema.Struct({ content: Schema.Array(Schema.Struct({ text: Schema.String })) })
 
+test("hold drains container-use audit during concurrent heartbeat writes", async () => {
+  const runner = await runnerFixture()
+  const client = bridgeClient(runner.transport)
+  const container = `${runner.name}-runner`
+  try {
+    await client.initialize()
+    await client.request("tools/list")
+    const created = await client.request("tools/call", {
+      name: "environment_create",
+      arguments: { environment_source: "/workspace/repository", title: "Heartbeat race" },
+    })
+    const { id } = JSON.parse(Schema.decodeUnknownSync(Output)(created).content[0]!.text)
+    // Delay the real date command so a truncate-before-write reliably overlaps hold.
+    await runner.docker(
+      "exec",
+      "-u",
+      "root",
+      container,
+      "bash",
+      "-c",
+      `printf '%s\n' '#!/bin/sh' 'sleep 0.02' 'exec /bin/date "$@"' > /usr/local/bin/date; chmod 755 /usr/local/bin/date`,
+    )
+    const writes = JSON.parse(
+      await runner.docker(
+        "exec",
+        container,
+        "python3",
+        "-c",
+        `
+import concurrent.futures, json, subprocess, time
+from pathlib import Path
+heartbeat = Path('/run/workflowd-sandbox/heartbeat')
+def hammer():
+    for _ in range(25):
+        subprocess.run(['/usr/local/bin/runner-control', 'heartbeat'], check=True)
+reads = invalid = 0
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    writers = [pool.submit(hammer) for _ in range(4)]
+    while not all(writer.done() for writer in writers):
+        reads += 1
+        try: int(heartbeat.read_text())
+        except ValueError: invalid += 1
+        time.sleep(0.001)
+    for writer in writers: writer.result()
+print(json.dumps({'reads': reads, 'invalid': invalid}))
+`,
+      ),
+    )
+    const result = await client.request("tools/call", {
+      name: "environment_run_cmd",
+      arguments: {
+        environment_source: "/workspace/repository",
+        environment_id: id,
+        command: "printf heartbeat-race-completed; exit 23",
+        background: false,
+      },
+    })
+    expect(JSON.stringify(result)).toContain("heartbeat-race-completed")
+    expect(writes.reads).toBeGreaterThan(0)
+    expect(writes.invalid).toBe(0)
+    const lines = (await runner.holdLog()).trim().split("\n")
+    expect(lines).toHaveLength(2)
+    expect(JSON.parse(lines[1]!.slice("workflowd.audit ".length))).toMatchObject({
+      tool: "environment_run_cmd",
+      exitCode: 23,
+      outcome: "error",
+      complete: true,
+    })
+  } finally {
+    await client.close()
+    await runner.close()
+  }
+}, 120_000)
+
+test("hold retries malformed heartbeats without extending the 120-second expiry", async () => {
+  const runner = await runnerFixture()
+  const exec = (...args: string[]) => runner.docker("exec", `${runner.name}-runner`, ...args)
+  let hold: ReturnType<typeof Bun.spawn> | undefined
+  let sequence = 0
+  const audit = async () => {
+    const pending = await beginToolAudit(runner.bindingFile, ++sequence, {
+      name: "environment_run_cmd",
+      arguments: { command: "exit 0" },
+    })
+    expect(await sendToolAudit(runner.transport, await pending.finish(0, "ok"))).toEqual({
+      emittedThrough: sequence,
+    })
+  }
+  const heartbeat = (value: string) =>
+    exec(
+      "python3",
+      "-c",
+      `
+import sys
+from pathlib import Path
+temporary = Path('/run/workflowd-sandbox/test-heartbeat')
+temporary.write_text(sys.argv[1])
+temporary.replace('/run/workflowd-sandbox/heartbeat')
+`,
+      value,
+    )
+  try {
+    await audit()
+    await runner.holdLog()
+    const holding = Bun.spawn(
+      ["docker", "exec", `${runner.name}-runner`, "/usr/local/bin/runner-control", "hold"],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    hold = holding
+    const stdout = new Response(holding.stdout).text()
+    const stderr = new Response(holding.stderr).text()
+    await audit()
+    for (const invalid of ["", "not-a-timestamp"]) {
+      await heartbeat(invalid)
+      await audit()
+      expect(hold.exitCode).toBeNull()
+      await exec("/usr/local/bin/runner-control", "heartbeat")
+      await audit()
+    }
+    await heartbeat(String(Math.floor(Date.now() / 1000) - 118))
+    await audit()
+    expect(hold.exitCode).toBeNull()
+    // Keep publishing invalid values past expiry. They must not refresh the lease.
+    await exec(
+      "python3",
+      "-c",
+      `
+import time
+from pathlib import Path
+temporary = Path('/run/workflowd-sandbox/test-heartbeat')
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    for value in ['', 'not-a-timestamp']:
+        temporary.write_text(value)
+        temporary.replace('/run/workflowd-sandbox/heartbeat')
+        time.sleep(0.02)
+`,
+    )
+    expect(await Promise.race([hold.exited, Bun.sleep(1000).then(() => "still holding")])).toBe(0)
+    expect(await stderr).toBe("")
+    expect((await stdout).trim().split("\n")).toHaveLength(sequence - 1)
+  } finally {
+    hold?.kill("SIGKILL")
+    await hold?.exited
+    await runner.close()
+  }
+}, 120_000)
+
 test("bridge records actual command exits and strips only its nonce marker", async () => {
   const runner = await runnerFixture()
   const client = bridgeClient(runner.transport)

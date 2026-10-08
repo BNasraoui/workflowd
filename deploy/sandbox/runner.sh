@@ -24,6 +24,13 @@ clone_source() {
   docker exec workflowd-sandbox-tooling git checkout --detach "$source_sha"
 }
 
+write_heartbeat() {
+  local temporary
+  temporary=$(mktemp /run/workflowd-sandbox/heartbeat.XXXXXX)
+  date +%s > "$temporary"
+  mv -f "$temporary" /run/workflowd-sandbox/heartbeat
+}
+
 case "${1:-}" in
   start)
     repository="${2:?repository required}"
@@ -121,9 +128,10 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
     touch /run/workflowd-sandbox/finished
     ;;
   heartbeat)
-    date +%s > /run/workflowd-sandbox/heartbeat
+    write_heartbeat
     ;;
   audit|hold)
+    if [[ "$1" == hold ]]; then write_heartbeat; fi
     # The hold process owns Actions stdout. SSH only queues data and reads receipts.
     python3 -c '
 import fcntl, json, os, sys, time
@@ -185,8 +193,14 @@ if mode == "audit":
     else: sys.exit("Sandbox audit emission unconfirmed")
 else:
     heartbeat = root / "heartbeat"
-    heartbeat.write_text(str(int(time.time())))
-    while time.time() - int(heartbeat.read_text()) < 120:
+    last_heartbeat = int(time.time())
+    while True:
+        try:
+            last_heartbeat = int(heartbeat.read_text())
+        except (ValueError, OSError):
+            # Retry on the next 50ms tick without renewing the last valid heartbeat.
+            pass
+        if time.time() - last_heartbeat >= 120: break
         if (root / "finished").exists(): break
         with lock.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
