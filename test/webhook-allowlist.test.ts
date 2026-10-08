@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { createHmac } from "node:crypto"
+import { signedRequest } from "./github-webhook"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
@@ -36,15 +36,7 @@ function request(event: string, installationId: number, repository: string) {
     issue: { number: 7, pull_request: { url: "https://api.github.test/pr/7" } },
     comment: { id: 10, body: "/agent review", user: { login: owner } },
   })
-  return new Request("http://localhost/hooks/github", {
-    method: "POST",
-    body,
-    headers: {
-      "x-github-delivery": "allowlist-delivery",
-      "x-github-event": event,
-      "x-hub-signature-256": `sha256=${createHmac("sha256", "secret").update(body).digest("hex")}`,
-    },
-  })
+  return signedRequest(event, body, "allowlist-delivery", "secret")
 }
 
 test.each([

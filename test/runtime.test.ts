@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
@@ -478,6 +479,57 @@ test("job, command, and reconciliation workers declare conservative downstream w
 })
 
 describe("runHookService startup", () => {
+  test("applies the configured PR repository allowlist to signed webhooks", async () => {
+    const loaded = await loadConfig(
+      {
+        GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      },
+      { home: "/tmp" },
+    )
+    const config = {
+      ...loaded,
+      http: { ...loaded.http, host: "127.0.0.1", port: 0 },
+      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* startHookService(config)
+          const url = `http://${server.hostname}:${server.port}/hooks/github`
+          for (const [repository, expected] of [
+            ["example-owner/example", { status: "enqueued", generation: 1 }],
+            ["foreign/repository", { status: "ignored", reason: "pr-repository-not-allowlisted" }],
+          ] as const) {
+            const response = yield* Effect.tryPromise(() =>
+              fetch(
+                signedRequest(
+                  "pull_request",
+                  pullRequestPayload(repository),
+                  repository,
+                  "secret",
+                  url,
+                ),
+              ),
+            )
+            expect(response.status).toBe(202)
+            expect(yield* Effect.tryPromise(() => response.json())).toEqual(expected)
+          }
+          const store = yield* WorkflowStore
+          const claim = { workerId: "test", now: new Date(), leaseDurationMs: 60_000 }
+          const job = yield* store.claimNextJob(claim)
+          expect(job?.repositoryFullName).toBe("example-owner/example")
+          expect(yield* store.claimNextJob(claim)).toBeNull()
+        }),
+      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), stubAdapters()))),
+    )
+  })
+
   test("starts local HTTP while remote coordination is unavailable and recovers later", async () => {
     const loaded = await loadConfig(
       {
