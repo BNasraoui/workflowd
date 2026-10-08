@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           installer="$RUNNER_TEMP/install-nix.sh"
-          curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/b85815f71a6de0ddee80b8a80a98d43f4bcc66c7/install-nix.sh -o "$installer"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
           echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
           env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
       - name: Build locked image and verify deterministic streaming

@@ -11,7 +11,7 @@ const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // Reviewed in full: anonymous checkout, credential-free pinned Nix installation,
 // locked build/determinism/E2E, and artifact upload restricted to main pushes.
 // Any dependency, permission, input or script edit requires a fresh review.
-const imageWorkflowSha256 = "e1e1e8a6aedd6d9b917471ce0a90562009668f356d9fd321f3c7511518ae05be"
+const imageWorkflowSha256 = "483f0cfecd3f4dc404dd977d281a0318c556174ce326244c1f223bf7f2736c2f"
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"
 const checkout = `set -euo pipefail

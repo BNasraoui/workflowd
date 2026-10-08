@@ -82,6 +82,9 @@ for (const mutation of [
   "extra head",
   "archive traversal",
   "swapped archive",
+  "source option",
+  "result option",
+  "source helper",
 ])
   test(`publisher validates actual Git objects and bounded ZIP: ${mutation}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "sandbox-bundle-"))
@@ -153,7 +156,10 @@ for (const mutation of [
         digest: "sha256:" + digest(new Uint8Array(await Bun.file(archive).arrayBuffer())),
       }
       if (mutation === "swapped archive") binding.digest = "sha256:" + "0".repeat(64)
-      const validated = Bun.spawn(["python3", script, "validate", repo], {
+      if (mutation === "source option") binding.source = "--help"
+      if (mutation === "result option") binding.result = "--all"
+      const source = mutation === "source helper" ? "ext::sh -c touch% helper-executed" : repo
+      const validated = Bun.spawn(["python3", script, "validate", source], {
         cwd: root,
         stdin: new Blob([JSON.stringify(binding)]),
         stdout: "pipe",
@@ -253,7 +259,12 @@ for (const mutation of [
             resultSha + ":result",
           ]),
         ).toBe("accepted bytes")
-      } else expect(status).not.toBe(0)
+      } else {
+        expect(status).not.toBe(0)
+        expect(
+          await Bun.file(join(root, "validated", "objects.git", "helper-executed")).exists(),
+        ).toBe(false)
+      }
     } finally {
       await rm(root, { recursive: true, force: true })
     }

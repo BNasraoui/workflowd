@@ -35,7 +35,8 @@ def git(repo, *args):
              '-c', 'core.attributesFile=/dev/null', *args], cwd=repo,
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
                  'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
-                 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0'},
+                 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0',
+                 'GIT_ALLOW_PROTOCOL': 'https:file'},
             stdout=output, stderr=subprocess.DEVNULL, timeout=60,
             check=True, preexec_fn=bounds)
         assert output.tell() <= 16 * 1024**2, 'Git inventory exceeded bound'
@@ -75,7 +76,8 @@ def seal(source):
                 'bundleSha256': sha(bundle.read_bytes())}
     encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
     assert len(encoded) <= 65536
-    (root / 'result.json').write_bytes(encoded)
+    with (root / 'result.json').open('wb') as manifest_file:
+        manifest_file.write(encoded)
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
 
 
@@ -139,8 +141,8 @@ def inspect_changes(repo, source, result):
 
 def validate(source_url):
     binding = json.loads(sys.stdin.buffer.read(65537))
-    for key in ('source', 'result'):
-        binding[key] = commit_id(binding[key])
+    source = commit_id(binding['source'])
+    result = commit_id(binding['result'])
     path = Path('result.zip')
     if path.is_symlink():
         raise ValueError('Archive must not be a symlink')
@@ -167,22 +169,22 @@ def validate(source_url):
     manifest = json.loads(raw)
     assert set(manifest) == {'sourceSha', 'resultSha', 'branch', 'bundleSha256'}
     assert isinstance(manifest['branch'], str)
-    assert manifest['sourceSha'] == binding['source'] and manifest['resultSha'] == binding['result']
+    assert manifest['sourceSha'] == source and manifest['resultSha'] == result
     bundle = root.absolute() / 'result.bundle'
     assert sha(bundle.read_bytes()) == manifest['bundleSha256']
     repo = str(root.absolute() / 'objects.git')
     git(str(root), 'init', '--bare', repo)
-    git(repo, '-c', 'credential.helper=', '-c', 'http.extraHeader=', 'fetch', '--no-tags', '--', source_url, binding['source'])
+    git(repo, '-c', 'credential.helper=', '-c', 'http.extraHeader=', 'fetch', '--no-tags', '--', source_url, source)
     before = set(git(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)').splitlines())
     heads = git(repo, 'bundle', 'list-heads', str(bundle)).decode().splitlines()
-    assert heads == [binding['result'] + ' refs/workflowd/result']
+    assert heads == [result + ' refs/workflowd/result']
     git(repo, 'bundle', 'verify', str(bundle))
     git(repo, 'fetch', '--no-tags', '--', str(bundle), 'refs/workflowd/result')
     inventory = git(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname) %(objectsize)').splitlines()
     added = [line.split() for line in inventory if line.split()[0] not in before]
     assert len(added) <= 10000 and sum(int(fields[1]) for fields in added) <= 64 * 1024**2
-    git(repo, 'fsck', '--strict', '--no-reflogs', binding['result'])
-    inspect_changes(repo, binding['source'], binding['result'])
+    git(repo, 'fsck', '--strict', '--no-reflogs', result)
+    inspect_changes(repo, source, result)
     print(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')))
 
 
