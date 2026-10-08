@@ -117,3 +117,34 @@ export const sandboxPublishMigration = Effect.gen(function* () {
       OR (OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.artifact_digest IS NOT OLD.artifact_digest))
     BEGIN SELECT RAISE(ABORT,'immutable publication intent'); END`
 })
+
+// Upgrade in place; canary intents retain a null base and can never publish retroactively.
+export const sandboxPublicationReceiptMigration = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`DROP TRIGGER sandbox_publish_immutable`
+  yield* sql`ALTER TABLE sandbox_publications RENAME TO sandbox_publications_previous`
+  yield* sql`CREATE TABLE sandbox_publications (
+    run_id TEXT PRIMARY KEY,
+    actions_run_id INTEGER NOT NULL CHECK(actions_run_id > 0),
+    attempt INTEGER NOT NULL CHECK(attempt = 1),
+    metadata TEXT NOT NULL CHECK(json_valid(metadata)),
+    phase TEXT NOT NULL CHECK(phase IN ('sealed','approving','approved','probed','published','operator_required','cancelled')),
+    artifact_id INTEGER CHECK(artifact_id > 0), artifact_digest TEXT,
+    deadline INTEGER NOT NULL, base_ref TEXT,
+    receipt TEXT CHECK(receipt IS NULL OR json_valid(receipt)),
+    CHECK((artifact_id IS NULL) = (artifact_digest IS NULL)),
+    CHECK(phase NOT IN ('approving','approved','probed','published') OR artifact_id IS NOT NULL),
+    CHECK(phase != 'published' OR (base_ref IS NOT NULL AND receipt IS NOT NULL))
+  ) STRICT`
+  yield* sql`INSERT INTO sandbox_publications
+    (run_id,actions_run_id,attempt,metadata,phase,artifact_id,artifact_digest,deadline)
+    SELECT run_id,actions_run_id,attempt,metadata,phase,artifact_id,artifact_digest,deadline
+    FROM sandbox_publications_previous`
+  yield* sql`DROP TABLE sandbox_publications_previous`
+  yield* sql`CREATE TRIGGER sandbox_publish_immutable BEFORE UPDATE ON sandbox_publications
+    WHEN NEW.run_id != OLD.run_id OR NEW.actions_run_id != OLD.actions_run_id
+      OR NEW.attempt != OLD.attempt OR NEW.metadata != OLD.metadata OR NEW.deadline != OLD.deadline
+      OR NEW.base_ref IS NOT OLD.base_ref
+      OR (OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.artifact_digest IS NOT OLD.artifact_digest))
+    BEGIN SELECT RAISE(ABORT,'immutable publication intent'); END`
+})

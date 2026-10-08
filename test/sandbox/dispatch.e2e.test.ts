@@ -674,7 +674,13 @@ for (const settlement of [
       },
     }
     const fixture = await sandboxGithubFixture(publicationPolicy, runner.name)
-    const publication = sandboxPublicationFixture(fixture, publicationPolicy, runner.name)
+    const publication = sandboxPublicationFixture(
+      fixture,
+      publicationPolicy,
+      runner.name,
+      "none",
+      "agent choice/$() 雪",
+    )
     publication.wait(true)
     const sourceSha = await runner.docker(
       "exec",
@@ -934,15 +940,13 @@ for (const settlement of [
           expect(fixture.cancellations).toEqual([])
           expect((yield* runs.read("run-1"))?.state).toBe("verified")
           if (settlement === "cancel") yield* resumed.cancel(active)
-          else publication.wait(false)
+          publication.wait(false)
           fixture.mutateRun({
             status: "completed",
             conclusion: settlement === "cancel" ? "cancelled" : "success",
           })
           yield* resumed.iteration
-          expect((yield* runs.read("run-1"))?.state).toBe(
-            settlement === "cancel" ? "cancelled" : "completed",
-          )
+          expect((yield* runs.read("run-1"))?.state).toBe("completed")
           expect(publication.posts).toBe(1)
           const mail = yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
           expect(mail).toHaveLength(1)

@@ -53,13 +53,13 @@ jobs:
         with:
           github-token: ${{ github.token }}
           gate-actor-id: "306741873"
-          publish-probe-canary: ${{ secrets.PUBLISH_PROBE_CANARY }}
+          publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
           publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}
 ```
 
 Save as `.github/workflows/agent-sandbox-caller.yml`. Keep the job IDs `sandbox` and `agent-publish`: the controller binds to `sandbox / runner` and `agent-publish`. The publish job belongs to the target caller and resolves its own `agent-publish` environment. The lease call passes no secrets. Do not use `secrets: inherit`, including between repositories with the same owner.
 
-The composite action runs reviewed `deploy/sandbox/publish.mjs` and its adjacent validator from the action's pinned installation; no target-source checkout, copied scripts, installation of agent dependencies, or caller working-directory convention is needed. It validates the existing approval and immutable artifact before its second step receives the canary. Explicit inputs keep the read token in validation and the canary in its consumer. The future `GHETTIMONSTER_PRIVATE_KEY` must similarly be an explicit input used only by a reviewed token-mint step after validation; it is absent from this candidate. See [composite action paths](https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#runs-for-composite-actions).
+The composite action runs reviewed `deploy/sandbox/publish.mjs` and its adjacent validator from the action's pinned installation; no target-source checkout, copied scripts, installation of agent dependencies, or caller working-directory convention is needed. It validates the existing approval, recorded base and immutable artifact before the pinned token-mint action receives the key. Explicit inputs keep the read token in validation and the key in the token-mint step. The token is scoped to the caller repository with Contents write and Pull requests write, passed only to publication/revocation steps, and revoked with an always-run step plus the token action's post-job fallback. The guard pins the composite's reviewed shape so another step cannot consume the key input. See [composite action paths](https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#runs-for-composite-actions).
 
 Workflowd's own caller uses its local reusable workflow plus an exact-`github.sha` sparse checkout of the action and deploy tooling, then the local action. Coordinator pins the target caller SHA separately as `workflowSha` and the central workflowd SHA as `toolingSha`. No result-branch input exists. Review the target caller and run the isolation guard/tests: only `agent-publish` may declare an environment or reference `secrets.`; inherited secrets are forbidden everywhere.
 
@@ -124,9 +124,9 @@ Operator adds provenance's configured alias/root and sandbox policy alongside wo
 
 ## 6. Probes, live runs, review
 
-The implemented verifier gains `--probe-publish` for the first D2 contract gate. After Ben's setup and re-pin, use a harmless environment-only canary before the real publish key: show a custom-only gate in pending deployments, approval by polling without consuming a webhook, gate App comment/identity visible to the publish job, matching artifact ID/digests, and canary unavailable to the lease. Unknown run, wrong expected SHA/artifact, stale attempt or unsuccessful agent never releases the gate. A failed probe stops D2 for revision; no human-approval workaround. Replace the canary with normal key provisioning only after this proof and the separately reviewed real-publishing implementation. Stop this candidate after CI for coordinator review/re-pin; the coordinator re-runs the canary.
+The implemented verifier gains `--probe-publish` for the first D2 contract gate. After Ben's setup and re-pin, use a harmless environment-only canary before the real publish key: show a custom-only gate in pending deployments, approval by polling without consuming a webhook, gate App comment/identity visible to the publish job, matching artifact ID/digests, and canary unavailable to the lease. Unknown run, wrong expected SHA/artifact, stale attempt or unsuccessful agent never releases the gate. A failed probe stops D2 for revision; no human-approval workaround. Replace the canary with normal key provisioning only after this proof and the separately reviewed real-publishing implementation. The workflowd canary passed at 28fcbd7 with pin b28944e. The real-publication candidate removes the canary step and stops after CI for coordinator review/re-pin; no live publication is authorized by that implementation handoff.
 
-Use existing proof environment/trust inputs and uniquely named transient user units capped at 6G/no swap. D3's `--proof` file supplies each repository's small task and test command, with **no branch value**; select one policy entry per invocation. The D2 probe intentionally stops before token minting while the key is absent.
+Use existing proof environment/trust inputs and uniquely named transient user units capped at 6G/no swap. D3's `--proof` file supplies each repository's small task and test command, with **no branch value**; select one policy entry per invocation. The historical D2 probe uses the key-absent canary pin, not the real-publication candidate. The D3 verifier/live runs remain a separate gate.
 
 ```bash
 bun scripts/evidence/agent-sandbox.mjs --probe-publish

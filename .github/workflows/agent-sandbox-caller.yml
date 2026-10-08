@@ -42,10 +42,10 @@ jobs:
             .github/actions/agent-publish
             deploy/sandbox
           path: trusted
-      - name: Validate result and probe protected publication
+      - name: Publish validated agent result
         uses: ./trusted/.github/actions/agent-publish
         with:
           github-token: ${{ github.token }}
           gate-actor-id: "306741873"
-          publish-probe-canary: ${{ secrets.PUBLISH_PROBE_CANARY }}
+          publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
           publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}

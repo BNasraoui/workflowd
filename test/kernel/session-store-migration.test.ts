@@ -108,6 +108,7 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 31, name: "sandbox_lease_operations" },
       { migration_id: 32, name: "sandbox_ref_creation" },
       { migration_id: 33, name: "sandbox_publications" },
+      { migration_id: 34, name: "sandbox_publication_receipts" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(14)

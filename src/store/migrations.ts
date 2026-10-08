@@ -4,6 +4,7 @@ import {
   sandboxOperationMigration,
   sandboxCreationMigration,
   sandboxPublishMigration,
+  sandboxPublicationReceiptMigration,
 } from "../sandbox/migration"
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
@@ -1483,5 +1484,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0031_sandbox_lease_operations": sandboxOperationMigration,
     "0032_sandbox_ref_creation": sandboxCreationMigration,
     "0033_sandbox_publications": sandboxPublishMigration,
+    "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
   }),
 })

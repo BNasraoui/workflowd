@@ -11,6 +11,11 @@ export const ResultMetadata = Schema.Struct({
   bundleSha256: digest,
   manifestSha256: digest,
 })
+export const PublicationReceipt = Schema.Struct({
+  stage: Schema.Literals(["validated", "pushing", "pushed", "creating_pr", "published"]),
+  pr: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
+  revoked: Schema.Boolean,
+})
 export const PublishIntent = Schema.Struct({
   run_id: Schema.String,
   actions_run_id: Schema.Int,
@@ -21,12 +26,15 @@ export const PublishIntent = Schema.Struct({
     "approving",
     "approved",
     "probed",
+    "published",
     "operator_required",
     "cancelled",
   ]),
   artifact_id: Schema.NullOr(Schema.Int),
   artifact_digest: Schema.NullOr(Schema.String),
   deadline: Schema.Number,
+  base_ref: Schema.NullOr(Schema.String),
+  receipt: Schema.NullOr(Schema.fromJsonString(PublicationReceipt)),
 })
 export type PublishIntent = typeof PublishIntent.Type
 
@@ -42,14 +50,15 @@ export const makePublishStore = Effect.gen(function* () {
     attempt: number
     metadata: typeof ResultMetadata.Type
     deadline: number
+    baseRef: string
   }) {
     const metadata = yield* Schema.encodeEffect(Schema.fromJsonString(ResultMetadata))(
       input.metadata,
     )
     yield* sql.withTransaction(
       Effect.gen(function* () {
-        yield* sql`INSERT INTO sandbox_publications(run_id,actions_run_id,attempt,metadata,phase,deadline)
-        VALUES(${input.runId},${input.actionsRunId},${input.attempt},${metadata},'sealed',${input.deadline})
+        yield* sql`INSERT INTO sandbox_publications(run_id,actions_run_id,attempt,metadata,phase,deadline,base_ref)
+        VALUES(${input.runId},${input.actionsRunId},${input.attempt},${metadata},'sealed',${input.deadline},${input.baseRef})
         ON CONFLICT(run_id) DO NOTHING`
         const saved = yield* read(input.runId)
         if (
@@ -57,7 +66,8 @@ export const makePublishStore = Effect.gen(function* () {
           saved.actions_run_id !== input.actionsRunId ||
           saved.attempt !== input.attempt ||
           JSON.stringify(saved.metadata) !== metadata ||
-          saved.deadline !== input.deadline
+          saved.deadline !== input.deadline ||
+          saved.base_ref !== input.baseRef
         )
           return yield* Effect.fail(new SandboxError({ message: "Publication intent changed" }))
       }),
@@ -72,5 +82,13 @@ export const makePublishStore = Effect.gen(function* () {
     sql`UPDATE sandbox_publications SET phase=${to} WHERE run_id=${runId} AND phase=${from}`.pipe(
       Effect.asVoid,
     )
-  return { read, seal, claimApproval, advance }
+  const saveReceipt = Effect.fn("PublishStore.saveReceipt")(function* (
+    runId: string,
+    receipt: typeof PublicationReceipt.Type,
+  ) {
+    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(PublicationReceipt))(receipt)
+    yield* sql`UPDATE sandbox_publications SET receipt=${encoded} WHERE run_id=${runId} AND phase='approved'
+      AND (receipt IS NULL OR json_extract(receipt,'$.stage') != 'published')`
+  })
+  return { read, seal, claimApproval, advance, saveReceipt }
 })

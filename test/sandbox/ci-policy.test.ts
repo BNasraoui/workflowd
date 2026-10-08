@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
-import { assertUnprivilegedPrWorkflows } from "../../src/sandbox/ci-policy"
+import {
+  assertUnprivilegedPrWorkflows,
+  assertProtectedPublishAction,
+} from "../../src/sandbox/ci-policy"
 
 async function workflows(): Promise<Record<string, string>> {
   const files = await readdir(".github/workflows")
@@ -149,4 +152,31 @@ test("CI guard rejects ambient workflow secrets outside the publisher job", asyn
   const files = await workflows()
   files["agent-sandbox-caller.yml"] += "\nenv: { CANARY: '${{ secrets.PUBLISH_PROBE_CANARY }}' }\n"
   expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+})
+
+for (const replacement of [
+  "env: { KEY: '${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}' }\n    steps:",
+  "steps:\n      - run: echo '${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}'",
+])
+  test("publisher key cannot escape the composite input", async () => {
+    const files = await workflows()
+    files["agent-sandbox-caller.yml"] = files["agent-sandbox-caller.yml"]!.replace(
+      "    steps:",
+      "    " + replacement,
+    )
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  })
+
+test("publisher guard rejects key consumers outside the reviewed token step", async () => {
+  const source = await Bun.file(".github/actions/agent-publish/action.yml").text()
+  expect(() => assertProtectedPublishAction(source)).not.toThrow()
+  for (const changed of [
+    source.replace(" validate", " publish"),
+    source.replace(
+      "GATE_ACTOR_ID:",
+      "KEY: ${{ inputs.publisher-private-key }}\n        GATE_ACTOR_ID:",
+    ),
+    source.replace("skip-token-revoke: false", "skip-token-revoke: true"),
+  ])
+    expect(() => assertProtectedPublishAction(changed)).toThrow()
 })

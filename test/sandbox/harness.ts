@@ -312,6 +312,10 @@ export async function sandboxGithubFixture(
           { status: 201 },
         )
       }
+      if (request.headers.get("authorization") === null) {
+        const publicRead = request.method === "GET" ? await publication?.(request) : undefined
+        return publicRead ?? new Response(null, { status: 401 })
+      }
       if (
         request.headers.get("authorization") !== "token fixture-token" &&
         request.headers.get("authorization") !== "Bearer fixture-token"
@@ -869,11 +873,13 @@ export function sandboxPublicationFixture(
   policy: import("../../src/sandbox/config").SandboxPolicy,
   leaseId = "lease-1",
   fault = "none",
+  branch = "no/name/rules '$()\n雪",
 ) {
   let reviews: unknown[] = []
   let posts = 0
   let waiting = false
   let downloads = 0
+  let binding: Record<string, unknown> = {}
   fixture.publication(async (request) => {
     const path = new URL(request.url).pathname
     if (path.endsWith("/deployment_protection_rule")) {
@@ -881,6 +887,7 @@ export function sandboxPublicationFixture(
       const body = Schema.decodeUnknownSync(Schema.Struct({ comment: Schema.String }))(
         await request.json(),
       )
+      binding = JSON.parse(body.comment)
       reviews = [
         {
           state: "approved",
@@ -890,6 +897,55 @@ export function sandboxPublicationFixture(
         },
       ]
       return new Response(null, { status: fault === "lost approval" ? 502 : 204 })
+    }
+    if (path.endsWith("/jobs/102/logs")) {
+      if (fault === "saved receipt") return new Response(null, { status: 404 })
+      const stage =
+        fault === "lost push" ? "pushing" : fault === "lost PR" ? "creating_pr" : "published"
+      const receipt = {
+        binding,
+        repository: policy.repository,
+        branch,
+        marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+        stage,
+        pr: stage === "published" ? 17 : null,
+        revoked: fault !== "unrevoked",
+      }
+      return new Response(
+        "2026-10-08T00:00:00.0000000Z workflowd.publish.receipt " +
+          Buffer.from(JSON.stringify(receipt)).toString("base64") +
+          "\n",
+      )
+    }
+    if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === branch)
+      return Response.json({
+        ref: `refs/heads/${branch}`,
+        object: { sha: binding.result },
+      })
+    if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {
+      const pull = {
+        number: 17,
+        html_url: `https://github.com/${policy.repository}/pull/17`,
+        draft: true,
+        state: "open",
+        maintainer_can_modify: false,
+        user: {
+          id: policy.publish!.publisherActorId,
+          login: fault === "foreign PR" ? "foreign[bot]" : "ghettimonster[bot]",
+          type: "Bot",
+        },
+        head: {
+          ref: branch,
+          sha: binding.result,
+          repo: { id: policy.repositoryId, full_name: policy.repository },
+        },
+        base: {
+          ref: binding.base,
+          repo: { id: policy.repositoryId, full_name: policy.repository },
+        },
+        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+      }
+      return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }
     if (path.endsWith("/approvals")) return Response.json(reviews)
     if (path.endsWith("/pending_deployments"))
@@ -919,6 +975,7 @@ export function sandboxPublicationFixture(
         total_count: 2,
         jobs: [
           {
+            id: 101,
             name: "sandbox / runner",
             run_id: 41,
             run_attempt: 1,
@@ -927,6 +984,7 @@ export function sandboxPublicationFixture(
             conclusion: fault === "bad job" ? "failure" : "success",
           },
           {
+            id: 102,
             name: "agent-publish",
             run_id: 41,
             run_attempt: 1,

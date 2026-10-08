@@ -536,7 +536,21 @@ export const makeSandboxGithub = (
         return yield* Effect.fail(githubFailure())
       return response.data
     })
+    const publicationRead = Effect.fn("SandboxGithub.publicationRead")(function* (
+      policy: SandboxPolicy,
+      path: string,
+    ) {
+      // Public repository metadata needs no token; the approval token keeps its narrow grants.
+      const response = yield* request(
+        new OctokitClass(),
+        "GET",
+        `/repos/${policy.repository}/${path}`,
+      )
+      if (response.status !== 200) return yield* Effect.fail(githubFailure())
+      return response.data
+    })
     return {
+      publicationRead,
       gateAppId: github.appId,
       publishRequest,
       ensureRef,

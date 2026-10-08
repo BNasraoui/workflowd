@@ -93,7 +93,7 @@ test("runner disables routes after the action joins and before preparing tooling
   expect(steps.at(-1)?.run).toBe("bash deploy/sandbox/runner.sh stop")
 })
 
-test("publication uses a fresh environment-gated runner with only read credentials and a canary", async () => {
+test("publication uses a fresh environment-gated runner with a step-scoped explicit publisher key", async () => {
   const source = await Bun.file(`${root}/.github/workflows/agent-sandbox-caller.yml`).text()
   const raw = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
     Bun.YAML.parse(source),
@@ -106,38 +106,39 @@ test("publication uses a fresh environment-gated runner with only read credentia
   expect(job.environment).toBe("agent-publish")
   expect(job.permissions).toEqual({ actions: "read", contents: "read" })
   expect(job["runs-on"]).toBe("ubuntu-24.04")
-  expect(JSON.stringify(job)).not.toMatch(/tailscale|id-token|PRIVATE_KEY|secrets: inherit/)
-  expect(JSON.stringify(job)).toContain("PUBLISH_PROBE_CANARY")
+  expect(JSON.stringify(job)).not.toMatch(/tailscale|id-token|secrets: inherit/)
+  expect(JSON.stringify(job)).toContain("secrets.GHETTIMONSTER_PRIVATE_KEY")
   const runner = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
   expect(runner).toContain("sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}")
   expect(runner).not.toMatch(/agent-publish:|environment:|secrets[.:]/)
   expect(source).toContain("./trusted/.github/actions/agent-publish")
 })
 
-test("reviewed composite validates before exposing the canary to its only consumer", async () => {
+test("reviewed composite validates before minting a repository-only token and always revokes", async () => {
   const source = await Bun.file(`${root}/.github/actions/agent-publish/action.yml`).text()
   const record = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))
   const action = record(Bun.YAML.parse(source))
-  const runs = record(action.runs)
-  expect(runs.using).toBe("composite")
-  const steps = Schema.decodeUnknownSync(Schema.Array(Schema.Json))(runs.steps).map((step) =>
-    record(step),
+  const steps = Schema.decodeUnknownSync(Schema.Array(Schema.Json))(record(action.runs).steps).map(
+    (value) => record(value),
   )
-  expect(steps).toHaveLength(2)
-  expect(steps[0]?.run).toBe(
-    'node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" validate',
+  expect(steps[0]?.run).toContain('publish.mjs" validate')
+  expect(steps[1]?.uses).toBe(
+    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",
   )
-  expect(steps[0]?.env).toEqual({
-    GITHUB_TOKEN: "${{ inputs.github-token }}",
-    GATE_ACTOR_ID: "${{ inputs.gate-actor-id }}",
+  expect(steps[1]?.with).toEqual({
+    "app-id": "${{ inputs.publisher-app-id }}",
+    "private-key": "${{ inputs.publisher-private-key }}",
+    owner: "${{ github.repository_owner }}",
+    repositories: "${{ github.event.repository.name }}",
+    "permission-contents": "write",
+    "permission-pull-requests": "write",
+    "skip-token-revoke": false,
   })
-  expect(steps[1]?.run).toBe(
-    'node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" canary',
-  )
-  expect(steps[1]?.env).toEqual({
-    PUBLISH_PROBE_CANARY: "${{ inputs.publish-probe-canary }}",
-    GHETTIMONSTER_APP_ID: "${{ inputs.publisher-app-id }}",
-  })
-  for (const step of steps) expect(step.shell).toBe("bash")
-  expect(source).not.toMatch(/secrets[.[]|PRIVATE_KEY|checkout|tailscale/)
+  expect(steps[2]?.run).toContain('publish.mjs" publish')
+  expect(steps[3]?.if).toBe("${{ always() && steps.token.outputs.token != '' }}")
+  expect(steps[3]?.run).toContain('publish.mjs" revoke')
+  expect(
+    steps.filter((step) => JSON.stringify(step).includes("inputs.publisher-private-key")),
+  ).toEqual([steps[1]!])
+  expect(source).not.toContain("canary")
 })

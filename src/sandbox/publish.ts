@@ -7,7 +7,7 @@ import { Effect, Schema } from "effect"
 import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
-import { makePublishStore, type PublishIntent } from "./publish-store"
+import { makePublishStore, PublicationReceipt, type PublishIntent } from "./publish-store"
 import { readSandboxSubmission } from "./submission"
 
 export const SandboxTerminal = Schema.Struct({
@@ -30,6 +30,7 @@ const Jobs = Schema.Struct({
   total_count: Schema.Int,
   jobs: Schema.Array(
     Schema.Struct({
+      id: Schema.Int,
       name: Schema.String,
       run_id: Schema.Int,
       run_attempt: Schema.Int,
@@ -62,7 +63,7 @@ const fail = () => new SandboxError({ message: "Publication identity or protecti
 
 export function approvalComment(intent: PublishIntent): string {
   return JSON.stringify({
-    v: 1,
+    v: intent.base_ref === null ? 1 : 2,
     run: intent.actions_run_id,
     attempt: intent.attempt,
     artifact: intent.artifact_id,
@@ -70,6 +71,7 @@ export function approvalComment(intent: PublishIntent): string {
     source: intent.metadata.sourceSha,
     result: intent.metadata.resultSha,
     manifest: intent.metadata.manifestSha256,
+    ...(intent.base_ref === null ? {} : { base: intent.base_ref }),
   })
 }
 
@@ -204,6 +206,109 @@ export const makeSandboxPublisher = (
       if (runners.length !== 1 || publishers.length !== 1) return yield* Effect.fail(fail())
       return { runners, publishers }
     })
+    const reconcile = Effect.fn("SandboxPublisher.reconcile")(function* (
+      policy: SandboxPolicy,
+      intent: PublishIntent,
+      jobId: number,
+    ) {
+      const marker = `<!-- workflowd-publication:${Buffer.from(approvalComment(intent)).toString("base64")} -->`
+      const branch = intent.metadata.branch
+      let receipt = intent.receipt
+      if (receipt === null) {
+        const logs = yield* Schema.decodeUnknownEffect(
+          Schema.String.check(Schema.isMaxLength(1048576)),
+        )(yield* github.publishRequest(policy, "GET", `actions/jobs/${jobId}/logs`))
+        const records = logs.split("\n").flatMap((line) => {
+          const match =
+            /^\d{4}-\d{2}-\d{2}T\S+Z workflowd\.publish\.receipt ([A-Za-z0-9+/=]+)\r?$/.exec(line)
+          return match === null ? [] : [match[1]!]
+        })
+        if (records.length === 0 || records.length > 8) return yield* Effect.fail(fail())
+        const raw = yield* Effect.try((): unknown =>
+          JSON.parse(Buffer.from(records.at(-1)!, "base64").toString()),
+        )
+        const proof = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            ...PublicationReceipt.fields,
+            binding: Schema.Json,
+            repository: Schema.String,
+            branch: Schema.String,
+            marker: Schema.String,
+          }),
+        )(raw)
+        if (
+          JSON.stringify(proof.binding) !== approvalComment(intent) ||
+          proof.repository !== policy.repository ||
+          proof.branch !== intent.metadata.branch ||
+          proof.marker !== marker
+        )
+          return yield* Effect.fail(fail())
+        receipt = { stage: proof.stage, pr: proof.pr, revoked: proof.revoked }
+        yield* store.saveReceipt(intent.run_id, receipt)
+      }
+      if (!receipt.revoked || !["creating_pr", "published"].includes(receipt.stage))
+        return "operator_required" as const
+      const ref = yield* Schema.decodeUnknownEffect(
+        Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) }),
+      )(yield* github.publicationRead(policy, `git/ref/heads/${encodeURIComponent(branch)}`))
+      if (ref.ref !== `refs/heads/${branch}` || ref.object.sha !== intent.metadata.resultSha)
+        return yield* Effect.fail(fail())
+      const repo = Schema.Struct({ id: Schema.Int, full_name: Schema.String })
+      const pullSchema = Schema.Struct({
+        number: Schema.Int,
+        html_url: Schema.String,
+        state: Schema.Literal("open"),
+        draft: Schema.Literal(true),
+        maintainer_can_modify: Schema.Literal(false),
+        body: Schema.String,
+        user: Schema.Struct({
+          id: Schema.Int,
+          login: Schema.Literal("ghettimonster[bot]"),
+          type: Schema.Literal("Bot"),
+        }),
+        head: Schema.Struct({ ref: Schema.String, sha: Schema.String, repo }),
+        base: Schema.Struct({ ref: Schema.String, repo }),
+      })
+      const found = yield* Schema.decodeUnknownEffect(
+        Schema.Array(Schema.Struct({ number: Schema.Int.check(Schema.isGreaterThan(0)) })),
+      )(
+        yield* github.publicationRead(
+          policy,
+          "pulls?" +
+            new URLSearchParams({
+              state: "all",
+              head: policy.repository.split("/")[0] + ":" + branch,
+              base: intent.base_ref!,
+              per_page: "100",
+            }).toString(),
+        ),
+      )
+      if (found.length !== 1) return yield* Effect.fail(fail())
+      const pull = yield* Schema.decodeUnknownEffect(pullSchema)(
+        yield* github.publicationRead(policy, `pulls/${found[0]!.number}`),
+      )
+      if (
+        pull.number <= 0 ||
+        pull.number !== found[0]!.number ||
+        (receipt.pr !== null && receipt.pr !== pull.number) ||
+        pull.html_url !== `https://github.com/${policy.repository}/pull/${pull.number}` ||
+        pull.user.id !== policy.publish!.publisherActorId ||
+        pull.head.ref !== branch ||
+        pull.head.sha !== intent.metadata.resultSha ||
+        pull.base.ref !== intent.base_ref ||
+        pull.body !== marker ||
+        [pull.head.repo, pull.base.repo].some(
+          (repo) => repo.id !== policy.repositoryId || repo.full_name !== policy.repository,
+        )
+      )
+        return yield* Effect.fail(fail())
+      yield* store.saveReceipt(intent.run_id, {
+        stage: "published",
+        pr: pull.number,
+        revoked: true,
+      })
+      return "published" as const
+    })
     const poll = Effect.fn("SandboxPublisher.poll")(function* (runId: string) {
       const saved = yield* store.read(runId)
       const lease = yield* leases.read(runId)
@@ -213,30 +318,33 @@ export const makeSandboxPublisher = (
         lease.policy.publish === undefined ||
         saved.actions_run_id !== lease.actions_run_id ||
         saved.attempt !== lease.actions_attempt ||
-        saved.metadata.sourceSha !== lease.source_sha
+        saved.metadata.sourceSha !== lease.source_sha ||
+        (saved.base_ref !== null && saved.base_ref !== lease.policy.publish.baseRef) ||
+        lease.policy.publish.publisherAppId !== 5232172 ||
+        lease.policy.publish.publisherActorId !== 339414993
       )
         return yield* Effect.fail(fail())
       let intent = saved
-      if (["probed", "operator_required", "cancelled"].includes(intent.phase)) return intent.phase
-      if (intent.deadline <= Date.now()) {
+      if (["probed", "published", "operator_required", "cancelled"].includes(intent.phase))
+        return intent.phase
+      if (
+        intent.base_ref === null ||
+        (intent.deadline <= Date.now() && intent.phase === "sealed")
+      ) {
         yield* store.advance(runId, intent.phase, "operator_required")
         return "operator_required"
       }
       const policy = lease.policy
-      const run = yield* github.savedRun(
-        policy,
-        lease.lease_id,
-        intent.actions_run_id,
-        intent.attempt,
-      )
+      yield* github.savedRun(policy, lease.lease_id, intent.actions_run_id, intent.attempt)
       const prefix = `actions/runs/${intent.actions_run_id}`
       const { runners, publishers } = yield* jobsFor(policy, intent)
       const runner = runners[0]!
+      if (intent.deadline <= Date.now() && publishers[0]?.status !== "completed") {
+        yield* github.cancel(policy, intent.actions_run_id)
+        return intent.phase
+      }
       if (runner.status !== "completed") return intent.phase
-      if (
-        runner.conclusion !== "success" ||
-        (run.status === "completed" && run.conclusion !== "success")
-      ) {
+      if (runner.conclusion !== "success") {
         yield* store.advance(runId, intent.phase, "operator_required")
         return "operator_required"
       }
@@ -284,9 +392,15 @@ export const makeSandboxPublisher = (
       if (matches.length !== 1) return yield* Effect.fail(fail())
       yield* store.advance(runId, "approving", "approved")
       if (publishers[0]?.status === "completed") {
-        const phase = publishers[0].conclusion === "success" ? "probed" : "operator_required"
+        const phase = yield* reconcile(policy, intent, publishers[0].id).pipe(
+          Effect.catch(() => Effect.succeed("operator_required" as const)),
+        )
         yield* store.advance(runId, "approved", phase)
         return phase
+      }
+      if (intent.deadline <= Date.now()) {
+        yield* store.advance(runId, "approved", "operator_required")
+        return "operator_required"
       }
       return "approved"
     })
@@ -315,6 +429,7 @@ export const makeSandboxPublisher = (
           actionsRunId: lease.actions_run_id,
           attempt: lease.actions_attempt,
           metadata,
+          baseRef: lease.policy.publish.baseRef,
           deadline: Math.min(lease.deadline, Date.now() + 15 * 60000),
         })
     })
@@ -391,13 +506,13 @@ export const makeSandboxPublisher = (
               state: "completed",
               sessionId: run.nativeSessionId,
               finalMessage,
-              diagnostic: "Publication canary result recovered",
+              diagnostic: "Publication result recovered",
             }),
             true,
           )
         })
       }
-      if (cancel) {
+      if (cancel && intent.phase === "sealed") {
         yield* store.advance(run.runId, intent.phase, "cancelled")
         yield* Effect.tryPromise(() =>
           saveSandboxFile(
@@ -407,16 +522,41 @@ export const makeSandboxPublisher = (
               state: "cancelled",
               sessionId: run.nativeSessionId,
               finalMessage: null,
-              diagnostic: "Publication probe cancelled; no write token was available",
+              diagnostic: "Publication cancelled before approval",
             }),
           ),
         )
       } else {
+        if (cancel && ["approving", "approved"].includes(intent.phase))
+          yield* github.cancel(lease.policy, intent.actions_run_id)
         if (intent.phase === "sealed") yield* remote.finish(run.runId).pipe(Effect.ignore)
         yield* poll(run.runId)
       }
-      const phase = (yield* store.read(run.runId))!.phase
-      if (!["probed", "operator_required", "cancelled"].includes(phase)) return true
+      const settled = (yield* store.read(run.runId))!
+      const phase = settled.phase
+      if (!["probed", "published", "operator_required", "cancelled"].includes(phase)) return true
+      if (phase === "published") {
+        const finalMessage = JSON.stringify({
+          repository: lease.policy.repository,
+          branch: settled.metadata.branch,
+          resultSha: settled.metadata.resultSha,
+          base: settled.base_ref,
+          pullRequest: `https://github.com/${lease.policy.repository}/pull/${settled.receipt!.pr}`,
+        })
+        yield* Effect.tryPromise(() =>
+          saveSandboxFile(
+            run.directory,
+            "terminal.json",
+            JSON.stringify({
+              state: "completed",
+              sessionId: run.nativeSessionId,
+              finalMessage,
+              diagnostic: "Draft PR publication confirmed",
+            }),
+          ),
+        )
+        yield* Effect.tryPromise(() => saveSandboxFile(run.directory, "final.txt", finalMessage))
+      }
       if (phase === "operator_required")
         yield* Effect.tryPromise(() =>
           saveSandboxFile(

@@ -98,6 +98,15 @@ function assertJob(value: Schema.Json, workflows: Record<string, string>) {
     throw new Error("Dependency installation must ignore scripts")
 }
 
+export function assertProtectedPublishAction(source: string): void {
+  // Reviewed token scope, validation ordering, only key consumer, always-revoke and post fallback.
+  if (
+    createHash("sha256").update(source).digest("hex") !==
+    "a2dd5f97f860408dd28b6dbe72f63e7f8de97bdbc5251ab9a4c1346326d2c811"
+  )
+    throw new Error("Publisher action differs from the reviewed secret-isolation snapshot")
+}
+
 function assertPublishIsolation(workflow: ReturnType<typeof object>) {
   const referencesSecrets = (value: unknown) =>
     /secrets\s*(?:\.|\[)|toJSON\s*\(\s*secrets\b/i.test(JSON.stringify(value))
@@ -110,8 +119,28 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
     if (name !== "agent-publish") {
       if (job.environment !== undefined || referencesSecrets(job) || job.secrets !== undefined)
         throw new Error("Only agent-publish may attach an environment or reference secrets")
-    } else if ("workflow_call" in object(workflow.on)) {
-      throw new Error("agent-publish must be a top-level caller job")
+    } else {
+      if ("workflow_call" in object(workflow.on))
+        throw new Error("agent-publish must be a top-level caller job")
+      const { steps, ...ambientJob } = job
+      if (referencesSecrets(ambientJob) || job.secrets !== undefined || job.env !== undefined)
+        throw new Error("Publisher secrets must be explicit composite inputs")
+      for (const value of Schema.decodeUnknownSync(Schema.Array(Schema.Json))(steps)) {
+        const step = object(value)
+        const inputs = object(step.with ?? {})
+        if (inputs["publisher-private-key"] !== undefined) {
+          const { "publisher-private-key": key, ...other } = inputs
+          if (
+            key !== "${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}" ||
+            typeof step.uses !== "string" ||
+            !/^(?:\.\/trusted\/\.github\/actions\/agent-publish|BNasraoui\/workflowd\/\.github\/actions\/agent-publish@[a-f0-9]{40})$/.test(
+              step.uses,
+            ) ||
+            referencesSecrets({ ...step, with: other })
+          )
+            throw new Error("Publisher key is only allowed as the reviewed action input")
+        } else if (referencesSecrets(step)) throw new Error("Unexpected publisher secret consumer")
+      }
     }
   }
 }
@@ -149,6 +178,7 @@ if (import.meta.main) {
       names.map(async (name) => [name, await Bun.file(`${root}/${name}`).text()] as const),
     ),
   )
+  assertProtectedPublishAction(await Bun.file(".github/actions/agent-publish/action.yml").text())
   assertUnprivilegedPrWorkflows(workflows)
   console.log(
     "PR workflow policy passed: empty permissions, anonymous checkout, no secrets or shared caches",

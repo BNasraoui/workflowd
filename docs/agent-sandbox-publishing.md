@@ -1,20 +1,17 @@
 # Sandbox audit and PR execution
 
 D1 is accepted and pinned at `30c864febd464f1ed91424742bbf9d74f4d1de82`.
-This D2 candidate implements the canary gate, before write-token minting or real PR
-publication. The coordinator must re-pin this candidate after exact-head CI before
-running any lease or probe. Workers do not change production configuration, Apps,
-environments, rulesets or pins.
+The D2 canary gate passed at `28fcbd7` with runner pin `b28944e`. This candidate
+implements real publication and must stop after exact-head CI for coordinator review
+and re-pin. No live publication or production enablement is part of this change.
 
 For repository setup and the short cross-owner caller, see the
 [onboarding runbook](agent-sandbox-onboarding.md).
 
 The publish App is **ghettimonster**, App ID **5232172**, bot **339414993**
-(`ghettimonster[bot]`). Its variable is `GHETTIMONSTER_APP_ID`; the eventual key is
-`GHETTIMONSTER_PRIVATE_KEY`, only in the protected environment. The candidate never
-references that key in its workflow or mints a token. Ben has provisioned the workflowd
-canary environment; rulesets and private-key provisioning remain operator work after
-the canary gate.
+(`ghettimonster[bot]`). Its variable is `GHETTIMONSTER_APP_ID`; its key is
+`GHETTIMONSTER_PRIVATE_KEY`, held only in the caller's protected environment.
+Ben owns key provisioning, rulesets, environment settings and deployment pins.
 
 ## Command status and public audit
 
@@ -116,9 +113,9 @@ No live GitHub-hosted lease is acquired before the coordinator's re-pin.
 Run focused audit/CI-policy/workflow/transport/runner-init tests and the full repository
 check in transient systemd user units capped at `MemoryMax=6G`, `MemorySwapMax=0`.
 The approved reviewer decision requires polling exact-head CI and stopping for the
-coordinator at the canary gate. Do not subscribe to CI for this stage.
+coordinator review and re-pin. Do not subscribe to CI for this stage.
 
-## Canary publication contract
+## Protected publication contract
 
 Result tooling takes its workspace from the trusted caller's working directory.
 Sealing reads `repository/` and writes `result/`; validation reads `result.zip` and
@@ -172,13 +169,37 @@ Workflowd checks out only the action and deploy tooling at its own exact `github
 and uses the local action at that commit. This works across repository owners without
 passing secrets through a reusable workflow. `secrets: inherit` is forbidden.
 
-The caller passes `github.token`, the gate bot ID, the protected canary and the App ID
-as explicit action inputs. The composite supplies the read token only to validation,
-and the canary only to the subsequent canary step. Neither is a workflow/job-wide
-environment variable. A future reviewed token-mint step must likewise receive
-`GHETTIMONSTER_PRIVATE_KEY` explicitly, only after validation; that input and step
-are absent from this canary candidate. Moving the job preserves the same custom gate,
-approval binding, immutable artifact validation and polling protocol.
+The caller passes `github.token`, the gate bot ID, App ID and
+`publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}` as explicit inputs.
+Only validation receives the read token. Only the token-mint step consumes the key,
+after validation succeeds. Neither credential is a job/workflow environment variable.
+The canary-only step is removed.
+
+The reviewed token action is
+[`actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349`](https://github.com/actions/create-github-app-token/tree/fee1f7d63c2ff003460e3d139729b119787bc349).
+Review covered its entrypoints, repository installation lookup, permission input mapping,
+masking, token state and post-job revocation. Explicit owner and single repository inputs
+limit the installation token to the caller, with Contents write and Pull requests write
+(Metadata read is implicit). Its default post-job revocation stays enabled. The composite
+also runs an `always()` revoke step before returning its final receipt; revocation failure
+cannot produce a successful publication receipt. Runner destruction/network failure can
+prevent cleanup: no software can guarantee remote revocation in that case, and the token's
+GitHub expiry remains the final bound. No key or token is stored in workflowd state.
+
+The publisher uses a fresh validated bare repository with no inherited Git environment,
+config, hooks, checkout, filters or replacement refs. A trusted ephemeral credential helper
+serves only the exact caller HTTPS repository, using an environment token rather than argv
+or stored Git configuration. Push output is captured and never printed. A taken name fails;
+the exact validated SHA and unchanged agent branch form one explicit refspec, without force,
+update, delete, tags or mirror options. Only Git's newly-created porcelain status is accepted,
+then the remote ref/SHA is read back. GitHub's required update/deletion rules close the
+preflight race; publication must not be enabled before those rules are verified.
+
+The PR is created as a draft to the base bound into the approval, with
+`maintainer_can_modify: false`. Readback checks its number, URL, draft/open state, author
+login and ID, same-repository head/base and exact result SHA. Its small binding marker
+allows recovery of a lost PR reply without repeating the POST. No result branch is deleted
+or overwritten as rollback.
 
 Migration 33 stores metadata-only immutable publication intents. Approval checks the
 owned run, attempt, source, workflow identity, successful runner job, immutable artifact
@@ -195,30 +216,30 @@ validates the manifest/bundle against the approval. A clean bare Git repository 
 the trusted source anonymously, without checking out agent code, and inspects every new
 commit. Forbidden paths, hidden forbidden intermediate changes, symlinks, submodules,
 mode changes, extra bundle heads, unrelated/nonlinear history and content limits fail.
-Only the following step receives the harmless `PUBLISH_PROBE_CANARY`. It checks secret
-presence without printing its value, then exits. There is no push or PR API in this
-candidate. Ruleset enforcement, ref collision/race tests, push/PR recovery and real draft
-PR receipts remain gated on the canary result and subsequent operator key/rule setup.
 
-Pending publication retains lease custody and stops SSH heartbeats. Restart uses the
-saved intent and deadline; cancellation terminates the waiting Actions run. Missing or
-mismatched review evidence retains custody until reconciliation or deadline. Successful
-canary, failure or cancellation still confirms Actions termination and lease-ref
-absence before terminal mailbox delivery. Historical capture-only rows are not backfilled.
+Publication receipts are metadata only. The trusted publisher emits bounded base64 JSON
+records in its own job log at each stage, including before writes and after revocation.
+The controller selects the exact `agent-publish` job ID from the owned run/attempt, limits
+its log to 1 MiB, checks the binding, and saves only receipt metadata in migration 34's
+publication table. Same-run receipt artifacts are deliberately not trusted: the lease
+runner can upload artifacts too. The result bundle stays on GitHub and the publish runner.
 
-After the coordinator re-pin, use the existing proof environment with one repository
-policy, its nonsecret Tailscale evidence and a `publish` block. The verifier uses the
-existing authenticated dispatch path and takes the same explicit executor/model options
-as the live verifier:
+Migration 34 binds the immutable base ref into new version-2 approvals. Historical canary
+intents retain a null base and are never retroactively published. Recovery reuses stored
+receipts, checks the remote head and draft PR, and never repeats a push or PR POST. An
+ambiguous push without Git's creation acknowledgement remains `operator_required`, even
+if a matching SHA exists remotely; ownership has not been proven. A known-created branch
+with a lost PR reply can recover by exact marker, author, head and base. Missing logs,
+revocation failure, foreign PRs and ambiguous ownership fail closed.
 
-```bash
-bun scripts/evidence/agent-sandbox.mjs --probe-publish --executor opencode:opencode-primary --model "$OPENCODE_MODEL"
-```
+Cancellation before approval does not publish. After approval, cancellation/expiry stops
+the owned Actions run and reconciles its receipt before settlement; it does not promise
+rollback. A confirmed PR returns only repository, branch, result SHA, base and PR URL.
+Actions termination and lease-ref deletion still precede the terminal mailbox.
 
-Run this in a uniquely named transient user unit with `MemoryMax=6G` and
-`MemorySwapMax=0`. It checks that the lease has neither the canary nor the publish key,
-that the gate released only its bound result, and that the binding, Actions run and
-lease ref were cleaned up. Evidence contains metadata, audit records and Actions logs,
-never a downloaded patch or bundle. `--live` cannot perform real publishing in this
-bootstrap candidate. A failed canary requires review; there is no manual-approval or
-webhook fallback.
+The current candidate stops for coordinator review/re-pin. The historical
+`--probe-publish` evidence command was for the key-absent canary pin; it is not a live
+publication verifier for this candidate. D3 still requires the three workflowd harness
+receipts, provenance onboarding/live receipt and independent Claude security review.
+All heavy checks and future authorized probes run in transient user units capped at
+`MemoryMax=6G`, `MemorySwapMax=0`. Poll exact-head CI with `gh run list`; never subscribe.

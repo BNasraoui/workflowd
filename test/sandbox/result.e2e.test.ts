@@ -193,7 +193,7 @@ for (const mutation of [
         await chmod(join(hostilePath, "python3"), 0o755)
         await mkdir(join(root, "fixture"))
         await symlink(repo, join(root, "fixture", "repo.git"))
-        const approved = { v: 1, run: 41, attempt: 1, artifact: 52, ...binding }
+        const approved = { v: 2, run: 41, attempt: 1, artifact: 52, ...binding, base: "main" }
         const api = Bun.serve({
           hostname: "127.0.0.1",
           port: 0,
@@ -245,10 +245,12 @@ for (const mutation of [
         const actionPath = resolve(".github/actions/agent-publish")
         const action = Schema.decodeUnknownSync(
           Schema.Struct({
-            runs: Schema.Struct({ steps: Schema.Array(Schema.Struct({ run: Schema.String })) }),
+            runs: Schema.Struct({
+              steps: Schema.Array(Schema.Struct({ run: Schema.optionalKey(Schema.String) })),
+            }),
           }),
         )(Bun.YAML.parse(await Bun.file(join(actionPath, "action.yml")).text()))
-        const invoke = async (mode: string, secret = "") => {
+        const invoke = async () => {
           const process = Bun.spawn(
             [
               "bash",
@@ -258,14 +260,13 @@ for (const mutation of [
               "-o",
               "pipefail",
               "-c",
-              action.runs.steps[mode === "validate" ? 0 : 1]!.run,
+              action.runs.steps[0]!.run!,
             ],
             {
               cwd: root,
               env: {
                 ...env,
                 GITHUB_ACTION_PATH: actionPath,
-                PUBLISH_PROBE_CANARY: secret,
                 GHETTIMONSTER_APP_ID: "5232172",
               },
               stdout: "pipe",
@@ -279,12 +280,12 @@ for (const mutation of [
           ])
         }
         try {
-          expect((await invoke("validate"))[0]).toBe(0)
-          expect((await invoke("canary"))[0]).toBe(1)
-          const receipt = await invoke("canary", "canary-value-never-logged")
-          expect(receipt[0]).toBe(0)
-          expect(receipt[1]).toContain("no write token minted")
-          expect(receipt.join()).not.toContain("canary-value-never-logged")
+          expect((await invoke())[0]).toBe(0)
+          const validated = JSON.parse(
+            await Bun.file(join(root, "workflowd-publish/validated.json")).text(),
+          )
+          expect(validated.binding.base).toBe("main")
+          expect(validated.metadata.resultSha).toBe(resultSha)
         } finally {
           await api.stop(true)
         }
