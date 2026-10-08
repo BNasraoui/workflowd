@@ -1,0 +1,50 @@
+name: Agent image reusable build
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  build:
+    name: Agent image build and container-use E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build locked image and verify deterministic streaming
+        run: |
+          nix build .#agent-image --no-update-lock-file
+          ./result > agent-image.tar
+          first=$(sha256sum agent-image.tar | cut -d' ' -f1)
+          second=$(./result | sha256sum | cut -d' ' -f1)
+          test "$first" = "$second"
+          docker load -i agent-image.tar
+      - name: Exercise real container-use and Dagger with local image
+        run: timeout 900 bash test/agent-image/e2e.sh
+      - name: Record image size
+        run: |
+          gzip -n agent-image.tar
+          docker image inspect workflowd-agent-base:local --format '{{.Size}}' > image-size.txt
+          {
+            printf 'Uncompressed image: %s bytes\n' "$(cat image-size.txt)"
+            printf 'Compressed archive: %s bytes\n' "$(stat -c %s agent-image.tar.gz)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save tested image for publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-image
+          path: |
+            agent-image.tar.gz
+            image-size.txt
+          compression-level: 0
+          retention-days: 1
