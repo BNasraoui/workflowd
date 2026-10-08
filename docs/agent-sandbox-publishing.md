@@ -45,9 +45,13 @@ advances its acknowledgement watermark. SSH receives only that watermark. Replay
 the same record does not print it again. A crash between stdout emission and checkpoint
 can repeat a line; correlate/deduplicate by run, lease and sequence.
 
-Settlement stops/revokes the session and drains the canonical audit through the hold
-process. For policies with `publish`, a successful agent completion seals its result
-on the runner and ends hold normally. Other terminal outcomes clean up without approval.
+Settlement stops/revokes the session and reads the hold process acknowledgement in one
+bounded SSH call. It validates all canonical records, replays only sequences after the
+watermark in one bounded batch, and requires acknowledgement through the final sequence.
+The overall drain limit remains 30 seconds. Missing acknowledgement refuses success;
+`audit-failure.json` and the terminal diagnostic retain the exception and elapsed time.
+For policies with `publish`, a successful agent completion seals its result on the
+runner and ends hold normally. Other terminal outcomes clean up without approval.
 No patch or bundle is downloaded to mint. Missing
 or failed audit acknowledgement preserves an `operator_required` result while lease
 cleanup still proceeds. The drain has a 30-second deadline; a large backlog that cannot
@@ -137,14 +141,18 @@ A configured `publish` policy supplies the PR base ref, environment ID and publi
 App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;
 it defaults to `workflowSha`. The base tip is recorded before dispatch. There is no
 result branch input in policy or dispatch. The agent chooses the name and finishes with
-a JSON object whose sole field is `branch`. Names pass unchanged through JSON; GitHub
+a JSON object with `environmentId` (the exact container-use environment holding its
+result) and `branch` (its chosen name). The agent works in container-use environments
+and must not create Git branches inside the container or push; the publisher creates
+the branch. Names pass unchanged through JSON; GitHub
 will decide ref validity and collision protection when real publication is enabled.
 
 After session quiescence and audit acknowledgement, the fixed runner control seals the
-single container-use result in `result.bundle` and `result.json`. Only source/result
-SHAs, the name and content digests return over SSH. No result or an ambiguous result
-fails; an unchanged source explicitly produces no publication. The lease uploads the
-artifact and a fresh `agent-publish` job waits on its environment. It has Actions read
+selected container-use result in `result.bundle` and `result.json`, verifying the exact
+environment among `refs/remotes/container-use/*` even when several exist. Only
+source/result SHAs, the name and content digests return over SSH. A missing or unknown
+environment produces an explicit operator outcome without choosing another result;
+an unchanged source explicitly produces no publication. The lease uploads the artifact and a fresh `agent-publish` job waits on its environment. It has Actions read
 and Contents read, no Tailscale, OIDC, shared cache, inherited secrets or agent checkout.
 
 Migration 33 stores metadata-only immutable publication intents. Approval checks the

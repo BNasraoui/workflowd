@@ -333,7 +333,7 @@ export const makeSandboxPublisher = (
             result = {
               ...result,
               state: "operator_required",
-              diagnostic: "Sandbox audit drain unconfirmed",
+              diagnostic: audited.failure.message,
             }
         }
         if (result.state === "completed" && lease?.policy.publish !== undefined) {
@@ -342,7 +342,7 @@ export const makeSandboxPublisher = (
             result = {
               ...result,
               state: "operator_required",
-              diagnostic: "Sandbox result sealing failed",
+              diagnostic: `Sandbox result unavailable: ${String(sealed.failure)}`,
             }
         }
         const message =

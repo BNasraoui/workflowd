@@ -4,7 +4,7 @@ import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
 import type { OpenCodeModel, OpenCodeAdapter } from "../opencode/adapter"
 import { makeSandboxStore, SandboxError, isUnobservedRun } from "./store"
-import type { SandboxPolicy } from "./config"
+import { sandboxCompletionInstructions, type SandboxPolicy } from "./config"
 import type { makeSandboxGithub } from "./github"
 import type { makeSandboxLeaseService } from "./lease"
 import { Session, type OpenCodeClient } from "@opencode-ai/client/effect"
@@ -20,7 +20,7 @@ import {
   transportHash,
 } from "./binding"
 import { readSandboxEndpoint, makeSandboxOpenCode, stopSandboxOpenCode } from "./opencode"
-import type { CliPort } from "../kernel/cli-process-contract"
+import type { CliPort, CliSpawnInput } from "../kernel/cli-process-contract"
 import { compileSandboxBridge } from "./bridge"
 import { makeSandboxPublisher, SandboxTerminal as Terminal } from "./publish"
 import { makePublishStore } from "./publish-store"
@@ -144,7 +144,14 @@ export const makeSandboxDispatch = (options: {
             ),
           listModels: options.executor.listModels,
           listProviders: options.executor.listProviders,
-          promptSession: (input) => guard(input, options.executor.promptSession(input)),
+          promptSession: (input) =>
+            guard(
+              input,
+              options.executor.promptSession({
+                ...input,
+                text: `${sandboxCompletionInstructions}\n\n${input.text}`,
+              }),
+            ),
           abortSession: (input) => guard(input, options.executor.abortSession(input)),
           sessionTelemetry: (input) => guard(input, options.executor.sessionTelemetry(input)),
         } satisfies AgentRunProviderPort
@@ -378,7 +385,17 @@ export const makeSandboxDispatch = (options: {
           await saveSandboxFile(root, "transport.json", JSON.stringify(lease.transport), true)
           await writeSandboxBinding({ ...binding, state: "active" })
         })
-        return { cli, sandboxBindingFile: join(root, "binding.json") }
+        return {
+          cli: {
+            ...cli,
+            spawn: (input: CliSpawnInput) =>
+              cli.spawn({
+                ...input,
+                prompt: `${sandboxCompletionInstructions}\n\n${input.prompt}`,
+              }),
+          },
+          sandboxBindingFile: join(root, "binding.json"),
+        }
       }).pipe(Effect.timeout("5 minutes"), Effect.mapError(failure))
     const launch = (run: AgentRunRecord, model: OpenCodeModel) =>
       Effect.gen(function* () {

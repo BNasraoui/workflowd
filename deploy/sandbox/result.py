@@ -56,12 +56,19 @@ def seal(source):
     raw = sys.stdin.buffer.read(65537)
     assert len(raw) <= 65536
     completion = json.loads(raw)
-    assert set(completion) == {'branch'} and isinstance(completion['branch'], str)
+    if not isinstance(completion, dict) or set(completion) != {'branch', 'environmentId'}:
+        sys.exit('Missing container-use result metadata')
+    if not isinstance(completion['branch'], str) or not isinstance(completion['environmentId'], str):
+        sys.exit('Invalid container-use result metadata')
+    # Enumerate trusted ref names, then compare the ID as data, never as a Git revision.
     # No branch predicate: the name never participates in a Git command or path.
-    refs = git(repo, 'for-each-ref', '--format=%(objectname)',
+    refs = git(repo, 'for-each-ref', '--format=%(refname) %(objectname)',
                'refs/remotes/container-use/').decode().splitlines()
-    assert len(refs) == 1, 'Missing or ambiguous container-use result'
-    result = commit_id(refs[0])
+    selected = [line.split(' ', 1)[1] for line in refs
+                if line.split(' ', 1)[0] == 'refs/remotes/container-use/' + completion['environmentId']]
+    if len(selected) != 1:
+        sys.exit('Missing or unknown container-use result environment')
+    result = commit_id(selected[0])
     assert git(repo, 'cat-file', '-t', result).strip() == b'commit'
     assert git(repo, 'rev-parse', source + '^{commit}').decode().strip() == source
     if git(repo, 'rev-parse', source + '^{tree}') == git(repo, 'rev-parse', result + '^{tree}'):

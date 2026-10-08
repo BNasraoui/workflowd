@@ -166,31 +166,34 @@ def validate(record):
         expected = json.loads(identity.read_text()).get("leaseId")
         assert expected is None or record["leaseId"] == expected
 if mode == "audit":
-    raw = sys.stdin.buffer.read(limit + 1)
-    assert len(raw) <= limit
-    record = json.loads(raw)
-    validate(record)
+    raw = sys.stdin.buffer.read(limit * (capacity + 1) + 1)
+    assert len(raw) <= limit * (capacity + 1)
+    records = json.loads(raw)
+    if isinstance(records, dict): records = [records]
+    assert isinstance(records, list) and len(records) <= capacity
+    for record in records: validate(record)
     with lock.open("a") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         data = state()
-        key = str(record["sequence"])
-        previous = data["records"].get(key)
-        assert previous is None or previous == record
-        if data["records"]:
-            owner = next(iter(data["records"].values()))
-            assert (owner["runId"], owner["leaseId"]) == (record["runId"], record["leaseId"])
-        data["records"][key] = record
-        save(data)
+        for record in records:
+            key = str(record["sequence"])
+            previous = data["records"].get(key)
+            assert previous is None or previous == record
+            if data["records"]:
+                owner = next(iter(data["records"].values()))
+                assert (owner["runId"], owner["leaseId"]) == (record["runId"], record["leaseId"])
+            data["records"][key] = record
+        if records: save(data)
+        receipt = data["emittedThrough"]
+    target = max((record["sequence"] for record in records), default=0)
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
+    while receipt < target and time.monotonic() < deadline:
+        time.sleep(0.05)
         with lock.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_SH)
             receipt = state()["emittedThrough"]
-        if receipt >= record["sequence"]:
-            print(json.dumps({"emittedThrough": receipt}), flush=True)
-            break
-        time.sleep(0.05)
-    else: sys.exit("Sandbox audit emission unconfirmed")
+    if receipt < target: sys.exit("Sandbox audit emission unconfirmed")
+    print(json.dumps({"emittedThrough": receipt}), flush=True)
 else:
     heartbeat = root / "heartbeat"
     last_heartbeat = int(time.time())

@@ -165,6 +165,10 @@ for (const [kind, mode] of [
       expect((await readSandboxBinding(run!.directory)).state).toBe("revoked")
       if (mode === "completed") {
         expect(fixture.requests.length).toBeGreaterThan(2)
+        const instructions = JSON.stringify(fixture.requests[0])
+        expect(instructions).toContain("environmentId")
+        expect(instructions).toContain("Do not create git branches")
+        expect(instructions).toContain("publisher creates the branch")
         expect(JSON.stringify(fixture.requests.at(-1))).toContain("native-tests-passed")
         expect(await Bun.file(join(run!.directory, "native-proof.txt")).exists()).toBe(false)
         expect(await Bun.file(join(run!.directory, "result.patch")).exists()).toBe(false)

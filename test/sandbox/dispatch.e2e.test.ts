@@ -655,7 +655,12 @@ test("sandbox dispatch keeps mint workspace custody and prompts without worker m
   })
 })
 
-for (const settlement of ["complete", "cancel"] as const)
+for (const settlement of [
+  "complete",
+  "cancel",
+  "missing environment",
+  "unknown environment",
+] as const)
   test(`protected publisher ${settlement} retains custody through restart and sends one terminal mailbox`, async () => {
     const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
     const runner = await dispatchRunnerFixture()
@@ -688,7 +693,7 @@ for (const settlement of ["complete", "cancel"] as const)
       "_",
       sourceSha,
     )
-    const completion = JSON.stringify({ branch: "agent choice/$() 雪" })
+    let completion = JSON.stringify({ branch: "agent choice/$() 雪" })
     const shared = await sharedOpenCodeFixture("dispatch")
     const directory = join(runner.root, "control")
     const base = WorkflowStoreLive.pipe(
@@ -834,18 +839,57 @@ for (const settlement of ["complete", "cancel"] as const)
           })
           yield* runs.markVerified({ runId: "run-1", outputTokens: 1, now: new Date() })
           const active = (yield* runs.read("run-1"))!
-          const finished = yield* provider
-            .sessionTelemetry({ sessionID: launched.nativeSessionId })
-            .pipe(
-              Effect.repeat({
-                while: (state) => !state?.idle,
-                schedule: Schedule.spaced("100 millis"),
-              }),
-              Effect.timeout("120 seconds"),
-            )
+          const idle = provider.sessionTelemetry({ sessionID: launched.nativeSessionId }).pipe(
+            Effect.repeat({
+              while: (state) => !state?.idle,
+              schedule: Schedule.spaced("100 millis"),
+            }),
+            Effect.timeout("120 seconds"),
+          )
+          yield* idle
+          const environmentId = yield* Effect.tryPromise(() =>
+            runner.docker(
+              "exec",
+              `${runner.name}-runner`,
+              "git",
+              "for-each-ref",
+              "--format=%(refname:strip=3)",
+              "refs/remotes/container-use/",
+            ),
+          )
+          completion = JSON.stringify({
+            branch: "agent choice/$() 雪",
+            ...(settlement === "missing environment"
+              ? {}
+              : {
+                  environmentId:
+                    settlement === "unknown environment" ? "absent-environment" : environmentId,
+                }),
+          })
+          shared.script([], completion)
+          yield* provider.promptSession({
+            ...prompt,
+            text: "Report the result environment and requested branch",
+          })
+          const finished = yield* idle
           expect(finished?.finalMessage).toBe(completion)
+          const instructions = JSON.stringify(shared.requests)
+          expect(instructions).toContain("environmentId")
+          expect(instructions).toContain("Do not create git branches")
+          expect(instructions).toContain("publisher creates the branch")
           yield* service.observe(active)
           const sql = yield* SqlClient.SqlClient
+          if (settlement === "missing environment" || settlement === "unknown environment") {
+            fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+            yield* service.iteration
+            const terminal = (yield* runs.read("run-1"))!
+            expect(terminal.state).toBe("operator_required")
+            expect(terminal.diagnostic).toContain("Sandbox result unavailable")
+            expect(publication.posts).toBe(0)
+            expect(yield* sql`SELECT * FROM sandbox_publications`).toHaveLength(0)
+            expect((yield* store.read("run-1"))?.state).toBe("released")
+            return
+          }
           expect(
             yield* sql`SELECT id FROM resident_inbox WHERE id='agent-run-end-run-1'`,
           ).toHaveLength(0)

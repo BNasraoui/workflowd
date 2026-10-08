@@ -9,7 +9,10 @@ import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { parseSandboxRepositories } from "../../src/sandbox/config.ts"
+import {
+  parseSandboxRepositories,
+  sandboxCompletionInstructions,
+} from "../../src/sandbox/config.ts"
 import { makeSandboxGithub } from "../../src/sandbox/github.ts"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease.ts"
 import { makePublishStore } from "../../src/sandbox/publish-store.ts"
@@ -901,7 +904,8 @@ async function probeLive(policy) {
               base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
               idempotency_key: createHash("sha256").update(output).digest("hex"),
               prompt:
-                'Use only container-use. Choose your own branch name and finish with ONLY a JSON object containing that name in a branch field. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Keep the test evidence in your tool calls, then finish with ONLY the branch JSON object. All repository files and commands must stay in the container-use environment.',
+                sandboxCompletionInstructions +
+                '\nCreate an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Keep the test evidence in your tool calls, then finish with ONLY the JSON object containing environmentId and branch. All repository files and commands must stay in the container-use environment.',
             },
           },
           undefined,
@@ -915,7 +919,8 @@ async function probeLive(policy) {
     evidence.remoteTestsPassed = prior?.remoteTestsPassed ?? false
     await persist()
     stage = "remote test-writing task and confirmed release"
-    const deadline = Date.now() + 15 * 60000
+    // Allow 30 minutes for task/tool execution and 15 for protected publication.
+    const deadline = Date.now() + 45 * 60000
     let run
     for (;;) {
       run = await runtime.runPromise(runs.read(evidence.runId))
@@ -1068,10 +1073,23 @@ async function probeLive(policy) {
         }
       }
     } finally {
-      await client.close()
-      await mcp.stop(true)
-      await host.stop(true)
-      await runtime.dispose()
+      try {
+        if (evidence.runId) {
+          const current = await runtime.runPromise(runs.read(evidence.runId))
+          evidence.terminal = current?.state
+          evidence.terminalDiagnostic = current?.diagnostic
+          if (current) {
+            const failure = Bun.file(`${current.directory}.sandbox/audit-failure.json`)
+            if (await failure.exists()) evidence.auditFailure = await failure.json()
+          }
+          await persist()
+        }
+      } finally {
+        await client.close()
+        await mcp.stop(true)
+        await host.stop(true)
+        await runtime.dispose()
+      }
     }
   }
 }
@@ -1175,6 +1193,17 @@ if (import.meta.main) {
   } catch (error) {
     evidence.result = "stopped"
     evidence.stage = stage
+    evidence.failure = {
+      failedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - Date.parse(evidence.started),
+      name: error instanceof Error ? error.name : typeof error,
+      message: String(error)
+        .replace(
+          /(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s"']+)/g,
+          "[redacted]",
+        )
+        .slice(0, 4096),
+    }
     // Only prerequisite assertions are printed. SDK/process errors may carry secrets.
     const detail =
       stage.startsWith("operator") && error instanceof Error ? `: ${error.message}` : ""

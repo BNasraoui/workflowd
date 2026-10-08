@@ -26,12 +26,13 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
     await command(["git", "commit", "-m", "result"], repo)
     const resultSha = await command(["git", "rev-parse", "HEAD"], repo)
     await command(["git", "update-ref", "refs/remotes/container-use/one", resultSha], repo)
+    await command(["git", "update-ref", "refs/remotes/container-use/two", sourceSha], repo)
     await command(["git", "checkout", "--detach", sourceSha], repo)
     const branch = "a name with ' quotes/$()\n雪"
-    const seal = () => {
+    const seal = (completion: unknown = { branch, environmentId: "one" }) => {
       const child = Bun.spawn(["python3", script, "seal", sourceSha], {
         cwd: root,
-        stdin: new Blob([JSON.stringify({ branch })]),
+        stdin: new Blob([JSON.stringify(completion)]),
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -61,9 +62,20 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
       bundleSha256: digest(bundle),
     })
     expect((await seal())[1]).toBe(text)
-    await command(["git", "update-ref", "refs/remotes/container-use/two", resultSha], repo)
-    expect((await seal())[0]).not.toBe(0)
+    const other = await seal({ branch, environmentId: "two" })
+    expect(other[0]).toBe(0)
+    expect(JSON.parse(other[1])).toEqual({ empty: true, sourceSha })
+    for (const completion of [
+      { branch },
+      { branch, environmentId: "missing" },
+      { branch, environmentId: "one^{commit}" },
+    ]) {
+      const rejected = await seal(completion)
+      expect(rejected[0]).not.toBe(0)
+      expect(rejected[2]).toContain("container-use result")
+    }
     await command(["git", "update-ref", "-d", "refs/remotes/container-use/two"], repo)
+    expect((await seal({ branch }))[0]).not.toBe(0)
     await command(["git", "commit", "--allow-empty", "-m", "empty result"], repo)
     await command(["git", "update-ref", "refs/remotes/container-use/one", "HEAD"], repo)
     const empty = await seal()
@@ -116,7 +128,7 @@ for (const mutation of [
       await git("update-ref", "refs/remotes/container-use/one", resultSha)
       const child = Bun.spawn(["python3", script, "seal", sourceSha], {
         cwd: root,
-        stdin: new Blob([JSON.stringify({ branch: "chosen/by/agent" })]),
+        stdin: new Blob([JSON.stringify({ branch: "chosen/by/agent", environmentId: "one" })]),
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -319,7 +331,7 @@ test("real SSH completion seals on the container-use runner and ends hold withou
         "exec /usr/local/bin/runner-control finish-result",
       ],
       {
-        stdin: new Blob([JSON.stringify({ branch: "free choice/$() 雪" })]),
+        stdin: new Blob([JSON.stringify({ branch: "free choice/$() 雪", environmentId: env.id })]),
         stdout: "pipe",
         stderr: "pipe",
       },

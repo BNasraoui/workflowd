@@ -1,3 +1,5 @@
+import { saveSandboxFile } from "./binding"
+import { SandboxCompletion } from "./config"
 import { ResultMetadata } from "./publish-store"
 import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
@@ -60,10 +62,11 @@ async function controlCommand(
   signal: AbortSignal,
   limit = 1048576,
 ): Promise<string | Uint8Array> {
+  signal.throwIfAborted()
   const child = Bun.spawn([...args], {
     stdin: new Blob([input]),
     stdout: "pipe",
-    stderr: "ignore",
+    stderr: "pipe",
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
   })
   const stop = () => {
@@ -71,6 +74,19 @@ async function controlCommand(
   }
   signal.addEventListener("abort", stop, { once: true })
   const timer = setTimeout(stop, 300000)
+  const stderr = (async () => {
+    const chunks: Uint8Array[] = []
+    let length = 0
+    for await (const chunk of child.stderr) {
+      length += chunk.length
+      if (length > 4096) {
+        stop()
+        break
+      }
+      chunks.push(chunk)
+    }
+    return Buffer.concat(chunks).toString("utf8")
+  })()
   try {
     const reader = child.stdout.getReader()
     const chunks: Uint8Array[] = []
@@ -83,14 +99,19 @@ async function controlCommand(
         throw new SandboxError({ message: "Sandbox control output exceeded its bound" })
       chunks.push(item.value)
     }
-    if ((await child.exited) !== 0)
-      throw new SandboxError({ message: "Sandbox control command failed" })
+    const status = await child.exited
+    signal.throwIfAborted()
+    if (status !== 0)
+      throw new SandboxError({
+        message: `Sandbox control command exited ${status}: ${(await stderr).trim()}`,
+      })
     return Buffer.concat(chunks)
   } finally {
     clearTimeout(timer)
     signal.removeEventListener("abort", stop)
     stop()
     await child.exited
+    await stderr
   }
 }
 
@@ -411,7 +432,8 @@ export const makeSandboxLeaseService = (
               signal,
               limit,
             ),
-          catch: () => new SandboxError({ message: "Sandbox control operation failed" }),
+          catch: (cause) =>
+            new SandboxError({ message: `Sandbox control operation failed: ${String(cause)}` }),
         })
       })
     const heartbeat = (runId: string) =>
@@ -422,11 +444,21 @@ export const makeSandboxLeaseService = (
     const finishResult = (runId: string, completion: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
+        const selected = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(SandboxCompletion),
+        )(completion, { onExcessProperty: "error" }).pipe(
+          Effect.mapError(
+            () =>
+              new SandboxError({
+                message: "Sandbox result unavailable: completion requires environmentId and branch",
+              }),
+          ),
+        )
         const response = yield* remote(
           runId,
           "exec /usr/local/bin/runner-control finish-result",
           65536,
-          completion,
+          JSON.stringify(selected),
         )
         const value: unknown = yield* Effect.try((): unknown => JSON.parse(controlText(response)))
         const result = yield* Schema.decodeUnknownEffect(
@@ -449,22 +481,49 @@ export const makeSandboxLeaseService = (
           return yield* Effect.fail(
             new SandboxError({ message: "Sandbox audit transport missing" }),
           )
+        const startedAt = new Date().toISOString()
+        const started = performance.now()
         yield* Effect.tryPromise({
           try: (signal) =>
-            drainToolAudit(directory, async (record) => {
+            drainToolAudit(directory, async (records) => {
               const result = await command(
                 [
                   ...sandboxSshArguments(transport).slice(0, -1),
                   "exec /usr/local/bin/runner-control audit",
                 ],
-                JSON.stringify(record),
-                signal,
+                JSON.stringify(records),
+                AbortSignal.any([signal, AbortSignal.timeout(15000)]),
                 4096,
               )
               return Schema.decodeUnknownSync(AuditReceipt)(JSON.parse(controlText(result)))
             }),
-          catch: () => new SandboxError({ message: "Sandbox audit drain unconfirmed" }),
-        }).pipe(Effect.timeout("30 seconds"))
+          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+        }).pipe(
+          Effect.timeout("30 seconds"),
+          Effect.catch((cause) =>
+            Effect.gen(function* () {
+              const evidence = {
+                startedAt,
+                failedAt: new Date().toISOString(),
+                elapsedMs: Math.round(performance.now() - started),
+                error: String(cause),
+                stack: cause instanceof Error ? cause.stack : undefined,
+              }
+              const message = `Sandbox audit drain unconfirmed after ${evidence.elapsedMs}ms (${startedAt}): ${evidence.error}`
+              yield* Effect.tryPromise({
+                try: () =>
+                  saveSandboxFile(
+                    `${directory}.sandbox`,
+                    "audit-failure.json",
+                    JSON.stringify(evidence),
+                  ),
+                catch: () =>
+                  new SandboxError({ message: `${message}; failure receipt could not be saved` }),
+              })
+              return yield* Effect.fail(new SandboxError({ message }))
+            }),
+          ),
+        )
       })
     const revalidateReleased = Effect.fn("SandboxLease.revalidateReleased")(function* () {
       const saved = yield* store.cleanupRuns(true)

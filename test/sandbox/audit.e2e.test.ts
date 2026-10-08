@@ -281,12 +281,33 @@ test("audit output escapes public command injection, redacts credentials, and re
     expect(receipt.emittedThrough).toBe(1)
     expect(await sendToolAudit(runner.transport, record)).toEqual(receipt)
     await expect(sendToolAudit(runner.transport, { ...record, exitCode: 23 })).rejects.toThrow()
-    const log = await runner.holdLog()
-    expect(log.trim().split("\n")).toHaveLength(1)
-    expect(JSON.parse(log.trim().slice("workflowd.audit ".length))).toEqual(record)
     await expect(
       sendToolAudit(runner.transport, { ...record, command: "x".repeat(5000) }),
     ).rejects.toThrow("bound")
+    for (let sequence = 2; sequence <= 33; sequence++) {
+      const pending = await beginToolAudit(runner.bindingFile, sequence, {
+        name: "environment_run_cmd",
+        arguments: { command: "exit 0" },
+      })
+      await pending.finish(0, "ok")
+    }
+    const batches: number[][] = []
+    await drainToolAudit(
+      runner.bindingFile.slice(0, -".sandbox/binding.json".length),
+      (records) => {
+        batches.push(records.map((record) => record.sequence))
+        return sendToolAudit(runner.transport, records)
+      },
+    )
+    expect(batches).toEqual([[], Array.from({ length: 32 }, (_, i) => i + 2)])
+    const lines = (await runner.holdLog()).trim().split("\n")
+    expect(lines).toHaveLength(33)
+    expect(JSON.parse(lines[0]!.slice("workflowd.audit ".length))).toEqual(record)
+    await expect(
+      drainToolAudit(runner.bindingFile.slice(0, -".sandbox/binding.json".length), async () => ({
+        emittedThrough: 34,
+      })),
+    ).rejects.toThrow("watermark")
     await writeFile(join(dirname(runner.bindingFile), "audit", "1.json"), "x".repeat(4097))
     await expect(
       drainToolAudit(runner.bindingFile.slice(0, -".sandbox/binding.json".length), (item) =>
@@ -298,8 +319,8 @@ test("audit output escapes public command injection, redacts credentials, and re
   }
 }, 120_000)
 
-for (const interrupted of [false, true]) {
-  test(`settlement drains audit before cancelling Actions; interrupted=${interrupted}`, async () => {
+for (const scenario of ["emitted", "incomplete", "transport"] as const) {
+  test(`settlement drains audit before cancelling Actions; ${scenario}`, async () => {
     const { Effect, Layer } = await import("effect")
     const { SqliteClient } = await import("@effect/sql-sqlite-bun")
     const { WorkflowStoreLive } = await import("../../src/store")
@@ -369,11 +390,33 @@ for (const interrupted of [false, true]) {
           const run = (yield* runs.read("run-1"))!
           yield* service.launch(run, { providerID: "openai", modelID: "fixture" })
           yield* Effect.tryPromise(async () => {
-            const audit = await beginToolAudit(`${directory}.sandbox/binding.json`, 1, {
-              name: "environment_run_cmd",
-              arguments: { command: "exit 23" },
-            })
-            if (!interrupted) await audit.finish(23, "error")
+            for (let sequence = 1; sequence <= (scenario === "emitted" ? 32 : 1); sequence++) {
+              const audit = await beginToolAudit(`${directory}.sandbox/binding.json`, sequence, {
+                name: "environment_run_cmd",
+                arguments: { command: "exit 23" },
+              })
+              if (scenario !== "incomplete")
+                await sendToolAudit(runner.transport, await audit.finish(23, "error"))
+            }
+            if (scenario !== "incomplete") {
+              // Real SSH/control with WAN-like per-command latency, after all records emitted.
+              const script = await readFile("deploy/sandbox/runner.sh", "utf8")
+              await writeFile(
+                join(runner.root, "slow-control"),
+                script.replace(
+                  "set -euo pipefail",
+                  scenario === "emitted"
+                    ? 'set -euo pipefail\nif [[ "$1" == audit ]]; then echo audit >> /run/workflowd-sandbox/control-calls; sleep 1.1; fi'
+                    : 'set -euo pipefail\nif [[ "$1" == audit ]]; then sleep 0.1; echo "audit transport fixture failure" >&2; exit 23; fi',
+                ),
+                { mode: 0o755 },
+              )
+              await runner.docker(
+                "cp",
+                join(runner.root, "slow-control"),
+                `${runner.name}-runner:/usr/local/bin/runner-control`,
+              )
+            }
           })
           let checked = false
           githubFixture.beforeCancel(async () => {
@@ -383,16 +426,47 @@ for (const interrupted of [false, true]) {
               "cat",
               "/run/workflowd-sandbox/audit.json",
             )
-            expect(JSON.parse(remote).emittedThrough).toBe(1)
+            expect(JSON.parse(remote).emittedThrough).toBe(scenario === "emitted" ? 32 : 1)
             checked = true
           })
+          const started = performance.now()
           yield* service.cancel(run)
+          if (scenario === "emitted") {
+            expect(performance.now() - started).toBeLessThan(10000)
+            expect(
+              yield* Effect.tryPromise(() =>
+                runner.docker(
+                  "exec",
+                  `${runner.name}-runner`,
+                  "cat",
+                  "/run/workflowd-sandbox/control-calls",
+                ),
+              ),
+            ).toBe("audit")
+          }
           expect(checked).toBe(true)
           const terminal = yield* Effect.tryPromise(() =>
             Bun.file(join(directory, "terminal.json")).json(),
           )
-          expect(terminal.state).toBe(interrupted ? "operator_required" : "cancelled")
-          if (interrupted) expect(terminal.diagnostic).toContain("audit")
+          expect(terminal.state).toBe(scenario === "emitted" ? "cancelled" : "operator_required")
+          if (scenario !== "emitted") {
+            const failure = yield* Effect.tryPromise(() =>
+              Bun.file(`${directory}.sandbox/audit-failure.json`).json(),
+            )
+            expect(failure.elapsedMs).toBeGreaterThan(0)
+            expect(Date.parse(String(failure.failedAt))).toBeGreaterThanOrEqual(
+              Date.parse(String(failure.startedAt)),
+            )
+            expect(terminal.diagnostic).toContain(failure.error)
+            expect(terminal.diagnostic).toContain(`${failure.elapsedMs}ms`)
+            if (scenario === "transport")
+              expect(failure.error).toContain("audit transport fixture failure")
+          } else {
+            const receipt = yield* Effect.tryPromise(() =>
+              Bun.file(`${directory}.sandbox/audit-receipt.json`).json(),
+            )
+            expect(receipt.emittedThrough).toBe(32)
+          }
         }).pipe(
           Effect.provide(
             AgentRunStoreLive.pipe(

@@ -26,7 +26,9 @@ const Audit = Schema.Struct({
   complete: Schema.Boolean,
 })
 export type ToolAudit = typeof Audit.Type
-export const AuditReceipt = Schema.Struct({ emittedThrough: Schema.Int })
+export const AuditReceipt = Schema.Struct({
+  emittedThrough: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: maxRecords })),
+})
 
 type Call = { name: string; arguments: Record<string, Schema.Json> }
 
@@ -177,11 +179,16 @@ export async function beginToolAudit(bindingFile: string, id: string | number, p
   }
 }
 
-export async function sendToolAudit(transport: SandboxTransport, record: ToolAudit) {
+export async function sendToolAudit(
+  transport: SandboxTransport,
+  record: ToolAudit | ReadonlyArray<ToolAudit>,
+) {
+  const records = "sequence" in record ? [record] : record
+  if (records.length > maxRecords) throw new Error("Sandbox audit capacity exceeded")
   const child = Bun.spawn(
     [...sandboxSshArguments(transport).slice(0, -1), "exec /usr/local/bin/runner-control audit"],
     {
-      stdin: new Blob([encode(record)]),
+      stdin: new Blob(["[" + records.map(encode).join(",") + "]"]),
       stdout: "pipe",
       stderr: "ignore",
       env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
@@ -209,7 +216,7 @@ export async function sendToolAudit(transport: SandboxTransport, record: ToolAud
 
 export async function drainToolAudit(
   directory: string,
-  deliver: (record: ToolAudit) => Promise<typeof AuditReceipt.Type>,
+  deliver: (records: ReadonlyArray<ToolAudit>) => Promise<typeof AuditReceipt.Type>,
 ) {
   const root = join(`${directory}.sandbox`, "audit")
   if (!(await Bun.file(join(`${directory}.sandbox`, "binding.json")).exists())) return
@@ -223,7 +230,10 @@ export async function drainToolAudit(
     .filter((name) => /^[0-9]+\.json$/.test(name))
     .sort((a, b) => Number(a.split(".")[0]) - Number(b.split(".")[0]))
   if (names.length > maxRecords) throw new Error("Sandbox audit capacity exceeded")
-  let emittedThrough = 0
+  const acknowledged = (await deliver([])).emittedThrough
+  if (acknowledged < 0 || acknowledged > names.length)
+    throw new Error("Sandbox audit watermark exceeds canonical records")
+  const pending: ToolAudit[] = []
   let complete = !(await Bun.file(join(`${directory}.sandbox`, "audit-failed")).exists())
   for (const [index, name] of names.entries()) {
     const text = await readFile(join(root, name), "utf8")
@@ -233,9 +243,10 @@ export async function drainToolAudit(
       throw new Error("Sandbox audit identity mismatch")
     if (record.sequence !== index + 1) throw new Error("Sandbox audit sequence is incomplete")
     complete &&= record.complete
-    const receipt = await deliver(record)
-    emittedThrough = receipt.emittedThrough
+    if (record.sequence > acknowledged) pending.push(record)
   }
+  const emittedThrough =
+    pending.length === 0 ? acknowledged : (await deliver(pending)).emittedThrough
   if (!complete || emittedThrough !== names.length)
     throw new Error("Sandbox audit drain unconfirmed")
   await saveSandboxFile(
