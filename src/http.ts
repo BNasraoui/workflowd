@@ -1,3 +1,4 @@
+import type { PrRepositories } from "./pr-automation-config"
 import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
@@ -57,6 +58,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 
 export type WebhookHandlerOptions = {
   readonly prAutomationEnabled?: boolean
+  readonly prRepositories?: PrRepositories
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
@@ -547,7 +549,7 @@ export function handleGitHubWebhook(
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
         ? Effect.succeed({ _tag: "Ignored" as const, reason: `unsupported:${eventName}` })
-        : decodeGitHubEvent(eventName, payload)
+        : decodeGitHubEvent(eventName, payload, options.prRepositories)
     const decoded = yield* decode.pipe(
       Effect.catch((error) =>
         Effect.succeed(Response.json({ error: error.message }, { status: 400 })),

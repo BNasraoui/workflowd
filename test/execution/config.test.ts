@@ -6,6 +6,7 @@ import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
 
 const env = {
   GITHUB_APP_ID: "123",
+  WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
   GITHUB_PRIVATE_KEY_PATH: "/fixture/key",
   GITHUB_WEBHOOK_SECRET: "secret",
   OPENCODE_SERVER_PASSWORD: "secret",

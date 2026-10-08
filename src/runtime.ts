@@ -481,6 +481,7 @@ export function startHookService(
           return yield* routeRequest(request, {
             ...options,
             prAutomationEnabled: config.mode !== "execution",
+            prRepositories: config.github?.prRepositories ?? [],
             ...(Option.isSome(ci) ? { ci: ci.value } : {}),
             ...(config.qrspi === undefined
               ? {}

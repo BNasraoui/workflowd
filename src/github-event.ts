@@ -1,3 +1,4 @@
+import type { PrRepositories } from "./pr-automation-config"
 import { Data, Effect, Schema } from "effect"
 import { decodeCiCompletion, type CiCompletion } from "./ci/event"
 import { Command } from "./domain/command"
@@ -65,6 +66,28 @@ const IssueCommentPayload = Schema.Struct({
 })
 
 export function decodeGitHubEvent(
+  event: string,
+  payload: unknown,
+  repositories: PrRepositories = [],
+): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
+  return decodeEvent(event, payload).pipe(
+    Effect.map((decoded) => {
+      if (
+        (decoded._tag === "PullRequest" || decoded._tag === "Command") &&
+        !repositories.some(
+          (r) =>
+            r.installationId === decoded.installationId &&
+            r.repository === decoded.repository.fullName.toLowerCase(),
+        )
+      ) {
+        return { _tag: "Ignored" as const, reason: "pr-repository-not-allowlisted" }
+      }
+      return decoded
+    }),
+  )
+}
+
+function decodeEvent(
   event: string,
   payload: unknown,
 ): Effect.Effect<GitHubEvent, InvalidGitHubEvent> {
