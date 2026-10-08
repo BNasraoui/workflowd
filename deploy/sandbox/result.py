@@ -30,7 +30,12 @@ def git(repo, *args):
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
         resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024**2, 128 * 1024**2))
     with tempfile.TemporaryFile() as output:
-        subprocess.run(
+        # S8705 / AaEZv6-2dwEzUswl_4bM follows source through commit_id() into
+        # fetch after '--'. A fullmatched 40-character lowercase hex ID cannot
+        # be an option. No shell is used; URL operands follow '--' and only
+        # HTTPS/file transports are enabled. See the documented false-positive
+        # review and the source/result-option and external-helper regressions.
+        subprocess.run(  # NOSONAR -- S8705: validated commit ID, not an option
             ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
              '-c', 'core.attributesFile=/dev/null', *args], cwd=repo,
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',

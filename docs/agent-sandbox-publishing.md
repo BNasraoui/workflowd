@@ -117,8 +117,21 @@ parameters, and ZIP entries map to fixed output filenames. Commit identities mus
 40 lowercase hexadecimal characters before entering Git arguments. Git and Python
 use absolute system executable paths; the hosted-entrypoint fixture also runs with
 a hostile `python3` earlier on PATH. Approval fields are compared as a set because
-their order has no meaning. These changes address PR76's Sonar findings without
-suppressions or quality-gate changes.
+their order has no meaning. Git enables only HTTPS/file transports.
+
+One residual SonarCloud finding, `AaEZv6-2dwEzUswl_4bM` (`pythonsecurity:S8705`),
+has a narrow suppression on `subprocess.run` in `result.py`. Its final trace follows
+the JSON `source` field through `commit_id()` into `git fetch`. That validator rejects
+every non-string or value that does not fully match `[a-f0-9]{40}` before invoking Git.
+The accepted value cannot contain an option prefix, whitespace, a URL or revision
+operators. Fetch also places its URL and source operands after `--`; no shell is
+invoked, executable paths are absolute, ambient Git configuration is disabled, and
+external-helper/SSH transports are unavailable. This trace is therefore a false
+positive, not an accepted argument-injection risk. The real Git/ZIP tests reject
+option-like source/result IDs and an attempted external helper while accepting the
+ordinary bundle and preserving arbitrary agent-selected branch data as JSON. The
+other seven security/reliability findings were resolved in code. No quality gate or
+project setting was changed.
 
 A configured `publish` policy supplies the PR base ref, environment ID and publisher
 App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;
