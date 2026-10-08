@@ -108,3 +108,45 @@ for (const [label, before, after] of [
     expect(() => assertUnprivilegedPrWorkflows(changed)).toThrow()
   })
 }
+
+for (const [label, extra] of [
+  ["environment", "environment: agent-publish"],
+  ["secret expression", "env: { CANARY: '${{ secrets.PUBLISH_PROBE_CANARY }}' }"],
+  ["secret bracket expression", "env: { CANARY: '${{ secrets[\"PUBLISH_PROBE_CANARY\"] }}' }"],
+  ["whole secret context", "env: { CANARY: '${{ toJSON(secrets) }}' }"],
+  ["inherited secrets", "secrets: inherit"],
+]) {
+  test(`CI guard rejects ${label} in any non-publisher job, including push-only jobs`, async () => {
+    const files = await workflows()
+    files["untrusted.yml"] = `on: { push: {} }
+permissions: {}
+jobs:
+  other:
+    runs-on: ubuntu-24.04
+    ${extra}
+    steps: [{ run: 'true' }]
+`
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  })
+}
+
+test("CI guard rejects inherited secrets even on the publisher", async () => {
+  const files = await workflows()
+  files["agent-sandbox-caller.yml"] = files["agent-sandbox-caller.yml"]!.replace(
+    "  agent-publish:",
+    "  agent-publish:\n    secrets: inherit",
+  )
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+})
+
+test("CI guard rejects a publish environment inside a reusable workflow", async () => {
+  const files = await workflows()
+  files["agent-sandbox.yml"] += "\n  agent-publish:\n    environment: agent-publish\n"
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+})
+
+test("CI guard rejects ambient workflow secrets outside the publisher job", async () => {
+  const files = await workflows()
+  files["agent-sandbox-caller.yml"] += "\nenv: { CANARY: '${{ secrets.PUBLISH_PROBE_CANARY }}' }\n"
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+})

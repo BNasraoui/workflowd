@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { Schema } from "effect"
 import { chmod, mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -241,12 +242,36 @@ for (const mutation of [
           GATE_ACTOR_ID: "306741873",
           GITHUB_TOKEN: "read-only-fixture",
         }
+        const actionPath = resolve(".github/actions/agent-publish")
+        const action = Schema.decodeUnknownSync(
+          Schema.Struct({
+            runs: Schema.Struct({ steps: Schema.Array(Schema.Struct({ run: Schema.String })) }),
+          }),
+        )(Bun.YAML.parse(await Bun.file(join(actionPath, "action.yml")).text()))
         const invoke = async (mode: string, secret = "") => {
-          const process = Bun.spawn(["node", resolve("deploy/sandbox/publish.mjs"), mode], {
-            env: { ...env, PUBLISH_PROBE_CANARY: secret, GHETTIMONSTER_APP_ID: "5232172" },
-            stdout: "pipe",
-            stderr: "pipe",
-          })
+          const process = Bun.spawn(
+            [
+              "bash",
+              "--noprofile",
+              "--norc",
+              "-e",
+              "-o",
+              "pipefail",
+              "-c",
+              action.runs.steps[mode === "validate" ? 0 : 1]!.run,
+            ],
+            {
+              cwd: root,
+              env: {
+                ...env,
+                GITHUB_ACTION_PATH: actionPath,
+                PUBLISH_PROBE_CANARY: secret,
+                GHETTIMONSTER_APP_ID: "5232172",
+              },
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          )
           return Promise.all([
             process.exited,
             new Response(process.stdout).text(),

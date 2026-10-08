@@ -6,6 +6,9 @@ publication. The coordinator must re-pin this candidate after exact-head CI befo
 running any lease or probe. Workers do not change production configuration, Apps,
 environments, rulesets or pins.
 
+For repository setup and the short cross-owner caller, see the
+[onboarding runbook](agent-sandbox-onboarding.md).
+
 The publish App is **ghettimonster**, App ID **5232172**, bot **339414993**
 (`ghettimonster[bot]`). Its variable is `GHETTIMONSTER_APP_ID`; the eventual key is
 `GHETTIMONSTER_PRIVATE_KEY`, only in the protected environment. The candidate never
@@ -86,8 +89,11 @@ image workflow change requires reviewing and updating that snapshot. Other local
 actions and reusable workflow calls (including inherited secrets) are refused. The guard
 checks effective permissions, runner class, privileged contexts, install policy and
 the anonymous checkout snapshot. Its quality-matrix result feeds `Required checks`.
-It rejects target/downstream privileged triggers. It cannot secure arbitrary edits
-to its own implementation or repository scripts: the trust root remains the
+Across all workflows, only a top-level `agent-publish` job may declare an environment
+or reference the secrets context. Inherited secrets and ambient workflow secret references
+are always rejected, including on push-only workflows. The reusable lease workflow
+has no secrets or environment. It rejects target/downstream privileged triggers.
+It cannot secure arbitrary edits to its own implementation or repository scripts: the trust root remains the
 operator-reviewed workflow snapshot and human review of workflow changes. Future
 publishing must evaluate the trusted base policy before writing a ref.
 
@@ -152,8 +158,27 @@ selected container-use result in `result.bundle` and `result.json`, verifying th
 environment among `refs/remotes/container-use/*` even when several exist. Only
 source/result SHAs, the name and content digests return over SSH. A missing or unknown
 environment produces an explicit operator outcome without choosing another result;
-an unchanged source explicitly produces no publication. The lease uploads the artifact and a fresh `agent-publish` job waits on its environment. It has Actions read
-and Contents read, no Tailscale, OIDC, shared cache, inherited secrets or agent checkout.
+an unchanged source explicitly produces no publication. The reusable lease job uploads
+the artifact and finishes. Each repository's caller owns a top-level `agent-publish`
+job with `needs: sandbox`, `environment: agent-publish`, and only Actions read and
+Contents read. Its separate hosted runner has no Tailscale, OIDC, shared cache or
+agent checkout. The controller matches `sandbox / runner` and `agent-publish` exactly.
+
+The caller invokes the reviewed `.github/actions/agent-publish` composite action.
+Other repositories pin both the reusable workflow and action to the same exact
+approved workflowd SHA; the action finds `deploy/sandbox/publish.mjs` relative to
+its own installation, independent of the caller repository or working directory.
+Workflowd checks out only the action and deploy tooling at its own exact `github.sha`
+and uses the local action at that commit. This works across repository owners without
+passing secrets through a reusable workflow. `secrets: inherit` is forbidden.
+
+The caller passes `github.token`, the gate bot ID, the protected canary and the App ID
+as explicit action inputs. The composite supplies the read token only to validation,
+and the canary only to the subsequent canary step. Neither is a workflow/job-wide
+environment variable. A future reviewed token-mint step must likewise receive
+`GHETTIMONSTER_PRIVATE_KEY` explicitly, only after validation; that input and step
+are absent from this canary candidate. Moving the job preserves the same custom gate,
+approval binding, immutable artifact validation and polling protocol.
 
 Migration 33 stores metadata-only immutable publication intents. Approval checks the
 owned run, attempt, source, workflow identity, successful runner job, immutable artifact

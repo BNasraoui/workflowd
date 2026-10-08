@@ -926,7 +926,7 @@ export function sandboxPublicationFixture(
             conclusion: fault === "bad job" ? "failure" : "success",
           },
           {
-            name: "sandbox / agent-publish",
+            name: "agent-publish",
             run_id: 41,
             run_attempt: 1,
             head_sha: policy.workflowSha,

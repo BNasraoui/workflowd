@@ -94,7 +94,7 @@ test("runner disables routes after the action joins and before preparing tooling
 })
 
 test("publication uses a fresh environment-gated runner with only read credentials and a canary", async () => {
-  const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
+  const source = await Bun.file(`${root}/.github/workflows/agent-sandbox-caller.yml`).text()
   const raw = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
     Bun.YAML.parse(source),
   )
@@ -102,11 +102,42 @@ test("publication uses a fresh environment-gated runner with only read credentia
   const job = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
     jobs["agent-publish"],
   )
-  expect(job.needs).toBe("runner")
+  expect(job.needs).toBe("sandbox")
   expect(job.environment).toBe("agent-publish")
   expect(job.permissions).toEqual({ actions: "read", contents: "read" })
   expect(job["runs-on"]).toBe("ubuntu-24.04")
   expect(JSON.stringify(job)).not.toMatch(/tailscale|id-token|PRIVATE_KEY|secrets: inherit/)
   expect(JSON.stringify(job)).toContain("PUBLISH_PROBE_CANARY")
-  expect(source).toContain("sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}")
+  const runner = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
+  expect(runner).toContain("sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}")
+  expect(runner).not.toMatch(/agent-publish:|environment:|secrets[.:]/)
+  expect(source).toContain("./trusted/.github/actions/agent-publish")
+})
+
+test("reviewed composite validates before exposing the canary to its only consumer", async () => {
+  const source = await Bun.file(`${root}/.github/actions/agent-publish/action.yml`).text()
+  const record = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))
+  const action = record(Bun.YAML.parse(source))
+  const runs = record(action.runs)
+  expect(runs.using).toBe("composite")
+  const steps = Schema.decodeUnknownSync(Schema.Array(Schema.Json))(runs.steps).map((step) =>
+    record(step),
+  )
+  expect(steps).toHaveLength(2)
+  expect(steps[0]?.run).toBe(
+    'node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" validate',
+  )
+  expect(steps[0]?.env).toEqual({
+    GITHUB_TOKEN: "${{ inputs.github-token }}",
+    GATE_ACTOR_ID: "${{ inputs.gate-actor-id }}",
+  })
+  expect(steps[1]?.run).toBe(
+    'node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" canary',
+  )
+  expect(steps[1]?.env).toEqual({
+    PUBLISH_PROBE_CANARY: "${{ inputs.publish-probe-canary }}",
+    GHETTIMONSTER_APP_ID: "${{ inputs.publisher-app-id }}",
+  })
+  for (const step of steps) expect(step.shell).toBe("bash")
+  expect(source).not.toMatch(/secrets[.[]|PRIVATE_KEY|checkout|tailscale/)
 })

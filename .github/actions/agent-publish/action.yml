@@ -1,0 +1,31 @@
+name: Protected agent publication probe
+description: Validate the approved immutable result before probing environment secret access.
+inputs:
+  github-token:
+    description: Caller token with Actions read and Contents read only.
+    required: true
+  gate-actor-id:
+    description: Bot actor ID of the App that approved the custom deployment rule.
+    required: true
+  publish-probe-canary:
+    description: Harmless canary from the caller job's protected environment.
+    required: true
+  publisher-app-id:
+    description: Configured ghettimonster App ID.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Verify approval and sealed artifact
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GATE_ACTOR_ID: ${{ inputs.gate-actor-id }}
+      run: node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" validate
+    # Bootstrap gate: no publisher key or write token exists in this candidate.
+    - name: Prove environment secret access after validation
+      shell: bash
+      env:
+        PUBLISH_PROBE_CANARY: ${{ inputs.publish-probe-canary }}
+        GHETTIMONSTER_APP_ID: ${{ inputs.publisher-app-id }}
+      run: node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" canary

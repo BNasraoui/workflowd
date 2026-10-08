@@ -14,7 +14,6 @@ jobs:
       github.repository_id == '1306107007' &&
       github.event.repository.fork == false
     permissions:
-      actions: read
       contents: read
       id-token: write
     uses: ./.github/workflows/agent-sandbox.yml
@@ -23,3 +22,30 @@ jobs:
       app-actor-id: "306741873"
       tailscale-client-id: ${{ vars.TS_AGENT_CLIENT_ID }}
       tailscale-audience: ${{ vars.TS_AGENT_AUDIENCE }}
+
+  agent-publish:
+    needs: sandbox
+    environment: agent-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out reviewed publisher tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BNasraoui/workflowd
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/agent-publish
+            deploy/sandbox
+          path: trusted
+      - name: Validate result and probe protected publication
+        uses: ./trusted/.github/actions/agent-publish
+        with:
+          github-token: ${{ github.token }}
+          gate-actor-id: "306741873"
+          publish-probe-canary: ${{ secrets.PUBLISH_PROBE_CANARY }}
+          publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}

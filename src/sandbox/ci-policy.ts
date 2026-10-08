@@ -98,6 +98,24 @@ function assertJob(value: Schema.Json, workflows: Record<string, string>) {
     throw new Error("Dependency installation must ignore scripts")
 }
 
+function assertPublishIsolation(workflow: ReturnType<typeof object>) {
+  const referencesSecrets = (value: unknown) =>
+    /secrets\s*(?:\.|\[)|toJSON\s*\(\s*secrets\b/i.test(JSON.stringify(value))
+  if (/"secrets"\s*:\s*"inherit"/i.test(JSON.stringify(workflow)))
+    throw new Error("Inherited secrets are forbidden in every workflow")
+  const { jobs, ...ambient } = workflow
+  if (referencesSecrets(ambient)) throw new Error("Workflow-level secrets are forbidden")
+  for (const [name, value] of Object.entries(object(jobs))) {
+    const job = object(value)
+    if (name !== "agent-publish") {
+      if (job.environment !== undefined || referencesSecrets(job) || job.secrets !== undefined)
+        throw new Error("Only agent-publish may attach an environment or reference secrets")
+    } else if ("workflow_call" in object(workflow.on)) {
+      throw new Error("agent-publish must be a top-level caller job")
+    }
+  }
+}
+
 /** PR paths may call the two reviewed setup actions or the exact image workflow snapshot.
  * Other local/composite/reusable dependencies and inherited secrets are refused. This
  * runs against an operator-reviewed snapshot; untrusted code cannot secure its own edits.
@@ -106,6 +124,7 @@ export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>)
   let pullRequests = 0
   for (const source of Object.values(workflows)) {
     const workflow = object(Bun.YAML.parse(source))
+    assertPublishIsolation(workflow)
     const triggers = object(workflow.on)
     if ("pull_request_target" in triggers || "workflow_run" in triggers)
       throw new Error("Privileged PR/downstream triggers are forbidden")

@@ -199,7 +199,7 @@ export const makeSandboxPublisher = (
       )
         return yield* Effect.fail(fail())
       const runners = jobs.jobs.filter((job) => job.name === "sandbox / runner")
-      const publishers = jobs.jobs.filter((job) => job.name === "sandbox / agent-publish")
+      const publishers = jobs.jobs.filter((job) => job.name === "agent-publish")
       if (runners.length !== 1 || publishers.length !== 1) return yield* Effect.fail(fail())
       return { runners, publishers }
     })
