@@ -103,6 +103,7 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 26, name: "agent_caller_mailbox" },
       { migration_id: 27, name: "resident_server_unit" },
       { migration_id: 28, name: "agent_run_base_ref" },
+      { migration_id: 29, name: "agent_directory" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
     expect(result.tables).toHaveLength(10)

@@ -173,6 +173,7 @@ describe("strict initial store schema", () => {
       { migration_id: 26, name: "agent_caller_mailbox" },
       { migration_id: 27, name: "resident_server_unit" },
       { migration_id: 28, name: "agent_run_base_ref" },
+      { migration_id: 29, name: "agent_directory" },
     ])
     expect(result.tables).toHaveLength(32)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

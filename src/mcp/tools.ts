@@ -4,6 +4,7 @@ import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
 import { McpQueries, MAX_RECENT_JOBS } from "./queries"
 import { listExecutionCapabilities } from "./execution-capabilities"
+import { queryDirectory } from "./directory"
 import {
   AgentWaitReceipt,
   AgentWaitRefusal,
@@ -128,6 +129,8 @@ const decodeArguments = <A, I>(schema: Schema.Codec<A, I>, value: unknown) =>
 export const callTool = (name: string, args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
     switch (name) {
+      case "agent_directory":
+        return yield* queryDirectory(args, context)
       case "list_execution_capabilities":
         return yield* listExecutionCapabilities(args, context)
       case "job_status": {

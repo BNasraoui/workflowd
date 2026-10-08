@@ -1,5 +1,5 @@
 import type { CiStore } from "./ci/store"
-import { createHash, timingSafeEqual } from "node:crypto"
+import { authorized } from "./http-auth"
 import { Effect, Schema } from "effect"
 import { decodeGitHubEvent } from "./github-event"
 import { JsonText } from "./json"
@@ -32,7 +32,8 @@ import { AgentRunStoreConflictError } from "./kernel/agent-run-store"
 import type { DogfoodStorePort } from "./kernel/dogfood-store"
 import { KernelSessionStoreConflictError } from "./kernel/session-store"
 import { KernelStoreConflictError } from "./kernel/event-store"
-import type { ExecutionCapabilities } from "./execution-capability-contract"
+import { routeExecutionDiscovery, type ExecutionDiscoveryHttpBinding } from "./execution/http"
+import { routeDirectory, type DirectoryHttpBinding } from "./directory/http"
 
 type QrspiIngress = {
   readonly token: string
@@ -66,10 +67,8 @@ export type WebhookHandlerOptions = {
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
-  readonly executionCapabilities?: {
-    readonly token: string
-    readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
-  }
+  readonly executionCapabilities?: ExecutionDiscoveryHttpBinding
+  readonly directory?: DirectoryHttpBinding
 }
 
 export function routeRequest(
@@ -77,22 +76,10 @@ export function routeRequest(
   options: WebhookHandlerOptions,
 ): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   const { pathname } = new URL(request.url)
-  if (
-    pathname === "/execution-capabilities" &&
-    request.method === "GET" &&
-    options.executionCapabilities !== undefined
-  ) {
-    if (!authorized(request.headers.get("authorization"), options.executionCapabilities.token)) {
-      return Effect.succeed(Response.json({ error: "unauthorized" }, { status: 401 }))
-    }
-    return options.executionCapabilities.list().pipe(
-      Effect.match({
-        onSuccess: (capabilities) => Response.json(capabilities),
-        onFailure: () =>
-          Response.json({ error: "capability discovery unavailable" }, { status: 503 }),
-      }),
-    )
-  }
+  const directory = routeDirectory(request, options.directory, options.maxBodyBytes)
+  if (directory !== undefined) return directory
+  const discovery = routeExecutionDiscovery(request, options.executionCapabilities)
+  if (discovery !== undefined) return discovery
   if (pathname === "/health" && request.method === "GET") {
     return Effect.succeed(Response.json({ status: "ok" }))
   }
@@ -479,13 +466,6 @@ function workflowStartStatus(error: WorkflowStartError): number {
     case "QrspiStoreDataError":
       return 500
   }
-}
-
-function authorized(header: string | null, token: string) {
-  if (header === null || !header.startsWith("Bearer ")) return false
-  const supplied = createHash("sha256").update(header.slice("Bearer ".length)).digest()
-  const expected = createHash("sha256").update(token).digest()
-  return timingSafeEqual(supplied, expected)
 }
 
 function wakePullRequestWork(signals: WorkSignalPort, result: IngestPullRequestResult) {

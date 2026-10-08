@@ -1,4 +1,5 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
+import { DirectoryStore } from "../directory/store"
 import { WorkSignal } from "../work-signal"
 import { AgentRunProvider } from "./agent-run-ingress"
 import { AgentRunStore, type AgentRunRecord } from "./agent-run-store"
@@ -22,6 +23,7 @@ import { AgentRunStore, type AgentRunRecord } from "./agent-run-store"
 export type AgentRunWatchdogOptions = {
   readonly progressWindowMs: number
   readonly staleAfterMs: number
+  readonly directoryLeaseMs?: number
   /** Providers whose verified runs complete outside the watchdog (inline
    * subprocess execution like codex-cli); those rows are never watchable. */
   readonly unsupervisedExecutorKinds: ReadonlyArray<"opencode" | "codex" | "claude">
@@ -77,7 +79,12 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
     const telemetry = yield* provider
       .sessionTelemetry({ sessionID: run.nativeSessionId })
       .pipe(Effect.option)
+    const directory = yield* Effect.serviceOption(DirectoryStore)
     if (telemetry._tag === "None") {
+      if (Option.isSome(directory))
+        yield* directory.value
+          .unavailableManaged(run.runId, run.nativeSessionId)
+          .pipe(Effect.ignore)
       // The provider is unreachable; leave the run untouched for the next tick.
       yield* store.touch({ runId: run.runId, now })
       return "idle" as const
@@ -91,6 +98,20 @@ export const runAgentRunWatchdogIteration = (options: AgentRunWatchdogOptions) =
       return "worked" as const
     }
     const observed = telemetry.value
+    if (Option.isSome(directory)) {
+      const matches =
+        observed.sessionID === run.nativeSessionId && observed.directory === run.directory
+      yield* (
+        matches
+          ? directory.value.observeManaged(
+              run.runId,
+              { nativeSessionId: run.nativeSessionId, directory: observed.directory },
+              now,
+              options.directoryLeaseMs,
+            )
+          : directory.value.unavailableManaged(run.runId, run.nativeSessionId)
+      ).pipe(Effect.ignore)
+    }
 
     if (observed.idle) {
       if (observed.outcome === "succeeded" || observed.outcome === undefined) {

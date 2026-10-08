@@ -24,9 +24,18 @@ import { randomUUID } from "node:crypto"
 import { deliverResident } from "./delivery"
 import type { ResidentConfig } from "./config"
 import { ExecutionSelectionError } from "../execution-selection"
+import { DirectoryStore } from "../directory/store"
 
+// Optional metadata preserves older completion protocols; absence is not input proof.
+const NativeThread = {
+  id: Schema.optionalKey(Schema.String),
+  cwd: Schema.optionalKey(Schema.String),
+  status: Schema.optionalKey(Schema.Struct({ type: Schema.String })),
+  canAcceptDirectInput: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+}
 const ThreadResult = Schema.Struct({
-  thread: Schema.Struct({ id: Schema.String }),
+  thread: Schema.Struct({ ...NativeThread, id: Schema.String }),
+  cwd: Schema.optionalKey(Schema.String),
   model: Schema.optionalKey(Schema.String),
   modelProvider: Schema.optionalKey(Schema.String),
   reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -46,6 +55,7 @@ const Queued = Schema.Struct({
 })
 const History = Schema.Struct({
   thread: Schema.Struct({
+    ...NativeThread,
     turns: Schema.Array(
       Schema.Struct({
         id: Schema.String,
@@ -70,7 +80,11 @@ type ResidentPort = {
 export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCodex")
 
 export const ResidentCodexLive = (
-  config: ResidentConfig & { readonly unitPrefix?: string },
+  config: ResidentConfig & {
+    readonly unitPrefix?: string
+    readonly directoryRefreshMs?: number
+    readonly directoryLeaseMs?: number
+  },
   binary: string,
   ciConfig: CiConfig,
   start: typeof startAppServer = startAppServer,
@@ -83,6 +97,13 @@ export const ResidentCodexLive = (
       const runs = yield* AgentRunStore
       const ci = yield* CiService
       const sql = yield* SqlClient.SqlClient
+      const directory = yield* Effect.serviceOption(DirectoryStore)
+      if (Option.isSome(directory)) {
+        yield* directory.value.invalidateResidentBindings()
+        yield* Effect.addFinalizer(() =>
+          directory.value.invalidateResidentBindings().pipe(Effect.orDie),
+        )
+      }
       const notifications = yield* Queue.unbounded<{
         readonly method: string
         readonly params: unknown
@@ -100,6 +121,8 @@ export const ResidentCodexLive = (
           disconnected: boolean
           attempts: number
           lastEventAt: number
+          lastDirectoryCheckAt: number
+          runtimeDirectory: string | null
         }
       >()
       const threadRuns = new Map<string, string>()
@@ -158,7 +181,14 @@ export const ResidentCodexLive = (
           process = launched
           yield* store.adoptServer(runId, launched.invocation)
         } else process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
-        servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
+        servers.set(runId, {
+          process,
+          disconnected: false,
+          attempts,
+          lastEventAt: Date.now(),
+          lastDirectoryCheckAt: 0,
+          runtimeDirectory: null,
+        })
         yield* Effect.try(() => registerPeer(runId, process.pid))
         yield* Effect.tryPromise(() => process.initialize())
         return process
@@ -174,6 +204,27 @@ export const ResidentCodexLive = (
           return Promise.reject(new Error("Resident run process unavailable"))
         return entry.process.rpc.request(method, params)
       }
+      const observeDirectory = Effect.fn("Resident.observeDirectory")(function* (
+        row: { readonly run_id: string; readonly thread_id: string; readonly directory: string },
+        thread: Schema.Schema.Type<typeof History>["thread"],
+      ) {
+        if (Option.isNone(directory)) return
+        const runtimeDirectory = servers.get(row.run_id)?.runtimeDirectory
+        if (
+          thread.id === row.thread_id &&
+          thread.cwd === row.directory &&
+          runtimeDirectory === row.directory &&
+          (thread.status?.type === "idle" || thread.status?.type === "active") &&
+          thread.canAcceptDirectInput === true
+        )
+          yield* directory.value.observeManaged(
+            row.run_id,
+            { nativeSessionId: thread.id, directory: thread.cwd },
+            new Date(),
+            config.directoryLeaseMs,
+          )
+        else yield* directory.value.invalidateResidentBindings(row.run_id)
+      })
       const closeServer = Effect.fn("Resident.closeServer")(function* (
         runId: string,
         threadId: string,
@@ -359,6 +410,8 @@ export const ResidentCodexLive = (
                     disconnected: false,
                     attempts: 0,
                     lastEventAt: Date.now(),
+                    lastDirectoryCheckAt: 0,
+                    runtimeDirectory: null,
                   })
                   yield* Effect.try(() => registerPeer(row.run_id, attached.value.pid))
                   yield* Effect.tryPromise(() => attached.value.initialize())
@@ -389,6 +442,8 @@ export const ResidentCodexLive = (
             Effect.flatMap(
               Schema.decodeUnknownEffect(
                 Schema.Struct({
+                  thread: Schema.optionalKey(Schema.Struct(NativeThread)),
+                  cwd: Schema.optionalKey(Schema.String),
                   model: Schema.optionalKey(Schema.String),
                   modelProvider: Schema.optionalKey(Schema.String),
                   reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -413,9 +468,20 @@ export const ResidentCodexLive = (
             yield* finish(row.thread_id, true)
             continue
           }
+          const entry = servers.get(row.run_id)
+          if (entry !== undefined)
+            entry.runtimeDirectory =
+              resumed.thread?.id === row.thread_id &&
+              resumed.thread.cwd === row.directory &&
+              (resumed.thread.status?.type === "idle" ||
+                resumed.thread.status?.type === "active") &&
+              resumed.thread.canAcceptDirectInput === true
+                ? (resumed.cwd ?? null)
+                : null
           const history = yield* Effect.tryPromise(() =>
             request("thread/read", { threadId: row.thread_id, includeTurns: true }),
           ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
+          yield* observeDirectory(row, history.thread)
           const last = history.thread.turns.at(-1)
           if (last !== undefined && last.id !== row.current_turn)
             yield* store.started(row.thread_id, last.id)
@@ -515,6 +581,7 @@ export const ResidentCodexLive = (
         readonly run_id: string
         readonly thread_id: string
         readonly state: string
+        readonly directory: string
       }) {
         const entry = servers.get(row.run_id)
         if (
@@ -526,7 +593,25 @@ export const ResidentCodexLive = (
           yield* finish(row.thread_id, true)
           return
         }
-        if (!entry?.disconnected) return
+        if (!entry?.disconnected) {
+          if (
+            Option.isSome(directory) &&
+            entry !== undefined &&
+            Date.now() - entry.lastDirectoryCheckAt >= (config.directoryRefreshMs ?? 30_000)
+          ) {
+            entry.lastDirectoryCheckAt = Date.now()
+            yield* Effect.tryPromise(() =>
+              request("thread/read", { threadId: row.thread_id, includeTurns: false }),
+            ).pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(History)),
+              Effect.timeout("2 seconds"),
+              Effect.flatMap((history) => observeDirectory(row, history.thread)),
+              Effect.catch(() => directory.value.invalidateResidentBindings(row.run_id)),
+              Effect.ignore,
+            )
+          }
+          return
+        }
         if (entry.attempts >= 3) {
           yield* store.uncertain(`restart:${row.thread_id}`, row.thread_id)
           yield* finish(row.thread_id, true)
@@ -647,6 +732,8 @@ export const ResidentCodexLive = (
               })
             }
             const threadId = thread.thread.id
+            const entry = servers.get(input.runId)
+            if (entry !== undefined) entry.runtimeDirectory = thread.cwd ?? null
             threadRuns.set(threadId, input.runId)
             yield* store.attach(input.runId, threadId, input.directory, input.model)
             const queue = makeEventQueue()

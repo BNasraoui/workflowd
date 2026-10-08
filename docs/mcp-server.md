@@ -44,6 +44,7 @@ contract so agents learn it from the schema itself.
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
+| `agent_directory({kind?, id?})` | authenticated read | Stable agent recipients, runner identity/liveness and per-host catalogs, with verified endpoint bindings and explicit expiry. See [directory and ownership protocol](agent-directory.md). |
 | `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
 | `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
