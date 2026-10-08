@@ -19,14 +19,20 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def commit_id(value):
+    if not isinstance(value, str) or not re.fullmatch('[a-f0-9]{40}', value):
+        raise ValueError('Invalid commit identity')
+    return value
+
+
 def git(repo, *args):
     def bounds():
         resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
         resource.setrlimit(resource.RLIMIT_FSIZE, (128 * 1024**2, 128 * 1024**2))
     with tempfile.TemporaryFile() as output:
         subprocess.run(
-            ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
-             '-c', 'core.attributesFile=/dev/null', '-C', repo, *args],
+            ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+             '-c', 'core.attributesFile=/dev/null', *args], cwd=repo,
             env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent',
                  'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                  'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_TERMINAL_PROMPT': '0'},
@@ -37,7 +43,10 @@ def git(repo, *args):
         return output.read()
 
 
-def seal(repo, directory, source):
+def seal(source):
+    # The control entrypoint selects the workspace; no caller-supplied paths.
+    repo = 'repository'
+    source = commit_id(source)
     raw = sys.stdin.buffer.read(65537)
     assert len(raw) <= 65536
     completion = json.loads(raw)
@@ -46,19 +55,21 @@ def seal(repo, directory, source):
     refs = git(repo, 'for-each-ref', '--format=%(objectname)',
                'refs/remotes/container-use/').decode().splitlines()
     assert len(refs) == 1, 'Missing or ambiguous container-use result'
-    result = refs[0]
+    result = commit_id(refs[0])
     assert git(repo, 'cat-file', '-t', result).strip() == b'commit'
     assert git(repo, 'rev-parse', source + '^{commit}').decode().strip() == source
     if git(repo, 'rev-parse', source + '^{tree}') == git(repo, 'rev-parse', result + '^{tree}'):
         print(json.dumps({'empty': True, 'sourceSha': source}))
         return
     git(repo, 'merge-base', '--is-ancestor', source, result)
-    root = Path(directory)
+    root = Path('result')
+    if root.is_symlink():
+        raise ValueError('Result directory must not be a symlink')
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     bundle = root / 'result.bundle'
     # A fixed advertised head avoids exposing container-use refs or the agent name.
     git(repo, 'update-ref', 'refs/workflowd/result', result)
-    git(repo, 'bundle', 'create', str(bundle), 'refs/workflowd/result', '^' + source)
+    git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
     assert bundle.stat().st_size <= 16 * 1024 * 1024
     manifest = {'sourceSha': source, 'resultSha': result, 'branch': completion['branch'],
                 'bundleSha256': sha(bundle.read_bytes())}
@@ -126,14 +137,16 @@ def inspect_changes(repo, source, result):
     assert parent == result
 
 
-def validate(archive, source_url, directory):
+def validate(source_url):
     binding = json.loads(sys.stdin.buffer.read(65537))
     for key in ('source', 'result'):
-        assert re.fullmatch('[a-f0-9]{40}', binding[key])
-    path = Path(archive)
+        binding[key] = commit_id(binding[key])
+    path = Path('result.zip')
+    if path.is_symlink():
+        raise ValueError('Archive must not be a symlink')
     assert path.stat().st_size <= 16 * 1024 * 1024
     assert 'sha256:' + sha(path.read_bytes()) == binding['digest']
-    root = Path(directory)
+    root = Path('validated')
     root.mkdir(mode=0o700, parents=True)
     with zipfile.ZipFile(path) as zipped:
         entries = zipped.infolist()
@@ -147,16 +160,17 @@ def validate(archive, source_url, directory):
             assert entry.file_size <= (65536 if entry.filename == 'result.json' else 64 * 1024 * 1024)
             data = zipped.read(entry)
             assert len(data) == entry.file_size
-            (root / entry.filename).write_bytes(data)
+            destination = root / ('result.json' if entry.filename == 'result.json' else 'result.bundle')
+            destination.write_bytes(data)
     raw = (root / 'result.json').read_bytes()
     assert sha(raw) == binding['manifest']
     manifest = json.loads(raw)
     assert set(manifest) == {'sourceSha', 'resultSha', 'branch', 'bundleSha256'}
     assert isinstance(manifest['branch'], str)
     assert manifest['sourceSha'] == binding['source'] and manifest['resultSha'] == binding['result']
-    bundle = root / 'result.bundle'
+    bundle = root.absolute() / 'result.bundle'
     assert sha(bundle.read_bytes()) == manifest['bundleSha256']
-    repo = str(root / 'objects.git')
+    repo = str(root.absolute() / 'objects.git')
     git(str(root), 'init', '--bare', repo)
     git(repo, '-c', 'credential.helper=', '-c', 'http.extraHeader=', 'fetch', '--no-tags', '--', source_url, binding['source'])
     before = set(git(repo, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)').splitlines())

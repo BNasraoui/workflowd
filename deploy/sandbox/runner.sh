@@ -107,11 +107,11 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
     ;;
   finish-result)
     source_sha=$(cat /run/workflowd-sandbox/source.sha)
-    docker exec -i workflowd-sandbox-tooling python3 /usr/local/lib/workflowd-result.py seal \
-      /workspace/repository /tmp/workflowd-result "$source_sha" > /run/workflowd-sandbox/result-metadata.json
+    docker exec -i -w /workspace workflowd-sandbox-tooling python3 /usr/local/lib/workflowd-result.py seal \
+      "$source_sha" > /run/workflowd-sandbox/result-metadata.json
     if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open("/run/workflowd-sandbox/result-metadata.json")).get("empty") else 1)'; then
       mkdir -p /run/workflowd-sandbox/result
-      docker cp workflowd-sandbox-tooling:/tmp/workflowd-result/. /run/workflowd-sandbox/result/ >/dev/null
+      docker cp workflowd-sandbox-tooling:/workspace/result/. /run/workflowd-sandbox/result/ >/dev/null
     fi
     cat /run/workflowd-sandbox/result-metadata.json
     ;;

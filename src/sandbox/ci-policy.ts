@@ -1,4 +1,5 @@
 import { readdir } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { Schema } from "effect"
 
 const ObjectValue = Schema.Record(Schema.String, Schema.Json)
@@ -7,6 +8,10 @@ const mainOnly =
   "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')"
 const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
 const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
+// Reviewed in full: anonymous checkout, credential-free pinned Nix installation,
+// locked build/determinism/E2E, and artifact upload restricted to main pushes.
+// Any dependency, permission, input or script edit requires a fresh review.
+const imageWorkflowSha256 = "e1e1e8a6aedd6d9b917471ce0a90562009668f356d9fd321f3c7511518ae05be"
 const head = "${{ github.event.pull_request.head.sha || github.sha }}"
 const base = "${{ github.event.pull_request.base.sha || github.event.before }}"
 const checkout = `set -euo pipefail
@@ -45,9 +50,19 @@ function assertStep(value: Schema.Json) {
   } else throw new Error("PR action/reusable dependency is not an approved pinned setup action")
 }
 
-function assertJob(value: Schema.Json) {
+function assertJob(value: Schema.Json, workflows: Record<string, string>) {
   const job = object(value)
   requireEmpty(job.permissions)
+  if (job.uses === "./.github/workflows/agent-image.yml") {
+    const source = workflows["agent-image.yml"]
+    if (
+      Object.keys(job).some((key) => key !== "uses" && key !== "permissions") ||
+      source === undefined ||
+      createHash("sha256").update(source).digest("hex") !== imageWorkflowSha256
+    )
+      throw new Error("Image build differs from the reviewed unprivileged snapshot")
+    return
+  }
   if (
     job.uses !== undefined ||
     job.secrets !== undefined ||
@@ -83,8 +98,8 @@ function assertJob(value: Schema.Json) {
     throw new Error("Dependency installation must ignore scripts")
 }
 
-/** Conservative dependency policy: PR paths may call only the two reviewed setup actions.
- * Local/composite/reusable dependencies are refused, including inherited secrets. This
+/** PR paths may call the two reviewed setup actions or the exact image workflow snapshot.
+ * Other local/composite/reusable dependencies and inherited secrets are refused. This
  * runs against an operator-reviewed snapshot; untrusted code cannot secure its own edits.
  */
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {
@@ -101,7 +116,7 @@ export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>)
       throw new Error("PR workflow ambient environment/defaults are not approved")
     for (const job of Object.values(object(workflow.jobs))) {
       if (object(job).if === mainOnly) continue
-      assertJob(job)
+      assertJob(job, workflows)
     }
   }
   if (pullRequests < 2) throw new Error("CI and CodeQL PR policy workflows are required")

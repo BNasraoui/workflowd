@@ -76,14 +76,22 @@ CodeQL's PR policy job has no checkout and explains that scanning waits for revi
 main. The write-capable analysis job runs only for main pushes or schedules.
 
 `bun src/sandbox/ci-policy.ts` inspects all workflow files. PR dependencies are
-conservatively restricted to the two reviewed, pinned setup actions; local actions
-and reusable workflow calls (including inherited secrets) are refused. The guard
+restricted to the two reviewed, pinned setup actions and the complete SHA-256 snapshot
+of `agent-image.yml`. Its caller accepts no inputs, secrets or other overrides. Any
+image workflow change requires reviewing and updating that snapshot. Other local
+actions and reusable workflow calls (including inherited secrets) are refused. The guard
 checks effective permissions, runner class, privileged contexts, install policy and
 the anonymous checkout snapshot. Its quality-matrix result feeds `Required checks`.
 It rejects target/downstream privileged triggers. It cannot secure arbitrary edits
 to its own implementation or repository scripts: the trust root remains the
 operator-reviewed workflow snapshot and human review of workflow changes. Future
 publishing must evaluate the trusted base policy before writing a ref.
+
+The image build fetches the exact SHA anonymously. It runs the pinned, checksum-verified
+Nix installer script with both token inputs removed: the composite action itself would
+otherwise pass `github.token` and persist it in Nix configuration. The locked Nix build,
+deterministic archive comparison and real container-use E2E remain blocking. Artifact
+upload runs only on main pushes; GHCR publication retains its existing push-only gate.
 
 ## Verification
 
@@ -101,6 +109,16 @@ The approved reviewer decision requires polling exact-head CI and stopping for t
 coordinator at the canary gate. Do not subscribe to CI for this stage.
 
 ## Canary publication contract
+
+Result tooling takes its workspace from the trusted caller's working directory.
+Sealing reads `repository/` and writes `result/`; validation reads `result.zip` and
+creates `validated/`. Arbitrary archive/output/repository paths are no longer CLI
+parameters, and ZIP entries map to fixed output filenames. Commit identities must be
+40 lowercase hexadecimal characters before entering Git arguments. Git and Python
+use absolute system executable paths; the hosted-entrypoint fixture also runs with
+a hostile `python3` earlier on PATH. Approval fields are compared as a set because
+their order has no meaning. These changes address PR76's Sonar findings without
+suppressions or quality-gate changes.
 
 A configured `publish` policy supplies the PR base ref, environment ID and publisher
 App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;

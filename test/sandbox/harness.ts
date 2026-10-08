@@ -481,7 +481,7 @@ export async function dispatchRunnerFixture() {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /tmp/workflowd-result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd /workspace/repository\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
@@ -775,7 +775,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /tmp/workflowd-result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd /workspace/repository\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)

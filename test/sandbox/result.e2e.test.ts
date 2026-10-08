@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises"
+import { chmod, mkdtemp, mkdir, rm, writeFile, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
@@ -10,7 +10,7 @@ const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 
 test("sealing keeps the agent name opaque and sends only digests and commit identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandbox-result-"))
-  const repo = join(root, "repo")
+  const repo = join(root, "repository")
   const output = join(root, "result")
   await mkdir(repo)
   try {
@@ -29,7 +29,8 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
     await command(["git", "checkout", "--detach", sourceSha], repo)
     const branch = "a name with ' quotes/$()\n雪"
     const seal = () => {
-      const child = Bun.spawn(["python3", script, "seal", repo, output, sourceSha], {
+      const child = Bun.spawn(["python3", script, "seal", sourceSha], {
+        cwd: root,
         stdin: new Blob([JSON.stringify({ branch })]),
         stdout: "pipe",
         stderr: "pipe",
@@ -84,7 +85,7 @@ for (const mutation of [
 ])
   test(`publisher validates actual Git objects and bounded ZIP: ${mutation}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "sandbox-bundle-"))
-    const repo = join(root, "repo")
+    const repo = join(root, "repository")
     const output = join(root, "result")
     await mkdir(repo)
     const git = (...args: string[]) => command(["git", ...args], repo)
@@ -110,7 +111,8 @@ for (const mutation of [
       await git("commit", "-m", "result")
       const resultSha = await git("rev-parse", "HEAD")
       await git("update-ref", "refs/remotes/container-use/one", resultSha)
-      const child = Bun.spawn(["python3", script, "seal", repo, output, sourceSha], {
+      const child = Bun.spawn(["python3", script, "seal", sourceSha], {
+        cwd: root,
         stdin: new Blob([JSON.stringify({ branch: "chosen/by/agent" })]),
         stdout: "pipe",
         stderr: "pipe",
@@ -135,7 +137,7 @@ for (const mutation of [
           new Uint8Array(await Bun.file(join(output, "result.json")).arrayBuffer()),
         )
       }
-      const archive = join(root, "artifact.zip")
+      const archive = join(root, "result.zip")
       await command(["zip", "-q", archive, "result.bundle", "result.json"], output)
       if (mutation === "archive traversal")
         await command([
@@ -151,10 +153,12 @@ for (const mutation of [
         digest: "sha256:" + digest(new Uint8Array(await Bun.file(archive).arrayBuffer())),
       }
       if (mutation === "swapped archive") binding.digest = "sha256:" + "0".repeat(64)
-      const validated = Bun.spawn(
-        ["python3", script, "validate", archive, repo, join(root, "validated")],
-        { stdin: new Blob([JSON.stringify(binding)]), stdout: "pipe", stderr: "pipe" },
-      )
+      const validated = Bun.spawn(["python3", script, "validate", repo], {
+        cwd: root,
+        stdin: new Blob([JSON.stringify(binding)]),
+        stdout: "pipe",
+        stderr: "pipe",
+      })
       const [status, stdout] = await Promise.all([
         validated.exited,
         new Response(validated.stdout).text(),
@@ -164,6 +168,10 @@ for (const mutation of [
         expect(status).toBe(0)
         expect(JSON.parse(stdout).resultSha).toBe(resultSha)
         // Exercise the exact hosted entrypoint; only GitHub is an HTTP fixture.
+        const hostilePath = join(root, "bin")
+        await mkdir(hostilePath)
+        await writeFile(join(hostilePath, "python3"), "#!/bin/sh\nexit 99\n")
+        await chmod(join(hostilePath, "python3"), 0o755)
         await mkdir(join(root, "fixture"))
         await symlink(repo, join(root, "fixture", "repo.git"))
         const approved = { v: 1, run: 41, attempt: 1, artifact: 52, ...binding }
@@ -202,7 +210,7 @@ for (const mutation of [
           },
         })
         const env = {
-          PATH: process.env.PATH,
+          PATH: hostilePath + ":" + process.env.PATH,
           RUNNER_TEMP: root,
           GITHUB_API_URL: api.url.toString().replace(/\/$/, ""),
           GITHUB_SERVER_URL: "file://" + root,

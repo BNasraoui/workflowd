@@ -39,7 +39,7 @@ async function validate() {
     review.user?.type === "Bot" && review.environments?.some(env => env.name === "agent-publish"))
   assert.equal(matches.length, 1, "Missing or ambiguous gate approval")
   const binding = JSON.parse(matches[0].comment)
-  assert.deepEqual(Object.keys(binding).sort(), ["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v"])
+  assert.deepEqual(new Set(Object.keys(binding)), new Set(["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v"]))
   assert.equal(binding.v, 1)
   assert.equal(binding.run, run)
   assert.equal(binding.attempt, attempt)
@@ -60,9 +60,9 @@ async function validate() {
   await mkdir(root, { mode: 0o700 })
   const archive = join(root, "result.zip")
   await writeFile(archive, await bytes(await request(`/actions/artifacts/${binding.artifact}/zip`), 16 * 1048576), { mode: 0o600 })
-  const checked = spawnSync("python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "validate", archive,
-    `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}.git`, join(root, "validated")], {
-    input: JSON.stringify(binding), timeout: 180000, maxBuffer: 65536,
+  const checked = spawnSync("/usr/bin/python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "validate",
+    `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}.git`], {
+    cwd: root, input: JSON.stringify(binding), timeout: 180000, maxBuffer: 65536,
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
   })
   assert.equal(checked.status, 0, "Bundle validation failed")

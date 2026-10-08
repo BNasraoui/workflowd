@@ -12,8 +12,7 @@ concurrency:
 
 jobs:
   build:
-    permissions:
-      contents: read
+    permissions: {}
     uses: ./.github/workflows/agent-image.yml
 
   publish:
