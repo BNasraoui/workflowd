@@ -132,6 +132,7 @@ test.each([
   "/access_tokens",
   `/repos/${policy.repository}`,
   "/git/ref/heads/workflowd/leases/lease-1",
+  "/artifacts/52/zip",
 ])("GitHub request deadline aborts the transport at %s", async (path) => {
   const { Fiber } = await import("effect")
   const { TestClock } = await import("effect/testing")
@@ -155,12 +156,18 @@ test.each([
     },
   })
   try {
+    await fixture.setReady(readiness())
     await Effect.runPromise(
       Effect.gen(function* () {
         const github = yield* makeSandboxGithub(fixture.github, client)
-        const fiber = yield* github
-          .ensureRef(policy, "lease-1")
-          .pipe(Effect.timeout("11 seconds"), Effect.result, Effect.forkChild)
+        const operation: Effect.Effect<unknown, unknown> = path.endsWith("/zip")
+          ? github.readiness(policy, "lease-1", 41, 1)
+          : github.ensureRef(policy, "lease-1")
+        const fiber = yield* operation.pipe(
+          Effect.timeout("11 seconds"),
+          Effect.result,
+          Effect.forkChild,
+        )
         yield* Effect.promise(() => entered.promise)
         yield* TestClock.adjust("10 seconds")
         expect(signal?.aborted).toBe(true)
@@ -452,6 +459,90 @@ test("readiness metadata must match the repository, lease, run and OIDC claims",
         }
       }),
     )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test.each([false, true])(
+  "readiness download retries a listed 404 with a bounded startup diagnostic (exhausted=%s)",
+  async (exhausted) => {
+    const { Logger } = await import("effect")
+    const { sandboxGithubFixture } = await import("./harness")
+    const { makeSandboxGithub } = await import("../../src/sandbox/github")
+    const fixture = await sandboxGithubFixture(policy)
+    const logs: unknown[] = []
+    let downloads = 0
+    fixture.publication(async (request) => {
+      if (!new URL(request.url).pathname.endsWith("/artifacts/52/zip")) return
+      downloads++
+      if (exhausted || downloads <= 2) return new Response(null, { status: 404 })
+    })
+    try {
+      await fixture.setReady(readiness())
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          return yield* Effect.result(github.readiness(policy, "lease-1", 41, 1))
+        }).pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))]))),
+      )
+      expect(result._tag).toBe(exhausted ? "Failure" : "Success")
+      expect(downloads).toBe(exhausted ? 7 : 3)
+      expect(JSON.stringify(logs)).toContain(`"downloadAttempts":${downloads}`)
+      if (result._tag === "Success") expect(result.success?.peerId).toBe("peer-1")
+    } finally {
+      await fixture.close()
+    }
+  },
+  70000,
+)
+
+test.each([
+  ["forbidden", 403, {}],
+  ["gone", 410, {}],
+  ["server error", 500, {}],
+  ["disappeared", 404, null],
+  ["replaced", 404, { id: 53 }],
+  ["expired", 404, { expired: true }],
+  ["resized", 404, { size_in_bytes: 200 }],
+  ["changed digest", 404, { digest: "sha256:changed" }],
+  ["wrong artifact attempt", 404, { name: "sandbox-ready-41-2" }],
+  ["wrong artifact run", 404, { workflow_run: { id: 42, head_sha: policy.workflowSha } }],
+  ["rerun", 404, {}],
+] as const)("readiness download fails immediately when %s", async (fault, status, mutation) => {
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const fixture = await sandboxGithubFixture(policy)
+  let downloads = 0
+  fixture.publication(async (request) => {
+    const path = new URL(request.url).pathname
+    if (path.endsWith("/artifacts/52/zip")) {
+      downloads++
+      if (fault === "rerun") fixture.savedRun(41, { run_attempt: 2 })
+      return new Response(null, { status })
+    }
+    if (path.endsWith("/artifacts")) {
+      const artifact = {
+        id: 52,
+        name: "sandbox-ready-41-1",
+        size_in_bytes: 100,
+        expired: false,
+        workflow_run: { id: 41, head_sha: policy.workflowSha },
+        ...(downloads > 0 ? mutation : {}),
+      }
+      const artifacts = downloads > 0 && mutation === null ? [] : [artifact]
+      return Response.json({ total_count: artifacts.length, artifacts })
+    }
+  })
+  try {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        return yield* Effect.result(github.readiness(policy, "lease-1", 41, 1))
+      }),
+    )
+    expect(result._tag).toBe("Failure")
+    expect(downloads).toBe(1)
   } finally {
     await fixture.close()
   }

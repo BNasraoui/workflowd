@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Effect, Schema } from "effect"
+import { Duration, Effect, Schedule, Schema } from "effect"
 import type { SandboxPolicy } from "./config"
 import { SandboxError, SandboxRefAbsent, SandboxRefRejected } from "./store"
 
@@ -348,13 +348,12 @@ export const makeSandboxGithub = (
           new SandboxError({ message: "Sandbox lease ref deletion unconfirmed" }),
         )
     })
-    const readiness = Effect.fn("SandboxGithub.readiness")(function* (
+    const readyArtifact = Effect.fn("SandboxGithub.readyArtifact")(function* (
+      client: Octokit,
       policy: SandboxPolicy,
-      leaseId: string,
       runId: number,
       attempt: number,
     ) {
-      const client = yield* scoped(policy)
       const response = yield* request(
         client,
         "GET",
@@ -371,6 +370,8 @@ export const makeSandboxGithub = (
               name: Schema.String,
               size_in_bytes: Schema.Int,
               expired: Schema.Boolean,
+              digest: Schema.optionalKey(Schema.NullOr(Schema.String)),
+              workflow_run: Schema.Struct({ id: Schema.Int, head_sha: Schema.String }),
             }),
           ),
         }),
@@ -385,15 +386,70 @@ export const makeSandboxGithub = (
         matches.length !== 1 ||
         artifact === undefined ||
         artifact.expired ||
-        artifact.size_in_bytes > 65536
+        artifact.size_in_bytes > 65536 ||
+        artifact.workflow_run.id !== runId ||
+        artifact.workflow_run.head_sha !== policy.workflowSha
       )
         return yield* Effect.fail(githubFailure())
-      const download = yield* request(
-        client,
-        "GET",
-        `/repos/${policy.repository}/actions/artifacts/${artifact.id}/zip`,
+      return artifact
+    })
+    const readiness = Effect.fn("SandboxGithub.readiness")(function* (
+      policy: SandboxPolicy,
+      leaseId: string,
+      runId: number,
+      attempt: number,
+    ) {
+      const client = yield* scoped(policy)
+      const artifact = yield* readyArtifact(client, policy, runId, attempt)
+      if (artifact === null) return null
+      const unchanged = Effect.gen(function* () {
+        yield* savedRun(policy, leaseId, runId, attempt)
+        const current = yield* readyArtifact(client, policy, runId, attempt)
+        if (JSON.stringify(current) !== JSON.stringify(artifact))
+          return yield* Effect.fail(
+            new SandboxError({ message: "Sandbox readiness artifact changed during download" }),
+          )
+      })
+      let downloadAttempts = 0
+      let status: number | undefined
+      const download = yield* Effect.gen(function* () {
+        // Revalidate both when a 404 arrives and after backoff; never adopt a replacement.
+        if (downloadAttempts > 0) yield* unchanged
+        downloadAttempts++
+        const response = yield* request(
+          client,
+          "GET",
+          `/repos/${policy.repository}/actions/artifacts/${artifact.id}/zip`,
+        )
+        status = response.status
+        if (status === 404) yield* unchanged
+        else if (status !== 200) return yield* Effect.fail(githubFailure())
+        return response
+      }).pipe(
+        Effect.repeat({
+          until: (response) => response.status === 200,
+          schedule: Schedule.exponential("1 second").pipe(
+            Schedule.modifyDelay(({ duration }) =>
+              Effect.succeed(Duration.min(duration, Duration.seconds(15))),
+            ),
+            Schedule.upTo({ times: 6 }),
+          ),
+        }),
+        Effect.flatMap((response) =>
+          response.status === 200 ? Effect.succeed(response) : Effect.fail(githubFailure()),
+        ),
+        Effect.timeout("60 seconds"),
+        Effect.onExit((exit) =>
+          Effect.logInfo("Sandbox readiness download startup diagnostic", {
+            runId,
+            attempt,
+            artifactId: artifact.id,
+            downloadAttempts,
+            status,
+            outcome: exit._tag,
+          }),
+        ),
       )
-      if (download.status !== 200) return yield* Effect.fail(githubFailure())
       const data = yield* Effect.tryPromise({
         try: (signal) => readyArchive(download.data, signal),
         catch: githubFailure,

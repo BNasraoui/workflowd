@@ -364,6 +364,7 @@ export async function sandboxGithubFixture(
                   {
                     id: 52,
                     name: "sandbox-ready-41-1",
+                    workflow_run: { id: 41, head_sha: policy.workflowSha },
                     size_in_bytes: archive.byteLength,
                     expired: false,
                   },
