@@ -1,0 +1,43 @@
+name: Publish agent base image
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: agent-image-publish
+  cancel-in-progress: true
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/agent-image.yml
+
+  publish:
+    name: Publish agent image to GHCR
+    needs: build
+    if: github.repository == 'BNasraoui/workflowd'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agent-image
+      - name: Publish the tested image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          docker load -i agent-image.tar.gz
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          image=ghcr.io/bnasraoui/workflowd-agent-base
+          docker tag workflowd-agent-base:local "$image:$COMMIT_SHA"
+          docker tag workflowd-agent-base:local "$image:main"
+          docker push "$image:$COMMIT_SHA"
+          docker push "$image:main"
