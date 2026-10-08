@@ -33,6 +33,75 @@ const metadata = {
   manifestSha256: "e".repeat(64),
 }
 
+test("completion accepts one bare or fenced object and forwards only canonical JSON", async () => {
+  const fixture = await sandboxGithubFixture(policy)
+  const selected = { environmentId: "arriving-leech", branch: metadata.branch }
+  const json = JSON.stringify(selected)
+  const fenced = (value: string, language = "json") => `\`\`\`${language}\n${value}\n\`\`\``
+  const calls: string[] = []
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* runStoreMigrations
+        const store = yield* makeSandboxStore
+        yield* store.request({
+          runId: "run-1",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: metadata.sourceSha,
+          now: Date.now(),
+        })
+        yield* store.beginStart("run-1")
+        yield* store.recordRun("run-1", 41, 1)
+        yield* store.bind("run-1", 41, 1, {
+          leaseId: "lease-1",
+          peerId: "peer-1",
+          repositoryPath: "/workspace/repository",
+          address: "100.64.0.1",
+          port: 22,
+          knownHostsFile: "/tmp/known_hosts",
+          identityFile: "/dev/null",
+        })
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github, undefined, async (args, input) => {
+          expect(args.at(-1)).toBe("exec /usr/local/bin/runner-control finish-result")
+          calls.push(input)
+          return JSON.stringify(metadata)
+        })
+        for (const completion of [json, fenced(json), fenced(json, "")]) {
+          expect(yield* leases.finishResult("run-1", ` \n${completion}\n\t`)).toEqual(metadata)
+          expect(calls.at(-1)).toBe(json)
+        }
+        const count = calls.length
+        for (const completion of [
+          `Done: ${json}`,
+          `${json}\nDone`,
+          `Done:\n${fenced(json)}`,
+          `${fenced(json)}\nDone`,
+          `${json}\n${json}`,
+          fenced(`${json}\n${json}`),
+          `${fenced(json)}\n${fenced(json)}`,
+          fenced(json, "javascript"),
+          `\`\`\`json\n${json}`,
+          JSON.stringify({ ...selected, extra: true }),
+          fenced(JSON.stringify({ ...selected, extra: true })),
+          JSON.stringify({ branch: selected.branch }),
+          JSON.stringify({ ...selected, environmentId: "" }),
+          JSON.stringify({ ...selected, branch: 7 }),
+          `[${json}]`,
+          "null",
+        ]) {
+          const result = yield* Effect.result(leases.finishResult("run-1", completion))
+          expect(result._tag).toBe("Failure")
+          expect(calls).toHaveLength(count)
+        }
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
 for (const fault of [
   "none",
   "lost approval",

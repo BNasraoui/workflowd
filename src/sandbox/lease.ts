@@ -444,9 +444,10 @@ export const makeSandboxLeaseService = (
     const finishResult = (runId: string, completion: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
+        const json = completion.trim().replace(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/, "$1")
         const selected = yield* Schema.decodeUnknownEffect(
           Schema.fromJsonString(SandboxCompletion),
-        )(completion, { onExcessProperty: "error" }).pipe(
+        )(json, { onExcessProperty: "error" }).pipe(
           Effect.mapError(
             () =>
               new SandboxError({
