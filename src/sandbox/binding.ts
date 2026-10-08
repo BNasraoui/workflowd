@@ -94,6 +94,7 @@ export async function assertBridgeBinding(file: string, transport: SandboxTransp
     binding.deadline <= Date.now()
   )
     throw new Error("Sandbox bridge is revoked or has a different transport")
+  return binding
 }
 
 export async function saveSandboxFile(
@@ -110,6 +111,7 @@ export async function saveSandboxFile(
   } finally {
     await file.close()
   }
+  let created = true
   if (exclusive) {
     try {
       await link(temporary, join(directory, name))
@@ -121,6 +123,7 @@ export async function saveSandboxFile(
         error.code === "EEXIST"
       ))
         throw error
+      created = false
     } finally {
       await rm(temporary, { force: true })
     }
@@ -131,4 +134,5 @@ export async function saveSandboxFile(
   } finally {
     await parent.close()
   }
+  return created
 }

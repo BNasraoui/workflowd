@@ -5,6 +5,7 @@ import { dirname } from "node:path"
 import { createHash } from "node:crypto"
 import { Schema } from "effect"
 import { SandboxTransport, sandboxSshArguments } from "./transport"
+import { submitResultTool, submitSandboxResult } from "./submission"
 
 const frameLimit = 1024 * 1024
 const timeoutMs = 5 * 60 * 1000
@@ -151,6 +152,13 @@ export async function runSandboxBridge(
             break
           case "tools/call": {
             const call = Schema.decodeUnknownSync(Call)(frame.params)
+            if (allowed.has(call.name) && call.name === submitResultTool.name) {
+              const result = await submitSandboxResult(bindingFile, transport, call.arguments)
+              outcome = result.isError ? "error" : "ok"
+              await finish()
+              await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
+              continue
+            }
             if (
               !allowed.has(call.name) ||
               call.arguments.environment_source !== transport.repositoryPath
@@ -199,7 +207,8 @@ export async function runSandboxBridge(
             allowed = new Set(
               catalog.tools.map((tool) => Schema.decodeUnknownSync(Tool)(tool).name),
             )
-            result = catalog
+            allowed.add(submitResultTool.name)
+            result = { tools: [...catalog.tools, submitResultTool] }
           } else {
             const audited = auditedOutput(result, nonce, commandTool)
             result = audited.result

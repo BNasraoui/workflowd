@@ -8,6 +8,7 @@ import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
 import { makePublishStore, type PublishIntent } from "./publish-store"
+import { readSandboxSubmission } from "./submission"
 
 export const SandboxTerminal = Schema.Struct({
   state: Schema.Literals(["completed", "cancelled", "failed", "operator_required"]),
@@ -290,9 +291,10 @@ export const makeSandboxPublisher = (
       return "approved"
     })
     const capture = Effect.fn("SandboxPublisher.capture")(function* (
-      runId: string,
+      run: AgentRunRecord,
       completion: string,
     ) {
+      const runId = run.runId
       const lease = yield* leases.read(runId)
       if (
         lease?.policy.publish === undefined ||
@@ -300,7 +302,13 @@ export const makeSandboxPublisher = (
         lease.actions_attempt === null
       )
         return yield* Effect.fail(fail())
-      const metadata = yield* remote.finishResult(runId, completion)
+      const submission = yield* Effect.tryPromise(() =>
+        readSandboxSubmission(run.directory, runId, lease.lease_id, run.nativeSessionId),
+      )
+      const metadata = yield* remote.finishResult(
+        runId,
+        submission === null ? completion : JSON.stringify(submission),
+      )
       if (!("empty" in metadata))
         yield* store.seal({
           runId,
@@ -337,7 +345,7 @@ export const makeSandboxPublisher = (
             }
         }
         if (result.state === "completed" && lease?.policy.publish !== undefined) {
-          const sealed = yield* capture(run.runId, result.finalMessage ?? "").pipe(Effect.result)
+          const sealed = yield* capture(run, result.finalMessage ?? "").pipe(Effect.result)
           if (sealed._tag === "Failure")
             result = {
               ...result,

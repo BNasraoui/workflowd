@@ -181,9 +181,21 @@ test("hostile runner frames and metadata cannot become controller capabilities",
   try {
     const original = bridgeClient(runner.transport)
     let catalog: Schema.Json
+    let bridgeCatalog: Schema.Json
     try {
       await original.initialize()
-      catalog = await original.request("tools/list")
+      bridgeCatalog = await original.request("tools/list")
+      const listed = Schema.decodeUnknownSync(Schema.Struct({ tools: Schema.Array(Schema.Json) }))(
+        bridgeCatalog,
+      )
+      // The simulated runner advertises container-use only; submit_result belongs to mint.
+      catalog = {
+        tools: listed.tools.filter(
+          (tool) =>
+            Schema.decodeUnknownSync(Schema.Struct({ name: Schema.String }))(tool).name !==
+            "submit_result",
+        ),
+      }
     } finally {
       await original.close()
     }
@@ -204,6 +216,7 @@ test("hostile runner frames and metadata cannot become controller capabilities",
     const cases = [
       [JSON.stringify({ jsonrpc: "2.0", method: "sampling/createMessage", id: 1 }) + "\n"],
       [reply(99, {})],
+      [reply(1, {}), reply(2, bridgeCatalog)],
       ["x".repeat(1024 * 1024 + 1) + "\n"],
       ['{"jsonrpc":'],
       [

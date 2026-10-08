@@ -120,6 +120,8 @@ for (const kind of ["codex", "claude"] as const) {
       name: "environment_list",
       arguments: { environment_source: "/workspace/repository" },
     })
+    const completion = { environmentId: "fixture-result", branch: "" }
+    fixture.actions.push({ name: "submit_result", arguments: completion })
     fixture.actions.push({
       name: kind === "codex" ? "exec_command" : "Bash",
       arguments: {
@@ -133,6 +135,7 @@ for (const kind of ["codex", "claude"] as const) {
       const events = await readFile(options.eventsFile, "utf8")
       expect({ status, stderr, events }).toMatchObject({ status: 0 })
       expect(events).toContain("native-fixture-complete")
+      expect((await Bun.file(join(root, "submission.json")).json()).completion).toEqual(completion)
       const frames = events
         .trim()
         .split("\n")
@@ -187,6 +190,7 @@ for (const kind of ["codex", "claude"] as const) {
       expect(await Bun.file(join(directory, "native-canary")).exists()).toBe(false)
       expect(JSON.stringify(fixture.requests.at(-1))).toContain("environment")
       expect(fixture.catalogs.flat().some((name) => name.endsWith("environment_list"))).toBe(true)
+      expect(fixture.catalogs.flat().some((name) => name.endsWith("submit_result"))).toBe(true)
       if (kind === "claude")
         expect(
           fixture.catalogs.flat().every((name) => name.startsWith("mcp__wfdlease_fixture__")),

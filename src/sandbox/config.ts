@@ -42,5 +42,5 @@ export const SandboxCompletion = Schema.Struct({
 
 export const sandboxCompletionInstructions =
   "Work only in container-use environments. Do not create git branches inside the container. " +
-  "Finish with only a JSON object containing environmentId (the exact ID of the environment holding your result) " +
+  "Finish by calling submit_result on your owned sandbox MCP server with exactly environmentId (the exact ID of the environment holding your result) " +
   "and branch (the branch name you choose). The publisher creates the branch. Do not push."

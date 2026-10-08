@@ -74,6 +74,7 @@ test("completion accepts one bare or fenced object and forwards only canonical J
         }
         const count = calls.length
         for (const completion of [
+          "",
           `Done: ${json}`,
           `${json}\nDone`,
           `Done:\n${fenced(json)}`,

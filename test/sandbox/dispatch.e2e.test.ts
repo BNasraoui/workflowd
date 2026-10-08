@@ -866,15 +866,38 @@ for (const settlement of [
                     settlement === "unknown environment" ? "absent-environment" : environmentId,
                 }),
           })
-          shared.script([], completion)
+          if (settlement === "complete") {
+            const binding = yield* Effect.tryPromise(() => readSandboxBinding(directory))
+            shared.script(
+              [
+                {
+                  name: "execute",
+                  arguments: JSON.stringify({
+                    code: `return await tools.${binding.bridgeServerName}.submit_result(${completion})`,
+                  }),
+                },
+              ],
+              "Finished the task. The result was submitted through the tool.",
+            )
+            completion = "Finished the task. The result was submitted through the tool."
+          } else shared.script([], completion)
           yield* provider.promptSession({
             ...prompt,
             text: "Report the result environment and requested branch",
           })
-          const finished = yield* idle
+          const finished = yield* provider
+            .sessionTelemetry({ sessionID: launched.nativeSessionId })
+            .pipe(
+              Effect.repeat({
+                while: (state) => !state?.idle || state.finalMessage !== completion,
+                schedule: Schedule.spaced("100 millis"),
+              }),
+              Effect.timeout("120 seconds"),
+            )
           expect(finished?.finalMessage).toBe(completion)
           const instructions = JSON.stringify(shared.requests)
           expect(instructions).toContain("environmentId")
+          expect(instructions).toContain("Finish by calling submit_result")
           expect(instructions).toContain("Do not create git branches")
           expect(instructions).toContain("publisher creates the branch")
           yield* service.observe(active)
