@@ -33,7 +33,7 @@
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.112",
     "@effect/sql-sqlite-bun": "4.0.0-rc.112",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/nats-core": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
