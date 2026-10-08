@@ -19,6 +19,9 @@ const Run = Schema.Struct({
   head_repository: Repository,
   actor: Schema.Struct({ id: Schema.Int }),
   triggering_actor: Schema.Struct({ id: Schema.Int }),
+  referenced_workflows: Schema.optionalKey(
+    Schema.Array(Schema.Struct({ path: Schema.String, sha: Schema.String })),
+  ),
   status: Schema.String,
   conclusion: Schema.NullOr(Schema.String),
 })
@@ -97,12 +100,17 @@ export const makeSandboxGithub = (
       catch: githubFailure,
     })
     const app = new App({ appId: github.appId, privateKey: key, Octokit: OctokitClass })
-    const scoped = Effect.fn("SandboxGithub.scoped")(function* (policy: SandboxPolicy) {
+    const scoped = Effect.fn("SandboxGithub.scoped")(function* (
+      policy: SandboxPolicy,
+      approval = false,
+    ) {
       const response = yield* http((signal) =>
         app.octokit.request("POST /app/installations/{installation_id}/access_tokens", {
           installation_id: policy.installationId,
           repository_ids: [policy.repositoryId],
-          permissions: { contents: "write", actions: "write" },
+          permissions: approval
+            ? { actions: "read", deployments: "write" }
+            : { contents: "write", actions: "write" },
           request: { signal },
         }),
       )
@@ -225,7 +233,14 @@ export const makeSandboxGithub = (
         run.actor.id !== policy.appActorId ||
         run.triggering_actor.id !== policy.appActorId ||
         run.event !== "push" ||
-        run.run_attempt !== 1
+        run.run_attempt !== 1 ||
+        (policy.toolingSha !== undefined &&
+          !run.referenced_workflows?.some(
+            (workflow) =>
+              workflow.sha === policy.toolingSha &&
+              workflow.path ===
+                `BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@${policy.toolingSha}`,
+          ))
       )
         return yield* Effect.fail(
           new SandboxError({ message: "Sandbox Actions run identity mismatch" }),
@@ -390,8 +405,11 @@ export const makeSandboxGithub = (
         actor_id: String(policy.appActorId),
         ref: `refs/heads/${leaseBranch(leaseId)}`,
         sha: policy.workflowSha,
-        job_workflow_sha: policy.workflowSha,
-        job_workflow_ref: `${policy.repository}/.github/workflows/agent-sandbox.yml@refs/heads/${leaseBranch(leaseId)}`,
+        job_workflow_sha: policy.toolingSha ?? policy.workflowSha,
+        job_workflow_ref:
+          policy.toolingSha === undefined
+            ? `${policy.repository}/.github/workflows/agent-sandbox.yml@refs/heads/${leaseBranch(leaseId)}`
+            : `BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@${policy.toolingSha}`,
         event_name: "push",
         runner_environment: "github-hosted",
         run_id: String(runId),
@@ -436,8 +454,13 @@ export const makeSandboxGithub = (
         const result = yield* request(
           client,
           "GET",
-          `/repos/${policy.repository}/contents/.github/workflows/${file}`,
-          { ref: policy.workflowSha },
+          `/repos/${file === "agent-sandbox.yml" && policy.toolingSha !== undefined ? "BNasraoui/workflowd" : policy.repository}/contents/.github/workflows/${file}`,
+          {
+            ref:
+              file === "agent-sandbox.yml"
+                ? (policy.toolingSha ?? policy.workflowSha)
+                : policy.workflowSha,
+          },
         )
         if (result.status !== 200)
           return yield* Effect.fail(
@@ -445,7 +468,21 @@ export const makeSandboxGithub = (
           )
       }
     })
+    const publishRequest = Effect.fn("SandboxGithub.publishRequest")(function* (
+      policy: SandboxPolicy,
+      method: "GET" | "POST",
+      path: string,
+      body: Record<string, unknown> = {},
+    ) {
+      const client = yield* scoped(policy, true)
+      const response = yield* request(client, method, `/repos/${policy.repository}/${path}`, body)
+      if (response.status < 200 || response.status >= 300)
+        return yield* Effect.fail(githubFailure())
+      return response.data
+    })
     return {
+      gateAppId: github.appId,
+      publishRequest,
       ensureRef,
       runs,
       savedRun,

@@ -76,7 +76,7 @@ describe("migration 13: kernel session store", () => {
             'kernel_working_resources', 'kernel_sessions', 'kernel_resume_requests',
             'kernel_resume_attempts', 'kernel_resume_checkpoints', 'kernel_resume_results',
             'kernel_resume_observations', 'kernel_cleanup_requests', 'kernel_cleanup_attempts',
-            'kernel_cleanup_outcomes', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations'
+            'kernel_cleanup_outcomes', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications'
           ) ORDER BY name`
         const preserved = yield* sql`SELECT instance_id FROM kernel_workflow_instances`
         const migrations = yield* sql`SELECT migration_id, name FROM effect_sql_migrations
@@ -107,9 +107,10 @@ describe("migration 13: kernel session store", () => {
       { migration_id: 30, name: "sandbox_cleanup_runs" },
       { migration_id: 31, name: "sandbox_lease_operations" },
       { migration_id: 32, name: "sandbox_ref_creation" },
+      { migration_id: 33, name: "sandbox_publications" },
     ])
     expect(result.preserved).toEqual([{ instance_id: "preserved" }])
-    expect(result.tables).toHaveLength(13)
+    expect(result.tables).toHaveLength(14)
     expect(result.tables.every(({ strict }) => strict === 1)).toBe(true)
   })
 

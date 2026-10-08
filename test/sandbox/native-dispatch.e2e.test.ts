@@ -167,9 +167,7 @@ for (const [kind, mode] of [
         expect(fixture.requests.length).toBeGreaterThan(2)
         expect(JSON.stringify(fixture.requests.at(-1))).toContain("native-tests-passed")
         expect(await Bun.file(join(run!.directory, "native-proof.txt")).exists()).toBe(false)
-        expect(await Bun.file(join(run!.directory, "result.patch")).text()).toContain(
-          "remote-native",
-        )
+        expect(await Bun.file(join(run!.directory, "result.patch")).exists()).toBe(false)
       }
     } finally {
       await runtime.dispose()

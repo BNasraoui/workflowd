@@ -22,6 +22,8 @@ import {
 import { readSandboxEndpoint, makeSandboxOpenCode, stopSandboxOpenCode } from "./opencode"
 import type { CliPort } from "../kernel/cli-process-contract"
 import { compileSandboxBridge } from "./bridge"
+import { makeSandboxPublisher, SandboxTerminal as Terminal } from "./publish"
+import { makePublishStore } from "./publish-store"
 
 export type SandboxDispatchPort = {
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
@@ -60,12 +62,6 @@ export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/S
 
 const failure = () =>
   new SandboxError({ message: "Sandbox custody operation failed; reconciliation required" })
-const Terminal = Schema.Struct({
-  state: Schema.Literals(["completed", "cancelled", "failed", "operator_required"]),
-  sessionId: Schema.NullOr(Schema.String),
-  finalMessage: Schema.NullOr(Schema.String),
-  diagnostic: Schema.String,
-})
 
 export const makeSandboxDispatch = (options: {
   readonly policies: ReadonlyArray<SandboxPolicy>
@@ -81,6 +77,9 @@ export const makeSandboxDispatch = (options: {
     const store = yield* makeSandboxStore
     const runs = yield* AgentRunStore
     const { github, leases } = options
+    const publications = yield* makePublishStore
+    const publisher = yield* makeSandboxPublisher(github, leases)
+    const continuePublication = publisher.continuePublication
     const cancelling = new Set<string>()
     const executor = makeSandboxOpenCode(options.client, options.executor)
     const nativeCli = (run: AgentRunRecord) => {
@@ -269,61 +268,33 @@ export const makeSandboxDispatch = (options: {
         if (current === null || current.nativeSessionId !== run.nativeSessionId)
           return yield* Effect.fail(failure())
         yield* stop(run)
-        const pending = yield* Effect.tryPromise(() =>
-          Bun.file(join(run.directory, "terminal.json")).exists(),
-        )
-        if (!pending) {
-          yield* Effect.tryPromise(() => mkdir(run.directory, { recursive: true, mode: 0o700 }))
-          let result = terminal
-          if (
-            terminal.state === "operator_required" &&
-            lease?.state === "released" &&
-            lease.actions_run_id === null
-          )
-            result = { ...terminal, state: "failed", diagnostic: "Sandbox ref creation rejected" }
-          if (lease?.transport != null && lease.state !== "released") {
-            const patch = yield* Effect.result(leases.artifact(run.runId))
-            if (patch._tag === "Success")
-              yield* Effect.tryPromise(() =>
-                saveSandboxFile(run.directory, "result.patch", patch.success),
-              )
-            else
-              result = {
-                ...terminal,
-                state: "operator_required",
-                diagnostic: "Sandbox artifact capture failed",
-              }
-          }
-          if (lease?.transport != null && lease.state !== "released") {
-            const audited = yield* Effect.result(leases.audit(run.runId, run.directory))
-            if (audited._tag === "Failure")
-              result = {
-                ...result,
-                state: "operator_required",
-                diagnostic: "Sandbox audit drain unconfirmed",
-              }
-          }
-          const message =
-            result.finalMessage === null
-              ? null
-              : Buffer.from(result.finalMessage).subarray(0, 1048573).toString("utf8")
-          yield* Effect.tryPromise(() => saveSandboxFile(run.directory, "final.txt", message ?? ""))
-          yield* Effect.tryPromise(() =>
-            saveSandboxFile(
-              run.directory,
-              "terminal.json",
-              JSON.stringify({ ...result, finalMessage: message }),
-              true,
-            ),
-          )
+        if (
+          lease?.policy.publish !== undefined &&
+          (yield* publications.read(run.runId)) !== null &&
+          terminal.state !== "cancelled"
+        ) {
+          if (!(yield* continuePublication(run))) yield* leases.release(run.runId)
+          yield* publish(run)
+          return
         }
+        yield* publisher.saveTerminal(run, terminal)
         yield* stop(run)
-        if (lease !== null) yield* leases.release(run.runId)
+        if (lease !== null && !(yield* continuePublication(run, terminal.state === "cancelled")))
+          yield* leases.release(run.runId)
         yield* publish(run)
       }).pipe(
         Effect.onError(() =>
           stop(run).pipe(
-            Effect.andThen(leases.release(run.runId).pipe(Effect.ignore)),
+            Effect.andThen(
+              Effect.gen(function* () {
+                const lease = yield* store.read(run.runId)
+                if (
+                  lease?.policy.publish === undefined ||
+                  (yield* publications.read(run.runId)) === null
+                )
+                  yield* leases.release(run.runId).pipe(Effect.ignore)
+              }),
+            ),
             Effect.ignore,
           ),
         ),
@@ -365,7 +336,10 @@ export const makeSandboxDispatch = (options: {
           await mkdir(run.directory, { mode: 0o700 })
         })
         yield* github.verifyWorkflow(policy)
-        const sourceSha = yield* github.resolveSource(policy, run.baseRef ?? "HEAD")
+        const sourceSha = yield* github.resolveSource(
+          policy,
+          policy.publish?.baseRef ?? run.baseRef ?? "HEAD",
+        )
         yield* store.request({
           runId: run.runId,
           leaseId: run.runId,
@@ -417,7 +391,10 @@ export const makeSandboxDispatch = (options: {
           return yield* Effect.fail(failure())
         const locationIdentity = yield* executor.reserve(run.directory)
         yield* github.verifyWorkflow(policy)
-        const sourceSha = yield* github.resolveSource(policy, run.baseRef ?? "HEAD")
+        const sourceSha = yield* github.resolveSource(
+          policy,
+          policy.publish?.baseRef ?? run.baseRef ?? "HEAD",
+        )
         yield* store.request({
           runId: run.runId,
           leaseId: run.runId,
@@ -503,6 +480,7 @@ export const makeSandboxDispatch = (options: {
         )
         if (pending) {
           yield* stop(run)
+          if (yield* continuePublication(run)) return
           yield* leases.release(run.runId)
           yield* publish(run)
           return
@@ -567,7 +545,11 @@ export const makeSandboxDispatch = (options: {
     }
     const heartbeat = Effect.gen(function* () {
       for (const lease of yield* store.active())
-        if (lease.state === "ready") yield* leases.heartbeat(lease.run_id).pipe(Effect.ignore)
+        if (
+          lease.state === "ready" &&
+          (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
+        )
+          yield* leases.heartbeat(lease.run_id).pipe(Effect.ignore)
     }).pipe(Effect.mapError(failure))
     const iteration = Effect.gen(function* () {
       // Observe sessions before inventory; failure to inventory never proves release.

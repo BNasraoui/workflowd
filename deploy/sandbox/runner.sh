@@ -58,7 +58,7 @@ expected = {
     'actor_id': os.environ['GITHUB_ACTOR_ID'], 'event_name': 'push',
     'ref': ref, 'sha': os.environ['GITHUB_SHA'],
     'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
-    'job_workflow_sha': os.environ['GITHUB_SHA'], 'runner_environment': 'github-hosted',
+    'job_workflow_sha': os.environ.get('SANDBOX_TOOLING_SHA', os.environ['GITHUB_SHA']), 'runner_environment': 'github-hosted',
 }
 assert all(claims.get(key) == value for key, value in expected.items()), 'OIDC claim mismatch'
 expected_sub = 'repo:' + os.environ['GITHUB_REPOSITORY_OWNER'] + '@' + os.environ['GITHUB_REPOSITORY_OWNER_ID'] + '/' + os.environ['GITHUB_REPOSITORY'].split('/')[1] + '@' + os.environ['GITHUB_REPOSITORY_ID'] + ':ref:' + ref
@@ -104,6 +104,21 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
       printf '%s\n' "$source_sha" > /run/workflowd-sandbox/source.sha
     fi
     printf '%s\n' "$source_sha"
+    ;;
+  finish-result)
+    source_sha=$(cat /run/workflowd-sandbox/source.sha)
+    docker exec -i workflowd-sandbox-tooling python3 /usr/local/lib/workflowd-result.py seal \
+      /workspace/repository /tmp/workflowd-result "$source_sha" > /run/workflowd-sandbox/result-metadata.json
+    if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open("/run/workflowd-sandbox/result-metadata.json")).get("empty") else 1)'; then
+      mkdir -p /run/workflowd-sandbox/result
+      docker cp workflowd-sandbox-tooling:/tmp/workflowd-result/. /run/workflowd-sandbox/result/ >/dev/null
+    fi
+    cat /run/workflowd-sandbox/result-metadata.json
+    ;;
+  finish)
+    test -s /run/workflowd-sandbox/result/result.json
+    test -s /run/workflowd-sandbox/result/result.bundle
+    touch /run/workflowd-sandbox/finished
     ;;
   heartbeat)
     date +%s > /run/workflowd-sandbox/heartbeat
@@ -172,6 +187,7 @@ else:
     heartbeat = root / "heartbeat"
     heartbeat.write_text(str(int(time.time())))
     while time.time() - int(heartbeat.read_text()) < 120:
+        if (root / "finished").exists(): break
         with lock.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             data = state()

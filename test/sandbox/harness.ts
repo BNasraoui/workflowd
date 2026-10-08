@@ -261,6 +261,7 @@ export async function sandboxGithubFixture(
     format: "pem",
   })
   await writeFile(privateKeyPath, key, { mode: 0o600 })
+  let publication: ((request: Request) => Promise<Response | undefined>) | undefined
   let ref: string | null = null
   let refCreates = 0
   let refDeletes = 0
@@ -323,6 +324,8 @@ export async function sandboxGithubFixture(
           fork: false,
           private: false,
         })
+      const publicationResponse = await publication?.(request)
+      if (publicationResponse !== undefined) return publicationResponse
       if (path.includes("/commits/")) return Response.json({ sha: sourceSha })
       if (path.includes("/contents/.github/workflows/")) return Response.json({ type: "file" })
       if (path.endsWith("/git/refs") && request.method === "POST") {
@@ -403,6 +406,9 @@ export async function sandboxGithubFixture(
     github: { appId: 1, privateKeyPath },
     apiUrl: server.url.toString(),
     tokenRequests,
+    publication: (handler: (request: Request) => Promise<Response | undefined>) => {
+      publication = handler
+    },
     cancellations,
     savedRunRequests,
     beforeCancel: (check: (id: number) => Promise<void>) => {
@@ -475,7 +481,7 @@ export async function dispatchRunnerFixture() {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\ntest "$1" = exec\ntest "$2" = workflowd-sandbox-tooling\nshift 2\ncd /workspace/repository\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /tmp/workflowd-result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd /workspace/repository\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
@@ -769,7 +775,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\ntest "$1" = exec\ntest "$2" = workflowd-sandbox-tooling\nshift 2\ncd /workspace/repository\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /tmp/workflowd-result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd /workspace/repository\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
@@ -854,5 +860,119 @@ export async function leaseRunnerFixture(repositoryName: string) {
   } catch (error) {
     await runner.close()
     throw error
+  }
+}
+
+export function sandboxPublicationFixture(
+  fixture: Awaited<ReturnType<typeof sandboxGithubFixture>>,
+  policy: import("../../src/sandbox/config").SandboxPolicy,
+  leaseId = "lease-1",
+  fault = "none",
+) {
+  let reviews: unknown[] = []
+  let posts = 0
+  let waiting = false
+  let downloads = 0
+  fixture.publication(async (request) => {
+    const path = new URL(request.url).pathname
+    if (path.endsWith("/deployment_protection_rule")) {
+      posts++
+      const body = Schema.decodeUnknownSync(Schema.Struct({ comment: Schema.String }))(
+        await request.json(),
+      )
+      reviews = [
+        {
+          state: "approved",
+          comment: fault === "wrong approval" ? "{}" : body.comment,
+          user: { id: policy.appActorId, type: "Bot" },
+          environments: [{ id: 9, name: "agent-publish" }],
+        },
+      ]
+      return new Response(null, { status: fault === "lost approval" ? 502 : 204 })
+    }
+    if (path.endsWith("/approvals")) return Response.json(reviews)
+    if (path.endsWith("/pending_deployments"))
+      return Response.json([
+        { environment: { id: 9, name: "agent-publish" }, wait_timer: 0, reviewers: [] },
+      ])
+    if (path.endsWith("/deployment_protection_rules"))
+      return Response.json({
+        total_count: 1,
+        custom_deployment_protection_rules: [{ enabled: true, app: { id: 1, slug: "gate-app" } }],
+      })
+    if (path.endsWith("/deployment-branch-policies"))
+      return Response.json({
+        total_count: 1,
+        branch_policies: [{ name: "workflowd/leases/*", type: "branch" }],
+      })
+    if (path.endsWith("/environments/agent-publish"))
+      return Response.json({
+        id: fault === "wrong environment" ? 10 : 9,
+        name: "agent-publish",
+        can_admins_bypass: false,
+        deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+        protection_rules: [],
+      })
+    if (path.endsWith("/jobs"))
+      return Response.json({
+        total_count: 2,
+        jobs: [
+          {
+            name: "sandbox / runner",
+            run_id: 41,
+            run_attempt: 1,
+            head_sha: policy.workflowSha,
+            status: "completed",
+            conclusion: fault === "bad job" ? "failure" : "success",
+          },
+          {
+            name: "sandbox / agent-publish",
+            run_id: 41,
+            run_attempt: 1,
+            head_sha: policy.workflowSha,
+            status: posts && !waiting ? "completed" : "waiting",
+            conclusion: posts && !waiting ? "success" : null,
+          },
+        ],
+      })
+    if (path.endsWith("/artifacts"))
+      return Response.json({
+        total_count: 1,
+        artifacts: [
+          {
+            id: posts && fault === "artifact replaced" ? 53 : 52,
+            name: "sandbox-result-41-1",
+            digest: "sha256:" + "f".repeat(64),
+            size_in_bytes: 100,
+            expired: false,
+            workflow_run: {
+              id: fault === "foreign artifact" ? 42 : 41,
+              repository_id: policy.repositoryId,
+              head_repository_id: policy.repositoryId,
+              head_sha: policy.workflowSha,
+              head_branch: `workflowd/leases/${leaseId}`,
+            },
+          },
+        ],
+      })
+    if (path.endsWith("/zip")) {
+      downloads++
+      return new Response("not permitted")
+    }
+    return undefined
+  })
+  return {
+    get reviews() {
+      return reviews
+    },
+    get posts() {
+      return posts
+    },
+    get downloads() {
+      return downloads
+    },
+    wait: (value: boolean) => {
+      waiting = value
+    },
   }
 }

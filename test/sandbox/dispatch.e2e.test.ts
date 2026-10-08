@@ -16,7 +16,12 @@ import { WorkflowStoreLive } from "../../src/store"
 import { makeSandboxStore, SandboxError } from "../../src/sandbox/store"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
-import { dispatchRunnerFixture, sandboxGithubFixture, sandboxIngressFixtureLayer } from "./harness"
+import {
+  dispatchRunnerFixture,
+  sandboxGithubFixture,
+  sandboxIngressFixtureLayer,
+  sandboxPublicationFixture,
+} from "./harness"
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { sharedOpenCodeFixture } from "./opencode-fixture"
 import {
@@ -650,208 +655,263 @@ test("sandbox dispatch keeps mint workspace custody and prompts without worker m
   })
 })
 
-test("shared executor session captures an inert patch and releases before publishing its terminal mailbox", async () => {
-  const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
-  const runner = await dispatchRunnerFixture()
-  const fixture = await sandboxGithubFixture(policy, runner.name)
-  const shared = await sharedOpenCodeFixture("dispatch")
-  const directory = join(runner.root, "control")
-  const base = WorkflowStoreLive.pipe(
-    Layer.provideMerge(SqliteClient.layer({ filename: join(runner.root, "coordinator.sqlite") })),
-  )
-  const stores = Layer.merge(AgentRunStoreLive, KernelSessionStoreLive).pipe(
-    Layer.provideMerge(base),
-  )
-  try {
-    // The lease acquisition boundary is proven separately against the same real SSH fixture.
-    // This starts from its ready custody and exercises the actual session coordinator.
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const runs = yield* AgentRunStore
-        const store = yield* makeSandboxStore
-        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
-        const leases = yield* makeSandboxLeaseService(github, directory)
-        const service = yield* makeSandboxDispatch({
-          policies: [policy],
-          github,
-          leases,
-          executor: {
-            ...shared.executor,
-            createSession: (input) =>
-              Effect.gen(function* () {
-                expect(input.id).toBeDefined()
-                const reservation = yield* store.bySession(input.id ?? "")
-                expect(reservation?.run_id).toBe("run-1")
-                expect(reservation?.unit).toBeNull()
-                const binding = yield* Effect.tryPromise(() => readSandboxBinding(input.directory))
-                expect(binding.state).toBe("reserved")
-                expect(binding.sessionId).toBe(input.id ?? "")
-                return yield* shared.executor.createSession(input)
-              }).pipe(Effect.orDie),
-          },
-          client: shared.client,
-          executorId: "opencode:opencode-primary",
-          endpointIdentity: shared.url,
-        })
-        yield* runs.create(sandboxRun(directory, "gpt-6-astra-fixture", "Write a proof file"))
-        yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
-        yield* store.request({
-          runId: "run-1",
-          leaseId: runner.name,
-          policy,
-          sourceSha: "b".repeat(40),
-          now: Date.now(),
-        })
-        yield* store.beginStart("run-1")
-        yield* store.recordRun("run-1", 41, 1)
-        yield* store.bind("run-1", 41, 1, runner.transport)
-        const run = (yield* runs.read("run-1"))!
-        const launched = yield* service.launch(run, {
-          providerID: "openai",
-          modelID: "gpt-6-astra-fixture",
-        })
-        const sessions = yield* KernelSessionStore
-        yield* sessions.registerResource({
-          resourceId: "resource",
-          owningHostId: "mint",
-          absolutePath: directory,
-          kind: "workspace",
-          createdAt: new Date(),
-        })
-        yield* sessions.registerSession({
-          sessionId: `opencode-session-${launched.nativeSessionId}`,
-          nativeSessionId: launched.nativeSessionId,
-          resourceId: "resource",
-          providerKind: "opencode",
-          providerVersion: 1,
-          providerId: "sandbox",
-          serverId: "sandbox",
-          endpointAlias: "sandbox",
-          endpointIdentity: shared.url,
-          owningHostId: "mint",
-          createdAt: new Date(),
-        })
-        yield* runs.markSpawned({
-          runId: "run-1",
-          nativeSessionId: launched.nativeSessionId,
-          sessionId: `opencode-session-${launched.nativeSessionId}`,
-          resourceId: "resource",
-          now: new Date(),
-        })
-        const provider = yield* service.provider(launched.nativeSessionId)
-        const binding = yield* Effect.tryPromise(() => readSandboxBinding(directory))
-        expect(binding).toMatchObject({
-          state: "active",
-          executorId: "opencode:opencode-primary",
-          endpointIdentity: shared.url,
-          repositoryId: policy.repositoryId,
-          sourceSha: "b".repeat(40),
-        })
-        const prompt = {
-          sessionID: launched.nativeSessionId,
-          directory,
-          agent: "sandbox",
-          model: { providerID: "openai", modelID: "gpt-6-astra-fixture" },
-          text: "Must stay confined",
-        }
-        for (const mutation of [
-          { agent: "build" },
-          { directory: shared.root },
-          { sessionID: "ses_foreign" },
-        ]) {
-          expect(
-            (yield* Effect.result(provider.promptSession({ ...prompt, ...mutation })))._tag,
-          ).toBe("Failure")
-        }
-        yield* Effect.tryPromise(() =>
-          assertBridgeBinding(join(bindingDirectory(directory), "binding.json"), runner.transport),
-        )
-        yield* Effect.tryPromise(async () => {
-          await expect(
-            assertBridgeBinding(join(bindingDirectory(directory), "binding.json"), {
-              ...runner.transport,
-              leaseId: "foreign",
-            }),
-          ).rejects.toThrow("different transport")
-        })
-        shared.script(
-          [
-            {
-              name: "execute",
-              arguments: JSON.stringify({
-                code: `const env = JSON.parse(await tools["${sandboxBridgeName(runner.name)}"].environment_create({ environment_source: "/workspace/repository", title: "Dispatch fixture" })); return await tools["${sandboxBridgeName(runner.name)}"].environment_run_cmd({environment_source: "/workspace/repository", environment_id: env.id, command: "printf dispatch-proof > proof.txt"});`,
-              }),
+for (const settlement of ["complete", "cancel"] as const)
+  test(`protected publisher ${settlement} retains custody through restart and sends one terminal mailbox`, async () => {
+    const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
+    const runner = await dispatchRunnerFixture()
+    const publicationPolicy = {
+      ...policy,
+      publish: {
+        baseRef: "main",
+        environmentId: 9,
+        publisherAppId: 5232172,
+        publisherActorId: 339414993,
+      },
+    }
+    const fixture = await sandboxGithubFixture(publicationPolicy, runner.name)
+    const publication = sandboxPublicationFixture(fixture, publicationPolicy, runner.name)
+    publication.wait(true)
+    const sourceSha = await runner.docker(
+      "exec",
+      `${runner.name}-runner`,
+      "git",
+      "rev-parse",
+      "HEAD",
+    )
+    fixture.source(sourceSha)
+    await runner.docker(
+      "exec",
+      `${runner.name}-runner`,
+      "sh",
+      "-c",
+      'printf "%s" "$1" > /run/workflowd-sandbox/source.sha',
+      "_",
+      sourceSha,
+    )
+    const completion = JSON.stringify({ branch: "agent choice/$() 雪" })
+    const shared = await sharedOpenCodeFixture("dispatch")
+    const directory = join(runner.root, "control")
+    const base = WorkflowStoreLive.pipe(
+      Layer.provideMerge(SqliteClient.layer({ filename: join(runner.root, "coordinator.sqlite") })),
+    )
+    const stores = Layer.merge(AgentRunStoreLive, KernelSessionStoreLive).pipe(
+      Layer.provideMerge(base),
+    )
+    try {
+      // The lease acquisition boundary is proven separately against the same real SSH fixture.
+      // This starts from its ready custody and exercises the actual session coordinator.
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const runs = yield* AgentRunStore
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          const leases = yield* makeSandboxLeaseService(github, directory)
+          const service = yield* makeSandboxDispatch({
+            policies: [publicationPolicy],
+            github,
+            leases,
+            executor: {
+              ...shared.executor,
+              createSession: (input) =>
+                Effect.gen(function* () {
+                  expect(input.id).toBeDefined()
+                  const reservation = yield* store.bySession(input.id ?? "")
+                  expect(reservation?.run_id).toBe("run-1")
+                  expect(reservation?.unit).toBeNull()
+                  const binding = yield* Effect.tryPromise(() =>
+                    readSandboxBinding(input.directory),
+                  )
+                  expect(binding.state).toBe("reserved")
+                  expect(binding.sessionId).toBe(input.id ?? "")
+                  return yield* shared.executor.createSession(input)
+                }).pipe(Effect.orDie),
             },
-          ],
-          "sandbox dispatch complete",
-        )
-        yield* provider.promptSession({
-          sessionID: launched.nativeSessionId,
-          directory,
-          agent: "sandbox",
-          model: { providerID: "openai", modelID: "gpt-6-astra-fixture" },
-          text: "Write a proof file",
-        })
-        yield* runs.markVerified({ runId: "run-1", outputTokens: 1, now: new Date() })
-        const active = (yield* runs.read("run-1"))!
-        const finished = yield* provider
-          .sessionTelemetry({ sessionID: launched.nativeSessionId })
-          .pipe(
-            Effect.repeat({
-              while: (state) => !state?.idle,
-              schedule: Schedule.spaced("100 millis"),
-            }),
-            Effect.timeout("120 seconds"),
-          )
-        expect(finished?.finalMessage).toBe("sandbox dispatch complete")
-        yield* service.observe(active)
-        const sql = yield* SqlClient.SqlClient
-        expect(
-          yield* sql`SELECT id FROM resident_inbox WHERE id='agent-run-end-run-1'`,
-        ).toHaveLength(0)
-        expect((yield* store.read("run-1"))?.state).toBe("releasing")
-        fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
-        yield* service.iteration
-        expect((yield* runs.read("run-1"))?.state).toBe("completed")
-        const mail = yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
-        expect(String(mail[0]?.prompt)).toContain("sandbox dispatch complete")
-        expect(
-          yield* Effect.tryPromise(() => Bun.file(join(directory, "result.patch")).text()),
-        ).toContain("dispatch-proof")
-        expect(
-          (yield* Effect.tryPromise(() =>
-            Bun.file(join(directory, "result.patch")).text(),
-          )).endsWith("\n"),
-        ).toBe(true)
-        expect(
-          yield* Effect.tryPromise(() => Bun.file(join(directory, "proof.txt")).exists()),
-        ).toBe(false)
-        expect((yield* store.read("run-1"))?.state).toBe("released")
-        expect((yield* Effect.tryPromise(() => readSandboxBinding(directory))).state).toBe(
-          "revoked",
-        )
-        expect((yield* Effect.result(provider.promptSession(prompt)))._tag).toBe("Failure")
-        yield* Effect.tryPromise(async () => {
-          await expect(writeSandboxBinding(binding)).rejects.toThrow("revoked")
-          await expect(
+            client: shared.client,
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+          })
+          yield* runs.create(sandboxRun(directory, "gpt-6-astra-fixture", "Write a proof file"))
+          yield* runs.claimSpawn({ runId: "run-1", now: new Date() })
+          yield* store.request({
+            runId: "run-1",
+            leaseId: runner.name,
+            policy: publicationPolicy,
+            sourceSha,
+            now: Date.now(),
+          })
+          yield* store.beginStart("run-1")
+          yield* store.recordRun("run-1", 41, 1)
+          yield* store.bind("run-1", 41, 1, runner.transport)
+          const run = (yield* runs.read("run-1"))!
+          const launched = yield* service.launch(run, {
+            providerID: "openai",
+            modelID: "gpt-6-astra-fixture",
+          })
+          const sessions = yield* KernelSessionStore
+          yield* sessions.registerResource({
+            resourceId: "resource",
+            owningHostId: "mint",
+            absolutePath: directory,
+            kind: "workspace",
+            createdAt: new Date(),
+          })
+          yield* sessions.registerSession({
+            sessionId: `opencode-session-${launched.nativeSessionId}`,
+            nativeSessionId: launched.nativeSessionId,
+            resourceId: "resource",
+            providerKind: "opencode",
+            providerVersion: 1,
+            providerId: "sandbox",
+            serverId: "sandbox",
+            endpointAlias: "sandbox",
+            endpointIdentity: shared.url,
+            owningHostId: "mint",
+            createdAt: new Date(),
+          })
+          yield* runs.markSpawned({
+            runId: "run-1",
+            nativeSessionId: launched.nativeSessionId,
+            sessionId: `opencode-session-${launched.nativeSessionId}`,
+            resourceId: "resource",
+            now: new Date(),
+          })
+          const provider = yield* service.provider(launched.nativeSessionId)
+          const binding = yield* Effect.tryPromise(() => readSandboxBinding(directory))
+          expect(binding).toMatchObject({
+            state: "active",
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+            repositoryId: policy.repositoryId,
+            sourceSha,
+          })
+          const prompt = {
+            sessionID: launched.nativeSessionId,
+            directory,
+            agent: "sandbox",
+            model: { providerID: "openai", modelID: "gpt-6-astra-fixture" },
+            text: "Must stay confined",
+          }
+          for (const mutation of [
+            { agent: "build" },
+            { directory: shared.root },
+            { sessionID: "ses_foreign" },
+          ]) {
+            expect(
+              (yield* Effect.result(provider.promptSession({ ...prompt, ...mutation })))._tag,
+            ).toBe("Failure")
+          }
+          yield* Effect.tryPromise(() =>
             assertBridgeBinding(
               join(bindingDirectory(directory), "binding.json"),
               runner.transport,
             ),
-          ).rejects.toThrow("revoked")
-        })
-      }).pipe(Effect.provide(stores)),
-    )
-  } finally {
-    await shared.close()
-    await rm(bindingDirectory(directory), { recursive: true, force: true })
-    await fixture.close()
-    await runner.close()
-  }
-}, 180000)
+          )
+          yield* Effect.tryPromise(async () => {
+            await expect(
+              assertBridgeBinding(join(bindingDirectory(directory), "binding.json"), {
+                ...runner.transport,
+                leaseId: "foreign",
+              }),
+            ).rejects.toThrow("different transport")
+          })
+          shared.script(
+            [
+              {
+                name: "execute",
+                arguments: JSON.stringify({
+                  code: `const env = JSON.parse(await tools["${sandboxBridgeName(runner.name)}"].environment_create({ environment_source: "/workspace/repository", title: "Dispatch fixture" })); return await tools["${sandboxBridgeName(runner.name)}"].environment_run_cmd({environment_source: "/workspace/repository", environment_id: env.id, command: "printf dispatch-proof > proof.txt"});`,
+                }),
+              },
+            ],
+            completion,
+          )
+          yield* provider.promptSession({
+            sessionID: launched.nativeSessionId,
+            directory,
+            agent: "sandbox",
+            model: { providerID: "openai", modelID: "gpt-6-astra-fixture" },
+            text: "Write a proof file",
+          })
+          yield* runs.markVerified({ runId: "run-1", outputTokens: 1, now: new Date() })
+          const active = (yield* runs.read("run-1"))!
+          const finished = yield* provider
+            .sessionTelemetry({ sessionID: launched.nativeSessionId })
+            .pipe(
+              Effect.repeat({
+                while: (state) => !state?.idle,
+                schedule: Schedule.spaced("100 millis"),
+              }),
+              Effect.timeout("120 seconds"),
+            )
+          expect(finished?.finalMessage).toBe(completion)
+          yield* service.observe(active)
+          const sql = yield* SqlClient.SqlClient
+          expect(
+            yield* sql`SELECT id FROM resident_inbox WHERE id='agent-run-end-run-1'`,
+          ).toHaveLength(0)
+          expect((yield* store.read("run-1"))?.state).toBe("ready")
+          expect(fixture.cancellations).toEqual([])
+          expect(publication.posts).toBe(1)
+          if (settlement === "complete")
+            yield* Effect.tryPromise(() => rm(join(directory, "terminal.json")))
+          const resumed = yield* makeSandboxDispatch({
+            policies: [publicationPolicy],
+            github,
+            leases,
+            executor: shared.executor,
+            client: shared.client,
+            executorId: "opencode:opencode-primary",
+            endpointIdentity: shared.url,
+          })
+          yield* resumed.heartbeat
+          expect(fixture.cancellations).toEqual([])
+          expect((yield* runs.read("run-1"))?.state).toBe("verified")
+          if (settlement === "cancel") yield* resumed.cancel(active)
+          else publication.wait(false)
+          fixture.mutateRun({
+            status: "completed",
+            conclusion: settlement === "cancel" ? "cancelled" : "success",
+          })
+          yield* resumed.iteration
+          expect((yield* runs.read("run-1"))?.state).toBe(
+            settlement === "cancel" ? "cancelled" : "completed",
+          )
+          expect(publication.posts).toBe(1)
+          const mail = yield* sql`SELECT prompt FROM resident_inbox WHERE id='agent-run-end-run-1'`
+          expect(mail).toHaveLength(1)
+          if (settlement === "complete") expect(String(mail[0]?.prompt)).toContain("agent choice")
+          expect(
+            yield* Effect.tryPromise(() => Bun.file(join(directory, "result.patch")).exists()),
+          ).toBe(false)
+          expect(
+            yield* Effect.tryPromise(() => Bun.file(join(directory, "proof.txt")).exists()),
+          ).toBe(false)
+          expect((yield* store.read("run-1"))?.state).toBe("released")
+          expect((yield* Effect.tryPromise(() => readSandboxBinding(directory))).state).toBe(
+            "revoked",
+          )
+          expect((yield* Effect.result(provider.promptSession(prompt)))._tag).toBe("Failure")
+          yield* Effect.tryPromise(async () => {
+            await expect(writeSandboxBinding(binding)).rejects.toThrow("revoked")
+            await expect(
+              assertBridgeBinding(
+                join(bindingDirectory(directory), "binding.json"),
+                runner.transport,
+              ),
+            ).rejects.toThrow("revoked")
+          })
+        }).pipe(Effect.provide(stores)),
+      )
+    } finally {
+      await shared.close()
+      await rm(bindingDirectory(directory), { recursive: true, force: true })
+      await fixture.close()
+      await runner.close()
+    }
+  }, 180000)
 
 for (const reason of ["missing endpoint", "deadline", "cancel"])
-  test(`sandbox ${reason} retains artifacts and confirms release before its terminal mailbox`, async () => {
+  test(`sandbox ${reason} retains no code on mint and confirms release before its terminal mailbox`, async () => {
     const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
     const directory = await mkdtemp(join(tmpdir(), "sandbox-terminal-"))
     const fixture = await sandboxGithubFixture(policy)
@@ -937,12 +997,8 @@ for (const reason of ["missing endpoint", "deadline", "cancel"])
           expect(yield* sql`SELECT * FROM resident_inbox`).toEqual([])
           expect((yield* store.read("run-1"))?.state).toBe("releasing")
           expect(
-            new Uint8Array(
-              yield* Effect.tryPromise(() =>
-                Bun.file(join(directory, "result.patch")).arrayBuffer(),
-              ),
-            ),
-          ).toEqual(bytes)
+            yield* Effect.tryPromise(() => Bun.file(join(directory, "result.patch")).exists()),
+          ).toBe(false)
           fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
           yield* service.iteration
           expect((yield* store.read("run-1"))?.state).toBe("released")

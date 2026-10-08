@@ -1,11 +1,17 @@
 # Sandbox audit and PR execution
 
-Phase D1 adds audit delivery and unprivileged PR execution. Publication remains disabled;
-Phase D2 requires operator setup and a coordinator re-pin before live probes. Workers do
-not change rulesets, App grants, workflow pins, production configuration or installed
-agents. After the D1 candidate passes exact-head CI, the coordinator must record a
-superseding pin before another live lease. The current pin remains
-`1dfc34c2742ede3d1499b8bcd303fd487c2a3f7d` until that happens.
+D1 is accepted and pinned at `30c864febd464f1ed91424742bbf9d74f4d1de82`.
+This D2 candidate implements the canary gate, before write-token minting or real PR
+publication. The coordinator must re-pin this candidate after exact-head CI before
+running any lease or probe. Workers do not change production configuration, Apps,
+environments, rulesets or pins.
+
+The publish App is **ghettimonster**, App ID **5232172**, bot **339414993**
+(`ghettimonster[bot]`). Its variable is `GHETTIMONSTER_APP_ID`; the eventual key is
+`GHETTIMONSTER_PRIVATE_KEY`, only in the protected environment. The candidate never
+references that key in its workflow or mints a token. Ben has provisioned the workflowd
+canary environment; rulesets and private-key provisioning remain operator work after
+the canary gate.
 
 ## Command status and public audit
 
@@ -39,8 +45,10 @@ advances its acknowledgement watermark. SSH receives only that watermark. Replay
 the same record does not print it again. A crash between stdout emission and checkpoint
 can repeat a line; correlate/deduplicate by run, lease and sequence.
 
-Settlement stops/revokes the session, captures the inert patch, drains the canonical
-audit through the hold process, and only then requests Actions cancellation. Missing
+Settlement stops/revokes the session and drains the canonical audit through the hold
+process. For policies with `publish`, a successful agent completion seals its result
+on the runner and ends hold normally. Other terminal outcomes clean up without approval.
+No patch or bundle is downloaded to mint. Missing
 or failed audit acknowledgement preserves an `operator_required` result while lease
 cleanup still proceeds. The drain has a 30-second deadline; a large backlog that cannot
 be confirmed within it requires operator review, never invented success. Mint's records
@@ -90,4 +98,63 @@ No live GitHub-hosted lease is acquired before the coordinator's re-pin.
 Run focused audit/CI-policy/workflow/transport/runner-init tests and the full repository
 check in transient systemd user units capped at `MemoryMax=6G`, `MemorySwapMax=0`.
 The approved reviewer decision requires polling exact-head CI and stopping for the
-coordinator after D1. Do not subscribe to CI for this stage.
+coordinator at the canary gate. Do not subscribe to CI for this stage.
+
+## Canary publication contract
+
+A configured `publish` policy supplies the PR base ref, environment ID and publisher
+App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;
+it defaults to `workflowSha`. The base tip is recorded before dispatch. There is no
+result branch input in policy or dispatch. The agent chooses the name and finishes with
+a JSON object whose sole field is `branch`. Names pass unchanged through JSON; GitHub
+will decide ref validity and collision protection when real publication is enabled.
+
+After session quiescence and audit acknowledgement, the fixed runner control seals the
+single container-use result in `result.bundle` and `result.json`. Only source/result
+SHAs, the name and content digests return over SSH. No result or an ambiguous result
+fails; an unchanged source explicitly produces no publication. The lease uploads the
+artifact and a fresh `agent-publish` job waits on its environment. It has Actions read
+and Contents read, no Tailscale, OIDC, shared cache, inherited secrets or agent checkout.
+
+Migration 33 stores metadata-only immutable publication intents. Approval checks the
+owned run, attempt, source, workflow identity, successful runner job, immutable artifact
+identity, expected custom rule and environment settings. The gate App uses a separate
+repository token with Actions read and Deployments write. Approval is an exact
+result-binding JSON comment. Its intent is saved before POST; a lost response is
+recovered by reading the matching review, never by blindly repeating the POST. The
+publisher checks the authenticated bot ID and review state, run/attempt and artifact
+identity before downloading. The bootstrap deliberately fails closed if custom-only
+pending deployments or custom approval comments are unavailable via these APIs.
+
+The fresh job bounds and hashes the ZIP, permits exactly two regular entries, and
+validates the manifest/bundle against the approval. A clean bare Git repository imports
+the trusted source anonymously, without checking out agent code, and inspects every new
+commit. Forbidden paths, hidden forbidden intermediate changes, symlinks, submodules,
+mode changes, extra bundle heads, unrelated/nonlinear history and content limits fail.
+Only the following step receives the harmless `PUBLISH_PROBE_CANARY`. It checks secret
+presence without printing its value, then exits. There is no push or PR API in this
+candidate. Ruleset enforcement, ref collision/race tests, push/PR recovery and real draft
+PR receipts remain gated on the canary result and subsequent operator key/rule setup.
+
+Pending publication retains lease custody and stops SSH heartbeats. Restart uses the
+saved intent and deadline; cancellation terminates the waiting Actions run. Missing or
+mismatched review evidence retains custody until reconciliation or deadline. Successful
+canary, failure or cancellation still confirms Actions termination and lease-ref
+absence before terminal mailbox delivery. Historical capture-only rows are not backfilled.
+
+After the coordinator re-pin, use the existing proof environment with one repository
+policy, its nonsecret Tailscale evidence and a `publish` block. The verifier uses the
+existing authenticated dispatch path and takes the same explicit executor/model options
+as the live verifier:
+
+```bash
+bun scripts/evidence/agent-sandbox.mjs --probe-publish --executor opencode:opencode-primary --model "$OPENCODE_MODEL"
+```
+
+Run this in a uniquely named transient user unit with `MemoryMax=6G` and
+`MemorySwapMax=0`. It checks that the lease has neither the canary nor the publish key,
+that the gate released only its bound result, and that the binding, Actions run and
+lease ref were cleaned up. Evidence contains metadata, audit records and Actions logs,
+never a downloaded patch or bundle. `--live` cannot perform real publishing in this
+bootstrap candidate. A failed canary requires review; there is no manual-approval or
+webhook fallback.

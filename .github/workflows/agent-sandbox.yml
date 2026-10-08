@@ -3,6 +3,9 @@ name: Disposable agent runner
 on:
   workflow_call:
     inputs:
+      tooling-sha:
+        type: string
+        required: false
       repository-id:
         type: string
         required: true
@@ -35,7 +38,8 @@ jobs:
       - name: Check out pinned tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ github.sha }}
+          repository: BNasraoui/workflowd
+          ref: ${{ inputs.tooling-sha || github.sha }}
           persist-credentials: false
           sparse-checkout: deploy/sandbox
       - name: Join the restricted tailnet
@@ -55,6 +59,7 @@ jobs:
         run: sudo tailscale set --accept-routes=false
       - name: Prepare the disposable tooling
         env:
+          SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
         run: bash deploy/sandbox/runner.sh prepare
       - name: Publish fixed readiness metadata
@@ -66,6 +71,43 @@ jobs:
           retention-days: 1
       - name: Hold the lease while mint sends heartbeats
         run: /usr/local/bin/container-use hold
+      - name: Upload sealed result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /run/workflowd-sandbox/result/
+          if-no-files-found: error
+          retention-days: 1
       - name: Release disposable containers
         if: always()
         run: bash deploy/sandbox/runner.sh stop
+
+  agent-publish:
+    needs: runner
+    environment: agent-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out reviewed publisher tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BNasraoui/workflowd
+          ref: ${{ inputs.tooling-sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy/sandbox
+          path: trusted
+      - name: Verify approval and sealed artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GATE_ACTOR_ID: ${{ inputs.app-actor-id }}
+        run: node trusted/deploy/sandbox/publish.mjs validate
+      # Bootstrap gate: no publisher key or write token exists in this candidate.
+      - name: Prove environment secret access after validation
+        env:
+          PUBLISH_PROBE_CANARY: ${{ secrets.PUBLISH_PROBE_CANARY }}
+          GHETTIMONSTER_APP_ID: ${{ vars.GHETTIMONSTER_APP_ID }}
+        run: node trusted/deploy/sandbox/publish.mjs canary

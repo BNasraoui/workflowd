@@ -1,3 +1,4 @@
+import { ResultMetadata } from "./publish-store"
 import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -397,7 +398,7 @@ export const makeSandboxLeaseService = (
           new SandboxError({ message: "Sandbox policy reconciliation incomplete; retry required" }),
         )
     })
-    const remote = (runId: string, operation: string, limit = 1048576) =>
+    const remote = (runId: string, operation: string, limit = 1048576, input = "") =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
         if (lease.transport === null)
@@ -406,7 +407,7 @@ export const makeSandboxLeaseService = (
           try: (signal) =>
             command(
               [...sandboxSshArguments(lease.transport!).slice(0, -1), operation],
-              "",
+              input,
               signal,
               limit,
             ),
@@ -418,14 +419,28 @@ export const makeSandboxLeaseService = (
         Effect.timeout("10 seconds"),
         Effect.andThen(store.heartbeat(runId, Date.now())),
       )
-    // A fixed command executes only on the runner. Ref names and patch paths
-    // remain remote; the returned bytes are never parsed as mint paths or code.
-    const artifact = (runId: string) =>
-      remote(
-        runId,
-        `exec docker exec workflowd-sandbox-tooling sh -c 'git for-each-ref --format="%(refname)" refs/remotes/container-use/ | while IFS= read -r ref; do git -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --binary HEAD "$ref" -- || exit; done'`,
-        8 * 1048576,
-      )
+    const finishResult = (runId: string, completion: string) =>
+      Effect.gen(function* () {
+        const lease = yield* required(runId)
+        const response = yield* remote(
+          runId,
+          "exec /usr/local/bin/runner-control finish-result",
+          65536,
+          completion,
+        )
+        const value: unknown = yield* Effect.try((): unknown => JSON.parse(controlText(response)))
+        const result = yield* Schema.decodeUnknownEffect(
+          Schema.Union([
+            ResultMetadata,
+            Schema.Struct({ empty: Schema.Literal(true), sourceSha: Schema.String }),
+          ]),
+        )(value)
+        if (result.sourceSha !== lease.source_sha)
+          return yield* Effect.fail(new SandboxError({ message: "Sandbox result source mismatch" }))
+        return result
+      })
+    const finish = (runId: string) =>
+      remote(runId, "exec /usr/local/bin/runner-control finish", 4096).pipe(Effect.asVoid)
     const audit = (runId: string, directory: string) =>
       Effect.gen(function* () {
         const lease = yield* required(runId)
@@ -483,7 +498,8 @@ export const makeSandboxLeaseService = (
       reconcile,
       reconcileRejectedCreation,
       heartbeat,
-      artifact,
+      finishResult,
+      finish,
       audit,
       revalidateReleased,
     }

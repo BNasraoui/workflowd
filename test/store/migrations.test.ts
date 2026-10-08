@@ -178,7 +178,7 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications'
           )
           ORDER BY name
         `
@@ -224,8 +224,9 @@ describe("strict initial store schema", () => {
       { migration_id: 30, name: "sandbox_cleanup_runs" },
       { migration_id: 31, name: "sandbox_lease_operations" },
       { migration_id: 32, name: "sandbox_ref_creation" },
+      { migration_id: 33, name: "sandbox_publications" },
     ])
-    expect(result.tables).toHaveLength(35)
+    expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])

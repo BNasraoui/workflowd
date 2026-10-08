@@ -8,6 +8,15 @@ export const SandboxPolicy = Schema.Struct({
   installationId: positiveId,
   workflowSha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
   appActorId: positiveId,
+  toolingSha: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/))),
+  publish: Schema.optionalKey(
+    Schema.Struct({
+      baseRef: Schema.String,
+      environmentId: positiveId,
+      publisherAppId: positiveId,
+      publisherActorId: positiveId,
+    }),
+  ),
   tailscaleClientId: Schema.NonEmptyString,
   tailscaleAudience: Schema.NonEmptyString,
 })

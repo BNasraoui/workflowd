@@ -92,3 +92,21 @@ test("runner disables routes after the action joins and before preparing tooling
   expect(steps[join + 2]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
   expect(steps.at(-1)?.run).toBe("bash deploy/sandbox/runner.sh stop")
 })
+
+test("publication uses a fresh environment-gated runner with only read credentials and a canary", async () => {
+  const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
+  const raw = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
+    Bun.YAML.parse(source),
+  )
+  const jobs = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(raw.jobs)
+  const job = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Json))(
+    jobs["agent-publish"],
+  )
+  expect(job.needs).toBe("runner")
+  expect(job.environment).toBe("agent-publish")
+  expect(job.permissions).toEqual({ actions: "read", contents: "read" })
+  expect(job["runs-on"]).toBe("ubuntu-24.04")
+  expect(JSON.stringify(job)).not.toMatch(/tailscale|id-token|PRIVATE_KEY|secrets: inherit/)
+  expect(JSON.stringify(job)).toContain("PUBLISH_PROBE_CANARY")
+  expect(source).toContain("sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}")
+})

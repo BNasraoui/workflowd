@@ -95,3 +95,25 @@ export const sandboxCreationMigration = Effect.gen(function* () {
       WHERE l.lease_id=sandbox_lease_operations.lease_id AND l.state='starting'
       AND json_extract(l.policy,'$.repositoryId')=sandbox_lease_operations.repository_id)`
 })
+
+// Metadata only. Historical patch captures intentionally receive no publication intent.
+export const sandboxPublishMigration = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`CREATE TABLE sandbox_publications (
+    run_id TEXT PRIMARY KEY,
+    actions_run_id INTEGER NOT NULL CHECK(actions_run_id > 0),
+    attempt INTEGER NOT NULL CHECK(attempt = 1),
+    metadata TEXT NOT NULL CHECK(json_valid(metadata)),
+    phase TEXT NOT NULL CHECK(phase IN ('sealed','approving','approved','probed','operator_required','cancelled')),
+    artifact_id INTEGER CHECK(artifact_id > 0),
+    artifact_digest TEXT,
+    deadline INTEGER NOT NULL,
+    CHECK((artifact_id IS NULL) = (artifact_digest IS NULL)),
+    CHECK(phase NOT IN ('approving','approved','probed') OR artifact_id IS NOT NULL)
+  ) STRICT`
+  yield* sql`CREATE TRIGGER sandbox_publish_immutable BEFORE UPDATE ON sandbox_publications
+    WHEN NEW.run_id != OLD.run_id OR NEW.actions_run_id != OLD.actions_run_id
+      OR NEW.attempt != OLD.attempt OR NEW.metadata != OLD.metadata OR NEW.deadline != OLD.deadline
+      OR (OLD.artifact_id IS NOT NULL AND (NEW.artifact_id IS NOT OLD.artifact_id OR NEW.artifact_digest IS NOT OLD.artifact_digest))
+    BEGIN SELECT RAISE(ABORT,'immutable publication intent'); END`
+})

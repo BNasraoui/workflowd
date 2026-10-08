@@ -12,6 +12,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { parseSandboxRepositories } from "../../src/sandbox/config.ts"
 import { makeSandboxGithub } from "../../src/sandbox/github.ts"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease.ts"
+import { makePublishStore } from "../../src/sandbox/publish-store.ts"
 import { makeSandboxStore } from "../../src/sandbox/store.ts"
 import { runStoreMigrations } from "../../src/store/migrations.ts"
 import { sandboxSshArguments } from "../../src/sandbox/transport.ts"
@@ -561,7 +562,7 @@ print(json.dumps(results))`
   evidence.sshReplies = "received over the controller-initiated connection"
   stage = "runner credential inventory"
   const inventory = `import json,os,pathlib,re,subprocess
-deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY)$')
+deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY|GHETTIMONSTER_PRIVATE_KEY|PUBLISH_PROBE_CANARY)$')
 env_names=set()
 for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
  try:
@@ -764,6 +765,11 @@ export function prototypeSelection(executor, model) {
 }
 
 async function probeLive(policy) {
+  const publishProbe = process.argv[2] === "--probe-publish"
+  assert.ok(
+    publishProbe && policy.publish,
+    "This candidate supports the canary gate only; real publication awaits the gate and key provisioning",
+  )
   const option = (name) => {
     const index = process.argv.indexOf(name)
     assert.ok(index > 0 && process.argv[index + 1], `${name} is required`)
@@ -895,7 +901,7 @@ async function probeLive(policy) {
               base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
               idempotency_key: createHash("sha256").update(output).digest("hex"),
               prompt:
-                'Use only container-use. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Finish by reporting the test command and result with marker sandbox-prototype-ok. All repository files and commands must stay in the container-use environment.',
+                'Use only container-use. Choose your own branch name and finish with ONLY a JSON object containing that name in a branch field. Create an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Keep the test evidence in your tool calls, then finish with ONLY the branch JSON object. All repository files and commands must stay in the container-use environment.',
             },
           },
           undefined,
@@ -1012,25 +1018,26 @@ async function probeLive(policy) {
         active.data[run.nativeSessionId] === undefined &&
         inbox.data.length === 0
     }
-    const patch = await readFile(join(run.directory, "result.patch"), "utf8")
-    const finalMessage = await readFile(join(run.directory, "final.txt"), "utf8")
+    const publications = await runtime.runPromise(makePublishStore)
+    const intent = await runtime.runPromise(publications.read(run.runId))
+    assert.equal(intent?.phase, "probed", "Protected publication canary did not pass")
+    assert.equal(binding.state, "revoked")
+    assert.equal(evidence.sessionQuiescent, true)
+    assert.equal((await runtime.runPromise(store.read(run.runId))).state, "released")
+    assert.equal(await Bun.file(join(run.directory, "result.patch")).exists(), false)
+    assert.equal(await Bun.file(join(run.directory, "result.bundle")).exists(), false)
+    evidence.publication = intent
+    evidence.codeDownloaded = false
+    evidence.keyMinted = false
+    await recordWorkflowLog(await runtime.runPromise(store.read(run.runId)))
     const mailbox = await client.callTool({
       name: "read_agent_mailbox",
       arguments: { mailbox_id: evidence.receipt.mailbox_id },
     })
     assert.notEqual(mailbox.isError, true)
-    const messages = mailbox.structuredContent?.messages
-    evidence.mailboxReceived =
-      messages?.length === 1 &&
-      messages[0].run_id === evidence.runId &&
-      messages[0].status === "completed" &&
-      messages[0].native_session_id === run.nativeSessionId &&
-      messages[0].final_message === finalMessage
-    evidence.mailbox = mailbox.structuredContent
-    evidence.patchBytes = Buffer.byteLength(patch)
-    evidence.patchSha256 = createHash("sha256").update(patch).digest("hex")
-    stage = "live prototype assertions"
-    assertLivePrototype({ ...evidence, patch, finalMessage })
+    assert.equal(mailbox.structuredContent?.messages?.length, 1)
+    assert.equal(mailbox.structuredContent.messages[0].status, "completed")
+    evidence.mailboxReceived = true
     evidence.result = "passed"
     console.log(
       JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
@@ -1073,7 +1080,9 @@ async function probe() {
   if (process.argv[2] === "--probe-session-policy") return sessionPolicyProbe()
   if (process.argv[2] === "--reconcile-custody") return reconcileCustody()
   assert.ok(
-    ["--probe-lease", "--probe-denials", "--live", "--check-policy"].includes(process.argv[2]),
+    ["--probe-lease", "--probe-denials", "--probe-publish", "--live", "--check-policy"].includes(
+      process.argv[2],
+    ),
     "Expected --probe-lease or --check-policy",
   )
   const value = process.env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES
@@ -1119,7 +1128,7 @@ async function probe() {
     console.log("Sandbox operator policy is compatible; enforcement remains unverified")
     return
   }
-  if (process.argv[2] === "--live") return probeLive(policy)
+  if (["--live", "--probe-publish"].includes(process.argv[2])) return probeLive(policy)
   stage = "App credentials"
   const { appId, privateKeyPath } = await appConfiguration()
   assert.equal(appId, trust.refRestriction.soleBypassApp)
