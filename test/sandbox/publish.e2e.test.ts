@@ -195,11 +195,15 @@ for (const fault of [
   "PR failure",
 ]) {
   test(`real publisher create-only Git/HTTP receipt: ${fault}`, async () => {
-    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
+    const { mkdtemp, mkdir, writeFile, copyFile, rm } = await import("node:fs/promises")
     const { tmpdir } = await import("node:os")
     const { join, resolve } = await import("node:path")
     const { command } = await import("./harness")
     const root = await mkdtemp(join(tmpdir(), "publisher-http-"))
+    const node = Bun.which("node")
+    if (node === null) throw new Error("Publisher fixture requires Node on PATH")
+    const runtime = join(root, "trusted node's runtime")
+    await copyFile(node, runtime)
     const remote = join(root, "fixture/repo.git")
     const work = join(root, "workflowd-publish")
     const objects = join(work, "validated/objects.git")
@@ -356,7 +360,7 @@ for (const fault of [
       },
     })
     const invoke = async (operation: string) => {
-      const child = Bun.spawn(["/usr/bin/node", resolve("deploy/sandbox/publish.mjs"), operation], {
+      const child = Bun.spawn([runtime, resolve("deploy/sandbox/publish.mjs"), operation], {
         cwd: root,
         env: {
           PATH: "/usr/bin:/bin",

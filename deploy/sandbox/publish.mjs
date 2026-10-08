@@ -135,10 +135,11 @@ async function publish() {
   assert.equal((await request(refPath)).status, 404, "Branch already exists")
   state.stage = "pushing"
   await record(state)
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
   // Fresh bare repository, no ambient credentials/configuration, only a fixed trusted helper.
   const pushed = spawnSync("/usr/bin/git", [
     "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null",
-    "-c", "credential.helper=", "-c", `credential.helper=!/usr/bin/node '${script.replaceAll("'", "'\\''")}' credential`,
+    "-c", "credential.helper=", "-c", `credential.helper=!${quote(process.execPath)} ${quote(script)} credential`,
     "-c", "credential.useHttpPath=true", "-c", "http.extraHeader=", "-c", "http.followRedirects=false",
     "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no", "--",
     `${server}/${repository}.git`, `${binding.result}:refs/heads/${state.branch}`,
