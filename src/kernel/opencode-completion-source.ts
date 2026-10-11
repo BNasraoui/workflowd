@@ -299,7 +299,9 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_sessions AS session ON session.session_id = watch.child_session_id
       JOIN kernel_agent_runs AS run ON run.session_id = watch.child_session_id
       JOIN resident_inbox AS inbox ON inbox.id = 'agent-run-end-' || run.run_id
-      WHERE watch.provider_kind IN ('codex', 'claude')
+      WHERE (watch.provider_kind IN ('codex', 'claude') OR EXISTS (
+        SELECT 1 FROM sandbox_leases lease WHERE lease.session_id = watch.native_session_id AND lease.state = 'released'
+      ))
         AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
         AND watch.child_session_generation = session.revision
@@ -346,6 +348,7 @@ export const runOpenCodeCompletionSourceIteration = (options: OpenCodeCompletion
       JOIN kernel_working_resources AS resource ON resource.resource_id = watch.resource_id
       WHERE watch.provider_kind = 'opencode' AND watch.owning_host_id = ${options.owningHostId}
         AND watch.state = 'watching'
+        AND NOT EXISTS (SELECT 1 FROM sandbox_leases lease WHERE lease.session_id = watch.native_session_id)
         AND NOT EXISTS (
           SELECT 1 FROM resident_threads t JOIN kernel_agent_runs a ON a.run_id = t.run_id
           WHERE t.provider_kind = 'opencode' AND t.thread_id = watch.native_session_id

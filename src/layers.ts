@@ -3,6 +3,10 @@ import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
+import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
+import { makeSandboxGithub } from "./sandbox/github"
+import { makeSandboxLeaseService } from "./sandbox/lease"
+import { routeSandboxProvider, routeSandboxHandoffs } from "./sandbox/provider"
 import { dirname, join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
@@ -16,7 +20,7 @@ import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
 import { toJsonSchemaObject } from "./json"
 import { makeOctokitClientPort, OctokitInstallationAdapter } from "./github/adapter"
 import { KernelEventStore, KernelEventStoreLive } from "./kernel/event-store"
-import { AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
+import { AgentHandoffStore, AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
 import {
   AGENT_WAKE_CONTRACT,
   AGENT_WAKE_MAX_OUTPUT_BYTES,
@@ -371,6 +375,9 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const testJobCanaryLayer = TestJobCanaryLive.pipe(Layer.provideMerge(storeLayer))
   const agentWaitIngressLayer = AgentWaitIngressLive(completionSourceOptions).pipe(
+    Layer.provide(
+      Layer.effect(AgentHandoffStore, routeSandboxHandoffs).pipe(Layer.provide(storeLayer)),
+    ),
     Layer.provideMerge(storeLayer),
     Layer.provideMerge(workSignalLayer),
   )
@@ -497,6 +504,56 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(kernelStoreLayer),
           Layer.provideMerge(claudeCliLayer),
         )
+  const sandboxPolicies = config.agentRuns?.sandboxRepositories ?? []
+  const sandboxLayer =
+    sandboxPolicies.length === 0
+      ? Layer.empty
+      : Layer.effect(
+          SandboxDispatch,
+          Effect.gen(function* () {
+            const github = yield* makeSandboxGithub(config.github)
+            const leases = yield* makeSandboxLeaseService(github)
+            return yield* makeSandboxDispatch({
+              policies: sandboxPolicies,
+              github,
+              leases,
+              executor: openCodeAdapter,
+              client: yield* openCodeClientEffect,
+              executorId: `opencode:${completionSourceOptions.providerId}`,
+              endpointIdentity: completionSourceOptions.endpointIdentity,
+              nativeExecutors: {
+                codex: makeCodexCli({
+                  binary: config.agentRuns?.codexBinary ?? "codex",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-codex-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-codex-",
+                }),
+                claude: makeClaudeDispatchCli({
+                  binary: config.agentRuns?.claudeBinary ?? "claude",
+                  custodyRoot: join(
+                    dirname(config.storage.databasePath),
+                    "sandbox-claude-processes",
+                  ),
+                  unitPrefix: "workflowd-sandbox-claude-",
+                }),
+              },
+            })
+          }),
+        ).pipe(Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))))
+  const sandboxProviderLayer =
+    sandboxPolicies.length === 0
+      ? Layer.succeed(AgentRunProvider, openCodeAdapter)
+      : Layer.effect(
+          AgentRunProvider,
+          Effect.gen(function* () {
+            const sandbox = yield* Effect.serviceOption(SandboxDispatch)
+            if (Option.isNone(sandbox))
+              return yield* Effect.fail(new Error("Configured sandbox service is unavailable"))
+            return yield* routeSandboxProvider(openCodeAdapter, sandbox.value)
+          }),
+        ).pipe(Layer.provideMerge(sandboxLayer), Layer.provideMerge(kernelStoreLayer))
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -506,6 +563,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             codexRoutes: config.agentRuns.codexRoutes,
             claudeRoutes: config.agentRuns.claudeRoutes,
             repositories: config.agentRuns.repositories,
+            sandboxRepositories: config.agentRuns.sandboxRepositories ?? [],
             agent: config.agentRuns.agent,
             worktreeRoot: config.workspace.worktreeRoot,
             verifyTimeoutMs: config.agentRuns.verifyTimeoutMs,
@@ -528,7 +586,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         ).pipe(
           Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
-          Layer.provideMerge(Layer.succeed(AgentRunProvider, openCodeAdapter)),
+          Layer.provideMerge(sandboxProviderLayer),
           Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),

@@ -1,3 +1,11 @@
+import {
+  sandboxMigration,
+  sandboxCleanupMigration,
+  sandboxOperationMigration,
+  sandboxCreationMigration,
+  sandboxPublishMigration,
+  sandboxPublicationReceiptMigration,
+} from "../sandbox/migration"
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
@@ -1456,12 +1464,26 @@ export const runStoreMigrationsThrough0024 = Migrator.make({})({
   loader: Migrator.fromRecord(migrationsThrough0024),
 })
 
+const migrationsThrough0029 = {
+  ...migrationsThrough0024,
+  "0025_resident_closure": residentClosure,
+  "0026_agent_caller_mailbox": agentCallerMailbox,
+  "0027_resident_server_unit": residentServerUnit,
+  "0028_agent_run_base_ref": agentRunBaseRef,
+  "0029_sandbox_leases": sandboxMigration,
+}
+
+export const runStoreMigrationsThrough0029 = Migrator.make({})({
+  loader: Migrator.fromRecord(migrationsThrough0029),
+})
+
 export const runStoreMigrations = Migrator.make({})({
   loader: Migrator.fromRecord({
-    ...migrationsThrough0024,
-    "0025_resident_closure": residentClosure,
-    "0026_agent_caller_mailbox": agentCallerMailbox,
-    "0027_resident_server_unit": residentServerUnit,
-    "0028_agent_run_base_ref": agentRunBaseRef,
+    ...migrationsThrough0029,
+    "0030_sandbox_cleanup_runs": sandboxCleanupMigration,
+    "0031_sandbox_lease_operations": sandboxOperationMigration,
+    "0032_sandbox_ref_creation": sandboxCreationMigration,
+    "0033_sandbox_publications": sandboxPublishMigration,
+    "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
   }),
 })

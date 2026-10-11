@@ -1,0 +1,13 @@
+{
+  "agents": {
+    "sandbox": {
+      "mode": "primary",
+      "description": "Disposable runner workspace",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "execute", "resource": "*", "effect": "allow" },
+        { "action": "wfdlease_*", "resource": "*", "effect": "allow" }
+      ]
+    }
+  }
+}

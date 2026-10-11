@@ -1,4 +1,5 @@
 import { open, readFile, rename, writeFile } from "node:fs/promises"
+import { nativeSandboxArguments } from "../sandbox/native"
 
 export type CliWorkerOptions = {
   readonly binary: string
@@ -11,6 +12,7 @@ export type CliWorkerOptions = {
   readonly model: string | null
   readonly effort?: string
   readonly provider?: string
+  readonly sandboxBindingFile?: string
 }
 
 const writeResult = async (path: string, exitCode: number) => {
@@ -44,7 +46,14 @@ export async function runCodexWorker(options: CliWorkerOptions): Promise<number>
     options.binary,
     "exec",
     "--json",
-    "--dangerously-bypass-approvals-and-sandbox",
+    ...(options.sandboxBindingFile === undefined
+      ? ["--dangerously-bypass-approvals-and-sandbox"]
+      : await nativeSandboxArguments(
+          "codex",
+          options.binary,
+          options.directory,
+          options.sandboxBindingFile,
+        )),
     "--cd",
     options.directory,
     ...(options.model === null ? [] : ["-m", options.model]),
@@ -107,6 +116,9 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
     model: values.get("--model") ?? null,
     ...(values.has("--effort") ? { effort: required("--effort") } : {}),
     ...(values.has("--provider") ? { provider: required("--provider") } : {}),
+    ...(values.has("--sandbox-binding-file")
+      ? { sandboxBindingFile: required("--sandbox-binding-file") }
+      : {}),
   }
 }
 

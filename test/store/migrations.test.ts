@@ -7,7 +7,11 @@ import {
   commandClaimCandidate,
   reconciliationClaimCandidate,
 } from "../../src/store/internal-claim-queries"
-import { reconciliationObservationSequence } from "../../src/store/migrations"
+import {
+  reconciliationObservationSequence,
+  runStoreMigrations,
+  runStoreMigrationsThrough0029,
+} from "../../src/store/migrations"
 import { makeStoreLayer } from "./harness"
 
 const timestamp = "2026-07-19T12:00:00.000Z"
@@ -28,6 +32,49 @@ const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
 
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.result, Effect.map(Result.isFailure))
+
+test("migration 32 retains uncertain creation for an acquisition already in flight", async () => {
+  const {
+    sandboxMigration,
+    sandboxCleanupMigration,
+    sandboxOperationMigration,
+    sandboxCreationMigration,
+  } = await import("../../src/sandbox/migration")
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sandboxMigration
+      yield* sandboxCleanupMigration
+      yield* sandboxOperationMigration
+      yield* sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,created_at,heartbeat_at,deadline)
+      VALUES('run','lease','{"repositoryId":7}',${"a".repeat(40)},'starting',100,100,1000)`
+      yield* sql`INSERT INTO sandbox_lease_operations(repository_id,lease_id,owner,expires_at,generation)
+      VALUES(7,'lease','saved-owner',900,3),(7,'orphan',NULL,NULL,0)`
+      yield* sandboxCreationMigration
+      expect(yield* sql`SELECT * FROM sandbox_lease_operations ORDER BY lease_id`).toEqual([
+        {
+          repository_id: 7,
+          lease_id: "lease",
+          owner: "saved-owner",
+          expires_at: 900,
+          generation: 3,
+          creation_pending: 1,
+        },
+        {
+          repository_id: 7,
+          lease_id: "orphan",
+          owner: null,
+          expires_at: null,
+          generation: 0,
+          creation_pending: 0,
+        },
+      ])
+      expect(yield* rejected(sql`UPDATE sandbox_lease_operations SET creation_pending=2`)).toBe(
+        true,
+      )
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+})
 
 const seedSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
@@ -131,7 +178,7 @@ describe("strict initial store schema", () => {
              'kernel_resume_requests', 'kernel_resume_attempts', 'kernel_resume_checkpoints',
              'kernel_resume_results', 'kernel_resume_observations', 'kernel_cleanup_requests',
               'kernel_cleanup_attempts', 'kernel_cleanup_outcomes',
-              'kernel_agent_completion_watches', 'kernel_agent_runs'
+              'kernel_agent_completion_watches', 'kernel_agent_runs', 'sandbox_leases', 'sandbox_cleanup_runs', 'sandbox_lease_operations', 'sandbox_publications'
           )
           ORDER BY name
         `
@@ -173,8 +220,14 @@ describe("strict initial store schema", () => {
       { migration_id: 26, name: "agent_caller_mailbox" },
       { migration_id: 27, name: "resident_server_unit" },
       { migration_id: 28, name: "agent_run_base_ref" },
+      { migration_id: 29, name: "sandbox_leases" },
+      { migration_id: 30, name: "sandbox_cleanup_runs" },
+      { migration_id: 31, name: "sandbox_lease_operations" },
+      { migration_id: 32, name: "sandbox_ref_creation" },
+      { migration_id: 33, name: "sandbox_publications" },
+      { migration_id: 34, name: "sandbox_publication_receipts" },
     ])
-    expect(result.tables).toHaveLength(32)
+    expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)
     expect(result.foreignKeys).toEqual([{ foreign_keys: 1 }])
     expect(result.busyTimeout).toEqual([{ timeout: 5000 }])
@@ -859,4 +912,88 @@ describe("migration 9: qrspi_stage_definitions strict table", () => {
 
     expect(wasRejected).toBe(true)
   })
+})
+
+test("migration 30 preserves lease authority, backfills cleanup pairs and is repeatable", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* runStoreMigrationsThrough0029
+      const policy = JSON.stringify({
+        alias: "repo",
+        repository: "owner/repo",
+        repositoryId: 7,
+        installationId: 8,
+        workflowSha: "a".repeat(40),
+        appActorId: 9,
+        tailscaleClientId: "client",
+        tailscaleAudience: "audience",
+      })
+      for (const [id, state, run] of [
+        ["active", "starting", 41],
+        ["released", "released", 42],
+        ["requested", "requested", null],
+      ] as const) {
+        yield* sql`INSERT INTO sandbox_leases(run_id,lease_id,policy,source_sha,state,actions_run_id,actions_attempt,session_id,unit,invocation,created_at,heartbeat_at,deadline)
+        VALUES(${id},${id},${policy},${"b".repeat(40)},${state},${run},${run === null ? null : 1},'session','unit','invocation',100,200,300)`
+      }
+      const before = yield* sql`SELECT * FROM sandbox_leases ORDER BY run_id`
+      yield* runStoreMigrations
+      expect(yield* sql`SELECT * FROM sandbox_leases ORDER BY run_id`).toEqual(before)
+      expect(yield* sql`SELECT * FROM sandbox_lease_operations ORDER BY lease_id`).toEqual(
+        ["active", "released", "requested"].map((lease_id) => ({
+          repository_id: 7,
+          lease_id,
+          generation: 0,
+          owner: null,
+          expires_at: null,
+          creation_pending: 0,
+        })),
+      )
+      expect(yield* sql`SELECT * FROM sandbox_cleanup_runs`).toEqual([
+        {
+          repository_id: 7,
+          actions_run_id: 41,
+          actions_attempt: 1,
+          lease_id: "active",
+          policy,
+          state: "pending",
+          observed_at: 100,
+          updated_at: 200,
+          last_error: null,
+        },
+      ])
+      yield* runStoreMigrations
+      expect(yield* sql`SELECT count(*) AS n FROM sandbox_cleanup_runs`).toEqual([{ n: 1 }])
+      for (const change of [
+        sql`UPDATE sandbox_cleanup_runs SET repository_id=8`,
+        sql`UPDATE sandbox_cleanup_runs SET actions_run_id=42`,
+        sql`UPDATE sandbox_cleanup_runs SET actions_attempt=2`,
+        sql`UPDATE sandbox_cleanup_runs SET lease_id='other'`,
+        sql`UPDATE sandbox_cleanup_runs SET policy='{}'`,
+        sql`UPDATE sandbox_cleanup_runs SET observed_at=101`,
+        sql`UPDATE sandbox_cleanup_runs SET state='bogus'`,
+      ])
+        expect(yield* rejected(change)).toBe(true)
+      for (const [repo, run, attempt, lease, snapshot] of [
+        [0, 42, 1, "valid", policy],
+        [7, 0, 1, "valid", policy],
+        [7, 42, 2, "valid", policy],
+        [7, 42, 1, "../bad", policy],
+        [7, 42, 1, "", policy],
+        [8, 42, 1, "valid", policy],
+        [7, 42, 1, "valid", "{}"],
+      ] as const)
+        expect(
+          yield* rejected(
+            sql`INSERT INTO sandbox_cleanup_runs VALUES(${repo},${run},${attempt},${lease},${snapshot},'pending',100,100,NULL)`,
+          ),
+        ).toBe(true)
+      yield* sql`INSERT INTO sandbox_cleanup_runs VALUES(7,42,1,'active',${policy},'pending',101,101,NULL)`
+      const other = JSON.stringify({ ...JSON.parse(policy), repositoryId: 8 })
+      yield* sql`INSERT INTO sandbox_cleanup_runs VALUES(8,41,1,'orphan',${other},'pending',101,101,NULL)`
+      expect(yield* sql`SELECT count(*) AS n FROM sandbox_cleanup_runs`).toEqual([{ n: 3 }])
+      expect(yield* sql`PRAGMA foreign_key_check`).toEqual([])
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
 })

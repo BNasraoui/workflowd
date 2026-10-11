@@ -1,0 +1,47 @@
+name: Protected agent publication
+description: Validate an approved immutable result, then create its branch and draft PR.
+inputs:
+  github-token:
+    description: Caller token with Actions read and Contents read only.
+    required: true
+  gate-actor-id:
+    description: Bot actor ID of the App that approved the custom deployment rule.
+    required: true
+  publisher-private-key:
+    description: GHETTIMONSTER_PRIVATE_KEY from the caller's protected environment.
+    required: true
+  publisher-app-id:
+    description: Configured ghettimonster App ID.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Verify approval and sealed artifact
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GATE_ACTOR_ID: ${{ inputs.gate-actor-id }}
+        GHETTIMONSTER_APP_ID: ${{ inputs.publisher-app-id }}
+      run: node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" validate
+    - name: Mint caller repository publication token
+      id: token
+      uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+      with:
+        app-id: ${{ inputs.publisher-app-id }}
+        private-key: ${{ inputs.publisher-private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-contents: write
+        permission-pull-requests: write
+        skip-token-revoke: false
+    - name: Publish validated result
+      shell: bash
+      env:
+        PUBLISH_TOKEN: ${{ steps.token.outputs.token }}
+      run: node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" publish
+    - name: Revoke token and return metadata receipt
+      if: ${{ always() && steps.token.outputs.token != '' }}
+      shell: bash
+      env:
+        PUBLISH_TOKEN: ${{ steps.token.outputs.token }}
+      run: node "$GITHUB_ACTION_PATH/../../../deploy/sandbox/publish.mjs" revoke

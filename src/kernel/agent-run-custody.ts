@@ -35,7 +35,7 @@ export const makeAgentRunCustody = (dependencies: {
   const ensureResource = (input: {
     readonly resourceId: string
     readonly absolutePath: string
-    readonly kind: "worktree" | "checkout"
+    readonly kind: "workspace" | "worktree" | "checkout"
     readonly createdAt: Date
   }) =>
     Effect.gen(function* () {

@@ -12,8 +12,7 @@ concurrency:
 
 jobs:
   build:
-    permissions:
-      contents: read
+    permissions: {}
     uses: ./.github/workflows/agent-image.yml
 
   publish:
@@ -30,7 +29,7 @@ jobs:
           name: agent-image
       - name: Publish the tested image
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           GHCR_USER: ${{ github.actor }}
           COMMIT_SHA: ${{ github.sha }}
         run: |

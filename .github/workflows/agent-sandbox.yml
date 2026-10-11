@@ -1,0 +1,84 @@
+name: Disposable agent runner
+
+on:
+  workflow_call:
+    inputs:
+      tooling-sha:
+        type: string
+        required: false
+      repository-id:
+        type: string
+        required: true
+      app-actor-id:
+        type: string
+        required: true
+      tailscale-client-id:
+        type: string
+        required: true
+      tailscale-audience:
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  runner:
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/heads/workflowd/leases/') &&
+      github.repository_id == inputs.repository-id &&
+      github.actor_id == inputs.app-actor-id &&
+      github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out pinned tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BNasraoui/workflowd
+          ref: ${{ inputs.tooling-sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy/sandbox
+      - name: Join the restricted tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd
+        with:
+          oauth-client-id: ${{ inputs.tailscale-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+          tags: tag:agent-runner
+          version: 1.94.2
+          args: --ssh
+          hostname: lease-${{ github.run_id }}-${{ github.run_attempt }}
+          use-cache: "false"
+          log-mode: quiet
+      # The pinned action supplies --accept-routes itself; repeating it in args
+      # fails the join. Disable routes before any tooling or task can start.
+      - name: Disable advertised routes
+        run: sudo tailscale set --accept-routes=false
+      - name: Prepare the disposable tooling
+        env:
+          SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}
+          SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
+        run: bash deploy/sandbox/runner.sh prepare
+      - name: Publish fixed readiness metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /run/workflowd-sandbox/ready.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Hold the lease while mint sends heartbeats
+        run: /usr/local/bin/container-use hold
+      - name: Upload sealed result
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /run/workflowd-sandbox/result/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Release disposable containers
+        if: always()
+        run: bash deploy/sandbox/runner.sh stop

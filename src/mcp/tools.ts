@@ -95,10 +95,11 @@ export const DispatchAgentArguments = Schema.Struct({
 
 /**
  * Dispatch holds the HTTP request open through the daemon's bounded
- * first-token verification (up to ~2 minutes), so its timeout is far larger
+ * sandbox acquisition (up to five minutes) and first-token verification
+ * (up to two minutes), so its timeout is far larger
  * than the agent-wait proxy's.
  */
-const DISPATCH_AGENT_TIMEOUT_MS = 180_000
+const DISPATCH_AGENT_TIMEOUT_MS = 480_000
 
 const structured = (value: Record<string, unknown>, rendering?: string): ToolResult => ({
   content: [{ type: "text", text: rendering ?? JSON.stringify(value, null, 2) }],
