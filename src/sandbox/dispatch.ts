@@ -1,9 +1,10 @@
+import { sandboxDiagnostic, retainSandboxFailure } from "./diagnostics"
 import { Context, Effect, Schedule, Schema } from "effect"
 import { mkdir } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
 import type { OpenCodeModel, OpenCodeAdapter } from "../opencode/adapter"
-import { makeSandboxStore, SandboxError, isUnobservedRun } from "./store"
+import { makeSandboxStore, SandboxError, isUnobservedRun, sandboxStage } from "./store"
 import { sandboxCompletionInstructions, type SandboxPolicy } from "./config"
 import type { makeSandboxGithub } from "./github"
 import type { makeSandboxLeaseService } from "./lease"
@@ -67,8 +68,13 @@ export type SandboxDispatchPort = {
 
 export const SandboxDispatch = Context.Service<SandboxDispatchPort>("workflowd/SandboxDispatch")
 
-const failure = () =>
-  new SandboxError({ message: "Sandbox custody operation failed; reconciliation required" })
+const failure = (cause?: unknown) =>
+  new SandboxError(
+    sandboxDiagnostic(
+      "dispatch.custody",
+      cause ?? new Error("Sandbox custody operation failed; reconciliation required"),
+    ),
+  )
 
 export const makeSandboxDispatch = (options: {
   readonly policies: ReadonlyArray<SandboxPolicy>
@@ -319,8 +325,9 @@ export const makeSandboxDispatch = (options: {
             Effect.ignore,
           ),
         ),
-        Effect.tapError(() => store.recordError(run.runId)),
-        Effect.mapError(failure),
+        Effect.tapError((cause) => store.recordError(run.runId, cause)),
+        (effect) => sandboxStage("dispatch.settle", effect),
+        Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.settle", cause)),
       )
     const cancel = (run: AgentRunRecord) =>
       Effect.suspend(() => {
@@ -340,7 +347,7 @@ export const makeSandboxDispatch = (options: {
         const current = yield* runs.read(run.runId)
         if (current === null) return yield* Effect.fail(failure())
         yield* settle(current, { ...terminal, sessionId: current.nativeSessionId })
-      }).pipe(Effect.mapError(failure))
+      }).pipe((effect) => sandboxStage("dispatch.finishNative", effect))
     const prepareNative: NonNullable<SandboxDispatchPort["prepareNative"]> = (run) =>
       Effect.gen(function* () {
         const cli = yield* Effect.try(() => nativeCli(run))
@@ -410,7 +417,13 @@ export const makeSandboxDispatch = (options: {
           },
           sandboxBindingFile: join(root, "binding.json"),
         }
-      }).pipe(Effect.timeout("5 minutes"), Effect.mapError(failure))
+      }).pipe(
+        Effect.timeout("5 minutes"),
+        (effect) => sandboxStage("dispatch.prepareNative", effect),
+        Effect.tapError((cause) =>
+          retainSandboxFailure(run.directory, "dispatch.prepareNative", cause),
+        ),
+      )
     const launch = (run: AgentRunRecord, model: OpenCodeModel) =>
       Effect.gen(function* () {
         const policy = options.policies.find((entry) => entry.alias === run.repository)
@@ -463,15 +476,16 @@ export const makeSandboxDispatch = (options: {
         return { nativeSessionId: binding.sessionId }
       }).pipe(
         Effect.timeout("5 minutes"),
-        Effect.onError(() =>
+        Effect.onError((cause) =>
           settle(run, {
             state: "operator_required",
             sessionId: run.nativeSessionId,
             finalMessage: null,
-            diagnostic: "Sandbox startup failed",
+            diagnostic: sandboxDiagnostic("dispatch.startup", cause).message,
           }).pipe(Effect.ignore),
         ),
-        Effect.mapError(failure),
+        (effect) => sandboxStage("dispatch.launch", effect),
+        Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.launch", cause)),
       )
     const observe = (run: AgentRunRecord) =>
       Effect.gen(function* () {
@@ -562,7 +576,10 @@ export const makeSandboxDispatch = (options: {
             outputTokens: telemetry.outputTokens,
             now: new Date(),
           })
-      }).pipe(Effect.mapError(failure))
+      }).pipe(
+        (effect) => sandboxStage("dispatch.observe", effect),
+        Effect.tapError((cause) => retainSandboxFailure(run.directory, "dispatch.observe", cause)),
+      )
     // A new coordinator never resumes an abandoned execution or injects resident tools.
     for (const lease of yield* store.active()) {
       const run = yield* runs.read(lease.run_id)
@@ -583,8 +600,13 @@ export const makeSandboxDispatch = (options: {
           lease.state === "ready" &&
           (lease.policy.publish === undefined || (yield* publications.read(lease.run_id)) === null)
         )
-          yield* leases.heartbeat(lease.run_id).pipe(Effect.ignore)
-    }).pipe(Effect.mapError(failure))
+          yield* leases.heartbeat(lease.run_id).pipe(
+            Effect.tapError((cause) =>
+              Effect.logError(sandboxDiagnostic("lease.heartbeat", cause).message),
+            ),
+            Effect.ignore,
+          )
+    }).pipe((effect) => sandboxStage("dispatch.heartbeat", effect))
     const iteration = Effect.gen(function* () {
       // Observe sessions before inventory; failure to inventory never proves release.
       for (const lease of yield* store.active()) {
@@ -596,7 +618,7 @@ export const makeSandboxDispatch = (options: {
       for (const kind of ["opencode", "codex", "claude"] as const)
         for (const run of yield* runs.listActiveByExecutor(kind))
           if ((yield* store.read(run.runId))?.state === "released") yield* observe(run)
-    }).pipe(Effect.mapError(failure))
+    }).pipe((effect) => sandboxStage("dispatch.iteration", effect))
     return {
       launch,
       prepareNative,
@@ -609,7 +631,7 @@ export const makeSandboxDispatch = (options: {
       owns: (runId: string) =>
         store.read(runId).pipe(
           Effect.map((lease) => lease !== null),
-          Effect.mapError(failure),
+          (effect) => sandboxStage("dispatch.owns", effect),
         ),
     } satisfies SandboxDispatchPort
   })

@@ -8,6 +8,7 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { assertBridgeBinding, readSandboxBinding } from "../../src/sandbox/binding"
 import { compileSandboxBridge } from "../../src/sandbox/bridge"
+import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 
 const transport: SandboxTransport = {
   leaseId: "fixture-lease",
@@ -31,6 +32,34 @@ test("SSH binds the pinned host key without forwarding or ambient configuration"
 test("SSH rejects an address that could introduce remote command arguments", () => {
   expect(() => sandboxSshArguments({ ...transport, address: "peer -oProxyCommand=bad" })).toThrow()
 })
+
+for (const mode of ["reply", "closed"] as const) {
+  test(`bridge retains the cause when the remote transport returns ${mode}`, async () => {
+    const runner = await runnerFixture()
+    try {
+      const script =
+        mode === "reply"
+          ? '#!/bin/sh\nread request\nprintf \'%s\\n\' \'{"jsonrpc":"2.0","id":1,"error":{"message":"runner backend unavailable token=fixture-secret","data":{"password":"fixture-secret"}}}\'\ncat >/dev/null\n'
+          : "#!/bin/sh\nread request\nprintf 'runner backend unavailable token=fixture-secret\\n' >&2\nexit 42\n"
+      const file = join(runner.root, "failing-transport")
+      await writeFile(file, script, { mode: 0o755 })
+      await runner.docker("cp", file, `${runner.name}-runner:/usr/local/bin/container-use`)
+      const client = bridgeClient(runner.transport)
+      try {
+        await expect(client.initialize()).rejects.toThrow()
+        const diagnostic = sandboxDiagnostic("transport.fixture", await client.settled)
+        expect(diagnostic.message).toContain("runner backend unavailable")
+        expect(diagnostic.message).not.toContain("fixture-secret")
+        if (mode === "closed")
+          expect(diagnostic.evidence.causes.some((cause) => cause.exitCode === 42)).toBe(true)
+      } finally {
+        await client.close()
+      }
+    } finally {
+      await runner.close()
+    }
+  }, 120_000)
+}
 
 test("tooling and the SSH fixture run without root defaults", async () => {
   const runner = await runnerFixture()

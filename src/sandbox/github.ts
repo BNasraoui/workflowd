@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -28,14 +29,24 @@ const Run = Schema.Struct({
 const Ref = Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) })
 export type OwnedLeaseRun = { readonly leaseId: string; readonly run: typeof Run.Type }
 const leaseBranch = (leaseId: string) => `workflowd/leases/${leaseId}`
-const githubFailure = () => new SandboxError({ message: "Sandbox GitHub request failed" })
-const http = <A>(send: (signal: AbortSignal) => Promise<A>) =>
-  Effect.tryPromise({ try: send, catch: githubFailure }).pipe(
-    Effect.timeout("10 seconds"),
-    Effect.mapError(
-      () => new SandboxError({ message: "Sandbox GitHub request uncertain", uncertain: true }),
-    ),
+const githubFailure = (cause?: unknown) =>
+  new SandboxError(
+    sandboxDiagnostic("github.request", cause ?? new Error("Sandbox GitHub request failed")),
   )
+const http = <A>(send: (signal: AbortSignal) => Promise<A>) =>
+  Effect.suspend(() => {
+    const started = Date.now()
+    return Effect.tryPromise({ try: send, catch: githubFailure }).pipe(
+      Effect.timeout("10 seconds"),
+      Effect.mapError(
+        (cause) =>
+          new SandboxError({
+            ...sandboxDiagnostic("github.http", cause, started),
+            uncertain: true,
+          }),
+      ),
+    )
+  })
 
 const Ready = Schema.Struct({
   leaseId: Schema.String,
@@ -77,7 +88,13 @@ async function readyArchive(value: unknown, signal: AbortSignal): Promise<unknow
         if (length > 16384) throw githubFailure()
         chunks.push(item.value)
       }
-      if ((await child.exited) !== 0) throw githubFailure()
+      const exitCode = await child.exited
+      if (exitCode !== 0)
+        throw githubFailure({
+          name: "Error",
+          message: "Readiness archive command failed",
+          exitCode,
+        })
       return JSON.parse(Buffer.concat(chunks).toString())
     } finally {
       clearTimeout(timer)
@@ -145,17 +162,17 @@ export const makeSandboxGithub = (
             request: { signal },
           })
           const data: unknown = result.data
-          return { status: result.status, data }
+          return { status: result.status, data, cause: undefined }
         } catch (error) {
-          // Retain only the HTTP status; Octokit exceptions can contain credentials.
+          // Keep only bounded diagnostics; Octokit exceptions can contain authenticated requests.
           if (
             typeof error === "object" &&
             error !== null &&
             "status" in error &&
             typeof error.status === "number"
           )
-            return { status: error.status, data: null }
-          throw githubFailure()
+            return { status: error.status, data: null, cause: githubFailure(error) }
+          throw githubFailure(error)
         }
       })
     })
@@ -177,11 +194,16 @@ export const makeSandboxGithub = (
           sha: policy.workflowSha,
         })
         if (created.status >= 400 && created.status < 500)
-          return yield* Effect.fail(new SandboxRefRejected({ status: created.status }))
+          return yield* Effect.fail(
+            new SandboxRefRejected({
+              status: created.status,
+              evidence: sandboxDiagnostic("github.ref.create", created).evidence,
+            }),
+          )
         result = yield* request(client, "GET", path)
       }
       if (result.status === 404 && !create) return yield* Effect.fail(new SandboxRefAbsent())
-      if (result.status !== 200) return yield* Effect.fail(githubFailure())
+      if (result.status !== 200) return yield* Effect.fail(githubFailure(result))
       const ref = yield* Schema.decodeUnknownEffect(Ref)(result.data)
       if (ref.ref !== `refs/heads/${leaseBranch(leaseId)}` || ref.object.sha !== policy.workflowSha)
         return yield* Effect.fail(
@@ -199,7 +221,7 @@ export const makeSandboxGithub = (
         event: "push",
         per_page: 100,
       })
-      if (result.status !== 200) return yield* Effect.fail(githubFailure())
+      if (result.status !== 200) return yield* Effect.fail(githubFailure(result))
       const page = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
       )(result.data)
@@ -259,7 +281,7 @@ export const makeSandboxGithub = (
         "GET",
         `/repos/${policy.repository}/actions/runs/${runId}`,
       )
-      if (response.status !== 200) return yield* Effect.fail(githubFailure())
+      if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
       const run = yield* validateRun(policy, leaseId, response.data)
       if (run.id !== runId || run.run_attempt !== attempt)
         return yield* Effect.fail(
@@ -285,7 +307,7 @@ export const makeSandboxGithub = (
               page: number,
             },
           )
-          if (response.status !== 200) return yield* Effect.fail(githubFailure())
+          if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
           const page = yield* Schema.decodeUnknownEffect(
             Schema.Struct({ total_count: Schema.Int, workflow_runs: Schema.Array(Run) }),
           )(response.data)
@@ -310,12 +332,7 @@ export const makeSandboxGithub = (
         return yield* Effect.fail(githubFailure())
       }).pipe(
         Effect.timeout("60 seconds"),
-        Effect.mapError(
-          () =>
-            new SandboxError({
-              message: "Sandbox repository inventory incomplete; retry required",
-            }),
-        ),
+        Effect.mapError((cause) => new SandboxError(sandboxDiagnostic("github.inventory", cause))),
       )
     })
     const cancel = Effect.fn("SandboxGithub.cancel")(function* (
@@ -328,7 +345,7 @@ export const makeSandboxGithub = (
         "POST",
         `/repos/${policy.repository}/actions/runs/${runId}/cancel`,
       )
-      if (![202, 409].includes(response.status)) return yield* Effect.fail(githubFailure())
+      if (![202, 409].includes(response.status)) return yield* Effect.fail(githubFailure(response))
     })
     const deleteRef = Effect.fn("SandboxGithub.deleteRef")(function* (
       policy: SandboxPolicy,
@@ -337,16 +354,15 @@ export const makeSandboxGithub = (
       const client = yield* scoped(policy)
       const path = `/repos/${policy.repository}/git/refs/heads/${leaseBranch(leaseId)}`
       const removed = yield* request(client, "DELETE", path)
-      if (![204, 404, 422].includes(removed.status)) return yield* Effect.fail(githubFailure())
+      if (![204, 404, 422].includes(removed.status))
+        return yield* Effect.fail(githubFailure(removed))
       const read = yield* request(
         client,
         "GET",
         `/repos/${policy.repository}/git/ref/heads/${leaseBranch(leaseId)}`,
       )
       if (read.status !== 404)
-        return yield* Effect.fail(
-          new SandboxError({ message: "Sandbox lease ref deletion unconfirmed" }),
-        )
+        return yield* Effect.fail(new SandboxError(sandboxDiagnostic("github.ref.delete", read)))
     })
     const readyArtifact = Effect.fn("SandboxGithub.readyArtifact")(function* (
       client: Octokit,
@@ -360,7 +376,7 @@ export const makeSandboxGithub = (
         `/repos/${policy.repository}/actions/runs/${runId}/artifacts`,
         { per_page: 100 },
       )
-      if (response.status !== 200) return yield* Effect.fail(githubFailure())
+      if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
       const artifacts = yield* Schema.decodeUnknownEffect(
         Schema.Struct({
           total_count: Schema.Int,
@@ -423,7 +439,7 @@ export const makeSandboxGithub = (
         )
         status = response.status
         if (status === 404) yield* unchanged
-        else if (status !== 200) return yield* Effect.fail(githubFailure())
+        else if (status !== 200) return yield* Effect.fail(githubFailure(response))
         return response
       }).pipe(
         Effect.repeat({
@@ -436,7 +452,7 @@ export const makeSandboxGithub = (
           ),
         }),
         Effect.flatMap((response) =>
-          response.status === 200 ? Effect.succeed(response) : Effect.fail(githubFailure()),
+          response.status === 200 ? Effect.succeed(response) : Effect.fail(githubFailure(response)),
         ),
         Effect.timeout("60 seconds"),
         Effect.onExit((exit) =>
@@ -496,7 +512,7 @@ export const makeSandboxGithub = (
         "GET",
         `/repos/${policy.repository}/commits/${encodeURIComponent(ref)}`,
       )
-      if (result.status !== 200) return yield* Effect.fail(githubFailure())
+      if (result.status !== 200) return yield* Effect.fail(githubFailure(result))
       const commit = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)) }),
       )(result.data)
@@ -519,9 +535,7 @@ export const makeSandboxGithub = (
           },
         )
         if (result.status !== 200)
-          return yield* Effect.fail(
-            new SandboxError({ message: "Pinned sandbox workflow is not published" }),
-          )
+          return yield* Effect.fail(new SandboxError(sandboxDiagnostic("github.workflow", result)))
       }
     })
     const publishRequest = Effect.fn("SandboxGithub.publishRequest")(function* (
@@ -533,7 +547,7 @@ export const makeSandboxGithub = (
       const client = yield* scoped(policy, true)
       const response = yield* request(client, method, `/repos/${policy.repository}/${path}`, body)
       if (response.status < 200 || response.status >= 300)
-        return yield* Effect.fail(githubFailure())
+        return yield* Effect.fail(githubFailure(response))
       return response.data
     })
     const publicationRead = Effect.fn("SandboxGithub.publicationRead")(function* (
@@ -546,7 +560,7 @@ export const makeSandboxGithub = (
         "GET",
         `/repos/${policy.repository}/${path}`,
       )
-      if (response.status !== 200) return yield* Effect.fail(githubFailure())
+      if (response.status !== 200) return yield* Effect.fail(githubFailure(response))
       return response.data
     })
     return {

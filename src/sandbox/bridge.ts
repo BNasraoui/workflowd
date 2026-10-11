@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { auditedOutput, beginToolAudit, sendToolAudit, wrapAuditedCommand } from "./audit"
 import { assertBridgeBinding } from "./binding"
 import { watch } from "node:fs/promises"
@@ -64,15 +65,22 @@ async function* frames(reader: {
 
 async function drainDiagnostics(stream: ReadableStream<Uint8Array>) {
   let bytes = 0
+  let detail = ""
   for await (const chunk of stream) {
     bytes += chunk.length
+    if (detail.length < 4096)
+      detail += Buffer.from(chunk)
+        .toString("utf8")
+        .slice(0, 4096 - detail.length)
     if (bytes > frameLimit) throw new Error("Sandbox SSH diagnostics exceed 1 MiB")
   }
+  return detail
 }
 
 export async function compileSandboxBridge(outfile: string) {
   const result = await Bun.build({ entrypoints: [import.meta.path], compile: { outfile } })
-  if (!result.success) throw new Error("Could not compile sandbox MCP bridge")
+  if (!result.success)
+    throw new Error("Could not compile sandbox MCP bridge", { cause: result.logs[0] })
 }
 
 export async function runSandboxBridge(
@@ -96,8 +104,20 @@ export async function runSandboxBridge(
   process.once("SIGTERM", stop)
   process.once("SIGINT", stop)
   const monitor = async () => {
-    await drainDiagnostics(child.stderr)
-    throw new Error("Sandbox SSH connection closed")
+    const started = Date.now()
+    const detail = await drainDiagnostics(child.stderr)
+    throw Object.assign(
+      new Error("Sandbox SSH connection closed"),
+      sandboxDiagnostic(
+        "transport.ssh",
+        {
+          name: "Error",
+          message: detail || "Sandbox SSH connection closed",
+          exitCode: await child.exited,
+        },
+        started,
+      ),
+    )
   }
   const forward = async () => {
     let initialized = false
@@ -174,19 +194,27 @@ export async function runSandboxBridge(
           default:
             throw new Error("Sandbox MCP method is not allowed")
         }
+        const started = Date.now()
         const timer = setTimeout(() => child.kill(), timeoutMs)
         try {
           outcome = "unknown"
           child.stdin.write(JSON.stringify(request) + "\n")
           await child.stdin.flush()
           const next = await replies.next()
+          if (next.done) return await diagnostics
           if (
-            next.done ||
             next.value.method !== undefined ||
             next.value.id !== frame.id ||
             next.value.error !== undefined
           ) {
-            throw new Error("Unexpected sandbox server frame")
+            throw Object.assign(
+              new Error("Unexpected sandbox server frame"),
+              sandboxDiagnostic(
+                "transport.reply",
+                next.value.error ?? new Error("Unexpected sandbox server frame"),
+                started,
+              ),
+            )
           }
           let result = next.value.result
           if (frame.method === "initialize") {
@@ -259,8 +287,13 @@ if (import.meta.main) {
       bindingFile,
     )
   }
-  await run().catch(() => {
-    process.stderr.write("Sandbox MCP bridge refused or lost its transport\n")
+  const started = Date.now()
+  await run().catch((cause) => {
+    process.stderr.write(
+      "Sandbox MCP bridge refused or lost its transport: " +
+        sandboxDiagnostic("transport.bridge", cause, started).message +
+        "\n",
+    )
     process.exitCode = 1
   })
 }

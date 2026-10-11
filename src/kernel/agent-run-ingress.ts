@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
 import type { SandboxPolicy } from "../sandbox/config"
 import { SandboxDispatch } from "../sandbox/dispatch"
@@ -262,11 +263,8 @@ const make = (options: AgentRunIngressOptions) =>
     const sandbox = Option.getOrUndefined(yield* Effect.serviceOption(SandboxDispatch))
     const requiresSandbox = (repository: string) =>
       options.sandboxRepositories?.some((policy) => policy.alias === repository) ?? false
-    const sandboxFailure = () =>
-      refuse(
-        "executor_unavailable",
-        "Sandbox launch or custody operation failed; cleanup remains durable",
-      )
+    const sandboxFailure = (cause: unknown) =>
+      refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
     const provider = Option.getOrUndefined(providerOption)
@@ -702,8 +700,11 @@ const make = (options: AgentRunIngressOptions) =>
           const catalog = yield* discovery.value
             .list()
             .pipe(
-              Effect.mapError(() =>
-                refuse("executor_unavailable", "Capability discovery unavailable"),
+              Effect.mapError((cause) =>
+                refuse(
+                  "executor_unavailable",
+                  sandboxDiagnostic("ingress.capabilities", cause).message,
+                ),
               ),
             )
           const selected = resolveExecutionSelection(catalog, requested)
@@ -758,8 +759,11 @@ const make = (options: AgentRunIngressOptions) =>
               const catalog = yield* discovery.value
                 .list()
                 .pipe(
-                  Effect.mapError(() =>
-                    refuse("executor_unavailable", "Capability discovery unavailable"),
+                  Effect.mapError((cause) =>
+                    refuse(
+                      "executor_unavailable",
+                      sandboxDiagnostic("ingress.capabilities", cause).message,
+                    ),
                   ),
                 )
               const selected = resolveExecutionSelection(catalog, {

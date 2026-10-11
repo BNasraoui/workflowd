@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { saveSandboxFile } from "./binding"
 import { SandboxCompletion } from "./config"
 import { ResultMetadata } from "./publish-store"
@@ -62,6 +63,7 @@ async function controlCommand(
   signal: AbortSignal,
   limit = 1048576,
 ): Promise<string | Uint8Array> {
+  const started = Date.now()
   signal.throwIfAborted()
   const child = Bun.spawn([...args], {
     stdin: new Blob([input]),
@@ -103,7 +105,15 @@ async function controlCommand(
     signal.throwIfAborted()
     if (status !== 0)
       throw new SandboxError({
-        message: `Sandbox control command exited ${status}: ${(await stderr).trim()}`,
+        ...sandboxDiagnostic(
+          "control.command",
+          {
+            name: "Error",
+            message: (await stderr).trim(),
+            exitCode: status,
+          },
+          started,
+        ),
       })
     return Buffer.concat(chunks)
   } finally {
@@ -124,65 +134,81 @@ const connectPeer = (
   root: string,
   command: typeof controlCommand,
 ) =>
-  Effect.tryPromise({
-    try: async (signal) => {
-      const status: unknown = JSON.parse(
-        controlText(await command(["/usr/bin/tailscale", "status", "--json"], "", signal)),
-      )
-      const keys = bindSandboxPeer(ready, status)
-      await mkdir(root, { recursive: true, mode: 0o700 })
-      const directory = await mkdtemp(join(root, lease.lease_id + "-"))
-      try {
-        const knownHostsFile = join(directory, "known_hosts")
-        await writeFile(knownHostsFile, keys.map((key) => `${ready.address} ${key}\n`).join(""), {
-          mode: 0o600,
-        })
-        const transport: SandboxTransport = {
-          leaseId: lease.lease_id,
-          peerId: ready.peerId,
-          address: ready.address,
-          port: 22,
-          repositoryPath: "/workspace/repository",
-          knownHostsFile,
-          identityFile: "/dev/null",
-        }
-        const args = sandboxSshArguments(transport).slice(0, -1)
-        await command([...args, "exec /usr/local/bin/container-use heartbeat"], "", signal)
-        const keepalive = new AbortController()
-        const initializing = AbortSignal.any([signal, keepalive.signal])
-        let pulse = Promise.resolve()
-        const timer = setInterval(() => {
-          pulse = command(
-            [...args, "exec /usr/local/bin/container-use heartbeat"],
-            "",
-            AbortSignal.any([initializing, AbortSignal.timeout(10000)]),
-          ).then(
-            () => undefined,
-            () => {
-              keepalive.abort()
-            },
-          )
-        }, 30000)
+  Effect.suspend(() => {
+    const started = Date.now()
+    let stage = "peer.status"
+    return Effect.tryPromise({
+      try: async (signal) => {
+        const status: unknown = JSON.parse(
+          controlText(await command(["/usr/bin/tailscale", "status", "--json"], "", signal)),
+        )
+        stage = "peer.binding"
+        const keys = bindSandboxPeer(ready, status)
+        await mkdir(root, { recursive: true, mode: 0o700 })
+        const directory = await mkdtemp(join(root, lease.lease_id + "-"))
         try {
-          const source = await command(
-            [...args, "exec /usr/local/bin/container-use initialize"],
-            JSON.stringify({ repository: lease.policy.repository, sourceSha: lease.source_sha }),
-            initializing,
-          )
-          if (controlText(source).trim() !== lease.source_sha || keepalive.signal.aborted)
-            throw new SandboxError({ message: "Sandbox source checkout unconfirmed" })
-        } finally {
-          clearInterval(timer)
-          keepalive.abort()
-          await pulse
+          const knownHostsFile = join(directory, "known_hosts")
+          await writeFile(knownHostsFile, keys.map((key) => `${ready.address} ${key}\n`).join(""), {
+            mode: 0o600,
+          })
+          const transport: SandboxTransport = {
+            leaseId: lease.lease_id,
+            peerId: ready.peerId,
+            address: ready.address,
+            port: 22,
+            repositoryPath: "/workspace/repository",
+            knownHostsFile,
+            identityFile: "/dev/null",
+          }
+          const args = sandboxSshArguments(transport).slice(0, -1)
+          stage = "peer.heartbeat"
+          await command([...args, "exec /usr/local/bin/container-use heartbeat"], "", signal)
+          const keepalive = new AbortController()
+          const initializing = AbortSignal.any([signal, keepalive.signal])
+          let pulse = Promise.resolve()
+          const timer = setInterval(() => {
+            pulse = command(
+              [...args, "exec /usr/local/bin/container-use heartbeat"],
+              "",
+              AbortSignal.any([initializing, AbortSignal.timeout(10000)]),
+            ).then(
+              () => undefined,
+              (cause) => {
+                keepalive.abort(
+                  new SandboxError(sandboxDiagnostic("peer.keepalive", cause, started)),
+                )
+              },
+            )
+          }, 30000)
+          try {
+            stage = "peer.initialize"
+            const source = await command(
+              [...args, "exec /usr/local/bin/container-use initialize"],
+              JSON.stringify({ repository: lease.policy.repository, sourceSha: lease.source_sha }),
+              initializing,
+            )
+            initializing.throwIfAborted()
+            if (controlText(source).trim() !== lease.source_sha)
+              throw new SandboxError({ message: "Sandbox source checkout unconfirmed" })
+          } finally {
+            clearInterval(timer)
+            keepalive.abort()
+            await pulse
+          }
+          return transport
+        } catch (error) {
+          try {
+            await rm(directory, { recursive: true, force: true })
+          } catch (cleanupError) {
+            throw new AggregateError([error], "Peer initialization and local cleanup failed", {
+              cause: cleanupError,
+            })
+          }
+          throw error
         }
-        return transport
-      } catch (error) {
-        await rm(directory, { recursive: true, force: true })
-        throw error
-      }
-    },
-    catch: () => new SandboxError({ message: "Sandbox authenticated peer initialization failed" }),
+      },
+      catch: (cause) => new SandboxError(sandboxDiagnostic(stage, cause, started)),
+    })
   })
 
 export const makeSandboxLeaseService = (
@@ -204,7 +230,7 @@ export const makeSandboxLeaseService = (
       const retained = (yield* store.cleanupRuns()).filter(
         (row) => policy === undefined || JSON.stringify(row.policy) === JSON.stringify(policy),
       )
-      let failed = false
+      let failed: unknown = undefined
       for (const row of retained) {
         const lease = yield* store.cleanupLease(row)
         if (
@@ -226,12 +252,16 @@ export const makeSandboxLeaseService = (
           yield* store.cleanupState(row, run.status === "completed" ? "terminated" : "pending")
           if (run.status !== "completed") yield* github.cancel(row.policy, row.actions_run_id)
         }).pipe(
-          Effect.tapError(() =>
-            store.cleanupState(row, "pending", "Sandbox run confirmation failed; retry required"),
+          Effect.tapError((cause) =>
+            store.cleanupState(
+              row,
+              "pending",
+              sandboxDiagnostic("lease.confirmRun", cause).message,
+            ),
           ),
           Effect.result,
         )
-        if (result._tag === "Failure") failed = true
+        if (result._tag === "Failure") failed ??= result.failure
       }
       for (const row of retained) {
         const result = yield* store
@@ -241,21 +271,19 @@ export const makeSandboxLeaseService = (
             github.ensureRef(row.policy, row.lease_id, false),
           )
           .pipe(
-            Effect.tapError(() =>
+            Effect.tapError((cause) =>
               store.cleanupState(
                 row,
                 "terminated",
-                "Sandbox ref deletion unconfirmed; retry required",
+                sandboxDiagnostic("lease.deleteRef", cause).message,
               ),
             ),
             Effect.result,
           )
-        if (result._tag === "Failure") failed = true
+        if (result._tag === "Failure") failed ??= result.failure
       }
-      if (failed)
-        return yield* Effect.fail(
-          new SandboxError({ message: "Sandbox cleanup incomplete; retry required" }),
-        )
+      if (failed !== undefined)
+        return yield* Effect.fail(new SandboxError(sandboxDiagnostic("lease.cleanup", failed)))
     })
     const discover = (lease: Effect.Success<ReturnType<typeof required>>) =>
       github.runs(lease.policy, lease.lease_id).pipe(
@@ -269,7 +297,7 @@ export const makeSandboxLeaseService = (
     const inventory = Effect.fn("SandboxLease.inventory")(function* (policy: SandboxPolicy) {
       const owned = yield* github
         .inventory(policy)
-        .pipe(Effect.tapError(() => store.inventoryError(policy)))
+        .pipe(Effect.tapError((cause) => store.inventoryError(policy, cause)))
       yield* store.adoptAll(policy, owned)
     })
     const release = Effect.fn("SandboxLease.release")(function* (runId: string) {
@@ -281,7 +309,7 @@ export const makeSandboxLeaseService = (
         yield* discover(lease)
         yield* cleanup(lease.policy)
         yield* store.clearPolicyErrors(lease.policy)
-      }).pipe(Effect.tapError(() => store.recordError(runId)))
+      }).pipe(Effect.tapError((cause) => store.recordError(runId, cause)))
     })
     const cleanupUnobserved = (lease: Effect.Success<ReturnType<typeof required>>) =>
       store.reconcileUnobserved(
@@ -383,7 +411,7 @@ export const makeSandboxLeaseService = (
           ...saved.map((row) => row.policy),
         ].map((policy) => [JSON.stringify(policy), policy] as const),
       )
-      let failed = false
+      let failed: unknown = undefined
       for (const policy of snapshots.values()) {
         const selected = leases.filter(
           (lease) => JSON.stringify(lease.policy) === JSON.stringify(policy),
@@ -412,12 +440,10 @@ export const makeSandboxLeaseService = (
           yield* cleanup(policy)
           yield* store.clearPolicyErrors(policy)
         }).pipe(Effect.result)
-        if (result._tag === "Failure") failed = true
+        if (result._tag === "Failure") failed ??= result.failure
       }
-      if (failed)
-        return yield* Effect.fail(
-          new SandboxError({ message: "Sandbox policy reconciliation incomplete; retry required" }),
-        )
+      if (failed !== undefined)
+        return yield* Effect.fail(new SandboxError(sandboxDiagnostic("lease.reconcile", failed)))
     })
     const remote = (runId: string, operation: string, limit = 1048576, input = "") =>
       Effect.gen(function* () {
@@ -432,8 +458,7 @@ export const makeSandboxLeaseService = (
               signal,
               limit,
             ),
-          catch: (cause) =>
-            new SandboxError({ message: `Sandbox control operation failed: ${String(cause)}` }),
+          catch: (cause) => new SandboxError(sandboxDiagnostic("control.remote", cause)),
         })
       })
     const heartbeat = (runId: string) =>
@@ -449,11 +474,7 @@ export const makeSandboxLeaseService = (
           Schema.fromJsonString(SandboxCompletion),
         )(json, { onExcessProperty: "error" }).pipe(
           Effect.mapError(
-            () =>
-              new SandboxError({
-                message:
-                  "Sandbox result unavailable: completion requires environmentId, branch, title and commitMessage",
-              }),
+            (cause) => new SandboxError(sandboxDiagnostic("result.completion", cause)),
           ),
         )
         const response = yield* remote(
@@ -489,8 +510,7 @@ export const makeSandboxLeaseService = (
           return yield* Effect.fail(
             new SandboxError({ message: "Sandbox audit transport missing" }),
           )
-        const startedAt = new Date().toISOString()
-        const started = performance.now()
+        const started = Date.now()
         yield* Effect.tryPromise({
           try: (signal) =>
             drainToolAudit(directory, async (records) => {
@@ -505,19 +525,18 @@ export const makeSandboxLeaseService = (
               )
               return Schema.decodeUnknownSync(AuditReceipt)(JSON.parse(controlText(result)))
             }),
-          catch: (cause) => (cause instanceof Error ? cause : new Error(String(cause))),
+          catch: (cause) => new SandboxError(sandboxDiagnostic("audit.transport", cause, started)),
         }).pipe(
           Effect.timeout("30 seconds"),
           Effect.catch((cause) =>
             Effect.gen(function* () {
+              const diagnostic = sandboxDiagnostic("audit.drain", cause, started)
               const evidence = {
-                startedAt,
+                ...diagnostic.evidence,
                 failedAt: new Date().toISOString(),
-                elapsedMs: Math.round(performance.now() - started),
-                error: String(cause),
-                stack: cause instanceof Error ? cause.stack : undefined,
+                error: diagnostic.message,
               }
-              const message = `Sandbox audit drain unconfirmed after ${evidence.elapsedMs}ms (${startedAt}): ${evidence.error}`
+              const message = `Sandbox audit drain unconfirmed after ${evidence.elapsedMs}ms: ${diagnostic.message}`
               yield* Effect.tryPromise({
                 try: () =>
                   saveSandboxFile(
@@ -525,10 +544,19 @@ export const makeSandboxLeaseService = (
                     "audit-failure.json",
                     JSON.stringify(evidence),
                   ),
-                catch: () =>
-                  new SandboxError({ message: `${message}; failure receipt could not be saved` }),
+                catch: (receiptCause) =>
+                  new SandboxError(
+                    sandboxDiagnostic(
+                      "audit.receipt",
+                      new AggregateError(
+                        [cause, receiptCause],
+                        "Audit drain and failure receipt failed",
+                      ),
+                      started,
+                    ),
+                  ),
               })
-              return yield* Effect.fail(new SandboxError({ message }))
+              return yield* Effect.fail(new SandboxError({ message, evidence }))
             }),
           ),
         )

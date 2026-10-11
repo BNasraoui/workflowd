@@ -51,6 +51,60 @@ function readiness(sourcePolicy = policy) {
   }
 }
 
+test("peer connection failure retains its sanitized cause and leaves custody fail closed", async () => {
+  const { sandboxGithubFixture } = await import("./harness")
+  const { makeSandboxGithub } = await import("../../src/sandbox/github")
+  const { makeSandboxLeaseService } = await import("../../src/sandbox/lease")
+  const fixture = await sandboxGithubFixture(policy)
+  let attempts = 0
+  try {
+    await fixture.setReady(readiness())
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* sandboxMigration
+        yield* sandboxCleanupMigration
+        yield* sandboxOperationMigration
+        yield* sandboxCreationMigration
+        const store = yield* makeSandboxStore
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const leases = yield* makeSandboxLeaseService(github, "/unused", async () => {
+          attempts++
+          throw Object.assign(new Error("Peer connection refused; token=peer-secret"), {
+            code: "ECONNREFUSED",
+            exitCode: 255,
+            cause: Object.assign(new TypeError("upstream unavailable"), { status: 503 }),
+          })
+        })
+        yield* store.request({
+          runId: "run-peer",
+          leaseId: "lease-1",
+          policy,
+          sourceSha: "b".repeat(40),
+          now: Date.now(),
+        })
+        const result = yield* Effect.result(leases.acquire("run-peer"))
+        expect(result._tag).toBe("Failure")
+        if (result._tag === "Failure") {
+          const diagnostic = String(result.failure)
+          expect(diagnostic).toContain("Peer connection refused")
+          expect(diagnostic).toContain("peer.status")
+          expect(diagnostic).toContain("ECONNREFUSED")
+          expect(diagnostic).toContain("255")
+          expect(diagnostic).toContain("503")
+          expect(diagnostic).toContain("elapsedMs")
+          expect(diagnostic).not.toContain("peer-secret")
+          expect(diagnostic.length).toBeLessThan(8192)
+        }
+        expect(attempts).toBe(1)
+        expect((yield* store.read("run-peer"))?.state).toBe("starting")
+        expect((yield* store.read("run-peer"))?.transport).toBeNull()
+      }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
 test("sandbox policy rejects ambiguous aliases, mutable workflow refs and foreign repository names", () => {
   expect(parseSandboxRepositories(undefined)).toEqual([])
   expect(parseSandboxRepositories(JSON.stringify([policy]))).toEqual([policy])

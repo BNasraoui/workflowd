@@ -1,3 +1,4 @@
+import { sandboxDiagnostic, retainSandboxFailure } from "../sandbox/diagnostics"
 import {
   type CliPort,
   type CliEvent,
@@ -209,7 +210,10 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   const sandboxFailure = (cause: unknown) =>
     new WorkspaceError({
       operation: "native sandbox custody",
-      cause: cause instanceof Error ? cause : new Error(String(cause)),
+      cause: Object.assign(
+        new Error("Native sandbox custody failed"),
+        sandboxDiagnostic("native.custody", cause),
+      ),
     })
   const finishSandbox = (
     run: AgentRunRecord,
@@ -278,7 +282,16 @@ export const makeAgentRunCliDispatcher = (dependencies: {
               ? "completed"
               : "operator_required",
           finalMessage,
-          diagnostic: diagnostic(stalled, input.stallWindowMs, exit, turnFailed, kind),
+          diagnostic: sandboxDiagnostic(
+            "native.exit",
+            {
+              name: "Error",
+              message: diagnostic(stalled, input.stallWindowMs, exit, turnFailed, kind),
+              exitCode: Exit.isSuccess(exit) ? exit.value.exitCode : undefined,
+              cause: Exit.isFailure(exit) ? exit.cause : undefined,
+            },
+            input.sandboxRun.createdAt.getTime(),
+          ).message,
         })
         return
       }
@@ -321,6 +334,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
   ) =>
     Effect.suspend(() => {
       let claimed = false
+      const started = Date.now()
       return Effect.gen(function* () {
         if (run.state === "spawning") {
           return yield* refuse(
@@ -450,13 +464,18 @@ export const makeAgentRunCliDispatcher = (dependencies: {
           `a previous dispatch left this run ${run.state}; ${kind} processes cannot be re-observed`,
         )
       }).pipe(
-        Effect.onError(() =>
+        Effect.onError((cause) =>
           claimed && run.agent === "sandbox"
-            ? finishSandbox(run, {
-                state: "operator_required",
-                finalMessage: null,
-                diagnostic: "Native sandbox startup failed",
-              }).pipe(Effect.ignore)
+            ? retainSandboxFailure(run.directory, "native.startup", cause, started).pipe(
+                Effect.andThen(
+                  finishSandbox(run, {
+                    state: "operator_required",
+                    finalMessage: null,
+                    diagnostic: sandboxDiagnostic("native.startup", cause, started).message,
+                  }),
+                ),
+                Effect.ignore,
+              )
             : Effect.void,
         ),
       )

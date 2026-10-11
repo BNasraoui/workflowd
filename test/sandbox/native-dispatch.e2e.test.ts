@@ -1,3 +1,5 @@
+import { SqlClient } from "effect/unstable/sql"
+import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 import { expect, test } from "bun:test"
 import { Effect, ManagedRuntime } from "effect"
 import { join } from "node:path"
@@ -31,6 +33,7 @@ for (const [kind, mode] of [
   ["claude", "completed"],
   ["codex", "cancelled"],
   ["codex", "restart"],
+  ["claude", "peer-failed"],
 ] as const) {
   test(`native ${kind} ${mode} uses leased custody and publishes only after release`, async () => {
     const runner = await dispatchRunnerFixture()
@@ -52,7 +55,24 @@ for (const [kind, mode] of [
       const service = yield* makeSandboxDispatch({
         policies: [policy],
         github,
-        leases,
+        leases:
+          mode === "peer-failed"
+            ? {
+                ...leases,
+                acquire: () =>
+                  Effect.fail(
+                    new SandboxError(
+                      sandboxDiagnostic(
+                        "peer.heartbeat",
+                        Object.assign(
+                          new Error("SSH peer connection refused; token=native-secret"),
+                          { exitCode: 255, code: "ECONNREFUSED" },
+                        ),
+                      ),
+                    ),
+                  ),
+              }
+            : leases,
         client: shared.client,
         executor: shared.executor,
         executorId: "opencode:opencode-primary",
@@ -76,7 +96,7 @@ for (const [kind, mode] of [
             return yield* service.prepareNative(run)
           }).pipe(
             Effect.mapError(
-              () => new SandboxError({ message: "Native fixture preparation failed" }),
+              (cause) => new SandboxError(sandboxDiagnostic("fixture.prepare", cause)),
             ),
           ),
       }
@@ -128,17 +148,50 @@ for (const [kind, mode] of [
         fixture.holdAfter(1)
       }
       const ingress = await runtime.runPromise(AgentRunIngress)
-      const receipt = await runtime.runPromise(
-        ingress.register(
-          {
-            route: "native",
-            repository: policy.alias,
-            prompt: "List remote environments and finish",
-            idempotencyKey: runner.name,
-          },
-          new Date(),
-        ),
+      const registration = await runtime.runPromise(
+        ingress
+          .register(
+            {
+              route: "native",
+              repository: policy.alias,
+              prompt: "List remote environments and finish",
+              idempotencyKey: runner.name,
+            },
+            new Date(),
+          )
+          .pipe(Effect.result),
       )
+      if (mode === "peer-failed") {
+        expect(registration._tag).toBe("Failure")
+        const sql = await runtime.runPromise(SqlClient.SqlClient)
+        const rows = await runtime.runPromise(sql`SELECT run_id,directory FROM kernel_agent_runs`)
+        expect(rows).toHaveLength(1)
+        const directory = String(rows[0]!.directory)
+        const terminal = await Bun.file(join(directory, "terminal.json")).json()
+        expect(terminal.state).toBe("operator_required")
+        expect(terminal.diagnostic).toContain("SSH peer connection refused")
+        expect(terminal.diagnostic).toContain("peer.heartbeat")
+        expect(terminal.diagnostic).toContain("255")
+        expect(terminal.diagnostic).not.toContain("native-secret")
+        const evidence = await Bun.file(join(directory, "sandbox-failure.json")).text()
+        expect(evidence).toContain("ECONNREFUSED")
+        expect(evidence).not.toContain("native-secret")
+        githubFixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+        const service = await runtime.runPromise(SandboxDispatch)
+        await runtime.runPromise(service.iteration)
+        const leases = await runtime.runPromise(makeSandboxStore)
+        expect((await runtime.runPromise(leases.read(String(rows[0]!.run_id))))?.state).toBe(
+          "released",
+        )
+        expect(
+          await runtime.runPromise(
+            sql`SELECT id FROM resident_inbox WHERE id LIKE 'agent-run-end-%'`,
+          ),
+        ).toHaveLength(1)
+        return
+      }
+      if (registration._tag === "Failure") throw registration.failure
+      const receipt = registration.success
       const runs = await runtime.runPromise(AgentRunStore)
       const leases = await runtime.runPromise(makeSandboxStore)
       const service = await runtime.runPromise(SandboxDispatch)

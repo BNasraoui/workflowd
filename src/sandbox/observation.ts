@@ -1,3 +1,4 @@
+import { sandboxDiagnostic, type SandboxFailureEvidence } from "./diagnostics"
 import { Data, Effect } from "effect"
 import { saveSandboxFile } from "./binding"
 
@@ -8,9 +9,10 @@ type Evidence = {
   readonly httpStatus: number | null
   readonly startedAt: string
   readonly elapsedMs: number
+  readonly causes: typeof SandboxFailureEvidence.Type.causes
 }
 
-// Only classifications cross the durable boundary. SDK errors can carry complete
+// Only sanitized evidence crosses the durable boundary. SDK errors can carry complete
 // authenticated requests, response bodies and tool payloads in their causes.
 const classes = new Set([
   "Error",
@@ -46,6 +48,7 @@ export class SandboxObservationError extends Data.TaggedError("SandboxObservatio
 }
 
 export function observationFailure(stage: Stage, cause: unknown, started: number) {
+  const causes = sandboxDiagnostic(stage, cause, started).evidence.causes
   let errorClass = "UnknownError"
   let httpStatus: number | null = null
   for (let depth = 0; cause != null && depth < 8; depth++) {
@@ -60,6 +63,7 @@ export function observationFailure(stage: Stage, cause: unknown, started: number
   return new SandboxObservationError({
     evidence: {
       stage,
+      causes,
       errorClass,
       httpStatus,
       startedAt: new Date(started).toISOString(),

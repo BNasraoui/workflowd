@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
@@ -19,10 +20,13 @@ export const routeSandboxProvider = (shared: AgentRunProviderPort, sandbox: Sand
         return lease === null ? shared : yield* sandbox.provider(sessionId)
       }).pipe(
         Effect.mapError(
-          () =>
+          (cause) =>
             new OpenCodeAdapterError({
               operation: "route saved sandbox session",
-              cause: new Error("Sandbox session binding unavailable"),
+              cause: Object.assign(
+                new Error("Sandbox session binding unavailable"),
+                sandboxDiagnostic("provider.binding", cause),
+              ),
             }),
         ),
       )

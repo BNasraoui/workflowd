@@ -1,6 +1,7 @@
+import { SandboxFailureEvidence } from "../../src/sandbox/diagnostics"
 import { Session } from "@opencode-ai/client/effect"
 import { expect, test } from "bun:test"
-import { Effect, Fiber, Layer, ManagedRuntime, Schedule } from "effect"
+import { Effect, Fiber, Layer, ManagedRuntime, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import {
   SandboxDispatch,
@@ -904,7 +905,13 @@ for (const settlement of [
             expect(evidence.elapsedMs).toBeGreaterThanOrEqual(0)
             expect(Number.isFinite(Date.parse(String(evidence.startedAt)))).toBe(true)
             expect(JSON.stringify(evidence)).not.toContain("credential-canary")
-            expect(JSON.stringify(evidence).length).toBeLessThan(512)
+            const retained = Schema.decodeUnknownSync(SandboxFailureEvidence)(evidence)
+            expect(retained.causes.length).toBeLessThanOrEqual(8)
+            expect(retained.causes.every((cause) => cause.message.length <= 512)).toBe(true)
+            expect(retained.causes.at(-1)?.errorClass).toBe(
+              settlement === "missing telemetry" ? "SessionMissing" : "HttpError",
+            )
+            expect(JSON.stringify(evidence).length).toBeLessThan(8192)
             expect((yield* Effect.tryPromise(() => readSandboxBinding(directory))).state).toBe(
               "revoked",
             )

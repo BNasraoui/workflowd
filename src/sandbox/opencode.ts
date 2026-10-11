@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { mkdir, readFile, realpath } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AbsolutePath, Config, Session, type OpenCodeClient } from "@opencode-ai/client/effect"
@@ -63,7 +64,11 @@ async function command(args: ReadonlyArray<string>) {
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ])
-  if (code !== 0) throw new Error(`Sandbox process command failed: ${stderr.slice(0, 4096)}`)
+  if (code !== 0)
+    throw Object.assign(
+      new Error("Sandbox process command failed"),
+      sandboxDiagnostic("executor.command", { name: "Error", message: stderr, exitCode: code }),
+    )
   return stdout.trim()
 }
 

@@ -1,3 +1,4 @@
+import { sandboxDiagnostic } from "./diagnostics"
 import { join } from "node:path"
 import { Schema } from "effect"
 import { bindingDirectory, readSandboxBinding } from "./binding"
@@ -51,12 +52,16 @@ export async function nativeSandboxArguments(
   const timer = setTimeout(() => child.kill("SIGKILL"), 30000)
   let servers: typeof Servers.Type
   try {
-    const [status, output] = await Promise.all([
+    const [status, output, stderr] = await Promise.all([
       child.exited,
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ])
-    if (status !== 0) throw new Error("Cannot discover inherited native MCP servers")
+    if (status !== 0)
+      throw Object.assign(
+        new Error("Cannot discover inherited native MCP servers"),
+        sandboxDiagnostic("native.mcp", { name: "Error", message: stderr, exitCode: status }),
+      )
     servers = Schema.decodeUnknownSync(Servers)(JSON.parse(output))
   } finally {
     clearTimeout(timer)

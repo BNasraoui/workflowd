@@ -203,7 +203,9 @@ export async function sendToolAudit(
       if (length > maxLine) throw new Error("Sandbox audit receipt exceeds bound")
       chunks.push(chunk)
     }
-    if ((await child.exited) !== 0) throw new Error("Sandbox audit delivery failed")
+    const exitCode = await child.exited
+    if (exitCode !== 0)
+      throw Object.assign(new Error("Sandbox audit delivery failed"), { exitCode })
     return Schema.decodeUnknownSync(AuditReceipt)(
       JSON.parse(Buffer.concat(chunks).toString("utf8")),
     )

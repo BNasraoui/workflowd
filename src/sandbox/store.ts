@@ -5,11 +5,21 @@ import type { SqlError } from "effect/unstable/sql/SqlError"
 import { SandboxPolicy } from "./config"
 import { SandboxTransport } from "./transport"
 import type { OwnedLeaseRun } from "./github"
+import { SandboxFailureEvidence, sandboxDiagnostic } from "./diagnostics"
 
 export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxError", {
   message: Schema.String,
   uncertain: Schema.optionalKey(Schema.Boolean),
+  evidence: Schema.optionalKey(SandboxFailureEvidence),
 }) {}
+
+export const sandboxStage = <A, E, R>(stage: string, effect: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    const started = Date.now()
+    return effect.pipe(
+      Effect.mapError((cause) => new SandboxError(sandboxDiagnostic(stage, cause, started))),
+    )
+  })
 
 export class SandboxRefAbsent extends Schema.TaggedError<SandboxRefAbsent>()(
   "SandboxRefAbsent",
@@ -18,7 +28,10 @@ export class SandboxRefAbsent extends Schema.TaggedError<SandboxRefAbsent>()(
 
 export class SandboxRefRejected extends Schema.TaggedError<SandboxRefRejected>()(
   "SandboxRefRejected",
-  { status: Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 499 })) },
+  {
+    status: Schema.Int.check(Schema.isBetween({ minimum: 400, maximum: 499 })),
+    evidence: Schema.optionalKey(SandboxFailureEvidence),
+  },
 ) {}
 
 export const sessionCleanupUnconfirmed = "Sandbox session cleanup unconfirmed; retry required"
@@ -400,8 +413,15 @@ export const makeSandboxStore = Effect.gen(function* () {
       yield* sql`SELECT * FROM sandbox_leases WHERE state != 'released' ORDER BY created_at`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(Lease)(row))
   })
-  const recordError = Effect.fn("SandboxStore.recordError")(function* (runId: string) {
-    yield* sql`UPDATE sandbox_leases SET release_error='Sandbox reconciliation failed; retry required' WHERE run_id=${runId}
+  const recordError = Effect.fn("SandboxStore.recordError")(function* (
+    runId: string,
+    cause?: unknown,
+  ) {
+    const diagnostic =
+      cause === undefined
+        ? "Sandbox reconciliation failed; retry required"
+        : sandboxDiagnostic("lease.reconcile", cause).message
+    yield* sql`UPDATE sandbox_leases SET release_error=${diagnostic} WHERE run_id=${runId}
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
   const sessionCleanupError = Effect.fn("SandboxStore.sessionCleanupError")(function* (
@@ -508,10 +528,15 @@ export const makeSandboxStore = Effect.gen(function* () {
   })
   const inventoryError = Effect.fn("SandboxStore.inventoryError")(function* (
     policy: SandboxPolicy,
+    cause?: unknown,
   ) {
-    yield* sql`UPDATE sandbox_cleanup_runs SET last_error='Sandbox inventory incomplete; retry required',updated_at=${Date.now()}
+    const diagnostic =
+      cause === undefined
+        ? "Sandbox inventory incomplete; retry required"
+        : sandboxDiagnostic("lease.inventory", cause).message
+    yield* sql`UPDATE sandbox_cleanup_runs SET last_error=${diagnostic},updated_at=${Date.now()}
       WHERE repository_id=${policy.repositoryId} AND state != 'released'`
-    yield* sql`UPDATE sandbox_leases SET release_error='Sandbox inventory incomplete; retry required'
+    yield* sql`UPDATE sandbox_leases SET release_error=${diagnostic}
       WHERE json_extract(policy,'$.repositoryId')=${policy.repositoryId} AND state != 'released'
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })

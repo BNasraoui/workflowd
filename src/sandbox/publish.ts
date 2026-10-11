@@ -1,3 +1,4 @@
+import { sandboxDiagnostic, retainSandboxFailure, SandboxFailureEvidence } from "./diagnostics"
 import type { AgentRunRecord } from "../kernel/agent-run-store"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
@@ -328,7 +329,7 @@ export const makeSandboxPublisher = (
       })
       return "published" as const
     })
-    const poll = Effect.fn("SandboxPublisher.poll")(function* (runId: string) {
+    const poll = Effect.fn("SandboxPublisher.poll")(function* (runId: string, directory?: string) {
       const saved = yield* store.read(runId)
       const lease = yield* leases.read(runId)
       if (
@@ -412,7 +413,12 @@ export const makeSandboxPublisher = (
       yield* store.advance(runId, "approving", "approved")
       if (publishers[0]?.status === "completed") {
         const phase = yield* reconcile(policy, intent, publishers[0].id).pipe(
-          Effect.catch(() => Effect.succeed("operator_required" as const)),
+          Effect.catch((cause) =>
+            (directory === undefined
+              ? Effect.logError(sandboxDiagnostic("publish.reconcile", cause).message)
+              : retainSandboxFailure(directory, "publish.reconcile", cause)
+            ).pipe(Effect.as("operator_required" as const)),
+          ),
         )
         yield* store.advance(runId, "approved", phase)
         return phase
@@ -468,7 +474,11 @@ export const makeSandboxPublisher = (
           lease?.state === "released" &&
           lease.actions_run_id === null
         )
-          result = { ...terminal, state: "failed", diagnostic: "Sandbox ref creation rejected" }
+          result = {
+            ...terminal,
+            state: "failed",
+            diagnostic: `Sandbox ref creation rejected; ${terminal.diagnostic}`,
+          }
         if (lease?.transport != null && lease.state !== "released") {
           const audited = yield* Effect.result(remote.audit(run.runId, run.directory))
           if (audited._tag === "Failure")
@@ -484,7 +494,9 @@ export const makeSandboxPublisher = (
             result = {
               ...result,
               state: "operator_required",
-              diagnostic: `Sandbox result unavailable: ${String(sealed.failure)}`,
+              diagnostic:
+                "Sandbox result unavailable: " +
+                sandboxDiagnostic("publish.capture", sealed.failure).message,
             }
         }
         const message =
@@ -548,8 +560,14 @@ export const makeSandboxPublisher = (
       } else {
         if (cancel && ["approving", "approved"].includes(intent.phase))
           yield* github.cancel(lease.policy, intent.actions_run_id)
-        if (intent.phase === "sealed") yield* remote.finish(run.runId).pipe(Effect.ignore)
-        yield* poll(run.runId)
+        if (intent.phase === "sealed")
+          yield* remote.finish(run.runId).pipe(
+            Effect.tapError((cause) =>
+              retainSandboxFailure(run.directory, "publish.finish", cause),
+            ),
+            Effect.ignore,
+          )
+        yield* poll(run.runId, run.directory)
       }
       const settled = (yield* store.read(run.runId))!
       const phase = settled.phase
@@ -578,7 +596,13 @@ export const makeSandboxPublisher = (
         )
         yield* Effect.tryPromise(() => saveSandboxFile(run.directory, "final.txt", finalMessage))
       }
-      if (phase === "operator_required")
+      if (phase === "operator_required") {
+        const failureFile = Bun.file(join(run.directory, "sandbox-failure.json"))
+        const evidence = yield* Effect.tryPromise(async () =>
+          (await failureFile.exists())
+            ? Schema.decodeUnknownSync(SandboxFailureEvidence)(await failureFile.json())
+            : undefined,
+        )
         yield* Effect.tryPromise(() =>
           saveSandboxFile(
             run.directory,
@@ -587,10 +611,14 @@ export const makeSandboxPublisher = (
               state: "operator_required",
               sessionId: run.nativeSessionId,
               finalMessage: null,
-              diagnostic: "Protected publication requires operator reconciliation",
+              diagnostic:
+                evidence === undefined
+                  ? "Protected publication requires operator reconciliation"
+                  : sandboxDiagnostic("publish.reconcile", { evidence }).message,
             }),
           ),
         )
+      }
       return false
     })
     return { poll, saveTerminal, continuePublication }
