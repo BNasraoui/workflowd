@@ -761,7 +761,10 @@ async function recordWorkflowLog(row) {
 export function proofTask(repository) {
   const task = proofTasks[repository]
   assert.ok(task, `No approved proof task for ${repository}`)
-  assert.deepEqual(Object.keys(task).sort(), ["prompt", "testCommand"])
+  assert.deepEqual(
+    Object.keys(task).sort((left, right) => left.localeCompare(right)),
+    ["prompt", "testCommand"],
+  )
   assert.ok(task.prompt && task.testCommand)
   return task
 }
