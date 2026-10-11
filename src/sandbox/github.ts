@@ -564,6 +564,8 @@ export const makeSandboxGithub = (
       return response.data
     })
     return {
+      repositoryUrl: (policy: SandboxPolicy) =>
+        new OctokitClass().request.endpoint(`GET /repos/${policy.repository}`).url,
       publicationRead,
       gateAppId: github.appId,
       publishRequest,

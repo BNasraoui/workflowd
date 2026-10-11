@@ -529,7 +529,7 @@ for (const fault of [
           try {
             await objectGit(["update-ref", body.ref, body.sha, "0".repeat(40)])
           } catch {
-            return new Response(null, { status: 422 })
+            return Response.json({ message: `Authorization: Bearer ${token}` }, { status: 422 })
           }
           return fault === "lost ref reply"
             ? new Response(null, { status: 502 })
@@ -567,7 +567,8 @@ for (const fault of [
             draft: true,
             maintainer_can_modify: false,
           })
-          if (fault === "PR failure") return new Response(null, { status: 422 })
+          if (fault === "PR failure")
+            return Response.json({ message: `Authorization: Bearer ${token}` }, { status: 422 })
           pull = {
             ...body,
             title: fault === "wrong title" ? "changed" : title,
@@ -641,6 +642,8 @@ for (const fault of [
       if (
         ["binding mismatch", "invalid co-author", "format title", "bidi message"].includes(fault)
       ) {
+        expect(published.err).toContain("manifest validation failed")
+        expect(published.out).toContain("workflowd.publish.failure ")
         expect(pushes).toBe(0)
         expect(posts).toBe(0)
         expect(await Bun.file(join(work, "receipt.json")).exists()).toBe(false)
@@ -648,6 +651,19 @@ for (const fault of [
       }
       const receipt = JSON.parse(await Bun.file(join(work, "receipt.json")).text())
       expect(receipt).toMatchObject({ binding, repository: "fixture/repo", branch, revoked: true })
+      const expectedCause =
+        fault === "collision"
+          ? "branch already exists (HTTP 200)"
+          : fault === "race"
+            ? "branch creation failed (HTTP 422)"
+            : fault === "PR failure"
+              ? "PR creation failed (HTTP 422)"
+              : undefined
+      if (expectedCause !== undefined) {
+        expect(receipt.cause).toBe(expectedCause)
+        expect(published.err).toContain(expectedCause)
+      }
+      if (fault === "wrong tree") expect(receipt.cause).toBe("commit validation failed")
       if (
         [
           "none",

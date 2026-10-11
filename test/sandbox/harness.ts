@@ -9,7 +9,9 @@ import {
   transportHash,
   writeSandboxBinding,
 } from "../../src/sandbox/binding"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { runStoreMigrations } from "../../src/store/migrations"
 
 const repository = resolve(import.meta.dir, "../..")
 
@@ -26,11 +28,38 @@ export async function command(args: ReadonlyArray<string>, cwd = repository): Pr
 
 export async function runnerFixture() {
   const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-"))
+  const databasePath = join(root, "submission.sqlite")
+  await Effect.runPromise(
+    runStoreMigrations.pipe(Effect.provide(SqliteClient.layer({ filename: databasePath }))),
+  )
+  const branchResponses = new Map<string, number>()
+  const submissionRequests: string[] = []
+  const submissionServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (request.method !== "GET" || request.headers.has("authorization"))
+        throw new Error("Submission lookup must be an anonymous GET")
+      const branch = decodeURIComponent(
+        new URL(request.url).pathname.split("/git/ref/heads/")[1] ?? "",
+      )
+      submissionRequests.push(branch)
+      const status = branchResponses.get(branch) ?? 404
+      return status === 200
+        ? Response.json({ ref: `refs/heads/${branch}`, object: { sha: "a".repeat(40) } })
+        : new Response(null, { status })
+    },
+  })
+  const submissionCheck = {
+    databasePath,
+    repositoryUrl: new URL("repos/fixture/repo", submissionServer.url).toString(),
+  }
   const name = `workflowd-sandbox-${process.pid}-${root.split("-").at(-1) ?? "fixture"}`
   const docker = (...args: string[]) => command(["env", "DOCKER_BUILDKIT=0", "docker", ...args])
   let hold: ReturnType<typeof Bun.spawn> | undefined
   let holdLog = Promise.resolve("")
   const close = async () => {
+    await submissionServer.stop(true)
     hold?.kill("SIGKILL")
     await hold?.exited
     await docker("rm", "-f", `${name}-runner`, `${name}-engine`)
@@ -157,6 +186,7 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DA
         locationIdentity: "fixture",
         bridgeServerName: "wfdlease_fixture",
         repositoryId: 1,
+        submissionCheck,
         sourceSha: "a".repeat(40),
         policyHash: sandboxPolicyHash,
         transportHash: transportHash(transport),
@@ -167,6 +197,9 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DA
     )
     const bindingFile = join(bindingDirectory(directory), "binding.json")
     return {
+      submissionCheck,
+      branchResponses,
+      submissionRequests,
       bindingFile,
       holdLog: async () => {
         await docker(
@@ -907,8 +940,20 @@ export function sandboxPublicationFixture(
     }
     if (path.endsWith("/jobs/102/logs")) {
       if (fault === "saved receipt") return new Response(null, { status: 404 })
+      if (fault === "validation failure")
+        return new Response(
+          "2026-10-08T00:00:00.0000000Z workflowd.publish.failure " +
+            Buffer.from(JSON.stringify({ cause: "bundle validation failed" })).toString("base64") +
+            "\n",
+        )
       const stage =
-        fault === "lost push" ? "pushing" : fault === "lost PR" ? "creating_pr" : "published"
+        fault === "branch collision"
+          ? "validated"
+          : fault === "lost push"
+            ? "pushing"
+            : fault === "lost PR"
+              ? "creating_pr"
+              : "published"
       const receipt = {
         binding,
         repository: policy.repository,
@@ -918,6 +963,7 @@ export function sandboxPublicationFixture(
         pr: stage === "published" ? 17 : null,
         revoked: fault !== "unrevoked",
         commitSha: "2".repeat(40),
+        ...(fault === "branch collision" ? { cause: "branch already exists (HTTP 200)" } : {}),
       }
       return new Response(
         "2026-10-08T00:00:00.0000000Z workflowd.publish.receipt " +
@@ -926,10 +972,12 @@ export function sandboxPublicationFixture(
       )
     }
     if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === branch)
-      return Response.json({
-        ref: `refs/heads/${branch}`,
-        object: { sha: "2".repeat(40) },
-      })
+      return posts === 0
+        ? new Response(null, { status: 404 })
+        : Response.json({
+            ref: `refs/heads/${branch}`,
+            object: { sha: "2".repeat(40) },
+          })
     if (path.includes("/git/commits/"))
       return Response.json({
         sha: "2".repeat(40),

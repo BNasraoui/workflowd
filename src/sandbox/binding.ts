@@ -32,6 +32,12 @@ export const SandboxSessionBinding = Schema.Struct({
   locationIdentity: Schema.NonEmptyString,
   bridgeServerName: Schema.String.check(Schema.isPattern(/^wfdlease_[a-zA-Z0-9_]+$/)),
   repositoryId: Schema.Int.check(Schema.isGreaterThan(0)),
+  submissionCheck: Schema.optionalKey(
+    Schema.Struct({
+      repositoryUrl: Schema.String,
+      databasePath: Schema.String,
+    }),
+  ),
   sourceSha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)),
   policyHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
   transportHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),

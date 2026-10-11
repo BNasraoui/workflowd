@@ -97,6 +97,7 @@ for (const kind of ["codex", "claude"] as const) {
       sourceSha: "a".repeat(40),
       policyHash: sandboxPolicyHash,
       transportHash: transportHash(runner.transport),
+      submissionCheck: runner.submissionCheck,
       deadline: Date.now() + 600000,
       state: "active" as const,
     }

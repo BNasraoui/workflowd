@@ -33,6 +33,7 @@ export const PublicationReceipt = Schema.Struct({
   commitSha: Schema.NullOr(sha),
   pr: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   revoked: Schema.Boolean,
+  cause: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
 })
 export const PublishIntent = Schema.Struct({
   run_id: Schema.String,
@@ -58,6 +59,14 @@ export type PublishIntent = typeof PublishIntent.Type
 
 export const makePublishStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient
+  const databasePath = sql`PRAGMA database_list`.pipe(
+    Effect.flatMap(
+      Schema.decodeUnknownEffect(
+        Schema.Array(Schema.Struct({ name: Schema.String, file: Schema.String })),
+      ),
+    ),
+    Effect.map((databases) => databases.find((database) => database.name === "main")?.file ?? ""),
+  )
   const read = Effect.fn("PublishStore.read")(function* (runId: string) {
     const rows = yield* sql`SELECT * FROM sandbox_publications WHERE run_id=${runId}`
     return rows.length === 0 ? null : yield* Schema.decodeUnknownEffect(PublishIntent)(rows[0])
@@ -108,5 +117,5 @@ export const makePublishStore = Effect.gen(function* () {
     yield* sql`UPDATE sandbox_publications SET receipt=${encoded} WHERE run_id=${runId} AND phase='approved'
       AND (receipt IS NULL OR json_extract(receipt,'$.stage') != 'published')`
   })
-  return { read, seal, claimApproval, advance, saveReceipt }
+  return { read, seal, claimApproval, advance, saveReceipt, databasePath }
 })

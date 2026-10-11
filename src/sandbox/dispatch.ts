@@ -392,6 +392,10 @@ export const makeSandboxDispatch = (options: {
           locationIdentity: run.directory,
           bridgeServerName: sandboxBridgeName(lease.lease_id),
           repositoryId: policy.repositoryId,
+          submissionCheck: {
+            repositoryUrl: github.repositoryUrl(policy),
+            databasePath: yield* publications.databasePath,
+          },
           sourceSha,
           policyHash: sandboxPolicyHash,
           transportHash: transportHash(lease.transport),
@@ -464,6 +468,10 @@ export const makeSandboxDispatch = (options: {
           locationIdentity,
           bridgeServerName: sandboxBridgeName(lease.lease_id),
           repositoryId: policy.repositoryId,
+          submissionCheck: {
+            repositoryUrl: github.repositoryUrl(policy),
+            databasePath: yield* publications.databasePath,
+          },
           sourceSha,
           policyHash: sandboxPolicyHash,
           transportHash: transportHash(lease.transport),

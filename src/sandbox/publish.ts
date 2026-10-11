@@ -234,6 +234,22 @@ export const makeSandboxPublisher = (
             /^\d{4}-\d{2}-\d{2}T\S+Z workflowd\.publish\.receipt ([A-Za-z0-9+/=]+)\r?$/.exec(line)
           return match === null ? [] : [match[1]!]
         })
+        if (records.length === 0) {
+          const failure =
+            /^\d{4}-\d{2}-\d{2}T\S+Z workflowd\.publish\.failure ([A-Za-z0-9+/=]{1,512})\r?$/m.exec(
+              logs,
+            )
+          if (failure !== null) {
+            const detail = yield* Schema.decodeUnknownEffect(
+              Schema.fromJsonString(
+                Schema.Struct({ cause: Schema.String.check(Schema.isMaxLength(256)) }),
+              ),
+            )(Buffer.from(failure[1]!, "base64").toString())
+            return yield* Effect.fail(
+              new SandboxError(sandboxDiagnostic("publish.validation", detail.cause)),
+            )
+          }
+        }
         if (records.length === 0 || records.length > 8) return yield* Effect.fail(fail())
         const raw = yield* Effect.try((): unknown =>
           JSON.parse(Buffer.from(records.at(-1)!, "base64").toString()),
@@ -254,10 +270,14 @@ export const makeSandboxPublisher = (
           proof.marker !== marker
         )
           return yield* Effect.fail(fail())
-        const { stage, pr, revoked, commitSha } = proof
-        receipt = { stage, pr, revoked, commitSha }
+        const { stage, pr, revoked, commitSha, cause } = proof
+        receipt = { stage, pr, revoked, commitSha, ...(cause === undefined ? {} : { cause }) }
         yield* store.saveReceipt(intent.run_id, receipt)
       }
+      if (receipt.cause !== undefined)
+        return yield* Effect.fail(
+          new SandboxError(sandboxDiagnostic("publish.receipt", receipt.cause)),
+        )
       if (
         !receipt.revoked ||
         receipt.commitSha === null ||
@@ -435,12 +455,24 @@ export const makeSandboxPublisher = (
       yield* store.advance(runId, "approving", "approved")
       if (publishers[0]?.status === "completed") {
         const phase = yield* reconcile(policy, intent, publishers[0].id).pipe(
-          Effect.catch((cause) =>
-            (directory === undefined
-              ? Effect.logError(sandboxDiagnostic("publish.reconcile", cause).message)
-              : retainSandboxFailure(directory, "publish.reconcile", cause)
-            ).pipe(Effect.as("operator_required" as const)),
-          ),
+          Effect.catch((cause) => {
+            const diagnostic = sandboxDiagnostic("publish.reconcile", cause)
+            // The completed publisher's evidence supersedes earlier controller failures.
+            return Effect.logError(diagnostic.message).pipe(
+              Effect.andThen(
+                directory === undefined
+                  ? Effect.void
+                  : Effect.tryPromise(() =>
+                      saveSandboxFile(
+                        directory,
+                        "sandbox-failure.json",
+                        JSON.stringify(diagnostic.evidence),
+                      ),
+                    ).pipe(Effect.ignore),
+              ),
+              Effect.as("operator_required" as const),
+            )
+          }),
         )
         yield* store.advance(runId, "approved", phase)
         return phase
@@ -634,9 +666,11 @@ export const makeSandboxPublisher = (
               sessionId: run.nativeSessionId,
               finalMessage: null,
               diagnostic:
-                evidence === undefined
-                  ? "Protected publication requires operator reconciliation"
-                  : sandboxDiagnostic("publish.reconcile", { evidence }).message,
+                settled.receipt?.cause !== undefined
+                  ? sandboxDiagnostic("publish.receipt", settled.receipt.cause).message
+                  : evidence === undefined
+                    ? "Protected publication requires operator reconciliation"
+                    : sandboxDiagnostic("publish.reconcile", { evidence }).message,
             }),
           ),
         )

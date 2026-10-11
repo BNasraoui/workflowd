@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path"
 import { Schema } from "effect"
+import { Database } from "bun:sqlite"
 import { SandboxCompletion } from "./config"
 import {
   assertBridgeBinding,
@@ -24,6 +25,43 @@ export const submitResultTool = {
   ),
 }
 
+const rejected = (text: string) => ({ isError: true, content: [{ type: "text", text }] })
+
+async function checkBranch(binding: SandboxSessionBinding, branch: string) {
+  const check = binding.submissionCheck
+  if (check === undefined || check.databasePath === "")
+    throw new Error("Submission lookup is unavailable")
+  // The bridge receives only lookup metadata. Neither this GET nor SQLite has write authority.
+  using database = new Database(check.databasePath, { readonly: true })
+  const pending = () =>
+    database
+      .query(
+        `SELECT 1 FROM sandbox_publications p
+    JOIN sandbox_leases l ON l.run_id=p.run_id
+    WHERE json_extract(l.policy,'$.repositoryId')=? AND json_extract(p.metadata,'$.branch')=?
+      AND p.phase IN ('sealed','approving','approved') LIMIT 1`,
+      )
+      .get(binding.repositoryId, branch) !== null
+  if (pending())
+    return "That branch name is taken by a pending publication; choose another and call submit_result again."
+  const response = await fetch(
+    `${check.repositoryUrl}/git/ref/heads/${encodeURIComponent(branch)}`,
+    {
+      method: "GET",
+      redirect: "error",
+      headers: { Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(10000),
+    },
+  )
+  await response.body?.cancel()
+  if (response.status === 200)
+    return "That branch name is taken in the target repository; choose another and call submit_result again."
+  if (response.status !== 404) throw new Error("Branch lookup failed")
+  return pending()
+    ? "That branch name is taken by a pending publication; choose another and call submit_result again."
+    : null
+}
+
 export async function submitSandboxResult(
   file: string,
   transport: SandboxTransport,
@@ -41,6 +79,17 @@ export async function submitSandboxResult(
         },
       ],
     }
+  if (await Bun.file(join(dirname(file), "submission.json")).exists())
+    return rejected("Result already submitted for this binding; the first valid submission wins.")
+  try {
+    const problem = await checkBranch(binding, decoded.value.branch)
+    if (problem !== null) return rejected(problem)
+  } catch {
+    return rejected(
+      "Could not verify branch availability; retry submit_result after the lookup is available.",
+    )
+  }
+  await assertBridgeBinding(file, transport)
   const accepted = await saveSandboxFile(
     dirname(file),
     "submission.json",

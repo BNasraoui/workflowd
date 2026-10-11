@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test"
-import { Schema } from "effect"
+import { Effect, Schema } from "effect"
+import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { makeSandboxStore } from "../../src/sandbox/store"
+import { makePublishStore } from "../../src/sandbox/publish-store"
 import { dirname, join } from "node:path"
 import {
   readSandboxBinding,
@@ -173,6 +176,91 @@ test("submit_result is refused for a revoked binding", async () => {
       await client.close()
     }
   } finally {
+    await runner.close()
+  }
+}, 120000)
+
+test("submit_result rejects taken and pending names, then accepts the agent's other name", async () => {
+  const runner = await runnerFixture()
+  const client = bridgeClient(runner.transport)
+  const completion = {
+    environmentId: "one",
+    branch: "taken/雪'$()",
+    title: "Agent title",
+    commitMessage: "Agent message",
+  }
+  const file = Bun.file(join(dirname(runner.bindingFile), "submission.json"))
+  try {
+    runner.branchResponses.set(completion.branch, 200)
+    runner.branchResponses.set("unavailable", 503)
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const leases = yield* makeSandboxStore
+        yield* leases.request({
+          runId: "pending",
+          leaseId: "pending",
+          sourceSha: "a".repeat(40),
+          now: Date.now(),
+          policy: {
+            alias: "fixture",
+            repository: "fixture/repo",
+            repositoryId: 1,
+            installationId: 1,
+            workflowSha: "a".repeat(40),
+            appActorId: 1,
+            tailscaleClientId: "fixture",
+            tailscaleAudience: "fixture",
+          },
+        })
+        const publications = yield* makePublishStore
+        yield* publications.seal({
+          runId: "pending",
+          actionsRunId: 41,
+          attempt: 1,
+          baseRef: "main",
+          deadline: Date.now() + 60000,
+          metadata: {
+            ...completion,
+            branch: "pending/雪'$()",
+            sourceSha: "a".repeat(40),
+            resultSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            bundleSha256: "d".repeat(64),
+            manifestSha256: "e".repeat(64),
+          },
+        })
+      }).pipe(
+        Effect.provide(SqliteClient.layer({ filename: runner.submissionCheck.databasePath })),
+      ),
+    )
+    await client.initialize()
+    await client.request("tools/list")
+    for (const branch of [completion.branch, "pending/雪'$()"]) {
+      const result = await client.request("tools/call", {
+        name: "submit_result",
+        arguments: { ...completion, branch },
+      })
+      expect(result).toMatchObject({ isError: true })
+      expect(JSON.stringify(result)).toContain("choose another")
+      expect(await file.exists()).toBe(false)
+    }
+    expect(runner.submissionRequests).toContain(completion.branch)
+    const unavailable = await client.request("tools/call", {
+      name: "submit_result",
+      arguments: { ...completion, branch: "unavailable" },
+    })
+    expect(unavailable).toMatchObject({ isError: true })
+    expect(JSON.stringify(unavailable)).toContain("Could not verify branch availability")
+    expect(await file.exists()).toBe(false)
+    const available = { ...completion, branch: "another/雪'$()" }
+    expect(
+      await client.request("tools/call", { name: "submit_result", arguments: available }),
+    ).toMatchObject({ isError: false })
+    expect(
+      (await Bun.file(join(dirname(runner.bindingFile), "submission.json")).json()).completion,
+    ).toEqual(available)
+  } finally {
+    await client.close()
     await runner.close()
   }
 }, 120000)

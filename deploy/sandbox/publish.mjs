@@ -11,8 +11,13 @@ const validated = join(root, "validated.json")
 const receipt = join(root, "receipt.json")
 const repository = process.env.GITHUB_REPOSITORY
 const api = process.env.GITHUB_API_URL || "https://api.github.com"
+// Only fixed operation labels and numeric HTTP statuses may reach diagnostics.
+// Assertion messages can contain agent text, and HTTP errors can contain credentials.
+let failureCause = "publication validation failed"
+let publicationState
 
 async function bytes(response, maximum) {
+  if (!response.ok) failureCause += ` (HTTP ${response.status})`
   assert.ok(response.ok, "GitHub request failed")
   const chunks = []
   let size = 0
@@ -78,6 +83,7 @@ async function validate() {
     signal: AbortSignal.timeout(30000),
   })
   const json = async (path) => JSON.parse((await bytes(await request(path), 1048576)).toString())
+  failureCause = "approval validation failed"
   const reviews = await json(`/actions/runs/${run}/approvals`)
   assert.ok(Array.isArray(reviews) && reviews.length <= 100)
   const matches = reviews.filter(review => review.state === "approved" && review.user?.id === actor &&
@@ -94,6 +100,7 @@ async function validate() {
   assert.ok(Number.isSafeInteger(binding.artifact) && binding.artifact > 0)
   assert.match(binding.digest, /^sha256:[a-f0-9]{64}$/)
   assert.match(binding.manifest, /^[a-f0-9]{64}$/)
+  failureCause = "artifact validation failed"
   const artifact = await json(`/actions/artifacts/${binding.artifact}`)
   assert.equal(artifact.id, binding.artifact)
   assert.equal(artifact.name, `sandbox-result-${run}-${attempt}`)
@@ -108,6 +115,7 @@ async function validate() {
   await mkdir(root, { mode: 0o700 })
   const archive = join(root, "result.zip")
   await writeFile(archive, await bytes(await request(`/actions/artifacts/${binding.artifact}/zip`), 16 * 1048576), { mode: 0o600 })
+  failureCause = "bundle validation failed"
   const checked = spawnSync("/usr/bin/python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "validate",
     `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}.git`], {
     cwd: root, input: JSON.stringify(binding), timeout: 180000, maxBuffer: 65536,
@@ -127,8 +135,11 @@ async function request(path, method = "GET", body) {
       "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (response.status === 404 || response.status === 204 || response.status === 401)
+  if (!response.ok || response.status === 204) {
+    if (!response.ok) failureCause += ` (HTTP ${response.status})`
+    await response.body?.cancel()
     return { status: response.status }
+  }
   return { status: response.status, data: JSON.parse((await bytes(response, 1048576)).toString()) }
 }
 
@@ -163,6 +174,7 @@ function verifyPull(pull, state) {
 }
 
 async function publish() {
+  failureCause = "manifest validation failed"
   const { binding } = JSON.parse(await readFile(validated, "utf8"))
   // Re-read the sealed bytes: only the manifest digest in the approval authorizes agent text.
   const manifest = await readFile(join(root, "validated", "result.json"))
@@ -185,9 +197,14 @@ async function publish() {
   const prefix = `/repos/${repository}`
   const state = { binding, metadata, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
     marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->` }
+  publicationState = state
   await record(state)
   const refPath = prefix + "/git/ref/heads/" + encodeURIComponent(state.branch)
-  assert.equal((await request(refPath)).status, 404, "Branch already exists")
+  failureCause = "branch lookup failed"
+  const existing = await request(refPath)
+  if (existing.status === 200) failureCause = "branch already exists (HTTP 200)"
+  assert.equal(existing.status, 404, "Branch already exists")
+  failureCause = "tree preparation failed"
   const prepared = spawnSync("/usr/bin/python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "tree", binding.source, binding.result], {
     cwd: root, timeout: 180000, maxBuffer: 16 * 1048576,
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
@@ -196,32 +213,38 @@ async function publish() {
   const tree = JSON.parse(prepared.stdout.toString())
   for (const entry of tree.tree) {
     if (entry.sha !== null) {
+      failureCause = "blob creation failed"
       const blob = await request(prefix + "/git/blobs", "POST", { content: entry.content, encoding: "base64" })
       assert.equal(blob.status, 201)
       assert.equal(blob.data.sha, entry.sha)
       delete entry.content
     }
   }
+  failureCause = "tree creation failed"
   const createdTree = await request(prefix + "/git/trees", "POST", tree)
   assert.equal(createdTree.status, 201)
   assert.equal(createdTree.data.sha, binding.tree)
   // Omit author/committer so GitHub attributes and signs using the authenticated App.
+  failureCause = "commit creation failed"
   const commit = await request(prefix + "/git/commits", "POST", {
     tree: binding.tree, parents: [binding.source], message: commitMessage,
   })
   assert.equal(commit.status, 201)
+  failureCause = "commit validation failed"
   verifyCommit(commit.data, state)
   state.commitSha = commit.data.sha
   state.stage = "pushing"
   await record(state)
   // GitHub's create-ref endpoint fails on collisions, including a race after preflight.
   // An ambiguous reply is never retried or adopted as a successful creation.
+  failureCause = "branch creation failed"
   const createdRef = await request(prefix + "/git/refs", "POST", { ref: `refs/heads/${state.branch}`, sha: state.commitSha })
   assert.equal(createdRef.status, 201)
   assert.equal(createdRef.data.ref, `refs/heads/${state.branch}`)
   assert.equal(createdRef.data.object.sha, state.commitSha)
   state.stage = "pushed"
   await record(state)
+  failureCause = "branch readback failed"
   const remote = await request(refPath)
   assert.equal(remote.status, 200)
   assert.equal(remote.data.ref, `refs/heads/${state.branch}`)
@@ -230,23 +253,33 @@ async function publish() {
   await record(state)
   let number
   try {
+    failureCause = "PR creation failed"
     const created = await request(prefix + "/pulls", "POST", { title: metadata.title, body: publicationBody(state),
       head: state.branch, base: binding.base, draft: true, maintainer_can_modify: false })
     assert.equal(created.status, 201)
     number = created.data.number
-  } catch {
+  } catch (error) {
     // The branch was proven created above. An ambiguous POST is read back, never retried.
-    const found = await request(prefix + "/pulls?" + new URLSearchParams({
-      state: "all", head: repository.split("/")[0] + ":" + state.branch, base: binding.base, per_page: "100",
-    }))
-    assert.equal(found.status, 200)
-    assert.ok(Array.isArray(found.data) && found.data.length === 1)
-    number = found.data[0].number
+    const originalCause = failureCause
+    try {
+      failureCause = "PR recovery failed"
+      const found = await request(prefix + "/pulls?" + new URLSearchParams({
+        state: "all", head: repository.split("/")[0] + ":" + state.branch, base: binding.base, per_page: "100",
+      }))
+      assert.equal(found.status, 200)
+      assert.ok(Array.isArray(found.data) && found.data.length === 1)
+      number = found.data[0].number
+    } catch {
+      failureCause = originalCause
+      throw error
+    }
   }
+  failureCause = "PR validation failed"
   assert.ok(Number.isSafeInteger(number) && number > 0)
   const readback = await request(prefix + "/pulls/" + number)
   assert.equal(readback.status, 200)
   state.pr = verifyPull(readback.data, state)
+  failureCause = "commit validation failed"
   const commitReadback = await request(prefix + "/git/commits/" + state.commitSha)
   assert.equal(commitReadback.status, 200)
   assert.equal(commitReadback.data.sha, state.commitSha)
@@ -256,6 +289,7 @@ async function publish() {
 }
 
 async function revoke() {
+  failureCause = "token revocation failed"
   // Idempotent DELETE; 401 means this token is already invalid. No response body is logged.
   const response = await request("/installation/token", "DELETE")
   assert.ok(response.status === 204 || response.status === 401)
@@ -275,6 +309,11 @@ try {
   else throw new Error("Unknown operation")
 } catch {
   // Never include server bodies, credentials, agent metadata or process output.
-  console.error("Protected publication failed closed")
+  if (publicationState !== undefined) {
+    publicationState.cause = failureCause
+    await record(publicationState).catch(() => undefined)
+  }
+  console.log("workflowd.publish.failure " + Buffer.from(JSON.stringify({ cause: failureCause })).toString("base64"))
+  console.error("Protected publication failed closed: " + failureCause)
   process.exitCode = 1
 }

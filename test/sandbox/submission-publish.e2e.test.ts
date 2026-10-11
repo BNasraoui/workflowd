@@ -10,9 +10,10 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { makePublishStore } from "../../src/sandbox/publish-store"
 import { makeSandboxPublisher } from "../../src/sandbox/publish"
 import { makeSandboxGithub } from "../../src/sandbox/github"
+import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { bindingDirectory, saveSandboxFile, writeSandboxBinding } from "../../src/sandbox/binding"
-import { sandboxGithubFixture } from "./harness"
+import { sandboxGithubFixture, sandboxPublicationFixture } from "./harness"
 
 const policy = {
   alias: "workflowd",
@@ -112,6 +113,7 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
             let seals = 0
             const publisher = yield* makeSandboxPublisher(github, {
               ...remote,
+              finish: () => Effect.void,
               finishResult: (_runId, input) => {
                 expect(JSON.parse(input)).toEqual(completion)
                 seals++
@@ -140,6 +142,16 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
             expect((yield* publication.read(stored.runId)) !== null).toBe(!mismatch)
             expect(seals).toBe(mismatch ? 0 : 1)
             if (!mismatch) {
+              yield* Effect.tryPromise(() =>
+                saveSandboxFile(
+                  directory,
+                  "sandbox-failure.json",
+                  JSON.stringify(
+                    sandboxDiagnostic("publish.reconcile", new Error("Earlier controller failure"))
+                      .evidence,
+                  ),
+                ),
+              )
               const intent = (yield* publication.read(stored.runId))!
               expect(intent.deadline).toBeGreaterThan(lease.deadline)
               expect(intent.deadline - Date.now()).toBeGreaterThan(14 * 60000)
@@ -149,6 +161,22 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
               Bun.file(join(directory, "terminal.json")).json(),
             )
             expect(terminal.state).toBe(mismatch ? "operator_required" : "completed")
+            if (!mismatch) {
+              const fault = kind === "codex" ? "validation failure" : "branch collision"
+              const cause =
+                kind === "codex" ? "bundle validation failed" : "branch already exists (HTTP 200)"
+              sandboxPublicationFixture(fixture, policy, "lease-1", fault, completion.branch)
+              yield* publisher.continuePublication({ ...stored, nativeSessionId })
+              yield* publisher.continuePublication({ ...stored, nativeSessionId })
+              const receipt = (yield* publication.read(stored.runId))?.receipt
+              if (kind === "codex") expect(receipt).toBeNull()
+              else expect(receipt).toMatchObject({ cause })
+              const failed = yield* Effect.tryPromise(() =>
+                Bun.file(join(directory, "terminal.json")).json(),
+              )
+              expect(failed.state).toBe("operator_required")
+              expect(failed.diagnostic).toContain(cause)
+            }
           }).pipe(
             Effect.provide(
               AgentRunStoreLive.pipe(
