@@ -167,6 +167,8 @@ for (const [kind, mode] of [
         expect(fixture.requests.length).toBeGreaterThan(2)
         const instructions = JSON.stringify(fixture.requests[0])
         expect(instructions).toContain("environmentId")
+        expect(instructions).toContain("commitMessage")
+        expect(instructions).toContain("your PR title")
         expect(instructions).toContain("Do not create git branches")
         expect(instructions).toContain("publisher creates the branch")
         expect(JSON.stringify(fixture.requests.at(-1))).toContain("native-tests-passed")

@@ -144,17 +144,23 @@ project setting was changed.
 A configured `publish` policy supplies the PR base ref, environment ID and publisher
 App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;
 it defaults to `workflowSha`. The base tip is recorded before dispatch. There is no
-result branch input in policy or dispatch. The agent chooses the name and finishes with
-a JSON object with `environmentId` (the exact container-use environment holding its
-result) and `branch` (its chosen name). The agent works in container-use environments
-and must not create Git branches inside the container or push; the publisher creates
-the branch. Names pass unchanged through JSON; GitHub
-will decide ref validity and collision protection when real publication is enabled.
+result branch input in policy or dispatch. The agent calls `submit_result` with exactly
+`environmentId` (the result's container-use environment), `branch` (its chosen name),
+`title` (its PR title) and `commitMessage` (the single published commit's message).
+The strict final-message fallback accepts the same object, either bare or in one JSON
+fence, without surrounding prose or extra fields. Title and message are required,
+non-empty valid UTF-8 plain text. Titles have at most 200 Unicode code points and one
+line; messages have at most 10 KiB of UTF-8. Unicode control characters are forbidden,
+except LF in messages. Unpaired surrogates and title line/paragraph separators fail.
+Nothing trims or normalizes the accepted text. Metadata travels as JSON/API payloads,
+never shell interpolation. Branch naming remains entirely the agent's choice.
+The agent must not create Git branches inside the container or push.
 
 After session quiescence and audit acknowledgement, the fixed runner control seals the
 selected container-use result in `result.bundle` and `result.json`, verifying the exact
 environment among `refs/remotes/container-use/*` even when several exist. Only
-source/result SHAs, the name and content digests return over SSH. A missing or unknown
+source/result/tree SHAs, branch, title, commit message and content digests return over SSH.
+The controller refuses any difference between the submitted wording and sealed metadata. A missing or unknown
 environment produces an explicit operator outcome without choosing another result;
 an unchanged source explicitly produces no publication. The reusable lease job uploads
 the artifact and finishes. Each repository's caller owns a top-level `agent-publish`
@@ -188,25 +194,29 @@ prevent cleanup: no software can guarantee remote revocation in that case, and t
 GitHub expiry remains the final bound. No key or token is stored in workflowd state.
 
 The publisher uses a fresh validated bare repository with no inherited Git environment,
-config, hooks, checkout, filters or replacement refs. A trusted ephemeral credential helper
-serves only the exact caller HTTPS repository, using an environment token rather than argv
-or stored Git configuration. Push output is captured and never printed. A taken name fails;
-the exact validated SHA and unchanged agent branch form one explicit refspec, without force,
-update, delete, tags or mirror options. Only Git's newly-created porcelain status is accepted,
-then the remote ref/SHA is read back. GitHub's required update/deletion rules close the
-preflight race; publication must not be enabled before those rules are verified.
+config, hooks, checkout, filters or replacement refs. It sends only final source-relative
+blobs and tree entries to GitHub's [Git Data API](https://docs.github.com/en/rest/git/trees),
+preserving binary contents and deletions. It verifies every returned blob SHA and the
+created tree SHA against the validated result. With the ghettimonster token, it creates
+**one commit**, with that exact tree, exactly one parent (the recorded source), and the
+agent's unchanged message. It omits author/committer overrides so GitHub supplies the
+App identity and signature. Commit creation and readback must report the expected tree,
+parent and message, and a verified signature. No agent commit history is published.
 
-The PR is created as a draft to the base bound into the approval, with
-`maintainer_can_modify: false`. Readback checks its number, URL, draft/open state, author
-login and ID, same-repository head/base and exact result SHA. Its small binding marker
-allows recovery of a lost PR reply without repeating the POST. No result branch is deleted
-or overwritten as rollback.
+The publisher uses `POST /git/refs` once to create the agent-named branch at this new
+commit. A taken name or a race fails without updating a ref. There is no credential
+helper, authenticated git push, force/update/delete operation or automatic rename.
+The PR is a draft with the agent's title, the existing workflowd binding marker followed
+by two newlines and the unchanged commit message, and `maintainer_can_modify: false`.
+Readback checks the title, body, number, URL, open/draft state, bot login/ID, repository,
+base and squashed commit. No result branch is deleted or overwritten as rollback.
 
 Migration 33 stores metadata-only immutable publication intents. Approval checks the
 owned run, attempt, source, workflow identity, successful runner job, immutable artifact
 identity, expected custom rule and environment settings. The gate App uses a separate
 repository token with Actions read and Deployments write. Approval is an exact
-result-binding JSON comment. Its intent is saved before POST; a lost response is
+version-3 result-binding JSON comment, including title, commit message and result tree SHA.
+The manifest and validated binding carry the same values; a mismatch or old binding version fails closed. Its intent is saved before POST; a lost response is
 recovered by reading the matching review, never by blindly repeating the POST. The
 publisher checks the authenticated bot ID and review state, run/attempt and artifact
 identity before downloading. The bootstrap deliberately fails closed if custom-only
@@ -219,23 +229,24 @@ commit. Forbidden paths, hidden forbidden intermediate changes, symlinks, submod
 mode changes, extra bundle heads, unrelated/nonlinear history and content limits fail.
 
 Publication receipts are metadata only. The trusted publisher emits bounded base64 JSON
-records in its own job log at each stage, including before writes and after revocation.
+records in its own job log at each stage, including before ref/PR writes and after revocation.
+The receipt records the newly created commit SHA separately from the agent result SHA.
 The controller selects the exact `agent-publish` job ID from the owned run/attempt, limits
 its log to 1 MiB, checks the binding, and saves only receipt metadata in migration 34's
 publication table. Same-run receipt artifacts are deliberately not trusted: the lease
 runner can upload artifacts too. The result bundle stays on GitHub and the publish runner.
 
-Migration 34 binds the immutable base ref into new version-2 approvals. Historical canary
+Migration 34 stores the immutable base ref and metadata receipt. Version-3 approvals retain that base binding. Historical canary
 intents retain a null base and are never retroactively published. Recovery reuses stored
-receipts, checks the remote head and draft PR, and never repeats a push or PR POST. An
-ambiguous push without Git's creation acknowledgement remains `operator_required`, even
+receipts, checks the remote head and draft PR, and never repeats a ref or PR POST. An
+ambiguous ref creation without a successful API acknowledgement remains `operator_required`, even
 if a matching SHA exists remotely; ownership has not been proven. A known-created branch
-with a lost PR reply can recover by exact marker, author, head and base. Missing logs,
+with a lost PR reply can recover by exact marker, title/message, author, head/tree/parent and base. Missing logs,
 revocation failure, foreign PRs and ambiguous ownership fail closed.
 
 Cancellation before approval does not publish. After approval, cancellation/expiry stops
 the owned Actions run and reconciles its receipt before settlement; it does not promise
-rollback. A confirmed PR returns only repository, branch, result SHA, base and PR URL.
+rollback. A confirmed PR returns only repository, branch, published commit SHA, tree SHA, title, base and PR URL.
 Actions termination and lease-ref deletion still precede the terminal mailbox.
 
 ## D3 live publication evidence
@@ -271,10 +282,12 @@ Success requires the bound `submit_result` receipt and matching owned tool call,
 passing remote tests, the exact custom-rule approval, and a successful `agent-publish`
 job from the recorded run/attempt. Only that job's log supplies publisher receipts.
 Its final receipt must confirm the published PR and token revocation. GitHub readback
-must show the agent-selected ref at the sealed result SHA and an **open draft** PR
+must show the agent-selected ref at the receipt's squashed commit and an **open draft** PR
 by `ghettimonster[bot]` (339414993), with the same repository, recorded base and
-`maintainer_can_modify: false`. Matching immutable PR base/head SHAs proves equality
-to the sealed source/result diff without downloading a patch or bundle. If the base
+`maintainer_can_modify: false`. The PR title/message must match the submission, and
+the published commit must have the sealed tree, the recorded source as its only parent,
+the supplied message and a verified signature. This proves tree equality without
+downloading a patch or bundle. If the base
 has moved, verification stops rather than claiming that the diff still matches.
 
 The verifier compares every canonical audit record with the runner job's timestamped

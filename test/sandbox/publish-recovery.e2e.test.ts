@@ -10,6 +10,9 @@ import { makePublishStore } from "../../src/sandbox/publish-store"
 const metadata = {
   sourceSha: "a".repeat(40),
   resultSha: "b".repeat(40),
+  treeSha: "1".repeat(40),
+  title: "Agent title",
+  commitMessage: "Agent message\n\nDetails",
   branch: "arbitrary/$()\n雪",
   bundleSha256: "c".repeat(64),
   manifestSha256: "d".repeat(64),
@@ -90,7 +93,12 @@ test("publication receipt and recorded base survive reopening without authorizin
         })
         yield* store.claimApproval("one", 52, "sha256:" + "e".repeat(64))
         yield* store.advance("one", "approving", "approved")
-        yield* store.saveReceipt("one", { stage: "creating_pr", pr: null, revoked: true })
+        yield* store.saveReceipt("one", {
+          stage: "creating_pr",
+          pr: null,
+          revoked: true,
+          commitSha: "2".repeat(40),
+        })
       }),
     )
     await run(
@@ -101,14 +109,26 @@ test("publication receipt and recorded base survive reopening without authorizin
           stage: "creating_pr",
           pr: null,
           revoked: true,
+          commitSha: "2".repeat(40),
         })
         expect(yield* store.claimApproval("one", 52, "sha256:" + "e".repeat(64))).toBe(false)
-        yield* store.saveReceipt("one", { stage: "published", pr: 17, revoked: true })
-        yield* store.saveReceipt("one", { stage: "creating_pr", pr: null, revoked: true })
+        yield* store.saveReceipt("one", {
+          stage: "published",
+          pr: 17,
+          revoked: true,
+          commitSha: "2".repeat(40),
+        })
+        yield* store.saveReceipt("one", {
+          stage: "creating_pr",
+          pr: null,
+          revoked: true,
+          commitSha: "2".repeat(40),
+        })
         expect((yield* store.read("one"))?.receipt).toEqual({
           stage: "published",
           pr: 17,
           revoked: true,
+          commitSha: "2".repeat(40),
         })
       }),
     )

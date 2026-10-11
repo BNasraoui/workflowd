@@ -910,6 +910,7 @@ export function sandboxPublicationFixture(
         stage,
         pr: stage === "published" ? 17 : null,
         revoked: fault !== "unrevoked",
+        commitSha: "2".repeat(40),
       }
       return new Response(
         "2026-10-08T00:00:00.0000000Z workflowd.publish.receipt " +
@@ -920,12 +921,21 @@ export function sandboxPublicationFixture(
     if (decodeURIComponent(path.split("/git/ref/heads/")[1] ?? "") === branch)
       return Response.json({
         ref: `refs/heads/${branch}`,
-        object: { sha: binding.result },
+        object: { sha: "2".repeat(40) },
+      })
+    if (path.includes("/git/commits/"))
+      return Response.json({
+        sha: "2".repeat(40),
+        tree: { sha: fault === "wrong tree" ? "0".repeat(40) : binding.tree },
+        parents: [{ sha: fault === "wrong parent" ? "0".repeat(40) : binding.source }],
+        message: fault === "wrong message" ? "changed" : binding.commitMessage,
+        verification: { verified: true },
       })
     if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {
       const pull = {
         number: 17,
         html_url: `https://github.com/${policy.repository}/pull/17`,
+        title: fault === "wrong title" ? "changed" : binding.title,
         draft: true,
         state: "open",
         maintainer_can_modify: false,
@@ -936,14 +946,14 @@ export function sandboxPublicationFixture(
         },
         head: {
           ref: branch,
-          sha: binding.result,
+          sha: "2".repeat(40),
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
         base: {
           ref: binding.base,
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
-        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n${String(binding.commitMessage)}`,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }

@@ -18,7 +18,7 @@ const Submission = Schema.Struct({
 export const submitResultTool = {
   name: "submit_result",
   description:
-    "Finish your task by submitting the exact result environment ID and the branch name you choose. Only the first valid submission is accepted.",
+    "Finish your task by submitting the exact result environment ID and the branch name, PR title and squash commit message you choose. Only the first valid submission is accepted.",
   inputSchema: Schema.decodeUnknownSync(Schema.Json)(
     Schema.toJsonSchemaDocument(SandboxCompletion).schema,
   ),
@@ -37,7 +37,7 @@ export async function submitSandboxResult(
       content: [
         {
           type: "text",
-          text: "submit_result requires exactly {environmentId: non-empty string, branch: string}",
+          text: "submit_result requires exactly {environmentId: non-empty string, branch: string, title: non-empty single-line plain text (200 characters), commitMessage: non-empty plain text (10 KiB UTF-8; newlines only)}",
         },
       ],
     }

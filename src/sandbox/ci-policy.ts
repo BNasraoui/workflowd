@@ -102,7 +102,7 @@ export function assertProtectedPublishAction(source: string): void {
   // Reviewed token scope, validation ordering, only key consumer, always-revoke and post fallback.
   if (
     createHash("sha256").update(source).digest("hex") !==
-    "a2dd5f97f860408dd28b6dbe72f63e7f8de97bdbc5251ab9a4c1346326d2c811"
+    "d7ecdc1fb8ccc01859461a940db6a1840f428afe77f17e891d13d9485ca09d8c"
   )
     throw new Error("Publisher action differs from the reviewed secret-isolation snapshot")
 }

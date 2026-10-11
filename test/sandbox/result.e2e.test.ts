@@ -6,6 +6,7 @@ import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { command } from "./harness"
 
+const wording = { title: "Title 雪 '$()'", commitMessage: "Message 雪 $()\n\nDetails\n" }
 const script = resolve("deploy/sandbox/result.py")
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 
@@ -25,12 +26,13 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
     await writeFile(join(repo, "result"), "runner-only-result\n")
     await command(["git", "add", "."], repo)
     await command(["git", "commit", "-m", "result"], repo)
+    const treeSha = await command(["git", "rev-parse", "HEAD^{tree}"], repo)
     const resultSha = await command(["git", "rev-parse", "HEAD"], repo)
     await command(["git", "update-ref", "refs/remotes/container-use/one", resultSha], repo)
     await command(["git", "update-ref", "refs/remotes/container-use/two", sourceSha], repo)
     await command(["git", "checkout", "--detach", sourceSha], repo)
     const branch = "a name with ' quotes/$()\n雪"
-    const seal = (completion: unknown = { branch, environmentId: "one" }) => {
+    const seal = (completion: unknown = { ...wording, branch, environmentId: "one" }) => {
       const child = Bun.spawn(["python3", script, "seal", sourceSha], {
         cwd: root,
         stdin: new Blob([JSON.stringify(completion)]),
@@ -49,6 +51,8 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
     const bundle = new Uint8Array(await Bun.file(join(output, "result.bundle")).arrayBuffer())
     const manifest = new Uint8Array(await Bun.file(join(output, "result.json")).arrayBuffer())
     expect(metadata).toEqual({
+      ...wording,
+      treeSha,
       sourceSha,
       resultSha,
       branch,
@@ -57,19 +61,31 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
     })
     expect(text).not.toContain("runner-only-result")
     expect(JSON.parse(new TextDecoder().decode(manifest))).toEqual({
+      ...wording,
+      treeSha,
       sourceSha,
       resultSha,
       branch,
       bundleSha256: digest(bundle),
     })
     expect((await seal())[1]).toBe(text)
-    const other = await seal({ branch, environmentId: "two" })
+    const other = await seal({ ...wording, branch, environmentId: "two" })
     expect(other[0]).toBe(0)
     expect(JSON.parse(other[1])).toEqual({ empty: true, sourceSha })
+    for (const fields of [
+      { title: "bad\nline" },
+      { title: "x".repeat(201) },
+      { commitMessage: "bad\tcontrol" },
+      { commitMessage: "é".repeat(5121) },
+      { title: "\ud800" },
+      { commitMessage: "\udfff" },
+    ]) {
+      expect((await seal({ ...wording, branch, environmentId: "one", ...fields }))[0]).not.toBe(0)
+    }
     for (const completion of [
       { branch },
-      { branch, environmentId: "missing" },
-      { branch, environmentId: "one^{commit}" },
+      { ...wording, branch, environmentId: "missing" },
+      { ...wording, branch, environmentId: "one^{commit}" },
     ]) {
       const rejected = await seal(completion)
       expect(rejected[0]).not.toBe(0)
@@ -98,6 +114,9 @@ for (const mutation of [
   "source option",
   "result option",
   "source helper",
+  "title mismatch",
+  "message mismatch",
+  "tree mismatch",
 ])
   test(`publisher validates actual Git objects and bounded ZIP: ${mutation}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "sandbox-bundle-"))
@@ -129,7 +148,9 @@ for (const mutation of [
       await git("update-ref", "refs/remotes/container-use/one", resultSha)
       const child = Bun.spawn(["python3", script, "seal", sourceSha], {
         cwd: root,
-        stdin: new Blob([JSON.stringify({ branch: "chosen/by/agent", environmentId: "one" })]),
+        stdin: new Blob([
+          JSON.stringify({ ...wording, branch: "chosen/by/agent", environmentId: "one" }),
+        ]),
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -163,11 +184,16 @@ for (const mutation of [
           archive,
         ])
       const binding = {
+        ...wording,
+        tree: metadata.treeSha,
         source: sourceSha,
         result: resultSha,
         manifest: metadata.manifestSha256,
         digest: "sha256:" + digest(new Uint8Array(await Bun.file(archive).arrayBuffer())),
       }
+      if (mutation === "title mismatch") binding.title = "changed"
+      if (mutation === "message mismatch") binding.commitMessage = "changed"
+      if (mutation === "tree mismatch") binding.tree = sourceSha
       if (mutation === "swapped archive") binding.digest = "sha256:" + "0".repeat(64)
       if (mutation === "source option") binding.source = "--help"
       if (mutation === "result option") binding.result = "--all"
@@ -193,7 +219,7 @@ for (const mutation of [
         await chmod(join(hostilePath, "python3"), 0o755)
         await mkdir(join(root, "fixture"))
         await symlink(repo, join(root, "fixture", "repo.git"))
-        const approved = { v: 2, run: 41, attempt: 1, artifact: 52, ...binding, base: "main" }
+        const approved = { v: 3, run: 41, attempt: 1, artifact: 52, ...binding, base: "main" }
         const api = Bun.serve({
           hostname: "127.0.0.1",
           port: 0,
@@ -357,7 +383,9 @@ test("real SSH completion seals on the container-use runner and ends hold withou
         "exec /usr/local/bin/runner-control finish-result",
       ],
       {
-        stdin: new Blob([JSON.stringify({ branch: "free choice/$() 雪", environmentId: env.id })]),
+        stdin: new Blob([
+          JSON.stringify({ ...wording, branch: "free choice/$() 雪", environmentId: env.id }),
+        ]),
         stdout: "pipe",
         stderr: "pipe",
       },
@@ -371,6 +399,7 @@ test("real SSH completion seals on the container-use runner and ends hold withou
     const metadata = JSON.parse(text)
     expect(metadata.sourceSha).toBe(base)
     expect(metadata.branch).toBe("free choice/$() 雪")
+    expect(metadata).toMatchObject(wording)
     expect(text).not.toContain("runner-only-publication")
     expect(await Bun.file(join(runner.root, "result.bundle")).exists()).toBe(false)
     expect(

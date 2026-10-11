@@ -7,7 +7,12 @@ import { Effect, Schema } from "effect"
 import type { makeSandboxGithub } from "./github"
 import type { SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
-import { makePublishStore, PublicationReceipt, type PublishIntent } from "./publish-store"
+import {
+  makePublishStore,
+  PublicationReceipt,
+  publishedCommitSchema,
+  type PublishIntent,
+} from "./publish-store"
 import { readSandboxSubmission } from "./submission"
 
 export const SandboxTerminal = Schema.Struct({
@@ -63,7 +68,7 @@ const fail = () => new SandboxError({ message: "Publication identity or protecti
 
 export function approvalComment(intent: PublishIntent): string {
   return JSON.stringify({
-    v: intent.base_ref === null ? 1 : 2,
+    v: 3,
     run: intent.actions_run_id,
     attempt: intent.attempt,
     artifact: intent.artifact_id,
@@ -71,6 +76,9 @@ export function approvalComment(intent: PublishIntent): string {
     source: intent.metadata.sourceSha,
     result: intent.metadata.resultSha,
     manifest: intent.metadata.manifestSha256,
+    tree: intent.metadata.treeSha,
+    title: intent.metadata.title,
+    commitMessage: intent.metadata.commitMessage,
     ...(intent.base_ref === null ? {} : { base: intent.base_ref }),
   })
 }
@@ -243,16 +251,24 @@ export const makeSandboxPublisher = (
           proof.marker !== marker
         )
           return yield* Effect.fail(fail())
-        receipt = { stage: proof.stage, pr: proof.pr, revoked: proof.revoked }
+        const { stage, pr, revoked, commitSha } = proof
+        receipt = { stage, pr, revoked, commitSha }
         yield* store.saveReceipt(intent.run_id, receipt)
       }
-      if (!receipt.revoked || !["creating_pr", "published"].includes(receipt.stage))
+      if (
+        !receipt.revoked ||
+        receipt.commitSha === null ||
+        !["creating_pr", "published"].includes(receipt.stage)
+      )
         return "operator_required" as const
       const ref = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) }),
       )(yield* github.publicationRead(policy, `git/ref/heads/${encodeURIComponent(branch)}`))
-      if (ref.ref !== `refs/heads/${branch}` || ref.object.sha !== intent.metadata.resultSha)
+      if (ref.ref !== `refs/heads/${branch}` || ref.object.sha !== receipt.commitSha)
         return yield* Effect.fail(fail())
+      yield* Schema.decodeUnknownEffect(publishedCommitSchema(intent.metadata, receipt.commitSha))(
+        yield* github.publicationRead(policy, `git/commits/${receipt.commitSha}`),
+      )
       const repo = Schema.Struct({ id: Schema.Int, full_name: Schema.String })
       const pullSchema = Schema.Struct({
         number: Schema.Int,
@@ -261,6 +277,7 @@ export const makeSandboxPublisher = (
         draft: Schema.Literal(true),
         maintainer_can_modify: Schema.Literal(false),
         body: Schema.String,
+        title: Schema.String,
         user: Schema.Struct({
           id: Schema.Int,
           login: Schema.Literal("ghettimonster[bot]"),
@@ -294,9 +311,10 @@ export const makeSandboxPublisher = (
         pull.html_url !== `https://github.com/${policy.repository}/pull/${pull.number}` ||
         pull.user.id !== policy.publish!.publisherActorId ||
         pull.head.ref !== branch ||
-        pull.head.sha !== intent.metadata.resultSha ||
+        pull.head.sha !== receipt.commitSha ||
         pull.base.ref !== intent.base_ref ||
-        pull.body !== marker ||
+        pull.title !== intent.metadata.title ||
+        pull.body !== marker + "\n\n" + intent.metadata.commitMessage ||
         [pull.head.repo, pull.base.repo].some(
           (repo) => repo.id !== policy.repositoryId || repo.full_name !== policy.repository,
         )
@@ -304,6 +322,7 @@ export const makeSandboxPublisher = (
         return yield* Effect.fail(fail())
       yield* store.saveReceipt(intent.run_id, {
         stage: "published",
+        commitSha: receipt.commitSha,
         pr: pull.number,
         revoked: true,
       })
@@ -539,7 +558,9 @@ export const makeSandboxPublisher = (
         const finalMessage = JSON.stringify({
           repository: lease.policy.repository,
           branch: settled.metadata.branch,
-          resultSha: settled.metadata.resultSha,
+          resultSha: settled.receipt!.commitSha,
+          treeSha: settled.metadata.treeSha,
+          title: settled.metadata.title,
           base: settled.base_ref,
           pullRequest: `https://github.com/${lease.policy.repository}/pull/${settled.receipt!.pr}`,
         })

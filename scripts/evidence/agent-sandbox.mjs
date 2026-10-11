@@ -803,6 +803,7 @@ export function assertLivePublication(proof) {
     jobs,
     reviews,
     publisherLog,
+    commit,
     ref,
     pull,
   } = proof
@@ -810,8 +811,15 @@ export function assertLivePublication(proof) {
   assert.equal(intent.metadata.sourceSha, sourceSha)
   assert.notEqual(intent.metadata.resultSha, sourceSha)
   assert.equal(intent.base_ref, policy.publish.baseRef)
-  assert.deepEqual(intent.receipt, { stage: "published", pr: pull.number, revoked: true })
+  assert.deepEqual(intent.receipt, {
+    stage: "published",
+    pr: pull.number,
+    revoked: true,
+    commitSha: pull.head.sha,
+  })
   assert.equal(submission?.branch, intent.metadata.branch)
+  assert.equal(submission?.title, intent.metadata.title)
+  assert.equal(submission?.commitMessage, intent.metadata.commitMessage)
   assert.ok(submission?.environmentId)
   assert.ok(
     calls.some(
@@ -820,7 +828,9 @@ export function assertLivePublication(proof) {
         call.completed &&
         call.name.endsWith("submit_result") &&
         call.input?.environmentId === submission.environmentId &&
-        call.input?.branch === submission.branch,
+        call.input?.branch === submission.branch &&
+        call.input?.title === submission.title &&
+        call.input?.commitMessage === submission.commitMessage,
     ),
     "Agent did not call submit_result for the sealed result",
   )
@@ -870,7 +880,16 @@ export function assertLivePublication(proof) {
   assert.equal(last.pr, pull.number)
   assert.equal(last.revoked, true, "Publication token revocation unconfirmed")
   assert.equal(ref.ref, `refs/heads/${submission.branch}`)
-  assert.equal(ref.object.sha, intent.metadata.resultSha)
+  assert.equal(ref.object.sha, intent.receipt.commitSha)
+  assert.equal(last.commitSha, intent.receipt.commitSha)
+  assert.equal(commit.sha, intent.receipt.commitSha)
+  assert.equal(commit.tree.sha, intent.metadata.treeSha)
+  assert.deepEqual(
+    commit.parents.map((parent) => parent.sha),
+    [sourceSha],
+  )
+  assert.equal(commit.message, intent.metadata.commitMessage)
+  assert.equal(commit.verification.verified, true)
   assert.ok(Number.isSafeInteger(pull.number) && pull.number > 0)
   assert.equal(pull.html_url, `https://github.com/${policy.repository}/pull/${pull.number}`)
   assert.equal(pull.state, "open")
@@ -881,9 +900,10 @@ export function assertLivePublication(proof) {
     { login: "ghettimonster[bot]", id: 339414993, type: "Bot" },
   )
   assert.equal(policy.publish.publisherActorId, 339414993)
-  assert.equal(pull.body, marker)
+  assert.equal(pull.title, intent.metadata.title)
+  assert.equal(pull.body, marker + "\n\n" + intent.metadata.commitMessage)
   assert.equal(pull.head.ref, submission.branch)
-  assert.equal(pull.head.sha, intent.metadata.resultSha)
+  assert.equal(pull.head.sha, intent.receipt.commitSha)
   assert.equal(pull.base.ref, intent.base_ref)
   // Equal immutable diff endpoints establish equality without fetching code.
   assert.equal(
@@ -953,6 +973,7 @@ async function recordLivePublication({ policy, intent, lease, run, binding, call
       `git/ref/heads/${encodeURIComponent(intent.metadata.branch)}`,
     ),
     pull: await githubEvidence(policy.repository, `pulls/${intent.receipt.pr}`),
+    commit: await githubEvidence(policy.repository, `git/commits/${intent.receipt.commitSha}`),
   }
   await writeFile(join(output, "publication.json"), JSON.stringify(proof, null, 2), { mode: 0o600 })
   assertLivePublication(proof)

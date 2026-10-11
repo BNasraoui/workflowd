@@ -120,7 +120,12 @@ for (const kind of ["codex", "claude"] as const) {
       name: "environment_list",
       arguments: { environment_source: "/workspace/repository" },
     })
-    const completion = { environmentId: "fixture-result", branch: "" }
+    const completion = {
+      environmentId: "fixture-result",
+      branch: "",
+      title: "Native result",
+      commitMessage: "Publish native result",
+    }
     fixture.actions.push({ name: "submit_result", arguments: completion })
     fixture.actions.push({
       name: kind === "codex" ? "exec_command" : "Bash",

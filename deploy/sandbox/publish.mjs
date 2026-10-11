@@ -8,9 +8,7 @@ import { spawnSync } from "node:child_process"
 const root = join(process.env.RUNNER_TEMP, "workflowd-publish")
 const validated = join(root, "validated.json")
 const receipt = join(root, "receipt.json")
-const script = fileURLToPath(import.meta.url)
 const repository = process.env.GITHUB_REPOSITORY
-const server = process.env.GITHUB_SERVER_URL || "https://github.com"
 const api = process.env.GITHUB_API_URL || "https://api.github.com"
 
 async function bytes(response, maximum) {
@@ -23,6 +21,22 @@ async function bytes(response, maximum) {
     chunks.push(chunk)
   }
   return Buffer.concat(chunks)
+}
+
+function publicationText(value, message = false) {
+  assert.equal(typeof value, "string")
+  assert.ok(value.length > 0 && value.isWellFormed())
+  assert.ok(message ? Buffer.byteLength(value, "utf8") <= 10240 : [...value].length <= 200)
+  assert.ok(!/\p{Cc}/u.test(message ? value.replaceAll("\n", "") : value))
+  assert.ok(message || !/[\u2028\u2029]/u.test(value))
+}
+
+function verifyCommit(commit, state) {
+  assert.match(commit.sha, /^[a-f0-9]{40}$/)
+  assert.equal(commit.tree.sha, state.binding.tree)
+  assert.deepEqual(commit.parents.map(parent => parent.sha), [state.binding.source])
+  assert.equal(commit.message, state.binding.commitMessage)
+  assert.equal(commit.verification.verified, true)
 }
 
 async function validate() {
@@ -45,8 +59,10 @@ async function validate() {
     review.user?.type === "Bot" && review.environments?.some(env => env.name === "agent-publish"))
   assert.equal(matches.length, 1, "Missing or ambiguous gate approval")
   const binding = JSON.parse(matches[0].comment)
-  assert.deepEqual(new Set(Object.keys(binding)), new Set(["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v", "base"]))
-  assert.equal(binding.v, 2)
+  assert.deepEqual(new Set(Object.keys(binding)), new Set(["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v", "base", "tree", "title", "commitMessage"]))
+  assert.equal(binding.v, 3)
+  publicationText(binding.title)
+  publicationText(binding.commitMessage, true)
   assert.equal(typeof binding.base, "string")
   assert.ok(binding.base.length > 0)
   assert.equal(binding.run, run)
@@ -108,13 +124,14 @@ function verifyPull(pull, state) {
   assert.equal(pull.user.id, 339414993)
   assert.equal(pull.user.type, "Bot")
   assert.equal(pull.head.ref, state.branch)
-  assert.equal(pull.head.sha, state.binding.result)
+  assert.equal(pull.head.sha, state.commitSha)
+  assert.equal(pull.title, state.binding.title)
   assert.equal(pull.base.ref, state.binding.base)
   for (const side of [pull.head, pull.base]) {
     assert.equal(side.repo.full_name, repository)
     assert.equal(side.repo.id, Number(process.env.GITHUB_REPOSITORY_ID))
   }
-  assert.equal(pull.body, state.marker)
+  assert.equal(pull.body, state.marker + "\n\n" + state.binding.commitMessage)
   assert.equal(pull.html_url, `https://github.com/${repository}/pull/${pull.number}`)
   return pull.number
 }
@@ -123,45 +140,68 @@ async function publish() {
   const { binding, metadata } = JSON.parse(await readFile(validated, "utf8"))
   assert.equal(binding.run, Number(process.env.GITHUB_RUN_ID))
   assert.equal(binding.attempt, Number(process.env.GITHUB_RUN_ATTEMPT))
+  assert.equal(binding.v, 3)
+  publicationText(binding.title)
+  publicationText(binding.commitMessage, true)
+  assert.equal(metadata.title, binding.title)
+  assert.equal(metadata.commitMessage, binding.commitMessage)
+  assert.equal(metadata.treeSha, binding.tree)
+  assert.equal(metadata.sourceSha, binding.source)
+  assert.match(binding.tree, /^[a-f0-9]{40}$/)
+  assert.match(binding.source, /^[a-f0-9]{40}$/)
   assert.match(binding.result, /^[a-f0-9]{40}$/)
   assert.equal(metadata.resultSha, binding.result)
   assert.equal(typeof metadata.branch, "string")
   assert.ok(process.env.PUBLISH_TOKEN)
   const prefix = `/repos/${repository}`
-  const state = { binding, repository, branch: metadata.branch, stage: "validated", pr: null, revoked: false,
+  const state = { binding, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
     marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->` }
   await record(state)
   const refPath = prefix + "/git/ref/heads/" + encodeURIComponent(state.branch)
   assert.equal((await request(refPath)).status, 404, "Branch already exists")
+  const prepared = spawnSync("/usr/bin/python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "tree", binding.source, binding.result], {
+    cwd: root, timeout: 180000, maxBuffer: 16 * 1048576,
+    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
+  })
+  assert.equal(prepared.status, 0, "Tree preparation failed")
+  const tree = JSON.parse(prepared.stdout.toString())
+  for (const entry of tree.tree) {
+    if (entry.sha !== null) {
+      const blob = await request(prefix + "/git/blobs", "POST", { content: entry.content, encoding: "base64" })
+      assert.equal(blob.status, 201)
+      assert.equal(blob.data.sha, entry.sha)
+      delete entry.content
+    }
+  }
+  const createdTree = await request(prefix + "/git/trees", "POST", tree)
+  assert.equal(createdTree.status, 201)
+  assert.equal(createdTree.data.sha, binding.tree)
+  // Omit author/committer so GitHub attributes and signs using the authenticated App.
+  const commit = await request(prefix + "/git/commits", "POST", {
+    tree: binding.tree, parents: [binding.source], message: binding.commitMessage,
+  })
+  assert.equal(commit.status, 201)
+  verifyCommit(commit.data, state)
+  state.commitSha = commit.data.sha
   state.stage = "pushing"
   await record(state)
-  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
-  // Fresh bare repository, no ambient credentials/configuration, only a fixed trusted helper.
-  const pushed = spawnSync("/usr/bin/git", [
-    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null",
-    "-c", "credential.helper=", "-c", `credential.helper=!${quote(process.execPath)} ${quote(script)} credential`,
-    "-c", "credential.useHttpPath=true", "-c", "http.extraHeader=", "-c", "http.followRedirects=false",
-    "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no", "--",
-    `${server}/${repository}.git`, `${binding.result}:refs/heads/${state.branch}`,
-  ], { cwd: join(root, "validated/objects.git"), timeout: 120000, maxBuffer: 131072,
-    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_NO_REPLACE_OBJECTS: "1", GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "https:http",
-      PUBLISH_TOKEN: process.env.PUBLISH_TOKEN, GITHUB_SERVER_URL: server, GITHUB_REPOSITORY: repository,
-      RUNNER_TEMP: process.env.RUNNER_TEMP } })
-  assert.equal(pushed.status, 0, "Push outcome uncertain")
-  const updates = pushed.stdout.toString().split("\n").filter(line => line.includes("\t"))
-  assert.deepEqual(updates, [`*\t${binding.result}:refs/heads/${state.branch}\t[new branch]`])
+  // GitHub's create-ref endpoint fails on collisions, including a race after preflight.
+  // An ambiguous reply is never retried or adopted as a successful creation.
+  const createdRef = await request(prefix + "/git/refs", "POST", { ref: `refs/heads/${state.branch}`, sha: state.commitSha })
+  assert.equal(createdRef.status, 201)
+  assert.equal(createdRef.data.ref, `refs/heads/${state.branch}`)
+  assert.equal(createdRef.data.object.sha, state.commitSha)
   state.stage = "pushed"
   await record(state)
   const remote = await request(refPath)
   assert.equal(remote.status, 200)
   assert.equal(remote.data.ref, `refs/heads/${state.branch}`)
-  assert.equal(remote.data.object.sha, binding.result)
+  assert.equal(remote.data.object.sha, state.commitSha)
   state.stage = "creating_pr"
   await record(state)
   let number
   try {
-    const created = await request(prefix + "/pulls", "POST", { title: "Agent result", body: state.marker,
+    const created = await request(prefix + "/pulls", "POST", { title: binding.title, body: state.marker + "\n\n" + binding.commitMessage,
       head: state.branch, base: binding.base, draft: true, maintainer_can_modify: false })
     assert.equal(created.status, 201)
     number = created.data.number
@@ -178,6 +218,10 @@ async function publish() {
   const readback = await request(prefix + "/pulls/" + number)
   assert.equal(readback.status, 200)
   state.pr = verifyPull(readback.data, state)
+  const commitReadback = await request(prefix + "/git/commits/" + state.commitSha)
+  assert.equal(commitReadback.status, 200)
+  assert.equal(commitReadback.data.sha, state.commitSha)
+  verifyCommit(commitReadback.data, state)
   state.stage = "published"
   await record(state)
 }
@@ -195,25 +239,10 @@ async function revoke() {
   }
 }
 
-async function credential() {
-  let input = ""
-  for await (const chunk of process.stdin) { input += chunk; assert.ok(input.length <= 4096) }
-  if (process.argv[3] !== "get") return
-  const fields = Object.fromEntries(input.trimEnd().split("\n").map(line => {
-    const at = line.indexOf("="); return [line.slice(0, at), line.slice(at + 1)]
-  }))
-  const remote = new URL(`${server}/${repository}.git`)
-  assert.equal(fields.protocol, remote.protocol.slice(0, -1))
-  assert.equal(fields.host, remote.host)
-  assert.equal(fields.path, remote.pathname.slice(1))
-  process.stdout.write(`username=x-access-token\npassword=${process.env.PUBLISH_TOKEN}\n\n`)
-}
-
 try {
   if (process.argv[2] === "validate") await validate()
   else if (process.argv[2] === "publish") await publish()
   else if (process.argv[2] === "revoke") await revoke()
-  else if (process.argv[2] === "credential") await credential()
   else throw new Error("Unknown operation")
 } catch {
   // Never include server bodies, credentials, agent metadata or process output.

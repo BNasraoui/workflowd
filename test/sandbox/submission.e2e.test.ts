@@ -10,11 +10,46 @@ import { SandboxCompletion } from "../../src/sandbox/config"
 import { bridgeClient, runnerFixture } from "./harness"
 import { readSandboxSubmission } from "../../src/sandbox/submission"
 
+test("completion requires bounded Unicode plain text without altering agent wording", () => {
+  const decode = Schema.decodeUnknownSync(SandboxCompletion)
+  const valid = {
+    environmentId: "one",
+    branch: "anything",
+    title: "雪 '$() `title`",
+    commitMessage: "Fix result\n\n雪 '$() `message`\n",
+  }
+  expect(decode(valid)).toEqual(valid)
+  expect(decode({ ...valid, title: "😀".repeat(200), commitMessage: "é".repeat(5120) }).title).toBe(
+    "😀".repeat(200),
+  )
+  for (const fields of [
+    { title: undefined },
+    { commitMessage: undefined },
+    { title: "" },
+    { commitMessage: "" },
+    { title: "x".repeat(201) },
+    { title: "two\nlines" },
+    { title: "line\u2028separator" },
+    { title: "bad\tcontrol" },
+    { commitMessage: "bad\rcontrol" },
+    { commitMessage: "bad\u0085control" },
+    { title: "\ud800" },
+    { commitMessage: "\udfff" },
+    { commitMessage: "é".repeat(5121) },
+  ])
+    expect(() => decode({ ...valid, ...fields })).toThrow()
+})
+
 test("submit_result validates, durably accepts once across bridges, and audits each attempt", async () => {
   const runner = await runnerFixture()
   const first = bridgeClient(runner.transport)
   const second = bridgeClient(runner.transport)
-  const completion = { environmentId: "one", branch: "agent choice '$()\n雪" }
+  const completion = {
+    title: "Agent title",
+    commitMessage: "Agent message\n\nDetails",
+    environmentId: "one",
+    branch: "agent choice '$()\n雪",
+  }
   const file = join(dirname(runner.bindingFile), "submission.json")
   try {
     await first.initialize()
@@ -43,7 +78,7 @@ test("submit_result validates, durably accepts once across bridges, and audits e
     await second.request("tools/list")
     const duplicate = await second.request("tools/call", {
       name: "submit_result",
-      arguments: { environmentId: "two", branch: "" },
+      arguments: { ...completion, environmentId: "two", branch: "" },
     })
     expect(duplicate).toMatchObject({ isError: true })
     expect(JSON.stringify(duplicate)).toContain("already submitted")
@@ -76,7 +111,12 @@ test("concurrent bridges cannot replace a submission and settlement verifies its
       clients.map((client, index) =>
         client.request("tools/call", {
           name: "submit_result",
-          arguments: { environmentId: String(index), branch: "" },
+          arguments: {
+            environmentId: String(index),
+            branch: "",
+            title: "Concurrent result",
+            commitMessage: "Publish result",
+          },
         }),
       ),
     )

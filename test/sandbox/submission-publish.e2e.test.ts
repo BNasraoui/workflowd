@@ -90,7 +90,12 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
               deadline: lease.deadline,
               state: "active" as const,
             }
-            const completion = { environmentId: "selected", branch: "agent-choice" }
+            const completion = {
+              title: "Agent title",
+              commitMessage: "Agent message\n\nDetails",
+              environmentId: "selected",
+              branch: "agent-choice",
+            }
             yield* Effect.tryPromise(async () => {
               await writeSandboxBinding(binding, true)
               await saveSandboxFile(
@@ -112,6 +117,9 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
                 return Effect.succeed({
                   sourceSha: lease.source_sha,
                   resultSha: "c".repeat(40),
+                  treeSha: "1".repeat(40),
+                  title: completion.title,
+                  commitMessage: completion.commitMessage,
                   branch: completion.branch,
                   bundleSha256: "d".repeat(64),
                   manifestSha256: "e".repeat(64),

@@ -451,7 +451,8 @@ export const makeSandboxLeaseService = (
           Effect.mapError(
             () =>
               new SandboxError({
-                message: "Sandbox result unavailable: completion requires environmentId and branch",
+                message:
+                  "Sandbox result unavailable: completion requires environmentId, branch, title and commitMessage",
               }),
           ),
         )
@@ -468,7 +469,13 @@ export const makeSandboxLeaseService = (
             Schema.Struct({ empty: Schema.Literal(true), sourceSha: Schema.String }),
           ]),
         )(value)
-        if (result.sourceSha !== lease.source_sha)
+        if (
+          result.sourceSha !== lease.source_sha ||
+          ("branch" in result &&
+            (result.branch !== selected.branch ||
+              result.title !== selected.title ||
+              result.commitMessage !== selected.commitMessage))
+        )
           return yield* Effect.fail(new SandboxError({ message: "Sandbox result source mismatch" }))
         return result
       })

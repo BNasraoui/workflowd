@@ -1,5 +1,5 @@
 name: Protected agent publication
-description: Validate an approved immutable result, then create its branch and draft PR.
+description: Validate approved agent metadata and tree, then create one bot commit and its draft PR.
 inputs:
   github-token:
     description: Caller token with Actions read and Contents read only.
@@ -34,7 +34,7 @@ runs:
         permission-contents: write
         permission-pull-requests: write
         skip-token-revoke: false
-    - name: Publish validated result
+    - name: Create squashed commit and draft PR
       shell: bash
       env:
         PUBLISH_TOKEN: ${{ steps.token.outputs.token }}

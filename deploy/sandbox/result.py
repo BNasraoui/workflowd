@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Runner result sealing. Only metadata is returned over the control connection."""
+import base64
 import hashlib
 import json
 import os
@@ -49,6 +50,14 @@ def git(repo, *args):
         return output.read()
 
 
+def publication_text(value, message=False):
+    assert isinstance(value, str) and value
+    encoded = value.encode('utf8', errors='strict')
+    assert len(encoded) <= 10240 if message else len(value) <= 200
+    assert all(unicodedata.category(c) != 'Cc' or (message and c == '\n') for c in value)
+    assert message or not any(c in value for c in ('\u2028', '\u2029'))
+
+
 def seal(source):
     # The control entrypoint selects the workspace; no caller-supplied paths.
     repo = 'repository'
@@ -56,10 +65,12 @@ def seal(source):
     raw = sys.stdin.buffer.read(65537)
     assert len(raw) <= 65536
     completion = json.loads(raw)
-    if not isinstance(completion, dict) or set(completion) != {'branch', 'environmentId'}:
+    if not isinstance(completion, dict) or set(completion) != {'branch', 'environmentId', 'title', 'commitMessage'}:
         sys.exit('Missing container-use result metadata')
     if not isinstance(completion['branch'], str) or not isinstance(completion['environmentId'], str):
         sys.exit('Invalid container-use result metadata')
+    publication_text(completion['title'])
+    publication_text(completion['commitMessage'], True)
     # Enumerate trusted ref names, then compare the ID as data, never as a Git revision.
     # No branch predicate: the name never participates in a Git command or path.
     refs = git(repo, 'for-each-ref', '--format=%(refname) %(objectname)',
@@ -85,7 +96,9 @@ def seal(source):
     git(repo, 'bundle', 'create', str(bundle.absolute()), 'refs/workflowd/result', '^' + source)
     assert bundle.stat().st_size <= 16 * 1024 * 1024
     manifest = {'sourceSha': source, 'resultSha': result, 'branch': completion['branch'],
-                'bundleSha256': sha(bundle.read_bytes())}
+                'bundleSha256': sha(bundle.read_bytes()),
+                'treeSha': git(repo, 'rev-parse', result + '^{tree}').decode().strip(),
+                'title': completion['title'], 'commitMessage': completion['commitMessage']}
     encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
     assert len(encoded) <= 65536
     with (root / 'result.json').open('wb') as manifest_file:
@@ -179,8 +192,12 @@ def validate(source_url):
     raw = (root / 'result.json').read_bytes()
     assert sha(raw) == binding['manifest']
     manifest = json.loads(raw)
-    assert set(manifest) == {'sourceSha', 'resultSha', 'branch', 'bundleSha256'}
+    assert set(manifest) == {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage'}
     assert isinstance(manifest['branch'], str)
+    publication_text(manifest['title'])
+    publication_text(manifest['commitMessage'], True)
+    assert manifest['title'] == binding['title'] and manifest['commitMessage'] == binding['commitMessage']
+    assert manifest['treeSha'] == commit_id(binding['tree'])
     assert manifest['sourceSha'] == source and manifest['resultSha'] == result
     bundle = root.absolute() / 'result.bundle'
     assert sha(bundle.read_bytes()) == manifest['bundleSha256']
@@ -197,7 +214,28 @@ def validate(source_url):
     assert len(added) <= 10000 and sum(int(fields[1]) for fields in added) <= 64 * 1024**2
     git(repo, 'fsck', '--strict', '--no-reflogs', result)
     inspect_changes(repo, source, result)
+    assert git(repo, 'rev-parse', result + '^{tree}').decode().strip() == manifest['treeSha']
     print(json.dumps(manifest, ensure_ascii=True, separators=(',', ':')))
+
+
+def tree(source, result):
+    source, result = commit_id(source), commit_id(result)
+    repo = 'validated/objects.git'
+    entries = git(repo, 'diff-tree', '-r', '--raw', '--no-renames', '-z', source, result).split(b'\0')[:-1]
+    assert len(entries) % 2 == 0 and len(entries) <= 200
+    changes = []
+    for i in range(0, len(entries), 2):
+        _, mode, _, blob, _ = entries[i].decode('ascii').split()
+        path = entries[i + 1]
+        safe_path(path)
+        deleted = mode == '000000'
+        item = {'path': path.decode('utf8'), 'mode': '100644' if deleted else mode,
+                'type': 'blob', 'sha': None if deleted else blob}
+        if not deleted:
+            item['content'] = base64.b64encode(git(repo, 'cat-file', 'blob', blob)).decode('ascii')
+        changes.append(item)
+    print(json.dumps({'base_tree': git(repo, 'rev-parse', source + '^{tree}').decode().strip(),
+                      'tree': changes}, separators=(',', ':')))
 
 
 if __name__ == '__main__':
@@ -205,6 +243,7 @@ if __name__ == '__main__':
         signal.alarm(180)
         if sys.argv[1] == 'seal': seal(*sys.argv[2:])
         elif sys.argv[1] == 'validate': validate(*sys.argv[2:])
+        elif sys.argv[1] == 'tree': tree(*sys.argv[2:])
         else: raise ValueError('Unknown operation')
     except Exception:
         sys.exit('Sandbox result sealing failed')
