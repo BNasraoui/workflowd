@@ -405,3 +405,51 @@ for (const fault of [
     }
   }, 30000)
 }
+
+test("live publication verifier binds submission, approved job, revoked receipt and PR diff endpoints", async () => {
+  const { command } = await import("./harness")
+  await command([
+    process.execPath,
+    "--eval",
+    `
+    import assert from "node:assert/strict"
+    import { assertLivePublication, proofTask } from "./scripts/evidence/agent-sandbox.mjs"
+    import { approvalComment } from "./src/sandbox/publish.ts"
+    const policy = ${JSON.stringify(policy)}
+    const metadata = ${JSON.stringify(metadata)}
+    const intent = {run_id:"run",actions_run_id:41,attempt:1,metadata,base_ref:"main",phase:"published",artifact_id:52,artifact_digest:"sha256:"+"f".repeat(64),receipt:{stage:"published",pr:17,revoked:true}}
+    const binding = JSON.parse(approvalComment(intent))
+    const marker = "<!-- workflowd-publication:"+Buffer.from(JSON.stringify(binding)).toString("base64")+" -->"
+    const repo = {id:policy.repositoryId,full_name:policy.repository}
+    const job = {id:42,name:"agent-publish",run_id:41,run_attempt:1,head_sha:policy.workflowSha,status:"completed",conclusion:"success"}
+    const receipt = {...intent.receipt,binding,repository:policy.repository,branch:metadata.branch,marker}
+    const valid = {
+      policy,intent,sourceSha:metadata.sourceSha,
+      submission:{environmentId:"selected",branch:metadata.branch},
+      calls:[{name:"bridge.submit_result",owned:true,completed:true,input:{environmentId:"selected",branch:metadata.branch}}],
+      actions:{id:41,run_attempt:1,head_sha:policy.workflowSha,status:"completed",conclusion:"success"},
+      jobs:[job],
+      reviews:[{state:"approved",comment:approvalComment(intent),user:{id:policy.appActorId,type:"Bot"},environments:[{id:9,name:"agent-publish"}]}],
+      publisherLog:"2026-10-11T00:00:00Z workflowd.publish.receipt "+Buffer.from(JSON.stringify(receipt)).toString("base64"),
+      ref:{ref:"refs/heads/"+metadata.branch,object:{sha:metadata.resultSha}},
+      pull:{number:17,html_url:"https://github.com/"+policy.repository+"/pull/17",state:"open",draft:true,maintainer_can_modify:false,body:marker,user:{login:"ghettimonster[bot]",id:339414993,type:"Bot"},head:{ref:metadata.branch,sha:metadata.resultSha,repo},base:{ref:"main",sha:metadata.sourceSha,repo}},
+    }
+    assertLivePublication(valid)
+    for(const mutate of [
+      x=>x.intent.phase="probed", x=>x.calls=[], x=>x.submission.branch="different",
+      x=>x.intent.receipt.revoked=false, x=>x.publisherLog="",
+      x=>x.pull.draft=false, x=>x.pull.state="closed", x=>x.pull.user.id=1,
+      x=>x.pull.user.login="foreign[bot]", x=>x.pull.head.sha=metadata.sourceSha,
+      x=>x.pull.base.sha=metadata.resultSha, x=>x.pull.base.ref="different",
+      x=>x.pull.head.repo.id=1, x=>x.ref.object.sha=metadata.sourceSha,
+      x=>x.reviews[0].comment="foreign", x=>x.reviews[0].user.id=1,
+      x=>x.jobs[0].conclusion="failure", x=>x.jobs[0].run_attempt=2,
+    ]) {const changed=structuredClone(valid); mutate(changed); assert.throws(()=>assertLivePublication(changed))}
+    const task = proofTask(policy.repository)
+    assert.equal(typeof task.prompt,"string")
+    assert.equal(typeof task.testCommand,"string")
+    assert.equal(Object.hasOwn(task,"branch"),false)
+    assert.throws(()=>proofTask("unknown/repository"))
+    `,
+  ])
+})

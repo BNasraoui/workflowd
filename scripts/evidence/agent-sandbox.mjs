@@ -3,7 +3,7 @@ import * as Bun from "bun"
 // Opt-in real lease probe. Operator trust settings are read, never provisioned.
 import assert from "node:assert/strict"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises"
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -20,6 +20,10 @@ import { makeSandboxStore } from "../../src/sandbox/store.ts"
 import { runStoreMigrations } from "../../src/store/migrations.ts"
 import { sandboxSshArguments } from "../../src/sandbox/transport.ts"
 import { sandboxBridgeName, isSandboxBridgeNamespace } from "../../src/sandbox/binding.ts"
+
+import proofTasks from "./agent-sandbox-proof.json"
+import { approvalComment } from "../../src/sandbox/publish.ts"
+import { readSandboxSubmission } from "../../src/sandbox/submission.ts"
 
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
@@ -617,11 +621,13 @@ export function assertLivePrototype(report) {
     "bridgeAbsent",
     "sessionQuiescent",
     "mailboxReceived",
+    "submissionVerified",
+    "publicationVerified",
+    "auditMatched",
   ])
     assert.equal(report[key], true, `Live proof missing: ${key}`)
-  assert.match(report.patch, /diff --git a\/test\/sandbox\/prototype-proof\.test\.ts/)
-  assert.match(report.patch, /parseSandboxRepositories/)
-  assert.match(report.finalMessage, /sandbox-prototype-ok/)
+  assert.equal(report.leaseRefStatus, 404)
+  assert.equal(report.codeDownloaded, false)
 }
 
 // Normalize completed tool telemetry, never the model's final prose.
@@ -630,7 +636,10 @@ export function prototypeToolEvidence(kind, frames, bridge) {
     const parts = frames.filter((part) => part.type === "tool")
     assertSandboxCalls(parts, bridge)
     return parts.flatMap((part) =>
-      (part.state.metadata?.toolCalls ?? []).map((call) => ({
+      (part.name.startsWith(`${bridge}.`)
+        ? [{ tool: part.name, input: part.state.input, status: part.state.status }]
+        : (part.state.metadata?.toolCalls ?? [])
+      ).map((call) => ({
         name: call.tool,
         input: call.input,
         result: part.state.content,
@@ -681,14 +690,17 @@ export function prototypeToolEvidence(kind, frames, bridge) {
     )
 }
 
-export function remotePrototypePassed(calls) {
+export function remotePrototypePassed(
+  calls,
+  testCommand = "bun test test/sandbox/prototype-proof.test.ts",
+) {
   return calls.some((call) => {
     const result = JSON.stringify(call.result ?? "")
     return (
       call.owned &&
       call.completed &&
       call.name.endsWith("environment_run_cmd") &&
-      /bun test test\/sandbox\/prototype-proof\.test\.ts/.test(call.input?.command ?? "") &&
+      (call.input?.command ?? "").includes(testCommand) &&
       /3 pass/.test(result) &&
       /0 fail/.test(result) &&
       /workflowd-test-exit=0/.test(result) &&
@@ -746,6 +758,234 @@ async function recordWorkflowLog(row) {
   }
 }
 
+export function proofTask(repository) {
+  const task = proofTasks[repository]
+  assert.ok(task, `No approved proof task for ${repository}`)
+  assert.deepEqual(Object.keys(task).sort(), ["prompt", "testCommand"])
+  assert.ok(task.prompt && task.testCommand)
+  return task
+}
+
+export function assertAuditMatch(log, records, acknowledgement, identity) {
+  assert.ok(records.length > 0 && records.length <= 1024, "Canonical audit is empty or oversized")
+  assert.equal(acknowledgement.emittedThrough, records.length)
+  const observed = new Map()
+  for (const line of log.split("\n")) {
+    const match = /^\d{4}-\d{2}-\d{2}T\S+Z workflowd\.audit (\{.*\})\r?$/.exec(line)
+    if (!match) continue
+    const record = JSON.parse(match[1])
+    assert.equal(record.runId, identity.runId)
+    assert.equal(record.leaseId, identity.leaseId)
+    if (observed.has(record.sequence)) assert.deepEqual(observed.get(record.sequence), record)
+    observed.set(record.sequence, record)
+  }
+  assert.equal(observed.size, records.length, "Actions audit count differs")
+  for (const [index, record] of records.entries()) {
+    assert.equal(record.sequence, index + 1)
+    assert.equal(record.runId, identity.runId)
+    assert.equal(record.leaseId, identity.leaseId)
+    assert.equal(record.complete, true)
+    assert.deepEqual(observed.get(record.sequence), record, "Actions audit differs")
+  }
+}
+
+export function assertLivePublication(proof) {
+  const {
+    policy,
+    intent,
+    sourceSha,
+    submission,
+    calls,
+    actions,
+    jobs,
+    reviews,
+    publisherLog,
+    ref,
+    pull,
+  } = proof
+  assert.equal(intent.phase, "published", "Protected publication did not complete")
+  assert.equal(intent.metadata.sourceSha, sourceSha)
+  assert.notEqual(intent.metadata.resultSha, sourceSha)
+  assert.equal(intent.base_ref, policy.publish.baseRef)
+  assert.deepEqual(intent.receipt, { stage: "published", pr: pull.number, revoked: true })
+  assert.equal(submission?.branch, intent.metadata.branch)
+  assert.ok(submission?.environmentId)
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.owned &&
+        call.completed &&
+        call.name.endsWith("submit_result") &&
+        call.input?.environmentId === submission.environmentId &&
+        call.input?.branch === submission.branch,
+    ),
+    "Agent did not call submit_result for the sealed result",
+  )
+  assert.equal(actions.id, intent.actions_run_id)
+  assert.equal(actions.run_attempt, intent.attempt)
+  assert.equal(actions.head_sha, policy.workflowSha)
+  assert.equal(actions.status, "completed")
+  assert.equal(actions.conclusion, "success")
+  const publishers = jobs.filter((job) => job.name === "agent-publish")
+  assert.equal(publishers.length, 1)
+  const [job] = publishers
+  assert.equal(job.run_id, intent.actions_run_id)
+  assert.equal(job.run_attempt, intent.attempt)
+  assert.equal(job.head_sha, policy.workflowSha)
+  assert.equal(job.status, "completed")
+  assert.equal(job.conclusion, "success")
+  const comment = approvalComment(intent)
+  assert.equal(
+    reviews.filter(
+      (review) =>
+        review.state === "approved" &&
+        review.comment === comment &&
+        review.user.id === policy.appActorId &&
+        review.user.type === "Bot" &&
+        review.environments.some(
+          (env) => env.id === policy.publish.environmentId && env.name === "agent-publish",
+        ),
+    ).length,
+    1,
+  )
+  const receipts = publisherLog.split("\n").flatMap((line) => {
+    const match = /^\d{4}-\d{2}-\d{2}T\S+Z workflowd\.publish\.receipt ([A-Za-z0-9+/=]+)\r?$/.exec(
+      line,
+    )
+    return match ? [JSON.parse(Buffer.from(match[1], "base64").toString())] : []
+  })
+  assert.ok(receipts.length > 0 && receipts.length <= 8, "Missing trusted publisher receipt")
+  const marker = `<!-- workflowd-publication:${Buffer.from(comment).toString("base64")} -->`
+  for (const receipt of receipts) {
+    assert.deepEqual(receipt.binding, JSON.parse(comment))
+    assert.equal(receipt.repository, policy.repository)
+    assert.equal(receipt.branch, submission.branch)
+    assert.equal(receipt.marker, marker)
+  }
+  const last = receipts.at(-1)
+  assert.equal(last.stage, "published")
+  assert.equal(last.pr, pull.number)
+  assert.equal(last.revoked, true, "Publication token revocation unconfirmed")
+  assert.equal(ref.ref, `refs/heads/${submission.branch}`)
+  assert.equal(ref.object.sha, intent.metadata.resultSha)
+  assert.ok(Number.isSafeInteger(pull.number) && pull.number > 0)
+  assert.equal(pull.html_url, `https://github.com/${policy.repository}/pull/${pull.number}`)
+  assert.equal(pull.state, "open")
+  assert.equal(pull.draft, true)
+  assert.equal(pull.maintainer_can_modify, false)
+  assert.deepEqual(
+    pull.user && { login: pull.user.login, id: pull.user.id, type: pull.user.type },
+    { login: "ghettimonster[bot]", id: 339414993, type: "Bot" },
+  )
+  assert.equal(policy.publish.publisherActorId, 339414993)
+  assert.equal(pull.body, marker)
+  assert.equal(pull.head.ref, submission.branch)
+  assert.equal(pull.head.sha, intent.metadata.resultSha)
+  assert.equal(pull.base.ref, intent.base_ref)
+  // Equal immutable diff endpoints establish equality without fetching code.
+  assert.equal(
+    pull.base.sha,
+    sourceSha,
+    "PR base moved since dispatch; diff is not the sealed diff",
+  )
+  for (const repo of [pull.head.repo, pull.base.repo]) {
+    assert.equal(repo.id, policy.repositoryId)
+    assert.equal(repo.full_name, policy.repository)
+  }
+}
+
+async function githubEvidence(repository, path, text = false) {
+  const child = Bun.spawn(["gh", "api", `repos/${repository}/${path}`], {
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  assert.ok(Buffer.byteLength(stdout) <= 1048576, "GitHub evidence exceeds bound")
+  if (status !== 0) {
+    const response = JSON.parse(stdout)
+    if (String(response.status) === "404") return { status: 404 }
+    throw new Error(`GitHub metadata request failed: ${stderr}`)
+  }
+  return text ? stdout : JSON.parse(stdout)
+}
+
+async function recordLivePublication({ policy, intent, lease, run, binding, calls }) {
+  stage = "publication metadata and trusted publisher receipts"
+  assert.equal(intent?.phase, "published", "Protected publication did not complete")
+  const jobs = await githubEvidence(
+    policy.repository,
+    `actions/runs/${intent.actions_run_id}/attempts/${intent.attempt}/jobs?per_page=100`,
+  )
+  assert.equal(jobs.total_count, jobs.jobs.length, "Incomplete Actions job inventory")
+  const publishers = jobs.jobs.filter((job) => job.name === "agent-publish")
+  assert.equal(publishers.length, 1)
+  const proof = {
+    policy,
+    intent,
+    sourceSha: lease.source_sha,
+    calls,
+    submission: await readSandboxSubmission(
+      run.directory,
+      run.runId,
+      lease.lease_id,
+      binding.sessionId,
+    ),
+    actions: await githubEvidence(policy.repository, `actions/runs/${intent.actions_run_id}`),
+    jobs: jobs.jobs,
+    reviews: await githubEvidence(
+      policy.repository,
+      `actions/runs/${intent.actions_run_id}/approvals`,
+    ),
+    publisherLog: await githubEvidence(
+      policy.repository,
+      `actions/jobs/${publishers[0].id}/logs`,
+      true,
+    ),
+    ref: await githubEvidence(
+      policy.repository,
+      `git/ref/heads/${encodeURIComponent(intent.metadata.branch)}`,
+    ),
+    pull: await githubEvidence(policy.repository, `pulls/${intent.receipt.pr}`),
+  }
+  await writeFile(join(output, "publication.json"), JSON.stringify(proof, null, 2), { mode: 0o600 })
+  assertLivePublication(proof)
+  evidence.submissionVerified = true
+  evidence.publicationVerified = true
+  evidence.prUrl = proof.pull.html_url
+  evidence.diff = { baseSha: proof.pull.base.sha, headSha: proof.pull.head.sha }
+  const leaseRef = await githubEvidence(
+    policy.repository,
+    `git/ref/heads/${encodeURIComponent(`workflowd/leases/${lease.lease_id}`)}`,
+  )
+  evidence.leaseRefStatus = leaseRef.status
+  assert.equal(evidence.leaseRefStatus, 404, "Lease ref still exists")
+  stage = "canonical audit and Actions comparison"
+  const root = `${run.directory}.sandbox`
+  const records = await Promise.all(
+    (await readdir(join(root, "audit")))
+      .filter((name) => /^[0-9]+\.json$/.test(name))
+      .sort((a, b) => parseInt(a) - parseInt(b))
+      .map((name) => Bun.file(join(root, "audit", name)).json()),
+  )
+  const acknowledgement = await Bun.file(join(root, "audit-receipt.json")).json()
+  const runner = jobs.jobs.filter((job) => job.name === "sandbox / runner")
+  assert.equal(runner.length, 1)
+  const log = await githubEvidence(policy.repository, `actions/jobs/${runner[0].id}/logs`, true)
+  await writeFile(
+    join(output, "audit.json"),
+    JSON.stringify({ records, acknowledgement }, null, 2),
+    { mode: 0o600 },
+  )
+  await writeFile(join(output, "runner.log"), log, { mode: 0o600 })
+  assertAuditMatch(log, records, acknowledgement, { runId: run.runId, leaseId: lease.lease_id })
+  evidence.auditMatched = true
+  evidence.auditCount = records.length
+}
+
 export function prototypeSelection(executor, model) {
   if (executor === "claude:local")
     return {
@@ -769,10 +1009,9 @@ export function prototypeSelection(executor, model) {
 
 async function probeLive(policy) {
   const publishProbe = process.argv[2] === "--probe-publish"
-  assert.ok(
-    publishProbe && policy.publish,
-    "This candidate supports the canary gate only; real publication awaits the gate and key provisioning",
-  )
+  stage = "operator publication policy"
+  assert.ok(policy.publish, "A publication policy is required")
+  const task = proofTask(policy.repository)
   const option = (name) => {
     const index = process.argv.indexOf(name)
     assert.ok(index > 0 && process.argv[index + 1], `${name} is required`)
@@ -901,11 +1140,15 @@ async function probeLive(policy) {
             arguments: {
               ...selection.arguments,
               repository: policy.alias,
-              base_ref: process.env.EVIDENCE_SANDBOX_SOURCE_REF ?? "rpi/workflowd-d6g",
+              base_ref: policy.publish.baseRef,
               idempotency_key: createHash("sha256").update(output).digest("hex"),
               prompt:
                 sandboxCompletionInstructions +
-                '\nCreate an environment for /workspace/repository using oven/bun:1.3.14 as its base image. Add test/sandbox/prototype-proof.test.ts with three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and invalid workflow SHA. Install the frozen dependencies and run this exact command: bun test test/sandbox/prototype-proof.test.ts && printf "\\nworkflowd-test-exit=0\\n". Keep the resulting test artifact; do not push. Keep the test evidence in your tool calls, then finish with ONLY the JSON object containing environmentId and branch. All repository files and commands must stay in the container-use environment.',
+                "\n" +
+                task.prompt +
+                "\nRun this exact test command: " +
+                task.testCommand +
+                ". Keep all repository files and commands in container-use. After the tests pass, call submit_result on your owned MCP server.",
             },
           },
           undefined,
@@ -994,7 +1237,7 @@ async function probeLive(policy) {
     const calls = prototypeToolEvidence(kind, frames, binding.bridgeServerName)
     evidence.executor = executor
     evidence.model = model
-    evidence.remoteTestsPassed = remotePrototypePassed(calls)
+    evidence.remoteTestsPassed = remotePrototypePassed(calls, task.testCommand)
     await writeFile(join(output, "tool-evidence.json"), JSON.stringify(calls, null, 2), {
       mode: 0o600,
     })
@@ -1025,7 +1268,11 @@ async function probeLive(policy) {
     }
     const publications = await runtime.runPromise(makePublishStore)
     const intent = await runtime.runPromise(publications.read(run.runId))
-    assert.equal(intent?.phase, "probed", "Protected publication canary did not pass")
+    evidence.publication = intent
+    await persist()
+    if (publishProbe)
+      assert.equal(intent?.phase, "probed", "Protected publication canary did not pass")
+    else await recordLivePublication({ policy, intent, lease, run, binding, calls })
     assert.equal(binding.state, "revoked")
     assert.equal(evidence.sessionQuiescent, true)
     assert.equal((await runtime.runPromise(store.read(run.runId))).state, "released")
@@ -1033,8 +1280,7 @@ async function probeLive(policy) {
     assert.equal(await Bun.file(join(run.directory, "result.bundle")).exists(), false)
     evidence.publication = intent
     evidence.codeDownloaded = false
-    evidence.keyMinted = false
-    await recordWorkflowLog(await runtime.runPromise(store.read(run.runId)))
+    evidence.keyMinted = !publishProbe
     const mailbox = await client.callTool({
       name: "read_agent_mailbox",
       arguments: { mailbox_id: evidence.receipt.mailbox_id },
@@ -1042,11 +1288,27 @@ async function probeLive(policy) {
     assert.notEqual(mailbox.isError, true)
     assert.equal(mailbox.structuredContent?.messages?.length, 1)
     assert.equal(mailbox.structuredContent.messages[0].status, "completed")
+    evidence.mailbox = mailbox.structuredContent
     evidence.mailboxReceived = true
+    if (!publishProbe) assertLivePrototype(evidence)
+    evidence.finished = new Date().toISOString()
+    evidence.elapsedMs = Date.now() - Date.parse(evidence.started)
     evidence.result = "passed"
     console.log(
-      JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
+      JSON.stringify({
+        result: evidence.result,
+        runUrl: evidence.runUrl,
+        prUrl: evidence.prUrl,
+        evidence: output,
+      }),
     )
+  } catch (error) {
+    evidence.taskFailure = {
+      stage,
+      message: redactFailure(String(error)),
+      stack: error instanceof Error ? redactFailure(error.stack ?? "") : undefined,
+    }
+    throw error
   } finally {
     try {
       for (const lease of await runtime.runPromise(store.active())) {
@@ -1184,8 +1446,21 @@ async function probe() {
   )
   evidence.result = "passed"
   console.log(
-    JSON.stringify({ result: evidence.result, runUrl: evidence.runUrl, evidence: output }),
+    JSON.stringify({
+      result: evidence.result,
+      runUrl: evidence.runUrl,
+      prUrl: evidence.prUrl,
+      evidence: output,
+    }),
   )
+}
+function redactFailure(value) {
+  return value
+    .replace(
+      /(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s"']+)/g,
+      "[redacted]",
+    )
+    .slice(0, 12000)
 }
 if (import.meta.main) {
   try {
@@ -1197,12 +1472,8 @@ if (import.meta.main) {
       failedAt: new Date().toISOString(),
       elapsedMs: Date.now() - Date.parse(evidence.started),
       name: error instanceof Error ? error.name : typeof error,
-      message: String(error)
-        .replace(
-          /(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s"']+)/g,
-          "[redacted]",
-        )
-        .slice(0, 4096),
+      stack: error instanceof Error ? redactFailure(error.stack ?? "") : undefined,
+      message: redactFailure(String(error)),
     }
     // Only prerequisite assertions are printed. SDK/process errors may carry secrets.
     const detail =

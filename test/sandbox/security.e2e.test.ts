@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto"
 import { Schema } from "effect"
 import { bridgeClient, command, runnerFixture } from "./harness"
 
-test("live verification requires remote tests, an inert patch and confirmed cleanup", async () => {
+test("live verification requires publication, matching audit and confirmed cleanup", async () => {
   const valid = {
     terminal: "completed",
     lease: { state: "released" },
@@ -14,9 +14,11 @@ test("live verification requires remote tests, an inert patch and confirmed clea
     bridgeAbsent: true,
     sessionQuiescent: true,
     mailboxReceived: true,
-    patch:
-      "diff --git a/test/sandbox/prototype-proof.test.ts b/test/sandbox/prototype-proof.test.ts\n+parseSandboxRepositories",
-    finalMessage: "sandbox-prototype-ok",
+    submissionVerified: true,
+    publicationVerified: true,
+    auditMatched: true,
+    leaseRefStatus: 404,
+    codeDownloaded: false,
   }
   for (const mutation of [
     undefined,
@@ -25,7 +27,11 @@ test("live verification requires remote tests, an inert patch and confirmed clea
     { bridgeAbsent: false },
     { sessionQuiescent: false },
     { mailboxReceived: false },
-    { patch: "" },
+    { submissionVerified: false },
+    { publicationVerified: false },
+    { auditMatched: false },
+    { leaseRefStatus: 200 },
+    { codeDownloaded: true },
     { terminal: "operator_required" },
     { lease: { state: "releasing" } },
   ]) {
@@ -57,6 +63,8 @@ test("prototype telemetry requires a successful owned bridge command for each ha
       claude: [{type: "assistant", message: {content: [{type: "tool_use", id: "call", name: "mcp__"+bridge+"__environment_run_cmd", input}]}}, {type: "user", message: {content: [{type: "tool_result", tool_use_id: "call", content: result.content}]}}],
       opencode: [{type: "tool", name: "execute", state: {status: "completed", content: result.content, metadata: {toolCalls: [{tool: bridge+".environment_run_cmd", status: "completed", input}]}}}],
     }
+    const direct = [{type:"tool",name:bridge+".submit_result",state:{status:"completed",input:{environmentId:"chosen",branch:"chosen by agent"},content:[{type:"text",text:"Result submitted."}]}}]
+    assert.equal(prototypeToolEvidence("opencode",direct,bridge).length,1)
     for (const [kind, frames] of Object.entries(samples)) {
       const calls = prototypeToolEvidence(kind, frames, bridge)
       assert.equal(remotePrototypePassed(calls), true, kind)
@@ -578,3 +586,22 @@ print('leak' if found else 'clean')`
     await runner.close()
   }
 }, 180000)
+
+test("live audit comparison rejects missing, conflicting and foreign records", async () => {
+  await command([
+    process.execPath,
+    "--eval",
+    `
+    import assert from "node:assert/strict"
+    import { assertAuditMatch } from "./scripts/evidence/agent-sandbox.mjs"
+    const record = {runId:"run",leaseId:"lease",sequence:1,complete:true,tool:"environment_run_cmd",exitCode:0,outcome:"ok"}
+    const line = r => "2026-10-11T00:00:00Z workflowd.audit " + JSON.stringify(r)
+    const check = lines => assertAuditMatch(lines, [record], {emittedThrough:1}, {runId:"run",leaseId:"lease"})
+    check([line(record),line(record)].join("\\n"))
+    assert.throws(() => check(""))
+    assert.throws(() => check(line({...record,exitCode:1})))
+    assert.throws(() => check(line({...record,runId:"foreign"})))
+    assert.throws(() => assertAuditMatch(line(record),[record],{emittedThrough:0},{runId:"run",leaseId:"lease"}))
+    `,
+  ])
+})

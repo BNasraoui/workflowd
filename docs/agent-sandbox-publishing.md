@@ -1,9 +1,10 @@
 # Sandbox audit and PR execution
 
 D1 is accepted and pinned at `30c864febd464f1ed91424742bbf9d74f4d1de82`.
-The D2 canary gate passed at `28fcbd7` with runner pin `b28944e`. This candidate
-implements real publication and must stop after exact-head CI for coordinator review
-and re-pin. No live publication or production enablement is part of this change.
+The D2 canary gate passed at `28fcbd7` with runner pin `b28944e`. The approved
+real-publication runner pin is `87aa541eeaf52754a1ad36d11b38ca08e1b43ad7`.
+The D3 verifier runs from the checked candidate checkout; its changes do not alter
+the runner pin. Workflow or bootstrap changes still require coordinator re-pin.
 
 For repository setup and the short cross-owner caller, see the
 [onboarding runbook](agent-sandbox-onboarding.md).
@@ -112,8 +113,8 @@ No live GitHub-hosted lease is acquired before the coordinator's re-pin.
 
 Run focused audit/CI-policy/workflow/transport/runner-init tests and the full repository
 check in transient systemd user units capped at `MemoryMax=6G`, `MemorySwapMax=0`.
-The approved reviewer decision requires polling exact-head CI and stopping for the
-coordinator review and re-pin. Do not subscribe to CI for this stage.
+Poll exact-head candidate CI with `gh run list --commit HEAD_SHA`. Do not subscribe
+to CI for this stage. Changes to pinned tooling stop for coordinator review/re-pin.
 
 ## Protected publication contract
 
@@ -237,9 +238,57 @@ the owned Actions run and reconciles its receipt before settlement; it does not 
 rollback. A confirmed PR returns only repository, branch, result SHA, base and PR URL.
 Actions termination and lease-ref deletion still precede the terminal mailbox.
 
-The current candidate stops for coordinator review/re-pin. The historical
-`--probe-publish` evidence command was for the key-absent canary pin; it is not a live
-publication verifier for this candidate. D3 still requires the three workflowd harness
-receipts, provenance onboarding/live receipt and independent Claude security review.
-All heavy checks and future authorized probes run in transient user units capped at
-`MemoryMax=6G`, `MemorySwapMax=0`. Poll exact-head CI with `gh run list`; never subscribe.
+## D3 live publication evidence
+
+`scripts/evidence/agent-sandbox.mjs --live` uses the selected executor and model with
+existing authentication and authenticated `dispatch_agent`. Repository tasks and exact
+test commands live in `scripts/evidence/agent-sandbox-proof.json`; there are no result
+branch values. An unlisted repository fails before dispatch. The agent chooses its
+branch and calls `submit_result` on its owned bridge after remote tests pass.
+
+Provide exactly one approved repository policy in `WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES`,
+the operator record in `EVIDENCE_TAILSCALE_TRUST_FILE`, the existing authenticated
+executor endpoint/password in `EVIDENCE_OPENCODE_URL` / `EVIDENCE_OPENCODE_PASSWORD`,
+and a distinct durable `EVIDENCE_SANDBOX_ROOT` for each gate. The configured publication
+base is also the dispatch source; its exact tip is recorded before work begins.
+Never place credentials on the command line or copy model credentials.
+
+After a trivial authenticated inference succeeds for that exact model, run each command
+separately from the candidate checkout in a transient systemd user unit with
+`MemoryMax=6G`, `MemorySwapMax=0`:
+
+```sh
+bun scripts/evidence/agent-sandbox.mjs --live --executor opencode:opencode-primary --model zai-coding-plan/glm-5.3-flash
+bun scripts/evidence/agent-sandbox.mjs --live --executor codex:local --model gpt-6-astra
+bun scripts/evidence/agent-sandbox.mjs --live --executor claude:local --model claude-opus-5-5
+```
+
+Run them one at a time. A Claude authentication failure is recorded separately; it does
+not turn an unrun Claude gate into a pass. Never substitute Fable. An existing receipt
+in the same evidence directory resumes that run rather than dispatching another one.
+
+Success requires the bound `submit_result` receipt and matching owned tool call,
+passing remote tests, the exact custom-rule approval, and a successful `agent-publish`
+job from the recorded run/attempt. Only that job's log supplies publisher receipts.
+Its final receipt must confirm the published PR and token revocation. GitHub readback
+must show the agent-selected ref at the sealed result SHA and an **open draft** PR
+by `ghettimonster[bot]` (339414993), with the same repository, recorded base and
+`maintainer_can_modify: false`. Matching immutable PR base/head SHAs proves equality
+to the sealed source/result diff without downloading a patch or bundle. If the base
+has moved, verification stops rather than claiming that the diff still matches.
+
+The verifier compares every canonical audit record with the runner job's timestamped
+Actions lines and its final acknowledgement. It requires released lease custody,
+revoked binding, absent bridge, quiescent session, independently observed lease-ref
+404, and exactly one completed mailbox message. Proof PRs are left open and unmerged.
+`probe.json` records timings, SHAs, run/PR URLs and terminal diagnostics;
+`publication.json`, `audit.json`, `runner.log`, `tool-evidence.json` and Actions logs
+retain the supporting evidence. Failures retain the exception and cleanup evidence.
+The historical `--probe-publish` mode continues to require the canary receipt; it is
+not a substitute for a live gate.
+
+Only workflowd is currently listed in the proof-task registry. Other repositories need
+approved onboarding and an appropriate task before their gate can run. The broader
+D3 plan still requires a separately authorized provenance receipt and independent
+Claude security review before merge. No GitHub settings, rulesets or secrets are
+changed by the verifier.
