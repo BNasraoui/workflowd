@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { sandboxSshArguments, type SandboxTransport } from "../../src/sandbox/transport"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { hostname } from "node:os"
 import { bridgeClient, runnerFixture } from "./harness"
 import { Schema } from "effect"
@@ -33,6 +33,43 @@ test("SSH rejects an address that could introduce remote command arguments", () 
   expect(() => sandboxSshArguments({ ...transport, address: "peer -oProxyCommand=bad" })).toThrow()
 })
 
+test("a late MCP cancellation leaves the audited bridge available for the next call", async () => {
+  const runner = await runnerFixture()
+  const client = bridgeClient(runner.transport)
+  try {
+    await client.initialize()
+    await client.request("tools/list")
+    await client.request("tools/call", {
+      name: "environment_list",
+      arguments: { environment_source: "/workspace/repository" },
+    })
+    await client.raw(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId: 3, reason: "A parallel Code Mode call failed" },
+      }) + "\n",
+    )
+    expect(
+      await client.request("tools/call", {
+        name: "environment_list",
+        arguments: { environment_source: "/workspace/repository" },
+      }),
+    ).toHaveProperty("content")
+    const lines = (await runner.holdLog()).trim().split("\n")
+    expect(lines).toHaveLength(2)
+    for (const line of lines)
+      expect(JSON.parse(line.slice("workflowd.audit ".length))).toMatchObject({
+        tool: "environment_list",
+        outcome: "ok",
+        complete: true,
+      })
+  } finally {
+    await client.close()
+    await runner.close()
+  }
+}, 120_000)
+
 for (const mode of ["reply", "closed"] as const) {
   test(`bridge retains the cause when the remote transport returns ${mode}`, async () => {
     const runner = await runnerFixture()
@@ -52,6 +89,11 @@ for (const mode of ["reply", "closed"] as const) {
         expect(diagnostic.message).not.toContain("fixture-secret")
         if (mode === "closed")
           expect(diagnostic.evidence.causes.some((cause) => cause.exitCode === 42)).toBe(true)
+        const retained = Bun.file(join(dirname(runner.bindingFile), "bridge-failure.json"))
+        expect(await retained.exists()).toBe(true)
+        const evidence = await retained.text()
+        expect(evidence).toContain("runner backend unavailable")
+        expect(evidence).not.toContain("fixture-secret")
       } finally {
         await client.close()
       }

@@ -1,4 +1,4 @@
-import { sandboxDiagnostic } from "./diagnostics"
+import { sandboxDiagnostic, SandboxFailureEvidence } from "./diagnostics"
 import { mkdir, readFile, realpath } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AbsolutePath, Config, Session, type OpenCodeClient } from "@opencode-ai/client/effect"
@@ -139,12 +139,27 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
       Effect.gen(function* () {
         const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
         const bridges = catalog.data.filter((entry) => isSandboxBridgeNamespace(entry.name))
-        if (
-          bridges.length !== 1 ||
-          bridges[0]?.name !== binding.bridgeServerName ||
-          bridges[0].status.status !== "connected"
-        )
+        if (bridges.length !== 1 || bridges[0]?.name !== binding.bridgeServerName)
           return yield* Effect.fail(new Error("Sandbox bridge binding changed"))
+        const status = bridges[0].status
+        if (status.status !== "connected") {
+          const retained = yield* Effect.tryPromise(async () => {
+            const file = Bun.file(join(bindingDirectory(binding.directory), "bridge-failure.json"))
+            if (!(await file.exists())) return undefined
+            return Schema.decodeUnknownSync(SandboxFailureEvidence)(await file.json())
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.succeed(sandboxDiagnostic("transport.evidence", cause).evidence),
+            ),
+          )
+          return yield* Effect.fail(
+            new Error(
+              `Sandbox bridge disconnected (${status.status})` +
+                (status.status === "failed" ? `: ${status.error}` : ""),
+              { cause: retained === undefined ? undefined : { evidence: retained } },
+            ),
+          )
+        }
       }),
     )
   })

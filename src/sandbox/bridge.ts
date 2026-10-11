@@ -1,6 +1,6 @@
 import { sandboxDiagnostic } from "./diagnostics"
 import { auditedOutput, beginToolAudit, sendToolAudit, wrapAuditedCommand } from "./audit"
-import { assertBridgeBinding } from "./binding"
+import { assertBridgeBinding, saveSandboxFile } from "./binding"
 import { watch } from "node:fs/promises"
 import { dirname } from "node:path"
 import { createHash } from "node:crypto"
@@ -26,6 +26,10 @@ const Catalog = Schema.Struct({ tools: Schema.Array(Schema.Json) })
 const Call = Schema.Struct({
   name: Schema.String,
   arguments: Schema.Record(Schema.String, Schema.Json),
+})
+const Cancellation = Schema.Struct({
+  requestId: Id,
+  reason: Schema.optionalKey(Schema.String),
 })
 
 async function watchBinding(file: string, transport: SandboxTransport, signal: AbortSignal) {
@@ -89,6 +93,7 @@ export async function runSandboxBridge(
   send: (frame: string) => Promise<void>,
   bindingFile: string,
 ) {
+  const started = Date.now()
   await assertBridgeBinding(bindingFile, transport)
   const child = Bun.spawn([...sandboxSshArguments(transport)], {
     env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
@@ -127,6 +132,18 @@ export async function runSandboxBridge(
       if (frame.method === "notifications/initialized" && initialized && frame.id === undefined) {
         child.stdin.write(JSON.stringify(frame) + "\n")
         await child.stdin.flush()
+        continue
+      }
+      if (
+        frame.method === "notifications/cancelled" &&
+        initialized &&
+        frame.id === undefined &&
+        frame.result === undefined &&
+        frame.error === undefined
+      ) {
+        Schema.decodeUnknownSync(Cancellation)(frame.params)
+        // Requests and their audits finish serially before the next frame is read.
+        // Cancellation is already late; MCP permits ignoring completed/unknown IDs.
         continue
       }
       if (
@@ -260,6 +277,16 @@ export async function runSandboxBridge(
   const custody = watchBinding(bindingFile, transport, closed.signal)
   try {
     await Promise.race([forwarding, diagnostics, custody])
+  } catch (cause) {
+    // OpenCode reduces a stdio exit to "Connection closed" and logs stderr at debug.
+    // Retain the first sanitized cause before cleanup can obscure it.
+    await saveSandboxFile(
+      dirname(bindingFile),
+      "bridge-failure.json",
+      JSON.stringify(sandboxDiagnostic("transport.bridge", cause, started).evidence),
+      true,
+    ).catch(() => undefined)
+    throw cause
   } finally {
     closed.abort()
     child.kill()
