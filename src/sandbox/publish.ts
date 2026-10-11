@@ -456,7 +456,7 @@ export const makeSandboxPublisher = (
             result = {
               ...result,
               state: "operator_required",
-              diagnostic: audited.failure.message,
+              diagnostic: `${result.diagnostic}; ${audited.failure.message}`,
             }
         }
         if (result.state === "completed" && lease?.policy.publish !== undefined) {

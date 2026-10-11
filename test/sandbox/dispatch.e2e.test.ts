@@ -662,6 +662,7 @@ for (const settlement of [
   "missing environment",
   "unknown environment",
   "telemetry failure",
+  "telemetry and audit failure",
   "missing telemetry",
 ] as const)
   test(`protected publisher ${settlement} retains custody through restart and sends one terminal mailbox`, async () => {
@@ -724,7 +725,14 @@ for (const settlement of [
           const service = yield* makeSandboxDispatch({
             policies: [publicationPolicy],
             github,
-            leases,
+            leases:
+              settlement === "telemetry and audit failure"
+                ? {
+                    ...leases,
+                    audit: () =>
+                      Effect.fail(new SandboxError({ message: "Sandbox audit transport failure" })),
+                  }
+                : leases,
             executor: {
               ...shared.executor,
               sessionTelemetry: (input) =>
@@ -877,7 +885,11 @@ for (const settlement of [
             Effect.timeout("120 seconds"),
           )
           yield* idle
-          if (settlement === "telemetry failure" || settlement === "missing telemetry") {
+          if (
+            settlement === "telemetry failure" ||
+            settlement === "telemetry and audit failure" ||
+            settlement === "missing telemetry"
+          ) {
             observationFault = true
             yield* service.observe(active)
             const evidence = yield* Effect.tryPromise(() =>
@@ -903,6 +915,8 @@ for (const settlement of [
             const terminal = (yield* runs.read("run-1"))!
             expect(terminal.state).toBe("operator_required")
             expect(terminal.diagnostic).toContain(JSON.stringify(evidence))
+            if (settlement === "telemetry and audit failure")
+              expect(terminal.diagnostic).toContain("Sandbox audit transport failure")
             expect((yield* store.read("run-1"))?.state).toBe("released")
             expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(1)
             return
