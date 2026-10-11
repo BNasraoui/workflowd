@@ -1,5 +1,6 @@
 // Reviewed tooling only. No agent code, configuration or command output is executed or logged.
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -48,7 +49,7 @@ function publicationCommitMessage(message) {
 }
 
 function publicationBody(state) {
-  const message = state.binding.commitMessage
+  const message = state.metadata.commitMessage
   const longest = Math.max(2, ...Array.from(message.matchAll(/`+/g), (match) => match[0].length))
   const fence = "`".repeat(longest + 1)
   return `${state.marker}\n\n${fence}text\n${message}\n${fence}`
@@ -58,7 +59,7 @@ function verifyCommit(commit, state) {
   assert.match(commit.sha, /^[a-f0-9]{40}$/)
   assert.equal(commit.tree.sha, state.binding.tree)
   assert.deepEqual(commit.parents.map(parent => parent.sha), [state.binding.source])
-  assert.equal(commit.message, publicationCommitMessage(state.binding.commitMessage))
+  assert.equal(commit.message, publicationCommitMessage(state.metadata.commitMessage))
   assert.equal(commit.verification.verified, true)
 }
 
@@ -82,11 +83,10 @@ async function validate() {
   const matches = reviews.filter(review => review.state === "approved" && review.user?.id === actor &&
     review.user?.type === "Bot" && review.environments?.some(env => env.name === "agent-publish"))
   assert.equal(matches.length, 1, "Missing or ambiguous gate approval")
+  assert.ok(Buffer.byteLength(matches[0].comment, "utf8") <= 900)
   const binding = JSON.parse(matches[0].comment)
-  assert.deepEqual(new Set(Object.keys(binding)), new Set(["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v", "base", "tree", "title", "commitMessage"]))
-  assert.equal(binding.v, 3)
-  publicationText(binding.title)
-  publicationText(binding.commitMessage, true)
+  assert.deepEqual(new Set(Object.keys(binding)), new Set(["artifact", "attempt", "digest", "manifest", "result", "run", "source", "v", "base", "tree"]))
+  assert.equal(binding.v, 4)
   assert.equal(typeof binding.base, "string")
   assert.ok(binding.base.length > 0)
   assert.equal(binding.run, run)
@@ -132,7 +132,9 @@ async function request(path, method = "GET", body) {
   return { status: response.status, data: JSON.parse((await bytes(response, 1048576)).toString()) }
 }
 
-async function record(value) {
+async function record(state) {
+  const value = { ...state }
+  delete value.metadata
   await writeFile(receipt + ".tmp", JSON.stringify(value), { mode: 0o600 })
   await rename(receipt + ".tmp", receipt)
   // Only this trusted job emits receipts. The untrusted lease can forge same-run artifacts.
@@ -149,7 +151,7 @@ function verifyPull(pull, state) {
   assert.equal(pull.user.type, "Bot")
   assert.equal(pull.head.ref, state.branch)
   assert.equal(pull.head.sha, state.commitSha)
-  assert.equal(pull.title, state.binding.title)
+  assert.equal(pull.title, state.metadata.title)
   assert.equal(pull.base.ref, state.binding.base)
   for (const side of [pull.head, pull.base]) {
     assert.equal(side.repo.full_name, repository)
@@ -161,14 +163,16 @@ function verifyPull(pull, state) {
 }
 
 async function publish() {
-  const { binding, metadata } = JSON.parse(await readFile(validated, "utf8"))
+  const { binding } = JSON.parse(await readFile(validated, "utf8"))
+  // Re-read the sealed bytes: only the manifest digest in the approval authorizes agent text.
+  const manifest = await readFile(join(root, "validated", "result.json"))
+  assert.equal(createHash("sha256").update(manifest).digest("hex"), binding.manifest)
+  const metadata = JSON.parse(manifest.toString("utf8"))
   assert.equal(binding.run, Number(process.env.GITHUB_RUN_ID))
   assert.equal(binding.attempt, Number(process.env.GITHUB_RUN_ATTEMPT))
-  assert.equal(binding.v, 3)
-  publicationText(binding.title)
-  publicationText(binding.commitMessage, true)
-  assert.equal(metadata.title, binding.title)
-  assert.equal(metadata.commitMessage, binding.commitMessage)
+  assert.equal(binding.v, 4)
+  publicationText(metadata.title)
+  publicationText(metadata.commitMessage, true)
   assert.equal(metadata.treeSha, binding.tree)
   assert.equal(metadata.sourceSha, binding.source)
   assert.match(binding.tree, /^[a-f0-9]{40}$/)
@@ -176,10 +180,10 @@ async function publish() {
   assert.match(binding.result, /^[a-f0-9]{40}$/)
   assert.equal(metadata.resultSha, binding.result)
   assert.equal(typeof metadata.branch, "string")
-  const commitMessage = publicationCommitMessage(binding.commitMessage)
+  const commitMessage = publicationCommitMessage(metadata.commitMessage)
   assert.ok(process.env.PUBLISH_TOKEN)
   const prefix = `/repos/${repository}`
-  const state = { binding, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
+  const state = { binding, metadata, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
     marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->` }
   await record(state)
   const refPath = prefix + "/git/ref/heads/" + encodeURIComponent(state.branch)
@@ -226,7 +230,7 @@ async function publish() {
   await record(state)
   let number
   try {
-    const created = await request(prefix + "/pulls", "POST", { title: binding.title, body: publicationBody(state),
+    const created = await request(prefix + "/pulls", "POST", { title: metadata.title, body: publicationBody(state),
       head: state.branch, base: binding.base, draft: true, maintainer_can_modify: false })
     assert.equal(created.status, 201)
     number = created.data.number

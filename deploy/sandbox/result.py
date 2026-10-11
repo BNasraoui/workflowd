@@ -196,7 +196,6 @@ def validate(source_url):
     assert isinstance(manifest['branch'], str)
     publication_text(manifest['title'])
     publication_text(manifest['commitMessage'], True)
-    assert manifest['title'] == binding['title'] and manifest['commitMessage'] == binding['commitMessage']
     assert manifest['treeSha'] == commit_id(binding['tree'])
     assert manifest['sourceSha'] == source and manifest['resultSha'] == result
     bundle = root.absolute() / 'result.bundle'

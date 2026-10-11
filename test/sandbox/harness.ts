@@ -880,6 +880,8 @@ export function sandboxPublicationFixture(
   let waiting = false
   let downloads = 0
   let binding: Record<string, unknown> = {}
+  const title = "Agent title"
+  const commitMessage = "Agent message\n\nDetails"
   fixture.publication(async (request) => {
     const path = new URL(request.url).pathname
     if (path.endsWith("/deployment_protection_rule")) {
@@ -887,6 +889,11 @@ export function sandboxPublicationFixture(
       const body = Schema.decodeUnknownSync(Schema.Struct({ comment: Schema.String }))(
         await request.json(),
       )
+      if (fault === "rejected approval")
+        return Response.json(
+          { message: "Comment exceeded maximum length of 1024 characters" },
+          { status: 422 },
+        )
       binding = JSON.parse(body.comment)
       reviews = [
         {
@@ -932,15 +939,15 @@ export function sandboxPublicationFixture(
           fault === "wrong message"
             ? "changed"
             : fault === "missing co-author"
-              ? binding.commitMessage
-              : `${String(binding.commitMessage)}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
+              ? commitMessage
+              : `${commitMessage}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
         verification: { verified: true },
       })
     if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {
       const pull = {
         number: 17,
         html_url: `https://github.com/${policy.repository}/pull/17`,
-        title: fault === "wrong title" ? "changed" : binding.title,
+        title: fault === "wrong title" ? "changed" : title,
         draft: true,
         state: "open",
         maintainer_can_modify: false,
@@ -958,7 +965,7 @@ export function sandboxPublicationFixture(
           ref: binding.base,
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
-        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`text\n${String(binding.commitMessage)}\n\`\`\``,
+        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`text\n${commitMessage}\n\`\`\``,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }

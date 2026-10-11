@@ -107,6 +107,7 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
 
 for (const mutation of [
   "ordinary",
+  "maximum metadata",
   "hidden history",
   "symlink",
   "mode",
@@ -126,6 +127,10 @@ for (const mutation of [
     const output = join(root, "result")
     await mkdir(repo)
     const git = (...args: string[]) => command(["git", ...args], repo)
+    const text =
+      mutation === "maximum metadata"
+        ? { title: "雪".repeat(200), commitMessage: "m".repeat(10240) }
+        : wording
     try {
       await git("init", "-b", "main")
       await git("config", "user.name", "Fixture")
@@ -151,7 +156,7 @@ for (const mutation of [
       const child = Bun.spawn(["python3", script, "seal", sourceSha], {
         cwd: root,
         stdin: new Blob([
-          JSON.stringify({ ...wording, branch: "chosen/by/agent", environmentId: "one" }),
+          JSON.stringify({ ...text, branch: "chosen/by/agent", environmentId: "one" }),
         ]),
         stdout: "pipe",
         stderr: "pipe",
@@ -176,6 +181,11 @@ for (const mutation of [
           new Uint8Array(await Bun.file(join(output, "result.json")).arrayBuffer()),
         )
       }
+      if (mutation === "title mismatch" || mutation === "message mismatch") {
+        const manifest = JSON.parse(await Bun.file(join(output, "result.json")).text())
+        manifest[mutation === "title mismatch" ? "title" : "commitMessage"] = "changed"
+        await writeFile(join(output, "result.json"), JSON.stringify(manifest))
+      }
       const archive = join(root, "result.zip")
       await command(["zip", "-q", archive, "result.bundle", "result.json"], output)
       if (mutation === "archive traversal")
@@ -186,15 +196,12 @@ for (const mutation of [
           archive,
         ])
       const binding = {
-        ...wording,
         tree: metadata.treeSha,
         source: sourceSha,
         result: resultSha,
         manifest: metadata.manifestSha256,
         digest: "sha256:" + digest(new Uint8Array(await Bun.file(archive).arrayBuffer())),
       }
-      if (mutation === "title mismatch") binding.title = "changed"
-      if (mutation === "message mismatch") binding.commitMessage = "changed"
       if (mutation === "tree mismatch") binding.tree = sourceSha
       if (mutation === "swapped archive") binding.digest = "sha256:" + "0".repeat(64)
       if (mutation === "source option") binding.source = "--help"
@@ -211,7 +218,7 @@ for (const mutation of [
         new Response(validated.stdout).text(),
         new Response(validated.stderr).text(),
       ])
-      if (mutation === "ordinary") {
+      if (mutation === "ordinary" || mutation === "maximum metadata") {
         expect(status).toBe(0)
         expect(JSON.parse(stdout).resultSha).toBe(resultSha)
         // Exercise the exact hosted entrypoint; only GitHub is an HTTP fixture.
@@ -221,7 +228,7 @@ for (const mutation of [
         await chmod(join(hostilePath, "python3"), 0o755)
         await mkdir(join(root, "fixture"))
         await symlink(repo, join(root, "fixture", "repo.git"))
-        const approved = { v: 3, run: 41, attempt: 1, artifact: 52, ...binding, base: "main" }
+        const approved = { v: 4, run: 41, attempt: 1, artifact: 52, ...binding, base: "main" }
         const api = Bun.serve({
           hostname: "127.0.0.1",
           port: 0,
@@ -315,6 +322,8 @@ for (const mutation of [
           )
           expect(validated.binding.base).toBe("main")
           expect(validated.metadata.resultSha).toBe(resultSha)
+          expect(validated.metadata.title).toBe(text.title)
+          expect(validated.metadata.commitMessage).toBe(text.commitMessage)
         } finally {
           await api.stop(true)
         }

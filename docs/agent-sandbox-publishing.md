@@ -143,7 +143,10 @@ project setting was changed.
 
 A configured `publish` policy supplies the PR base ref, environment ID and publisher
 App/bot IDs and required `coAuthor` (`Name <email>`, one line). `toolingSha` optionally selects the centrally reviewed reusable workflow;
-it defaults to `workflowSha`. The base tip is recorded before dispatch. There is no
+it defaults to `workflowSha`. For workflowd itself, leave `toolingSha` unset because its caller uses
+the local reusable workflow; readiness expects that workflow’s lease-branch ref, not an explicit
+central `@SHA` ref. The independent publisher action SHA stays in the caller’s `uses:` pin.
+The base tip is recorded before dispatch. There is no
 result branch input in policy or dispatch. The agent calls `submit_result` with exactly
 `environmentId` (the result's container-use environment), `branch` (its chosen name),
 `title` (its PR title) and `commitMessage` (the single published commit's message).
@@ -242,8 +245,10 @@ Migration 33 stores metadata-only immutable publication intents. Approval checks
 owned run, attempt, source, workflow identity, successful runner job, immutable artifact
 identity, expected custom rule and environment settings. The gate App uses a separate
 repository token with Actions read and Deployments write. Approval is an exact
-version-3 result-binding JSON comment, including title, commit message and result tree SHA.
-The manifest and validated binding carry the same values; a mismatch or old binding version fails closed. Its intent is saved before POST; a lost response is
+version-4 result-binding JSON comment, including the result tree SHA and sealed manifest digest.
+The manifest carries the title and commit message; its digest binds their exact bytes without
+duplicating them in the comment. A digest mismatch or old binding version fails closed.
+Its intent is saved before POST; a lost response is
 recovered by reading the matching review, never by blindly repeating the POST. The
 publisher checks the authenticated bot ID and review state, run/attempt and artifact
 identity before downloading. The bootstrap deliberately fails closed if custom-only
@@ -270,7 +275,13 @@ its log to 1 MiB, checks the binding, and saves only receipt metadata in migrati
 publication table. Same-run receipt artifacts are deliberately not trusted: the lease
 runner can upload artifacts too. The result bundle stays on GitHub and the publish runner.
 
-Migration 34 stores the immutable base ref and metadata receipt. Version-3 approvals retain that base binding. Historical canary
+Migration 34 stores the immutable base ref and metadata receipt. Version-4 approvals retain that base binding, run/attempt, artifact ID/archive digest,
+source/result/tree SHAs and manifest digest in compact JSON capped at 900 UTF-8 bytes before
+approval is claimed. Title and commit message remain only in the sealed manifest; its digest
+binds their exact bytes. The publisher rechecks that digest before using either field.
+Oversized bindings fail closed before any approval POST. Definitive HTTP 400/401/403/404/422
+approval rejections settle as `operator_required` with the original diagnostic; ambiguous
+failures retain approval custody and are never blindly retried. Historical canary
 intents retain a null base and are never retroactively published. Recovery reuses stored
 receipts, checks the remote head and draft PR, and never repeats a ref or PR POST. An
 ambiguous ref creation without a successful API acknowledgement remains `operator_required`, even

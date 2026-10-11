@@ -156,6 +156,8 @@ test("completion accepts one bare or fenced object and forwards only canonical J
 for (const fault of [
   "none",
   "lost approval",
+  "rejected approval",
+  "oversized binding",
   "foreign artifact",
   "rerun",
   "bad job",
@@ -175,8 +177,15 @@ for (const fault of [
   "missing co-author",
 ])
   test(`durable publication reconciliation: ${fault}`, async () => {
-    const fixture = await sandboxGithubFixture(policy)
-    const publication = sandboxPublicationFixture(fixture, policy, "lease-1", fault)
+    const configured = {
+      ...policy,
+      publish: {
+        ...policy.publish,
+        baseRef: fault === "oversized binding" ? "b".repeat(900) : "main",
+      },
+    }
+    const fixture = await sandboxGithubFixture(configured)
+    const publication = sandboxPublicationFixture(fixture, configured, "lease-1", fault)
     if (fault === "rerun") fixture.mutateRun({ run_attempt: 2 })
     try {
       await Effect.runPromise(
@@ -186,7 +195,7 @@ for (const fault of [
           yield* leases.request({
             runId: "run-1",
             leaseId: "lease-1",
-            policy,
+            policy: configured,
             sourceSha: metadata.sourceSha,
             now: Date.now(),
           })
@@ -198,13 +207,33 @@ for (const fault of [
             actionsRunId: 41,
             attempt: 1,
             metadata,
-            baseRef: "main",
+            baseRef: configured.publish.baseRef,
             deadline: Date.now() + (fault === "expired" ? -1 : 60000),
           })
           const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
           const remote = yield* makeSandboxLeaseService(github)
           const publisher = yield* makeSandboxPublisher(github, remote)
-          yield* publisher.poll("run-1").pipe(Effect.result)
+          const first = yield* publisher.poll("run-1").pipe(Effect.result)
+          if (fault === "oversized binding") {
+            expect(first._tag).toBe("Failure")
+            expect(JSON.stringify(first)).toContain("Approval binding exceeds 900 bytes")
+            expect((yield* store.read("run-1"))?.phase).toBe("operator_required")
+            expect(yield* publisher.poll("run-1")).toBe("operator_required")
+            expect(publication.posts).toBe(0)
+            return
+          }
+          if (fault === "rejected approval") {
+            expect(first._tag).toBe("Failure")
+            expect(JSON.stringify(first)).toContain('"httpStatus":422')
+            expect((yield* store.read("run-1"))?.phase).toBe("operator_required")
+            const resumed = yield* makeSandboxPublisher(github, remote)
+            expect(yield* resumed.poll("run-1")).toBe("operator_required")
+            expect(publication.posts).toBe(1)
+            expect(publication.reviews).toEqual([])
+            yield* remote.release("run-1")
+            expect(fixture.cancellations).toContain(41)
+            return
+          }
           if (["none", "lost approval", "lost PR", "saved receipt"].includes(fault)) {
             // Reopening the service must read the exact approval, never POST again.
             if (fault === "saved receipt")
@@ -257,6 +286,7 @@ for (const fault of [
 // Only GitHub HTTP is substituted; fixture API writes real Git objects and create-only refs.
 for (const fault of [
   "none",
+  "maximum metadata",
   "existing co-authors",
   "duplicate co-author",
   "invalid co-author",
@@ -296,12 +326,19 @@ for (const fault of [
       revokes = 0
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
-    const title = fault === "format title" ? "hidden\u200btitle" : "Agent title 雪 '$(touch-pwned)'"
+    const title =
+      fault === "maximum metadata"
+        ? "雪".repeat(200)
+        : fault === "format title"
+          ? "hidden\u200btitle"
+          : "Agent title 雪 '$(touch-pwned)'"
     const trailer = `Co-authored-by: ${policy.publish.coAuthor}`
     const body =
-      fault === "bidi message"
-        ? "bidi\u202emessage"
-        : "Agent message\n\n雪 `touch-pwned` $(touch-pwned)\n```\n@someone Closes #1\n`````\n<!-- hidden -->"
+      fault === "maximum metadata"
+        ? "m".repeat(10239)
+        : fault === "bidi message"
+          ? "bidi\u202emessage"
+          : "Agent message\n\n雪 `touch-pwned` $(touch-pwned)\n```\n@someone Closes #1\n`````\n<!-- hidden -->"
     const other =
       "Co-authored-by: Another Person <another@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>"
     const commitMessage =
@@ -335,20 +372,35 @@ for (const fault of [
     const result = await git("rev-parse", "HEAD")
     await mkdir(join(work, "validated"), { recursive: true })
     await command(["git", "clone", "--bare", join(root, "source"), objects])
-    const binding = {
-      v: 3,
-      tree: treeSha,
+    const manifest = {
+      sourceSha: source,
+      resultSha: result,
+      treeSha,
       title,
       commitMessage,
+      branch,
+      bundleSha256: "d".repeat(64),
+    }
+    const rawManifest = JSON.stringify(manifest)
+    const { createHash } = await import("node:crypto")
+    const binding = {
+      v: 4,
+      tree: treeSha,
       run: 41,
       attempt: 1,
       artifact: 52,
       digest: "sha256:" + "f".repeat(64),
       source,
       result,
-      manifest: "e".repeat(64),
+      manifest: createHash("sha256").update(rawManifest).digest("hex"),
       base: "main",
     }
+    await writeFile(
+      join(work, "validated/result.json"),
+      fault === "binding mismatch"
+        ? JSON.stringify({ ...manifest, title: "changed" })
+        : rawManifest,
+    )
     await writeFile(
       join(work, "validated.json"),
       JSON.stringify({
@@ -507,7 +559,10 @@ for (const fault of [
           expect(body).toMatchObject({
             head: branch,
             title,
-            body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`\`\`\`text\n${commitMessage}\n\`\`\`\`\`\``,
+            body: publicationBody(
+              `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
+              commitMessage,
+            ),
             base: "main",
             draft: true,
             maintainer_can_modify: false,
@@ -571,7 +626,13 @@ for (const fault of [
     try {
       const published = await invoke("publish")
       expect(published.code).toBe(
-        ["none", "lost PR reply", "existing co-authors", "duplicate co-author"].includes(fault)
+        [
+          "none",
+          "maximum metadata",
+          "lost PR reply",
+          "existing co-authors",
+          "duplicate co-author",
+        ].includes(fault)
           ? 0
           : 1,
       )
@@ -587,7 +648,15 @@ for (const fault of [
       }
       const receipt = JSON.parse(await Bun.file(join(work, "receipt.json")).text())
       expect(receipt).toMatchObject({ binding, repository: "fixture/repo", branch, revoked: true })
-      if (["none", "lost PR reply", "existing co-authors", "duplicate co-author"].includes(fault)) {
+      if (
+        [
+          "none",
+          "maximum metadata",
+          "lost PR reply",
+          "existing co-authors",
+          "duplicate co-author",
+        ].includes(fault)
+      ) {
         expect(receipt).toMatchObject({ stage: "published", pr: 17, commitSha: publishedSha })
         expect(publishedSha).not.toBe(result)
         expect(await objectGit(["rev-parse", publishedSha + "^{tree}"])).toBe(treeSha)

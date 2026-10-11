@@ -5,7 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { runStoreMigrations } from "../../src/store/migrations"
-import { makePublishStore } from "../../src/sandbox/publish-store"
+import { makePublishStore, type PublishIntent } from "../../src/sandbox/publish-store"
+import { approvalComment } from "../../src/sandbox/publish"
 
 const metadata = {
   sourceSha: "a".repeat(40),
@@ -17,6 +18,40 @@ const metadata = {
   bundleSha256: "c".repeat(64),
   manifestSha256: "d".repeat(64),
 }
+
+test("approval binding fits 900 bytes with maximum IDs and agent metadata", () => {
+  const intent: PublishIntent = {
+    run_id: "agent-1",
+    actions_run_id: Number.MAX_SAFE_INTEGER,
+    attempt: 1,
+    artifact_id: Number.MAX_SAFE_INTEGER,
+    artifact_digest: "sha256:" + "f".repeat(64),
+    metadata: { ...metadata, title: "雪".repeat(200), commitMessage: "m".repeat(10240) },
+    base_ref: "main",
+    deadline: Number.MAX_SAFE_INTEGER,
+    phase: "approving",
+    receipt: null,
+  }
+  const comment = approvalComment(intent)
+  expect(Buffer.byteLength(comment)).toBeLessThanOrEqual(900)
+  expect(JSON.parse(comment)).toEqual({
+    v: 4,
+    run: intent.actions_run_id,
+    attempt: 1,
+    artifact: intent.artifact_id,
+    digest: intent.artifact_digest,
+    source: metadata.sourceSha,
+    result: metadata.resultSha,
+    manifest: metadata.manifestSha256,
+    tree: metadata.treeSha,
+    base: "main",
+  })
+  // The remaining capacity bounds the only variable-length field, including JSON escaping.
+  const maximum = "b".repeat(900 - Buffer.byteLength(comment) + 4)
+  expect(Buffer.byteLength(approvalComment({ ...intent, base_ref: maximum }))).toBe(900)
+  expect(() => approvalComment({ ...intent, base_ref: maximum + "b" })).toThrow()
+  expect(() => approvalComment({ ...intent, base_ref: "雪".repeat(maximum.length) })).toThrow()
+})
 
 test("publication custody survives SQLite reopen and fences an ambiguous approval POST", async () => {
   const root = await mkdtemp(join(tmpdir(), "sandbox-publish-store-"))

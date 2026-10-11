@@ -1,6 +1,7 @@
 import { sandboxDiagnostic, retainSandboxFailure, SandboxFailureEvidence } from "./diagnostics"
 import type { AgentRunRecord } from "../kernel/agent-run-store"
 import { mkdir } from "node:fs/promises"
+import assert from "node:assert/strict"
 import { join } from "node:path"
 import { saveSandboxFile } from "./binding"
 import type { makeSandboxLeaseService } from "./lease"
@@ -68,8 +69,8 @@ const Artifacts = Schema.Struct({
 const fail = () => new SandboxError({ message: "Publication identity or protection mismatch" })
 
 export function approvalComment(intent: PublishIntent): string {
-  return JSON.stringify({
-    v: 3,
+  const comment = JSON.stringify({
+    v: 4,
     run: intent.actions_run_id,
     attempt: intent.attempt,
     artifact: intent.artifact_id,
@@ -78,10 +79,11 @@ export function approvalComment(intent: PublishIntent): string {
     result: intent.metadata.resultSha,
     manifest: intent.metadata.manifestSha256,
     tree: intent.metadata.treeSha,
-    title: intent.metadata.title,
-    commitMessage: intent.metadata.commitMessage,
     ...(intent.base_ref === null ? {} : { base: intent.base_ref }),
   })
+  // Leave headroom below GitHub's 1,024-character limit, including escaped base refs.
+  assert.ok(Buffer.byteLength(comment, "utf8") <= 900, "Approval binding exceeds 900 bytes")
+  return comment
 }
 
 export const makeSandboxPublisher = (
@@ -387,14 +389,34 @@ export const makeSandboxPublisher = (
           pending[0]?.reviewers.length !== 0
         )
           return yield* Effect.fail(fail())
+        const comment = yield* Effect.try({
+          try: () =>
+            approvalComment({
+              ...intent,
+              artifact_id: artifact.id,
+              artifact_digest: artifact.digest,
+            }),
+          catch: (cause) => new SandboxError(sandboxDiagnostic("publish.approval", cause)),
+        }).pipe(Effect.tapError(() => store.advance(runId, "sealed", "operator_required")))
         if (!(yield* store.claimApproval(runId, artifact.id, artifact.digest))) return "approving"
         intent = (yield* store.read(runId))!
         // Persist uncertainty BEFORE the side effect. A lost response is never blindly retried.
-        yield* github.publishRequest(policy, "POST", `${prefix}/deployment_protection_rule`, {
-          environment_name: "agent-publish",
-          state: "approved",
-          comment: approvalComment(intent),
-        })
+        yield* github
+          .publishRequest(policy, "POST", `${prefix}/deployment_protection_rule`, {
+            environment_name: "agent-publish",
+            state: "approved",
+            comment,
+          })
+          .pipe(
+            Effect.tapError((cause) =>
+              cause instanceof SandboxError &&
+              cause.evidence?.causes.some((entry) =>
+                [400, 401, 403, 404, 422].includes(entry.httpStatus ?? 0),
+              )
+                ? store.advance(runId, "approving", "operator_required")
+                : Effect.void,
+            ),
+          )
       }
       const reviews = yield* Schema.decodeUnknownEffect(Reviews)(
         yield* github.publishRequest(policy, "GET", `${prefix}/approvals`),
