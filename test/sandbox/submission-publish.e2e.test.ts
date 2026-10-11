@@ -69,7 +69,7 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
               leaseId: "lease-1",
               policy,
               sourceSha: "b".repeat(40),
-              now: Date.now(),
+              now: Date.now() - 284 * 60000,
             })
             yield* store.beginStart(stored.runId)
             yield* store.recordRun(stored.runId, 41, 1)
@@ -139,6 +139,12 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
             const publication = yield* makePublishStore
             expect((yield* publication.read(stored.runId)) !== null).toBe(!mismatch)
             expect(seals).toBe(mismatch ? 0 : 1)
+            if (!mismatch) {
+              const intent = (yield* publication.read(stored.runId))!
+              expect(intent.deadline).toBeGreaterThan(lease.deadline)
+              expect(intent.deadline - Date.now()).toBeGreaterThan(14 * 60000)
+              expect(intent.deadline - Date.now()).toBeLessThanOrEqual(15 * 60000)
+            }
             const terminal = yield* Effect.tryPromise(() =>
               Bun.file(join(directory, "terminal.json")).json(),
             )

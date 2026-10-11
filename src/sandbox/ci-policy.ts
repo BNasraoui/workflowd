@@ -125,17 +125,26 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
       const { steps, ...ambientJob } = job
       if (referencesSecrets(ambientJob) || job.secrets !== undefined || job.env !== undefined)
         throw new Error("Publisher secrets must be explicit composite inputs")
-      for (const value of Schema.decodeUnknownSync(Schema.Array(Schema.Json))(steps)) {
+      const publishSteps = Schema.decodeUnknownSync(Schema.Array(Schema.Json))(steps)
+      // One reviewed composite is the entire job: no cache restore/save, setup cache,
+      // local checkout, or arbitrary action/script can populate the privileged runner.
+      if (publishSteps.length !== 1)
+        throw new Error("Publisher must run only the reviewed pinned action without cache steps")
+      for (const value of publishSteps) {
         const step = object(value)
         const inputs = object(step.with ?? {})
+        if (
+          typeof step.uses !== "string" ||
+          !/^BNasraoui\/workflowd\/\.github\/actions\/agent-publish@[a-f0-9]{40}$/.test(
+            step.uses,
+          ) ||
+          Object.keys(step).some((key) => !["name", "uses", "with"].includes(key))
+        )
+          throw new Error("Publisher must use a constant full SHA reference to the reviewed action")
         if (inputs["publisher-private-key"] !== undefined) {
           const { "publisher-private-key": key, ...other } = inputs
           if (
             key !== "${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}" ||
-            typeof step.uses !== "string" ||
-            !/^(?:\.\/trusted\/\.github\/actions\/agent-publish|BNasraoui\/workflowd\/\.github\/actions\/agent-publish@[a-f0-9]{40})$/.test(
-              step.uses,
-            ) ||
             referencesSecrets({ ...step, with: other })
           )
             throw new Error("Publisher key is only allowed as the reviewed action input")

@@ -12,6 +12,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import {
   parseSandboxRepositories,
   publicationCommitMessage,
+  publicationBody,
   sandboxCompletionInstructions,
 } from "../../src/sandbox/config.ts"
 import { makeSandboxGithub } from "../../src/sandbox/github.ts"
@@ -905,7 +906,7 @@ export function assertLivePublication(proof) {
   )
   assert.equal(policy.publish.publisherActorId, 339414993)
   assert.equal(pull.title, intent.metadata.title)
-  assert.equal(pull.body, marker + "\n\n" + intent.metadata.commitMessage)
+  assert.equal(pull.body, publicationBody(marker, intent.metadata.commitMessage))
   assert.equal(pull.head.ref, submission.branch)
   assert.equal(pull.head.sha, intent.receipt.commitSha)
   assert.equal(pull.base.ref, intent.base_ref)

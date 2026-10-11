@@ -31,6 +31,8 @@ test("completion requires bounded Unicode plain text without altering agent word
     { title: "two\nlines" },
     { title: "line\u2028separator" },
     { title: "bad\tcontrol" },
+    { title: "hidden\u200bformat" },
+    { commitMessage: "bidi\u202econtrol" },
     { commitMessage: "bad\rcontrol" },
     { commitMessage: "bad\u0085control" },
     { title: "\ud800" },
@@ -60,6 +62,8 @@ test("submit_result validates, durably accepts once across bridges, and audits e
       { branch: "choice" },
       { ...completion, environmentId: "" },
       { ...completion, branch: 7 },
+      { ...completion, title: "hidden\u200bformat" },
+      { ...completion, commitMessage: "bidi\u202econtrol" },
       { ...completion, environment_source: "/workspace/repository" },
     ]) {
       expect(
@@ -85,7 +89,7 @@ test("submit_result validates, durably accepts once across bridges, and audits e
     expect(await Bun.file(file).json()).toEqual(accepted)
     const audit = await runner.holdLog()
     const lines = audit.split("\n").filter((line) => line.startsWith("workflowd.audit "))
-    expect(lines).toHaveLength(7)
+    expect(lines).toHaveLength(9)
     expect(lines.every((line) => line.includes('"tool":"submit_result"'))).toBe(true)
     expect(lines.filter((line) => line.includes('"outcome":"ok"'))).toHaveLength(1)
   } finally {

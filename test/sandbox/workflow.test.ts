@@ -111,7 +111,10 @@ test("publication uses a fresh environment-gated runner with a step-scoped expli
   const runner = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
   expect(runner).toContain("sandbox-result-${{ github.run_id }}-${{ github.run_attempt }}")
   expect(runner).not.toMatch(/agent-publish:|environment:|secrets[.:]/)
-  expect(source).toContain("./trusted/.github/actions/agent-publish")
+  expect(source).toMatch(
+    /uses: BNasraoui\/workflowd\/\.github\/actions\/agent-publish@[a-f0-9]{40}/,
+  )
+  expect(source).not.toContain("ref: ${{ github.sha }}")
 })
 
 test("reviewed composite validates before minting a repository-only token and always revokes", async () => {

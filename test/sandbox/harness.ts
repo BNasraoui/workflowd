@@ -958,7 +958,7 @@ export function sandboxPublicationFixture(
           ref: binding.base,
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
-        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n${String(binding.commitMessage)}`,
+        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`text\n${String(binding.commitMessage)}\n\`\`\``,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }
@@ -1004,7 +1004,7 @@ export function sandboxPublicationFixture(
             run_id: 41,
             run_attempt: 1,
             head_sha: policy.workflowSha,
-            status: posts && !waiting ? "completed" : "waiting",
+            status: posts ? (waiting ? "in_progress" : "completed") : "waiting",
             conclusion: posts && !waiting ? "success" : null,
           },
         ],

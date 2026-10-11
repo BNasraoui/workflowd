@@ -4,7 +4,7 @@ const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
     (value) =>
       value.isWellFormed() &&
-      !/[\p{Cc}\u2028\u2029]/u.test(value) &&
+      !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value) &&
       /^[^\s<>][^<>]* <[^\s<>@]+@[^\s<>@]+>$/u.test(value),
   ),
 )
@@ -12,14 +12,16 @@ const PublicationCoAuthor = Schema.String.check(
 export function publicationCommitMessage(message: string, coAuthor: string): string {
   const body = message
     .split("\n")
-    .filter(
-      (line) =>
-        line.replace(/^co-authored-by: */i, "").trimEnd() !== coAuthor ||
-        !/^co-authored-by:/i.test(line),
-    )
+    .filter((line) => !/^\s*co-authored-by\s*:/i.test(line))
     .join("\n")
     .trimEnd()
   return `${body}\n\nCo-authored-by: ${coAuthor}`
+}
+
+export function publicationBody(marker: string, message: string): string {
+  const longest = Math.max(2, ...Array.from(message.matchAll(/`+/g), (match) => match[0].length))
+  const fence = "`".repeat(longest + 1)
+  return `${marker}\n\n${fence}text\n${message}\n${fence}`
 }
 
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
@@ -60,7 +62,9 @@ export function parseSandboxRepositories(value: string | undefined): ReadonlyArr
 export const PublicationTitle = Schema.NonEmptyString.check(
   Schema.makeFilter(
     (value) =>
-      value.isWellFormed() && [...value].length <= 200 && !/[\p{Cc}\u2028\u2029]/u.test(value),
+      value.isWellFormed() &&
+      [...value].length <= 200 &&
+      !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value),
   ),
 )
 export const PublicationMessage = Schema.NonEmptyString.check(
@@ -68,7 +72,7 @@ export const PublicationMessage = Schema.NonEmptyString.check(
     (value) =>
       value.isWellFormed() &&
       Buffer.byteLength(value, "utf8") <= 10240 &&
-      !/[\p{Cc}]/u.test(value.replaceAll("\n", "")),
+      !/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")),
   ),
 )
 

@@ -54,7 +54,7 @@ def publication_text(value, message=False):
     assert isinstance(value, str) and value
     encoded = value.encode('utf8', errors='strict')
     assert len(encoded) <= 10240 if message else len(value) <= 200
-    assert all(unicodedata.category(c) != 'Cc' or (message and c == '\n') for c in value)
+    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value)
     assert message or not any(c in value for c in ('\u2028', '\u2029'))
 
 

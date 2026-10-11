@@ -1,7 +1,7 @@
 import { sandboxDiagnostic } from "./diagnostics"
 import { saveSandboxFile } from "./binding"
 import { SandboxCompletion } from "./config"
-import { ResultMetadata } from "./publish-store"
+import { makePublishStore, ResultMetadata } from "./publish-store"
 import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -218,6 +218,7 @@ export const makeSandboxLeaseService = (
 ) =>
   Effect.gen(function* () {
     const store = yield* makeSandboxStore
+    const publications = yield* makePublishStore
     const required = Effect.fn("SandboxLease.required")(function* (runId: string) {
       const lease = yield* store.read(runId)
       if (lease === null)
@@ -426,6 +427,21 @@ export const makeSandboxLeaseService = (
               (lease.session_id !== null && lease.unit === null && lease.state !== "releasing")
             )
               continue
+            if (lease.policy.publish !== undefined && lease.state !== "releasing") {
+              const intent = yield* publications.read(lease.run_id)
+              // Approval may have succeeded before its acknowledgement was persisted.
+              // Keep the owned run alive through publication's separate bounded deadline.
+              if (
+                intent !== null &&
+                ["approving", "approved"].includes(intent.phase) &&
+                intent.actions_run_id === lease.actions_run_id &&
+                intent.attempt === lease.actions_attempt &&
+                intent.metadata.sourceSha === lease.source_sha &&
+                intent.base_ref === lease.policy.publish.baseRef &&
+                intent.deadline > Date.now()
+              )
+                continue
+            }
             if (lease.deadline <= Date.now() || isUnobservedRun(lease))
               yield* store.beginRelease(lease.run_id)
             if (

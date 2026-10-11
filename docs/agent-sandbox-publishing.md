@@ -172,9 +172,21 @@ The caller invokes the reviewed `.github/actions/agent-publish` composite action
 Other repositories pin both the reusable workflow and action to the same exact
 approved workflowd SHA; the action finds `deploy/sandbox/publish.mjs` relative to
 its own installation, independent of the caller repository or working directory.
-Workflowd checks out only the action and deploy tooling at its own exact `github.sha`
-and uses the local action at that commit. This works across repository owners without
-passing secrets through a reusable workflow. `secrets: inherit` is forbidden.
+Workflowd also calls the action with a constant full 40-hex workflowd SHA. The lease
+SHA never selects the publisher action or `deploy/sandbox` code that receives the key.
+The caller can change only with Workflows permission, which neither App has.
+`ci-policy` requires this pinned action as the publisher job's only step; additional
+cache actions, setup cache options, restore/save scripts and local actions are refused.
+This works across repository owners without passing secrets through a reusable
+workflow. `secrets: inherit` is forbidden.
+
+Bootstrap order: commit the reviewed action and `deploy/sandbox` changes first; then
+set that full commit SHA in the caller's `agent-publish` action reference. Validate and
+push the caller candidate, wait for exact-head CI, and stop for the coordinator to
+record the final caller/runner pin before a confirming live gate. Whenever the action
+or `deploy/sandbox` changes, deliberately update the caller's publisher pin to the
+reviewed tooling commit. Updating a lease ref or the runner pin alone cannot upgrade
+the publisher. The publisher tooling commit and final caller commit may differ.
 
 The caller passes `github.token`, the gate bot ID, App ID, the operator-set `co-author` and
 `publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}` as explicit inputs.
@@ -207,12 +219,15 @@ The caller's `co-author` input and sandbox policy's `publish.coAuthor` are expli
 per-repository settings; neither comes from agent text. For ghettimonster, Ben's
 configured identity is `Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`.
 The publisher validates one `Name <email>` line before minting a token, removes
-matching copies of that trailer from the agent message, trims trailing whitespace,
+every agent-supplied `Co-authored-by` line (case-insensitive, including surrounding
+whitespace) from the agent message, trims trailing whitespace,
 and appends exactly one `Co-authored-by: Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`
-after a blank line. Other agent-supplied co-authors are preserved. Agent text cannot
-suppress or replace the configured trailer. Publisher readback, controller recovery
+after a blank line. Agent text cannot suppress or replace the configured trailer. Publisher readback, controller recovery
 and live evidence verify the complete composed message. The agent's original message
-continues to bind the artifact/approval and PR body. See the [onboarding runbook](agent-sandbox-onboarding.md)
+continues to bind the artifact/approval. The PR body encloses it in a code fence longer
+than any backtick run in the message, so agent Markdown cannot escape. Submission and
+publisher validation reject Unicode `Cf` formatting/bidi controls in titles and messages.
+See the [onboarding runbook](agent-sandbox-onboarding.md)
 for the paired per-repository settings and policy upgrade at re-pin.
 
 The publisher uses `POST /git/refs` once to create the agent-named branch at this new
@@ -239,6 +254,13 @@ validates the manifest/bundle against the approval. A clean bare Git repository 
 the trusted source anonymously, without checking out agent code, and inspects every new
 commit. Forbidden paths, hidden forbidden intermediate changes, symlinks, submodules,
 mode changes, extra bundle heads, unrelated/nonlinear history and content limits fail.
+
+Publication gets its own immutable 15-minute deadline when the result is sealed.
+Lease reconciliation retains an exactly bound approving/approved publication until
+that deadline, even after the lease execution deadline, without restarting the runner
+or heartbeat. Explicit cancellation still cancels; expired publication follows bounded
+cancellation and cleanup. Terminal settlement confirms Actions termination and ref
+deletion before releasing custody.
 
 Publication receipts are metadata only. The trusted publisher emits bounded base64 JSON
 records in its own job log at each stage, including before ref/PR writes and after revocation.

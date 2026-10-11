@@ -6,7 +6,7 @@ import { saveSandboxFile } from "./binding"
 import type { makeSandboxLeaseService } from "./lease"
 import { Effect, Schema } from "effect"
 import type { makeSandboxGithub } from "./github"
-import type { SandboxPolicy } from "./config"
+import { publicationBody, type SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
 import {
   makePublishStore,
@@ -315,7 +315,7 @@ export const makeSandboxPublisher = (
         pull.head.sha !== receipt.commitSha ||
         pull.base.ref !== intent.base_ref ||
         pull.title !== intent.metadata.title ||
-        pull.body !== marker + "\n\n" + intent.metadata.commitMessage ||
+        pull.body !== publicationBody(marker, intent.metadata.commitMessage) ||
         [pull.head.repo, pull.base.repo].some(
           (repo) => repo.id !== policy.repositoryId || repo.full_name !== policy.repository,
         )
@@ -455,7 +455,7 @@ export const makeSandboxPublisher = (
           attempt: lease.actions_attempt,
           metadata,
           baseRef: lease.policy.publish.baseRef,
-          deadline: Math.min(lease.deadline, Date.now() + 15 * 60000),
+          deadline: Date.now() + 15 * 60000,
         })
     })
     const saveTerminal = Effect.fn("SandboxPublisher.saveTerminal")(function* (

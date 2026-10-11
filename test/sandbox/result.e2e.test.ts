@@ -76,6 +76,8 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
       { title: "bad\nline" },
       { title: "x".repeat(201) },
       { commitMessage: "bad\tcontrol" },
+      { title: "hidden\u200btitle" },
+      { commitMessage: "bidi\u202emessage" },
       { commitMessage: "é".repeat(5121) },
       { title: "\ud800" },
       { commitMessage: "\udfff" },

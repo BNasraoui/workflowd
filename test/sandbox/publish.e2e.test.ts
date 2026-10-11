@@ -6,7 +6,11 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { makePublishStore } from "../../src/sandbox/publish-store"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxGithub } from "../../src/sandbox/github"
-import { parseSandboxRepositories } from "../../src/sandbox/config"
+import {
+  parseSandboxRepositories,
+  publicationBody,
+  publicationCommitMessage,
+} from "../../src/sandbox/config"
 import { makeSandboxPublisher } from "../../src/sandbox/publish"
 import { sandboxGithubFixture, sandboxPublicationFixture } from "./harness"
 
@@ -56,6 +60,18 @@ test("publication policy requires one operator-set co-author identity", () => {
       ),
     ).toThrow()
   }
+})
+
+test("controller recovery expects fenced agent text and only the configured co-author", () => {
+  const message =
+    "Details\n`````\n@someone Closes #1\n<!-- hidden -->\nCo-authored-by: Other <other@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>\n"
+  expect(publicationBody("marker", message)).toBe(
+    `marker\n\n\`\`\`\`\`\`text\n${message}\n\`\`\`\`\`\``,
+  )
+  expect(publicationCommitMessage(message, policy.publish.coAuthor)).toBe(
+    "Details\n`````\n@someone Closes #1\n<!-- hidden -->\n\nCo-authored-by: " +
+      policy.publish.coAuthor,
+  )
 })
 
 test("completion accepts one bare or fenced object and forwards only canonical JSON", async () => {
@@ -244,6 +260,8 @@ for (const fault of [
   "existing co-authors",
   "duplicate co-author",
   "invalid co-author",
+  "format title",
+  "bidi message",
   "collision",
   "race",
   "lost ref reply",
@@ -278,19 +296,21 @@ for (const fault of [
       revokes = 0
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
-    const title = "Agent title 雪 '$(touch-pwned)'"
+    const title = fault === "format title" ? "hidden\u200btitle" : "Agent title 雪 '$(touch-pwned)'"
     const trailer = `Co-authored-by: ${policy.publish.coAuthor}`
-    const body = "Agent message\n\n雪 `touch-pwned` $(touch-pwned)"
-    const other = "Co-authored-by: Another Person <another@example.invalid>"
+    const body =
+      fault === "bidi message"
+        ? "bidi\u202emessage"
+        : "Agent message\n\n雪 `touch-pwned` $(touch-pwned)\n```\n@someone Closes #1\n`````\n<!-- hidden -->"
+    const other =
+      "Co-authored-by: Another Person <another@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>"
     const commitMessage =
       fault === "existing co-authors"
         ? `${body}\n\n${other}\n`
         : fault === "duplicate co-author"
           ? `${body}\n${trailer}\n${trailer}\n${other}\n`
           : `${body}\n`
-    const expectedMessage = ["existing co-authors", "duplicate co-author"].includes(fault)
-      ? `${body}\n${fault === "existing co-authors" ? "\n" : ""}${other}\n\n${trailer}`
-      : `${body}\n\n${trailer}`
+    const expectedMessage = `${body}\n\n${trailer}`
     await mkdir(join(root, "fixture"), { recursive: true })
     await command(["git", "init", "--bare", remote])
     await command(["git", "-C", remote, "config", "http.receivepack", "true"])
@@ -487,7 +507,7 @@ for (const fault of [
           expect(body).toMatchObject({
             head: branch,
             title,
-            body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n${commitMessage}`,
+            body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`\`\`\`text\n${commitMessage}\n\`\`\`\`\`\``,
             base: "main",
             draft: true,
             maintainer_can_modify: false,
@@ -557,7 +577,9 @@ for (const fault of [
       )
       expect((await invoke("revoke")).code).toBe(0)
       expect(revokes).toBe(1)
-      if (["binding mismatch", "invalid co-author"].includes(fault)) {
+      if (
+        ["binding mismatch", "invalid co-author", "format title", "bidi message"].includes(fault)
+      ) {
         expect(pushes).toBe(0)
         expect(posts).toBe(0)
         expect(await Bun.file(join(work, "receipt.json")).exists()).toBe(false)
@@ -619,7 +641,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
       reviews:[{state:"approved",comment:approvalComment(intent),user:{id:policy.appActorId,type:"Bot"},environments:[{id:9,name:"agent-publish"}]}],
       publisherLog:"2026-10-11T00:00:00Z workflowd.publish.receipt "+Buffer.from(JSON.stringify(receipt)).toString("base64"),
       ref:{ref:"refs/heads/"+metadata.branch,object:{sha:"2".repeat(40)}},
-      pull:{number:17,html_url:"https://github.com/"+policy.repository+"/pull/17",state:"open",draft:true,maintainer_can_modify:false,title:metadata.title,body:marker+"\\n\\n"+metadata.commitMessage,user:{login:"ghettimonster[bot]",id:339414993,type:"Bot"},head:{ref:metadata.branch,sha:"2".repeat(40),repo},base:{ref:"main",sha:metadata.sourceSha,repo}},
+      pull:{number:17,html_url:"https://github.com/"+policy.repository+"/pull/17",state:"open",draft:true,maintainer_can_modify:false,title:metadata.title,body:marker+"\\n\\n"+"\`\`\`text\\n"+metadata.commitMessage+"\\n\`\`\`",user:{login:"ghettimonster[bot]",id:339414993,type:"Bot"},head:{ref:metadata.branch,sha:"2".repeat(40),repo},base:{ref:"main",sha:metadata.sourceSha,repo}},
     }
     assertLivePublication(valid)
     for(const mutate of [
@@ -641,3 +663,74 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     `,
   ])
 })
+
+for (const outcome of ["published", "expired", "cancelled"] as const) {
+  test(`expired lease lets approved publication settle before cleanup: ${outcome}`, async () => {
+    const fixture = await sandboxGithubFixture(policy)
+    const publication = sandboxPublicationFixture(fixture, policy)
+    publication.wait(true)
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* runStoreMigrations
+          const store = yield* makeSandboxStore
+          yield* store.request({
+            runId: "run-1",
+            leaseId: "lease-1",
+            policy,
+            sourceSha: metadata.sourceSha,
+            now: Date.now() - 286 * 60000,
+          })
+          yield* store.beginStart("run-1")
+          yield* store.recordRun("run-1", 41, 1)
+          const intents = yield* makePublishStore
+          yield* intents.seal({
+            runId: "run-1",
+            actionsRunId: 41,
+            attempt: 1,
+            metadata,
+            baseRef: "main",
+            deadline: Date.now() + 60000,
+          })
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          const remote = yield* makeSandboxLeaseService(github)
+          const publisher = yield* makeSandboxPublisher(github, remote)
+          expect(yield* publisher.poll("run-1")).toBe("approved")
+          // Reconstructed lease service models a coordinator restart at the lease deadline.
+          const recovered = yield* makeSandboxLeaseService(github)
+          yield* recovered.reconcile([policy])
+          expect(fixture.cancellations).toEqual([])
+          expect(fixture.refDeletes).toBe(0)
+          expect((yield* store.read("run-1"))?.state).toBe("starting")
+          if (outcome === "expired") {
+            // Deadlines are immutable; model elapsed time through the clock, not a DB edit.
+            const { spyOn } = yield* Effect.promise(() => import("bun:test"))
+            const now = Date.now()
+            const clock = spyOn(Date, "now").mockReturnValue(now + 61000)
+            try {
+              yield* recovered.reconcile([policy])
+            } finally {
+              clock.mockRestore()
+            }
+            expect(fixture.cancellations).toContain(41)
+          } else if (outcome === "cancelled") {
+            yield* recovered.release("run-1")
+            expect(fixture.cancellations).toContain(41)
+          } else {
+            publication.wait(false)
+            expect(yield* publisher.poll("run-1")).toBe("published")
+          }
+          fixture.mutateRun({
+            status: "completed",
+            conclusion: outcome === "published" ? "success" : "cancelled",
+          })
+          yield* recovered.reconcile([policy])
+          expect((yield* store.read("run-1"))?.state).toBe("released")
+          expect(fixture.refDeletes).toBe(1)
+        }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+      )
+    } finally {
+      await fixture.close()
+    }
+  })
+}

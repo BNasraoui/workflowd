@@ -180,3 +180,43 @@ test("publisher guard rejects key consumers outside the reviewed token step", as
   ])
     expect(() => assertProtectedPublishAction(changed)).toThrow()
 })
+
+for (const reference of [
+  "main",
+  "v1",
+  "${{ github.sha }}",
+  "a".repeat(39),
+  "./trusted/.github/actions/agent-publish",
+]) {
+  test(`publisher refuses unpinned action: ${reference}`, async () => {
+    const files = await workflows()
+    const uses = reference.startsWith("./")
+      ? reference
+      : `BNasraoui/workflowd/.github/actions/agent-publish@${reference}`
+    files["publisher.yml"] = `on: { push: {} }
+jobs:
+  agent-publish:
+    steps:
+      - uses: ${uses}
+        with:
+          publisher-private-key: \${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
+`
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  })
+}
+
+for (const step of [
+  "uses: actions/cache@" + "a".repeat(40),
+  "uses: actions/cache/restore@" + "a".repeat(40),
+  "uses: actions/cache/save@" + "a".repeat(40),
+  "uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020\n        with: { cache: npm }",
+  "uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with: { no-cache: false }",
+  "run: gh cache restore untrusted",
+  "uses: vendor/cache-helper@" + "a".repeat(40),
+]) {
+  test(`publisher refuses cache-capable extra steps: ${step}`, async () => {
+    const files = await workflows()
+    files["agent-sandbox-caller.yml"] += `\n      - ${step}\n`
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
+  })
+}

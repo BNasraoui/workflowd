@@ -27,14 +27,14 @@ function publicationText(value, message = false) {
   assert.equal(typeof value, "string")
   assert.ok(value.length > 0 && value.isWellFormed())
   assert.ok(message ? Buffer.byteLength(value, "utf8") <= 10240 : [...value].length <= 200)
-  assert.ok(!/\p{Cc}/u.test(message ? value.replaceAll("\n", "") : value))
+  assert.ok(!/[\p{Cc}\p{Cf}]/u.test(message ? value.replaceAll("\n", "") : value))
   assert.ok(message || !/[\u2028\u2029]/u.test(value))
 }
 
 function configuredCoAuthor() {
   const value = process.env.PUBLISH_CO_AUTHOR
   assert.equal(typeof value, "string")
-  assert.ok(value.isWellFormed() && !/[\p{Cc}\u2028\u2029]/u.test(value))
+  assert.ok(value.isWellFormed() && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value))
   assert.match(value, /^[^\s<>][^<>]* <[^\s<>@]+@[^\s<>@]+>$/u)
   return value
 }
@@ -42,9 +42,16 @@ function configuredCoAuthor() {
 function publicationCommitMessage(message) {
   const coAuthor = configuredCoAuthor()
   const body = message.split("\n").filter((line) =>
-    line.replace(/^co-authored-by: */i, "").trimEnd() !== coAuthor || !/^co-authored-by:/i.test(line),
+    !/^\s*co-authored-by\s*:/i.test(line),
   ).join("\n").trimEnd()
   return `${body}\n\nCo-authored-by: ${coAuthor}`
+}
+
+function publicationBody(state) {
+  const message = state.binding.commitMessage
+  const longest = Math.max(2, ...Array.from(message.matchAll(/`+/g), (match) => match[0].length))
+  const fence = "`".repeat(longest + 1)
+  return `${state.marker}\n\n${fence}text\n${message}\n${fence}`
 }
 
 function verifyCommit(commit, state) {
@@ -148,7 +155,7 @@ function verifyPull(pull, state) {
     assert.equal(side.repo.full_name, repository)
     assert.equal(side.repo.id, Number(process.env.GITHUB_REPOSITORY_ID))
   }
-  assert.equal(pull.body, state.marker + "\n\n" + state.binding.commitMessage)
+  assert.equal(pull.body, publicationBody(state))
   assert.equal(pull.html_url, `https://github.com/${repository}/pull/${pull.number}`)
   return pull.number
 }
@@ -219,7 +226,7 @@ async function publish() {
   await record(state)
   let number
   try {
-    const created = await request(prefix + "/pulls", "POST", { title: binding.title, body: state.marker + "\n\n" + binding.commitMessage,
+    const created = await request(prefix + "/pulls", "POST", { title: binding.title, body: publicationBody(state),
       head: state.branch, base: binding.base, draft: true, maintainer_can_modify: false })
     assert.equal(created.status, 201)
     number = created.data.number
