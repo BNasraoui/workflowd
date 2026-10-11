@@ -24,6 +24,11 @@ import type { CliPort, CliSpawnInput } from "../kernel/cli-process-contract"
 import { compileSandboxBridge } from "./bridge"
 import { makeSandboxPublisher, SandboxTerminal as Terminal } from "./publish"
 import { makePublishStore } from "./publish-store"
+import {
+  observeSandboxStage,
+  observeSandboxTelemetry,
+  type SandboxObservationError,
+} from "./observation"
 
 export type SandboxDispatchPort = {
   readonly prepareNative?: (run: AgentRunRecord) => Effect.Effect<
@@ -53,7 +58,9 @@ export type SandboxDispatchPort = {
   readonly cancel: (run: AgentRunRecord) => Effect.Effect<void, SandboxError>
   readonly observe: (run: AgentRunRecord) => Effect.Effect<void, SandboxError>
   readonly owns: (runId: string) => Effect.Effect<boolean, SandboxError>
-  readonly provider: (sessionId: string) => Effect.Effect<AgentRunProviderPort, SandboxError>
+  readonly provider: (
+    sessionId: string,
+  ) => Effect.Effect<AgentRunProviderPort, SandboxError | SandboxObservationError>
   readonly heartbeat: Effect.Effect<void, SandboxError>
   readonly iteration: Effect.Effect<void, SandboxError>
 }
@@ -91,28 +98,31 @@ export const makeSandboxDispatch = (options: {
     }
     const nativeEndpoint = (run: AgentRunRecord) =>
       `${run.executorKind}-cli://${run.resolvedSelection?.host ?? "local"}`
-    const bindingFor = Effect.fn("SandboxDispatch.binding")(function* (sessionId: string) {
-      const lease = yield* store.bySession(sessionId)
-      if (lease === null || lease.state !== "ready" || lease.transport === null)
-        return yield* Effect.fail(failure())
-      const run = yield* runs.read(lease.run_id)
-      if (run === null || run.agent !== "sandbox") return yield* Effect.fail(failure())
-      const binding = yield* Effect.tryPromise(() => readSandboxBinding(run.directory))
-      if (
-        binding.runId !== run.runId ||
-        binding.leaseId !== lease.lease_id ||
-        binding.sessionId !== sessionId ||
-        binding.repositoryId !== lease.policy.repositoryId ||
-        binding.sourceSha !== lease.source_sha ||
-        binding.executorId !== options.executorId ||
-        binding.endpointIdentity !== options.endpointIdentity ||
-        binding.transportHash !== transportHash(lease.transport) ||
-        binding.deadline !== lease.deadline
-      )
-        return yield* Effect.fail(failure())
-      yield* executor.check(binding)
-      return binding
-    })
+    const bindingFor = Effect.fn("SandboxDispatch.binding")(
+      function* (sessionId: string) {
+        const lease = yield* store.bySession(sessionId)
+        if (lease === null || lease.state !== "ready" || lease.transport === null)
+          return yield* Effect.fail(failure())
+        const run = yield* runs.read(lease.run_id)
+        if (run === null || run.agent !== "sandbox") return yield* Effect.fail(failure())
+        const binding = yield* Effect.tryPromise(() => readSandboxBinding(run.directory))
+        if (
+          binding.runId !== run.runId ||
+          binding.leaseId !== lease.lease_id ||
+          binding.sessionId !== sessionId ||
+          binding.repositoryId !== lease.policy.repositoryId ||
+          binding.sourceSha !== lease.source_sha ||
+          binding.executorId !== options.executorId ||
+          binding.endpointIdentity !== options.endpointIdentity ||
+          binding.transportHash !== transportHash(lease.transport) ||
+          binding.deadline !== lease.deadline
+        )
+          return yield* Effect.fail(failure())
+        yield* executor.check(binding)
+        return binding
+      },
+      (effect) => observeSandboxStage("binding", effect),
+    )
     const provider = (sessionId: string) =>
       Effect.gen(function* () {
         yield* bindingFor(sessionId)
@@ -153,9 +163,13 @@ export const makeSandboxDispatch = (options: {
               }),
             ),
           abortSession: (input) => guard(input, options.executor.abortSession(input)),
-          sessionTelemetry: (input) => guard(input, options.executor.sessionTelemetry(input)),
+          sessionTelemetry: (input) =>
+            guard(
+              input,
+              observeSandboxStage("telemetry", options.executor.sessionTelemetry(input)),
+            ),
         } satisfies AgentRunProviderPort
-      }).pipe(Effect.mapError(failure))
+      }).pipe((effect) => observeSandboxStage("binding", effect))
     const stop = (run: AgentRunRecord) =>
       Effect.gen(function* () {
         const lease = yield* store.read(run.runId)
@@ -515,16 +529,19 @@ export const makeSandboxDispatch = (options: {
         if (run.nativeSessionId === null) return
         const sessionId = run.nativeSessionId
         const result = yield* Effect.result(
-          provider(sessionId).pipe(
-            Effect.flatMap((dedicated) => dedicated.sessionTelemetry({ sessionID: sessionId })),
+          observeSandboxTelemetry(
+            run.directory,
+            provider(sessionId).pipe(
+              Effect.flatMap((dedicated) => dedicated.sessionTelemetry({ sessionID: sessionId })),
+            ),
           ),
         )
-        if (result._tag === "Failure" || result.success === undefined) {
+        if (result._tag === "Failure") {
           yield* settle(run, {
             state: "operator_required",
             sessionId: run.nativeSessionId,
             finalMessage: null,
-            diagnostic: "Sandbox process or session lost",
+            diagnostic: result.failure.message,
           })
           return
         }

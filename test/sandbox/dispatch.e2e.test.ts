@@ -31,6 +31,7 @@ import {
   assertBridgeBinding,
   writeSandboxBinding,
 } from "../../src/sandbox/binding"
+import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { AgentRunIngress } from "../../src/kernel/agent-run-ingress"
 import { AgentWaitIngress } from "../../src/kernel/agent-wait-ingress"
 import {
@@ -660,6 +661,8 @@ for (const settlement of [
   "cancel",
   "missing environment",
   "unknown environment",
+  "telemetry failure",
+  "missing telemetry",
 ] as const)
   test(`protected publisher ${settlement} retains custody through restart and sends one terminal mailbox`, async () => {
     const { makeSandboxDispatch } = await import("../../src/sandbox/dispatch")
@@ -699,6 +702,7 @@ for (const settlement of [
       "_",
       sourceSha,
     )
+    let observationFault = false
     let completion = JSON.stringify({ branch: "agent choice/$() 雪" })
     const shared = await sharedOpenCodeFixture("dispatch")
     const directory = join(runner.root, "control")
@@ -723,6 +727,26 @@ for (const settlement of [
             leases,
             executor: {
               ...shared.executor,
+              sessionTelemetry: (input) =>
+                observationFault
+                  ? settlement === "missing telemetry"
+                    ? Effect.succeed(undefined)
+                    : Effect.fail(
+                        new OpenCodeAdapterError({
+                          operation: "read session telemetry",
+                          cause: Object.assign(
+                            new Error(
+                              "Authorization: Bearer credential-canary " + "x".repeat(4000),
+                            ),
+                            {
+                              name: "HttpError",
+                              status: 503,
+                              request: { headers: { authorization: "credential-canary" } },
+                            },
+                          ),
+                        }),
+                      )
+                  : shared.executor.sessionTelemetry(input),
               createSession: (input) =>
                 Effect.gen(function* () {
                   expect(input.id).toBeDefined()
@@ -853,6 +877,36 @@ for (const settlement of [
             Effect.timeout("120 seconds"),
           )
           yield* idle
+          if (settlement === "telemetry failure" || settlement === "missing telemetry") {
+            observationFault = true
+            yield* service.observe(active)
+            const evidence = yield* Effect.tryPromise(() =>
+              Bun.file(join(directory, "observation-failure.json")).json(),
+            )
+            expect(evidence).toMatchObject({
+              stage: "telemetry",
+              errorClass: settlement === "missing telemetry" ? "SessionMissing" : "HttpError",
+              httpStatus: settlement === "missing telemetry" ? null : 503,
+            })
+            expect(evidence.elapsedMs).toBeGreaterThanOrEqual(0)
+            expect(Number.isFinite(Date.parse(String(evidence.startedAt)))).toBe(true)
+            expect(JSON.stringify(evidence)).not.toContain("credential-canary")
+            expect(JSON.stringify(evidence).length).toBeLessThan(512)
+            expect((yield* Effect.tryPromise(() => readSandboxBinding(directory))).state).toBe(
+              "revoked",
+            )
+            expect(publication.posts).toBe(0)
+            const sql = yield* SqlClient.SqlClient
+            expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(0)
+            fixture.mutateRun({ status: "completed", conclusion: "cancelled" })
+            yield* service.iteration
+            const terminal = (yield* runs.read("run-1"))!
+            expect(terminal.state).toBe("operator_required")
+            expect(terminal.diagnostic).toContain(JSON.stringify(evidence))
+            expect((yield* store.read("run-1"))?.state).toBe("released")
+            expect(yield* sql`SELECT * FROM resident_inbox`).toHaveLength(1)
+            return
+          }
           const environmentId = yield* Effect.tryPromise(() =>
             runner.docker(
               "exec",

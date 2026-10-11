@@ -14,6 +14,7 @@ import {
   type SandboxSessionBinding,
 } from "./binding"
 import type { SandboxTransport } from "./transport"
+import { observeSandboxStage } from "./observation"
 import type { OpenCodeAdapter, OpenCodeModel } from "../opencode/adapter"
 
 // Historical units remain in custody until their saved invocation is stopped.
@@ -108,24 +109,39 @@ export const makeSandboxOpenCode = (client: OpenCodeClient, executor: OpenCodeAd
     return session
   })
   const check = Effect.fn("SandboxOpenCode.check")(function* (binding: SandboxSessionBinding) {
-    const saved = yield* Effect.tryPromise(() => readSandboxBinding(binding.directory))
-    if (
-      saved.state !== "active" ||
-      JSON.stringify(saved) !== JSON.stringify(binding) ||
-      binding.policyHash !== sandboxPolicyHash
+    yield* observeSandboxStage(
+      "binding",
+      Effect.gen(function* () {
+        const saved = yield* Effect.tryPromise(() => readSandboxBinding(binding.directory))
+        if (
+          saved.state !== "active" ||
+          JSON.stringify(saved) !== JSON.stringify(binding) ||
+          binding.policyHash !== sandboxPolicyHash
+        )
+          return yield* Effect.fail(new Error("Sandbox binding is inactive or changed"))
+      }),
     )
-      return yield* Effect.fail(new Error("Sandbox binding is inactive or changed"))
-    if ((yield* preflight(binding.directory)) !== binding.locationIdentity)
-      return yield* Effect.fail(new Error("Sandbox location changed"))
-    yield* checkSession(binding)
-    const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
-    const bridges = catalog.data.filter((entry) => isSandboxBridgeNamespace(entry.name))
-    if (
-      bridges.length !== 1 ||
-      bridges[0]?.name !== binding.bridgeServerName ||
-      bridges[0].status.status !== "connected"
+    yield* observeSandboxStage(
+      "preflight",
+      Effect.gen(function* () {
+        if ((yield* preflight(binding.directory)) !== binding.locationIdentity)
+          return yield* Effect.fail(new Error("Sandbox location changed"))
+      }),
     )
-      return yield* Effect.fail(new Error("Sandbox bridge binding changed"))
+    yield* observeSandboxStage("session", checkSession(binding))
+    yield* observeSandboxStage(
+      "catalog",
+      Effect.gen(function* () {
+        const catalog = yield* client.mcp.list({ location: { directory: binding.directory } })
+        const bridges = catalog.data.filter((entry) => isSandboxBridgeNamespace(entry.name))
+        if (
+          bridges.length !== 1 ||
+          bridges[0]?.name !== binding.bridgeServerName ||
+          bridges[0].status.status !== "connected"
+        )
+          return yield* Effect.fail(new Error("Sandbox bridge binding changed"))
+      }),
+    )
   })
   const reserve = Effect.fn("SandboxOpenCode.reserve")(function* (directory: string) {
     yield* Effect.tryPromise(async () => {

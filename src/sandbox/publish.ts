@@ -417,7 +417,7 @@ export const makeSandboxPublisher = (
       )
         return yield* Effect.fail(fail())
       const submission = yield* Effect.tryPromise(() =>
-        readSandboxSubmission(run.directory, runId, lease.lease_id, run.nativeSessionId),
+        readSandboxSubmission(run.directory, runId, lease.lease_id, lease.session_id),
       )
       const metadata = yield* remote.finishResult(
         runId,

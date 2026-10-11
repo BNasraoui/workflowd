@@ -474,7 +474,9 @@ test("global sandbox agent keeps runtime bridges exclusive to their locations", 
       await fixture.api(`mcp/${intruder}?${locationA.toString()}`, { config }, "PUT")
       await expect(
         Effect.runPromise(executor.check(await readSandboxBinding(directoryA))),
-      ).rejects.toThrow("bridge binding changed")
+      ).rejects.toMatchObject({
+        evidence: { stage: "catalog", errorClass: "Error", httpStatus: null },
+      })
       await fixture.api(`mcp/${intruder}?${locationA.toString()}`, undefined, "DELETE")
     }
     await Effect.runPromise(
