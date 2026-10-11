@@ -11,6 +11,7 @@ import { Effect } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import {
   parseSandboxRepositories,
+  publicationCommitMessage,
   sandboxCompletionInstructions,
 } from "../../src/sandbox/config.ts"
 import { makeSandboxGithub } from "../../src/sandbox/github.ts"
@@ -888,7 +889,10 @@ export function assertLivePublication(proof) {
     commit.parents.map((parent) => parent.sha),
     [sourceSha],
   )
-  assert.equal(commit.message, intent.metadata.commitMessage)
+  assert.equal(
+    commit.message,
+    publicationCommitMessage(intent.metadata.commitMessage, policy.publish.coAuthor),
+  )
   assert.equal(commit.verification.verified, true)
   assert.ok(Number.isSafeInteger(pull.number) && pull.number > 0)
   assert.equal(pull.html_url, `https://github.com/${policy.repository}/pull/${pull.number}`)

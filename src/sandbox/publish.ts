@@ -266,9 +266,9 @@ export const makeSandboxPublisher = (
       )(yield* github.publicationRead(policy, `git/ref/heads/${encodeURIComponent(branch)}`))
       if (ref.ref !== `refs/heads/${branch}` || ref.object.sha !== receipt.commitSha)
         return yield* Effect.fail(fail())
-      yield* Schema.decodeUnknownEffect(publishedCommitSchema(intent.metadata, receipt.commitSha))(
-        yield* github.publicationRead(policy, `git/commits/${receipt.commitSha}`),
-      )
+      yield* Schema.decodeUnknownEffect(
+        publishedCommitSchema(intent.metadata, receipt.commitSha, policy.publish!.coAuthor),
+      )(yield* github.publicationRead(policy, `git/commits/${receipt.commitSha}`))
       const repo = Schema.Struct({ id: Schema.Int, full_name: Schema.String })
       const pullSchema = Schema.Struct({
         number: Schema.Int,

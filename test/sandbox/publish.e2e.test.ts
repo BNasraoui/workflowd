@@ -6,6 +6,7 @@ import { makeSandboxStore } from "../../src/sandbox/store"
 import { makePublishStore } from "../../src/sandbox/publish-store"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import { makeSandboxGithub } from "../../src/sandbox/github"
+import { parseSandboxRepositories } from "../../src/sandbox/config"
 import { makeSandboxPublisher } from "../../src/sandbox/publish"
 import { sandboxGithubFixture, sandboxPublicationFixture } from "./harness"
 
@@ -23,6 +24,7 @@ const policy = {
     environmentId: 9,
     publisherAppId: 5232172,
     publisherActorId: 339414993,
+    coAuthor: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>",
   },
 }
 const metadata = {
@@ -35,6 +37,26 @@ const metadata = {
   bundleSha256: "d".repeat(64),
   manifestSha256: "e".repeat(64),
 }
+
+test("publication policy requires one operator-set co-author identity", () => {
+  expect(parseSandboxRepositories(JSON.stringify([policy]))).toEqual([policy])
+  for (const coAuthor of [
+    undefined,
+    "",
+    " <x@y>",
+    "Name <bad>",
+    "Name <x@y>\n",
+    "Name\rInjected <x@y>",
+    "Name\u2028Injected <x@y>",
+    "Name <x@y>\nOther <z@y>",
+  ]) {
+    expect(() =>
+      parseSandboxRepositories(
+        JSON.stringify([{ ...policy, publish: { ...policy.publish, coAuthor } }]),
+      ),
+    ).toThrow()
+  }
+})
 
 test("completion accepts one bare or fenced object and forwards only canonical JSON", async () => {
   const fixture = await sandboxGithubFixture(policy)
@@ -134,6 +156,7 @@ for (const fault of [
   "wrong tree",
   "wrong parent",
   "wrong message",
+  "missing co-author",
 ])
   test(`durable publication reconciliation: ${fault}`, async () => {
     const fixture = await sandboxGithubFixture(policy)
@@ -193,6 +216,7 @@ for (const fault of [
               "wrong tree",
               "wrong parent",
               "wrong message",
+              "missing co-author",
             ].includes(fault)
           ) {
             yield* publisher.poll("run-1")
@@ -217,12 +241,16 @@ for (const fault of [
 // Only GitHub HTTP is substituted; fixture API writes real Git objects and create-only refs.
 for (const fault of [
   "none",
+  "existing co-authors",
+  "duplicate co-author",
+  "invalid co-author",
   "collision",
   "race",
   "lost ref reply",
   "wrong tree",
   "wrong parent",
   "wrong message",
+  "missing co-author",
   "wrong title",
   "binding mismatch",
   "lost PR reply",
@@ -251,7 +279,18 @@ for (const fault of [
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
     const title = "Agent title 雪 '$(touch-pwned)'"
-    const commitMessage = "Agent message\n\n雪 `touch-pwned` $(touch-pwned)\n"
+    const trailer = `Co-authored-by: ${policy.publish.coAuthor}`
+    const body = "Agent message\n\n雪 `touch-pwned` $(touch-pwned)"
+    const other = "Co-authored-by: Another Person <another@example.invalid>"
+    const commitMessage =
+      fault === "existing co-authors"
+        ? `${body}\n\n${other}\n`
+        : fault === "duplicate co-author"
+          ? `${body}\n${trailer}\n${trailer}\n${other}\n`
+          : `${body}\n`
+    const expectedMessage = ["existing co-authors", "duplicate co-author"].includes(fault)
+      ? `${body}\n${fault === "existing co-authors" ? "\n" : ""}${other}\n\n${trailer}`
+      : `${body}\n\n${trailer}`
     await mkdir(join(root, "fixture"), { recursive: true })
     await command(["git", "init", "--bare", remote])
     await command(["git", "-C", remote, "config", "http.receivepack", "true"])
@@ -337,7 +376,12 @@ for (const fault of [
       sha: publishedSha,
       tree: { sha: fault === "wrong tree" ? source : treeSha },
       parents: [{ sha: readback && fault === "wrong parent" ? result : source }],
-      message: fault === "wrong message" ? "changed" : commitMessage,
+      message:
+        fault === "wrong message"
+          ? "changed"
+          : readback && fault === "missing co-author"
+            ? commitMessage
+            : expectedMessage,
       verification: { verified: true },
     })
     const server = Bun.serve({
@@ -396,7 +440,7 @@ for (const fault of [
               message: Schema.String,
             }),
           )(await request.json(), { onExcessProperty: "error" })
-          expect(body).toEqual({ tree: treeSha, parents: [source], message: commitMessage })
+          expect(body).toEqual({ tree: treeSha, parents: [source], message: expectedMessage })
           publishedSha = await objectGit(
             ["commit-tree", body.tree, "-p", source],
             Buffer.from(body.message),
@@ -490,6 +534,8 @@ for (const fault of [
           GITHUB_RUN_ID: "41",
           GITHUB_RUN_ATTEMPT: "1",
           PUBLISH_TOKEN: token,
+          PUBLISH_CO_AUTHOR:
+            fault === "invalid co-author" ? "Injected\nName <x@y>" : policy.publish.coAuthor,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -504,10 +550,14 @@ for (const fault of [
     }
     try {
       const published = await invoke("publish")
-      expect(published.code).toBe(fault === "none" || fault === "lost PR reply" ? 0 : 1)
+      expect(published.code).toBe(
+        ["none", "lost PR reply", "existing co-authors", "duplicate co-author"].includes(fault)
+          ? 0
+          : 1,
+      )
       expect((await invoke("revoke")).code).toBe(0)
       expect(revokes).toBe(1)
-      if (fault === "binding mismatch") {
+      if (["binding mismatch", "invalid co-author"].includes(fault)) {
         expect(pushes).toBe(0)
         expect(posts).toBe(0)
         expect(await Bun.file(join(work, "receipt.json")).exists()).toBe(false)
@@ -515,16 +565,14 @@ for (const fault of [
       }
       const receipt = JSON.parse(await Bun.file(join(work, "receipt.json")).text())
       expect(receipt).toMatchObject({ binding, repository: "fixture/repo", branch, revoked: true })
-      if (["none", "lost PR reply"].includes(fault)) {
+      if (["none", "lost PR reply", "existing co-authors", "duplicate co-author"].includes(fault)) {
         expect(receipt).toMatchObject({ stage: "published", pr: 17, commitSha: publishedSha })
         expect(publishedSha).not.toBe(result)
         expect(await objectGit(["rev-parse", publishedSha + "^{tree}"])).toBe(treeSha)
         expect(await objectGit(["rev-list", "--parents", "-n", "1", publishedSha])).toBe(
           `${publishedSha} ${source}`,
         )
-        expect(await objectGit(["log", "-1", "--format=%B", publishedSha])).toBe(
-          commitMessage.trimEnd(),
-        )
+        expect(await objectGit(["log", "-1", "--format=%B", publishedSha])).toBe(expectedMessage)
       }
       if (fault === "lost ref reply") expect(receipt.stage).toBe("pushing")
       const beforeRef = ["collision", "wrong tree", "wrong message"].includes(fault)
@@ -563,7 +611,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     const receipt = {...intent.receipt,binding,repository:policy.repository,branch:metadata.branch,marker}
     const valid = {
       policy,intent,sourceSha:metadata.sourceSha,
-      commit:{sha:"2".repeat(40),tree:{sha:metadata.treeSha},parents:[{sha:metadata.sourceSha}],message:metadata.commitMessage,verification:{verified:true}},
+      commit:{sha:"2".repeat(40),tree:{sha:metadata.treeSha},parents:[{sha:metadata.sourceSha}],message:metadata.commitMessage+"\\n\\nCo-authored-by: "+policy.publish.coAuthor,verification:{verified:true}},
       submission:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage},
       calls:[{name:"bridge.submit_result",owned:true,completed:true,input:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage}}],
       actions:{id:41,run_attempt:1,head_sha:policy.workflowSha,status:"completed",conclusion:"success"},
@@ -575,7 +623,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     }
     assertLivePublication(valid)
     for(const mutate of [
-      x=>x.pull.title="changed", x=>x.commit.tree.sha=metadata.sourceSha, x=>x.commit.parents.push({sha:metadata.resultSha}), x=>x.commit.message="changed",
+      x=>x.pull.title="changed", x=>x.commit.tree.sha=metadata.sourceSha, x=>x.commit.parents.push({sha:metadata.resultSha}), x=>x.commit.message="changed", x=>x.commit.message=metadata.commitMessage,
       x=>x.intent.phase="probed", x=>x.calls=[], x=>x.submission.branch="different",
       x=>x.intent.receipt.revoked=false, x=>x.publisherLog="",
       x=>x.pull.draft=false, x=>x.pull.state="closed", x=>x.pull.user.id=1,

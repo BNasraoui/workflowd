@@ -928,7 +928,12 @@ export function sandboxPublicationFixture(
         sha: "2".repeat(40),
         tree: { sha: fault === "wrong tree" ? "0".repeat(40) : binding.tree },
         parents: [{ sha: fault === "wrong parent" ? "0".repeat(40) : binding.source }],
-        message: fault === "wrong message" ? "changed" : binding.commitMessage,
+        message:
+          fault === "wrong message"
+            ? "changed"
+            : fault === "missing co-author"
+              ? binding.commitMessage
+              : `${String(binding.commitMessage)}\n\nCo-authored-by: ${policy.publish!.coAuthor}`,
         verification: { verified: true },
       })
     if (path.endsWith("/pulls") || path.endsWith("/pulls/17")) {

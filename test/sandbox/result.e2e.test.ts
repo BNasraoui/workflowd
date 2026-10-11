@@ -294,6 +294,7 @@ for (const mutation of [
                 ...env,
                 GITHUB_ACTION_PATH: actionPath,
                 GHETTIMONSTER_APP_ID: "5232172",
+                PUBLISH_CO_AUTHOR: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>",
               },
               stdout: "pipe",
               stderr: "pipe",

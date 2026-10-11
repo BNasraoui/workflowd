@@ -49,3 +49,4 @@ jobs:
           gate-actor-id: "306741873"
           publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
           publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}
+          co-author: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>"

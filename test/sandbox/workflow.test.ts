@@ -121,6 +121,8 @@ test("reviewed composite validates before minting a repository-only token and al
   const steps = Schema.decodeUnknownSync(Schema.Array(Schema.Json))(record(action.runs).steps).map(
     (value) => record(value),
   )
+  expect(record(steps[0]?.env).PUBLISH_CO_AUTHOR).toBe("${{ inputs.co-author }}")
+  expect(record(steps[2]?.env).PUBLISH_CO_AUTHOR).toBe("${{ inputs.co-author }}")
   expect(steps[0]?.run).toContain('publish.mjs" validate')
   expect(steps[1]?.uses).toBe(
     "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349",

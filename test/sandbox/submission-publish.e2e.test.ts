@@ -28,6 +28,7 @@ const policy = {
     environmentId: 9,
     publisherAppId: 5232172,
     publisherActorId: 339414993,
+    coAuthor: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>",
   },
 }
 

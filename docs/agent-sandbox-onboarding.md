@@ -55,7 +55,10 @@ jobs:
           gate-actor-id: "306741873"
           publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}
           publisher-app-id: ${{ vars.GHETTIMONSTER_APP_ID }}
+          co-author: "Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>"
 ```
+
+Set `co-author` explicitly for each repository in its reviewed caller publish configuration; it is not an agent input or a global publisher default. Ben's decision for ghettimonster publications is `Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`. Set the same value in that repository's sandbox policy as `publish.coAuthor`. The required value is a single `Name <email>` line, without the `Co-authored-by:` prefix, controls or extra lines. Validation rejects a missing or malformed value before token minting. During re-pin, update existing publish policies too; publishing cannot resume with the old policy shape.
 
 Save as `.github/workflows/agent-sandbox-caller.yml`. Keep the job IDs `sandbox` and `agent-publish`: the controller binds to `sandbox / runner` and `agent-publish`. The publish job belongs to the target caller and resolves its own `agent-publish` environment. The lease call passes no secrets. Do not use `secrets: inherit`, including between repositories with the same owner.
 
@@ -120,7 +123,7 @@ repo:quality-sh@319835875/provenance@1286590015:ref:refs/heads/workflowd/leases/
 
 Put its client ID and audience in target Settings → Secrets and variables → Actions → **Variables** as `TS_AGENT_CLIENT_ID` and `TS_AGENT_AUDIENCE`. Confirm audience from the credential and tailnet tests denying runner-initiated mint/ben-arch connections. Do not infer trust from variable presence.
 
-Operator adds provenance's configured alias/root and sandbox policy alongside workflowd, using repository/owner IDs above, actual opencode installation ID, actor 306741873, approved target `workflowSha`, central `toolingSha`, and its Tailscale values. `publish` supplies recorded base ref, environment ID and ghettimonster App/bot IDs; it has no result-branch setting or private key. Use isolated proof configuration first: workflowd proofs target the existing RPI branch at the newly published candidate so the PR contains only the agent task; provenance proofs target reviewed main after onboarding. Record that base tip as source at dispatch. Production targets main and enablement is separate. Do not register a fresh model auth store.
+Operator adds provenance's configured alias/root and sandbox policy alongside workflowd, using repository/owner IDs above, actual opencode installation ID, actor 306741873, approved target `workflowSha`, central `toolingSha`, and its Tailscale values. `publish` supplies recorded base ref, environment ID, ghettimonster App/bot IDs and the per-repository `coAuthor` matching the caller; it has no result-branch setting or private key. Use isolated proof configuration first: workflowd proofs target the existing RPI branch at the newly published candidate so the PR contains only the agent task; provenance proofs target reviewed main after onboarding. Record that base tip as source at dispatch. Production targets main and enablement is separate. Do not register a fresh model auth store.
 
 ## 6. Probes, live runs, review
 

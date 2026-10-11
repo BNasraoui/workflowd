@@ -142,7 +142,7 @@ other seven security/reliability findings were resolved in code. No quality gate
 project setting was changed.
 
 A configured `publish` policy supplies the PR base ref, environment ID and publisher
-App/bot IDs. `toolingSha` optionally selects the centrally reviewed reusable workflow;
+App/bot IDs and required `coAuthor` (`Name <email>`, one line). `toolingSha` optionally selects the centrally reviewed reusable workflow;
 it defaults to `workflowSha`. The base tip is recorded before dispatch. There is no
 result branch input in policy or dispatch. The agent calls `submit_result` with exactly
 `environmentId` (the result's container-use environment), `branch` (its chosen name),
@@ -152,7 +152,7 @@ fence, without surrounding prose or extra fields. Title and message are required
 non-empty valid UTF-8 plain text. Titles have at most 200 Unicode code points and one
 line; messages have at most 10 KiB of UTF-8. Unicode control characters are forbidden,
 except LF in messages. Unpaired surrogates and title line/paragraph separators fail.
-Nothing trims or normalizes the accepted text. Metadata travels as JSON/API payloads,
+The submitted and sealed text remains unchanged. Metadata travels as JSON/API payloads,
 never shell interpolation. Branch naming remains entirely the agent's choice.
 The agent must not create Git branches inside the container or push.
 
@@ -176,7 +176,7 @@ Workflowd checks out only the action and deploy tooling at its own exact `github
 and uses the local action at that commit. This works across repository owners without
 passing secrets through a reusable workflow. `secrets: inherit` is forbidden.
 
-The caller passes `github.token`, the gate bot ID, App ID and
+The caller passes `github.token`, the gate bot ID, App ID, the operator-set `co-author` and
 `publisher-private-key: ${{ secrets.GHETTIMONSTER_PRIVATE_KEY }}` as explicit inputs.
 Only validation receives the read token. Only the token-mint step consumes the key,
 after validation succeeds. Neither credential is a job/workflow environment variable.
@@ -199,9 +199,21 @@ blobs and tree entries to GitHub's [Git Data API](https://docs.github.com/en/res
 preserving binary contents and deletions. It verifies every returned blob SHA and the
 created tree SHA against the validated result. With the ghettimonster token, it creates
 **one commit**, with that exact tree, exactly one parent (the recorded source), and the
-agent's unchanged message. It omits author/committer overrides so GitHub supplies the
+agent's message with the configured co-author trailer. It omits author/committer overrides so GitHub supplies the
 App identity and signature. Commit creation and readback must report the expected tree,
-parent and message, and a verified signature. No agent commit history is published.
+parent and composed message, including the trailer, and a verified signature. No agent commit history is published.
+
+The caller's `co-author` input and sandbox policy's `publish.coAuthor` are explicit
+per-repository settings; neither comes from agent text. For ghettimonster, Ben's
+configured identity is `Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`.
+The publisher validates one `Name <email>` line before minting a token, removes
+matching copies of that trailer from the agent message, trims trailing whitespace,
+and appends exactly one `Co-authored-by: Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`
+after a blank line. Other agent-supplied co-authors are preserved. Agent text cannot
+suppress or replace the configured trailer. Publisher readback, controller recovery
+and live evidence verify the complete composed message. The agent's original message
+continues to bind the artifact/approval and PR body. See the [onboarding runbook](agent-sandbox-onboarding.md)
+for the paired per-repository settings and policy upgrade at re-pin.
 
 The publisher uses `POST /git/refs` once to create the agent-named branch at this new
 commit. A taken name or a race fails without updating a ref. There is no credential

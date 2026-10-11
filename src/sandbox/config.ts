@@ -1,5 +1,27 @@
 import { Schema } from "effect"
 
+const PublicationCoAuthor = Schema.String.check(
+  Schema.makeFilter(
+    (value) =>
+      value.isWellFormed() &&
+      !/[\p{Cc}\u2028\u2029]/u.test(value) &&
+      /^[^\s<>][^<>]* <[^\s<>@]+@[^\s<>@]+>$/u.test(value),
+  ),
+)
+
+export function publicationCommitMessage(message: string, coAuthor: string): string {
+  const body = message
+    .split("\n")
+    .filter(
+      (line) =>
+        line.replace(/^co-authored-by: */i, "").trimEnd() !== coAuthor ||
+        !/^co-authored-by:/i.test(line),
+    )
+    .join("\n")
+    .trimEnd()
+  return `${body}\n\nCo-authored-by: ${coAuthor}`
+}
+
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
 export const SandboxPolicy = Schema.Struct({
   alias: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)),
@@ -15,6 +37,7 @@ export const SandboxPolicy = Schema.Struct({
       environmentId: positiveId,
       publisherAppId: positiveId,
       publisherActorId: positiveId,
+      coAuthor: PublicationCoAuthor,
     }),
   ),
   tailscaleClientId: Schema.NonEmptyString,

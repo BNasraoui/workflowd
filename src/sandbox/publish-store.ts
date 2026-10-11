@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { PublicationTitle, PublicationMessage } from "./config"
+import { PublicationTitle, PublicationMessage, publicationCommitMessage } from "./config"
 import { SandboxError } from "./store"
 
 const sha = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/))
@@ -15,12 +15,16 @@ export const ResultMetadata = Schema.Struct({
   bundleSha256: digest,
   manifestSha256: digest,
 })
-export const publishedCommitSchema = (metadata: typeof ResultMetadata.Type, commitSha: string) =>
+export const publishedCommitSchema = (
+  metadata: typeof ResultMetadata.Type,
+  commitSha: string,
+  coAuthor: string,
+) =>
   Schema.Struct({
     sha: Schema.Literal(commitSha),
     tree: Schema.Struct({ sha: Schema.Literal(metadata.treeSha) }),
     parents: Schema.Tuple([Schema.Struct({ sha: Schema.Literal(metadata.sourceSha) })]),
-    message: Schema.Literal(metadata.commitMessage),
+    message: Schema.Literal(publicationCommitMessage(metadata.commitMessage, coAuthor)),
     verification: Schema.Struct({ verified: Schema.Literal(true) }),
   })
 

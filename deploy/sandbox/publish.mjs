@@ -31,15 +31,32 @@ function publicationText(value, message = false) {
   assert.ok(message || !/[\u2028\u2029]/u.test(value))
 }
 
+function configuredCoAuthor() {
+  const value = process.env.PUBLISH_CO_AUTHOR
+  assert.equal(typeof value, "string")
+  assert.ok(value.isWellFormed() && !/[\p{Cc}\u2028\u2029]/u.test(value))
+  assert.match(value, /^[^\s<>][^<>]* <[^\s<>@]+@[^\s<>@]+>$/u)
+  return value
+}
+
+function publicationCommitMessage(message) {
+  const coAuthor = configuredCoAuthor()
+  const body = message.split("\n").filter((line) =>
+    line.replace(/^co-authored-by: */i, "").trimEnd() !== coAuthor || !/^co-authored-by:/i.test(line),
+  ).join("\n").trimEnd()
+  return `${body}\n\nCo-authored-by: ${coAuthor}`
+}
+
 function verifyCommit(commit, state) {
   assert.match(commit.sha, /^[a-f0-9]{40}$/)
   assert.equal(commit.tree.sha, state.binding.tree)
   assert.deepEqual(commit.parents.map(parent => parent.sha), [state.binding.source])
-  assert.equal(commit.message, state.binding.commitMessage)
+  assert.equal(commit.message, publicationCommitMessage(state.binding.commitMessage))
   assert.equal(commit.verification.verified, true)
 }
 
 async function validate() {
+  configuredCoAuthor()
   assert.equal(process.env.GHETTIMONSTER_APP_ID, "5232172")
   const repository = process.env.GITHUB_REPOSITORY
   assert.match(repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
@@ -152,6 +169,7 @@ async function publish() {
   assert.match(binding.result, /^[a-f0-9]{40}$/)
   assert.equal(metadata.resultSha, binding.result)
   assert.equal(typeof metadata.branch, "string")
+  const commitMessage = publicationCommitMessage(binding.commitMessage)
   assert.ok(process.env.PUBLISH_TOKEN)
   const prefix = `/repos/${repository}`
   const state = { binding, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
@@ -178,7 +196,7 @@ async function publish() {
   assert.equal(createdTree.data.sha, binding.tree)
   // Omit author/committer so GitHub attributes and signs using the authenticated App.
   const commit = await request(prefix + "/git/commits", "POST", {
-    tree: binding.tree, parents: [binding.source], message: binding.commitMessage,
+    tree: binding.tree, parents: [binding.source], message: commitMessage,
   })
   assert.equal(commit.status, 201)
   verifyCommit(commit.data, state)
