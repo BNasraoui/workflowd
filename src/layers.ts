@@ -705,30 +705,35 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         try: () => readFile(config.github.privateKeyPath, "utf8"),
         catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
       }).pipe(
-        Effect.map((privateKey) => {
-          const app = new App({
-            appId: config.github.appId,
-            privateKey,
-            Octokit,
-          })
-          const github = new GitHubAppAdapter(
-            config.github.appId,
-            async (installationId) =>
-              new OctokitInstallationAdapter(
-                makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
+        Effect.flatMap(
+          Effect.fn(function* (privateKey: string) {
+            const app = new App({
+              appId: config.github.appId,
+              privateKey,
+              Octokit,
+            })
+            const github = new GitHubAppAdapter(
+              config.github.appId,
+              async (installationId) =>
+                new OctokitInstallationAdapter(
+                  makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
+                ),
+              {
+                resolve: (reference) => sessionAccess.resolve(reference),
+              },
+              publicSonarRequest,
+            )
+            return Context.make(GitHub, github).pipe(
+              Context.add(
+                InstallationGuard,
+                yield* makeInstallationGuard(
+                  config.github.allowedInstallationAccountIds,
+                  app.octokit,
+                ),
               ),
-            {
-              resolve: (reference) => sessionAccess.resolve(reference),
-            },
-            publicSonarRequest,
-          )
-          return Context.make(GitHub, github).pipe(
-            Context.add(
-              InstallationGuard,
-              makeInstallationGuard(config.github.allowedInstallationAccountIds, app.octokit),
-            ),
-          )
-        }),
+            )
+          }),
+        ),
       ),
     ),
     Layer.succeed(AgentHarness, agentHarness),

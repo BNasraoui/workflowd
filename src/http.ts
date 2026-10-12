@@ -96,7 +96,13 @@ export function routeRequest(
     )
   }
   if (pathname === "/health" && request.method === "GET") {
-    return Effect.succeed(Response.json({ status: "ok" }))
+    return options.installationGuard === undefined
+      ? Effect.succeed(Response.json({ status: "ok" }))
+      : options.installationGuard
+          .health()
+          .pipe(
+            Effect.map((installationGuard) => Response.json({ status: "ok", installationGuard })),
+          )
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
     return options.prAutomationEnabled === false

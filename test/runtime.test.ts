@@ -82,7 +82,9 @@ const stubAdapters = (automation = automationStub()) =>
     WorkSignalLive,
     Layer.succeed(InstallationGuard, {
       handle: () => Effect.succeed(undefined),
-      reconcile: () => Effect.void,
+      reconcile: () => Effect.succeed(true),
+      runWebhooks: Effect.never,
+      health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
     }),
     Layer.succeed(GitHub, {
       fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
@@ -527,11 +529,14 @@ describe("runHookService startup", () => {
               reconcile: () =>
                 Effect.sync(() => {
                   guardPasses++
+                  return true
                 }),
+              runWebhooks: Effect.never,
+              health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
               handle: () =>
                 Effect.sync(() => {
                   guardEvents++
-                  return "allowed" as const
+                  return "accepted" as const
                 }),
             }),
           )
@@ -859,7 +864,10 @@ describe("runHookService startup", () => {
       new Set(["job", "kernel-job", "publication", "reconciliation", "command"]),
     )
     expect(result).toEqual({
-      health: { status: 200, body: { status: "ok" } },
+      health: {
+        status: 200,
+        body: { status: "ok", installationGuard: { lastSuccessfulReconciliationAt: null } },
+      },
       qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
       testJob: { status: 202, body: { jobId: "runtime-canary", status: "pending" } },
     })

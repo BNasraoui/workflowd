@@ -1,94 +1,33 @@
 import { expect, test } from "bun:test"
-import { createHmac, generateKeyPairSync } from "node:crypto"
 import { App } from "@octokit/app"
-import { Octokit } from "@octokit/rest"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Clock, Duration, Effect, Fiber, Layer, Logger, Queue } from "effect"
+import { Duration, Effect, Fiber, Queue } from "effect"
 import { TestClock } from "effect/testing"
 import { makeInstallationGuard, startInstallationGuard } from "../src/installation-guard"
-import { handleGitHubWebhook } from "../src/http"
-import { WorkflowStoreLive } from "../src/store"
-import { WorkSignalLive } from "../src/work-signal"
-
-const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
-  .privateKey.export({ type: "pkcs8", format: "pem" })
-  .toString()
-const allowed = [81005232, 319835875]
-const installation = (id: number, accountId = 999) => ({
-  id,
-  account: { id: accountId, login: "renamed-account" },
-})
-const storeLayer = Layer.merge(
-  WorkflowStoreLive.pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:" }))),
-  WorkSignalLive,
-)
-
-function fixture(
-  respond: (method: string, url: URL) => Response | Promise<Response> = () =>
-    new Response(null, { status: 204 }),
-) {
-  const requests: string[] = []
-  const auth: string[] = []
-  const logs: string[] = []
-  const app = new App({
-    appId: 123,
-    privateKey,
-    Octokit: Octokit.defaults({
-      request: {
-        fetch: async (input: string | URL | Request, init?: RequestInit) => {
-          const url = new URL(input instanceof Request ? input.url : input)
-          const method = init?.method ?? "GET"
-          requests.push(`${method} ${url.pathname}${url.search}`)
-          auth.push(new Headers(init?.headers).get("authorization") ?? "")
-          return respond(method, url)
-        },
-      },
-      log: { debug() {}, info() {}, warn() {}, error() {} },
-    }),
-  })
-  return {
-    guard: makeInstallationGuard(allowed, app.octokit),
-    requests,
-    auth,
-    logs,
-    logger: Logger.layer([
-      Logger.make(({ message }) => {
-        logs.push(String(message))
-      }),
-    ]),
-  }
-}
-
-function webhook(
-  event: string,
-  action: string,
-  accountId: number,
-  deliveryId = "delivery-1",
-  signed = true,
-) {
-  const body = JSON.stringify({ action, installation: installation(10, accountId) })
-  return new Request("http://localhost/hooks/github", {
-    method: "POST",
-    body,
-    headers: {
-      "x-github-event": event,
-      "x-github-delivery": deliveryId,
-      "x-hub-signature-256": `sha256=${createHmac("sha256", signed ? "secret" : "wrong")
-        .update(body)
-        .digest("hex")}`,
-    },
-  })
-}
+import { handleGitHubWebhook, routeRequest } from "../src/http"
+import {
+  allowed,
+  fixture,
+  installation,
+  privateKey,
+  storeLayer,
+  timed,
+  webhook,
+} from "./helpers/installation-guard"
 
 for (const [event, action] of [
   ["installation", "created"],
+  ["installation", "unsuspend"],
   ["installation", "new_permissions_accepted"],
   ["installation_repositories", "added"],
 ] as const) {
   test.each([999, ...allowed])(
     `${event}/${action} guards account %s and deduplicates concurrent deliveries`,
     async (accountId) => {
-      const f = fixture()
+      const f = fixture((method) =>
+        method === "GET"
+          ? Response.json(installation(10, accountId))
+          : new Response(null, { status: 204 }),
+      )
       const results = await Effect.runPromise(
         Effect.gen(function* () {
           return yield* Effect.forEach(
@@ -101,13 +40,17 @@ for (const [event, action] of [
               }),
             { concurrency: "unbounded" },
           )
-        }).pipe(Effect.provide(storeLayer), Effect.provide(f.logger)),
+        }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
       )
       expect(results.map((r) => r.status)).toEqual([202, 202])
       const bodies = await Promise.all(results.map((r) => r.json()))
       expect(bodies).toContainEqual({ status: "duplicate" })
-      expect(bodies).toContainEqual({ status: accountId === 999 ? "uninstalled" : "allowed" })
-      expect(f.requests).toEqual(accountId === 999 ? ["DELETE /app/installations/10"] : [])
+      expect(bodies).toContainEqual({ status: "accepted" })
+      expect(f.requests).toEqual(
+        accountId === 999
+          ? ["GET /app/installations/10", "DELETE /app/installations/10"]
+          : ["GET /app/installations/10"],
+      )
       expect(f.logs).toHaveLength(1)
       expect(f.logs[0]).toContain('"installationId":10')
       expect(f.logs[0]).toContain(`"accountId":${accountId}`)
@@ -143,38 +86,19 @@ test("other installation actions remain ignored", async () => {
   expect(f.requests).toEqual([])
 })
 
-test("DELETE 404 is already gone", async () => {
+test("GET 404 is already gone", async () => {
   const f = fixture(() => Response.json({ message: "Not Found" }, { status: 404 }))
   const response = await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999), {
       webhookSecret: "secret",
       now: new Date(),
       installationGuard: f.guard,
-    }).pipe(Effect.provide(storeLayer), Effect.provide(f.logger)),
+    }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
   )
-  expect(await response.json()).toEqual({ status: "already_gone" })
+  expect(await response.json()).toEqual({ status: "accepted" })
   expect(f.requests).toHaveLength(1)
   expect(f.logs[0]).toContain('"outcome":"already_gone"')
 })
-
-// Synchronize on scheduled sleeps: App JWT signing and fetch are asynchronous,
-// so advancing TestClock alone can race a request that has not returned yet.
-function timed<A, E, R>(run: (sleeps: Queue.Queue<Duration.Duration>) => Effect.Effect<A, E, R>) {
-  return Effect.gen(function* () {
-    const clock = yield* Effect.clockWith(Effect.succeed)
-    const sleeps = yield* Queue.unbounded<Duration.Duration>()
-    return yield* run(sleeps).pipe(
-      Effect.provideService(Clock.Clock, {
-        ...clock,
-        sleep: (duration) =>
-          (Duration.toMillis(duration) === 10_000
-            ? Effect.void
-            : Queue.offer(sleeps, duration)
-          ).pipe(Effect.andThen(clock.sleep(duration))),
-      }),
-    )
-  }).pipe(Effect.scoped, Effect.provide(TestClock.layer()))
-}
 
 test("startup and periodic reconciliation paginate before deleting and preserve allowed accounts", async () => {
   let scans = 0
@@ -194,6 +118,7 @@ test("startup and periodic reconciliation paginate before deleting and preserve 
     timed((sleeps) =>
       Effect.gen(function* () {
         yield* startInstallationGuard(f.guard)
+        expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(600000)
         expect(scans).toBe(1)
         expect(f.requests).toEqual([
           "GET /app/installations?per_page=100&page=1",
@@ -201,7 +126,6 @@ test("startup and periodic reconciliation paginate before deleting and preserve 
           "DELETE /app/installations/2",
           "DELETE /app/installations/4",
         ])
-        expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(600000)
         yield* TestClock.adjust("9 minutes")
         expect(scans).toBe(1)
         yield* TestClock.adjust("1 minute")
@@ -263,15 +187,14 @@ test("exhausted failures are bounded and the next reconciliation recovers", asyn
   await Effect.runPromise(
     timed((sleeps) =>
       Effect.gen(function* () {
-        const fiber = yield* Effect.forkChild(startInstallationGuard(f.guard))
+        yield* startInstallationGuard(f.guard)
         for (const delay of [1000, 2000, 4000]) {
           expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
           yield* TestClock.adjust(delay)
         }
-        yield* Fiber.join(fiber)
+        yield* Queue.take(sleeps)
         expect(f.requests.filter((r) => r.startsWith("DELETE"))).toHaveLength(4)
         expect(f.logs.some((log) => log.includes('"outcome":"failed"'))).toBe(true)
-        yield* Queue.take(sleeps)
         failing = false
         yield* TestClock.adjust("10 minutes")
         yield* Queue.take(sleeps)
@@ -285,7 +208,7 @@ test.each([[], [81005232, 81005232], [81005232, NaN], [81005232, -1]].map((ids) 
   "invalid programmatic policy refuses construction: %j",
   ({ ids }) => {
     const app = new App({ appId: 123, privateKey })
-    expect(() => makeInstallationGuard(ids, app.octokit)).toThrow(
+    expect(() => Effect.runSync(makeInstallationGuard(ids, app.octokit))).toThrow(
       "WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS",
     )
   },
@@ -293,9 +216,9 @@ test.each([[], [81005232, 81005232], [81005232, NaN], [81005232, -1]].map((ids) 
 
 test("a failed delivery stays deduplicated and reconciliation recovers it", async () => {
   let failing = true
-  const f = fixture((method) =>
+  const f = fixture((method, url) =>
     method === "GET"
-      ? Response.json([installation(10)])
+      ? Response.json(url.search ? [installation(10)] : installation(10))
       : failing
         ? Response.json({}, { status: 403 })
         : new Response(null, { status: 204 }),
@@ -308,14 +231,16 @@ test("a failed delivery stays deduplicated and reconciliation recovers it", asyn
           now: new Date(),
           installationGuard: f.guard,
         })
-      expect((yield* send()).status).toBe(500)
+      yield* f.guard.runWebhooks.pipe(Effect.forkScoped)
+      expect((yield* send()).status).toBe(202)
+      yield* f.nextLog
       const duplicate = yield* send()
       expect(yield* Effect.promise(() => duplicate.json())).toEqual({ status: "duplicate" })
-      expect(f.requests).toEqual(["DELETE /app/installations/10"])
+      expect(f.requests).toEqual(["GET /app/installations/10", "DELETE /app/installations/10"])
       failing = false
       yield* f.guard.reconcile()
       expect(f.requests.at(-1)).toBe("DELETE /app/installations/10")
-    }).pipe(Effect.provide(storeLayer), Effect.provide(f.logger)),
+    }).pipe(Effect.scoped, Effect.provide(storeLayer), Effect.provide(f.logger)),
   )
 })
 
@@ -346,13 +271,38 @@ test("a failed list retries with backoff before a complete reconciliation", asyn
   ])
 })
 
-test("malformed API account data never authorizes deletion", async () => {
-  const f = fixture(() =>
-    Response.json([installation(10), { id: 20, account: { id: "81005232", login: "allowed" } }]),
+test("malformed and null accounts are skipped while foreign and enterprise accounts are removed", async () => {
+  const f = fixture((method) =>
+    method === "DELETE"
+      ? new Response(null, { status: 204 })
+      : Response.json([
+          { id: 20, account: { id: "81005232", login: "allowed" } },
+          { id: 21, account: null },
+          installation(10),
+          { id: 22, account: { id: 777, slug: "enterprise" } },
+          { id: 23, account: { id: allowed[0], slug: "allowed-enterprise" } },
+        ]),
   )
-  const result = await Effect.runPromise(f.guard.reconcile().pipe(Effect.exit))
-  expect(result._tag).toBe("Failure")
-  expect(f.requests).toEqual(["GET /app/installations?per_page=100&page=1"])
+  await Effect.runPromise(f.guard.reconcile().pipe(Effect.provide(f.logger)))
+  expect(f.requests).toEqual([
+    "GET /app/installations?per_page=100&page=1",
+    "DELETE /app/installations/10",
+    "DELETE /app/installations/22",
+  ])
+  expect(f.logs.filter((line) => line.includes('"outcome":"undecodable"'))).toHaveLength(2)
+})
+
+test("a foreign payload account never deletes an installation GitHub says is allowed", async () => {
+  const f = fixture(() => Response.json(installation(10, allowed[0])))
+  await Effect.runPromise(
+    handleGitHubWebhook(webhook("installation", "created", 999), {
+      webhookSecret: "secret",
+      now: new Date(),
+      installationGuard: f.guard,
+    }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
+  )
+  expect(f.requests).toEqual(["GET /app/installations/10"])
+  expect(f.logs[0]).toContain('"outcome":"account_mismatch_allowed"')
 })
 
 test("list failure at startup is logged and retried on the next periodic pass", async () => {
@@ -416,4 +366,165 @@ test("GitHub's 403 rate limit response backs off and retries", async () => {
     ).pipe(Effect.provide(f.logger)),
   )
   expect(lists).toBe(2)
+})
+
+test("startup returns while GitHub is stalled", async () => {
+  const f = fixture(() => new Promise<Response>(() => {}))
+  await Effect.runPromise(
+    timed(() =>
+      Effect.gen(function* () {
+        const fiber = yield* Effect.forkChild(
+          Effect.race(
+            startInstallationGuard(f.guard).pipe(Effect.as("started")),
+            Effect.sleep("1 second").pipe(Effect.as("blocked")),
+          ),
+        )
+        yield* TestClock.adjust("1 second")
+        expect(yield* Fiber.join(fiber)).toBe("started")
+      }),
+    ),
+  )
+})
+
+test("webhooks return 202 without waiting for GitHub and retain their delivery claim", async () => {
+  const f = fixture(() => new Promise<Response>(() => {}))
+  await Effect.runPromise(
+    timed(() =>
+      Effect.gen(function* () {
+        const send = () =>
+          handleGitHubWebhook(webhook("installation", "created", 999), {
+            webhookSecret: "secret",
+            now: new Date(),
+            installationGuard: f.guard,
+          })
+        const fiber = yield* Effect.forkChild(
+          Effect.race(
+            send().pipe(Effect.map((r) => r.status)),
+            Effect.sleep("1 second").pipe(Effect.as(0)),
+          ),
+        )
+        yield* TestClock.adjust("1 second")
+        expect(yield* Fiber.join(fiber)).toBe(202)
+        const duplicate = yield* send()
+        expect(yield* Effect.promise(() => duplicate.json())).toEqual({ status: "duplicate" })
+      }),
+    ).pipe(Effect.provide(storeLayer)),
+  )
+})
+
+for (const [headers, delay] of [
+  [{ "retry-after": "17" }, 17000],
+  [{ "retry-after": "9999" }, 60000],
+  [{ "x-ratelimit-reset": "25" }, 25000],
+  [{ "retry-after": "Thu, 01 Jan 1970 00:00:30 GMT" }, 30000],
+  [{ "retry-after": "invalid" }, 1000],
+] as const) {
+  test(`retry respects bounded GitHub delay ${JSON.stringify(headers)}`, async () => {
+    let attempts = 0
+    const f = fixture(() =>
+      ++attempts === 1 ? Response.json({}, { status: 403, headers }) : Response.json([]),
+    )
+    await Effect.runPromise(
+      timed((sleeps) =>
+        Effect.gen(function* () {
+          const fiber = yield* Effect.forkChild(f.guard.reconcile())
+          expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
+          yield* TestClock.adjust(delay)
+          yield* Fiber.join(fiber)
+          expect(attempts).toBe(2)
+        }),
+      ),
+    )
+  })
+}
+
+test("background defects and failures back off, recover, and update health only after success", async () => {
+  let passes = 0
+  const f = fixture(() => (passes === 2 ? Response.json({}, { status: 401 }) : Response.json([])))
+  const guard = {
+    ...f.guard,
+    reconcile: () =>
+      Effect.suspend(() => {
+        passes++
+        if (passes === 1) return Effect.die("broken adapter")
+        return f.guard.reconcile()
+      }),
+  }
+  await Effect.runPromise(
+    timed((sleeps) =>
+      Effect.gen(function* () {
+        yield* startInstallationGuard(guard)
+        for (const delay of [600000, 1200000, 600000]) {
+          expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
+          const response = yield* routeRequest(new Request("http://localhost/health"), {
+            webhookSecret: "secret",
+            now: new Date(),
+            installationGuard: f.guard,
+          })
+          expect(yield* Effect.promise(() => response.json())).toEqual({
+            status: "ok",
+            installationGuard: { lastSuccessfulReconciliationAt: passes < 3 ? null : 1800000 },
+          })
+          if (passes < 3) yield* TestClock.adjust(delay)
+        }
+        expect(
+          f.logs.filter((line) => line.includes("Installation reconciliation failed")),
+        ).toHaveLength(2)
+      }),
+    ).pipe(Effect.provide(storeLayer), Effect.provide(f.logger)),
+  )
+})
+
+test("DELETE 404 after a verified foreign installation is already gone", async () => {
+  const f = fixture((method) =>
+    method === "GET" ? Response.json(installation(10)) : Response.json({}, { status: 404 }),
+  )
+  await Effect.runPromise(
+    handleGitHubWebhook(webhook("installation", "created", 999), {
+      webhookSecret: "secret",
+      now: new Date(),
+      installationGuard: f.guard,
+    }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
+  )
+  expect(f.requests).toEqual(["GET /app/installations/10", "DELETE /app/installations/10"])
+  expect(f.logs[0]).toContain('"outcome":"already_gone"')
+})
+
+test("undecodable webhook lookup is audited without deleting", async () => {
+  const f = fixture(() => Response.json({ id: 10, account: null }))
+  await Effect.runPromise(
+    handleGitHubWebhook(webhook("installation", "created", 999), {
+      webhookSecret: "secret",
+      now: new Date(),
+      installationGuard: f.guard,
+    }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
+  )
+  expect(f.requests).toEqual(["GET /app/installations/10"])
+  expect(f.logs[0]).toContain('"outcome":"undecodable"')
+})
+
+test("failed removals back off to an hour and preserve the last successful time", async () => {
+  let failing = false
+  const f = fixture((method) =>
+    method === "GET"
+      ? Response.json([installation(10)])
+      : new Response(null, { status: failing ? 401 : 204 }),
+  )
+  await Effect.runPromise(
+    timed((sleeps) =>
+      Effect.gen(function* () {
+        yield* startInstallationGuard(f.guard)
+        yield* Queue.take(sleeps)
+        expect(yield* f.guard.health()).toEqual({ lastSuccessfulReconciliationAt: 0 })
+        failing = true
+        let previous = 600000
+        for (const delay of [600000, 1200000, 2400000, 3600000, 3600000]) {
+          yield* TestClock.adjust(previous)
+          expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
+          expect(yield* f.guard.health()).toEqual({ lastSuccessfulReconciliationAt: 0 })
+          previous = delay
+        }
+      }),
+    ).pipe(Effect.provide(f.logger)),
+  )
 })
