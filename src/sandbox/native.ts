@@ -68,7 +68,10 @@ async function disabledCodexSkills(binary: string, directory: string) {
     const catalog = result.data[0]
     if (result.data.length !== 1 || catalog?.cwd !== directory || catalog.errors.length !== 0)
       throw new Error("Cannot discover native sandbox skills")
-    return `skills.config=[${catalog.skills.map((skill) => `{path=${JSON.stringify(skill.path)},enabled=false}`).join(",")}]`
+    const disabled = catalog.skills.map(
+      (skill) => `{path=${JSON.stringify(skill.path)},enabled=false}`,
+    )
+    return `skills.config=[${disabled.join(",")}]`
   } finally {
     rpc.close()
     reader.close()

@@ -32,6 +32,7 @@ write_heartbeat() {
 }
 
 configure_image() {
+  local image="$1"
   # container-use reads this local configuration; its source tree still comes
   # from the exact Git commit, so this setting is not part of the agent patch.
   docker exec workflowd-sandbox-tooling sh -eu -c '
@@ -42,7 +43,7 @@ configure_image() {
     else
       printf "\n/.container-use/environment.json\n" >> .git/info/exclude
     fi
-  ' _ "$1"
+  ' _ "$image"
 }
 
 case "${1:-}" in

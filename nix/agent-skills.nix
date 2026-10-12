@@ -24,5 +24,5 @@ pkgs.runCommand "workflowd-sandbox-skills" { nativeBuildInputs = [ python ]; } '
     cp upstream/${skill.source}/${skill.license} "$out${catalog.root}/${skill.name}/LICENSE.upstream"
   '') catalog.skills}
   chmod -R a-w "$out"
-  python ${../scripts/check-sandbox-skills.py} ${catalogFile} "$out${catalog.root}"
+  python ${../scripts/check-sandbox-skills.py} "$out${catalog.root}" < ${catalogFile}
 ''
