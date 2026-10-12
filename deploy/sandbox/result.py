@@ -63,45 +63,63 @@ CLOSING = re.compile(r'(?=(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(
 
 
 def safe_publication(value):
-    assert not INVISIBLE.search(value), 'Invisible publication content'
-    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value)
-    assert not re.search(r'&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);', value), 'Character reference'
-    assert not STACKED_MARKS.search(unicodedata.normalize('NFD', value)), 'Stacked combining marks'
+    if INVISIBLE.search(value):
+        raise ValueError('Invisible publication content')
+    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value):
+        raise ValueError('Invalid publication text')
+    if re.search(r'&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);', value):
+        raise ValueError('Character reference')
+    if STACKED_MARKS.search(unicodedata.normalize('NFD', value)):
+        raise ValueError('Stacked combining marks')
     normalized = ''.join(CASEFOLD.get(c, c) for c in unicodedata.normalize('NFKC', value))
     for separator in ('', ' '):
         folded = re.sub(r'[*_~`\[\]()]', separator, normalized)
-        assert not any(m.start() == 0 or not LETTERS.fullmatch(folded[m.start() - 1]) for m in CLOSING.finditer(folded)), 'Closing issue reference'
+        if any(m.start() == 0 or not LETTERS.fullmatch(folded[m.start() - 1]) for m in CLOSING.finditer(folded)):
+            raise ValueError('Closing issue reference')
     fence = None
     blank = True
     for line in value.split('\n'):
-        assert not re.match(r'^ +(?:`{3,}|~{3,})', line), 'Indented fence'
+        if re.match(r'^ +(?:`{3,}|~{3,})', line):
+            raise ValueError('Indented fence')
         if fence is not None:
             if line == fence: fence = None
-            else: assert not re.match(r'^ {0,3}(?:`{3,}|~{3,})', line), 'Ambiguous fence'
+            elif re.match(r'^ {0,3}(?:`{3,}|~{3,})', line):
+                raise ValueError('Ambiguous fence')
         else:
-            assert ']:' not in line, 'Link reference definition'
-            assert not re.match(r'^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})', line), 'Nested fence'
+            if ']:' in line:
+                raise ValueError('Link reference definition')
+            if re.match(r'^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})', line):
+                raise ValueError('Nested fence')
             opener = re.fullmatch(r'(`{3,}|~{3,})(.*)', line)
             if opener:
-                assert blank and opener[2] in LANGUAGES, 'Invalid fence opening'
+                if not blank or opener[2] not in LANGUAGES:
+                    raise ValueError('Invalid fence opening')
                 fence = opener[1]
-            else: assert not re.search(r'[<@$]', line), 'HTML, mention or math outside fence'
+            elif re.search(r'[<@$\\]', line):
+                raise ValueError('HTML, mention, math or backslash outside fence')
         blank = re.fullmatch(' *', line) is not None
-    assert fence is None, 'Unclosed fence'
+    if fence is not None:
+        raise ValueError('Unclosed fence')
 
 
 def publication_text(value, message=False):
-    assert isinstance(value, str) and value
+    if not isinstance(value, str) or not value:
+        raise ValueError('Invalid publication text')
     encoded = value.encode('utf8', errors='strict')
-    assert len(encoded) <= 10240 if message else len(value) <= 200
-    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value)
-    assert message or not any(c in value for c in ('\u2028', '\u2029'))
+    if (len(encoded) > 10240) if message else (len(value) > 200):
+        raise ValueError('Invalid publication text')
+    if not all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value):
+        raise ValueError('Invalid publication text')
+    if not message and any(c in value for c in ('\u2028', '\u2029')):
+        raise ValueError('Invalid publication text')
     safe_publication(value)
 
 
 def publication_body(value):
-    assert isinstance(value, str) and value.strip(), 'body must be non-empty Markdown'
-    assert len(value.encode('utf8', errors='strict')) <= 32768, 'body exceeds 32 KiB UTF-8'
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError('body must be non-empty Markdown')
+    if len(value.encode('utf8', errors='strict')) > 32768:
+        raise ValueError('body exceeds 32 KiB UTF-8')
     safe_publication(value)
 
 

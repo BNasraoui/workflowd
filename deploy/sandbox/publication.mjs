@@ -34,7 +34,7 @@ export function safePublication(value) {
       if (opener !== null) {
         if (!blank || !languages.has(opener[2])) return false
         fence = opener[1]
-      } else if (/[<@$]/.test(line)) return false
+      } else if (/[<@$\\]/.test(line)) return false
     }
     blank = /^ *$/.test(line)
   }

@@ -14,6 +14,8 @@ RUN apt-get update \
     && chown -R runner:runner /workspace
 COPY result.py /usr/local/lib/workflowd-result.py
 COPY publication-unicode.json casefold.json /usr/local/lib/
+# Fail the build if the base image's Python violates the Unicode 15.0.0 contract.
+RUN python3 -B -c "import runpy; runpy.run_path('/usr/local/lib/workflowd-result.py')"
 RUN chmod 0444 /usr/local/lib/workflowd-result.py /usr/local/lib/publication-unicode.json /usr/local/lib/casefold.json
 USER runner
 WORKDIR /workspace/repository

@@ -41,11 +41,7 @@ const validate = runInNewContext(source.slice(source.indexOf('function publicati
 console.log(JSON.stringify(JSON.parse(readFileSync(0, 'utf8')).map(item => validate(item.value, item.field))))
 `,
 ])
-const results = await run([
-  "python3",
-  "-B",
-  "-c",
-  `
+const pythonScript = `
 import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location('result', 'deploy/sandbox/result.py')
 m = importlib.util.module_from_spec(spec)
@@ -58,8 +54,26 @@ for item in json.load(sys.stdin):
         results.append(True)
     except (AssertionError, ValueError): results.append(False)
 print(json.dumps(results))
-`,
+`
+const [results, optimizedResults] = await Promise.all([
+  run(["python3", "-B", "-c", pythonScript]),
+  run(["python3", "-B", "-O", "-c", pythonScript]),
 ])
+test("optimized Python preserves publication types and field bounds", async () => {
+  const values = [
+    ...["body", "title", "commitMessage"].flatMap((field) =>
+      [null, 1, ""].map((value) => ({ field, value })),
+    ),
+    { field: "body", value: "   " },
+    { field: "body", value: "x".repeat(32769) },
+    { field: "title", value: "x".repeat(201) },
+    { field: "title", value: "line\u2028break" },
+    { field: "commitMessage", value: "雪".repeat(3414) },
+  ]
+  expect(await run(["python3", "-B", "-O", "-c", pythonScript], values)).toEqual(
+    values.map(() => false),
+  )
+})
 for (const [index, item] of inputs.entries()) {
   test(`publication parity ${item.field}: ${JSON.stringify(item.value)}`, () => {
     const schema = {
@@ -70,8 +84,14 @@ for (const [index, item] of inputs.entries()) {
     expect({
       schema: Schema.is(schema)(item.value),
       python: results[index],
+      optimizedPython: optimizedResults[index],
       publisher: publisherResults[index],
-    }).toEqual({ schema: item.accepted, python: item.accepted, publisher: item.accepted })
+    }).toEqual({
+      schema: item.accepted,
+      python: item.accepted,
+      optimizedPython: item.accepted,
+      publisher: item.accepted,
+    })
   })
 }
 

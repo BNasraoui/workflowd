@@ -99,7 +99,7 @@ export const SandboxCompletion = Schema.Struct({
 
 export const sandboxPublicationRules =
   "Title, commitMessage and body must contain no character references (such as &amp;), hidden/default-ignorable characters, link reference definitions, or issue-closing keyword followed by an issue reference (including Unicode/Markdown disguises, even in code). Ordinary prose such as 'this fixes the race' is allowed. " +
-  "Only validated fenced code may contain <, @ or $. Open a fence at column 0 after a blank line or at the start, using 3+ identical backticks or tildes; close it with exactly the same run at column 0 and nothing else. " +
+  "Only validated fenced code may contain <, @, $ or backslashes. Open a fence at column 0 after a blank line or at the start, using 3+ identical backticks or tildes; close it with exactly the same run at column 0 and nothing else. " +
   "The info string must be empty or exactly text, diff, ts, typescript, tsx, js, json, sh, bash, python, rust, go, sql, yaml or toml. No indented, nested, mismatched or unclosed fences, math/diagram fences, or inline-code exceptions. "
 
 export const sandboxCompletionInstructions =

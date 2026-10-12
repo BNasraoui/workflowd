@@ -1,6 +1,13 @@
 // Shared by the controller Schema, Python sealer, and actual publisher validators.
 // Unicode 15.0 policy: newer assignments must not drift with the host runtime.
 const rejected = [
+  "fixes \\#1",
+  "closes \\#2",
+  "fixes gh\\-1",
+  "fixes owner/repo\\#1",
+  "fixes https\\://github.com/o/r/issues/1",
+  "ordinary \\ prose",
+  "inline `\\`",
   "\u0378",
   "\u{2ebf0}fixes #1",
   "\u{1c89}fixes #1",
@@ -86,6 +93,8 @@ const rejected = [
   "```ts\nﬁxes #1\n```",
 ]
 const accepted = [
+  "```text\nfixes \\#1\n```",
+  "~~~text\nC:\\work\n~~~",
   "a\u0301\u0302",
   "a\u0301b\u0302c\u0303",
   "```ts\n[link]: x\n```",
