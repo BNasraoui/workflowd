@@ -31,6 +31,20 @@ write_heartbeat() {
   mv -f "$temporary" /run/workflowd-sandbox/heartbeat
 }
 
+configure_image() {
+  # container-use reads this local configuration; its source tree still comes
+  # from the exact Git commit, so this setting is not part of the agent patch.
+  docker exec workflowd-sandbox-tooling sh -eu -c '
+    container-use config base-image set "$1"
+    # Avoid container-use warning about controller-owned uncommitted changes.
+    if git ls-files --error-unmatch .container-use/environment.json >/dev/null 2>&1; then
+      git update-index --skip-worktree -- .container-use/environment.json
+    else
+      printf "\n/.container-use/environment.json\n" >> .git/info/exclude
+    fi
+  ' _ "$1"
+}
+
 case "${1:-}" in
   start)
     repository="${2:?repository required}"
@@ -77,6 +91,8 @@ ready = {'leaseId': lease, 'repository': expected['repository'], 'repositoryId':
          'peerId': peer['ID'], 'address': next(ip for ip in peer['TailscaleIPs'] if ':' not in ip),
          'claims': {**expected, 'sub': claims['sub'], 'job_workflow_ref': claims['job_workflow_ref']}}
 (root / 'identity.json').write_text(json.dumps(ready))
+assert re.fullmatch('[a-f0-9]{40}', expected['job_workflow_sha'])
+(root / 'agent-image').write_text('ghcr.io/bnasraoui/workflowd-agent-base:' + expected['job_workflow_sha'])
 PY
     # Suppress setup output: only the fixed metadata artifact is published.
     boot >/run/workflowd-sandbox/setup.log 2>&1
@@ -110,6 +126,7 @@ except (ValueError, KeyError, AssertionError, TypeError, OSError):
       timeout 300 bash -c 'set -euo pipefail; docker exec workflowd-sandbox-tooling git init -b sandbox; docker exec workflowd-sandbox-tooling git remote add origin "https://github.com/$1.git"; docker exec workflowd-sandbox-tooling git -c credential.helper= fetch origin "$2"; docker exec workflowd-sandbox-tooling git checkout --detach "$2"' _ "$repository" "$source_sha" >/run/workflowd-sandbox/clone.log 2>&1
       printf '%s\n' "$source_sha" > /run/workflowd-sandbox/source.sha
     fi
+    configure_image "$(cat /run/workflowd-sandbox/agent-image)" >/run/workflowd-sandbox/image.log 2>&1
     printf '%s\n' "$source_sha"
     ;;
   finish-result)

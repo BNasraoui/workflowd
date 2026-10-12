@@ -1,10 +1,82 @@
 import { sandboxDiagnostic } from "./diagnostics"
 import { join } from "node:path"
+import { createInterface } from "node:readline"
+import { Readable } from "node:stream"
+import { RpcClient } from "../resident/rpc"
 import { Schema } from "effect"
 import { bindingDirectory, readSandboxBinding } from "./binding"
 
 /** Only server names survive discovery; inherited transports and credentials stay in memory. */
 const Servers = Schema.Array(Schema.Struct({ name: Schema.String }))
+
+const Skills = Schema.Struct({
+  data: Schema.Array(
+    Schema.Struct({
+      cwd: Schema.String,
+      skills: Schema.Array(Schema.Struct({ path: Schema.String })),
+      errors: Schema.Array(Schema.Unknown),
+    }),
+  ),
+})
+
+// Ask the same CLI that will run the agent: discovery roots include user,
+// project, system and configured skills, and differ between CLI versions.
+async function disabledCodexSkills(binary: string, directory: string) {
+  const child = Bun.spawn(
+    [
+      binary,
+      "-c",
+      "features.plugins=false",
+      "-c",
+      "features.apps=false",
+      "app-server",
+      "--listen",
+      "stdio://",
+    ],
+    { cwd: directory, detached: true, stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+  )
+  const stop = () => {
+    try {
+      process.kill(-child.pid, "SIGKILL")
+    } catch (cause) {
+      if (!(cause instanceof Error && "code" in cause && cause.code === "ESRCH")) throw cause
+    }
+  }
+  const rpc = new RpcClient(
+    (line) => {
+      child.stdin.write(line)
+      void child.stdin.flush()
+    },
+    () => undefined,
+  )
+  const reader = createInterface({ input: Readable.fromWeb(child.stdout), crlfDelay: Infinity })
+  reader.on("line", (line) => {
+    try {
+      if (Buffer.byteLength(line) > 1048576) throw new Error("Skill discovery exceeds bound")
+      rpc.receive(line)
+    } catch {
+      rpc.close()
+      child.kill("SIGKILL")
+    }
+  })
+  void child.exited.then(() => rpc.close())
+  try {
+    await rpc.request("initialize", { clientInfo: { name: "workflowd-sandbox", version: "1" } })
+    const result = Schema.decodeUnknownSync(Skills)(
+      await rpc.request("skills/list", { cwds: [directory], forceReload: true }),
+    )
+    const catalog = result.data[0]
+    if (result.data.length !== 1 || catalog?.cwd !== directory || catalog.errors.length !== 0)
+      throw new Error("Cannot discover native sandbox skills")
+    return `skills.config=[${catalog.skills.map((skill) => `{path=${JSON.stringify(skill.path)},enabled=false}`).join(",")}]`
+  } finally {
+    rpc.close()
+    reader.close()
+    await child.stdin.end()
+    stop()
+    await child.exited
+  }
+}
 
 export async function nativeSandboxArguments(
   kind: "codex" | "claude",
@@ -71,6 +143,7 @@ export async function nativeSandboxArguments(
   const overrides = [
     'approval_policy="never"',
     'web_search="disabled"',
+    await disabledCodexSkills(binary, directory),
     ...[
       "shell_tool",
       "unified_exec",
@@ -82,6 +155,7 @@ export async function nativeSandboxArguments(
       "image_generation",
       "view_image",
       "hooks",
+      "skill_search",
     ].map((feature) => `features.${feature}=false`),
     ...servers.map((server) => `mcp_servers.${server.name}.enabled=false`),
     `mcp_servers.${name}={command=${JSON.stringify(command)},args=${JSON.stringify(args)},enabled=true,required=true,default_tools_approval_mode="approve",startup_timeout_sec=120,tool_timeout_sec=300}`,

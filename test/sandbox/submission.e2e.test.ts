@@ -20,6 +20,7 @@ test("completion requires bounded Unicode plain text without altering agent word
     branch: "anything",
     title: "雪 '$() `title`",
     commitMessage: "Fix result\n\n雪 '$() `message`\n",
+    body: "## Result\n\nReadable agent description.",
   }
   expect(decode(valid)).toEqual(valid)
   expect(decode({ ...valid, title: "😀".repeat(200), commitMessage: "é".repeat(5120) }).title).toBe(
@@ -52,6 +53,7 @@ test("submit_result validates, durably accepts once across bridges, and audits e
   const completion = {
     title: "Agent title",
     commitMessage: "Agent message\n\nDetails",
+    body: "## Result\n\nReadable agent description.",
     environmentId: "one",
     branch: "agent choice '$()\n雪",
   }
@@ -61,6 +63,16 @@ test("submit_result validates, durably accepts once across bridges, and audits e
     const catalog = await first.request("tools/list")
     expect(JSON.stringify(catalog)).toContain('"name":"submit_result"')
     for (const args of [
+      ...[
+        null,
+        "<!-- hidden -->",
+        "@org/team",
+        "Closes #1",
+        "bad\tcontrol",
+        "bad\u200dtext",
+        "\ud800",
+        "é".repeat(16385),
+      ].map((body) => ({ ...completion, body })),
       {},
       { branch: "choice" },
       { ...completion, environmentId: "" },
@@ -92,7 +104,7 @@ test("submit_result validates, durably accepts once across bridges, and audits e
     expect(await Bun.file(file).json()).toEqual(accepted)
     const audit = await runner.holdLog()
     const lines = audit.split("\n").filter((line) => line.startsWith("workflowd.audit "))
-    expect(lines).toHaveLength(9)
+    expect(lines).toHaveLength(17)
     expect(lines.every((line) => line.includes('"tool":"submit_result"'))).toBe(true)
     expect(lines.filter((line) => line.includes('"outcome":"ok"'))).toHaveLength(1)
   } finally {
@@ -123,6 +135,7 @@ test("concurrent bridges cannot replace a submission and settlement verifies its
             branch: "",
             title: "Concurrent result",
             commitMessage: "Publish result",
+            body: "## Result\n\nReadable agent description.",
           },
         }),
       ),
@@ -188,6 +201,7 @@ test("submit_result rejects taken and pending names, then accepts the agent's ot
     branch: "taken/雪'$()",
     title: "Agent title",
     commitMessage: "Agent message",
+    body: "## Result\n\nReadable agent description.",
   }
   const file = Bun.file(join(dirname(runner.bindingFile), "submission.json"))
   try {

@@ -37,6 +37,7 @@ const metadata = {
   treeSha: "1".repeat(40),
   title: "Agent title",
   commitMessage: "Agent message\n\nDetails",
+  body: "## Result\n\nReadable agent description.",
   branch: "no/name/rules '$()\n雪",
   bundleSha256: "d".repeat(64),
   manifestSha256: "e".repeat(64),
@@ -62,12 +63,10 @@ test("publication policy requires one operator-set co-author identity", () => {
   }
 })
 
-test("controller recovery expects fenced agent text and only the configured co-author", () => {
+test("controller recovery expects exact Markdown and only the configured co-author", () => {
   const message =
     "Details\n`````\n@someone Closes #1\n<!-- hidden -->\nCo-authored-by: Other <other@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>\n"
-  expect(publicationBody("marker", message)).toBe(
-    `marker\n\n\`\`\`\`\`\`text\n${message}\n\`\`\`\`\`\``,
-  )
+  expect(publicationBody("marker", metadata.body)).toBe(`marker\n\n${metadata.body}`)
   expect(publicationCommitMessage(message, policy.publish.coAuthor)).toBe(
     "Details\n`````\n@someone Closes #1\n<!-- hidden -->\n\nCo-authored-by: " +
       policy.publish.coAuthor,
@@ -81,6 +80,7 @@ test("completion accepts one bare or fenced object and forwards only canonical J
     branch: metadata.branch,
     title: metadata.title,
     commitMessage: metadata.commitMessage,
+    body: "## Result\n\nReadable agent description.",
   }
   const json = JSON.stringify(selected)
   const fenced = (value: string, language = "json") => `\`\`\`${language}\n${value}\n\`\`\``
@@ -171,6 +171,7 @@ for (const fault of [
   "foreign PR",
   "unrevoked",
   "wrong title",
+  "wrong body",
   "wrong tree",
   "wrong parent",
   "wrong message",
@@ -258,6 +259,7 @@ for (const fault of [
               "foreign PR",
               "unrevoked",
               "wrong title",
+              "wrong body",
               "wrong tree",
               "wrong parent",
               "wrong message",
@@ -300,7 +302,10 @@ for (const fault of [
   "wrong message",
   "missing co-author",
   "wrong title",
+  "wrong body",
   "binding mismatch",
+  "body binding mismatch",
+  "unsafe body",
   "lost PR reply",
   "wrong author",
   "wrong head",
@@ -378,6 +383,12 @@ for (const fault of [
       treeSha,
       title,
       commitMessage,
+      body:
+        fault === "unsafe body"
+          ? "<!-- hidden -->"
+          : fault === "maximum metadata"
+            ? "é".repeat(16384)
+            : "## Result\n\nReadable agent description.",
       branch,
       bundleSha256: "d".repeat(64),
     }
@@ -399,7 +410,9 @@ for (const fault of [
       join(work, "validated/result.json"),
       fault === "binding mismatch"
         ? JSON.stringify({ ...manifest, title: "changed" })
-        : rawManifest,
+        : fault === "body binding mismatch"
+          ? JSON.stringify({ ...manifest, body: "Changed" })
+          : rawManifest,
     )
     await writeFile(
       join(work, "validated.json"),
@@ -411,6 +424,7 @@ for (const fault of [
           treeSha,
           title: fault === "binding mismatch" ? "changed" : title,
           commitMessage,
+          body: "## Result\n\nReadable agent description.",
           branch,
           bundleSha256: "d".repeat(64),
         },
@@ -561,7 +575,7 @@ for (const fault of [
             title,
             body: publicationBody(
               `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
-              commitMessage,
+              manifest.body,
             ),
             base: "main",
             draft: true,
@@ -571,6 +585,7 @@ for (const fault of [
             return Response.json({ message: `Authorization: Bearer ${token}` }, { status: 422 })
           pull = {
             ...body,
+            body: fault === "wrong body" ? "Changed" : body.body,
             title: fault === "wrong title" ? "changed" : title,
             number: 17,
             html_url: "https://github.com/fixture/repo/pull/17",
@@ -640,7 +655,14 @@ for (const fault of [
       expect((await invoke("revoke")).code).toBe(0)
       expect(revokes).toBe(1)
       if (
-        ["binding mismatch", "invalid co-author", "format title", "bidi message"].includes(fault)
+        [
+          "binding mismatch",
+          "body binding mismatch",
+          "unsafe body",
+          "invalid co-author",
+          "format title",
+          "bidi message",
+        ].includes(fault)
       ) {
         expect(published.err).toContain("manifest validation failed")
         expect(published.out).toContain("workflowd.publish.failure ")
@@ -719,18 +741,18 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     const valid = {
       policy,intent,sourceSha:metadata.sourceSha,
       commit:{sha:"2".repeat(40),tree:{sha:metadata.treeSha},parents:[{sha:metadata.sourceSha}],message:metadata.commitMessage+"\\n\\nCo-authored-by: "+policy.publish.coAuthor,verification:{verified:true}},
-      submission:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage},
-      calls:[{name:"bridge.submit_result",owned:true,completed:true,input:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage}}],
+      submission:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage,body:metadata.body},
+      calls:[{name:"bridge.submit_result",owned:true,completed:true,input:{environmentId:"selected",branch:metadata.branch,title:metadata.title,commitMessage:metadata.commitMessage,body:metadata.body}}],
       actions:{id:41,run_attempt:1,head_sha:policy.workflowSha,status:"completed",conclusion:"success"},
       jobs:[job],
       reviews:[{state:"approved",comment:approvalComment(intent),user:{id:policy.appActorId,type:"Bot"},environments:[{id:9,name:"agent-publish"}]}],
       publisherLog:"2026-10-11T00:00:00Z workflowd.publish.receipt "+Buffer.from(JSON.stringify(receipt)).toString("base64"),
       ref:{ref:"refs/heads/"+metadata.branch,object:{sha:"2".repeat(40)}},
-      pull:{number:17,html_url:"https://github.com/"+policy.repository+"/pull/17",state:"open",draft:true,maintainer_can_modify:false,title:metadata.title,body:marker+"\\n\\n"+"\`\`\`text\\n"+metadata.commitMessage+"\\n\`\`\`",user:{login:"ghettimonster[bot]",id:339414993,type:"Bot"},head:{ref:metadata.branch,sha:"2".repeat(40),repo},base:{ref:"main",sha:metadata.sourceSha,repo}},
+      pull:{number:17,html_url:"https://github.com/"+policy.repository+"/pull/17",state:"open",draft:true,maintainer_can_modify:false,title:metadata.title,body:marker+"\\n\\n"+metadata.body,user:{login:"ghettimonster[bot]",id:339414993,type:"Bot"},head:{ref:metadata.branch,sha:"2".repeat(40),repo},base:{ref:"main",sha:metadata.sourceSha,repo}},
     }
     assertLivePublication(valid)
     for(const mutate of [
-      x=>x.pull.title="changed", x=>x.commit.tree.sha=metadata.sourceSha, x=>x.commit.parents.push({sha:metadata.resultSha}), x=>x.commit.message="changed", x=>x.commit.message=metadata.commitMessage,
+      x=>x.pull.title="changed", x=>x.pull.body+="changed", x=>x.submission.body="changed", x=>x.calls[0].input.body="changed", x=>x.commit.tree.sha=metadata.sourceSha, x=>x.commit.parents.push({sha:metadata.resultSha}), x=>x.commit.message="changed", x=>x.commit.message=metadata.commitMessage,
       x=>x.intent.phase="probed", x=>x.calls=[], x=>x.submission.branch="different",
       x=>x.intent.receipt.revoked=false, x=>x.publisherLog="",
       x=>x.pull.draft=false, x=>x.pull.state="closed", x=>x.pull.user.id=1,

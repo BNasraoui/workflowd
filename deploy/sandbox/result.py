@@ -58,19 +58,28 @@ def publication_text(value, message=False):
     assert message or not any(c in value for c in ('\u2028', '\u2029'))
 
 
+def publication_body(value):
+    assert isinstance(value, str) and value.strip(), 'body must be non-empty Markdown'
+    assert len(value.encode('utf8', errors='strict')) <= 32768, 'body exceeds 32 KiB UTF-8'
+    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value)
+    assert not re.search('[<@]', value), 'body cannot contain HTML or mentions'
+    assert not re.search(r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b', value, re.I | re.ASCII), 'body cannot contain closing keywords'
+
+
 def seal(source):
     # The control entrypoint selects the workspace; no caller-supplied paths.
     repo = 'repository'
     source = commit_id(source)
-    raw = sys.stdin.buffer.read(65537)
-    assert len(raw) <= 65536
+    raw = sys.stdin.buffer.read(262145)
+    assert len(raw) <= 262144
     completion = json.loads(raw)
-    if not isinstance(completion, dict) or set(completion) != {'branch', 'environmentId', 'title', 'commitMessage'}:
+    if not isinstance(completion, dict) or set(completion) != {'branch', 'environmentId', 'title', 'commitMessage', 'body'}:
         sys.exit('Missing container-use result metadata')
     if not isinstance(completion['branch'], str) or not isinstance(completion['environmentId'], str):
         sys.exit('Invalid container-use result metadata')
     publication_text(completion['title'])
     publication_text(completion['commitMessage'], True)
+    publication_body(completion['body'])
     # Enumerate trusted ref names, then compare the ID as data, never as a Git revision.
     # No branch predicate: the name never participates in a Git command or path.
     refs = git(repo, 'for-each-ref', '--format=%(refname) %(objectname)',
@@ -98,9 +107,9 @@ def seal(source):
     manifest = {'sourceSha': source, 'resultSha': result, 'branch': completion['branch'],
                 'bundleSha256': sha(bundle.read_bytes()),
                 'treeSha': git(repo, 'rev-parse', result + '^{tree}').decode().strip(),
-                'title': completion['title'], 'commitMessage': completion['commitMessage']}
+                'title': completion['title'], 'commitMessage': completion['commitMessage'], 'body': completion['body']}
     encoded = json.dumps(manifest, ensure_ascii=True, separators=(',', ':')).encode()
-    assert len(encoded) <= 65536
+    assert len(encoded) <= 262144
     with (root / 'result.json').open('wb') as manifest_file:
         manifest_file.write(encoded)
     print(json.dumps({**manifest, 'manifestSha256': sha(encoded)}, separators=(',', ':')))
@@ -184,7 +193,7 @@ def validate(source_url):
             assert not mode or stat.S_IFMT(mode) in (0, stat.S_IFREG)
             assert entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
             assert not entry.flag_bits & 1
-            assert entry.file_size <= (65536 if entry.filename == 'result.json' else 64 * 1024 * 1024)
+            assert entry.file_size <= (262144 if entry.filename == 'result.json' else 64 * 1024 * 1024)
             data = zipped.read(entry)
             assert len(data) == entry.file_size
             destination = root / ('result.json' if entry.filename == 'result.json' else 'result.bundle')
@@ -192,10 +201,11 @@ def validate(source_url):
     raw = (root / 'result.json').read_bytes()
     assert sha(raw) == binding['manifest']
     manifest = json.loads(raw)
-    assert set(manifest) == {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage'}
+    assert set(manifest) == {'sourceSha', 'resultSha', 'treeSha', 'branch', 'bundleSha256', 'title', 'commitMessage', 'body'}
     assert isinstance(manifest['branch'], str)
     publication_text(manifest['title'])
     publication_text(manifest['commitMessage'], True)
+    publication_body(manifest['body'])
     assert manifest['treeSha'] == commit_id(binding['tree'])
     assert manifest['sourceSha'] == source and manifest['resultSha'] == result
     bundle = root.absolute() / 'result.bundle'

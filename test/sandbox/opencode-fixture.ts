@@ -185,6 +185,12 @@ export async function sharedOpenCodeFixture(
   try {
     const configDirectory = join(root, "home/.config/opencode")
     await mkdir(configDirectory, { recursive: true })
+    const hostSkill = join(configDirectory, "skills", "host-only-canary")
+    await mkdir(hostSkill, { recursive: true })
+    await writeFile(
+      join(hostSkill, "SKILL.md"),
+      "---\nname: host-only-canary\ndescription: HOST_SKILL_MUST_NOT_BE_ADVERTISED\n---\nHost-only instructions",
+    )
     const sandboxConfig = join(root, "home/.config/workflowd/opencode2-sandbox-agent.json")
     await mkdir(join(root, "home/.config/workflowd"), { recursive: true })
     await writeFile(sandboxConfig, sandboxAgent ? artifact : "{}")

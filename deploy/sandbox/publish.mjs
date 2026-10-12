@@ -54,10 +54,16 @@ function publicationCommitMessage(message) {
 }
 
 function publicationBody(state) {
-  const message = state.metadata.commitMessage
-  const longest = Math.max(2, ...Array.from(message.matchAll(/`+/g), (match) => match[0].length))
-  const fence = "`".repeat(longest + 1)
-  return `${state.marker}\n\n${fence}text\n${message}\n${fence}`
+  return `${state.marker}\n\n${state.metadata.body}`
+}
+
+function validateBody(value) {
+  assert.equal(typeof value, "string")
+  assert.ok(value.trim().length > 0 && value.isWellFormed())
+  assert.ok(Buffer.byteLength(value, "utf8") <= 32768)
+  assert.ok(!/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")))
+  assert.ok(!/[<@]/u.test(value))
+  assert.ok(!/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/iu.test(value))
 }
 
 function verifyCommit(commit, state) {
@@ -118,7 +124,7 @@ async function validate() {
   failureCause = "bundle validation failed"
   const checked = spawnSync("/usr/bin/python3", [join(dirname(fileURLToPath(import.meta.url)), "result.py"), "validate",
     `${process.env.GITHUB_SERVER_URL || "https://github.com"}/${repository}.git`], {
-    cwd: root, input: JSON.stringify(binding), timeout: 180000, maxBuffer: 65536,
+    cwd: root, input: JSON.stringify(binding), timeout: 180000, maxBuffer: 262144,
     env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
   })
   assert.equal(checked.status, 0, "Bundle validation failed")
@@ -185,6 +191,7 @@ async function publish() {
   assert.equal(binding.v, 4)
   publicationText(metadata.title)
   publicationText(metadata.commitMessage, true)
+  validateBody(metadata.body)
   assert.equal(metadata.treeSha, binding.tree)
   assert.equal(metadata.sourceSha, binding.source)
   assert.match(binding.tree, /^[a-f0-9]{40}$/)

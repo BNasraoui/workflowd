@@ -164,7 +164,7 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DA
       `${name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
+      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
     )
     const holding = Bun.spawn(
       ["docker", "exec", `${name}-runner`, "bash", "/usr/local/bin/runner-control", "hold"],
@@ -829,7 +829,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
       `${runner.name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
+      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
     )
     await runner.docker(
       "exec",
@@ -1013,7 +1013,10 @@ export function sandboxPublicationFixture(
           ref: binding.base,
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
-        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`text\n${commitMessage}\n\`\`\``,
+        body:
+          fault === "wrong body"
+            ? "Changed description"
+            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n## Result\n\nReadable agent description.`,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }

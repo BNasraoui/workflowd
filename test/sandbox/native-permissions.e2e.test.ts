@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { runCodexWorker } from "../../src/kernel/codex-worker"
 import { runClaudeWorker } from "../../src/kernel/claude-worker"
+import { sandboxCompletionInstructions } from "../../src/sandbox/config"
 import { bindingDirectory, sandboxPolicyHash, writeSandboxBinding } from "../../src/sandbox/binding"
 
 for (const kind of ["codex", "claude"] as const) {
@@ -32,7 +33,7 @@ for (const kind of ["codex", "claude"] as const) {
     const binary = join(root, "capture")
     await writeFile(
       binary,
-      `#!${process.execPath}\nif (process.argv.includes("list")) console.log(JSON.stringify([{name:"inherited",enabled:true}])); else console.log(JSON.stringify(process.argv.slice(2)))\n`,
+      `#!${process.execPath}\nif (process.argv.includes("app-server")) { for await (const line of console) { const r=JSON.parse(line); if (r.id) console.log(JSON.stringify({id:r.id,result:r.method==="initialize"?{}:{data:[{cwd:process.cwd(),skills:[{path:"/host/skills/unreadable/SKILL.md"}],errors:[]}]}})) } } else if (process.argv.includes("list")) console.log(JSON.stringify([{name:"inherited",enabled:true}])); else console.log(JSON.stringify(process.argv.slice(2)))\n`,
       { mode: 0o755 },
     )
     await writeFile(join(root, "prompt"), "fixture")
@@ -55,19 +56,34 @@ for (const kind of ["codex", "claude"] as const) {
       expect(args).toContain("dispatch-selected-fixture")
       expect(args.join(" ")).toContain("wfdlease_fixture")
       expect(args.join(" ")).not.toContain("dangerously")
-      await writeSandboxBinding({ ...binding, state: "revoked" })
-      await expect((kind === "codex" ? runCodexWorker : runClaudeWorker)(options)).rejects.toThrow(
-        "inactive",
-      )
       if (kind === "codex") {
+        expect(args).toContain(
+          'skills.config=[{path="/host/skills/unreadable/SKILL.md",enabled=false}]',
+        )
+        expect(args).toContain("features.skill_search=false")
         expect(args).toContain("--strict-config")
         expect(args).toContain("mcp_servers.inherited.enabled=false")
         expect(args.join(" ")).toContain('default_tools_approval_mode="approve"')
+        await writeFile(
+          binary,
+          (await readFile(binary, "utf8")).replace(
+            "errors:[]",
+            "errors:[{message:'unreadable skill'}]",
+          ),
+        )
+        await expect(runCodexWorker(options)).rejects.toThrow(
+          "Cannot discover native sandbox skills",
+        )
       } else {
+        expect(args).toContain("--disable-slash-commands")
         expect(args).toContain("--strict-mcp-config")
         expect(args[args.indexOf("--tools") + 1]).toBe("")
         expect(args).toContain("mcp__wfdlease_fixture__*")
       }
+      await writeSandboxBinding({ ...binding, state: "revoked" })
+      await expect((kind === "codex" ? runCodexWorker : runClaudeWorker)(options)).rejects.toThrow(
+        "inactive",
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -116,7 +132,18 @@ for (const kind of ["codex", "claude"] as const) {
       model: "dispatch-selected-fixture",
       sandboxBindingFile: join(root, "binding.json"),
     }
-    await writeFile(options.promptFile, "Call the provided environment_list tool once then finish.")
+    for (const folder of [".agents", ".claude"]) {
+      const skill = join(directory, folder, "skills", "host-only-canary")
+      await mkdir(skill, { recursive: true })
+      await writeFile(
+        join(skill, "SKILL.md"),
+        "---\nname: host-only-canary\ndescription: HOST_SKILL_MUST_NOT_BE_ADVERTISED\n---\nHost-only instructions",
+      )
+    }
+    await writeFile(
+      options.promptFile,
+      sandboxCompletionInstructions + "\nCall the provided environment_list tool once then finish.",
+    )
     fixture.actions.push({
       name: "environment_list",
       arguments: { environment_source: "/workspace/repository" },
@@ -126,6 +153,7 @@ for (const kind of ["codex", "claude"] as const) {
       branch: "",
       title: "Native result",
       commitMessage: "Publish native result",
+      body: "## Result\n\nReadable agent description.",
     }
     fixture.actions.push({ name: "submit_result", arguments: completion })
     fixture.actions.push({
@@ -193,6 +221,11 @@ for (const kind of ["codex", "claude"] as const) {
           ),
         ).toBe(true)
       expect(fixture.requests.length).toBeGreaterThan(2)
+      expect(JSON.stringify(fixture.requests).includes("HOST_SKILL_MUST_NOT_BE_ADVERTISED")).toBe(
+        false,
+      )
+      expect(JSON.stringify(fixture.requests).includes("/home/ben/.agents/skills")).toBe(false)
+      expect(JSON.stringify(fixture.requests)).toContain("/opt/workflowd/skills/visual-pr/SKILL.md")
       expect(await Bun.file(join(directory, "native-canary")).exists()).toBe(false)
       expect(JSON.stringify(fixture.requests.at(-1))).toContain("environment")
       expect(fixture.catalogs.flat().some((name) => name.endsWith("environment_list"))).toBe(true)
