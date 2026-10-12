@@ -164,7 +164,7 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DA
       `${name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
+      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
     )
     const holding = Bun.spawn(
       ["docker", "exec", `${name}-runner`, "bash", "/usr/local/bin/runner-control", "hold"],
@@ -813,10 +813,21 @@ export async function leaseRunnerFixture(repositoryName: string) {
     const adapter = join(runner.root, "docker")
     await writeFile(
       adapter,
-      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexec "$@"\n',
+      '#!/bin/sh\nset -eu\nif [ "$1" = cp ]; then cp -rf /workspace/result/. /run/workflowd-sandbox/result/; exit; fi\ntest "$1" = exec\nshift\nif [ "$1" = -i ]; then shift; fi\nworkdir=/workspace/repository\nif [ "$1" = -w ]; then workdir="$2"; shift 2; fi\ntest "$1" = workflowd-sandbox-tooling\nshift\ncd "$workdir"\nexport PATH=/usr/local/lib/tooling-bin:$PATH\nexec "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", adapter, `${runner.name}-runner:/usr/local/bin/docker`)
+    // Production has separate host-control and tooling executables. Preserve
+    // that distinction when the Docker adapter runs both in one container.
+    await runner.docker(
+      "exec",
+      "-u",
+      "root",
+      `${runner.name}-runner`,
+      "sh",
+      "-ec",
+      "mkdir -p /usr/local/lib/tooling-bin && cp -f /usr/local/bin/container-use /usr/local/lib/tooling-bin/container-use",
+    )
     await runner.docker(
       "cp",
       "deploy/sandbox/runner.sh",
@@ -829,7 +840,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
       `${runner.name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
+      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
     )
     await runner.docker(
       "exec",
@@ -1013,7 +1024,10 @@ export function sandboxPublicationFixture(
           ref: binding.base,
           repo: { id: policy.repositoryId, full_name: policy.repository },
         },
-        body: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n\`\`\`text\n${commitMessage}\n\`\`\``,
+        body:
+          fault === "wrong body"
+            ? "Changed description"
+            : `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->\n\n## Result\n\nReadable agent description.`,
       }
       return Response.json(path.endsWith("/pulls") ? [{ number: pull.number }] : pull)
     }

@@ -95,6 +95,7 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
             const completion = {
               title: "Agent title",
               commitMessage: "Agent message\n\nDetails",
+              body: "## Result\n\nReadable agent description.",
               environmentId: "selected",
               branch: "agent-choice",
             }
@@ -123,6 +124,7 @@ for (const kind of ["opencode", "codex", "claude"] as const) {
                   treeSha: "1".repeat(40),
                   title: completion.title,
                   commitMessage: completion.commitMessage,
+                  body: "## Result\n\nReadable agent description.",
                   branch: completion.branch,
                   bundleSha256: "d".repeat(64),
                   manifestSha256: "e".repeat(64),

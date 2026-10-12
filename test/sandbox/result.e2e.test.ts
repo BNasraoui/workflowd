@@ -6,7 +6,11 @@ import { join, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { command } from "./harness"
 
-const wording = { title: "Title 雪 '$()'", commitMessage: "Message 雪 $()\n\nDetails\n" }
+const wording = {
+  body: "## Result\n\nReadable agent description.",
+  title: "Title 雪 '$()'",
+  commitMessage: "Message 雪 $()\n\nDetails\n",
+}
 const script = resolve("deploy/sandbox/result.py")
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 
@@ -69,10 +73,25 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
       bundleSha256: digest(bundle),
     })
     expect((await seal())[1]).toBe(text)
+    const changed = await seal({
+      ...wording,
+      branch,
+      environmentId: "one",
+      body: "Changed description",
+    })
+    expect(changed[0]).toBe(0)
+    expect(JSON.parse(changed[1]).manifestSha256).not.toBe(metadata.manifestSha256)
     const other = await seal({ ...wording, branch, environmentId: "two" })
     expect(other[0]).toBe(0)
     expect(JSON.parse(other[1])).toEqual({ empty: true, sourceSha })
     for (const fields of [
+      { body: "<!-- hidden -->" },
+      { body: "@org/team" },
+      { body: "Closes #1" },
+      { body: "é".repeat(16385) },
+      { body: "\ud800" },
+      { body: "bad\u200dtext" },
+      { body: "bad\ttext" },
       { title: "bad\nline" },
       { title: "x".repeat(201) },
       { commitMessage: "bad\tcontrol" },
@@ -119,6 +138,7 @@ for (const mutation of [
   "source helper",
   "title mismatch",
   "message mismatch",
+  "body mismatch",
   "tree mismatch",
 ])
   test(`publisher validates actual Git objects and bounded ZIP: ${mutation}`, async () => {
@@ -129,7 +149,7 @@ for (const mutation of [
     const git = (...args: string[]) => command(["git", ...args], repo)
     const text =
       mutation === "maximum metadata"
-        ? { title: "雪".repeat(200), commitMessage: "m".repeat(10240) }
+        ? { title: "雪".repeat(200), commitMessage: "m".repeat(10240), body: "é".repeat(16384) }
         : wording
     try {
       await git("init", "-b", "main")
@@ -181,9 +201,19 @@ for (const mutation of [
           new Uint8Array(await Bun.file(join(output, "result.json")).arrayBuffer()),
         )
       }
-      if (mutation === "title mismatch" || mutation === "message mismatch") {
+      if (
+        mutation === "title mismatch" ||
+        mutation === "message mismatch" ||
+        mutation === "body mismatch"
+      ) {
         const manifest = JSON.parse(await Bun.file(join(output, "result.json")).text())
-        manifest[mutation === "title mismatch" ? "title" : "commitMessage"] = "changed"
+        manifest[
+          mutation === "title mismatch"
+            ? "title"
+            : mutation === "body mismatch"
+              ? "body"
+              : "commitMessage"
+        ] = "changed"
         await writeFile(join(output, "result.json"), JSON.stringify(manifest))
       }
       const archive = join(root, "result.zip")

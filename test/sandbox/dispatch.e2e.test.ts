@@ -942,6 +942,7 @@ for (const settlement of [
           completion = JSON.stringify({
             title: "Agent title",
             commitMessage: "Agent message\n\nDetails",
+            body: "## Result\n\nReadable agent description.",
             branch: "agent choice/$() 雪",
             ...(settlement === "missing environment"
               ? {}

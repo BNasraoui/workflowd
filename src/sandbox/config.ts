@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import skills from "../../deploy/sandbox/skills/catalog.json"
 
 const PublicationCoAuthor = Schema.String.check(
   Schema.makeFilter(
@@ -18,10 +19,8 @@ export function publicationCommitMessage(message: string, coAuthor: string): str
   return `${body}\n\nCo-authored-by: ${coAuthor}`
 }
 
-export function publicationBody(marker: string, message: string): string {
-  const longest = Math.max(2, ...Array.from(message.matchAll(/`+/g), (match) => match[0].length))
-  const fence = "`".repeat(longest + 1)
-  return `${marker}\n\n${fence}text\n${message}\n${fence}`
+export function publicationBody(marker: string, body: string): string {
+  return `${marker}\n\n${body}`
 }
 
 const positiveId = Schema.Int.check(Schema.isGreaterThan(0))
@@ -76,12 +75,27 @@ export const PublicationMessage = Schema.NonEmptyString.check(
   ),
 )
 
+// Reject conservatively, including in code spans: GitHub's Markdown/linkification
+// rules must not decide whether approved text can hide content or notify people.
+export const PublicationBody = Schema.NonEmptyString.check(
+  Schema.makeFilter(
+    (value) =>
+      value.trim().length > 0 &&
+      value.isWellFormed() &&
+      Buffer.byteLength(value, "utf8") <= 32768 &&
+      !/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")) &&
+      !/[<@]/u.test(value) &&
+      !/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/iu.test(value),
+  ),
+)
+
 // The selected environment is an identity; branch is opaque agent data.
 export const SandboxCompletion = Schema.Struct({
   environmentId: Schema.NonEmptyString,
   branch: Schema.String,
   title: PublicationTitle,
   commitMessage: PublicationMessage,
+  body: PublicationBody,
 })
 
 export const sandboxCompletionInstructions =
@@ -89,5 +103,13 @@ export const sandboxCompletionInstructions =
   'Every container-use call must pass environment_source "/workspace/repository". ' +
   "Finish by calling submit_result on your owned sandbox MCP server with exactly environmentId (the exact ID of the environment holding your result), " +
   "branch (the branch name you choose), title (your PR title, non-empty, one line, at most 200 Unicode characters), " +
-  "and commitMessage (your non-empty commit message, at most 10 KiB of UTF-8). Both must be valid Unicode plain text with no control characters; only the message may contain newlines. " +
-  "The publisher creates the branch, squashes your commits into one commit with your message and opens a draft PR with your title. Do not push."
+  "commitMessage (your non-empty commit message, at most 10 KiB of UTF-8), and body (your PR description in GitHub Markdown, at most 32 KiB of UTF-8). " +
+  "All text must be valid Unicode with no control or format characters; only commitMessage and body may contain newlines. " +
+  "The body must contain no raw HTML or <, no @ mentions, and none of the GitHub closing words close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved, even in code examples. " +
+  "The publisher creates the branch, squashes your commits into one commit with your message and opens a draft PR with your title and body. Do not push. " +
+  "Use visual-pr to write body and pass it to submit_result; correct any tool validation error and resubmit. " +
+  `Read the following skills through container-use inside your environment at ${skills.root}/. ` +
+  "Resolve each skill’s relative references inside its full installed folder. Task context is supplied here; do not use skills that require unavailable tools or network.\n\n" +
+  skills.skills
+    .map((skill) => `- ${skill.name}: ${skill.description} (${skills.root}/${skill.name}/SKILL.md)`)
+    .join("\n")

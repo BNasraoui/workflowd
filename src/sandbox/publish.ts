@@ -337,7 +337,7 @@ export const makeSandboxPublisher = (
         pull.head.sha !== receipt.commitSha ||
         pull.base.ref !== intent.base_ref ||
         pull.title !== intent.metadata.title ||
-        pull.body !== publicationBody(marker, intent.metadata.commitMessage) ||
+        pull.body !== publicationBody(marker, intent.metadata.body) ||
         [pull.head.repo, pull.base.repo].some(
           (repo) => repo.id !== policy.repositoryId || repo.full_name !== policy.repository,
         )

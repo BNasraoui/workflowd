@@ -821,6 +821,7 @@ export function assertLivePublication(proof) {
   })
   assert.equal(submission?.branch, intent.metadata.branch)
   assert.equal(submission?.title, intent.metadata.title)
+  assert.equal(submission?.body, intent.metadata.body)
   assert.equal(submission?.commitMessage, intent.metadata.commitMessage)
   assert.ok(submission?.environmentId)
   assert.ok(
@@ -832,7 +833,8 @@ export function assertLivePublication(proof) {
         call.input?.environmentId === submission.environmentId &&
         call.input?.branch === submission.branch &&
         call.input?.title === submission.title &&
-        call.input?.commitMessage === submission.commitMessage,
+        call.input?.commitMessage === submission.commitMessage &&
+        call.input?.body === submission.body,
     ),
     "Agent did not call submit_result for the sealed result",
   )
@@ -906,7 +908,7 @@ export function assertLivePublication(proof) {
   )
   assert.equal(policy.publish.publisherActorId, 339414993)
   assert.equal(pull.title, intent.metadata.title)
-  assert.equal(pull.body, publicationBody(marker, intent.metadata.commitMessage))
+  assert.equal(pull.body, publicationBody(marker, intent.metadata.body))
   assert.equal(pull.head.ref, submission.branch)
   assert.equal(pull.head.sha, intent.receipt.commitSha)
   assert.equal(pull.base.ref, intent.base_ref)

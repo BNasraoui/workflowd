@@ -147,3 +147,57 @@ test("reviewed composite validates before minting a repository-only token and al
   ).toEqual([steps[1]!])
   expect(source).not.toContain("canary")
 })
+
+for (const tracked of [false, true]) {
+  test(`runner image configuration stays outside the source tree; tracked=${tracked}`, async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const { command } = await import("./harness")
+    const directory = await mkdtemp(join(tmpdir(), "sandbox-image-"))
+    const bin = join(directory, "bin")
+    const repo = join(directory, "repo")
+    const image = `ghcr.io/bnasraoui/workflowd-agent-base:${"a".repeat(40)}`
+    try {
+      await mkdir(bin)
+      await mkdir(repo)
+      await writeFile(join(bin, "docker"), '#!/bin/sh\nshift 2\nexec "$@"\n', { mode: 0o755 })
+      await writeFile(
+        join(bin, "container-use"),
+        '#!/bin/sh\nmkdir -p .container-use\nprintf "%s" "$4" > .container-use/environment.json\n',
+        { mode: 0o755 },
+      )
+      await command(["git", "init", "-q"], repo)
+      await command(["git", "config", "user.name", "fixture"], repo)
+      await command(["git", "config", "user.email", "fixture@example.invalid"], repo)
+      if (tracked) {
+        await mkdir(join(repo, ".container-use"))
+        await writeFile(join(repo, ".container-use/environment.json"), "original")
+        await command(["git", "add", "."], repo)
+      }
+      await command(["git", "commit", "--allow-empty", "-qm", "source"], repo)
+      const head = await command(["git", "rev-parse", "HEAD"], repo)
+      const source = await Bun.file(`${root}/deploy/sandbox/runner.sh`).text()
+      const helper = source.slice(
+        source.indexOf("configure_image() {"),
+        source.indexOf('\ncase "${1:-}"'),
+      )
+      const child = Bun.spawn(["bash", "-c", helper + '\nconfigure_image "$1"', "_", image], {
+        cwd: repo,
+        env: { PATH: `${bin}:/usr/bin:/bin` },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      expect(await child.exited).toBe(0)
+      expect(await Bun.file(join(repo, ".container-use/environment.json")).text()).toBe(image)
+      expect(await command(["git", "status", "--porcelain"], repo)).toBe("")
+      expect(await command(["git", "rev-parse", "HEAD"], repo)).toBe(head)
+      expect(source).toContain(
+        "'ghcr.io/bnasraoui/workflowd-agent-base:' + expected['job_workflow_sha']",
+      )
+      expect(source).toContain('configure_image "$(cat /run/workflowd-sandbox/agent-image)"')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+}

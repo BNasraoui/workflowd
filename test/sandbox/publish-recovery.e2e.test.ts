@@ -14,6 +14,7 @@ const metadata = {
   treeSha: "1".repeat(40),
   title: "Agent title",
   commitMessage: "Agent message\n\nDetails",
+  body: "## Result\n\nReadable agent description.",
   branch: "arbitrary/$()\n雪",
   bundleSha256: "c".repeat(64),
   manifestSha256: "d".repeat(64),

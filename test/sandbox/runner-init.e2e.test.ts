@@ -97,7 +97,7 @@ for (const path of ["initialize", "start source helper"]) {
           `--setenv=PATH=${runner.root}:/usr/bin:/bin`,
           "bash",
           "-c",
-          `set -euo pipefail\nprintf '{"repository":"%s"}' "$2" > /run/workflowd-sandbox/identity.json\n${invoke}`,
+          `set -euo pipefail\nprintf '{"repository":"%s"}' "$2" > /run/workflowd-sandbox/identity.json\nprintf ubuntu:24.04 > /run/workflowd-sandbox/agent-image\n${invoke}`,
           "_",
           runnerScript,
           fixtureRepository,
@@ -115,7 +115,10 @@ for (const path of ["initialize", "start source helper"]) {
         new Response(child.stderr).text(),
       ])
       expect({ status, stderr: status === 0 ? "" : stderr }).toEqual({ status: 0, stderr: "" })
-      if (path === "initialize") expect(stdout.trim()).toBe(sourceSha)
+      if (path === "initialize") {
+        expect(stdout.trim()).toBe(sourceSha)
+        expect(await exec("container-use", "config", "base-image", "get")).toBe("ubuntu:24.04")
+      }
       expect(await exec("git", "rev-parse", "HEAD")).toBe(sourceSha)
       expect(await exec("git", "rev-parse", "--is-shallow-repository")).toBe("false")
       expect(await exec("git", "rev-list", "--count", "HEAD")).toBe("2")

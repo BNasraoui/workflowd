@@ -1,5 +1,6 @@
 { pkgs }:
 let
+  skills = import ./agent-skills.nix { inherit pkgs; };
   tools = pkgs.buildEnv {
     name = "agent-tools";
     paths = with pkgs; [
@@ -16,7 +17,7 @@ pkgs.dockerTools.streamLayeredImage {
   name = "workflowd-agent-base";
   tag = "local";
   created = "1970-01-01T00:00:01Z";
-  contents = [ tools pkgs.nix-ld ];
+  contents = [ tools pkgs.nix-ld skills ];
   # Keep native Dagger snapshotters from copying a long chain of tiny layers.
   maxLayers = 20;
   extraCommands = ''

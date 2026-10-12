@@ -496,7 +496,7 @@ export const makeSandboxLeaseService = (
         const response = yield* remote(
           runId,
           "exec /usr/local/bin/runner-control finish-result",
-          65536,
+          262144,
           JSON.stringify(selected),
         )
         const value: unknown = yield* Effect.try((): unknown => JSON.parse(controlText(response)))
@@ -511,7 +511,8 @@ export const makeSandboxLeaseService = (
           ("branch" in result &&
             (result.branch !== selected.branch ||
               result.title !== selected.title ||
-              result.commitMessage !== selected.commitMessage))
+              result.commitMessage !== selected.commitMessage ||
+              result.body !== selected.body))
         )
           return yield* Effect.fail(new SandboxError({ message: "Sandbox result source mismatch" }))
         return result
