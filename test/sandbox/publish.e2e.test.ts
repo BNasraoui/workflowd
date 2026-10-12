@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect, Logger, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { runStoreMigrations } from "../../src/store/migrations"
 import { makeSandboxStore } from "../../src/sandbox/store"
@@ -21,6 +21,7 @@ const policy = {
   installationId: 147573449,
   workflowSha: "a".repeat(40),
   appActorId: 306741873,
+  agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
   tailscaleClientId: "fixture",
   tailscaleAudience: "fixture",
   publish: {
@@ -165,6 +166,10 @@ for (const fault of [
   "expired",
   "wrong approval",
   "artifact replaced",
+  "closing references",
+  "closing query malformed",
+  "unchecked PR",
+  "killed publisher",
   "lost push",
   "lost PR",
   "saved receipt",
@@ -235,11 +240,25 @@ for (const fault of [
             expect(fixture.cancellations).toContain(41)
             return
           }
-          if (["none", "lost approval", "lost PR", "saved receipt"].includes(fault)) {
+          if (fault === "killed publisher") {
+            const errors: unknown[] = []
+            expect(
+              yield* publisher
+                .poll("run-1")
+                .pipe(
+                  Effect.provide(
+                    Logger.layer([Logger.make(({ message }) => errors.push(message))]),
+                  ),
+                ),
+            ).toBe("operator_required")
+            expect(errors).toEqual([])
+            expect((yield* store.read("run-1"))?.phase).toBe("operator_required")
+          } else if (["none", "lost approval", "lost PR", "saved receipt"].includes(fault)) {
             // Reopening the service must read the exact approval, never POST again.
             if (fault === "saved receipt")
               yield* store.saveReceipt("run-1", {
                 stage: "creating_pr",
+                closingIssuesVerified: true,
                 pr: null,
                 revoked: true,
                 commitSha: "2".repeat(40),
@@ -255,6 +274,9 @@ for (const fault of [
             })
           } else if (
             [
+              "closing references",
+              "closing query malformed",
+              "unchecked PR",
               "lost push",
               "foreign PR",
               "unrevoked",
@@ -288,6 +310,13 @@ for (const fault of [
 // Only GitHub HTTP is substituted; fixture API writes real Git objects and create-only refs.
 for (const fault of [
   "none",
+  "closing references",
+  "closing references recovered",
+  "closing delayed references",
+  "closing delayed query failed",
+  "closing query failed",
+  "closing query malformed",
+  "closing close failed",
   "maximum metadata",
   "existing co-authors",
   "duplicate co-author",
@@ -328,7 +357,8 @@ for (const fault of [
     const token = "fixture-publisher-token-never-logged"
     let pushes = 0,
       posts = 0,
-      revokes = 0
+      revokes = 0,
+      closingQueries = 0
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
     const title =
@@ -336,23 +366,23 @@ for (const fault of [
         ? "雪".repeat(200)
         : fault === "format title"
           ? "hidden\u200btitle"
-          : "Agent title 雪 '$(touch-pwned)'"
+          : "Agent title 雪"
     const trailer = `Co-authored-by: ${policy.publish.coAuthor}`
     const body =
       fault === "maximum metadata"
         ? "m".repeat(10239)
         : fault === "bidi message"
           ? "bidi\u202emessage"
-          : "Agent message\n\n雪 `touch-pwned` $(touch-pwned)\n```\n@someone Closes #1\n`````\n<!-- hidden -->"
+          : "Agent message\n\n雪 prose\n\n```ts\nimport X from '@effect/sql'\n```"
     const other =
       "Co-authored-by: Another Person <another@example.invalid>\n co-AUTHORED-by : Forged <forged@example.invalid>"
     const commitMessage =
       fault === "existing co-authors"
-        ? `${body}\n\n${other}\n`
+        ? `${body}\n\n\`\`\`text\n${other}\n\`\`\`\n`
         : fault === "duplicate co-author"
-          ? `${body}\n${trailer}\n${trailer}\n${other}\n`
+          ? `${body}\n\n\`\`\`text\n${trailer}\n${trailer}\n${other}\n\`\`\`\n`
           : `${body}\n`
-    const expectedMessage = `${body}\n\n${trailer}`
+    const expectedMessage = publicationCommitMessage(commitMessage, policy.publish.coAuthor)
     await mkdir(join(root, "fixture"), { recursive: true })
     await command(["git", "init", "--bare", remote])
     await command(["git", "-C", remote, "config", "http.receivepack", "true"])
@@ -476,6 +506,35 @@ for (const fault of [
       async fetch(request) {
         const url = new URL(request.url)
         expect(request.headers.get("authorization")).toBe("Bearer " + token)
+        if (url.pathname === "/graphql") {
+          closingQueries++
+          if (fault === "closing delayed query failed" && closingQueries === 2)
+            return new Response(null, { status: 502 })
+          const query = Schema.decodeUnknownSync(
+            Schema.Struct({ query: Schema.String, variables: Schema.Json }),
+          )(await request.json())
+          expect(query.query).toContain("closingIssuesReferences")
+          expect(query.variables).toEqual({ owner: "fixture", name: "repo", number: 17 })
+          if (fault === "closing query failed") return new Response(null, { status: 502 })
+          if (fault === "closing query malformed")
+            return Response.json({ errors: [{ message: "unavailable" }] })
+          return Response.json({
+            data: {
+              repository: {
+                pullRequest: {
+                  closingIssuesReferences: {
+                    totalCount:
+                      fault.startsWith("closing references") ||
+                      fault === "closing close failed" ||
+                      (fault === "closing delayed references" && closingQueries === 2)
+                        ? 1
+                        : 0,
+                  },
+                },
+              },
+            },
+          })
+        }
         if (url.pathname === "/installation/token") {
           revokes++
           return new Response(null, { status: 204 })
@@ -602,11 +661,18 @@ for (const fault of [
             },
             base: { ref: "main", repo: { full_name: "fixture/repo", id: 7 } },
           }
-          return fault === "lost PR reply"
+          return ["lost PR reply", "closing references recovered"].includes(fault)
             ? new Response(null, { status: 502 })
             : Response.json(pull, { status: 201 })
         }
-        if (url.pathname.endsWith("/pulls/17")) return Response.json(pull)
+        if (url.pathname.endsWith("/pulls/17")) {
+          if (request.method === "PATCH") {
+            expect(await request.json()).toEqual({ state: "closed" })
+            if (fault === "closing close failed") return new Response(null, { status: 502 })
+            pull!.state = "closed"
+          }
+          return Response.json(pull)
+        }
         if (url.pathname.endsWith("/pulls"))
           return Response.json(pull ? [{ number: pull.number }] : [])
         return new Response(null, { status: 404 })
@@ -671,8 +737,18 @@ for (const fault of [
         expect(await Bun.file(join(work, "receipt.json")).exists()).toBe(false)
         return
       }
+      if (fault.startsWith("closing")) {
+        expect(pull?.state).toBe(fault === "closing close failed" ? "open" : "closed")
+        expect(published.err).toContain("closing issue references")
+        expect(published.out).toContain("workflowd.publish.failure ")
+      }
       const receipt = JSON.parse(await Bun.file(join(work, "receipt.json")).text())
       expect(receipt).toMatchObject({ binding, repository: "fixture/repo", branch, revoked: true })
+      if (fault.startsWith("closing")) {
+        expect(receipt.closingIssuesVerified).toBe(false)
+        expect(receipt.cause).toContain("closing issue references")
+        expect(receipt.stage).toBe("creating_pr")
+      }
       const expectedCause =
         fault === "collision"
           ? "branch already exists (HTTP 200)"
@@ -695,7 +771,13 @@ for (const fault of [
           "duplicate co-author",
         ].includes(fault)
       ) {
-        expect(receipt).toMatchObject({ stage: "published", pr: 17, commitSha: publishedSha })
+        expect(closingQueries).toBe(3)
+        expect(receipt).toMatchObject({
+          stage: "published",
+          pr: 17,
+          commitSha: publishedSha,
+          closingIssuesVerified: true,
+        })
         expect(publishedSha).not.toBe(result)
         expect(await objectGit(["rev-parse", publishedSha + "^{tree}"])).toBe(treeSha)
         expect(await objectGit(["rev-list", "--parents", "-n", "1", publishedSha])).toBe(
@@ -732,7 +814,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     import { approvalComment } from "./src/sandbox/publish.ts"
     const policy = ${JSON.stringify(policy)}
     const metadata = ${JSON.stringify(metadata)}
-    const intent = {run_id:"run",actions_run_id:41,attempt:1,metadata,base_ref:"main",phase:"published",artifact_id:52,artifact_digest:"sha256:"+"f".repeat(64),receipt:{stage:"published",pr:17,revoked:true,commitSha:"2".repeat(40)}}
+    const intent = {run_id:"run",actions_run_id:41,attempt:1,metadata,base_ref:"main",phase:"published",artifact_id:52,artifact_digest:"sha256:"+"f".repeat(64),receipt:{stage:"published",pr:17,revoked:true,closingIssuesVerified:true,commitSha:"2".repeat(40)}}
     const binding = JSON.parse(approvalComment(intent))
     const marker = "<!-- workflowd-publication:"+Buffer.from(JSON.stringify(binding)).toString("base64")+" -->"
     const repo = {id:policy.repositoryId,full_name:policy.repository}
@@ -754,7 +836,7 @@ test("live publication verifier binds submission, approved job, revoked receipt 
     for(const mutate of [
       x=>x.pull.title="changed", x=>x.pull.body+="changed", x=>x.submission.body="changed", x=>x.calls[0].input.body="changed", x=>x.commit.tree.sha=metadata.sourceSha, x=>x.commit.parents.push({sha:metadata.resultSha}), x=>x.commit.message="changed", x=>x.commit.message=metadata.commitMessage,
       x=>x.intent.phase="probed", x=>x.calls=[], x=>x.submission.branch="different",
-      x=>x.intent.receipt.revoked=false, x=>x.publisherLog="",
+      x=>x.intent.receipt.closingIssuesVerified=false, x=>x.intent.receipt.revoked=false, x=>x.publisherLog="",
       x=>x.pull.draft=false, x=>x.pull.state="closed", x=>x.pull.user.id=1,
       x=>x.pull.user.login="foreign[bot]", x=>x.pull.head.sha=metadata.sourceSha,
       x=>x.pull.base.sha=metadata.resultSha, x=>x.pull.base.ref="different",

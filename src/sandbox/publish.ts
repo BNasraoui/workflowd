@@ -271,7 +271,14 @@ export const makeSandboxPublisher = (
         )
           return yield* Effect.fail(fail())
         const { stage, pr, revoked, commitSha, cause } = proof
-        receipt = { stage, pr, revoked, commitSha, ...(cause === undefined ? {} : { cause }) }
+        receipt = {
+          stage,
+          pr,
+          revoked,
+          commitSha,
+          closingIssuesVerified: proof.closingIssuesVerified === true,
+          ...(cause === undefined ? {} : { cause }),
+        }
         yield* store.saveReceipt(intent.run_id, receipt)
       }
       if (receipt.cause !== undefined)
@@ -284,6 +291,13 @@ export const makeSandboxPublisher = (
         !["creating_pr", "published"].includes(receipt.stage)
       )
         return "operator_required" as const
+      // Only the publisher has PR read/write authority. Recovery requires its
+      // trusted receipt proving GitHub's parser returned zero, including when
+      // the final publication receipt was lost after a successful check.
+      if (receipt.closingIssuesVerified !== true)
+        return yield* Effect.fail(
+          new SandboxError({ message: "Publication closing issue references were not verified" }),
+        )
       const ref = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) }),
       )(yield* github.publicationRead(policy, `git/ref/heads/${encodeURIComponent(branch)}`))
@@ -345,6 +359,7 @@ export const makeSandboxPublisher = (
         return yield* Effect.fail(fail())
       yield* store.saveReceipt(intent.run_id, {
         stage: "published",
+        closingIssuesVerified: true,
         commitSha: receipt.commitSha,
         pr: pull.number,
         revoked: true,
