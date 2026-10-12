@@ -1,3 +1,4 @@
+import { requireSymlinkFreeReviewTree } from "./review-tree"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -158,6 +159,7 @@ export class ReviewContextFiles {
       yield* this.#requireClean(resolved.directory, "check worktree status")
       if (resolved.pull) {
         yield* this.#pull(resolved.directory)
+        yield* requireSymlinkFreeReviewTree(resolved.directory)
         yield* this.#requireClean(resolved.directory, "check worktree status after pull")
       }
       const head = yield* this.#head(resolved.directory)

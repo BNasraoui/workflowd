@@ -43,19 +43,19 @@ fall back to private per-run model credentials.
 
 ## Install, verify, and rollback (operator only)
 
-The sandbox-only `deploy/opencode/sandbox.json` remains the isolated sandbox
-fixture artifact. Production now installs the complete
-`deploy/opencode/opencode2.json` overlay, including the same sandbox agent and
-hardened reviewer/fixer definitions. Follow [the review isolation migration](review-hardening.md#mint-operator-migration)
-for the v2 config root, overlay, drop-in, and post-deploy verification. This
-supersedes the earlier sandbox-only installation commands. Do not reinstall that
-older overlay or remove the isolation drop-in during sandbox rollback.
+`deploy/opencode/sandbox.json` remains the sandbox overlay for the shared
+agent-run server and disposable sandbox fixtures. Preserve that server's global
+agents, plugins and providers. PR review now uses a separate
+`opencode2-reviewer.service` on port 4098 and the complete
+`deploy/opencode/opencode2.json` overlay in its own config root; follow
+[the review isolation migration](review-hardening.md#mint-operator-migration).
+Do not apply the reviewer unit's config isolation to the shared sandbox/agent-run
+server. The complete overlay includes the sandbox policy for compatibility but
+does not move sandbox dispatch to the reviewer server.
 
-Keep sandbox dispatch disabled until its live verification gate passes. The
-sandbox fixture and production probe requirements still apply; the
-hardening migration does not change the runner workflow pin or grant dispatch.
-To roll back a sandbox change, retain the reviewer restrictions and empty MCP
-configuration while the operator reviews sandbox custody separately.
+Keep sandbox dispatch disabled until its live verification gate passes. Sandbox
+rollback changes only the shared server's sandbox overlay, preserving the
+dedicated reviewer unit and restrictions.
 
 ## Sandbox verification (operator only)
 
@@ -78,7 +78,7 @@ the exact-code denial: it must still complete with `metadata.error` and no neste
 calls. The fixture includes a denial followed by 22 discovery calls across pages.
 
 Run `scripts/evidence/agent-sandbox.mjs --probe-session-policy` in a capped
-unit with `--expected-artifact deploy/opencode/opencode2.json` and the existing
+unit with `--expected-artifact deploy/opencode/sandbox.json` and the existing
 HTTP authentication in its environment. Confirm the selected config root,
 project-config disablement and deployed artifact before creating probe sessions.
 

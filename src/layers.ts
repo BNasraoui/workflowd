@@ -1,3 +1,4 @@
+import { reviewServerId, reviewEndpointAlias, routeReviewHarness } from "./review-harness"
 import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
@@ -281,7 +282,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     stageResumeContract(builtInStageContracts[4], definitions.stage),
     stageResumeContract(builtInStageContracts[5], definitions.stage),
   ]
-  const agentHarness = new OpenCodeAgentHarness(
+  const sharedHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
     new TrustedAgentHarnessCatalog(Object.values(definitions)),
     {
@@ -290,6 +291,27 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
+  const reviewClient = Effect.runSync(
+    Effect.cached(
+      OpenCode.make({ baseUrl: config.openCode.reviewUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+    ),
+  )
+  const reviewAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(reviewClient))
+  const reviewHarness = new OpenCodeAgentHarness(
+    reviewAdapter,
+    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+    {
+      serverId: reviewServerId,
+      endpointAlias: reviewEndpointAlias,
+      pollIntervalMs: config.openCode.pollIntervalMs,
+    },
+  )
+  const agentHarness = routeReviewHarness(sharedHarness, reviewHarness)
+  const reviewAccess = new SessionAccessResolver(reviewAdapter, {
+    serverId: reviewServerId,
+    endpointAlias: reviewEndpointAlias,
+    attachUrl: config.openCode.reviewUrl,
+  })
   const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
     serverId: config.openCode.serverId,
     endpointAlias: config.openCode.endpointAlias,
@@ -718,7 +740,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                 makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
               ),
             {
-              resolve: (reference) => sessionAccess.resolve(reference),
+              resolve: (reference) =>
+                (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(
+                  reference,
+                ),
             },
             publicSonarRequest,
           )

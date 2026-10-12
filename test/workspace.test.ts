@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Deferred, Effect, Fiber, Logger, Schema } from "effect"
@@ -406,6 +406,39 @@ describe("GitWorkspaceAdapter", () => {
     expect(prepared.head).toBe(forkHeadSha)
     expect(await git(collidingWorktree, "rev-parse", "HEAD")).toBe(fixture.baseSha)
   })
+
+  test.each(["managed", "existing", "pull"])(
+    "refuses tracked symlinks before review (%s worktree)",
+    async (mode) => {
+      const fixture = await createRepositoryFixture("workflowd-review-links-")
+      const reused = join(fixture.root, "reused")
+      if (mode === "pull")
+        await git(fixture.root, "clone", "--branch", "feature", fixture.remote, reused)
+      const outside = join(fixture.root, "outside")
+      await mkdir(outside)
+      await writeFile(join(outside, "sentinel"), "unchanged")
+      await symlink(outside, join(fixture.source, "linked-directory"))
+      await symlink(join(outside, "sentinel"), join(fixture.source, "linked-file"))
+      await git(fixture.source, "add", "linked-directory", "linked-file")
+      await git(fixture.source, "commit", "-m", "fixture links")
+      await git(fixture.source, "push", "origin", "feature")
+      const headSha = await git(fixture.source, "rev-parse", "HEAD")
+      await git(fixture.remote, "update-ref", "refs/pull/7/head", headSha)
+      const manager = makeManager(
+        fixture,
+        mode === "pull" ? [reused] : mode === "existing" ? [fixture.source] : [],
+      )
+      await expect(
+        Effect.runPromise(
+          Effect.scoped(
+            manager.prepareReview(makeReviewJob(fixture, { expectedHeadSha: headSha })),
+          ),
+        ),
+      ).rejects.toMatchObject({ operation: "validate review symlinks" })
+      expect(await readdir(outside)).toEqual(["sentinel"])
+      expect(await readFile(join(outside, "sentinel"), "utf8")).toBe("unchanged")
+    },
+  )
 
   test("never deletes an unowned .workflowd directory", async () => {
     const fixture = await createRepositoryFixture("workflowd-owned-context-")

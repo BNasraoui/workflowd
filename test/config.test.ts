@@ -243,6 +243,7 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        reviewUrl: "http://127.0.0.1:4098",
         attachUrl: "https://mint.example-tailnet.ts.net:4096",
         serverId: "opencode-primary",
         endpointAlias: "private-opencode",

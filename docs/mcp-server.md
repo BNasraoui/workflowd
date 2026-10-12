@@ -317,7 +317,15 @@ This ordinary client credential cannot dispatch. For dispatch, use the trusted
 coordinator channel below, or a separate HTTP MCP entry in a trusted non-OpenCode
 coordinator using `mcp-dispatch-token`. Keep ordinary writes on the original
 credential. OpenCode receives neither a global workflowd MCP entry nor dispatch
-credentials. Unauthenticated store-query clients can omit Authorization.
+credentials. The RPI coordinator needs both credentials and must use the channel
+below, rather than a single-bearer HTTP MCP client. Dispatched workers may read
+user-scope MCP configuration (`~/.claude.json` and `~/.codex/config.toml`, or their
+configured home overrides); those configurations must never contain the dispatch
+token. Direct Claude workers use strict empty MCP configuration, without workflowd
+MCP; sandbox workers use only their owned bridge. Until separate agent users are
+available, shell-capable OpenCode agent-run workers are separated from dispatch
+credentials by configuration only, not filesystem access control.
+Unauthenticated store-query clients can omit Authorization.
 
 ## Coordinator channel
 

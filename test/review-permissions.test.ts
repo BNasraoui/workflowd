@@ -87,12 +87,22 @@ test.each(["pr-reviewer", "pr-fixer"])("legacy agent %s also denies by default",
 })
 
 test("the reviewer server uses an isolated global config root and disables project config", async () => {
-  const file = Bun.file("deploy/systemd/opencode2-server.service.d/20-review-isolation.conf")
+  const file = Bun.file("deploy/systemd/opencode2-reviewer.service")
   expect(await file.exists()).toBe(true)
   const unit = await file.text()
-  expect(unit).toContain("Environment=XDG_CONFIG_HOME=%h/.config/workflowd/opencode2")
+  expect(unit).toContain("Environment=XDG_CONFIG_HOME=%h/.config/workflowd-reviewer")
   expect(unit).toContain("Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1")
-  expect(unit).toContain(
-    "Environment=OPENCODE_CONFIG=%h/.config/workflowd/opencode2-sandbox-agent.json",
-  )
+  expect(unit).toContain("Environment=OPENCODE_CONFIG=%h/.config/workflowd-reviewer/opencode2.json")
+})
+
+test("reviewer isolation leaves the agent-run unit unchanged and protects private files", async () => {
+  expect(
+    await Bun.file("deploy/systemd/opencode2-server.service.d/20-review-isolation.conf").exists(),
+  ).toBe(false)
+  const unit = await Bun.file("deploy/systemd/opencode2-reviewer.service").text()
+  expect(unit).toContain("--port 4098")
+  expect(unit).toContain("Environment=OPENCODE_CONFIG_PROJECT_DISABLE=1")
+  expect(unit).toContain("PrivateUsers=yes")
+  expect(unit).toContain("ReadOnlyPaths=%h/.config/workflowd-reviewer")
+  expect(unit).toContain("InaccessiblePaths=%h/.config/workflowd")
 })

@@ -59,6 +59,7 @@ interface WorkspaceConfig {
 
 interface OpenCodeConfig {
   readonly baseUrl: string
+  readonly reviewUrl: string
   readonly attachUrl: string
   readonly serverId: string
   readonly endpointAlias: string
@@ -602,6 +603,10 @@ function openCodeSection(
 ): OpenCodeConfig {
   return {
     baseUrl,
+    reviewUrl: credentialFreeHttpUrl(
+      env.WORKFLOWD_REVIEW_OPENCODE_URL ?? "http://127.0.0.1:4098",
+      "WORKFLOWD_REVIEW_OPENCODE_URL",
+    ),
     agentWakeAgent: agentId(
       env.WORKFLOWD_AGENT_WAKE_AGENT ?? "build",
       "WORKFLOWD_AGENT_WAKE_AGENT",
