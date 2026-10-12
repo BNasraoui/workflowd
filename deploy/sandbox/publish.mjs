@@ -1,6 +1,7 @@
 // Reviewed tooling only. No agent code, configuration or command output is executed or logged.
 import { safePublication } from "./publication.mjs"
 import assert from "node:assert/strict"
+import { setTimeout } from "node:timers/promises"
 import { createHash } from "node:crypto"
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises"
 import { join, dirname } from "node:path"
@@ -184,16 +185,21 @@ async function verifyClosingIssues(state) {
   failureCause = "closing issue references could not be verified"
   try {
     const [owner, name] = repository.split("/")
-    const response = await request("/graphql", "POST", {
-      query: "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences{totalCount}}}}",
-      variables: { owner, name, number: state.pr },
-    })
-    assert.equal(response.status, 200)
-    assert.ok(!response.data.errors)
-    const count = response.data.data.repository.pullRequest.closingIssuesReferences.totalCount
-    assert.ok(Number.isSafeInteger(count) && count >= 0)
-    if (count !== 0) failureCause = "PR contains closing issue references"
-    assert.equal(count, 0)
+    // Require a stable zero over three observations; allow GitHub's parser to
+    // settle between reads. Every read has the existing request timeout.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await setTimeout(2000)
+      const response = await request("/graphql", "POST", {
+        query: "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences{totalCount}}}}",
+        variables: { owner, name, number: state.pr },
+      })
+      assert.equal(response.status, 200)
+      assert.ok(!response.data.errors)
+      const count = response.data.data.repository.pullRequest.closingIssuesReferences.totalCount
+      assert.ok(Number.isSafeInteger(count) && count >= 0)
+      if (count !== 0) failureCause = "PR contains closing issue references"
+      assert.equal(count, 0)
+    }
   } catch (error) {
     const cause = failureCause
     failureCause = cause + "; PR closure failed"

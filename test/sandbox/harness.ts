@@ -966,7 +966,7 @@ export function sandboxPublicationFixture(
       const stage =
         fault === "branch collision"
           ? "validated"
-          : fault === "lost push"
+          : ["lost push", "killed publisher"].includes(fault)
             ? "pushing"
             : fault === "lost PR"
               ? "creating_pr"
@@ -979,6 +979,7 @@ export function sandboxPublicationFixture(
         stage,
         closingIssuesVerified: ![
           "unchecked PR",
+          "killed publisher",
           "closing references",
           "closing query malformed",
         ].includes(fault),

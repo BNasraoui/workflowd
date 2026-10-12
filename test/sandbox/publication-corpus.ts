@@ -1,5 +1,25 @@
 // Shared by the controller Schema, Python sealer, and actual publisher validators.
+// Unicode 15.0 policy: newer assignments must not drift with the host runtime.
 const rejected = [
+  "\u0378",
+  "\u{2ebf0}fixes #1",
+  "\u{1c89}fixes #1",
+  "\u{1e6c0}fixes #1",
+  "Refactor parser(fixes #1)",
+  "x*fixes #1",
+  "see foo[closes #2]",
+  "word`resolves #3`",
+  "a~fixes #1",
+  "[resolves](#1)",
+  "xfix github.com/,fixes:#1/issues/",
+  '[a\\]b]: /url "x"',
+  '[label\ncontinued]: /url "x"',
+  '> [x]: /url "x"',
+  '- [x]: /url "x"',
+  '[x]: /url\n  "title\ncontinued"',
+  "a\u0301\u0302\u0303",
+  "a\u093e\u093e\u093e",
+  "```text\na\u0301\u0302\u0303\n```",
   "&#64;user",
   "&#60;details>",
   "&commat;user",
@@ -64,11 +84,12 @@ const rejected = [
     "hidden\ufe0ftext",
   ].map((value) => "```ts\n" + value + "\n```"),
   "```ts\nﬁxes #1\n```",
-  "```ts\n[link]: x\n```",
 ]
 const accepted = [
+  "a\u0301\u0302",
+  "a\u0301b\u0302c\u0303",
+  "```ts\n[link]: x\n```",
   "this fixes the race",
-  "[resolves](#1)",
   "a & b",
   "fixed behavior",
   "hotfix #1",
@@ -88,3 +109,14 @@ export const publicationCorpus = [
 ]
   .map((value) => ({ value, accepted: false }))
   .concat(accepted.map((value) => ({ value, accepted: true })))
+
+// Both JS entry points and Python must fail closed on an unknown runtime.
+export const publicationRuntimeCorpus = [
+  { unicode: "15.0", icu: "73.2", python: "15.0.0", accepted: true },
+  { unicode: "15.1", icu: "75.1", python: "15.0.0", accepted: true },
+  { unicode: "16.0", icu: "77.1", python: "15.0.0", accepted: true },
+  { unicode: "17.0", icu: "78.3", python: "15.0.0", accepted: true },
+  { unicode: "18.0", icu: "79.1", python: "18.0.0", accepted: false },
+  { unicode: "15.1", icu: "99.0", python: "14.0.0", accepted: false },
+  { unicode: "", icu: "", python: "", accepted: false },
+]

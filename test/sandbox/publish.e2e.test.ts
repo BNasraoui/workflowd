@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect, Logger, Schema } from "effect"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { runStoreMigrations } from "../../src/store/migrations"
 import { makeSandboxStore } from "../../src/sandbox/store"
@@ -169,6 +169,7 @@ for (const fault of [
   "closing references",
   "closing query malformed",
   "unchecked PR",
+  "killed publisher",
   "lost push",
   "lost PR",
   "saved receipt",
@@ -239,7 +240,20 @@ for (const fault of [
             expect(fixture.cancellations).toContain(41)
             return
           }
-          if (["none", "lost approval", "lost PR", "saved receipt"].includes(fault)) {
+          if (fault === "killed publisher") {
+            const errors: unknown[] = []
+            expect(
+              yield* publisher
+                .poll("run-1")
+                .pipe(
+                  Effect.provide(
+                    Logger.layer([Logger.make(({ message }) => errors.push(message))]),
+                  ),
+                ),
+            ).toBe("operator_required")
+            expect(errors).toEqual([])
+            expect((yield* store.read("run-1"))?.phase).toBe("operator_required")
+          } else if (["none", "lost approval", "lost PR", "saved receipt"].includes(fault)) {
             // Reopening the service must read the exact approval, never POST again.
             if (fault === "saved receipt")
               yield* store.saveReceipt("run-1", {
@@ -298,6 +312,8 @@ for (const fault of [
   "none",
   "closing references",
   "closing references recovered",
+  "closing delayed references",
+  "closing delayed query failed",
   "closing query failed",
   "closing query malformed",
   "closing close failed",
@@ -341,7 +357,8 @@ for (const fault of [
     const token = "fixture-publisher-token-never-logged"
     let pushes = 0,
       posts = 0,
-      revokes = 0
+      revokes = 0,
+      closingQueries = 0
     let pull: Record<string, unknown> | undefined
     let publishedSha = ""
     const title =
@@ -490,6 +507,9 @@ for (const fault of [
         const url = new URL(request.url)
         expect(request.headers.get("authorization")).toBe("Bearer " + token)
         if (url.pathname === "/graphql") {
+          closingQueries++
+          if (fault === "closing delayed query failed" && closingQueries === 2)
+            return new Response(null, { status: 502 })
           const query = Schema.decodeUnknownSync(
             Schema.Struct({ query: Schema.String, variables: Schema.Json }),
           )(await request.json())
@@ -504,7 +524,9 @@ for (const fault of [
                 pullRequest: {
                   closingIssuesReferences: {
                     totalCount:
-                      fault.startsWith("closing references") || fault === "closing close failed"
+                      fault.startsWith("closing references") ||
+                      fault === "closing close failed" ||
+                      (fault === "closing delayed references" && closingQueries === 2)
                         ? 1
                         : 0,
                   },
@@ -749,6 +771,7 @@ for (const fault of [
           "duplicate co-author",
         ].includes(fault)
       ) {
+        expect(closingQueries).toBe(3)
         expect(receipt).toMatchObject({
           stage: "published",
           pr: 17,

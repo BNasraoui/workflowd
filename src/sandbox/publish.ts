@@ -285,6 +285,12 @@ export const makeSandboxPublisher = (
         return yield* Effect.fail(
           new SandboxError(sandboxDiagnostic("publish.receipt", receipt.cause)),
         )
+      if (
+        !receipt.revoked ||
+        receipt.commitSha === null ||
+        !["creating_pr", "published"].includes(receipt.stage)
+      )
+        return "operator_required" as const
       // Only the publisher has PR read/write authority. Recovery requires its
       // trusted receipt proving GitHub's parser returned zero, including when
       // the final publication receipt was lost after a successful check.
@@ -292,12 +298,6 @@ export const makeSandboxPublisher = (
         return yield* Effect.fail(
           new SandboxError({ message: "Publication closing issue references were not verified" }),
         )
-      if (
-        !receipt.revoked ||
-        receipt.commitSha === null ||
-        !["creating_pr", "published"].includes(receipt.stage)
-      )
-        return "operator_required" as const
       const ref = yield* Schema.decodeUnknownEffect(
         Schema.Struct({ ref: Schema.String, object: Schema.Struct({ sha: Schema.String }) }),
       )(yield* github.publicationRead(policy, `git/ref/heads/${encodeURIComponent(branch)}`))

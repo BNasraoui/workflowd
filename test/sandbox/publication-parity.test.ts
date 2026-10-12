@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../../src/sandbox/config"
-import { publicationCorpus } from "./publication-corpus"
+import { publicationCorpus, publicationRuntimeCorpus } from "./publication-corpus"
 
 const inputs = publicationCorpus.flatMap((item) =>
   ["body", "title", "commitMessage"].map((field) => ({
@@ -10,9 +10,9 @@ const inputs = publicationCorpus.flatMap((item) =>
     accepted: item.accepted && (field !== "title" || !item.value.includes("\n")),
   })),
 )
-async function run(args: string[]) {
+async function run(args: string[], values: unknown = inputs) {
   const child = Bun.spawn(args, {
-    stdin: new Blob([JSON.stringify(inputs)]),
+    stdin: new Blob([JSON.stringify(values)]),
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -72,5 +72,53 @@ for (const [index, item] of inputs.entries()) {
       python: results[index],
       publisher: publisherResults[index],
     }).toEqual({ schema: item.accepted, python: item.accepted, publisher: item.accepted })
+  })
+}
+
+const runtimeScript = `
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
+const source = readFileSync('deploy/sandbox/publication.mjs', 'utf8')
+  .replace(/^import .*$/gm, '').replace('export function', 'function')
+const casefold = JSON.parse(readFileSync('deploy/sandbox/casefold.json', 'utf8'))
+const unicode = JSON.parse(readFileSync('deploy/sandbox/publication-unicode.json', 'utf8'))
+console.log(JSON.stringify(JSON.parse(readFileSync(0, 'utf8')).map(item => {
+  try {
+    runInNewContext(source, { casefold, unicode, process: { versions: item } })
+    return true
+  } catch { return false }
+})))
+`
+const runtimeResults = await Promise.all([
+  run([process.execPath, "--input-type=module", "-e", runtimeScript], publicationRuntimeCorpus),
+  run(["node", "--input-type=module", "-e", runtimeScript], publicationRuntimeCorpus),
+  run(
+    [
+      "python3",
+      "-B",
+      "-c",
+      `
+import importlib.util, json, sys, unicodedata
+results = []
+for item in json.load(sys.stdin):
+    unicodedata.unidata_version = item['python']
+    try:
+        spec = importlib.util.spec_from_file_location('result', 'deploy/sandbox/result.py')
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        results.append(True)
+    except (AssertionError, RuntimeError): results.append(False)
+print(json.dumps(results))
+`,
+    ],
+    publicationRuntimeCorpus,
+  ),
+])
+for (const [index, item] of publicationRuntimeCorpus.entries()) {
+  test(`publication startup Unicode contract: ${JSON.stringify(item)}`, () => {
+    expect(runtimeResults.map((results) => results[index])).toEqual([
+      item.accepted,
+      item.accepted,
+      item.accepted,
+    ])
   })
 }

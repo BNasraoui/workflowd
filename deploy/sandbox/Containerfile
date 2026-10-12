@@ -13,7 +13,8 @@ RUN apt-get update \
     && mkdir -p /workspace/repository \
     && chown -R runner:runner /workspace
 COPY result.py /usr/local/lib/workflowd-result.py
-RUN chmod 0444 /usr/local/lib/workflowd-result.py
+COPY publication-unicode.json casefold.json /usr/local/lib/
+RUN chmod 0444 /usr/local/lib/workflowd-result.py /usr/local/lib/publication-unicode.json /usr/local/lib/casefold.json
 USER runner
 WORKDIR /workspace/repository
 ENV HOME=/home/runner
