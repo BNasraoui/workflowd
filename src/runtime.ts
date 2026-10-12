@@ -1,3 +1,4 @@
+import { configuredWebhookInstallations } from "./webhook-installations"
 import { AgentHarness } from "./agent-harness"
 import { GitHub } from "./github"
 import { Workspace } from "./workspace"
@@ -241,6 +242,7 @@ export function startHookService(
   config: AppConfig,
   observeWorkerIteration: (name: RuntimeWorkerName) => Effect.Effect<void> = () => Effect.void,
 ) {
+  const installationIds = configuredWebhookInstallations(config)
   const observed = <A extends string, E, R>(
     name: RuntimeWorkerName,
     iteration: Effect.Effect<A, E, R>,
@@ -508,6 +510,7 @@ export function startHookService(
             ...options,
             prAutomationEnabled: config.mode !== "execution",
             prRepositories: config.github?.prRepositories ?? [],
+            installationIds,
             ...(Option.isSome(ci) ? { ci: ci.value } : {}),
             ...(config.qrspi === undefined
               ? {}

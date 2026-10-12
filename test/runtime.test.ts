@@ -495,6 +495,18 @@ describe("runHookService startup", () => {
       ...loaded,
       http: { ...loaded.http, host: "127.0.0.1", port: 0 },
       worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
+      workerIdentity: {
+        directory: "/tmp/worker-identities",
+        socket: "/tmp/worker.sock",
+        policies: [
+          {
+            name: "worker",
+            repository: "worker/repo",
+            installationId: 92,
+            permissions: { contents: "read" as const },
+          },
+        ],
+      },
     }
 
     await Effect.runPromise(
@@ -519,6 +531,28 @@ describe("runHookService startup", () => {
             )
             expect(response.status).toBe(202)
             expect(yield* Effect.tryPromise(() => response.json())).toEqual(expected)
+          }
+
+          for (const [id, reason] of [
+            [92, "unsupported:push"],
+            [999, "installation-not-configured"],
+          ] as const) {
+            const response = yield* Effect.tryPromise(() =>
+              fetch(
+                signedRequest(
+                  "push",
+                  JSON.stringify({ installation: { id } }),
+                  `push-${id}`,
+                  "secret",
+                  url,
+                ),
+              ),
+            )
+            expect(response.status).toBe(202)
+            expect(yield* Effect.tryPromise(() => response.json())).toEqual({
+              status: "ignored",
+              reason,
+            })
           }
           const store = yield* WorkflowStore
           const claim = { workerId: "test", now: new Date(), leaseDurationMs: 60_000 }

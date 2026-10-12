@@ -1,3 +1,4 @@
+import { webhookInstallationId } from "./webhook-installations"
 import type { PrRepositories } from "./pr-automation-config"
 import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
@@ -58,6 +59,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 
 export type WebhookHandlerOptions = {
   readonly prAutomationEnabled?: boolean
+  readonly installationIds?: ReadonlySet<number>
   readonly prRepositories?: PrRepositories
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
@@ -545,6 +547,24 @@ export function handleGitHubWebhook(
       Effect.catch(() => Effect.succeed(Response.json({ error: "invalid JSON" }, { status: 400 }))),
     )
     if (payload instanceof Response) return payload
+
+    const installationId = webhookInstallationId(payload)
+    const configured =
+      installationId !== undefined &&
+      (options.installationIds?.has(installationId) ??
+        options.prRepositories?.some((r) => r.installationId === installationId) ??
+        false)
+    if (!configured) {
+      yield* Effect.logDebug({ deliveryId, installationId })
+      return Response.json(
+        {
+          status: "ignored",
+          reason:
+            installationId === undefined ? "missing-installation" : "installation-not-configured",
+        },
+        { status: 202 },
+      )
+    }
 
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")

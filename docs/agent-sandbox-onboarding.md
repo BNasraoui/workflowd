@@ -2,6 +2,18 @@
 
 This is the repository-maintained revision of the [approved onboarding runbook](https://gist.github.com/BNasraoui/867c7fc12ecc51478984c6a3dad97bcf#file-operator-runbook-md), updated for the coordinator-approved caller-level publisher. Existing operator settings must be inspected and preserved; these instructions do not mean they are absent or authorize workers to change them. Only Ben/the delegated operator applies these settings. Worker implementation stays on rpi/workflowd-d6g; this document also specifies the operator-owned onboarding changes in the target repository. Keep publishing disabled until all gates pass. Save returned rule/environment/installation IDs and full workflow pins in the bead; never record keys/tokens.
 
+## Public gate App prerequisite
+
+Before making `opencode-hooks` (App 4337845) public or installing it on `quality-sh/provenance`, the owner must deploy PR #81's early installation rejection and verify it. Set mint's effective environment to:
+
+```sh
+WORKFLOWD_PR_REPOSITORIES='[{"repository":"BNasraoui/workflowd","installationId":147573449}]'
+```
+
+Keep provenance out of this PR automation list: any outsider's PR could otherwise start a review. Add the new installation to the sandbox repository policy and the CI list only where required by those features. The webhook receiver verifies HMAC first, then checks the installation against the union of PR, CI, sandbox, worker identity, and QRSPI configs (resident inboxes use CI config). Unknown installations receive 202 ignored before full event decoding or database storage. Installation-free deliveries such as ping also receive 202 without persistence under the existing body-size limit. Known installations retain their feature-specific repository checks. No existing delivery pruning is added, and App permissions remain broad; a separate gate App would narrow them.
+
+After review and merge, the owner updates the deployment checkout, installs locked dependencies, restarts the coordinator, and verifies configured and unknown signed deliveries before changing App visibility. These are operator steps; workers must not change mint's running services or secrets.
+
 ## 1. Confirm repositories and publish reviewed workflows
 
 Read-only observations on 2026-10-07:
