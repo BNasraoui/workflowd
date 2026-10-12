@@ -84,6 +84,32 @@ const sixStageDefinition = {
   })),
 }
 
+function qrspiEnvironment(directory: string) {
+  return {
+    WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+    WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+    WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+    WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+    WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+    WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
+  }
+}
+
+function loadLayerConfig(directory: string, overrides: Record<string, string> = {}) {
+  return loadConfig(
+    {
+      GITHUB_APP_ID: "123",
+      WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+      GITHUB_PRIVATE_KEY_PATH: join(directory, "github.pem"),
+      GITHUB_WEBHOOK_SECRET: "secret",
+      OPENCODE_SERVER_PASSWORD: "password",
+      WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+      ...overrides,
+    },
+    { home: directory },
+  )
+}
+
 test.each([false, true])(
   "starts and restarts the full live layer with both kernel stores (sandbox %s)",
   async (sandbox) => {
@@ -93,49 +119,33 @@ test.each([false, true])(
       const databasePath = join(directory, "workflowd.db")
       const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
       await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-      const config = await loadConfig(
-        {
-          GITHUB_APP_ID: "123",
-          GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-          GITHUB_WEBHOOK_SECRET: "secret",
-          WORKFLOWD_PR_REPOSITORIES: JSON.stringify([
-            { repository: "example-owner/example", installationId: 91 },
-          ]),
-          OPENCODE_SERVER_PASSWORD: "password",
-          WORKFLOWD_DATABASE_PATH: databasePath,
-          WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-          WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-          WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-          WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-          WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-          WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-          WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-          WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-          WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
-          WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
-          WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
-          ...(sandbox
-            ? {
-                WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
-                  {
-                    alias: "workflowd",
-                    repository: "BNasraoui/workflowd",
-                    repositoryId: 1306107007,
-                    installationId: 147573449,
-                    workflowSha: "a".repeat(40),
-                    appActorId: 306741873,
-                    tailscaleClientId: "fixture",
-                    tailscaleAudience: "fixture",
-                  },
-                ]),
-              }
-            : {}),
-          WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
-          WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
-          OPENCODE_SERVER_URL: "http://127.0.0.1:1",
-        },
-        { home: directory },
-      )
+      const config = await loadLayerConfig(directory, {
+        WORKFLOWD_DATABASE_PATH: databasePath,
+        ...qrspiEnvironment(directory),
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+        WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+        WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+        WORKFLOWD_AGENT_RUN_REPOSITORIES: `workflowd=${directory}`,
+        ...(sandbox
+          ? {
+              WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+                {
+                  alias: "workflowd",
+                  repository: "BNasraoui/workflowd",
+                  repositoryId: 1306107007,
+                  installationId: 147573449,
+                  workflowSha: "a".repeat(40),
+                  appActorId: 306741873,
+                  tailscaleClientId: "fixture",
+                  tailscaleAudience: "fixture",
+                },
+              ]),
+            }
+          : {}),
+        WORKFLOWD_EXECUTION_CAPABILITIES_CODEX_ENABLED: "false",
+        WORKFLOWD_EXECUTION_CAPABILITIES_TIMEOUT_MS: "5",
+        OPENCODE_SERVER_URL: "http://127.0.0.1:1",
+      })
 
       const start = () =>
         Effect.runPromise(
@@ -206,24 +216,10 @@ test("composes the reusable agent harness with the live ports", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -259,24 +255,10 @@ test("composes the explicit six-contract catalog by default", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(sixStageDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(sixStageDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -301,17 +283,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory)
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -338,32 +310,18 @@ test("keeps unrelated services available when configured QRSPI is closed", async
     const privateKeyPath = join(directory, "github.pem")
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 })
     await writeFile(privateKeyPath, privateKey.export({ type: "pkcs8", format: "pem" }))
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
-          ...qrspiDefinition,
-          stages: [
-            {
-              ...qrspiDefinition.stages[0],
-              contract: { name: "qrspi.missing", contractVersion: 1 },
-            },
-          ],
-        }),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify({
+        ...qrspiDefinition,
+        stages: [
+          {
+            ...qrspiDefinition.stages[0],
+            contract: { name: "qrspi.missing", contractVersion: 1 },
+          },
+        ],
+      }),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
@@ -406,24 +364,11 @@ test("keeps unrelated services available when configured QRSPI is closed", async
 test("fails live composition when the configured GitHub key cannot be read", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflowd-layers-missing-key-"))
   try {
-    const config = await loadConfig(
-      {
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
-        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
-        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
-        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
-        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
-        WORKFLOWD_QRSPI_BEADS_WORKSPACE: directory,
-        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
-      },
-      { home: directory },
-    )
+    const config = await loadLayerConfig(directory, {
+      GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
+      ...qrspiEnvironment(directory),
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+    })
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
