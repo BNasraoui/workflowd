@@ -17,7 +17,7 @@ const passingReview: ReviewResult = {
 const requiredChecks = [
   { name: "Required checks", state: "success" as const },
   { name: "SonarCloud Code Analysis", state: "success" as const },
-  { name: "CodeQL (JavaScript/TypeScript)", state: "success" as const },
+  { name: "CodeQL PR policy", state: "success" as const },
 ]
 
 function evidence(overrides: Partial<HeadEvidence> = {}): HeadEvidence {

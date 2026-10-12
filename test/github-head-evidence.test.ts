@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { gateReviewWithHeadEvidence } from "../src/domain/head-evidence"
 import { collectHeadEvidence } from "../src/github/head-evidence"
 import type { GitHubInstallationAdapter } from "../src/github/adapter"
 
@@ -58,7 +59,7 @@ const requiredCheckRuns = [
   },
   {
     id: 103,
-    name: "CodeQL (JavaScript/TypeScript)",
+    name: "CodeQL PR policy",
     status: "completed",
     conclusion: "success",
     appId: 22,
@@ -165,6 +166,47 @@ function sonar(options?: {
 }
 
 describe("collectHeadEvidence", () => {
+  test.each([
+    ["skipped", "github-actions", 203, "pass"],
+    ["failure", "github-actions", 203, "changes_requested"],
+    ["skipped", "other-app", 203, "changes_requested"],
+    ["skipped", "github-actions", 999, "changes_requested"],
+  ] as const)(
+    "gates main-only CodeQL conclusion %s from %s suite %s",
+    async (conclusion, appSlug, checkSuiteId, verdict) => {
+      const evidence = await Effect.runPromise(
+        collectHeadEvidence({
+          client: github({
+            listCheckRunPages: () =>
+              onePage([
+                ...requiredCheckRuns,
+                {
+                  id: 104,
+                  name: "CodeQL (JavaScript/TypeScript)",
+                  status: "completed",
+                  conclusion,
+                  appSlug,
+                  checkSuiteId,
+                },
+              ]),
+          }),
+          repository: workflowdRepository,
+          pullRequestNumber: 7,
+          target,
+          workflowdAppId,
+          sonarRequest: sonar(),
+        }),
+      )
+
+      const review = { verdict: "pass", summary: "Ready", findings: [] } as const
+      expect(evidence.ci.state).toBe("available")
+      expect(gateReviewWithHeadEvidence(review, evidence)).toMatchObject({
+        _tag: "Ready",
+        review: { verdict },
+      })
+    },
+  )
+
   test("collects exact-head checks and public Sonar findings independently of check success", async () => {
     const evidence = await Effect.runPromise(
       collectHeadEvidence({
@@ -283,7 +325,7 @@ describe("collectHeadEvidence", () => {
 
     expect(evidence.ci).toMatchObject({
       state: "unavailable",
-      reason: "Missing required exact-head contexts: CodeQL (JavaScript/TypeScript).",
+      reason: "Missing required exact-head contexts: CodeQL PR policy.",
     })
   })
 
@@ -462,7 +504,7 @@ describe("collectHeadEvidence", () => {
     expect(evidence.ci).toMatchObject({
       state: "unavailable",
       reason:
-        "Missing required exact-head contexts: Required checks, SonarCloud Code Analysis, CodeQL (JavaScript/TypeScript).",
+        "Missing required exact-head contexts: Required checks, SonarCloud Code Analysis, CodeQL PR policy.",
     })
   })
 
@@ -487,8 +529,7 @@ describe("collectHeadEvidence", () => {
 
     expect(evidence.ci).toMatchObject({
       state: "unavailable",
-      reason:
-        "Missing required exact-head contexts: Required checks, CodeQL (JavaScript/TypeScript).",
+      reason: "Missing required exact-head contexts: Required checks, CodeQL PR policy.",
     })
   })
 
