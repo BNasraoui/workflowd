@@ -41,26 +41,30 @@ function request(event: string, installationId: number, repository: string) {
 }
 
 test.each([
-  ["pull_request", 999, "example-owner/example", repositories],
-  ["pull_request", 91, "foreign/repository", repositories],
-  ["pull_request", 91, "example-owner/second", repositories],
-  ["pull_request", 92, "example-owner/third", repositories],
-  ["issue_comment", 91, "foreign/repository", repositories],
-  ["issue_comment", 999, "example-owner/example", repositories],
-  ["pull_request", 91, "example-owner/example", []],
-  ["issue_comment", 91, "example-owner/example", undefined],
+  ["pull_request", 999, "example-owner/example", repositories, undefined],
+  ["pull_request", 91, "foreign/repository", repositories, undefined],
+  ["pull_request", 91, "example-owner/second", repositories, undefined],
+  ["pull_request", 92, "example-owner/third", repositories, undefined],
+  ["issue_comment", 91, "foreign/repository", repositories, undefined],
+  ["issue_comment", 999, "example-owner/example", repositories, undefined],
+  ["pull_request", 91, "example-owner/example", [], undefined],
+  ["issue_comment", 91, "example-owner/example", undefined, undefined],
+  ["pull_request", 999, "ci/repository", repositories, new Set([999])],
+  ["issue_comment", 999, "ci/repository", repositories, new Set([999])],
 ])(
   "ignores unconfigured %s from installation %s repository %s",
-  async (event, id, repo, allowed) => {
+  async (event, id, repo, allowed, installationIds) => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const options = {
           webhookSecret: "secret",
           now,
           ...(allowed === undefined ? {} : { prRepositories: allowed }),
+          ...(installationIds === undefined ? {} : { installationIds }),
         }
         const response = yield* handleGitHubWebhook(request(event, id, repo), options)
-        const installationConfigured = allowed?.some((r) => r.installationId === id) ?? false
+        const installationConfigured =
+          installationIds?.has(id) ?? allowed?.some((r) => r.installationId === id) ?? false
         const ignored = {
           status: "ignored",
           reason: installationConfigured
