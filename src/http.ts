@@ -74,6 +74,14 @@ export type WebhookHandlerOptions = {
   }
 }
 
+function healthResponse(guard: WebhookHandlerOptions["installationGuard"]) {
+  return guard === undefined
+    ? Effect.succeed(Response.json({ status: "ok" }))
+    : guard
+        .health()
+        .pipe(Effect.map((installationGuard) => Response.json({ status: "ok", installationGuard })))
+}
+
 export function routeRequest(
   request: Request,
   options: WebhookHandlerOptions,
@@ -96,13 +104,7 @@ export function routeRequest(
     )
   }
   if (pathname === "/health" && request.method === "GET") {
-    return options.installationGuard === undefined
-      ? Effect.succeed(Response.json({ status: "ok" }))
-      : options.installationGuard
-          .health()
-          .pipe(
-            Effect.map((installationGuard) => Response.json({ status: "ok", installationGuard })),
-          )
+    return healthResponse(options.installationGuard)
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
     return options.prAutomationEnabled === false
