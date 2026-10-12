@@ -33,7 +33,7 @@ jobs:
       contents: read
     steps:
       - name: Publish validated agent result
-        uses: BNasraoui/workflowd/.github/actions/agent-publish@2023f16fe705a4c9ab763c405e6e9b2dee7be064
+        uses: BNasraoui/workflowd/.github/actions/agent-publish@248846d65ba099684df73c0bdb0a7a6392647539
         with:
           github-token: ${{ github.token }}
           gate-actor-id: "306741873"
