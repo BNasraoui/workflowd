@@ -21,6 +21,8 @@ import { RemoteCoordinator } from "./remote/coordinator"
 import type { RemoteCoordinatorError } from "./remote/coordinator-store"
 import type { RemoteTransportError } from "./remote/transport"
 import { Automation } from "./opencode"
+import { SandboxDispatch } from "./sandbox/dispatch"
+import type { SandboxError } from "./sandbox/store"
 import {
   runCommandIteration,
   runJobIteration,
@@ -261,6 +263,7 @@ export function startHookService(
         new Error("ExecutionDiscovery is required when capability discovery is configured"),
       )
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const sandbox = yield* Effect.serviceOption(SandboxDispatch)
     const dogfood = yield* Effect.serviceOption(DogfoodStore)
     const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
     const resumeWorker = yield* Effect.serviceOption(OpenCodeResumeWorker)
@@ -387,6 +390,29 @@ export function startHookService(
         60_000,
         "agent-run",
         observed("agent-run", agentRunWatchdog.value.iteration),
+      )
+    }
+    if (Option.isSome(sandbox)) {
+      const superviseSandbox = (operation: Effect.Effect<void, SandboxError>) =>
+        operation.pipe(
+          Effect.as("worked" as const),
+          Effect.catch(() =>
+            Effect.logError("Sandbox reconciliation failed; saved custody retained").pipe(
+              Effect.as("idle" as const),
+            ),
+          ),
+        )
+      yield* superviseWorker(
+        "Sandbox heartbeat",
+        30_000,
+        "agent-run",
+        superviseSandbox(sandbox.value.heartbeat),
+      )
+      yield* superviseWorker(
+        "Sandbox reconciliation",
+        30_000,
+        "agent-run",
+        superviseSandbox(sandbox.value.iteration),
       )
     }
 

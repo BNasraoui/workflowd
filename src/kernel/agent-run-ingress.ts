@@ -1,4 +1,7 @@
+import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
+import type { SandboxPolicy } from "../sandbox/config"
+import { SandboxDispatch } from "../sandbox/dispatch"
 import { ExecutionDiscovery } from "../execution-capabilities"
 import {
   resolveExecutionSelection,
@@ -121,6 +124,7 @@ export const AgentRunProvider = Context.Service<AgentRunProviderPort>(
 )
 
 export type AgentRunIngressOptions = {
+  readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly routes: ReadonlyArray<AgentRunRoute>
   /** Codex CLI routes, resolved after `routes` and refused ambiguous when a
    * name or bare model id is served by both providers. */
@@ -256,6 +260,11 @@ const choiceForSelection = (
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
+    const sandbox = Option.getOrUndefined(yield* Effect.serviceOption(SandboxDispatch))
+    const requiresSandbox = (repository: string) =>
+      options.sandboxRepositories?.some((policy) => policy.alias === repository) ?? false
+    const sandboxFailure = (cause: unknown) =>
+      refuse("executor_unavailable", sandboxDiagnostic("ingress.custody", cause).message)
     const sessions = yield* KernelSessionStore
     const providerOption = yield* Effect.serviceOption(AgentRunProvider)
     const provider = Option.getOrUndefined(providerOption)
@@ -369,33 +378,50 @@ const make = (options: AgentRunIngressOptions) =>
         }
         if (run.state === "accepted" || nativeSessionId === null) {
           yield* store.claimSpawn({ runId: run.runId, now })
-          yield* createAgentRunWorktree(worktrees, {
-            repository: target.repositoryDirectory,
-            directory: run.directory,
-            branch: `agent-run/${target.short}`,
-            ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
-          })
+          const isolated = requiresSandbox(run.repository)
+          if (!isolated)
+            yield* createAgentRunWorktree(worktrees, {
+              repository: target.repositoryDirectory,
+              directory: run.directory,
+              branch: `agent-run/${target.short}`,
+              ...(run.baseRef == null ? {} : { base: `origin/${run.baseRef}` }),
+            })
           // Custody for the worktree is registered before the session is
           // created so the external-effect window holds as little
           // unrecorded state as possible.
           const resourceId = yield* ensureResource({
             resourceId: target.resourceId,
             absolutePath: run.directory,
-            kind: "worktree",
+            kind: isolated ? "workspace" : "worktree",
             createdAt: run.createdAt,
           })
-          const session = yield* provider.createSession({
-            directory: run.directory,
-            title: `workflowd ${run.runId}`,
-            agent: run.agent,
-            model: {
-              providerID: route.providerID,
-              modelID: route.modelID,
-              ...(run.resolvedSelection?.thinking.variant === undefined
-                ? {}
-                : { variant: run.resolvedSelection.thinking.variant }),
-            },
-          })
+          const sandboxSession =
+            isolated && sandbox !== undefined
+              ? yield* sandbox
+                  .launch(run, {
+                    providerID: route.providerID,
+                    modelID: route.modelID,
+                    ...(run.resolvedSelection?.thinking.variant === undefined
+                      ? {}
+                      : { variant: run.resolvedSelection.thinking.variant }),
+                  })
+                  .pipe(Effect.mapError(sandboxFailure))
+              : undefined
+          const session =
+            sandboxSession === undefined
+              ? yield* provider.createSession({
+                  directory: run.directory,
+                  title: `workflowd ${run.runId}`,
+                  agent: run.agent,
+                  model: {
+                    providerID: route.providerID,
+                    modelID: route.modelID,
+                    ...(run.resolvedSelection?.thinking.variant === undefined
+                      ? {}
+                      : { variant: run.resolvedSelection.thinking.variant }),
+                  },
+                })
+              : { id: sandboxSession.nativeSessionId }
           nativeSessionId = session.id
           const sessionId = yield* ensureSession({
             nativeSessionId,
@@ -409,19 +435,21 @@ const make = (options: AgentRunIngressOptions) =>
             nativeSessionId,
             now,
           })
-          const mailboxInstructions = Option.isSome(mailbox)
-            ? yield* mailbox.value
-                .prepare(run.runId)
-                .pipe(
-                  Effect.mapError(
-                    (cause) => new WorkspaceError({ operation: "prepare OpenCode mailbox", cause }),
-                  ),
-                )
-            : ""
+          const mailboxInstructions =
+            !isolated && Option.isSome(mailbox)
+              ? yield* mailbox.value
+                  .prepare(run.runId)
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new WorkspaceError({ operation: "prepare OpenCode mailbox", cause }),
+                    ),
+                  )
+              : ""
           yield* provider.promptSession({
             sessionID: nativeSessionId,
             directory: run.directory,
-            agent: run.agent,
+            agent: isolated ? "sandbox" : run.agent,
             model: {
               providerID: route.providerID,
               modelID: route.modelID,
@@ -429,11 +457,22 @@ const make = (options: AgentRunIngressOptions) =>
                 ? {}
                 : { variant: run.resolvedSelection.thinking.variant }),
             },
-            text: `${mailboxInstructions}\n\n${yield* workerPrompt(run)}`.trim(),
+            text: isolated
+              ? run.prompt
+              : `${mailboxInstructions}\n\n${yield* workerPrompt(run)}`.trim(),
           })
         }
         const outputTokens = yield* verifyFirstToken(nativeSessionId)
         if (outputTokens === null) {
+          if (requiresSandbox(run.repository) && sandbox !== undefined) {
+            const current = yield* store.read(run.runId)
+            if (current !== null)
+              yield* sandbox.cancel(current).pipe(Effect.mapError(sandboxFailure))
+            return yield* refuse(
+              "no_first_token",
+              "Sandbox generated no tokens before the verification deadline; release is pending confirmation",
+            )
+          }
           yield* provider
             .abortSession({ sessionID: nativeSessionId, directory: run.directory })
             .pipe(Effect.ignore)
@@ -455,6 +494,7 @@ const make = (options: AgentRunIngressOptions) =>
 
     const codexRuns = makeAgentRunCliDispatcher({
       cli: codex,
+      ...(sandbox === undefined ? {} : { sandbox }),
       executor: {
         kind: "codex",
         sessionCustodyId: codexSessionCustodyId,
@@ -475,6 +515,7 @@ const make = (options: AgentRunIngressOptions) =>
         ? undefined
         : makeAgentRunCliDispatcher({
             cli: claudeDispatch,
+            ...(sandbox === undefined ? {} : { sandbox }),
             executor: {
               kind: "claude",
               sessionCustodyId: claudeSessionCustodyId,
@@ -659,8 +700,11 @@ const make = (options: AgentRunIngressOptions) =>
           const catalog = yield* discovery.value
             .list()
             .pipe(
-              Effect.mapError(() =>
-                refuse("executor_unavailable", "Capability discovery unavailable"),
+              Effect.mapError((cause) =>
+                refuse(
+                  "executor_unavailable",
+                  sandboxDiagnostic("ingress.capabilities", cause).message,
+                ),
               ),
             )
           const selected = resolveExecutionSelection(catalog, requested)
@@ -715,8 +759,11 @@ const make = (options: AgentRunIngressOptions) =>
               const catalog = yield* discovery.value
                 .list()
                 .pipe(
-                  Effect.mapError(() =>
-                    refuse("executor_unavailable", "Capability discovery unavailable"),
+                  Effect.mapError((cause) =>
+                    refuse(
+                      "executor_unavailable",
+                      sandboxDiagnostic("ingress.capabilities", cause).message,
+                    ),
                   ),
                 )
               const selected = resolveExecutionSelection(catalog, {
@@ -742,6 +789,13 @@ const make = (options: AgentRunIngressOptions) =>
             "unknown_repository",
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
+        }
+        if (options.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
+          if (sandbox === undefined)
+            return yield* refuse(
+              "executor_unavailable",
+              "The required repository sandbox is unavailable",
+            )
         }
         if (keyed !== null && keyed.state !== "accepted") {
           // Already-launched duplicates need no fresh launch preflight.
@@ -809,7 +863,7 @@ const make = (options: AgentRunIngressOptions) =>
           executorKind: selection.executorKind,
           requestedSelection: requested,
           resolvedSelection: selection,
-          agent: options.agent,
+          agent: requiresSandbox(repository.name) ? "sandbox" : options.agent,
           repository: repository.name,
           baseRef: submission.baseRef ?? null,
           directory: join(options.worktreeRoot, "agent-runs", identifiers.short),
@@ -872,6 +926,17 @@ const make = (options: AgentRunIngressOptions) =>
                 short: identifiers.short,
               },
               now,
+            ).pipe(
+              Effect.onError(() =>
+                requiresSandbox(run.repository) && sandbox !== undefined
+                  ? store.read(run.runId).pipe(
+                      Effect.flatMap((current) =>
+                        current === null ? Effect.void : sandbox.cancel(current),
+                      ),
+                      Effect.ignore,
+                    )
+                  : Effect.void,
+              ),
             ),
           )
         }
@@ -912,6 +977,13 @@ const make = (options: AgentRunIngressOptions) =>
         if (run === null) return yield* refuse("run_conflict", `run ${runId} does not exist`)
         if (run.state === "completed" || run.state === "cancelled" || run.state === "failed") {
           return yield* refuse("run_conflict", `run ${runId} is already ${run.state}`)
+        }
+        if (
+          sandbox !== undefined &&
+          (yield* sandbox.owns(runId).pipe(Effect.mapError(sandboxFailure)))
+        ) {
+          yield* sandbox.cancel(run).pipe(Effect.mapError(sandboxFailure))
+          return
         }
         if (agentRunExecutorKind(run) === "codex") {
           yield* codexRuns.cancel(run, now)

@@ -1,7 +1,8 @@
 import { parseCodexWorkerArguments, runCliWorker, type CliWorkerOptions } from "./codex-worker"
+import { nativeSandboxArguments } from "../sandbox/native"
 
 /** Claude Code uses its own local subscription credentials and persisted sessions. */
-export const runClaudeWorker = (options: CliWorkerOptions): Promise<number> =>
+export const runClaudeWorker = async (options: CliWorkerOptions): Promise<number> =>
   runCliWorker(options, [
     options.binary,
     "--print",
@@ -9,7 +10,14 @@ export const runClaudeWorker = (options: CliWorkerOptions): Promise<number> =>
     "stream-json",
     "--verbose",
     "--include-partial-messages",
-    "--dangerously-skip-permissions",
+    ...(options.sandboxBindingFile === undefined
+      ? ["--dangerously-skip-permissions"]
+      : await nativeSandboxArguments(
+          "claude",
+          options.binary,
+          options.directory,
+          options.sandboxBindingFile,
+        )),
     ...(options.model === null ? [] : ["--model", options.model]),
     ...(options.effort === undefined ? [] : ["--effort", options.effort]),
   ])
