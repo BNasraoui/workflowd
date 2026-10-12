@@ -35,6 +35,7 @@ export type CliSpawnInput = {
   readonly model: string | null
   readonly provider?: string | null
   readonly effort?: string
+  readonly sandboxBindingFile?: string
 }
 
 type CliCommon = {
@@ -48,6 +49,7 @@ export type CliPort = CliCommon &
   (
     | {
         readonly ownership: "transient-exec"
+        readonly executionId?: (runId: string) => string
         readonly attach: (input: {
           readonly runId: string
         }) => Effect.Effect<CliRunProcess | null, WorkspaceError>

@@ -1,4 +1,5 @@
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
+import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
 import {
   loadOpenCodeResidentSocket,
   loadResidentConfig,
@@ -103,6 +104,7 @@ export interface QrspiConfig {
 }
 
 export interface AgentRunConfig {
+  readonly sandboxRepositories?: ReadonlyArray<SandboxPolicy>
   readonly token: string
   readonly claudeBinary: string
   readonly claudeHosts: ReadonlyArray<string>
@@ -398,7 +400,8 @@ function loadAgentRunConfig(
     if (
       env.WORKFLOWD_AGENT_RUN_ROUTES !== undefined ||
       env.WORKFLOWD_AGENT_RUN_CODEX_ROUTES !== undefined ||
-      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined
+      env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES !== undefined ||
+      env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES !== undefined
     ) {
       throw new Error("WORKFLOWD_AGENT_RUN_TOKEN is required when agent-run settings are present")
     }
@@ -412,7 +415,16 @@ function loadAgentRunConfig(
   if (remoteTurnTimeoutMs < 10_000 || remoteTurnTimeoutMs > 600_000) {
     throw new Error("WORKFLOWD_AGENT_RUN_REMOTE_TURN_TIMEOUT_MS must be between 10000 and 600000")
   }
+  const repositories = parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES"))
+  const sandboxRepositories = parseSandboxRepositories(env.WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES)
+  if (
+    sandboxRepositories.some(
+      (policy) => !repositories.some((repository) => repository.name === policy.alias),
+    )
+  )
+    throw new Error("Unknown sandbox alias")
   return {
+    ...(sandboxRepositories.length === 0 ? {} : { sandboxRepositories }),
     token,
     claudeBinary: env.WORKFLOWD_AGENT_RUN_CLAUDE_BIN ?? "claude",
     claudeHosts:
@@ -438,7 +450,7 @@ function loadAgentRunConfig(
       env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES === undefined
         ? []
         : parseAgentRunClaudeRoutes(env.WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES),
-    repositories: parseAgentRunRepositories(required(env, "WORKFLOWD_AGENT_RUN_REPOSITORIES")),
+    repositories,
     agent: agentId(env.WORKFLOWD_AGENT_RUN_AGENT ?? "build", "WORKFLOWD_AGENT_RUN_AGENT"),
     verifyTimeoutMs: positiveInteger(
       env.WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS,

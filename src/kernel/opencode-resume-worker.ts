@@ -66,7 +66,12 @@ export class OpenCodeResumeAdapter implements OpenCodeResumeProviderPort {
     Effect.runPromise(
       this.adapter
         .sessionTelemetry({ sessionID: input.sessionID })
-        .pipe(Effect.map((telemetry) => telemetry !== undefined && telemetry.idle)),
+        .pipe(
+          Effect.map(
+            (telemetry) =>
+              telemetry !== undefined && telemetry.idle && telemetry.outcome !== undefined,
+          ),
+        ),
       { signal },
     )
 
@@ -277,8 +282,13 @@ const validateCustody = (
     return { directory: resource.absolute_path, nativeSessionId: session.native_session_id }
   })
 
-const waitForAnswer = (events: AsyncIterable<OpenCodeSessionEvent>, sessionID: string) =>
-  providerCall("observe OpenCode session events", async () => {
+const waitForAnswer = (
+  events: AsyncIterable<OpenCodeSessionEvent>,
+  provider: OpenCodeResumeProviderPort,
+  reference: { readonly sessionID: string; readonly directory: string },
+) =>
+  providerCall("observe OpenCode session events", async (signal) => {
+    const { sessionID } = reference
     for await (const event of events) {
       if (
         event.type === "message.updated" &&
@@ -286,6 +296,15 @@ const waitForAnswer = (events: AsyncIterable<OpenCodeSessionEvent>, sessionID: s
         event.message.time.completed !== undefined
       ) {
         if (event.message.error !== undefined) throw new Error("OpenCode session failed")
+        // A completed message may be a tool step in an active OpenCode 2 turn.
+        if (await provider.sessionFinished(reference, signal)) return
+      }
+      if (
+        event.type === "session.status" &&
+        event.sessionID === sessionID &&
+        event.status.type === "idle" &&
+        (await provider.sessionFinished(reference, signal))
+      ) {
         return
       }
       if (event.type === "session.error" && (event.sessionID ?? sessionID) === sessionID) {
@@ -580,7 +599,7 @@ export const runOpenCodeResumeIteration = (options: OpenCodeResumeWorkerOptions)
             signal,
           ),
         )
-        yield* waitForAnswer(events, custody.nativeSessionId)
+        yield* waitForAnswer(events, provider, reference)
         return yield* providerCall("extract OpenCode resume output", (signal) =>
           provider.generate({ ...reference, jsonSchema: contract.jsonSchema }, signal),
         )

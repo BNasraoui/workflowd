@@ -9,6 +9,7 @@ import {
   runOpenCodeResumeIteration,
   type OpenCodeResumeProviderPort,
 } from "../../src/kernel/opencode-resume-worker"
+import type { OpenCodeSessionTelemetry } from "../../src/opencode/adapter"
 import { runSessionKernel } from "./session-store-harness"
 
 const startedAt = new Date("2026-08-14T08:00:00.000Z")
@@ -77,8 +78,9 @@ const options = {
 }
 
 describe("OpenCode local resume worker", () => {
-  test("adapts the saved prompt to OpenCode promptAsync without changing its text", async () => {
+  test("preserves saved prompt text and requires an idle session with an outcome", async () => {
     let prompted: unknown
+    let telemetry: OpenCodeSessionTelemetry | undefined
     const adapter = new OpenCodeResumeAdapter({
       createSession: () => Effect.succeed({ id: "unused" }),
       promptSession: (input) =>
@@ -94,7 +96,7 @@ describe("OpenCode local resume worker", () => {
       generateStructured: () => Effect.succeed(null),
       listProviders: () => Effect.succeed([]),
       listModels: () => Effect.succeed([]),
-      sessionTelemetry: () => Effect.succeed(undefined),
+      sessionTelemetry: () => Effect.succeed(telemetry),
     })
 
     await adapter.promptAsync(
@@ -108,12 +110,76 @@ describe("OpenCode local resume worker", () => {
       new AbortController().signal,
     )
 
+    const reference = { sessionID: "ses_exact", directory }
+    const signal = new AbortController().signal
+    expect(await adapter.sessionFinished(reference, signal)).toBe(false)
+    for (const idle of [false, true]) {
+      for (const outcome of [undefined, "succeeded", "failed", "interrupted"] as const) {
+        telemetry = {
+          directory,
+          outputTokens: 7,
+          updatedAtMs: 1,
+          idle,
+          ...(outcome === undefined ? {} : { outcome }),
+        }
+        expect(await adapter.sessionFinished(reference, signal)).toBe(idle && outcome !== undefined)
+      }
+    }
+
     expect(prompted).toMatchObject({
       sessionID: "ses_exact",
       agent: "resume-agent",
       text: '{"task":"continue exactly"}',
     })
   })
+
+  test.each(["message", "idle"] as const)(
+    "waits for the resumed run to finish before extraction on %s",
+    async (terminalEvent) => {
+      let finished = false
+      let generated = false
+      const message = { role: "assistant" as const, time: { created: 1, completed: 2 } }
+      const provider: OpenCodeResumeProviderPort = {
+        sessionExists: async () => true,
+        sessionFinished: async () => finished,
+        listMessages: async () => [],
+        promptAsync: async () => undefined,
+        subscribeEvents: async () =>
+          (async function* () {
+            for (let step = 0; step < 7; step += 1) {
+              yield { type: "message.updated" as const, sessionID: "ses_exact", message }
+              expect(generated).toBe(false)
+            }
+            finished = true
+            if (terminalEvent === "message") {
+              yield { type: "message.updated" as const, sessionID: "ses_exact", message }
+            } else {
+              yield {
+                type: "session.status" as const,
+                sessionID: "ses_exact",
+                status: { type: "idle" as const },
+              }
+            }
+          })(),
+        generate: async () => {
+          expect(finished).toBe(true)
+          generated = true
+          return { answer: "done" }
+        },
+      }
+      const result = await runSessionKernel(
+        ":memory:",
+        Effect.gen(function* () {
+          yield* registerRequest
+          return yield* runOpenCodeResumeIteration(options).pipe(
+            Effect.provideService(OpenCodeResumeProvider, provider),
+          )
+        }),
+      )
+      expect(result.status).toBe("completed")
+      expect(generated).toBe(true)
+    },
+  )
 
   test("retries safely when the first worker crashes before the durable sent fence", async () => {
     let prompts = 0

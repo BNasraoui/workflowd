@@ -1,0 +1,20 @@
+FROM ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       ca-certificates curl git python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL --proto '=https' --proto-redir '=https' \
+       https://github.com/dagger/container-use/releases/download/v0.4.2/container-use_v0.4.2_linux_amd64.tar.gz -o /tmp/cu.tgz \
+    && echo '3fa52b5833ae4aed2be4b86f7cf42671fdf4bca8c211fe5fff08cc19553d409b  /tmp/cu.tgz' | sha256sum -c - \
+    && tar -xzf /tmp/cu.tgz -C /usr/local/bin container-use && rm -f /tmp/cu.tgz \
+    && git config --system user.name workflowd-sandbox \
+    && git config --system user.email sandbox@workflowd.invalid \
+    && useradd -m runner \
+    && mkdir -p /workspace/repository \
+    && chown -R runner:runner /workspace
+COPY result.py /usr/local/lib/workflowd-result.py
+USER runner
+WORKDIR /workspace/repository
+ENV HOME=/home/runner
+ENV _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234
+CMD ["sleep", "infinity"]

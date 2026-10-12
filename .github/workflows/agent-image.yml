@@ -10,17 +10,33 @@ jobs:
     name: Agent image build and container-use E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions:
-      contents: read
+    permissions: {}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+      - name: Anonymous checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+          git init .
+          git remote add origin https://github.com/BNasraoui/workflowd.git
+          git -c credential.helper= -c http.extraHeader= fetch --no-tags origin "$HEAD_SHA" "$BASE_SHA"
+          git checkout --detach "$HEAD_SHA"
+      - name: Install pinned Nix without credentials
+        env:
+          INPUT_ENABLE_KVM: "true"
+          INPUT_SET_AS_TRUSTED_USER: "true"
+          INPUT_INSTALL_OPTIONS: ""
+          INPUT_EXTRA_NIX_CONFIG: experimental-features = nix-command flakes
+        run: |
+          set -euo pipefail
+          installer="$RUNNER_TEMP/install-nix.sh"
+          curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/cachix/install-nix-action/13d8dd58da0234aa297dedd986986ccb8e7f3e24/install-nix.sh -o "$installer"
+          echo "836671507d9b4ea84252f968bd0622c5c2fa72f5deea93f5764f1c60821062f6  $installer" | sha256sum -c -
+          env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN bash "$installer"
       - name: Build locked image and verify deterministic streaming
         run: |
           nix build .#agent-image --no-update-lock-file
@@ -40,6 +56,7 @@ jobs:
             printf 'Compressed archive: %s bytes\n' "$(stat -c %s agent-image.tar.gz)"
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Save tested image for publication
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agent-image

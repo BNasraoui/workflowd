@@ -4,14 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   schedule:
     - cron: "23 4 * * 1"
 
 permissions: {}
 
 jobs:
+  pr-policy:
+    name: CodeQL PR policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Explain scan boundary
+        run: echo 'CodeQL scanning waits for reviewed main; this PR job runs without checkout or credentials.'
   analyze:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')
     name: CodeQL (JavaScript/TypeScript)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -20,13 +29,14 @@ jobs:
       security-events: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
         with:
           languages: javascript-typescript
           build-mode: none
       - name: Analyze
-        uses: github/codeql-action/analyze@v4
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
