@@ -157,7 +157,7 @@ for (const tracked of [false, true]) {
     const directory = await mkdtemp(join(tmpdir(), "sandbox-image-"))
     const bin = join(directory, "bin")
     const repo = join(directory, "repo")
-    const image = `ghcr.io/bnasraoui/workflowd-agent-base:${"a".repeat(40)}`
+    const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"a".repeat(64)}`
     try {
       await mkdir(bin)
       await mkdir(repo)
@@ -182,19 +182,59 @@ for (const tracked of [false, true]) {
         source.indexOf("configure_image() {"),
         source.indexOf('\ncase "${1:-}"'),
       )
-      const child = Bun.spawn(["bash", "-c", helper + '\nconfigure_image "$1"', "_", image], {
-        cwd: repo,
-        env: { PATH: `${bin}:/usr/bin:/bin` },
-        stdout: "pipe",
-        stderr: "pipe",
-      })
+      const child = Bun.spawn(
+        ["bash", "-c", helper + '\nconfigure_image "$1"\nconfigure_image "$1"', "_", image],
+        {
+          cwd: repo,
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
       expect(await child.exited).toBe(0)
       expect(await Bun.file(join(repo, ".container-use/environment.json")).text()).toBe(image)
       expect(await command(["git", "status", "--porcelain"], repo)).toBe("")
       expect(await command(["git", "rev-parse", "HEAD"], repo)).toBe(head)
-      expect(source).toContain(
-        "'ghcr.io/bnasraoui/workflowd-agent-base:' + expected['job_workflow_sha']",
-      )
+      expect(source).toContain("os.environ['SANDBOX_AGENT_IMAGE']")
+      if (!tracked)
+        expect(
+          (await Bun.file(join(repo, ".git/info/exclude")).text()).split(
+            "/.container-use/environment.json",
+          ),
+        ).toHaveLength(2)
+      for (const bad of [
+        "ubuntu:24.04",
+        `ghcr.io/bnasraoui/workflowd-agent-base:${"a".repeat(40)}`,
+        image + "extra",
+        image + "\n",
+        image.replace("bnasraoui", "other"),
+      ]) {
+        const unsafe = Bun.spawn(["bash", "-c", helper + '\nconfigure_image "$1"', "_", bad], {
+          cwd: repo,
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+          stderr: "pipe",
+        })
+        expect(await unsafe.exited).not.toBe(0)
+      }
+      const { symlink } = await import("node:fs/promises")
+      for (const path of [".container-use/environment.json", ".container-use"]) {
+        await rm(join(repo, path), { recursive: true, force: true })
+        const target = join(
+          directory,
+          path.endsWith(".json") ? "outside-file" : "outside-directory",
+        )
+        if (!path.endsWith(".json")) await mkdir(target)
+        const protectedFile = path.endsWith(".json") ? target : join(target, "environment.json")
+        await writeFile(protectedFile, "untouched")
+        await symlink(target, join(repo, path))
+        const unsafe = Bun.spawn(["bash", "-c", helper + '\nconfigure_image "$1"', "_", image], {
+          cwd: repo,
+          env: { PATH: `${bin}:/usr/bin:/bin` },
+          stderr: "pipe",
+        })
+        expect(await unsafe.exited).not.toBe(0)
+        expect(await Bun.file(protectedFile).text()).toBe("untouched")
+      }
       expect(source).toContain('configure_image "$(cat /run/workflowd-sandbox/agent-image)"')
     } finally {
       await rm(directory, { recursive: true, force: true })

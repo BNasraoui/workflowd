@@ -13,6 +13,7 @@ RUN apt-get update \
     && mkdir -p /workspace/repository \
     && chown -R runner:runner /workspace
 COPY result.py /usr/local/lib/workflowd-result.py
+RUN chmod 0444 /usr/local/lib/workflowd-result.py
 USER runner
 WORKDIR /workspace/repository
 ENV HOME=/home/runner

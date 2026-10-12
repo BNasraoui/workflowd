@@ -3,6 +3,9 @@ name: Disposable agent runner
 on:
   workflow_call:
     inputs:
+      agent-image:
+        type: string
+        required: true
       tooling-sha:
         type: string
         required: false
@@ -59,6 +62,7 @@ jobs:
         run: sudo tailscale set --accept-routes=false
       - name: Prepare the disposable tooling
         env:
+          SANDBOX_AGENT_IMAGE: ${{ inputs.agent-image }}
           SANDBOX_TOOLING_SHA: ${{ inputs.tooling-sha || github.sha }}
           SANDBOX_AUDIENCE: ${{ inputs.tailscale-audience }}
         run: bash deploy/sandbox/runner.sh prepare

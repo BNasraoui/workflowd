@@ -8,8 +8,8 @@ import { command } from "./harness"
 
 const wording = {
   body: "## Result\n\nReadable agent description.",
-  title: "Title 雪 '$()'",
-  commitMessage: "Message 雪 $()\n\nDetails\n",
+  title: "Title 雪",
+  commitMessage: "Message 雪\n\n```sh\necho $VALUE\n```\n",
 }
 const script = resolve("deploy/sandbox/result.py")
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")

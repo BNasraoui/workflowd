@@ -39,6 +39,7 @@ export const PublicationReceipt = Schema.Struct({
   commitSha: Schema.NullOr(sha),
   pr: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
   revoked: Schema.Boolean,
+  closingIssuesVerified: Schema.optionalKey(Schema.Boolean),
   cause: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
 })
 export const PublishIntent = Schema.Struct({

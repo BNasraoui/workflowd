@@ -227,9 +227,8 @@ whitespace) from the agent message, trims trailing whitespace,
 and appends exactly one `Co-authored-by: Ben Nasraoui <81005232+BNasraoui@users.noreply.github.com>`
 after a blank line. Agent text cannot suppress or replace the configured trailer. Publisher readback, controller recovery
 and live evidence verify the complete composed message. The agent's original message
-continues to bind the artifact/approval. The PR body encloses it in a code fence longer
-than any backtick run in the message, so agent Markdown cannot escape. Submission and
-publisher validation reject Unicode `Cf` formatting/bidi controls in titles and messages.
+continues to bind the artifact/approval. The PR body uses the separately sealed Markdown body.
+Submission and publisher validation apply the publication text policy below to all three fields.
 See the [onboarding runbook](agent-sandbox-onboarding.md)
 for the paired per-repository settings and policy upgrade at re-pin.
 
@@ -350,3 +349,13 @@ approved onboarding and an appropriate task before their gate can run. The broad
 D3 plan still requires a separately authorized provenance receipt and independent
 Claude security review before merge. No GitHub settings, rulesets or secrets are
 changed by the verifier.
+
+## Publication text policy
+
+Title, commitMessage and body use the same safety rules in the controller, Python sealer, and publisher; the shared corpus in `test/sandbox/publication-corpus.ts` exercises all three. Character references, control/format/default-ignorable characters (including ZWJ and variation selectors), blank braille and link reference definitions are rejected everywhere. LF remains allowed in message/body. Closing issue references are rejected after NFKC and full case folding and removal of Markdown punctuation, including inside code. The matcher requires a non-letter boundary, a closing keyword, a colon or whitespace, then an issue reference. Ordinary prose such as “this fixes the race” and words with a letter prefix such as “hotfix” are allowed.
+
+Literal less-than signs, at signs and dollar signs are allowed only inside strict column-zero fences preceded by a blank line or the start of the field. Fences must have at least three identical backticks or tildes and an exact matching closing line. Indented, nested, mismatched, unclosed or unsupported-language fences fail closed. The info string is empty or one of text, diff, ts, typescript, tsx, js, json, sh, bash, python, rust, go, sql, yaml, toml. Inline code offers no exception. No math, Mermaid, GeoJSON, TopoJSON or STL fences are accepted.
+
+After PR creation (including recovery of a lost POST reply), the publisher queries GitHub's `closingIssuesReferences { totalCount }`. A nonzero count or unverifiable reply causes a PR closure attempt and a failed job with a bounded diagnostic retained in workflowd's receipt. Closure failure remains visible and requires operator action. After a zero count, the publisher durably records `closingIssuesVerified: true` before final commit readback. Controller recovery requires that proof in the trusted job receipt before adopting an already-created PR, including when the final receipt was lost. It uses the same immutable metadata/commit checks and does not require new App permissions. A receipt without verification proof requires operator intervention. See [GitHub's field definition](https://docs.github.com/en/graphql/reference/pulls). Normal recovery requires a zero count.
+
+The runner's base image is the required operator-recorded `agentImage` digest in the lease policy. See [digest discovery and rollout](agent-sandbox-onboarding.md#recording-the-agent-image-digest). Repository skills are read through the environment at `/workdir/.agents/skills` and `/workdir/.claude/skills` when present, alongside the pinned `/opt/workflowd/skills` set. Upstream skill revisions remain unchanged; Nix fetches unpacked content with `fetchFromGitHub` hashes.

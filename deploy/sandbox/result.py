@@ -50,20 +50,51 @@ def git(repo, *args):
         return output.read()
 
 
+# Unicode Default_Ignorable_Code_Point, plus blank braille; includes reserved
+# variation/tag ranges. Keep in agreement with publication.mjs and the corpus.
+INVISIBLE = re.compile('[\u00ad\u034f\u061c\u115f-\u1160\u17b4-\u17b5\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufff8\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]')
+LANGUAGES = {'', 'text', 'diff', 'ts', 'typescript', 'tsx', 'js', 'json', 'sh', 'bash', 'python', 'rust', 'go', 'sql', 'yaml', 'toml'}
+CLOSING = re.compile(r'(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+/[a-z0-9_.-]+#|https?://|github\.com/[^\s]*/(?:issues|pull)/)')
+
+
+def safe_publication(value):
+    assert not INVISIBLE.search(value), 'Invisible publication content'
+    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value)
+    assert not re.search(r'&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);', value), 'Character reference'
+    folded = re.sub(r'[*_~`\[\]()]', '', unicodedata.normalize('NFKC', value).casefold())
+    assert not any(m.start() == 0 or not folded[m.start() - 1].isalpha() for m in CLOSING.finditer(folded)), 'Closing issue reference'
+    fence = None
+    blank = True
+    for line in value.split('\n'):
+        assert not re.match(r'^ {0,3}\[[^\]]*\]:', line), 'Link reference definition'
+        assert not re.match(r'^ +(?:`{3,}|~{3,})', line), 'Indented fence'
+        if fence is not None:
+            if line == fence: fence = None
+            else: assert not re.match(r'^ {0,3}(?:`{3,}|~{3,})', line), 'Ambiguous fence'
+        else:
+            assert not re.match(r'^ {0,3}(?:> ?|(?:[-+*]|[0-9]+[.)]) +).*(?:`{3,}|~{3,})', line), 'Nested fence'
+            opener = re.fullmatch(r'(`{3,}|~{3,})(.*)', line)
+            if opener:
+                assert blank and opener[2] in LANGUAGES, 'Invalid fence opening'
+                fence = opener[1]
+            else: assert not re.search(r'[<@$]', line), 'HTML, mention or math outside fence'
+        blank = re.fullmatch(' *', line) is not None
+    assert fence is None, 'Unclosed fence'
+
+
 def publication_text(value, message=False):
     assert isinstance(value, str) and value
     encoded = value.encode('utf8', errors='strict')
     assert len(encoded) <= 10240 if message else len(value) <= 200
     assert all(unicodedata.category(c) not in ('Cc', 'Cf') or (message and c == '\n') for c in value)
     assert message or not any(c in value for c in ('\u2028', '\u2029'))
+    safe_publication(value)
 
 
 def publication_body(value):
     assert isinstance(value, str) and value.strip(), 'body must be non-empty Markdown'
     assert len(value.encode('utf8', errors='strict')) <= 32768, 'body exceeds 32 KiB UTF-8'
-    assert all(unicodedata.category(c) not in ('Cc', 'Cf') or c == '\n' for c in value)
-    assert not re.search('[<@]', value), 'body cannot contain HTML or mentions'
-    assert not re.search(r'\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b', value, re.I | re.ASCII), 'body cannot contain closing keywords'
+    safe_publication(value)
 
 
 def seal(source):
