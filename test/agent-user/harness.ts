@@ -68,7 +68,7 @@ export async function probeCodexCredentialSharing() {
       (await contains(authPath(agent), "synthetic-update")) &&
       (await lstat(authPath(controller))).isSymbolicLink()
 
-    if (command(controller, ["logout"]).status !== 0)
+    if (command(controller, ["-c", 'cli_auth_credentials_store="file"', "logout"]).status !== 0)
       throw new Error("Synthetic credential logout failed")
     login(controller, "synthetic-relogin")
     return {
