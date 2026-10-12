@@ -202,6 +202,8 @@ describe("OpenCode agent completion source", () => {
       "streamStarted",
       "sessionFinished",
       "listMessages",
+      "sessionFinished",
+      "listMessages",
     ])
     expect(result.iteration).toMatchObject({ status: "completed", childSessionId: "child-stable" })
     expect(result.rows).toHaveLength(1)
@@ -596,7 +598,13 @@ describe("OpenCode agent completion source", () => {
           },
         ]
       },
-      subscribeEvents: async (_input, signal) => abortAwareHangingStream(signal),
+      subscribeEvents: async (_input, signal) =>
+        (async function* () {
+          for (let step = 0; step < 7; step += 1) {
+            yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
+          }
+          yield* abortAwareHangingStream(signal)
+        })(),
     }
     const signals: WorkSignalPort = {
       subscribe: () => Effect.die(new Error("unused")),
@@ -631,6 +639,51 @@ describe("OpenCode agent completion source", () => {
     // History is never consulted while the run is live; the terminal signal
     // is the finished probe plus the execution-succeeded live event.
     expect(historyReads).toBe(0)
+  })
+
+  test("waits through live steps until the session finishes", async () => {
+    let finished = false
+    const finalAnswer = {
+      ...childAnswer,
+      id: "msg_final",
+      time: { ...childAnswer.time, completed: childAnswer.time.completed + 10 },
+    }
+    const provider: OpenCodeCompletionProviderPort = {
+      sessionExists: async () => true,
+      sessionFinished: async () => finished,
+      listMessages: async () => (finished ? [childAnswer, finalAnswer] : [childAnswer]),
+      subscribeEvents: async () =>
+        (async function* () {
+          yield { type: "message.updated" as const, sessionID: "ses_child", message: childAnswer }
+          finished = true
+          yield {
+            type: "session.status" as const,
+            sessionID: "ses_child",
+            status: { type: "idle" as const },
+          }
+        })(),
+    }
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient
+        yield* arrange
+        const iteration = yield* runOpenCodeCompletionSourceIteration(options)
+        const events = yield* sql<{
+          readonly payload_json: string
+        }>`SELECT payload_json FROM kernel_events`
+        return { iteration, payload: JSON.parse(events[0]!.payload_json) }
+      }).pipe(
+        Effect.provide(stores),
+        Effect.provideService(OpenCodeCompletionProvider, provider),
+        Effect.provideService(WorkSignal, {
+          subscribe: () => Effect.die(new Error("unused")),
+          wake: () => Effect.void,
+        }),
+      ),
+    )
+    expect(finished).toBe(true)
+    expect(result.iteration.status).toBe("completed")
+    expect(result.payload.completedAt).toBe(new Date(finalAnswer.time.completed).toISOString())
   })
 
   test("attributes the latest completed message of a finished multi-step run", async () => {
