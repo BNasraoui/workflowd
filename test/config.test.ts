@@ -3,6 +3,7 @@ import { loadConfig } from "../src/config"
 
 const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
+  WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
@@ -225,6 +226,7 @@ describe("loadConfig", () => {
       },
       github: {
         appId: 123,
+        allowedInstallationAccountIds: [81005232, 319835875],
         privateKeyPath: "/run/credentials/github-key.pem",
         webhookSecret: "webhook-secret",
       },
@@ -493,6 +495,7 @@ describe("loadConfig", () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
         OPENCODE_SERVER_PASSWORD_FILE: "/run/credentials/opencode-password",

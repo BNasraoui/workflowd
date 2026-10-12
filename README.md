@@ -243,6 +243,7 @@ install -m 0600 deploy/workflowd.env.example "$HOME/.config/workflowd/env"
 The required installed values are:
 
 - `GITHUB_APP_ID`: numeric GitHub App ID
+- `WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS`: required in automation mode; comma-separated immutable numeric GitHub account IDs allowed to hold App installations (production: `81005232,319835875`, BNasraoui and quality-sh). Missing, empty, malformed, unsafe, or duplicate IDs prevent startup.
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
@@ -251,6 +252,8 @@ The required installed values are:
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
 - `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled
 - `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
+
+A public GitHub App can be installed by anyone, and those installations send validly signed webhooks. The installation guard preserves listed accounts and uninstalls other accounts using an App JWT on `installation.created`, `installation.new_permissions_accepted`, and `installation_repositories.added`, before other delivery processing. It claims the existing durable delivery record to deduplicate redeliveries and emits an `installation_guard` audit line with installation ID, account ID, login, and outcome. Startup reconciliation and subsequent passes ten minutes after each pass collect all `/app/installations` pages before deleting foreign installations. Requests time out after ten seconds; transient failures retry at one, two, and four seconds, and DELETE 404 means already gone. Reconciliation recovers missed webhooks, crashes after a delivery claim, and exhausted retries. Execution mode does not require this setting. Installation and installation-repository events are delivered to Apps with webhooks; no extra event subscription is needed.
 
 Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 

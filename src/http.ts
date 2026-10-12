@@ -1,3 +1,4 @@
+import type { InstallationGuard } from "./installation-guard"
 import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
@@ -56,6 +57,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly installationGuard?: typeof InstallationGuard.Service
   readonly prAutomationEnabled?: boolean
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
@@ -544,6 +546,19 @@ export function handleGitHubWebhook(
     )
     if (payload instanceof Response) return payload
 
+    const action = webhookAction(payload)
+    const delivery = {
+      deliveryId,
+      event: eventName,
+      action,
+      payload: bodyText,
+      receivedAt: options.now,
+    }
+    if (options.installationGuard !== undefined) {
+      const outcome = yield* options.installationGuard.handle(delivery, payload)
+      if (outcome !== undefined) return Response.json({ status: outcome }, { status: 202 })
+    }
+
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
         ? Effect.succeed({ _tag: "Ignored" as const, reason: `unsupported:${eventName}` })
@@ -555,14 +570,6 @@ export function handleGitHubWebhook(
     )
     if (decoded instanceof Response) return decoded
 
-    const action = webhookAction(payload)
-    const delivery = {
-      deliveryId,
-      event: eventName,
-      action,
-      payload: bodyText,
-      receivedAt: options.now,
-    }
     if (decoded._tag === "CiCompletion" && options.ci !== undefined) {
       const status = yield* options.ci.ingest(deliveryId, decoded, bodyText, options.now.getTime())
       return Response.json({ status }, { status: 202 })
