@@ -239,7 +239,7 @@ export const TOOL_DEFINITIONS = [
       "session, registers it into kernel custody, and only returns a receipt " +
       "after observing the session's first generated token (bounded wait). A " +
       "dead route is refused loudly at dispatch with a machine-readable " +
-      "reason — no silent hangs. Requires bearer-token authorization. " +
+      "reason — no silent hangs. Requires the dedicated dispatch bearer token. " +
       "A dispatch waiting too long for another run to finish preparing the " +
       "same repository is refused with reason repository_busy. " +
       "Claude CLI and Codex CLI routes launch the respective local CLI directly, " +

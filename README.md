@@ -132,12 +132,12 @@ Session-reference metadata is retained with its execution. Workflowd does not co
 
 ### Policies
 
-- Reviews run through the read-only `pr-reviewer` agent.
+- Reviews run through the read-only `pr-reviewer` agent. Automatic review requires a trusted author association (OWNER, MEMBER, COLLABORATOR) or a same-repository head; other PRs are tracked and skipped with a reason. An allowlisted commenter can request `/agent review`.
 - Fix Work is disabled by default. Reviews and `/agent fix` cannot enqueue or execute fixes unless `WORKFLOWD_FIX_WORK_ENABLED=true` is explicitly configured.
-- When Fix Work is enabled, a review requesting changes automatically queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
+- The hardened `pr-fixer` is read-only: keep Fix Work disabled. Under the existing scheduling policy, a review requesting changes queues `pr-fixer` only when all of these checks pass: the review is actionable, the head is in the same repository, the branch begins with `opencode/` or `plan/` by default, and the PR author's exact GitHub login is listed in `WORKFLOWD_TRUSTED_AGENT_USERS` (login matching is case-insensitive).
 - The trusted identity is the PR author reported by GitHub and persisted with the current PR generation. It is not inferred from repository write access, branch name, branch creator, commit author, or organization membership. Therefore an unlisted collaborator's same-repository branch remains review-only even when its name has an eligible prefix. Command authorization is an additional check, not an override: `/agent fix` cannot run Fix Work for an unlisted author or ineligible branch.
-- The fixer verifies changes and commits without pushing. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
-- Enable Fix Work only for trusted agent-owned pull requests because fixer verification runs repository commands on this host.
+- The Fix Work protocol requires its executor to verify changes and commit without pushing; the shipped read-only fixer cannot fulfill this protocol. The controller validates the `Workflowd-Job: <job-id>` trailer and commit SHA, then pushes without force-pushing.
+- A separately isolated mutation executor is required before enabling Fix Work; verification executes repository commands.
 - A subsequent `pull_request.synchronize` webhook queues the follow-up review.
 - Authorized users may leave `/agent review`, `/agent fix`, or `/agent status` comments. Configure them with `WORKFLOWD_COMMAND_USERS`.
 - The OpenCode server must set `OPENCODE_DISABLE_PROJECT_CONFIG=1`, so an untrusted PR cannot replace the automation agents or permissions. The shipped systemd drop-in enforces this.
@@ -272,15 +272,14 @@ The OpenCode password file must contain the same password used by `opencode-serv
 
 ## OpenCode Agents
 
-Install both agents and the required server safety drop-in:
+For the automatic review server (`opencode2-server`), install the complete v2
+policy and isolated config root using [the review hardening operator steps](docs/review-hardening.md).
+The overlay declares no MCP servers and both reviewer and fixer deny tools by
+default. Fix Work must remain disabled because the fixer is read-only.
 
-```bash
-install -Dm0644 deploy/opencode/agent/pr-reviewer.md "$HOME/.config/opencode/agent/pr-reviewer.md"
-install -Dm0644 deploy/opencode/agent/pr-fixer.md "$HOME/.config/opencode/agent/pr-fixer.md"
-install -Dm0644 deploy/systemd/opencode-server.service.d/10-disable-project-config.conf "$HOME/.config/systemd/user/opencode-server.service.d/10-disable-project-config.conf"
-```
-
-OpenCode loads agents and configuration only at startup. Restart `opencode-server.service` after independent verification to apply these files. `systemctl --user cat opencode-server.service` must show `Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1` before processing untrusted repositories.
+The Markdown definitions in `deploy/opencode/agent/` are retained for v1 clients;
+they are not the production v2 installation path. Never install a workflowd MCP
+dispatch credential in any OpenCode configuration.
 
 ## Skills
 
@@ -322,7 +321,7 @@ The unit requires `opencode-server.service`, loads both credentials into a prote
 
 Two optional units ship beside it:
 
-- `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Without `WORKFLOWD_MCP_TOKEN` it starts read-only; write tools refuse every call. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
+- `workflowd-mcp.service` — the remote MCP server on loopback 8791, fronted by `tailscale serve` like the OpenCode server. Ordinary writes require `WORKFLOWD_MCP_TOKEN`; dispatch independently requires `WORKFLOWD_MCP_DISPATCH_TOKEN`. Missing credentials disable their respective capabilities. Install steps are in [docs/mcp-server.md](docs/mcp-server.md).
 - `workflowd-runner.service` — a host-specific remote runner. It needs a NATS credential and `deploy/runner.env.example` copied to `~/.config/workflowd/runner.env`; install steps, credential minting, and the `claude_resume` threat model are in [docs/remote-runner.md](docs/remote-runner.md).
 
 Codex agent runs survive workflowd's scheduled credential-rotation restart via

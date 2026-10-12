@@ -4,6 +4,7 @@ import {
   loadAgentRunDaemon,
   loadAgentWaitDaemon,
   loadMcpWriteAuth,
+  loadMcpDispatchAuth,
   requireDaemonTokenWithUrl,
 } from "../../src/mcp/auth"
 
@@ -162,4 +163,22 @@ test("an unreadable or empty agent-wait token file is a startup error", async ()
       () => Promise.resolve("\n"),
     ),
   ).rejects.toThrow("must not be empty")
+})
+
+test("dispatch loads only its own file source and rejects ambiguous sources", async () => {
+  const auth = await loadMcpDispatchAuth(
+    { WORKFLOWD_MCP_TOKEN: "ordinary", WORKFLOWD_MCP_DISPATCH_TOKEN_FILE: "/credentials/dispatch" },
+    async (path) => {
+      expect(path).toBe("/credentials/dispatch")
+      return "dispatch-secret\n"
+    },
+  )
+  expect(authorizedForWrites(auth, "Bearer dispatch-secret")).toBe(true)
+  expect(authorizedForWrites(auth, "Bearer ordinary")).toBe(false)
+  await expect(
+    loadMcpDispatchAuth({
+      WORKFLOWD_MCP_DISPATCH_TOKEN: "a",
+      WORKFLOWD_MCP_DISPATCH_TOKEN_FILE: "/b",
+    }),
+  ).rejects.toThrow("at most one")
 })

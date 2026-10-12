@@ -24,6 +24,7 @@ type PullRequestRow = {
   readonly repository_name: string
   readonly pull_request_number: number
   readonly author: string
+  readonly author_association: string | null
   readonly base_ref: string
   readonly base_sha: string
   readonly draft: number
@@ -108,6 +109,9 @@ export function makePullRequestTransition(
               pullRequest: {
                 number: row.pull_request_number,
                 author: row.author,
+                ...(row.author_association === null
+                  ? {}
+                  : { authorAssociation: row.author_association }),
                 baseRef: row.base_ref,
                 baseSha: row.base_sha,
                 draft: Boolean(row.draft),
@@ -253,6 +257,7 @@ export function makePullRequestTransition(
         }
       }
 
+      const skipped = decision.intents.find((intent) => intent._tag === "SkipAutomaticReview")
       yield* sql`
         INSERT INTO pull_requests (
           repository_id,
@@ -262,6 +267,8 @@ export function makePullRequestTransition(
           repository_owner,
           repository_name,
           author,
+          author_association,
+          automatic_review_skip_reason,
           base_ref,
           base_sha,
           draft,
@@ -280,6 +287,8 @@ export function makePullRequestTransition(
           ${repository.owner},
           ${repository.name},
           ${pullRequest.author},
+          ${pullRequest.authorAssociation ?? null},
+          ${skipped?.reason ?? null},
           ${pullRequest.baseRef},
           ${pullRequest.baseSha},
           ${pullRequest.draft},
@@ -297,6 +306,8 @@ export function makePullRequestTransition(
           repository_owner = excluded.repository_owner,
           repository_name = excluded.repository_name,
           author = excluded.author,
+          author_association = excluded.author_association,
+          automatic_review_skip_reason = excluded.automatic_review_skip_reason,
           base_ref = excluded.base_ref,
           base_sha = excluded.base_sha,
           draft = excluded.draft,
@@ -312,6 +323,13 @@ export function makePullRequestTransition(
           updated_at = excluded.updated_at
       `
 
+      if (skipped !== undefined) {
+        return {
+          status: "skipped",
+          generation: decision.generation,
+          reason: skipped.reason,
+        } as const
+      }
       const queue = decision.intents.find((intent) => intent._tag === "QueueReview")
       if (queue === undefined || queue._tag !== "QueueReview") {
         return { status: "ignored", generation: decision.generation } as const

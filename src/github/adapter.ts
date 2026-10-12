@@ -66,6 +66,7 @@ export type OctokitClientPort = {
   ) => Promise<{
     readonly number: number
     readonly user: { readonly login: string } | null
+    readonly author_association?: string
     readonly base: {
       readonly ref: string
       readonly sha: string
@@ -275,6 +276,9 @@ function normalizePullRequest(
     pullRequest: {
       number: pullRequest.number,
       author: pullRequest.user.login,
+      ...(pullRequest.author_association === undefined
+        ? {}
+        : { authorAssociation: pullRequest.author_association }),
       baseRef: pullRequest.base.ref,
       baseSha: pullRequest.base.sha,
       draft: pullRequest.draft ?? false,

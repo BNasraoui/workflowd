@@ -571,7 +571,7 @@ print(json.dumps(results))`
   evidence.sshReplies = "received over the controller-initiated connection"
   stage = "runner credential inventory"
   const inventory = `import json,os,pathlib,re,subprocess
-deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY|GHETTIMONSTER_PRIVATE_KEY|PUBLISH_PROBE_CANARY)$')
+deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_MCP_DISPATCH_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY|GHETTIMONSTER_PRIVATE_KEY|PUBLISH_PROBE_CANARY)$')
 env_names=set()
 for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
  try:
@@ -1091,6 +1091,7 @@ async function probeLive(policy) {
   const app = await appConfiguration()
   assert.equal(app.appId, evidence.trust.refRestriction.soleBypassApp)
   const token = randomUUID()
+  const dispatchToken = randomUUID()
   const config = await loadConfig(
     {
       GITHUB_APP_ID: String(app.appId),
@@ -1136,6 +1137,7 @@ async function probeLive(policy) {
   })
   const handler = createMcpFetchHandler({
     auth: { mode: "enabled", token },
+    dispatchAuth: { mode: "enabled", token: dispatchToken },
     agentRunDaemon: { baseUrl: host.url.toString(), token },
     runTool: (name, args, context) => runtime.runPromise(callTool(name, args, context)),
   })
@@ -1157,7 +1159,7 @@ async function probeLive(policy) {
     }
     await client.connect(
       new StreamableHTTPClientTransport(new URL("mcp", mcp.url), {
-        requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        requestInit: { headers: { Authorization: `Bearer ${dispatchToken}` } },
       }),
     )
     const priorFile = Bun.file(join(output, "probe.json"))
@@ -1312,10 +1314,21 @@ async function probeLive(policy) {
     evidence.publication = intent
     evidence.codeDownloaded = false
     evidence.keyMinted = !publishProbe
-    const mailbox = await client.callTool({
-      name: "read_agent_mailbox",
-      arguments: { mailbox_id: evidence.receipt.mailbox_id },
-    })
+    const reader = new Client({ name: "workflowd-sandbox-mailbox-evidence", version: "1" })
+    let mailbox
+    try {
+      await reader.connect(
+        new StreamableHTTPClientTransport(new URL("mcp", mcp.url), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      )
+      mailbox = await reader.callTool({
+        name: "read_agent_mailbox",
+        arguments: { mailbox_id: evidence.receipt.mailbox_id },
+      })
+    } finally {
+      await reader.close()
+    }
     assert.notEqual(mailbox.isError, true)
     assert.equal(mailbox.structuredContent?.messages?.length, 1)
     assert.equal(mailbox.structuredContent.messages[0].status, "completed")

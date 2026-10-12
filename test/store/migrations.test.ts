@@ -226,6 +226,7 @@ describe("strict initial store schema", () => {
       { migration_id: 32, name: "sandbox_ref_creation" },
       { migration_id: 33, name: "sandbox_publications" },
       { migration_id: 34, name: "sandbox_publication_receipts" },
+      { migration_id: 35, name: "automatic_review_trust" },
     ])
     expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

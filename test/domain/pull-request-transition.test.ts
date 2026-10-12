@@ -77,7 +77,10 @@ describe("pull request transition decisions", () => {
     ["base ref", { baseRef: "release" }],
     ["head SHA", { headSha: "d".repeat(40) }],
     ["head ref", { headRef: "feature/renamed" }],
-    ["head repository provenance", { headRepositoryFullName: "fork/repository" }],
+    [
+      "head repository provenance",
+      { headRepositoryFullName: "fork/repository", authorAssociation: "MEMBER" },
+    ],
   ])("advances Generation when the %s changes", (_, changedTarget) => {
     const decision = decidePullRequestTransition(tracked, observe(changedTarget))
 
@@ -186,3 +189,21 @@ describe("pull request transition decisions", () => {
     }
   })
 })
+
+test.each(["NONE", "MEMBER"])(
+  "authoritative reconciliation applies fork trust (%s)",
+  (authorAssociation) => {
+    const snapshot = decodeSnapshot({
+      _tag: "AuthoritativePullRequestSnapshot",
+      installationId: 91,
+      repository,
+      pullRequest: { ...pullRequest, headRepositoryFullName: "fork/repository", authorAssociation },
+    })
+    const decision = decidePullRequestTransition(undefined, snapshot)
+    expect(decision._tag).toBe("ApplySnapshot")
+    if (decision._tag === "ApplySnapshot")
+      expect(decision.intents.map((intent) => intent._tag)).toEqual([
+        authorAssociation === "MEMBER" ? "QueueReview" : "SkipAutomaticReview",
+      ])
+  },
+)

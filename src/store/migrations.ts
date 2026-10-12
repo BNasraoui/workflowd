@@ -1,3 +1,4 @@
+import { automaticReviewTrustMigration } from "./review-trust-migration"
 import {
   sandboxMigration,
   sandboxCleanupMigration,
@@ -1485,5 +1486,6 @@ export const runStoreMigrations = Migrator.make({})({
     "0032_sandbox_ref_creation": sandboxCreationMigration,
     "0033_sandbox_publications": sandboxPublishMigration,
     "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
+    "0035_automatic_review_trust": automaticReviewTrustMigration,
   }),
 })
