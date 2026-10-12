@@ -25,17 +25,17 @@ test.each([
   )
 })
 
-test("loads and normalizes explicit repository/installation pairs", async () => {
+test.each([91, 92])("loads repository pairs with second installation %s", async (secondId) => {
   const config = await loadConfig({
     ...environment,
     WORKFLOWD_PR_REPOSITORIES: JSON.stringify([
       { repository: "Owner/Repo", installationId: 91 },
-      { repository: "Owner/Second", installationId: 92 },
+      { repository: "Owner/Second", installationId: secondId },
     ]),
   })
   expect(config.github.prRepositories).toEqual([
     { repository: "owner/repo", installationId: 91 },
-    { repository: "owner/second", installationId: 92 },
+    { repository: "owner/second", installationId: secondId },
   ])
 })
 

@@ -11,6 +11,7 @@ import { WorkSignalLive } from "../src/work-signal"
 const repositories = [
   { repository: "example-owner/example", installationId: 91 },
   { repository: "example-owner/second", installationId: 92 },
+  { repository: "example-owner/third", installationId: 91 },
 ]
 const now = new Date("2026-10-07T00:00:00Z")
 const DatabaseLive = SqliteClient.layer({ filename: ":memory:" })
@@ -43,6 +44,7 @@ test.each([
   ["pull_request", 999, "example-owner/example", repositories],
   ["pull_request", 91, "foreign/repository", repositories],
   ["pull_request", 91, "example-owner/second", repositories],
+  ["pull_request", 92, "example-owner/third", repositories],
   ["issue_comment", 91, "foreign/repository", repositories],
   ["issue_comment", 999, "example-owner/example", repositories],
   ["pull_request", 91, "example-owner/example", []],
@@ -86,6 +88,7 @@ test.each([
 test.each([
   [91, "Example-Owner/Example"],
   [92, "example-owner/second"],
+  [91, "example-owner/third"],
 ])("configured repository %s %s still queues reviews", async (id, repo) => {
   await Effect.runPromise(
     Effect.gen(function* () {

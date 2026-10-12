@@ -516,6 +516,32 @@ function webhookAction(payload: unknown) {
     : null
 }
 
+function installationGateResponse(
+  payload: unknown,
+  options: WebhookHandlerOptions,
+  deliveryId: string,
+): Effect.Effect<Response | undefined> {
+  return Effect.gen(function* () {
+    const installationId = webhookInstallationId(payload)
+    const configured =
+      installationId !== undefined &&
+      (options.installationIds?.has(installationId) ??
+        options.prRepositories?.some((r) => r.installationId === installationId) ??
+        false)
+    if (!configured) {
+      yield* Effect.logDebug({ deliveryId, installationId })
+      return Response.json(
+        {
+          status: "ignored",
+          reason:
+            installationId === undefined ? "missing-installation" : "installation-not-configured",
+        },
+        { status: 202 },
+      )
+    }
+  })
+}
+
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
@@ -548,23 +574,8 @@ export function handleGitHubWebhook(
     )
     if (payload instanceof Response) return payload
 
-    const installationId = webhookInstallationId(payload)
-    const configured =
-      installationId !== undefined &&
-      (options.installationIds?.has(installationId) ??
-        options.prRepositories?.some((r) => r.installationId === installationId) ??
-        false)
-    if (!configured) {
-      yield* Effect.logDebug({ deliveryId, installationId })
-      return Response.json(
-        {
-          status: "ignored",
-          reason:
-            installationId === undefined ? "missing-installation" : "installation-not-configured",
-        },
-        { status: 202 },
-      )
-    }
+    const ignored = yield* installationGateResponse(payload, options, deliveryId)
+    if (ignored !== undefined) return ignored
 
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
