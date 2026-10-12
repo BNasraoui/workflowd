@@ -33,7 +33,7 @@ async function bytes(response, maximum) {
 
 function publicationText(value, message = false) {
   assert.equal(typeof value, "string")
-  assert.ok(value.length > 0 && safePublication(value))
+  assert.ok(value.length > 0 && safePublication(value, message))
   assert.ok(message ? Buffer.byteLength(value, "utf8") <= 10240 : [...value].length <= 200)
   assert.ok(!/[\p{Cc}\p{Cf}]/u.test(message ? value.replaceAll("\n", "") : value))
   assert.ok(message || !/[\u2028\u2029]/u.test(value))

@@ -1,1 +1,1 @@
-export function safePublication(value: string): boolean
+export function safePublication(value: string, message?: boolean): boolean

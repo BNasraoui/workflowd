@@ -7,6 +7,10 @@ const rejected = [
   "fixes owner/repo\\#1",
   "fixes https\\://github.com/o/r/issues/1",
   "ordinary \\ prose",
+  "ordinary ＼ prose",
+  "ordinary ﹨ prose",
+  "inline `＼`",
+  "fixes ﹨#1",
   "inline `\\`",
   "\u0378",
   "\u{2ebf0}fixes #1",
@@ -93,8 +97,6 @@ const rejected = [
   "```ts\nﬁxes #1\n```",
 ]
 const accepted = [
-  "```text\nfixes \\#1\n```",
-  "~~~text\nC:\\work\n~~~",
   "a\u0301\u0302",
   "a\u0301b\u0302c\u0303",
   "```ts\n[link]: x\n```",
@@ -108,16 +110,37 @@ const accepted = [
   "Unicode 雪 😀",
   "[design](https://example.com)",
   "# Change\n\nReviewable text.",
-  "```ts\nconst value: Effect<A, E> = sql\nimport { SqlClient } from '@effect/sql'\n```",
-  "Example:\n\n~~~text\n<literal> @user $5\n~~~",
   "````diff\n+ value\n````",
   "```\nliteral\n```",
 ]
-export const publicationCorpus = [
-  ...new Set(rejected.flatMap((value) => [value, value.normalize("NFKC")])),
+// These fences are literal in a body but cannot hide plain-text commit content.
+const bodyOnly = [
+  "```text\nfixes \\#1\n```",
+  "~~~text\nC:\\work\n~~~",
+  "```ts\nconst value: Effect<A, E> = sql\nimport { SqlClient } from '@effect/sql'\n```",
+  "Example:\n\n~~~text\n<literal> @user $5\n~~~",
+  ...["@user", "<details>", "$VALUE", "\\", "＼", "﹨"].flatMap((value) => [
+    `\`\`\`text\n${value}\n\`\`\``,
+    `~~~text\n${value}\n~~~`,
+  ]),
 ]
-  .map((value) => ({ value, accepted: false }))
-  .concat(accepted.map((value) => ({ value, accepted: true })))
+export const publicationCorpus = [
+  ...[...new Set(rejected.flatMap((value) => [value, value.normalize("NFKC")]))].map((value) => ({
+    value,
+    accepted: false,
+    messageAccepted: false,
+  })),
+  ...accepted.map((value) => ({ value, accepted: true, messageAccepted: true })),
+  ...bodyOnly.map((value) => ({ value, accepted: true, messageAccepted: false })),
+]
+
+export const pythonOptimizationCorpus = [
+  { args: [], optimize: "", accepted: true },
+  { args: ["-O"], optimize: "", accepted: false },
+  { args: ["-OO"], optimize: "", accepted: false },
+  { args: [], optimize: "1", accepted: false },
+  { args: [], optimize: "2", accepted: false },
+]
 
 // Both JS entry points and Python must fail closed on an unknown runtime.
 export const publicationRuntimeCorpus = [

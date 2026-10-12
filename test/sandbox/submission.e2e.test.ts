@@ -19,7 +19,7 @@ test("completion requires bounded Unicode plain text without altering agent word
     environmentId: "one",
     branch: "anything",
     title: "雪 'safe' `title`",
-    commitMessage: "Fix result\n\n```sh\n雪 '$() `message`\n```\n",
+    commitMessage: "Fix result\n\n```text\n雪 'literal' `message`\n```\n",
     body: "## Result\n\nReadable agent description.",
   }
   expect(decode(valid)).toEqual(valid)
@@ -29,6 +29,7 @@ test("completion requires bounded Unicode plain text without altering agent word
   for (const fields of [
     { title: undefined },
     { commitMessage: undefined },
+    { commitMessage: "Fix result\n\n```sh\n雪 '$() `message`\n```\n" },
     { title: "" },
     { commitMessage: "" },
     { title: "x".repeat(201) },
