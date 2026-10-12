@@ -1,4 +1,5 @@
-import { createHmac } from "node:crypto"
+import { signedRequest } from "../github-webhook"
+import { SqlClient } from "effect/unstable/sql"
 import { handleGitHubWebhook } from "../../src/http"
 import { WorkflowStoreLive } from "../../src/store"
 import { WorkSignalLive } from "../../src/work-signal"
@@ -81,26 +82,34 @@ test("state registration and replay are durable and scoped to exact SHA", () =>
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
   ))
 
-test("disabled CI keeps legacy ignored-event handling even for non-CI payloads", async () => {
-  const body = "{}"
-  const request = new Request("http://localhost/hooks/github", {
-    method: "POST",
-    body,
-    headers: {
-      "x-github-event": "workflow_run",
-      "x-github-delivery": "disabled",
-      "x-hub-signature-256": `sha256=${createHmac("sha256", "secret").update(body).digest("hex")}`,
-    },
-  })
-  const response = await Effect.runPromise(
-    handleGitHubWebhook(request, { webhookSecret: "secret", now: new Date() }).pipe(
-      Effect.provide(
-        Layer.merge(
-          WorkflowStoreLive.pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:" }))),
-          WorkSignalLive,
-        ),
-      ),
-    ),
-  )
-  expect(response.status).toBe(202)
-})
+test.each(["workflow_run", "check_suite"])(
+  "disabled CI records configured-installation %s without decoding its event payload",
+  async (event) => {
+    const database = SqliteClient.layer({ filename: ":memory:" })
+    const layer = Layer.merge(WorkflowStoreLive, WorkSignalLive).pipe(Layer.provideMerge(database))
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const request = signedRequest(
+          event,
+          JSON.stringify({ installation: { id: 91 } }),
+          "disabled",
+          "secret",
+        )
+        const response = yield* handleGitHubWebhook(request, {
+          webhookSecret: "secret",
+          installationIds: new Set([91]),
+          now: new Date(),
+        })
+        expect(response.status).toBe(202)
+        expect(yield* Effect.promise(() => response.json())).toEqual({
+          status: "ignored",
+          reason: `unsupported:${event}`,
+        })
+        const sql = yield* SqlClient.SqlClient
+        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([
+          { delivery_id: "disabled" },
+        ])
+      }).pipe(Effect.provide(layer)),
+    )
+  },
+)
