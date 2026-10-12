@@ -518,12 +518,15 @@ test("hostile runner metadata and paths cannot add tools or reach controller fil
       try {
         await client.initialize()
         await client.request("tools/list")
-        await expect(
-          client.request("tools/call", {
+        expect(
+          await client.request("tools/call", {
             name: "environment_create",
             arguments: { environment_source: source, title: "attack" },
           }),
-        ).rejects.toThrow("repository is not allowed")
+        ).toMatchObject({
+          isError: true,
+          content: [{ type: "text", text: expect.stringContaining("repository is not allowed") }],
+        })
       } finally {
         await client.close()
       }
