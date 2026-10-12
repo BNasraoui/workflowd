@@ -1,4 +1,5 @@
 import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
+import { parseInstallationAccountIds } from "./installation-policy"
 import {
   loadOpenCodeResidentSocket,
   loadResidentConfig,
@@ -35,6 +36,7 @@ interface HttpConfig {
 }
 
 interface GitHubConfig {
+  readonly allowedInstallationAccountIds: ReadonlyArray<number>
   readonly appId: number
   readonly privateKeyPath: string
   readonly webhookSecret: string
@@ -561,6 +563,9 @@ function githubSection(
 ): GitHubConfig {
   return {
     appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
+    allowedInstallationAccountIds: parseInstallationAccountIds(
+      env.WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS,
+    ),
     privateKeyPath: required(env, "GITHUB_PRIVATE_KEY_PATH"),
     webhookSecret,
   }

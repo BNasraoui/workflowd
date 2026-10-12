@@ -58,6 +58,7 @@ for (const [action, name] of [
       const config = await loadConfig(
         {
           GITHUB_APP_ID: "123",
+          WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
           GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
           GITHUB_WEBHOOK_SECRET: "fixture",
           OPENCODE_SERVER_PASSWORD: "fixture",

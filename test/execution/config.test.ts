@@ -6,6 +6,7 @@ import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
 
 const env = {
   GITHUB_APP_ID: "123",
+  WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/fixture/key",
   GITHUB_WEBHOOK_SECRET: "secret",
   OPENCODE_SERVER_PASSWORD: "secret",
