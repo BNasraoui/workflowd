@@ -9,6 +9,7 @@ import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 import type { CodexCliPort, CodexExit, CodexPreflightError } from "./codex-cli-port"
 import { cleanupFinishedCustody, incrementalLines } from "./codex-output"
+import { readSandboxBinding } from "../sandbox/binding"
 export type {
   CodexCliPort,
   CodexExit,
@@ -470,6 +471,7 @@ export const makeDurableCliProcess = (
 
   return {
     ownership: "transient-exec",
+    executionId: (runId) => executionIdFor(safeRunId(runId), unitPrefix),
     cleanup: (protectedRunIds) =>
       Effect.tryPromise({
         try: async () => {
@@ -508,6 +510,15 @@ export const makeDurableCliProcess = (
           safeRunId(input.runId)
           const directory = join(options.custodyRoot, input.runId)
           const executionId = executionIdFor(input.runId, unitPrefix)
+          if (input.sandboxBindingFile !== undefined) {
+            const binding = await readSandboxBinding(input.directory)
+            if (
+              binding.runId !== input.runId ||
+              binding.sessionId !== executionId ||
+              binding.state !== "active"
+            )
+              throw new Error("Native sandbox execution binding changed")
+          }
           const launchId = crypto.randomUUID()
           const promptPath = join(directory, "prompt")
           const eventsPath = join(directory, "events.jsonl")
@@ -557,6 +568,9 @@ export const makeDurableCliProcess = (
             `--description=workflowd ${cliName} launch ${launchId}`,
             `--working-directory=${input.directory}`,
             "--property=KillMode=control-group",
+            ...(input.sandboxBindingFile === undefined
+              ? []
+              : ["--property=MemoryMax=6G", "--property=MemorySwapMax=0"]),
             ...forwardedEnvironment,
             ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
               ([name, value]) => `--setenv=${name}=${value}`,
@@ -580,6 +594,9 @@ export const makeDurableCliProcess = (
             ...(input.model === null ? [] : ["--model", input.model]),
             ...(input.effort === undefined ? [] : ["--effort", input.effort]),
             ...(input.provider == null ? [] : ["--provider", input.provider]),
+            ...(input.sandboxBindingFile === undefined
+              ? []
+              : ["--sandbox-binding-file", input.sandboxBindingFile]),
           ]
           // Retain the manifest on every uncertain launch/inspection outcome. A manager
           // command error or timeout does not prove the native execution stopped.

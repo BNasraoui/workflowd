@@ -1,0 +1,6 @@
+{
+  "BNasraoui/workflowd": {
+    "prompt": "Create a container-use environment for /workspace/repository using oven/bun:1.3.14. Add test/sandbox/prototype-proof.test.ts containing exactly three focused bun tests for parseSandboxRepositories from ../../src/sandbox/config: a valid policy, duplicate aliases, and an invalid workflow SHA. Install frozen dependencies with bun install --frozen-lockfile --ignore-scripts. Keep the resulting tests as the task result.",
+    "testCommand": "bun test test/sandbox/prototype-proof.test.ts && printf '\\nworkflowd-test-exit=0\\n'"
+  }
+}

@@ -12,6 +12,7 @@ export type OpenCodeModel = {
 }
 
 export type OpenCodeCreateSessionInput = {
+  readonly id?: string
   readonly directory: string
   readonly title: string
   readonly agent: string
@@ -555,6 +556,7 @@ export function makeOpenCodeSdkClient(
       withClient((client) =>
         client.session
           .create({
+            ...(input.id === undefined ? {} : { id: toSessionID(input.id) }),
             title: input.title,
             agent: toAgentID(input.agent),
             model: toModelRef(input.model),

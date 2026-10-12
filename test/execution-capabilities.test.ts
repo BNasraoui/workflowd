@@ -111,6 +111,7 @@ test("one failed or unsupported source does not hide healthy sources", async () 
     host: "h",
     refreshMs: 10,
     timeoutMs: 5,
+    now: () => 0,
     sources: [
       { executor: "codex", discover: async () => new Promise(() => undefined) },
       { executor: "claude", discover: async () => ({ status: "unsupported" as const }) },

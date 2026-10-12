@@ -4,6 +4,11 @@ set -euo pipefail
 # A disposable local registry makes the build visible to Dagger's image resolver.
 # Nothing is pulled from GHCR or published beyond this machine.
 image=${1:-workflowd-agent-base:local}
+repository_root=$(cd "$(dirname "$0")/../.." && pwd)
+docker run --rm --entrypoint python3 \
+  -v "$repository_root/deploy/sandbox/skills/catalog.json:/tmp/catalog.json:ro" \
+  -v "$repository_root/test/agent-image/skills.py:/tmp/check-skills.py:ro" \
+  "$image" /tmp/check-skills.py
 root=$(mktemp -d)
 name="workflowd-agent-image-$$"
 cleanup() {

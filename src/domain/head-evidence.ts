@@ -53,7 +53,7 @@ export type GatedReview =
 export const repositoryRequiredCheckContexts = [
   "Required checks",
   "SonarCloud Code Analysis",
-  "CodeQL (JavaScript/TypeScript)",
+  "CodeQL PR policy",
 ] as const
 const evidencePath = ".workflowd/evidence.json"
 const gateSummaryPrefix = "Automated gates did not pass. Reviewer summary: "

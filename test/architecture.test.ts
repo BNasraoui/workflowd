@@ -45,9 +45,8 @@ describe("pull-request workflows", () => {
       [".github/workflows/ci.yml", "repository-validation"],
       [".github/workflows/ci.yml", "deployment-validation"],
       [".github/workflows/ci.yml", "tests"],
-      [".github/workflows/codeql.yml", "analyze"],
     ] as const
-    const exactHeadRef = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
+    const exactHeadRef = "HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
 
     for (const [path, job] of blockingJobs) {
       const workflow = await Bun.file(path).text()
@@ -56,6 +55,20 @@ describe("pull-request workflows", () => {
       )?.[0]
 
       expect(section, `${path}: ${job}`).toContain(exactHeadRef)
+      expect(section, `${path}: ${job}`).toContain('git checkout --detach "$HEAD_SHA"')
+      expect(section, `${path}: ${job}`).not.toContain("actions/checkout@")
     }
   })
+})
+
+test("CodeQL scans only reviewed main and acknowledges PRs without checkout", async () => {
+  const workflow = await Bun.file(".github/workflows/codeql.yml").text()
+  const analyze = workflow.split("  analyze:\n")[1]
+  expect(analyze).toContain(
+    "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')",
+  )
+  expect(analyze).toContain("ref: ${{ github.sha }}")
+  const policy = workflow.split("  pr-policy:\n")[1]?.split("  analyze:\n")[0]
+  expect(policy).toContain("permissions: {}")
+  expect(policy).not.toContain("uses:")
 })

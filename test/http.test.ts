@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test"
-import { createHmac } from "node:crypto"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { SqlError } from "effect/unstable/sql"
@@ -35,17 +34,7 @@ const payload = pullRequestPayload()
 describe("handleGitHubWebhook", () => {
   test("verifies and durably enqueues a pull request delivery", async () => {
     const secret = "webhook-secret"
-    const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`
-    const request = new Request("http://localhost/hooks/github", {
-      method: "POST",
-      body: payload,
-      headers: {
-        "content-type": "application/json",
-        "x-github-delivery": "delivery-http-1",
-        "x-github-event": "pull_request",
-        "x-hub-signature-256": signature,
-      },
-    })
+    const request = signedRequest("pull_request", payload, "delivery-http-1", secret)
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -79,16 +68,7 @@ describe("handleGitHubWebhook", () => {
       action: "opened",
       padding: "x".repeat(200),
     })
-    const signature = `sha256=${createHmac("sha256", secret).update(oversized).digest("hex")}`
-    const request = new Request("http://localhost/hooks/github", {
-      method: "POST",
-      body: oversized,
-      headers: {
-        "x-github-delivery": "delivery-http-large",
-        "x-github-event": "pull_request",
-        "x-hub-signature-256": signature,
-      },
-    })
+    const request = signedRequest("pull_request", oversized, "delivery-http-large", secret)
 
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
@@ -137,61 +117,34 @@ describe("handleGitHubWebhook", () => {
     ])
   })
 
-  test("returns 400 for a malformed pull request domain identifier", async () => {
+  test.each([
+    [
+      "pull_request",
+      {
+        ...JSON.parse(payload),
+        pull_request: { ...JSON.parse(payload).pull_request, number: 0 },
+      },
+    ],
+    [
+      "issue_comment",
+      {
+        action: "created",
+        installation: { id: 91 },
+        repository: JSON.parse(payload).repository,
+        issue: {
+          number: 7,
+          pull_request: { url: "https://api.github.test/pr/7" },
+        },
+        comment: {
+          id: 0,
+          body: "/agent review",
+          user: { login: "example-owner" },
+        },
+      },
+    ],
+  ] as const)("returns 400 for a malformed %s domain identifier", async (event, body) => {
     const secret = "webhook-secret"
-    const malformedPayload = JSON.stringify({
-      ...JSON.parse(payload),
-      pull_request: { ...JSON.parse(payload).pull_request, number: 0 },
-    })
-    const signature = `sha256=${createHmac("sha256", secret).update(malformedPayload).digest("hex")}`
-    const request = new Request("http://localhost/hooks/github", {
-      method: "POST",
-      body: malformedPayload,
-      headers: {
-        "x-github-delivery": "delivery-http-invalid-id",
-        "x-github-event": "pull_request",
-        "x-hub-signature-256": signature,
-      },
-    })
-
-    const response = await Effect.runPromise(
-      handleGitHubWebhook(request, {
-        webhookSecret: secret,
-        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
-        now: new Date("2026-07-19T12:00:00.000Z"),
-      }).pipe(Effect.provide(TestLayer)),
-    )
-
-    expect(response.status).toBe(400)
-  })
-
-  test("returns 400 for a malformed command domain identifier", async () => {
-    const secret = "webhook-secret"
-    const malformedPayload = JSON.stringify({
-      action: "created",
-      installation: { id: 91 },
-      repository: JSON.parse(payload).repository,
-      issue: {
-        number: 7,
-        pull_request: { url: "https://api.github.test/pr/7" },
-      },
-      comment: {
-        id: 0,
-        body: "/agent review",
-        user: { login: "example-owner" },
-      },
-    })
-    const signature = `sha256=${createHmac("sha256", secret).update(malformedPayload).digest("hex")}`
-    const request = new Request("http://localhost/hooks/github", {
-      method: "POST",
-      body: malformedPayload,
-      headers: {
-        "x-github-delivery": "delivery-http-invalid-command-id",
-        "x-github-event": "issue_comment",
-        "x-hub-signature-256": signature,
-      },
-    })
-
+    const request = signedRequest(event, JSON.stringify(body), `invalid-${event}`, secret)
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,

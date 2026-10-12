@@ -169,12 +169,12 @@ type CollectedChecks = {
 const requiredContextAppSlugs: Readonly<Record<string, string>> = {
   "Required checks": "github-actions",
   "SonarCloud Code Analysis": "sonarqubecloud",
-  "CodeQL (JavaScript/TypeScript)": "github-actions",
+  "CodeQL PR policy": "github-actions",
 }
 
 const requiredContextWorkflowPaths: Readonly<Record<string, string>> = {
   "Required checks": ".github/workflows/ci.yml",
-  "CodeQL (JavaScript/TypeScript)": ".github/workflows/codeql.yml",
+  "CodeQL PR policy": ".github/workflows/codeql.yml",
 }
 
 async function appendCheckRuns(
@@ -196,6 +196,13 @@ async function appendCheckRuns(
       if (isTrustedRequiredContext(check, normalized.name, trustedActionsCheckSuites)) {
         collected.trustedRequiredContexts.add(normalized.name)
       }
+      // The trusted CodeQL workflow intentionally skips main-only analysis on PRs.
+      if (
+        normalized.name === "CodeQL (JavaScript/TypeScript)" &&
+        normalized.conclusion === "skipped" &&
+        isTrustedRequiredContext(check, "CodeQL PR policy", trustedActionsCheckSuites)
+      )
+        continue
       retainCheck(collected, normalized)
       if (collected.truncated) return
     }
