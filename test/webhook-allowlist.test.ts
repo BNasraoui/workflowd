@@ -58,20 +58,26 @@ test.each([
           ...(allowed === undefined ? {} : { prRepositories: allowed }),
         }
         const response = yield* handleGitHubWebhook(request(event, id, repo), options)
-        expect(response.status).toBe(202)
-        expect(yield* Effect.promise(() => response.json())).toEqual({
+        const installationConfigured = allowed?.some((r) => r.installationId === id) ?? false
+        const ignored = {
           status: "ignored",
-          reason: "pr-repository-not-allowlisted",
-        })
+          reason: installationConfigured
+            ? "pr-repository-not-allowlisted"
+            : "installation-not-configured",
+        }
+        expect(response.status).toBe(202)
+        expect(yield* Effect.promise(() => response.json())).toEqual(ignored)
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([
-          { delivery_id: "allowlist-delivery" },
-        ])
+        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual(
+          installationConfigured ? [{ delivery_id: "allowlist-delivery" }] : [],
+        )
         expect(yield* sql`SELECT * FROM pull_requests`).toEqual([])
         expect(yield* sql`SELECT * FROM jobs`).toEqual([])
         expect(yield* sql`SELECT * FROM commands`).toEqual([])
         const duplicate = yield* handleGitHubWebhook(request(event, id, repo), options)
-        expect(yield* Effect.promise(() => duplicate.json())).toEqual({ status: "duplicate" })
+        expect(yield* Effect.promise(() => duplicate.json())).toEqual(
+          installationConfigured ? { status: "duplicate" } : ignored,
+        )
       }).pipe(Effect.provide(TestLayer)),
     )
   },

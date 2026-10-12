@@ -4,7 +4,7 @@ This is the repository-maintained revision of the [approved onboarding runbook](
 
 ## Public gate App prerequisite
 
-Before making `opencode-hooks` (App 4337845) public or installing it on `quality-sh/provenance`, the owner must deploy PR #81's early installation rejection and verify it. Set mint's effective environment to:
+Before making GitHub App 4337845 public or installing it on `quality-sh/provenance`, the owner must deploy PR #81's early installation rejection and verify it. Set mint's effective environment to:
 
 ```sh
 WORKFLOWD_PR_REPOSITORIES='[{"repository":"BNasraoui/workflowd","installationId":147573449}]'
