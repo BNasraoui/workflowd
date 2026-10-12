@@ -23,9 +23,11 @@ const events = [
   "unknown_event",
 ] as const
 
-function eventPayload(event: string, installationId: number) {
+function eventPayload(event: string, installationId: number, repository = "example-owner/example") {
+  const payload = JSON.parse(pullRequestPayload())
   return JSON.stringify({
-    ...JSON.parse(pullRequestPayload()),
+    ...payload,
+    repository: { ...payload.repository, full_name: repository },
     installation: { id: installationId },
     action:
       event === "issue_comment"
@@ -97,17 +99,22 @@ test.each(events.map((event) => [event] as const))(
     ),
 )
 
-test.each(events.map((event) => [event] as const))(
-  "retains configured installation handling for %s",
-  (event) =>
+test.each([
+  ...events.map((event) => [event, 91, "example-owner/example"] as const),
+  ["workflow_run", 92, "ci/repository"],
+  ["check_suite", 92, "ci/repository"],
+] as const)(
+  "retains configured installation handling for %s from installation %s in %s",
+  (event, installationId, repository) =>
     withStore(
       Effect.gen(function* () {
         const ci = yield* makeCiStore
-        const body = eventPayload(event, 91)
+        const body = eventPayload(event, installationId, repository)
         const response = yield* handleGitHubWebhook(signedRequest(event, body, event, "secret"), {
           webhookSecret: "secret",
           now: new Date(),
           prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
+          ...(installationId === 92 ? { installationIds: new Set([92]) } : {}),
           ci,
         })
         expect(response.status).toBe(202)
