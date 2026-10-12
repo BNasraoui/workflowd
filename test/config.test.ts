@@ -5,6 +5,7 @@ import { loadConfig } from "../src/config"
 const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
   WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+  WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
@@ -228,6 +229,7 @@ describe("loadConfig", () => {
       github: {
         prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         appId: 123,
+        allowedInstallationAccountIds: [81005232, 319835875],
         privateKeyPath: "/run/credentials/github-key.pem",
         webhookSecret: "webhook-secret",
       },
@@ -497,6 +499,7 @@ describe("loadConfig", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
         OPENCODE_SERVER_PASSWORD_FILE: "/run/credentials/opencode-password",
@@ -629,7 +632,7 @@ describe("loadConfig", () => {
   })
 })
 
-test("unions all configured webhook installation sources without authorizing PR repositories", async () => {
+test("uses only PR and CI installations for webhook ingestion", async () => {
   const config = await loadConfig(
     {
       ...requiredEnvironment,
@@ -679,7 +682,7 @@ test("unions all configured webhook installation sources without authorizing PR 
     },
     { home: "/tmp" },
   )
-  expect([...configuredWebhookInstallations(config)].sort()).toEqual([91, 92, 93, 94, 95])
+  expect([...configuredWebhookInstallations(config)].sort()).toEqual([91, 92])
   expect(config.github?.prRepositories).toEqual([
     { repository: "example-owner/example", installationId: 91 },
   ])

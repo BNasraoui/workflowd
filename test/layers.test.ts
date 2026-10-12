@@ -1,3 +1,4 @@
+import { InstallationGuard } from "../src/installation-guard"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -99,6 +100,7 @@ function loadLayerConfig(directory: string, overrides: Record<string, string> = 
   return loadConfig(
     {
       GITHUB_APP_ID: "123",
+      WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
       WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
       GITHUB_PRIVATE_KEY_PATH: join(directory, "github.pem"),
       GITHUB_WEBHOOK_SECRET: "secret",
@@ -152,6 +154,7 @@ test.each([false, true])(
           Effect.gen(function* () {
             const events = yield* KernelEventStore
             const jobs = yield* KernelJobStore
+            yield* InstallationGuard
             yield* WorkflowStore
             yield* WorkflowStart
             const testJobs = yield* TestJobCanary

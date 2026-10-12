@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto"
+import { InstallationGuard } from "../src/installation-guard"
 import { describe, expect, test } from "bun:test"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
@@ -79,6 +81,12 @@ const automationStub = (validateAvailability: () => Effect.Effect<void> = () => 
 const stubAdapters = (automation = automationStub()) =>
   Layer.mergeAll(
     WorkSignalLive,
+    Layer.succeed(InstallationGuard, {
+      handle: () => Effect.succeed(undefined),
+      reconcile: () => Effect.succeed(true),
+      runWebhooks: Effect.never,
+      health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
+    }),
     Layer.succeed(GitHub, {
       fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
       publishReview: () => Effect.die("unexpected publish"),
@@ -483,6 +491,7 @@ describe("runHookService startup", () => {
     const loaded = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
@@ -534,7 +543,7 @@ describe("runHookService startup", () => {
           }
 
           for (const [id, reason] of [
-            [92, "unsupported:push"],
+            [92, "installation-not-configured"],
             [999, "installation-not-configured"],
           ] as const) {
             const response = yield* Effect.tryPromise(() =>
@@ -565,10 +574,13 @@ describe("runHookService startup", () => {
   })
 
   test("starts local HTTP while remote coordination is unavailable and recovers later", async () => {
+    let guardPasses = 0
+    let guardEvents = 0
     const loaded = await loadConfig(
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -601,6 +613,20 @@ describe("runHookService startup", () => {
             Logger.layer([Logger.make(() => undefined)]),
             stubAdapters(),
             Layer.succeed(RemoteCoordinator, coordinator),
+            Layer.succeed(InstallationGuard, {
+              reconcile: () =>
+                Effect.sync(() => {
+                  guardPasses++
+                  return true
+                }),
+              runWebhooks: Effect.never,
+              health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
+              handle: () =>
+                Effect.sync(() => {
+                  guardEvents++
+                  return "accepted" as const
+                }),
+            }),
           )
           const started = yield* Effect.race(
             startHookService(config).pipe(
@@ -612,6 +638,21 @@ describe("runHookService startup", () => {
           const health = yield* Effect.tryPromise(() =>
             fetch(`http://${started.hostname}:${started.port}/health`),
           )
+          expect(guardPasses).toBe(1)
+          const body = JSON.stringify({ action: "created" })
+          const guarded = yield* Effect.tryPromise(() =>
+            fetch(`http://${started.hostname}:${started.port}/hooks/github`, {
+              method: "POST",
+              body,
+              headers: {
+                "x-github-delivery": "guard-runtime",
+                "x-github-event": "installation",
+                "x-hub-signature-256": `sha256=${createHmac("sha256", "secret").update(body).digest("hex")}`,
+              },
+            }),
+          )
+          expect(guarded.status).toBe(202)
+          expect(guardEvents).toBe(1)
           yield* Deferred.succeed(brokerAvailable, undefined)
           const didRecover = yield* Effect.race(
             Deferred.await(recovered).pipe(Effect.as(true)),
@@ -631,6 +672,7 @@ describe("runHookService startup", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -676,6 +718,7 @@ describe("runHookService startup", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -737,6 +780,7 @@ describe("runHookService startup", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -814,6 +858,7 @@ describe("runHookService startup", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -911,7 +956,10 @@ describe("runHookService startup", () => {
       new Set(["job", "kernel-job", "publication", "reconciliation", "command"]),
     )
     expect(result).toEqual({
-      health: { status: 200, body: { status: "ok" } },
+      health: {
+        status: 200,
+        body: { status: "ok", installationGuard: { lastSuccessfulReconciliationAt: null } },
+      },
       qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
       testJob: { status: 202, body: { jobId: "runtime-canary", status: "pending" } },
     })
@@ -932,6 +980,7 @@ describe("dogfood enrichment wiring", () => {
       {
         GITHUB_APP_ID: "123",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",

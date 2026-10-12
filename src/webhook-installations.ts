@@ -4,9 +4,6 @@ export function configuredWebhookInstallations(config: AppConfig): ReadonlySet<n
   return new Set([
     ...(config.github?.prRepositories ?? []).map((r) => r.installationId),
     ...(config.ci?.repositories ?? []).map((r) => r.installationId),
-    ...(config.agentRuns?.sandboxRepositories ?? []).map((r) => r.installationId),
-    ...(config.workerIdentity?.policies ?? []).map((p) => p.installationId),
-    ...(config.qrspi === undefined ? [] : [config.qrspi.installationId]),
   ])
 }
 

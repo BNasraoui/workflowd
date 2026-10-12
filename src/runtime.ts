@@ -1,4 +1,5 @@
 import { configuredWebhookInstallations } from "./webhook-installations"
+import { InstallationGuard, startInstallationGuard } from "./installation-guard"
 import { AgentHarness } from "./agent-harness"
 import { GitHub } from "./github"
 import { Workspace } from "./workspace"
@@ -249,6 +250,7 @@ export function startHookService(
   ) => iteration.pipe(Effect.tap(() => observeWorkerIteration(name)))
 
   return Effect.gen(function* () {
+    const installationGuard = yield* Effect.serviceOption(InstallationGuard)
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Effect.serviceOption(Automation)
     const github = yield* Effect.serviceOption(GitHub)
@@ -298,6 +300,12 @@ export function startHookService(
               ),
           ),
         )
+    }
+
+    if (config.mode !== "execution") {
+      if (Option.isNone(installationGuard))
+        return yield* Effect.die(new Error("InstallationGuard service is required"))
+      yield* startInstallationGuard(installationGuard.value)
     }
 
     if (config.remoteCoordinator !== undefined) {
@@ -511,6 +519,9 @@ export function startHookService(
             prAutomationEnabled: config.mode !== "execution",
             prRepositories: config.github?.prRepositories ?? [],
             installationIds,
+            ...(Option.isSome(installationGuard)
+              ? { installationGuard: installationGuard.value }
+              : {}),
             ...(Option.isSome(ci) ? { ci: ci.value } : {}),
             ...(config.qrspi === undefined
               ? {}

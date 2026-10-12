@@ -1,5 +1,6 @@
 import { webhookInstallationId } from "./webhook-installations"
 import type { PrRepositories } from "./pr-automation-config"
+import type { InstallationGuard } from "./installation-guard"
 import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Schema } from "effect"
@@ -58,6 +59,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly installationGuard?: typeof InstallationGuard.Service
   readonly prAutomationEnabled?: boolean
   readonly installationIds?: ReadonlySet<number>
   readonly prRepositories?: PrRepositories
@@ -74,6 +76,14 @@ export type WebhookHandlerOptions = {
     readonly token: string
     readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
   }
+}
+
+function healthResponse(guard: WebhookHandlerOptions["installationGuard"]) {
+  return guard === undefined
+    ? Effect.succeed(Response.json({ status: "ok" }))
+    : guard
+        .health()
+        .pipe(Effect.map((installationGuard) => Response.json({ status: "ok", installationGuard })))
 }
 
 export function routeRequest(
@@ -98,7 +108,7 @@ export function routeRequest(
     )
   }
   if (pathname === "/health" && request.method === "GET") {
-    return Effect.succeed(Response.json({ status: "ok" }))
+    return healthResponse(options.installationGuard)
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
     return options.prAutomationEnabled === false
@@ -574,6 +584,19 @@ export function handleGitHubWebhook(
     )
     if (payload instanceof Response) return payload
 
+    const action = webhookAction(payload)
+    const delivery = {
+      deliveryId,
+      event: eventName,
+      action,
+      payload: bodyText,
+      receivedAt: options.now,
+    }
+    if (options.installationGuard !== undefined) {
+      const outcome = yield* options.installationGuard.handle(delivery, payload)
+      if (outcome !== undefined) return Response.json({ status: outcome }, { status: 202 })
+    }
+
     const ignored = yield* installationGateResponse(payload, options, deliveryId)
     if (ignored !== undefined) return ignored
 
@@ -588,14 +611,6 @@ export function handleGitHubWebhook(
     )
     if (decoded instanceof Response) return decoded
 
-    const action = webhookAction(payload)
-    const delivery = {
-      deliveryId,
-      event: eventName,
-      action,
-      payload: bodyText,
-      receivedAt: options.now,
-    }
     if (decoded._tag === "CiCompletion" && options.ci !== undefined) {
       const status = yield* options.ci.ingest(deliveryId, decoded, bodyText, options.now.getTime())
       return Response.json({ status }, { status: 202 })

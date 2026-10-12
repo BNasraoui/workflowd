@@ -3,6 +3,9 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { makeCiStore } from "../src/ci/store"
+import { loadConfig } from "../src/config"
+import { configuredWebhookInstallations } from "../src/webhook-installations"
+import { fixture, installation } from "./helpers/installation-guard"
 import { GitHub } from "../src/github"
 import { handleGitHubWebhook } from "../src/http"
 import type { WorkflowStorePort } from "../src/store/contracts"
@@ -209,3 +212,153 @@ test("installation-free or invalid installation envelopes never persist", () =>
       expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
     }),
   ))
+
+test("rejects a sandbox-only installation without storing its delivery", async () => {
+  const config = await loadConfig({
+    GITHUB_APP_ID: "123",
+    GITHUB_PRIVATE_KEY_PATH: "/unused/key",
+    GITHUB_WEBHOOK_SECRET: "secret",
+    OPENCODE_SERVER_PASSWORD: "secret",
+    WORKFLOWD_OPENCODE_ATTACH_URL: "http://localhost:4096",
+    WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232",
+    WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+    WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+    WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+    WORKFLOWD_AGENT_RUN_REPOSITORIES: "sandbox=/tmp/sandbox",
+    WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+      {
+        alias: "sandbox",
+        repository: "sandbox/repo",
+        repositoryId: 42,
+        installationId: 999,
+        workflowSha: "a".repeat(40),
+        appActorId: 10,
+        tailscaleClientId: "fixture",
+        tailscaleAudience: "fixture",
+      },
+    ]),
+  })
+  await withStore(
+    Effect.gen(function* () {
+      const response = yield* handleGitHubWebhook(
+        signedRequest("push", eventPayload("push", 999, "sandbox/repo"), "sandbox", "secret"),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationIds: configuredWebhookInstallations(config),
+        },
+      )
+      expect(response.status).toBe(202)
+      expect(yield* Effect.tryPromise(() => response.json())).toEqual({
+        status: "ignored",
+        reason: "installation-not-configured",
+      })
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
+    }),
+  )
+})
+
+const guardEvents = [
+  ["installation", "created"],
+  ["installation", "new_permissions_accepted"],
+  ["installation", "unsuspend"],
+  ["installation_repositories", "added"],
+] as const
+
+for (const [event, action] of guardEvents) {
+  test.each([999, 81005232])(
+    `guard handles unconfigured ${event}.${action} for account %s`,
+    async (accountId) => {
+      const f = fixture((method) =>
+        method === "GET"
+          ? Response.json(installation(10, accountId))
+          : new Response(null, { status: 204 }),
+      )
+      await withStore(
+        Effect.gen(function* () {
+          yield* f.guard.runWebhooks.pipe(Effect.forkScoped)
+          const payload = JSON.stringify({ action, installation: installation(10, accountId) })
+          const send = () =>
+            handleGitHubWebhook(signedRequest(event, payload, "guard", "secret"), {
+              webhookSecret: "secret",
+              now: new Date(),
+              installationGuard: f.guard,
+              installationIds: new Set([91]),
+            })
+          const response = yield* send()
+          expect(response.status).toBe(202)
+          expect(yield* Effect.tryPromise(() => response.json())).toEqual({ status: "accepted" })
+          yield* f.nextLog
+          expect(f.requests).toEqual(
+            accountId === 999
+              ? ["GET /app/installations/10", "DELETE /app/installations/10"]
+              : ["GET /app/installations/10"],
+          )
+          const duplicate = yield* send()
+          expect(yield* Effect.tryPromise(() => duplicate.json())).toEqual({ status: "duplicate" })
+          const sql = yield* SqlClient.SqlClient
+          expect(yield* sql`SELECT payload FROM webhook_deliveries`).toEqual([{ payload }])
+          expect(yield* sql`SELECT * FROM jobs`).toHaveLength(0)
+          expect(yield* sql`SELECT * FROM commands`).toHaveLength(0)
+        }).pipe(Effect.scoped, Effect.provide(f.logger)),
+      )
+    },
+  )
+}
+
+test.each([
+  ["installation", "deleted"],
+  ["pull_request", "opened"],
+])("rejects unconfigured non-guard event %s.%s without storing it", (event, action) => {
+  const f = fixture()
+  return withStore(
+    Effect.gen(function* () {
+      const payload = JSON.stringify({ ...JSON.parse(eventPayload(event, 10)), action })
+      const response = yield* handleGitHubWebhook(
+        signedRequest(event, payload, "non-guard", "secret"),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationGuard: f.guard,
+          installationIds: new Set([91]),
+        },
+      )
+      expect(response.status).toBe(202)
+      expect(yield* Effect.tryPromise(() => response.json())).toEqual({
+        status: "ignored",
+        reason: "installation-not-configured",
+      })
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
+      expect(yield* sql`SELECT * FROM jobs`).toHaveLength(0)
+      expect(f.requests).toEqual([])
+    }),
+  )
+})
+
+test("an undecodable guard event stores nothing", () => {
+  const f = fixture()
+  return withStore(
+    Effect.gen(function* () {
+      const response = yield* handleGitHubWebhook(
+        signedRequest(
+          "installation",
+          JSON.stringify({ action: "created", installation: { id: 10, account: null } }),
+          "malformed-guard",
+          "secret",
+        ),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationGuard: f.guard,
+          installationIds: new Set([91]),
+        },
+      )
+      expect(response.status).toBe(500)
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
+      expect(f.requests).toEqual([])
+    }).pipe(Effect.provide(f.logger)),
+  )
+})
