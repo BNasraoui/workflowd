@@ -200,7 +200,20 @@ export async function runSandboxBridge(
               !allowed.has(call.name) ||
               call.arguments.environment_source !== transport.repositoryPath
             ) {
-              throw new Error("Sandbox tool or repository is not allowed")
+              const result = {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      "Sandbox tool or repository is not allowed. " +
+                      `Every container-use call must pass environment_source "${transport.repositoryPath}".`,
+                  },
+                ],
+              }
+              await finish()
+              await send(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result }) + "\n")
+              continue
             }
             commandTool = call.name === "environment_run_cmd"
             const wrapped = wrapAuditedCommand(call)

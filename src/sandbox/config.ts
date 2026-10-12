@@ -86,6 +86,7 @@ export const SandboxCompletion = Schema.Struct({
 
 export const sandboxCompletionInstructions =
   "Work only in container-use environments. Do not create git branches inside the container. " +
+  'Every container-use call must pass environment_source "/workspace/repository". ' +
   "Finish by calling submit_result on your owned sandbox MCP server with exactly environmentId (the exact ID of the environment holding your result), " +
   "branch (the branch name you choose), title (your PR title, non-empty, one line, at most 200 Unicode characters), " +
   "and commitMessage (your non-empty commit message, at most 10 KiB of UTF-8). Both must be valid Unicode plain text with no control characters; only the message may contain newlines. " +

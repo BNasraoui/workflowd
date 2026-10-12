@@ -213,14 +213,17 @@ test("bridge refuses malformed frames, foreign repositories, and an unpinned SSH
       await foreign.initialize()
       await foreign.request("tools/list")
       await expect(
-        foreign.request("tools/call", {
+        await foreign.request("tools/call", {
           name: "environment_create",
           arguments: {
             environment_source: "/another/repository",
             title: "rejected",
           },
         }),
-      ).rejects.toThrow("repository is not allowed")
+      ).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("/workspace/repository") }],
+      })
     } finally {
       await foreign.close()
     }
