@@ -31,6 +31,8 @@ function eventPayload(event: string, installationId: number, repository = "examp
   return JSON.stringify({
     ...payload,
     repository: { ...payload.repository, full_name: repository },
+    // These fixtures exercise admission gates with an author eligible for automatic review.
+    pull_request: { ...payload.pull_request, author_association: "MEMBER" },
     installation: { id: installationId },
     action:
       event === "issue_comment"
@@ -186,6 +188,36 @@ for (const event of ["pull_request", "issue_comment", "workflow_run", "check_sui
     ),
   )
 }
+
+test("stores an admitted untrusted fork PR without queuing automatic review", () =>
+  withStore(
+    Effect.gen(function* () {
+      const payload = JSON.parse(eventPayload("pull_request", 91, "pr/repo"))
+      payload.pull_request.author_association = "NONE"
+      payload.pull_request.head.repo.full_name = "outsider/repo"
+      const body = JSON.stringify(payload)
+      const response = yield* handleGitHubWebhook(
+        signedRequest("pull_request", body, "untrusted-fork", "secret"),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationIds: new Set([91]),
+          prRepositories: [{ repository: "pr/repo", installationId: 91 }],
+        },
+      )
+      expect(response.status).toBe(202)
+      expect(yield* Effect.tryPromise(() => response.json())).toMatchObject({
+        status: "skipped",
+        reason: "automatic-review-untrusted-fork",
+      })
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT payload FROM webhook_deliveries`).toEqual([{ payload: body }])
+      expect(yield* sql`SELECT automatic_review_skip_reason FROM pull_requests`).toEqual([
+        { automatic_review_skip_reason: "automatic-review-untrusted-fork" },
+      ])
+      expect(yield* sql`SELECT * FROM jobs`).toHaveLength(0)
+    }),
+  ))
 
 test("ignores malformed foreign events before the full event decode", () =>
   withStore(
