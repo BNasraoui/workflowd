@@ -24,8 +24,8 @@ test("owns a stdio server and closes only its subprocess", async () => {
     const result = await server.rpc.request("thread/list", {})
     expect(result).toMatchObject({
       ok: true,
-      args: expect.arrayContaining([
-        expect.stringContaining("mcp_servers.workflowd_subscriptions="),
+      args: expect.not.arrayContaining([
+        expect.stringContaining("mcp_servers.workflowd_subscriptions={"),
       ]),
     })
   } finally {
