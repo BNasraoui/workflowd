@@ -211,8 +211,50 @@ jobs:
           test/agent-user/credentials.e2e.test.ts
           test/agent-user/credential-dispatch.e2e.test.ts
           test/agent-user/opencode-migration.e2e.test.ts
+      - name: Require administrative migration coverage
+        run: |
+          mkdir -p coverage/administrative
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /usr/bin/unshare --pid --fork --mount-proc --net \
+            /bin/sh -c 'ip link set lo up && exec "$@"' fixture \
+            /opt/workflowd-credential-fixture/bin/bun test --coverage \
+            --coverage-dir=coverage/administrative \
+            test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
-        run: bun run test:coverage
+        run: |
+          # Administrative migration needs /proc access unavailable to the ordinary
+          # test UID. The preceding step enforces the unchanged Bun thresholds for
+          # that module. Every other module is checked here with the same thresholds.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          config = Path("bunfig.toml").read_text()
+          key = "coveragePathIgnorePatterns = ["
+          assert config.count(key) == 1
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",', 1)
+          Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
+          PY
+          bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
+      - name: Include administrative coverage in shared gates
+        run: |
+          # Use the complete, independently threshold-checked administrative record.
+          # No duplicate file records may mask ordinary-suite coverage.
+          python3 - <<'PY'
+          from pathlib import Path
+          marker = "SF:src/agent-host/opencode-credentials.ts\n"
+          administrative = Path("coverage/administrative/lcov.info").read_text()
+          records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
+          assert len(records) == 1, "administrative migration coverage missing or duplicated"
+          report = Path("coverage/lcov.info")
+          ordinary = report.read_text()
+          assert marker not in ordinary.splitlines(keepends=True), "duplicate migration coverage"
+          report.write_text(ordinary + records[0] + "end_of_record\n")
+          PY
       - name: Require 80% changed executable line coverage
         if: github.event_name == 'pull_request'
         env:
