@@ -1,3 +1,4 @@
+import { providerFailure, type ProviderFailure } from "../provider-failure"
 import { sandboxDiagnostic, retainSandboxFailure } from "../sandbox/diagnostics"
 import {
   type CliPort,
@@ -18,6 +19,7 @@ import type { AgentRunRecord, AgentRunStorePort } from "./agent-run-store"
 import { createAgentRunWorktree, type AgentRunWorktreesPort } from "./agent-run-worktrees"
 
 type RefusalReason =
+  | ProviderFailure["reason"]
   | "provider_not_authenticated"
   | "no_first_token"
   | "run_conflict"
@@ -56,6 +58,10 @@ const diagnostic = (
 ) => {
   if (stalled)
     return `${cliName}_stalled: no ${cliName} event for ${stallWindowMs}ms; the process group was terminated`
+  const provider = providerFailure(
+    turnFailed ?? (Exit.isSuccess(exit) && exit.value.exitCode !== 0 ? exit.value.stderr : null),
+  )
+  if (provider !== undefined) return `${provider.reason}: ${provider.message}`
   const exitCode = Exit.isSuccess(exit) ? exit.value.exitCode : -1
   let detail = `${cliName}_failed: exit ${exitCode}`
   if (exitCode === 143 || exitCode === -15) detail += " (SIGTERM)"
@@ -74,7 +80,7 @@ type FirstToken =
     }
   | {
       readonly outcome: "refused"
-      readonly reason: "provider_not_authenticated" | "no_first_token"
+      readonly reason: "provider_not_authenticated" | "no_first_token" | ProviderFailure["reason"]
       readonly detail: string
     }
 type Observation = {
@@ -109,6 +115,7 @@ const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: s
                 : `${cliName} produced model output but never announced a session id; the runner cannot custody it`,
           }
         }
+        if (step.type === "turn.started") errors.length = 0
         if (step.type === "thread.started") {
           threadId = step.threadId
           nativeModel = step.model
@@ -166,10 +173,13 @@ const observeFirstToken = (process: CliRunProcess, timeoutMs: number, cliName: s
     const authFailed =
       codexFailureLooksUnauthenticated(errors) ||
       (terminalExit !== null && codexFailureLooksUnauthenticated([terminalExit.stderr]))
-    const reason = authFailed ? ("provider_not_authenticated" as const) : result.reason
-    let detail = result.detail
+    const provider = providerFailure(errors.at(-1) ?? terminalExit?.stderr)
+    const reason = authFailed
+      ? ("provider_not_authenticated" as const)
+      : (provider?.reason ?? result.reason)
+    let detail = provider?.message ?? result.detail
     if (authFailed) detail += `: the ${cliName} CLI reported an authentication failure`
-    else {
+    else if (provider === undefined) {
       if (errors.length > 0) detail += `; last error: ${errors.at(-1)}`
       if (terminalExit !== null && terminalExit.stderr !== "")
         detail += `; stderr: ${terminalExit.stderr.slice(0, 300)}`
@@ -264,6 +274,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         }
         if (next.value === "closed") break
         const event = next.value
+        if (event.type === "turn.started") {
+          turnFailed = null
+          finalMessage = null
+          outputTokens = null
+        }
         if (event.type === "agent_message") finalMessage = event.text
         else if (event.type === "turn.completed") outputTokens = event.outputTokens
         else if (event.type === "turn.failed") turnFailed = event.message
@@ -271,6 +286,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
       }
       if (stalled) yield* input.cancel.pipe(Effect.ignore)
       const exit: Exit.Exit<CliExit, WorkspaceError> = yield* Effect.exit(Fiber.join(input.exited))
+      finalMessage =
+        providerFailure(
+          turnFailed ??
+            (Exit.isSuccess(exit) && exit.value.exitCode !== 0 ? exit.value.stderr : null),
+        )?.message ?? finalMessage
       if (input.sandboxRun !== undefined) {
         yield* finishSandbox(input.sandboxRun, {
           state:
@@ -406,13 +426,14 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             if (isolated)
               yield* finishSandbox(run, {
                 state: "operator_required",
-                finalMessage: null,
+                finalMessage: providerFailure(observed.result.detail)?.message ?? null,
                 diagnostic: observed.result.detail,
               })
             else
               yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
                 runId: run.runId,
                 diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
+                finalMessage: providerFailure(observed.result.detail)?.message ?? null,
                 now,
               }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
             return yield* refuse(observed.result.reason, observed.result.detail)
@@ -514,7 +535,8 @@ export const makeAgentRunCliDispatcher = (dependencies: {
         if (observed.result.outcome === "refused") {
           yield* (observed.terminationConfirmed ? store.fail : store.operatorRequired)({
             runId: run.runId,
-            diagnostic: `${kind}_recovery_failed: ${observed.result.detail}`,
+            diagnostic: `${observed.result.reason}: ${observed.result.detail}`,
+            finalMessage: providerFailure(observed.result.detail)?.message ?? null,
             now: new Date(),
           }).pipe(Effect.catchTag("AgentRunStoreConflictError", () => Effect.void))
           continue
