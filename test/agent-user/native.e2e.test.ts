@@ -269,7 +269,18 @@ async function nativeBoundary(simulatedManager: boolean) {
       expect(process.uid).toBe(agentUid)
       const deadline = Date.now() + 45000
       while (!(await readFile(proof, "utf8").catch(() => "")).includes("denied")) {
-        if (Date.now() > deadline) throw new Error(`${client} native tool did not reach proof`)
+        if (Date.now() > deadline) {
+          const io = join(ioRoot, createHash("sha256").update(runId).digest("hex"))
+          throw new Error(
+            JSON.stringify({
+              client,
+              requests: fixture.requests.length,
+              process: await call({ operation: "inspect", runId }),
+              stderr: await readFile(join(io, "stderr"), "utf8").catch(() => "missing"),
+              events: await readFile(join(io, "events"), "utf8").catch(() => "missing"),
+            }),
+          )
+        }
         await Bun.sleep(100)
       }
       expect(await readFile(proof, "utf8")).toBe(`${agentUid}\ndenied\n`)
@@ -389,9 +400,6 @@ async function nativeBoundary(simulatedManager: boolean) {
     const baseline = claude.requests.length
     const resumeProgram = (recover: boolean) => `
 import { Effect } from ${JSON.stringify(join(import.meta.dir, "../../node_modules/effect/dist/index.js"))};
-import { makeCodexCli } from "../../src/kernel/codex-session"
-import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
-import { launchAppServer, attachAppServer, sweepOrphanAppServers } from "../../src/resident/process"
 import { makeClaudeCli } from ${JSON.stringify(join(import.meta.dir, "../../src/kernel/claude-session.ts"))};
 import { makeClaudeResumeExecutor } from ${JSON.stringify(join(import.meta.dir, "../../src/remote/claude-resume-executor.ts"))};
 const executor = makeClaudeResumeExecutor({cli:makeClaudeCli({binary:"unused",credentialSocket:${JSON.stringify(path)}}),allowedDirectories:[${JSON.stringify(workspaceRoot)}]});
