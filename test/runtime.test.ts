@@ -11,6 +11,7 @@ import {
   type DogfoodEnrichmentDocument,
 } from "../src/kernel/dogfood-store"
 import { GitHub } from "../src/github"
+import { KernelSessionStoreLive } from "../src/kernel/session-store"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
 import { OpenCodeResumeWorker } from "../src/kernel/opencode-resume-worker"
@@ -36,7 +37,10 @@ import {
   closedWorkflowStart,
 } from "../src/qrspi/workflow-start"
 import { changesRequestedReview, makeStoreLayer, samplePullRequestEvent } from "./store/harness"
-import { arrangeDelivery, kernelLayer } from "./kernel/job-store-harness"
+import { arrangeDelivery, kernelLayer as jobKernelLayer } from "./kernel/job-store-harness"
+
+const kernelLayer = (filename: string) =>
+  KernelSessionStoreLive.pipe(Layer.provideMerge(jobKernelLayer(filename)))
 
 const qrspiDefinition = {
   contractVersion: 1,

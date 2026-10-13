@@ -23,6 +23,7 @@ export const AgentWaitSubmission = Schema.Struct({
 export type AgentWaitSubmission = typeof AgentWaitSubmission.Type
 
 export const AgentWaitReceipt = Schema.Struct({
+  mailboxId: Schema.optional(Schema.String),
   waitId: Schema.String,
   instanceId: Schema.String,
   status: Schema.Literals(["registered", "duplicate"]),

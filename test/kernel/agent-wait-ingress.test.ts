@@ -128,6 +128,7 @@ describe("agent wait ingress", () => {
     )
 
     expect(result.receipt.status).toBe("registered")
+    expect(result.receipt.mailboxId).toBe("agent-wake-mailbox-parent-stable")
     expect(result.receipt.waitId).toStartWith("agent-wait-")
     expect(result.watches).toHaveLength(1)
     expect(result.watches[0]!.child_session_id).toBe("child-stable")

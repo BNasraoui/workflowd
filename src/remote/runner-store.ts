@@ -190,7 +190,11 @@ const make = Effect.gen(function* () {
     } | null,
     at: Date,
   ) => {
-    if (command.hostId !== hostId) return "wrong_host"
+    if (
+      command.hostId !== hostId ||
+      (command.kind === "claude_resume" && command.payload.hostId !== hostId)
+    )
+      return "wrong_host"
     if (new Date(command.expiresAt).getTime() <= at.getTime()) return "expired"
     if (
       current === null ||

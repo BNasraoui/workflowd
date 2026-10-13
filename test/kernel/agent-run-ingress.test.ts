@@ -662,6 +662,36 @@ describe("agent-run ingress", () => {
     expect(result.parent[0]!.endpoint_identity).toBe("claude-cli://ben-arch")
   })
 
+  test("refuses a different parent_host for existing Claude custody before spawning", async () => {
+    const state = defaultState()
+    const layer = makeLayer(makeProvider(state), worktrees([]))
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const input = {
+          ...submission,
+          parentSessionId: "claude-parent-1",
+          parentKind: "claude" as const,
+          parentHost: "mint",
+          parentDirectory: "/home/ben/coordination",
+          resumePrompt: "Continue.",
+        }
+        yield* register(input)
+        return yield* register({
+          ...input,
+          idempotencyKey: "different-host",
+          parentHost: "ben-arch",
+        }).pipe(Effect.result)
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure")
+      expect(result.failure).toMatchObject({
+        _tag: "AgentRunRefusalError",
+        reason: "missing_parent_session",
+      })
+    expect(state.created).toHaveLength(1)
+  })
+
   test("a claude parent on an unlisted host is refused before spawning", async () => {
     const state = defaultState()
     const layer = makeLayer(makeProvider(state), worktrees([]))
