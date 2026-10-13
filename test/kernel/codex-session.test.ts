@@ -44,8 +44,8 @@ const parseAll = (lines: ReadonlyArray<string>): ReadonlyArray<CodexExecEvent> =
   lines.map(parseCodexExecEvent)
 
 describe("codex exec JSONL parsing", () => {
-  test("preserves structured provider error information", () => {
-    const error = { message: "Try again", codexErrorInfo: "serverOverloaded" }
+  test("preserves text-only provider error information", () => {
+    const error = { message: "Selected model is at capacity. Please try a different model." }
     expect(parseCodexExecEvent(JSON.stringify({ type: "turn.failed", error }))).toEqual({
       type: "turn.failed",
       ...error,

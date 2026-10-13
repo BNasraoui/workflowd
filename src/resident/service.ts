@@ -9,7 +9,18 @@ import { residentWorkerInstructions } from "./instructions"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
-import { Context, Effect, Exit, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
+import {
+  Clock,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Queue,
+  Schedule,
+  Schema,
+  Semaphore,
+} from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
@@ -304,11 +315,11 @@ export const ResidentCodexLive = (
             const attempts = counts[0]?.count ?? 2
             const delay = providerRetryDelay(attempts)
             if (delay !== undefined) {
-              yield* Effect.sleep(delay)
               yield* store.enqueue(
                 retryId,
                 event.threadId,
                 "The provider temporarily refused the previous turn before any tool step. Continue the task from the existing conversation.",
+                (yield* Clock.currentTimeMillis) + delay,
               )
               yield* store.completed(event.threadId, event.turn.id, true)
               return
@@ -335,9 +346,8 @@ export const ResidentCodexLive = (
             error == null
               ? "resident_turn_failed"
               : `${failure?.reason ?? "resident_turn_failed"}: ${message}`,
-            event.turn.status === "failed" && message !== undefined
-              ? { message, codexErrorInfo: error?.codexErrorInfo }
-              : undefined,
+            // The CLI consumer must classify the native error before its own preview truncation.
+            event.turn.status === "failed" && error != null ? error : undefined,
           )
         }
       })

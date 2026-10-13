@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
+import { TestClock } from "effect/testing"
 import { Effect } from "effect"
 import { makeResidentStore } from "../../src/resident/store"
 import { SqlClient } from "effect/unstable/sql"
@@ -87,4 +88,34 @@ test("server custody is recorded before thread creation and adopts one invocatio
       yield* store.closeServer("agent-run-a")
       expect(yield* store.activeServers()).toHaveLength(0)
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  ))
+
+test("delayed inbox delivery survives store recreation without blocking ready work", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      yield* runStoreMigrationsThrough0024
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`INSERT INTO resident_threads(run_id,thread_id,directory,state) VALUES('run1','thread1','/work/a','active')`
+      yield* sql`INSERT INTO resident_inbox(id,thread_id,prompt,state) VALUES('legacy','thread1','old message','prepared')`
+      yield* runStoreMigrations
+      const store = yield* makeResidentStore
+      yield* store.started("thread1", "turn1")
+      yield* store.enqueue("retry", "thread1", "Continue.", 5000)
+      yield* store.enqueue("ready", "thread1", "Ready now")
+      expect((yield* store.pending()).map((row) => row.id)).toEqual(["legacy", "ready"])
+      yield* store.delivered("legacy")
+      yield* store.delivered("ready")
+      expect(yield* store.completed("thread1", "turn1")).toBe("waiting")
+      const restored = yield* makeResidentStore
+      yield* restored.enqueue("retry", "thread1", "Duplicate")
+      yield* TestClock.setTime(4999)
+      expect(yield* restored.pending()).toHaveLength(0)
+      yield* TestClock.setTime(5000)
+      expect((yield* restored.pending()).map((row) => row.id)).toEqual(["retry"])
+      yield* restored.revokeDelivery("thread1")
+      expect(yield* restored.pending()).toHaveLength(0)
+    }).pipe(
+      Effect.provide(SqliteClient.layer({ filename: ":memory:" })),
+      Effect.provide(TestClock.layer()),
+    ),
   ))

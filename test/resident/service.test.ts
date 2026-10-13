@@ -1,8 +1,10 @@
+import { providerFailure } from "../../src/provider-failure"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { makeResidentStore } from "../../src/resident/store"
 import { join } from "node:path"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
-import { expect, test } from "bun:test"
+import { TestClock } from "effect/testing"
+import { expect, spyOn, test } from "bun:test"
 import { Effect, Layer, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -1219,4 +1221,81 @@ test("resident provider previews redact credentials and bound mailbox text", asy
       expect(Buffer.byteLength(JSON.stringify(final)) - 2).toBeLessThanOrEqual(512)
     }).pipe(Effect.provide(layer(fake.factory))),
   )
+})
+
+test("resident and CLI classify text beyond the diagnostic preview identically", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      fake.fail(
+        "thread-1",
+        "dispatch:a",
+        true,
+        "x".repeat(600) + " HTTP 429 Too Many Requests",
+        null,
+      )
+      yield* worker.exited
+      const run = yield* (yield* AgentRunStore).read("a")
+      expect(run?.diagnostic).toStartWith("provider_rate_limited:")
+      const failure = yield* Effect.promise(async () => {
+        for await (const event of worker.events)
+          if (event.type === "turn.failed")
+            return providerFailure(event.message, event.codexErrorInfo)
+      })
+      expect(failure?.reason).toBe("provider_rate_limited")
+      expect(run?.diagnostic).toBe(`${failure?.reason}: ${failure?.message}`)
+      expect(Buffer.byteLength(JSON.stringify(failure?.message)) - 2).toBeLessThanOrEqual(512)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("resident retry backoff releases delivery for other threads and cancellation", async () => {
+  const random = spyOn(Math, "random").mockReturnValue(0.5)
+  const fake = fixture(true)
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const now = new Date()
+        yield* prepareRun(now)
+        const worker = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        yield* verifyRun(now)
+        fake.fail("thread-1", fake.startNext("thread-1"), false, "Selected model is at capacity.")
+        const store = yield* makeResidentStore
+        yield* TestClock.withLive(
+          store.read("thread-1").pipe(
+            Effect.repeat({
+              schedule: Schedule.spaced(10),
+              until: (row) => row?.state === "waiting",
+            }),
+            Effect.timeout(1000),
+          ),
+        )
+        expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(1)
+        yield* prepareRun(now, "b")
+        yield* resident.cli.spawn({ runId: "b", directory: "/work/b", prompt: "hold", model: null })
+        expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(2)
+        yield* worker.cancel
+        yield* TestClock.adjust(20000)
+        expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(2)
+      }).pipe(Effect.provide(layer(fake.factory)), Effect.provide(TestClock.layer())),
+    )
+  } finally {
+    random.mockRestore()
+  }
 })

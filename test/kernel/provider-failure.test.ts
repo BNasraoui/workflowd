@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { providerFailure, providerRetryDelay } from "../../src/provider-failure"
+import { parseCodexExecEvent } from "../../src/kernel/codex-session"
 import { CodexRetryTurn } from "../../src/kernel/codex-retry"
 
 test("structured Codex failures take precedence over HTTP fallback", () => {
@@ -9,6 +10,9 @@ test("structured Codex failures take precedence over HTTP fallback", () => {
   ).toBe("provider_rate_limited")
   expect(providerFailure("HTTP 429", "contextWindowExceeded")).toBeUndefined()
   expect(providerFailure("HTTP 503: model at capacity")?.reason).toBe("model_at_capacity")
+  expect(providerFailure("unexpected status 503: model at capacity")?.reason).toBe(
+    "model_at_capacity",
+  )
   expect(providerFailure("unexpected status 429 Too Many Requests")?.reason).toBe(
     "provider_rate_limited",
   )
@@ -21,7 +25,11 @@ for (const message of [
   "gh: API rate limit exceeded",
   "Rate limit exceeded",
   "server_overloaded",
-  "Selected model is at capacity.",
+  "Provider said: Selected model is at capacity.",
+  "Selected model is at capacityish",
+  "exceeded retry limit, last status: 4290",
+  "Provider said: exceeded retry limit, last status: 429",
+  "Provider said: unexpected status 429",
   null,
   undefined,
 ])
@@ -57,7 +65,7 @@ test("chunked Codex errors retry only with positive evidence of a safe turn", ()
     chunk(turn, { type: "thread.started", thread_id: "one" })
     chunk(turn, {
       type: "turn.failed",
-      error: { message: "Retry later", codexErrorInfo: "serverOverloaded" },
+      error: { message: "Selected model is at capacity. Please try a different model." },
     })
     return turn
   }
@@ -95,4 +103,44 @@ test("chunked Codex errors retry only with positive evidence of a safe turn", ()
   partial.chunk(new TextEncoder().encode('{"type":"error","message":"HTTP 429 Rate '))
   partial.chunk(new TextEncoder().encode('limit exceeded"}'))
   expect(partial.retryDelay(0)).toBeLessThan(10000)
+})
+
+// Captured from codex exec --json 0.159.1 against a local fake provider.
+for (const [line, reason] of [
+  [
+    '{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}',
+    "provider_rate_limited",
+  ],
+  [
+    '{"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}',
+    "model_at_capacity",
+  ],
+] as const)
+  test(`real exec failure classifies and retries: ${reason}`, () => {
+    const event = parseCodexExecEvent(line)
+    expect(event.type).toBe("turn.failed")
+    if (event.type !== "turn.failed") throw new Error("Expected native failure")
+    expect(providerFailure(event.message, event.codexErrorInfo)?.reason).toBe(reason)
+    const turn = new CodexRetryTurn()
+    turn.chunk(
+      new TextEncoder().encode('{"type":"thread.started","thread_id":"one"}\n' + line + "\n"),
+    )
+    expect(turn.retryDelay(0)).toBeLessThan(10000)
+    expect(turn.retryDelay(2)).toBeUndefined()
+  })
+
+test("structured rate limits exclude usage limits and non-429 responses", () => {
+  expect(providerFailure("Retry later", "rateLimitExceeded")?.reason).toBe("provider_rate_limited")
+  expect(
+    providerFailure("Retry later", { responseTooManyFailedAttempts: { httpStatusCode: 429 } })
+      ?.reason,
+  ).toBe("provider_rate_limited")
+  expect(providerFailure("HTTP 429", "usageLimitExceeded")).toBeUndefined()
+  expect(
+    providerFailure("HTTP 429", { responseTooManyFailedAttempts: { httpStatusCode: 500 } }),
+  ).toBeUndefined()
+  expect(
+    providerFailure("HTTP 429", { responseTooManyFailedAttempts: { httpStatusCode: null } }),
+  ).toBeUndefined()
+  expect(providerFailure("Selected model is at capacity.")?.reason).toBe("model_at_capacity")
 })

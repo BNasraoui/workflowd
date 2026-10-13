@@ -27,7 +27,7 @@ if (${JSON.stringify(mode)} === "recover" && attempt === 2) {
   emit({type: "item.completed", item: {type: "agent_message", text: "done"}});
   emit({type: "turn.completed", usage: {output_tokens: 1}});
 } else {
-  emit({type: "turn.failed", error: {message: "Selected model is at capacity. Please try a different model.", codexErrorInfo: "serverOverloaded"}});
+  emit({type: "turn.failed", error: {message: "Selected model is at capacity. Please try a different model."}});
   process.exitCode = 1;
 }
 `,

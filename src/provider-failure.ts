@@ -12,23 +12,31 @@ export function providerFailure(
 ): ProviderFailure | undefined {
   let reason: ProviderFailure["reason"] | undefined
   if (codexErrorInfo === "serverOverloaded") reason = "model_at_capacity"
+  else if (codexErrorInfo === "rateLimitExceeded") reason = "provider_rate_limited"
   else if (codexErrorInfo != null) {
-    const connection: unknown =
-      typeof codexErrorInfo === "object"
-        ? Reflect.get(codexErrorInfo, "httpConnectionFailed")
-        : undefined
     if (
-      typeof connection === "object" &&
-      connection !== null &&
-      Reflect.get(connection, "httpStatusCode") === 429
+      typeof codexErrorInfo === "object" &&
+      ["httpConnectionFailed", "responseTooManyFailedAttempts"].some((key) => {
+        const response: unknown = Reflect.get(codexErrorInfo, key)
+        return (
+          typeof response === "object" &&
+          response !== null &&
+          Reflect.get(response, "httpStatusCode") === 429
+        )
+      })
     )
       reason = "provider_rate_limited"
   } else if (message != null) {
     const status =
-      /\b(?:HTTP(?:\/\d(?:\.\d)?)?(?: status(?: code)?)?|unexpected status(?: code)?)\s*[:=]?\s+(429|503)\b/i.exec(
+      /(?:\bHTTP(?:\/\d(?:\.\d)?)?(?: status(?: code)?)?|^unexpected status(?: code)?)\s*[:=]?\s+(429|503)\b/i.exec(
         message,
       )?.[1]
-    if (status === "429") reason = "provider_rate_limited"
+    if (/^Selected model is at capacity\b/.test(message)) reason = "model_at_capacity"
+    else if (
+      status === "429" ||
+      /^(?:exceeded retry limit, last status: 429|unexpected status 429)\b/.test(message)
+    )
+      reason = "provider_rate_limited"
     else if (
       status === "503" &&
       /\bat capacity\b|\bserver[_ ]overloaded\b|\bmodel.{0,40}\boverloaded\b/i.test(message)
