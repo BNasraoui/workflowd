@@ -2,7 +2,7 @@ import { RequestedSelection } from "../execution-selection"
 import { Effect, Schema } from "effect"
 import { RemoteProbeProducer } from "../remote/probe-producer"
 import { RemoteHostId } from "../remote/contract"
-import { McpQueries, MAX_RECENT_JOBS } from "./queries"
+import { McpQueries, MAX_RECENT_JOBS, ListAgentRunsArguments, MAX_AGENT_RUNS } from "./queries"
 import { listExecutionCapabilities } from "./execution-capabilities"
 import {
   AgentWaitReceipt,
@@ -151,6 +151,18 @@ export const callTool = (name: string, args: unknown, context: ToolCallContext) 
         const queries = yield* McpQueries
         const messages = yield* queries.readAgentMailbox(input.success.mailbox_id)
         return json({ mailbox_id: input.success.mailbox_id, messages })
+      }
+      case "list_agent_runs": {
+        if (!context.writesConfigured || !context.writesAuthorized)
+          return failure("unauthorized: list_agent_runs requires a valid bearer token")
+        const input = yield* decodeArguments(ListAgentRunsArguments, args).pipe(Effect.result)
+        if (input._tag === "Failure")
+          return failure(
+            `invalid arguments: status must be an agent run state, repository a non-empty string, and limit an integer 1-${MAX_AGENT_RUNS}`,
+          )
+        const queries = yield* McpQueries
+        const runs = yield* queries.listAgentRuns(input.success)
+        return json({ runs })
       }
       case "list_recent_jobs": {
         const queries = yield* McpQueries

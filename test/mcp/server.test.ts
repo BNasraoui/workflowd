@@ -74,6 +74,7 @@ test("the streamable HTTP endpoint lists every tool with the fire-and-ack contra
     "enqueue_probe",
     "host_health",
     "job_status",
+    "list_agent_runs",
     "list_execution_capabilities",
     "list_recent_jobs",
     "read_agent_mailbox",
@@ -138,4 +139,19 @@ test("the server exposes a health endpoint and rejects unknown paths", async () 
   expect(await health.json()).toEqual({ status: "ok" })
   const missing = await fetch(`http://127.0.0.1:${started.port}/nope`)
   expect(missing.status).toBe(404)
+})
+
+test("list_agent_runs enforces bearer auth over HTTP", async () => {
+  for (const headers of [undefined, { authorization: "Bearer wrong-token" }]) {
+    const result = await callTool("list_agent_runs", {}, headers)
+    expect(result.isError).toBe(true)
+    expect(resultText(result)).toContain("unauthorized")
+  }
+  const result = await callTool(
+    "list_agent_runs",
+    {},
+    { authorization: "Bearer integration-token" },
+  )
+  expect(result.isError).toBeUndefined()
+  expect(JSON.parse(resultText(result))).toEqual({ runs: [] })
 })
