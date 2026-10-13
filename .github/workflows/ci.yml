@@ -207,6 +207,16 @@ jobs:
             test "$relative" != "$source"
             sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
           done
+      - name: Probe two-UID native supervision prerequisites
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
+          /opt/workflowd-credential-fixture/bin/bun
+          scripts/evidence/agent-user.mjs --probe-supervision
       - name: Require two-UID credential admission and repair
         run: >-
           sudo systemd-run --wait --pipe --collect
