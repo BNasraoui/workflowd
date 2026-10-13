@@ -11,8 +11,10 @@ Environment=HOME=%h
 Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.config/workflowd/env
 LoadCredential=github-webhook-secret:%h/.config/workflowd/github-webhook-secret
+LoadCredential=reviewer-password:%h/.config/workflowd/reviewer-password
 LoadCredential=opencode-server-password:%h/.config/workflowd/opencode-server-password
 Environment=GITHUB_WEBHOOK_SECRET_FILE=%d/github-webhook-secret
+Environment=WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE=%d/reviewer-password
 Environment=OPENCODE_SERVER_PASSWORD_FILE=%d/opencode-server-password
 ExecStart=%h/.bun/bin/bun run start
 Restart=on-failure

@@ -219,6 +219,7 @@ test("rejects a sandbox-only installation without storing its delivery", async (
     GITHUB_PRIVATE_KEY_PATH: "/unused/key",
     GITHUB_WEBHOOK_SECRET: "secret",
     OPENCODE_SERVER_PASSWORD: "secret",
+    WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
     WORKFLOWD_OPENCODE_ATTACH_URL: "http://localhost:4096",
     WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232",
     WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',

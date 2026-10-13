@@ -227,21 +227,24 @@ function makeExecutionOnlyLayer(config: AppConfig) {
 }
 
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
-  const authorization = Buffer.from(
-    `${config.openCode.username}:${config.openCode.password}`,
-  ).toString("base64")
-  const openCodeHttpLayer = Layer.effect(
-    HttpClient.HttpClient,
-    Effect.map(HttpClient.HttpClient, (client) =>
-      HttpClient.mapRequest(
-        client,
-        HttpClientRequest.setHeader("authorization", `Basic ${authorization}`),
+  const openCodeHttpLayer = (password: string) =>
+    Layer.effect(
+      HttpClient.HttpClient,
+      Effect.map(HttpClient.HttpClient, (client) =>
+        HttpClient.mapRequest(
+          client,
+          HttpClientRequest.setHeader(
+            "authorization",
+            `Basic ${Buffer.from(`${config.openCode.username}:${password}`).toString("base64")}`,
+          ),
+        ),
       ),
-    ),
-  ).pipe(Layer.provide(FetchHttpClient.layer))
+    ).pipe(Layer.provide(FetchHttpClient.layer))
   const openCodeClientEffect = Effect.runSync(
     Effect.cached(
-      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(
+        Effect.provide(openCodeHttpLayer(config.openCode.password)),
+      ),
     ),
   )
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
@@ -294,7 +297,9 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const reviewClient = Effect.runSync(
     Effect.cached(
-      OpenCode.make({ baseUrl: config.openCode.reviewUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+      OpenCode.make({ baseUrl: config.openCode.reviewUrl }).pipe(
+        Effect.provide(openCodeHttpLayer(config.openCode.reviewPassword)),
+      ),
     ),
   )
   const reviewAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(reviewClient))

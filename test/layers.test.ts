@@ -105,6 +105,7 @@ function loadLayerConfig(directory: string, overrides: Record<string, string> = 
       GITHUB_PRIVATE_KEY_PATH: join(directory, "github.pem"),
       GITHUB_WEBHOOK_SECRET: "secret",
       OPENCODE_SERVER_PASSWORD: "password",
+      WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
       WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       ...overrides,
     },

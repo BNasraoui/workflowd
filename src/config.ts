@@ -68,6 +68,7 @@ interface OpenCodeConfig {
   readonly serverId: string
   readonly endpointAlias: string
   readonly username: string
+  readonly reviewPassword: string
   readonly password: string
   readonly model: string
   readonly reviewerAgent: string
@@ -331,6 +332,7 @@ interface PublicationTiming {
 
 interface ResolvedSecrets {
   readonly webhookSecret: string
+  readonly reviewOpenCodePassword: string
   readonly openCodePassword: string
   readonly testJobToken: string | undefined
   readonly agentWaitToken: string | undefined
@@ -349,6 +351,17 @@ async function loadSecrets(
   const openCodePassword = executionOnly
     ? ""
     : await secret(env, "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE", read)
+  const reviewOpenCodePassword = executionOnly
+    ? ""
+    : await secret(
+        env,
+        "WORKFLOWD_REVIEW_OPENCODE_PASSWORD",
+        "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE",
+        read,
+      )
+  if (!executionOnly && reviewOpenCodePassword === openCodePassword) {
+    throw new Error("Reviewer and agent-run passwords must differ")
+  }
   const testJobToken = await optionalSecret(
     env,
     "WORKFLOWD_TEST_JOB_TOKEN",
@@ -388,6 +401,7 @@ async function loadSecrets(
   return {
     webhookSecret,
     openCodePassword,
+    reviewOpenCodePassword,
     testJobToken,
     agentWaitToken,
     agentRunToken,
@@ -608,6 +622,7 @@ function openCodeSection(
   env: Record<string, string | undefined>,
   baseUrl: string,
   password: string,
+  reviewPassword: string,
 ): OpenCodeConfig {
   return {
     baseUrl,
@@ -638,6 +653,7 @@ function openCodeSection(
       "OPENCODE_SERVER_USERNAME",
     ),
     password,
+    reviewPassword,
     model: modelId(env.WORKFLOWD_MODEL ?? "openai/gpt-5.6-sol"),
     reviewerAgent: agentId(
       env.WORKFLOWD_REVIEWER_AGENT ?? "pr-reviewer",
@@ -711,6 +727,8 @@ export async function loadConfig(
       "OPENCODE_SERVER_URL",
       "OPENCODE_SERVER_PASSWORD",
       "OPENCODE_SERVER_PASSWORD_FILE",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE",
       "WORKFLOWD_QRSPI_TOKEN",
       "WORKFLOWD_CI_ENABLED",
       "WORKFLOWD_WORKER_IDENTITY_ENABLED",
@@ -756,7 +774,12 @@ export async function loadConfig(
       ? { mode: "execution" as const }
       : {
           github: githubSection(env, secrets.webhookSecret),
-          openCode: openCodeSection(env, baseUrl!, secrets.openCodePassword),
+          openCode: openCodeSection(
+            env,
+            baseUrl!,
+            secrets.openCodePassword,
+            secrets.reviewOpenCodePassword,
+          ),
         }),
     storage: storageSection(env, home),
     fixWork: { enabled: fixWorkEnabled },

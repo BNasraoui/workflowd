@@ -13,12 +13,14 @@ import { Automation, RunPullRequestAutomationInput } from "../src/opencode"
 
 test("review availability and sessions use the reviewer URL; agent runs retain their server", async () => {
   const requests: string[] = []
+  const credentials: string[] = []
   const server = (name: string) =>
     Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
       fetch: (request) => {
         requests.push(`${name}:${new URL(request.url).pathname}`)
+        credentials.push(`${name}:${request.headers.get("authorization")}`)
         return new Response("fixture refusal", { status: 400 })
       },
     })
@@ -37,10 +39,12 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example/repo","installationId":1}]',
         WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: key,
         GITHUB_WEBHOOK_SECRET: "fixture",
         OPENCODE_SERVER_PASSWORD: "fixture",
+        WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-fixture",
         OPENCODE_SERVER_URL: agents.url.toString(),
         WORKFLOWD_OPENCODE_ATTACH_URL: agents.url.toString(),
         WORKFLOWD_REVIEW_OPENCODE_URL: reviewer.url.toString(),
@@ -101,6 +105,18 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
           state: "created" as const,
         }
         yield* harness.resumeSession(prepared, reference).pipe(Effect.ignore)
+        requests.length = 0
+        // A persisted pre-migration review stays on the server that owns its session.
+        yield* harness
+          .resumeSession(prepared, {
+            ...reference,
+            serverId: "opencode-primary",
+            endpointAlias: "private-opencode",
+          })
+          .pipe(Effect.ignore)
+        expect(requests.length).toBeGreaterThan(0)
+        expect(requests.every((path) => path.startsWith("agents:"))).toBe(true)
+        requests.length = 0
         yield* harness.abortSession(reference).pipe(Effect.ignore)
         expect(requests.every((path) => path.startsWith("reviewer:"))).toBe(true)
         requests.length = 0
@@ -126,6 +142,13 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
         yield* provider.listProviders({ directory: root }).pipe(Effect.ignore)
         expect(requests.length).toBeGreaterThan(0)
         expect(requests.every((path) => path.startsWith("agents:"))).toBe(true)
+        for (const credential of credentials) {
+          const name = credential.split(":")[0]
+          const password = name === "reviewer" ? "review-fixture" : "fixture"
+          expect(credential).toBe(
+            `${name}:Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
+          )
+        }
       }).pipe(Effect.provide(live)),
     )
   } finally {

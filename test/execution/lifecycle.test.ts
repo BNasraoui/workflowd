@@ -63,6 +63,7 @@ for (const [action, name] of [
           GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
           GITHUB_WEBHOOK_SECRET: "fixture",
           OPENCODE_SERVER_PASSWORD: "fixture",
+          WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
           WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:1",
           OPENCODE_SERVER_URL: "http://127.0.0.1:1",
           WORKFLOWD_EXECUTION_CAPABILITIES_TOKEN: "fixture-token",

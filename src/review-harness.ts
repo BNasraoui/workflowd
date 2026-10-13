@@ -24,7 +24,10 @@ export function routeReviewHarness(
       forRef(definition.ref).prepare(definition, input, context, settings),
     createSession: (prepared) => forRef(prepared.launchIntent.harness).createSession(prepared),
     resumeSession: (prepared, reference) =>
-      forRef(prepared.launchIntent.harness).resumeSession(prepared, reference),
+      (reference.serverId === reviewServerId ? reviewer : agents).resumeSession(
+        prepared,
+        reference,
+      ),
     abortSession: (reference) =>
       (reference.serverId === reviewServerId ? reviewer : agents).abortSession(reference),
   }

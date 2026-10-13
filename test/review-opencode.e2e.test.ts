@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { expect, test } from "bun:test"
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
@@ -23,6 +24,52 @@ test.skipIf(Bun.which("opencode2") === null)(
     ).toBe(0)
     const home = join(root, "home")
     const isolated = join(home, ".config/workflowd-reviewer")
+    const unitText = await Bun.file("deploy/systemd/opencode2-reviewer.service").text()
+    const environment = Object.fromEntries(
+      unitText
+        .split("\n")
+        .filter((line) => line.startsWith("Environment="))
+        .map((line) => {
+          const [key, ...value] = line.slice("Environment=".length).split("=")
+          return [key!, value.join("=").replaceAll("%h", home)]
+        }),
+    )
+    for (const directory of [".claude", ".agents"]) {
+      const skill = join(home, directory, "skills", `${directory.slice(1)}-ambient-canary`)
+      await mkdir(skill, { recursive: true })
+      await writeFile(
+        join(skill, "SKILL.md"),
+        `---\nname: ${directory.slice(1)}-ambient-canary\ndescription: Must not enter reviewer\n---\nCANARY\n`,
+      )
+    }
+    await mkdir(environment.HOME!, { recursive: true })
+    if (environment.XDG_DATA_HOME) await mkdir(environment.XDG_DATA_HOME, { recursive: true })
+    // Ambient legacy auth must not enter the dedicated reviewer data store.
+    await mkdir(join(home, ".local/share/opencode"), { recursive: true })
+    await writeFile(
+      join(home, ".local/share/opencode/auth.json"),
+      JSON.stringify({ anthropic: { type: "api", key: "ambient-key" } }),
+      { mode: 0o600 },
+    )
+    const workflowdConfig = join(home, ".config/workflowd")
+    await mkdir(workflowdConfig, { recursive: true })
+    const passwordProperty = unitText
+      .split("\n")
+      .find((line) => line.startsWith("EnvironmentFile="))!
+    const passwordFile = passwordProperty.slice("EnvironmentFile=".length).replaceAll("%h", home)
+    await writeFile(passwordFile, "OPENCODE_SERVER_PASSWORD=fixture\n", { mode: 0o600 })
+    const restrictions = unitText
+      .split("\n")
+      .filter((line) =>
+        /^(PrivateUsers|NoNewPrivileges|InaccessiblePaths|ReadOnlyPaths|TemporaryFileSystem|MemoryMax|MemorySwapMax)=/.test(
+          line,
+        ),
+      )
+      .map((line) =>
+        line
+          .replaceAll("%h", home)
+          .replaceAll("%t", Bun.env.XDG_RUNTIME_DIR ?? "/run/user/fixture"),
+      )
     await mkdir(join(home, ".config/opencode"), { recursive: true })
     await mkdir(join(isolated, "opencode"), { recursive: true })
     await writeFile(
@@ -77,23 +124,10 @@ test.skipIf(Bun.which("opencode2") === null)(
               `--working-directory=${root}`,
               "-p",
               "RuntimeMaxSec=45",
+              ...restrictions.flatMap((property) => ["-p", property]),
               "-p",
-              "MemoryMax=6G",
-              "-p",
-              "MemorySwapMax=0",
-              "-p",
-              "PrivateUsers=yes",
-              "-p",
-              `ReadOnlyPaths=${isolated}`,
-              "/usr/bin/env",
-              "-i",
-              `HOME=${home}`,
-              `XDG_CONFIG_HOME=${isolated}`,
-              `OPENCODE_CONFIG=${join(isolated, "opencode2.json")}`,
-              "PATH=/usr/bin:/bin",
-              "OPENCODE_DISABLE_PROJECT_CONFIG=1",
-              "OPENCODE_CONFIG_PROJECT_DISABLE=1",
-              "OPENCODE_SERVER_PASSWORD=fixture",
+              `EnvironmentFile=${passwordFile}`,
+              ...Object.entries(environment).map(([key, value]) => `--setenv=${key}=${value}`),
             ]
           : []),
         Bun.which("opencode2")!,
@@ -106,10 +140,7 @@ test.skipIf(Bun.which("opencode2") === null)(
       {
         cwd: root,
         env: {
-          HOME: home,
-          XDG_CONFIG_HOME: isolated,
-          PATH: "/usr/bin:/bin",
-          OPENCODE_CONFIG: join(isolated, "opencode2.json"),
+          ...environment,
           ...(Bun.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: Bun.env.XDG_RUNTIME_DIR } : {}),
           OPENCODE_DISABLE_PROJECT_CONFIG: "1",
           OPENCODE_CONFIG_PROJECT_DISABLE: "1",
@@ -140,6 +171,7 @@ test.skipIf(Bun.which("opencode2") === null)(
         }
         await Bun.sleep(100)
       }
+      if (!agents) throw new Error("OpenCode did not become ready within 30 seconds")
       expect(agents?.data.some((agent) => agent.id.endsWith("-canary"))).toBe(false)
       expect(await Bun.file(pluginMarker).exists()).toBe(false)
       for (const name of ["pr-reviewer", "pr-fixer"]) {
@@ -173,6 +205,37 @@ test.skipIf(Bun.which("opencode2") === null)(
             true,
           )
       }
+      const connected = await fetch(
+        `http://127.0.0.1:${port}/api/integration/openai/connect/key?${query.toString()}`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Basic ${Buffer.from("opencode:fixture").toString("base64")}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ key: "synthetic-key" }),
+        },
+      )
+      expect(connected.ok).toBe(true)
+      const db = new Database(join(environment.XDG_DATA_HOME!, "opencode/opencode.db"), {
+        readonly: true,
+      })
+      try {
+        expect(db.query("select integration_id from credential").all()).toEqual([
+          { integration_id: "openai" },
+        ])
+      } finally {
+        db.close()
+      }
+      const providers = Schema.decodeUnknownSync(
+        Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+      )(await get("provider"))
+      expect(providers.data.map((provider) => provider.id)).toContain("openai")
+      expect(providers.data.map((provider) => provider.id)).not.toContain("anthropic")
+      const skills = Schema.decodeUnknownSync(
+        Schema.Struct({ data: Schema.Array(Schema.Struct({ name: Schema.String })) }),
+      )(await get("skill"))
+      expect(skills.data.some((skill) => skill.name.endsWith("-ambient-canary"))).toBe(false)
       const mcp = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Schema.Unknown) }))(
         await get("mcp"),
       )
