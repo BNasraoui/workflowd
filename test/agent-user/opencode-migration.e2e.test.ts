@@ -407,7 +407,8 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     const before = await readFile(policy.source)
     const victimBefore = await readFile(victim)
     const originalLstat = filesystem.lstat
-    for (const timing of ["parent", "attach"] as const) {
+    for (const timing of ["parent", "attach", "consumer"] as const) {
+      let lateConsumer: ReturnType<typeof Bun.spawn> | undefined
       let replaced = false
       let restored = false
       let observations = 0
@@ -434,11 +435,18 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         }
         const info = await originalLstat(path, options)
         // The fifth absolute-path observation is the final check before ATTACH.
-        if (path === policy.database && ++observations === (timing === "parent" ? 2 : 5)) {
+        if (
+          path === policy.database &&
+          ++observations === (timing === "parent" ? 2 : timing === "attach" ? 5 : 6)
+        ) {
           replaced = true
-          await rename(destinationDirectory, retainedDirectory)
-          if (timing === "parent") await symlink(victimDirectory, destinationDirectory)
-          else await rename(victimDirectory, destinationDirectory)
+          if (timing === "consumer") {
+            lateConsumer = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" })
+          } else {
+            await rename(destinationDirectory, retainedDirectory)
+            if (timing === "parent") await symlink(victimDirectory, destinationDirectory)
+            else await rename(victimDirectory, destinationDirectory)
+          }
         }
         return info
       }
@@ -452,34 +460,15 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         expect(await readFile(policy.source)).toEqual(before)
       } finally {
         race.mockRestore()
-        if (replaced && !restored) {
+        lateConsumer?.kill()
+        await lateConsumer?.exited
+        if (timing !== "consumer" && replaced && !restored) {
           if (timing === "parent") await rm(destinationDirectory)
           else await rename(destinationDirectory, victimDirectory)
           await rename(retainedDirectory, destinationDirectory)
         }
       }
       expect(await readFile(victim)).toEqual(victimBefore)
-    }
-    const originalReadFile = filesystem.readFile
-    let lateConsumer: ReturnType<typeof Bun.spawn> | undefined
-    const consumerRace = spyOn(filesystem, "readFile").mockImplementation(((
-      ...args: Parameters<typeof filesystem.readFile>
-    ) => {
-      if (args[0] === policy.journal)
-        lateConsumer = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" })
-      return originalReadFile(...args)
-    }) as typeof filesystem.readFile)
-    try {
-      await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
-        reason: "opencode_grant_migration_incomplete",
-      })
-      expect(lateConsumer).toBeDefined()
-      await expect(lstat(policy.journal)).rejects.toMatchObject({ code: "ENOENT" })
-      expect(await readFile(policy.source)).toEqual(before)
-    } finally {
-      consumerRace.mockRestore()
-      lateConsumer?.kill()
-      await lateConsumer?.exited
     }
     const { migrateConfiguredOpenCode } = await import("../../deploy/agent-user/migrate-opencode")
     await expect(migrateConfiguredOpenCode(policy)).rejects.toThrow()
