@@ -5,6 +5,7 @@ import {
   providerRetryDelay,
 } from "../provider-failure"
 import { diagnosticMessage } from "../sandbox/diagnostics"
+import { residentWorkerInstructions } from "./instructions"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -750,7 +751,7 @@ export const ResidentCodexLive = (
             })
             listeners.set(threadId, { queue, finish: resolveExit })
             queue.push({ type: "thread.started", threadId })
-            const instructions = `You are a resident workflowd worker. After pushing, use subscribe_to_event with {"kind":"ci","repository":"OWNER/NAME","sha":"HEAD_SHA"}, or {"kind":"agent_run","run_id":"RUN_ID"}. Equivalent shell call: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). After registration succeeds, END YOUR TURN. workflowd will queue one completion message. Do not sleep or poll.\n\n`
+            const instructions = residentWorkerInstructions + "\n\n"
             yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
             yield* flush()
             return {

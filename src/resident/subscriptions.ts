@@ -24,6 +24,7 @@ const TerminalMessage = Schema.fromJsonString(Schema.Record(Schema.String, JsonV
 const Pending = Schema.Struct({
   instance_id: Schema.String,
   event_cursor: Schema.Number,
+  created_at: Schema.String,
   payload_json: Schema.fromJsonString(Subscription),
 })
 
@@ -64,21 +65,23 @@ export const makeSubscriptions = Effect.gen(function* () {
   const resultFor = Effect.fn("Subscriptions.result")(function* (
     selector: EventSelector,
     deadline: number | undefined,
+    createdAt: string,
   ) {
-    let expired = false
+    let diagnostic: string | null = null
     let result: Record<string, JsonValue> | null = null
     if (selector.kind === "ci") {
       const state = yield* ci.read(selector)
       if (state !== null && state.conclusion !== "pending")
         result = { ...state, runLinks: state.runLinks ?? [] }
       else if (deadline !== undefined && deadline <= Date.now()) {
-        expired = true
-        result = {
-          kind: "ci",
-          status: "operator_required",
-          diagnostic: "CI result did not arrive in time",
-        }
+        diagnostic = "ci_wait_deadline: CI result did not arrive in time"
+      } else if (
+        Date.now() - Date.parse(createdAt) >= 10 * 60_000 &&
+        (state?.runLinks?.length ?? 0) === 0
+      ) {
+        diagnostic = "ci_wait_no_required_run: No required workflow run observed within 10 minutes"
       }
+      if (diagnostic !== null) result = { ...selector, status: "operator_required", diagnostic }
     }
     if (selector.kind === "agent_run") {
       const run = yield* runs.read(selector.run_id)
@@ -96,7 +99,7 @@ export const makeSubscriptions = Effect.gen(function* () {
         result = { ...summary, terminal: yield* terminalFor(run.runId, summary) }
       }
     }
-    return { result, expired }
+    return { result, diagnostic }
   })
   const reconcile = Effect.fn("Subscriptions.reconcile")(function* () {
     // Older subscriptions have no payload deadline. Anchor them to their own creation time.
@@ -105,13 +108,14 @@ export const makeSubscriptions = Effect.gen(function* () {
       WHERE workflow_type = 'mailbox_subscription'
         AND json_extract(payload_json, '$.selector.kind') = 'ci'
         AND json_extract(payload_json, '$.deadline') IS NULL`
-    const rows = yield* sql`SELECT i.instance_id, i.event_cursor, i.payload_json
+    const rows = yield* sql`SELECT i.instance_id, i.event_cursor, i.created_at, i.payload_json
       FROM kernel_workflow_instances i JOIN kernel_waits w ON w.instance_id = i.instance_id
       WHERE i.workflow_type = 'mailbox_subscription' AND w.state IN ('pending','matched')`
     for (const raw of rows) {
       const row = yield* Schema.decodeUnknownEffect(Pending)(raw)
       const { threadId, selector, deadline } = row.payload_json
-      const { result, expired } = yield* resultFor(selector, deadline)
+      const { result, diagnostic } = yield* resultFor(selector, deadline, row.created_at)
+      const expired = diagnostic !== null
       if (result === null) continue
       yield* sql.withTransaction(
         Effect.gen(function* () {
@@ -137,7 +141,7 @@ export const makeSubscriptions = Effect.gen(function* () {
               id,
               threadId,
               expired
-                ? "workflowd: CI result did not arrive in time. Operator attention is required; late results will not resume this subscription."
+                ? `workflowd: ${diagnostic} (${selector.kind === "ci" ? `${selector.repository}@${selector.sha}` : ""}). Operator attention is required; late results will not resume this subscription.`
                 : `workflowd completion: ${JSON.stringify(delivery.event.payload)}. Continue the task from this result.`,
             )
             const thread = yield* inbox.read(threadId)
@@ -153,7 +157,7 @@ export const makeSubscriptions = Effect.gen(function* () {
               if (run?.state === "verified")
                 yield* runs.operatorRequired({
                   runId: thread.run_id,
-                  diagnostic: "ci_wait_deadline: CI result did not arrive in time",
+                  diagnostic,
                   now: new Date(),
                 })
             }

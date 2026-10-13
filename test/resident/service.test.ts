@@ -375,6 +375,11 @@ test("dispatches concurrent threads with independent directories and completes t
         config: { model_reasoning_effort: "xhigh" },
       })
       expect(fake.calls.some((c) => c.method === "turn/start")).toBe(false)
+      const prompt = String(
+        JSON.stringify(fake.calls.filter((call) => call.method === "thread/queue/add")),
+      )
+      expect(prompt).toContain("gh pr checks")
+      expect(prompt).not.toContain("use subscribe_to_event")
       expect(yield* resident.route(new Request("http://localhost/unrelated"))).toBeUndefined()
       expect(
         (yield* resident.route(new Request("http://localhost/subscriptions", { method: "POST" })))
