@@ -268,6 +268,9 @@ function hostFailureDetail(error: unknown) {
     "host directory outside workspace policy",
     "host invocation identity mismatch",
     "host launch remains unconfirmed",
+    "host server inactive",
+    "host socket unavailable",
+    "unsafe host socket",
   ])
   return error instanceof Error && safe.has(error.message) ? { detail: error.message } : {}
 }
@@ -595,6 +598,8 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     `--property=ReadWritePaths=${launch.home} ${launch.workspaceRoot} ${io} ${policy.codex.canonical} ${policy.claude.canonical}`,
     "--setenv=WORKFLOWD_AGENT_HOST_SOCKET=host-managed",
     `--setenv=HOME=${launch.home}`,
+    `--setenv=TMPDIR=${io}`,
+    "--setenv=SHELL=/bin/bash",
     `--setenv=CODEX_HOME=${dirname(policy.codex.agentLink)}`,
     `--setenv=CLAUDE_CONFIG_DIR=${dirname(policy.claude.agentLink)}`,
     `--setenv=PATH=${dirname(launch.bun)}:/usr/bin:/bin`,

@@ -421,7 +421,11 @@ export function connectAgentHost(
               !("process" in reply) ||
               reply.process?.launchId !== process.launchId
             )
-              throw new Error("host relay refused custody")
+              throw new Error(
+                !reply.admitted && reply.detail
+                  ? `host relay refused custody: ${reply.detail}`
+                  : "host relay refused custody",
+              )
             admitted = true
             socket.setTimeout(0)
             resolve({

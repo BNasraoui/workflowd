@@ -564,7 +564,15 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
           launchId,
         },
         () => {},
-      )
+      ).catch(async (error: unknown) => {
+        const io = join(ioRoot, createHash("sha256").update(`${runId}-${launchId}`).digest("hex"))
+        throw new Error(
+          JSON.stringify({
+            error: String(error),
+            stderr: await readFile(join(io, "stderr"), "utf8").catch(() => "missing"),
+          }),
+        )
+      })
       await server.initialize()
       expect(await server.rpc.request("thread/list", { limit: 1 })).toHaveProperty("data")
       const count = codex.requests.length
