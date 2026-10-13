@@ -40,6 +40,7 @@ describe("handleGitHubWebhook", () => {
       Effect.gen(function* () {
         const response = yield* handleGitHubWebhook(request, {
           webhookSecret: secret,
+          installationIds: new Set([91]),
           prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
           now: new Date("2026-07-19T12:00:00.000Z"),
         })
@@ -73,6 +74,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        installationIds: new Set([91]),
         prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
         maxBodyBytes: 100,
@@ -103,6 +105,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: "webhook-secret",
+        installationIds: new Set([91]),
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(TestLayer), Effect.provide(Logger.layer([logger]))),
     )
@@ -148,6 +151,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        installationIds: new Set([91]),
         prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(TestLayer)),
@@ -179,6 +183,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        installationIds: new Set([91]),
         prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(layer)),
@@ -221,6 +226,7 @@ describe("handleGitHubWebhook", () => {
             signedRequest("pull_request", initialPayload, "rearm-initial", secret),
             {
               webhookSecret: secret,
+              installationIds: new Set([91]),
               prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
               now: new Date("2026-07-19T12:00:00.000Z"),
             },
@@ -229,6 +235,7 @@ describe("handleGitHubWebhook", () => {
             signedRequest("pull_request", ambiguousPayload, "rearm-ambiguous", secret),
             {
               webhookSecret: secret,
+              installationIds: new Set([91]),
               prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
               now: new Date("2026-07-19T12:00:01.000Z"),
             },
@@ -246,6 +253,7 @@ describe("handleGitHubWebhook", () => {
             signedRequest("pull_request", acceptedPayload, "rearm-accepted", secret),
             {
               webhookSecret: secret,
+              installationIds: new Set([91]),
               prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
               now: new Date("2026-07-19T12:01:01.000Z"),
             },
@@ -293,6 +301,7 @@ describe("handleGitHubWebhook", () => {
     const response = await Effect.runPromise(
       handleGitHubWebhook(request, {
         webhookSecret: secret,
+        installationIds: new Set([91]),
         prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(layer)),
@@ -320,6 +329,7 @@ describe("routeRequest", () => {
     const response = await Effect.runPromise(
       routeRequest(new Request("http://localhost/health"), {
         webhookSecret: "secret",
+        installationIds: new Set([91]),
         now: new Date("2026-07-19T12:00:00.000Z"),
       }).pipe(Effect.provide(TestLayer)),
     )
@@ -337,6 +347,7 @@ describe("routeRequest", () => {
         Effect.runPromise(
           routeRequest(request, {
             webhookSecret: "secret",
+            installationIds: new Set([91]),
             now: new Date("2026-07-19T12:00:00.000Z"),
           }).pipe(Effect.provide(TestLayer)),
         ),
@@ -366,6 +377,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           maxBodyBytes: 50,
           testJobs: canary,
@@ -406,6 +418,7 @@ describe("routeRequest", () => {
     }
     const options = {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date("2026-07-19T12:00:00.000Z"),
       testJobs,
     }
@@ -447,6 +460,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           testJobs: {
             token: "test-job-secret",
@@ -491,6 +505,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           qrspi: { token: "kickoff-secret", start },
         },
@@ -508,6 +523,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           qrspi: { token: "kickoff-secret", start },
         },
@@ -530,6 +546,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           qrspi: {
             token: "kickoff-secret",
@@ -552,6 +569,7 @@ describe("routeRequest", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           qrspi: {
             token: "kickoff-secret",
@@ -587,6 +605,7 @@ describe("routeRequest", () => {
           }),
           {
             webhookSecret: "secret",
+            installationIds: new Set([91]),
             now: new Date("2026-07-19T12:00:00.000Z"),
             qrspi: {
               token: "kickoff-secret",
@@ -662,6 +681,7 @@ describe("QRSPI ingress status mapping", () => {
         }),
         {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date("2026-07-19T12:00:00.000Z"),
           qrspi: { token: "kickoff-secret", start: () => Effect.fail(error) },
         },

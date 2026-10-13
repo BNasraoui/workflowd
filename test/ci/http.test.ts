@@ -83,7 +83,7 @@ test("state registration and replay are durable and scoped to exact SHA", () =>
   ))
 
 test.each(["workflow_run", "check_suite"])(
-  "disabled CI records configured-installation %s without decoding its event payload",
+  "disabled CI rejects %s without a CI repository pair",
   async (event) => {
     const database = SqliteClient.layer({ filename: ":memory:" })
     const layer = Layer.merge(WorkflowStoreLive, WorkSignalLive).pipe(Layer.provideMerge(database))
@@ -103,12 +103,10 @@ test.each(["workflow_run", "check_suite"])(
         expect(response.status).toBe(202)
         expect(yield* Effect.promise(() => response.json())).toEqual({
           status: "ignored",
-          reason: `unsupported:${event}`,
+          reason: "repository-not-configured",
         })
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([
-          { delivery_id: "disabled" },
-        ])
+        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([])
       }).pipe(Effect.provide(layer)),
     )
   },

@@ -1,3 +1,5 @@
+import { Schema } from "effect"
+import type { PrRepositories } from "./pr-automation-config"
 import type { AppConfig } from "./config"
 
 export function configuredWebhookInstallations(config: AppConfig): ReadonlySet<number> {
@@ -15,4 +17,24 @@ export function webhookInstallationId(payload: unknown): number | undefined {
     return undefined
   const id = installation.id
   return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : undefined
+}
+
+const RepositoryEnvelope = Schema.Struct({
+  repository: Schema.Struct({ full_name: Schema.String }),
+})
+
+export function webhookRepositoryAllowed(
+  payload: unknown,
+  installationId: number | undefined,
+  repositories: PrRepositories,
+): boolean {
+  const decoded = Schema.decodeUnknownOption(RepositoryEnvelope)(payload)
+  return (
+    decoded._tag === "Some" &&
+    repositories.some(
+      (entry) =>
+        entry.installationId === installationId &&
+        entry.repository.toLowerCase() === decoded.value.repository.full_name.toLowerCase(),
+    )
+  )
 }

@@ -85,7 +85,12 @@ const stubAdapters = (automation = automationStub()) =>
       handle: () => Effect.succeed(undefined),
       reconcile: () => Effect.succeed(true),
       runWebhooks: Effect.never,
-      health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
+      health: () =>
+        Effect.succeed({
+          lastSuccessfulReconciliationAt: null,
+          undecodableInstallations: 0,
+          status: "degraded",
+        }),
     }),
     Layer.succeed(GitHub, {
       fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
@@ -525,7 +530,7 @@ describe("runHookService startup", () => {
           const url = `http://${server.hostname}:${server.port}/hooks/github`
           for (const [repository, expected] of [
             ["example-owner/example", { status: "enqueued", generation: 1 }],
-            ["foreign/repository", { status: "ignored", reason: "pr-repository-not-allowlisted" }],
+            ["foreign/repository", { status: "ignored", reason: "repository-not-configured" }],
           ] as const) {
             const response = yield* Effect.tryPromise(() =>
               fetch(
@@ -620,7 +625,12 @@ describe("runHookService startup", () => {
                   return true
                 }),
               runWebhooks: Effect.never,
-              health: () => Effect.succeed({ lastSuccessfulReconciliationAt: null }),
+              health: () =>
+                Effect.succeed({
+                  lastSuccessfulReconciliationAt: null,
+                  undecodableInstallations: 0,
+                  status: "degraded",
+                }),
               handle: () =>
                 Effect.sync(() => {
                   guardEvents++
@@ -958,7 +968,14 @@ describe("runHookService startup", () => {
     expect(result).toEqual({
       health: {
         status: 200,
-        body: { status: "ok", installationGuard: { lastSuccessfulReconciliationAt: null } },
+        body: {
+          status: "degraded",
+          installationGuard: {
+            lastSuccessfulReconciliationAt: null,
+            undecodableInstallations: 0,
+            status: "degraded",
+          },
+        },
       },
       qrspi: { status: 503, body: { error: "WorkflowStartValidationError" } },
       testJob: { status: 202, body: { jobId: "runtime-canary", status: "pending" } },

@@ -19,7 +19,12 @@ const call = (input: unknown) =>
         headers: { authorization: "Bearer secret" },
         body: JSON.stringify(input),
       }),
-      { webhookSecret: "", now: at, agentRuns: { token: "secret", ...ingress } },
+      {
+        installationIds: new Set(),
+        webhookSecret: "",
+        now: at,
+        agentRuns: { token: "secret", ...ingress },
+      },
     )
   })
 for (const state of ["accepted", "spawning", "spawned", "verified", "completed"] as const)
