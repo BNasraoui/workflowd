@@ -14,10 +14,11 @@ const references = /&(#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);/u
 const closing = new RegExp(String.raw`(?:^|[^${unicode.letters}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?::\s*|\s+)(?:#[0-9]|gh-[0-9]|[a-z0-9_.-]+\/[a-z0-9_.-]+#|https?:\/\/|github\.com\/[^\s]*\/(?:issues|pull)\/)`, "u")
 
 /** Validate literal Markdown; return false on every ambiguous fence. */
-export function safePublication(value) {
+export function safePublication(value, message = false) {
   if (!value.isWellFormed() || invisible.test(value.replaceAll("\n", "")) || references.test(value)) return false
   if (stackedMarks.test(value.normalize("NFD"))) return false
   const folded = fold(value)
+  if (message && (/[<@$\\]/.test(value) || folded.includes("\\"))) return false
   // Check both concatenated emphasis and punctuation acting as a separator.
   if (["", " "].some(separator => closing.test(folded.replace(/[*_~`[\]()]/g, separator)))) return false
   let fence = null
@@ -34,7 +35,7 @@ export function safePublication(value) {
       if (opener !== null) {
         if (!blank || !languages.has(opener[2])) return false
         fence = opener[1]
-      } else if (/[<@$\\]/.test(line)) return false
+      } else if (/[<@$\\]/.test(line) || fold(line).includes("\\")) return false
     }
     blank = /^ *$/.test(line)
   }

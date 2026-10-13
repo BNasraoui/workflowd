@@ -9,7 +9,7 @@ import { command } from "./harness"
 const wording = {
   body: "## Result\n\nReadable agent description.",
   title: "Title 雪",
-  commitMessage: "Message 雪\n\n```sh\necho $VALUE\n```\n",
+  commitMessage: "Message 雪\n\n```sh\necho value\n```\n",
 }
 const script = resolve("deploy/sandbox/result.py")
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
@@ -95,6 +95,7 @@ test("sealing keeps the agent name opaque and sends only digests and commit iden
       { title: "bad\nline" },
       { title: "x".repeat(201) },
       { commitMessage: "bad\tcontrol" },
+      { branch: "x".repeat(262145) },
       { title: "hidden\u200btitle" },
       { commitMessage: "bidi\u202emessage" },
       { commitMessage: "é".repeat(5121) },

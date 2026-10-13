@@ -1,13 +1,20 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
 import { PublicationBody, PublicationMessage, PublicationTitle } from "../../src/sandbox/config"
-import { publicationCorpus, publicationRuntimeCorpus } from "./publication-corpus"
+import {
+  publicationCorpus,
+  publicationRuntimeCorpus,
+  pythonOptimizationCorpus,
+} from "./publication-corpus"
 
 const inputs = publicationCorpus.flatMap((item) =>
   ["body", "title", "commitMessage"].map((field) => ({
     ...item,
     field,
-    accepted: item.accepted && (field !== "title" || !item.value.includes("\n")),
+    accepted:
+      field === "commitMessage"
+        ? item.messageAccepted
+        : item.accepted && (field !== "title" || !item.value.includes("\n")),
   })),
 )
 async function run(args: string[], values: unknown = inputs) {
@@ -55,11 +62,29 @@ for item in json.load(sys.stdin):
     except (AssertionError, ValueError): results.append(False)
 print(json.dumps(results))
 `
-const [results, optimizedResults] = await Promise.all([
-  run(["python3", "-B", "-c", pythonScript]),
-  run(["python3", "-B", "-O", "-c", pythonScript]),
-])
-test("optimized Python preserves publication types and field bounds", async () => {
+const results = await run(["python3", "-B", "-c", pythonScript])
+for (const item of pythonOptimizationCorpus) {
+  test(`Python startup fails closed under optimization: ${JSON.stringify(item)}`, async () => {
+    const child = Bun.spawn(["python3", "-B", ...item.args, "-c", pythonScript], {
+      env: { ...process.env, PYTHONOPTIMIZE: item.optimize },
+      stdin: new Blob(["[]"]),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    expect(status === 0).toBe(item.accepted)
+    if (item.accepted) expect(stdout.trim()).toBe("[]")
+    else {
+      expect(stdout).toBe("")
+      expect(stderr).toContain("Python optimization is not supported")
+    }
+  })
+}
+test("Python preserves publication types and field bounds", async () => {
   const values = [
     ...["body", "title", "commitMessage"].flatMap((field) =>
       [null, 1, ""].map((value) => ({ field, value })),
@@ -70,9 +95,7 @@ test("optimized Python preserves publication types and field bounds", async () =
     { field: "title", value: "line\u2028break" },
     { field: "commitMessage", value: "雪".repeat(3414) },
   ]
-  expect(await run(["python3", "-B", "-O", "-c", pythonScript], values)).toEqual(
-    values.map(() => false),
-  )
+  expect(await run(["python3", "-B", "-c", pythonScript], values)).toEqual(values.map(() => false))
 })
 for (const [index, item] of inputs.entries()) {
   test(`publication parity ${item.field}: ${JSON.stringify(item.value)}`, () => {
@@ -84,12 +107,10 @@ for (const [index, item] of inputs.entries()) {
     expect({
       schema: Schema.is(schema)(item.value),
       python: results[index],
-      optimizedPython: optimizedResults[index],
       publisher: publisherResults[index],
     }).toEqual({
       schema: item.accepted,
       python: item.accepted,
-      optimizedPython: item.accepted,
       publisher: item.accepted,
     })
   })
