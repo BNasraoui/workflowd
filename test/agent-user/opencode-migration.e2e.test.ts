@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { chmod, chown, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { networkInterfaces, tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import { Schema } from "effect"
@@ -12,12 +12,15 @@ import {
 
 /** All client configuration, grants and responses are invented fixture data. */
 test("installed OpenCode moves grants, restarts one store, and attaches without copying refresh credentials", async () => {
-  if (process.getuid?.() !== 0) {
+  const isRoot = process.getuid?.() === 0
+  const egressDenied = Object.values(networkInterfaces())
+    .flat()
+    .every((entry) => entry?.internal)
+  if (!isRoot || !egressDenied) {
     const child = Bun.spawn(
       [
         "unshare",
-        "--user",
-        "--map-root-user",
+        ...(isRoot ? [] : ["--user", "--map-root-user"]),
         "--pid",
         "--fork",
         "--mount-proc",
@@ -43,11 +46,14 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
   await chown(root, ownUid, group)
   await chmod(root, 0o710)
   let modelRequests = 0
+  let migratedGrantUsed = false
   const model = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: () => {
+    fetch: (request) => {
       modelRequests++
+      migratedGrantUsed ||=
+        request.headers.get("authorization") === "Bearer synthetic-existing-grant"
       const chunk = (delta: unknown, finish_reason: string | null) =>
         `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "fixture", choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`
       return new Response(
@@ -117,10 +123,11 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
       return value
     }
     const deadline = Date.now() + 15000
+    // The API listens before plugin/config discovery has populated the catalog.
     for (;;) {
       try {
-        await api("model")
-        break
+        if (JSON.stringify(await api("model")).includes("fixture")) break
+        throw new Error("fixture_model_not_ready")
       } catch {
         if (Date.now() >= deadline) throw new Error("fixture_server_unavailable")
         await Bun.sleep(50)
@@ -202,6 +209,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
         "fixture",
         JSON.stringify({
           type: "oauth",
+          methodID: "oauth",
           access: "synthetic-access",
           refresh: "synthetic-refresh",
           expires: 1,
@@ -245,7 +253,10 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     await shared.api(`session/${session.data.id}/prompt`, { text: "synthetic fixture" })
     await shared.api(`session/${session.data.id}/wait`, {})
     expect(modelRequests).toBeGreaterThan(0)
-    const attached = Bun.spawn(asUser(ben, [binary, "auth", "list", "--server", shared.url]), {
+    expect(migratedGrantUsed).toBe(true)
+    await shared.stop()
+    const restarted = await start(homes[1]!, agent)
+    const attached = Bun.spawn(asUser(ben, [binary, "auth", "list", "--server", restarted.url]), {
       cwd: homes[0]!,
       env: environment(homes[0]!),
       stdout: "ignore",
@@ -253,7 +264,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     })
     expect(await attached.exited).toBe(0)
     await checkOpenCodeMigration(policy)
-    await shared.stop()
+    await restarted.stop()
     expect((await stat(policy.database)).uid).toBe(agent)
     expect((await stat(policy.database)).mode & 0o777).toBe(0o600)
     expect((await readFile(policy.journal, "utf8")).includes("synthetic-refresh")).toBe(false)
