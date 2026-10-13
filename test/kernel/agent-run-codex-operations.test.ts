@@ -222,15 +222,13 @@ for (const output of [false, true])
         const { SqlClient } = yield* Effect.promise(() => import("effect/unstable/sql"))
         const { Schedule } = yield* Effect.promise(() => import("effect"))
         if (result._tag === "Success")
-          yield* store
-            .read(result.success.runId)
-            .pipe(
-              Effect.repeat({
-                schedule: Schedule.spaced(10),
-                until: (run) => run?.state === "operator_required",
-              }),
-              Effect.timeout(2000),
-            )
+          yield* store.read(result.success.runId).pipe(
+            Effect.repeat({
+              schedule: Schedule.spaced(10),
+              until: (run) => run?.state === "operator_required",
+            }),
+            Effect.timeout(2000),
+          )
         const rows = yield* SqlClient.SqlClient.pipe(
           Effect.flatMap(
             (sql) =>
