@@ -1,0 +1,37 @@
+[Unit]
+Description=Dedicated read-only OpenCode PR reviewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/workflowd/reviewer
+Environment=HOME=%h/.local/share/workflowd/reviewer/home
+Environment=XDG_DATA_HOME=%h/.local/share/workflowd/reviewer/data
+Environment=XDG_CACHE_HOME=%h/.local/share/workflowd/reviewer/cache
+Environment=XDG_STATE_HOME=%h/.local/share/workflowd/reviewer/state
+Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=XDG_CONFIG_HOME=%h/.config/workflowd-reviewer
+Environment=OPENCODE_CONFIG=%h/.config/workflowd-reviewer/opencode2.json
+Environment=OPENCODE_CONFIG_PROJECT_DISABLE=1
+Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1
+EnvironmentFile=%h/.config/workflowd/reviewer.env
+UnsetEnvironment=OPENCODE_TEST_HOME OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR WORKFLOWD_MCP_TOKEN WORKFLOWD_MCP_TOKEN_FILE WORKFLOWD_MCP_DISPATCH_TOKEN WORKFLOWD_MCP_DISPATCH_TOKEN_FILE WORKFLOWD_AGENT_RUN_TOKEN WORKFLOWD_AGENT_RUN_TOKEN_FILE WORKFLOWD_AGENT_WAIT_TOKEN WORKFLOWD_AGENT_WAIT_TOKEN_FILE WORKFLOWD_CI_TOKEN WORKFLOWD_CI_TOKEN_FILE WORKFLOWD_NATS_CREDS
+ExecStart=%h/.bun/bin/opencode2 serve --hostname 127.0.0.1 --port 4098
+PrivateUsers=yes
+NoNewPrivileges=yes
+# Hide all current/future user-unit credential copies and both manager sockets.
+TemporaryFileSystem=%t
+# Hide the whole directory: covers default AND operator-named dispatch tokens,
+# mcp-token, agent-run-token, agent-wait-token, ci-token, github-app.pem,
+# github-webhook-secret, opencode-server-password, env files and fallback NATS creds.
+InaccessiblePaths=%h/.config/workflowd -%h/.config/noscope -%h/.config/nats -%h/.local/share/nats -%h/.local/share/opencode -%h/.local/share/opencode2
+ReadOnlyPaths=%h/.config/workflowd-reviewer
+UMask=0077
+MemoryMax=6G
+MemorySwapMax=0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

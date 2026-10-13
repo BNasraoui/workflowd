@@ -11,7 +11,12 @@ export const runClaudeWorker = async (options: CliWorkerOptions): Promise<number
     "--verbose",
     "--include-partial-messages",
     ...(options.sandboxBindingFile === undefined
-      ? ["--dangerously-skip-permissions"]
+      ? [
+          "--dangerously-skip-permissions",
+          "--strict-mcp-config",
+          "--mcp-config",
+          '{"mcpServers":{}}',
+        ]
       : await nativeSandboxArguments(
           "claude",
           options.binary,

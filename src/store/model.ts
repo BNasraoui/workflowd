@@ -20,6 +20,11 @@ export type CommandEvent = Extract<GitHubEvent, { readonly _tag: "Command" }>
 
 export type IngestPullRequestResult =
   | { readonly status: "duplicate" }
+  | {
+      readonly status: "skipped"
+      readonly generation: number
+      readonly reason: "automatic-review-untrusted-fork"
+    }
   | { readonly status: "ignored"; readonly generation: number }
   | { readonly status: "reconciliation_enqueued"; readonly generation: number }
   | { readonly status: "enqueued"; readonly generation: number }

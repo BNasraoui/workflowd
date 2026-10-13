@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { loadMcpWriteAuth } from "./mcp/auth"
+import { loadMcpWriteAuth, loadMcpDispatchAuth } from "./mcp/auth"
 import { createChannelMcp, DEFAULT_CHANNEL_POLL_MS, type ChannelOptions } from "./mcp/channel"
 
 export const DEFAULT_CHANNEL_MCP_URL = "http://127.0.0.1:8791/mcp"
@@ -16,7 +16,7 @@ const parsePollInterval = (raw: string | undefined) => {
 /**
  * Reads the channel's configuration: the HTTP MCP server URL, its bearer
  * (exactly one of WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE, as the
- * HTTP server loads it), and the mailbox poll interval.
+ * HTTP server loads it), an optional independent dispatch credential, and the mailbox poll interval.
  */
 export async function loadChannelOptions(
   env: Record<string, string | undefined>,
@@ -25,6 +25,7 @@ export async function loadChannelOptions(
   if (auth.mode === "disabled") {
     throw new Error("Set exactly one of WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE")
   }
+  const dispatchAuth = await loadMcpDispatchAuth(env)
   const mcpUrl =
     env.WORKFLOWD_MCP_URL === undefined || env.WORKFLOWD_MCP_URL === ""
       ? DEFAULT_CHANNEL_MCP_URL
@@ -32,6 +33,7 @@ export async function loadChannelOptions(
   return {
     mcpUrl,
     token: auth.token,
+    ...(dispatchAuth.mode === "enabled" ? { dispatchToken: dispatchAuth.token } : {}),
     pollIntervalMs: parsePollInterval(env.WORKFLOWD_CHANNEL_POLL_MS),
   }
 }

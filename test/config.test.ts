@@ -9,6 +9,7 @@ const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
   OPENCODE_SERVER_PASSWORD: "server-password",
+  WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
   WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
   WORKFLOWD_HOST_ID: "mint",
 }
@@ -248,11 +249,13 @@ describe("loadConfig", () => {
       },
       openCode: {
         baseUrl: "http://127.0.0.1:4096",
+        reviewUrl: "http://127.0.0.1:4098",
         attachUrl: "https://mint.example-tailnet.ts.net:4096",
         serverId: "opencode-primary",
         endpointAlias: "private-opencode",
         username: "opencode",
         password: "server-password",
+        reviewPassword: "review-password",
         model: "openai/gpt-5.6-sol",
         reviewerAgent: "pr-reviewer",
         fixerAgent: "pr-fixer",
@@ -503,18 +506,25 @@ describe("loadConfig", () => {
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
         OPENCODE_SERVER_PASSWORD_FILE: "/run/credentials/opencode-password",
+        WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE: "/run/credentials/reviewer-password",
         WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
       },
       {
         home: "/home/test",
         readFile: async (path) => {
           reads.push(path)
+          if (path.endsWith("reviewer-password")) return "review-password\n"
           return path.endsWith("webhook-secret") ? "webhook-from-file\n" : "password-from-file\r\n"
         },
       },
     )
 
-    expect(reads).toEqual(["/run/credentials/webhook-secret", "/run/credentials/opencode-password"])
+    expect(reads).toEqual([
+      "/run/credentials/webhook-secret",
+      "/run/credentials/opencode-password",
+      "/run/credentials/reviewer-password",
+    ])
+    expect(config.openCode?.reviewPassword).toBe("review-password")
     expect(config.github?.webhookSecret).toBe("webhook-from-file")
     expect(config.openCode?.password).toBe("password-from-file")
   })
@@ -530,6 +540,11 @@ describe("loadConfig", () => {
       "OPENCODE_SERVER_PASSWORD_FILE",
       "OPENCODE_SERVER_PASSWORD and OPENCODE_SERVER_PASSWORD_FILE cannot both be set",
     ],
+    [
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE",
+      "WORKFLOWD_REVIEW_OPENCODE_PASSWORD and WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE cannot both be set",
+    ],
   ])("rejects conflicting %s sources", async (direct, file, message) => {
     await expect(
       loadConfig(
@@ -542,6 +557,7 @@ describe("loadConfig", () => {
   test.each([
     ["GITHUB_WEBHOOK_SECRET", "GITHUB_WEBHOOK_SECRET_FILE"],
     ["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_PASSWORD_FILE"],
+    ["WORKFLOWD_REVIEW_OPENCODE_PASSWORD", "WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE"],
   ])("requires either %s or %s", async (direct, file) => {
     const environment = { ...requiredEnvironment }
     delete environment[direct]
@@ -689,4 +705,10 @@ test("uses only PR and CI installations for webhook ingestion", async () => {
   ])
   const execution = await loadConfig({ WORKFLOWD_MODE: "execution" }, { home: "/tmp" })
   expect([...configuredWebhookInstallations(execution)]).toEqual([])
+})
+
+test("reviewer password must differ from agent-run password", async () => {
+  await expect(
+    loadConfig({ ...requiredEnvironment, WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "server-password" }),
+  ).rejects.toThrow("Reviewer and agent-run passwords must differ")
 })

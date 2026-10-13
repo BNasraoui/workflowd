@@ -2,6 +2,7 @@ import { Context, Effect, Ref, type Scope } from "effect"
 import type { FixResult } from "./domain/fix-result"
 import type { HeadEvidence } from "./domain/head-evidence"
 import type { FixWork, ReviewWork, Work } from "./domain/work"
+import { requireSymlinkFreeReviewTree } from "./workspace/review-tree"
 import { ReviewContextFiles } from "./workspace/context"
 import { ExistingWorktreeDiscovery, LocalRepositoryCatalog } from "./workspace/discovery"
 import { ManagedWorkspaceLifecycle } from "./workspace/managed"
@@ -50,6 +51,7 @@ export class GitWorkspaceAdapter implements WorkspacePort {
   prepareReview(work: ReviewWork, evidence?: HeadEvidence) {
     return Effect.gen({ self: this }, function* () {
       const resolved = yield* this.#resolve(work, (workspace) => this.#removeManaged(workspace))
+      yield* requireSymlinkFreeReviewTree(resolved.directory)
       yield* this.#acquireContext(resolved)
       return yield* this.#context.prepareReview(work, resolved, evidence)
     })

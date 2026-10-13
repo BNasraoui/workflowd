@@ -1,3 +1,4 @@
+import { automaticReviewTrustMigration } from "./review-trust-migration"
 import {
   sandboxMigration,
   sandboxCleanupMigration,
@@ -1489,7 +1490,8 @@ export const runStoreMigrations = Migrator.make({})({
       const sql = yield* SqlClient.SqlClient
       yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
     }),
-    "0036_resident_inbox_delay": Effect.gen(function* () {
+    "0036_automatic_review_trust": automaticReviewTrustMigration,
+    "0037_resident_inbox_delay": Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient
       yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
     }),
