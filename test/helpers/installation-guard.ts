@@ -14,7 +14,7 @@ export const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
 export const allowed = [81005232, 319835875]
 export const installation = (id: number, accountId = 999) => ({
   id,
-  account: { id: accountId, login: "renamed-account" },
+  account: { id: accountId, login: "renamed-account", type: "User" },
 })
 export const storeLayer = Layer.merge(
   WorkflowStoreLive.pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:" }))),

@@ -35,6 +35,7 @@ for (const [event, action] of [
             () =>
               handleGitHubWebhook(webhook(event, action, accountId), {
                 webhookSecret: "secret",
+                installationIds: new Set([91]),
                 now: new Date(),
                 installationGuard: f.guard,
               }),
@@ -65,6 +66,7 @@ test("unsigned deliveries cannot invoke the guard", async () => {
   const response = await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999, "bad", false), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(Effect.provide(storeLayer)),
@@ -78,6 +80,7 @@ test("other installation actions remain ignored", async () => {
   const response = await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "deleted", 999), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(Effect.provide(storeLayer)),
@@ -91,6 +94,7 @@ test("GET 404 is already gone", async () => {
   const response = await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
@@ -228,6 +232,7 @@ test("a failed delivery stays deduplicated and reconciliation recovers it", asyn
       const send = () =>
         handleGitHubWebhook(webhook("installation", "created", 999), {
           webhookSecret: "secret",
+          installationIds: new Set([91]),
           now: new Date(),
           installationGuard: f.guard,
         })
@@ -288,6 +293,7 @@ test("malformed and null accounts are skipped while foreign and enterprise accou
     "GET /app/installations?per_page=100&page=1",
     "DELETE /app/installations/10",
     "DELETE /app/installations/22",
+    "DELETE /app/installations/23",
   ])
   expect(f.logs.filter((line) => line.includes('"outcome":"undecodable"'))).toHaveLength(2)
 })
@@ -297,12 +303,13 @@ test("a foreign payload account never deletes an installation GitHub says is all
   await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
   )
   expect(f.requests).toEqual(["GET /app/installations/10"])
-  expect(f.logs[0]).toContain('"outcome":"account_mismatch_allowed"')
+  expect(f.logs[0]).toContain('"outcome":"allowed"')
 })
 
 test("list failure at startup is logged and retried on the next periodic pass", async () => {
@@ -394,6 +401,7 @@ test("webhooks return 202 without waiting for GitHub and retain their delivery c
         const send = () =>
           handleGitHubWebhook(webhook("installation", "created", 999), {
             webhookSecret: "secret",
+            installationIds: new Set([91]),
             now: new Date(),
             installationGuard: f.guard,
           })
@@ -415,7 +423,7 @@ test("webhooks return 202 without waiting for GitHub and retain their delivery c
 for (const [headers, delay] of [
   [{ "retry-after": "17" }, 17000],
   [{ "retry-after": "9999" }, 60000],
-  [{ "x-ratelimit-reset": "25" }, 25000],
+  [{ "x-ratelimit-reset": "25", "x-ratelimit-remaining": "0" }, 25000],
   [{ "retry-after": "Thu, 01 Jan 1970 00:00:30 GMT" }, 30000],
   [{ "retry-after": "invalid" }, 1000],
 ] as const) {
@@ -458,12 +466,17 @@ test("background defects and failures back off, recover, and update health only 
           expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
           const response = yield* routeRequest(new Request("http://localhost/health"), {
             webhookSecret: "secret",
+            installationIds: new Set([91]),
             now: new Date(),
             installationGuard: f.guard,
           })
           expect(yield* Effect.promise(() => response.json())).toEqual({
-            status: "ok",
-            installationGuard: { lastSuccessfulReconciliationAt: passes < 3 ? null : 1800000 },
+            status: passes < 3 ? "degraded" : "ok",
+            installationGuard: {
+              lastSuccessfulReconciliationAt: passes < 3 ? null : 1800000,
+              undecodableInstallations: 0,
+              status: passes < 3 ? "degraded" : "ok",
+            },
           })
           if (passes < 3) yield* TestClock.adjust(delay)
         }
@@ -482,6 +495,7 @@ test("DELETE 404 after a verified foreign installation is already gone", async (
   await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
@@ -495,6 +509,7 @@ test("undecodable webhook lookup is audited without deleting", async () => {
   await Effect.runPromise(
     handleGitHubWebhook(webhook("installation", "created", 999), {
       webhookSecret: "secret",
+      installationIds: new Set([91]),
       now: new Date(),
       installationGuard: f.guard,
     }).pipe(f.background, Effect.provide(storeLayer), Effect.provide(f.logger)),
@@ -515,13 +530,13 @@ test("failed removals back off to an hour and preserve the last successful time"
       Effect.gen(function* () {
         yield* startInstallationGuard(f.guard)
         yield* Queue.take(sleeps)
-        expect(yield* f.guard.health()).toEqual({ lastSuccessfulReconciliationAt: 0 })
+        expect(yield* f.guard.health()).toMatchObject({ lastSuccessfulReconciliationAt: 0 })
         failing = true
         let previous = 600000
         for (const delay of [600000, 1200000, 2400000, 3600000, 3600000]) {
           yield* TestClock.adjust(previous)
           expect(Duration.toMillis(yield* Queue.take(sleeps))).toBe(delay)
-          expect(yield* f.guard.health()).toEqual({ lastSuccessfulReconciliationAt: 0 })
+          expect(yield* f.guard.health()).toMatchObject({ lastSuccessfulReconciliationAt: 0 })
           previous = delay
         }
       }),
