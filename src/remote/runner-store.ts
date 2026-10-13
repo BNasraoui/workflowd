@@ -393,8 +393,8 @@ const make = Effect.gen(function* () {
    * transaction records the result. A redelivery finds the claim spent and
    * replays the stored result; a claim spent with no stored result means a
    * previous execution was interrupted mid-flight — its effects on the
-   * session are unknowable, so the runner reports execution_interrupted
-   * rather than ever running the wake a second time.
+   * session require protected host custody for recovery. Without it the runner
+   * reports execution_interrupted; it never repeats an untracked wake.
    */
   const executeClaudeResume: RemoteRunnerStorePort["executeClaudeResume"] = (command, at) =>
     Effect.gen(function* () {

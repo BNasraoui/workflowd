@@ -22,7 +22,7 @@ import { KernelSessionStore, type KernelSessionStoreError, type ResumeClaim } fr
  * structured acknowledgment. The claude CLI (subscription auth) is the only
  * channel — never provider routing.
  *
- * Sessions on this daemon's host are woken by spawning the CLI directly. A
+ * Sessions on this daemon's host use its configured CLI transport. A
  * session owned by another allow-listed host is woken by that host's
  * workflowd runner: the worker enqueues a single-attempt claude_resume
  * remote kernel job (both turns execute runner-side), parks the resume in
@@ -30,9 +30,9 @@ import { KernelSessionStore, type KernelSessionStoreError, type ResumeClaim } fr
  * later iteration observes the job's terminal state to complete or
  * escalate. The daemon owns the whole lifecycle either way.
  *
- * A crash between the durable sent fence and completion with no such
- * checkpoint cannot be re-attributed from a CLI transcript, so restart
- * recovery escalates to operator_required rather than guessing.
+ * Local host delivery records its turn identity before the durable sent fence.
+ * Restart consults protected host custody to recover those same turns.
+ * Legacy local executions without that custody require operator observation.
  */
 export type ClaudeResumeContract = {
   readonly name: string

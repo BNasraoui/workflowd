@@ -268,11 +268,11 @@ async function nativeBoundary(simulatedManager: boolean) {
         arguments:
           client === "codex"
             ? {
-                cmd: `id -u > '${proof}'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                cmd: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
                 yield_time_ms: 1000,
               }
             : {
-                command: `id -u > '${proof}'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                command: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
                 timeout: 1000,
               },
       })
@@ -310,6 +310,12 @@ async function nativeBoundary(simulatedManager: boolean) {
         await Bun.sleep(100)
       }
       expect(await readFile(proof, "utf8")).toBe(`${agentUid}\ndenied\n`)
+      const descendant = Number((await readFile(`${proof}-pid`, "utf8")).trim())
+      if (!simulatedManager) {
+        expect(await readFile(`/proc/${descendant}/status`, "utf8")).toContain(
+          `Uid:\t${agentUid}\t${agentUid}\t${agentUid}\t${agentUid}`,
+        )
+      }
       await host.close()
       await rm(path, { force: true })
       host = await serveCredentialHost(path, policy, supervisor)
@@ -340,6 +346,10 @@ async function nativeBoundary(simulatedManager: boolean) {
       )
       expect(stopped.active).toBe(false)
       expect(await readFile(`/proc/${process.pid}/status`, "utf8").catch(() => null)).toBeNull()
+      if (!simulatedManager) {
+        const status = await readFile(`/proc/${descendant}/status`, "utf8").catch(() => null)
+        if (status !== null) expect(status).toContain("State:\tZ")
+      }
       const output = join(ioRoot, createHash("sha256").update(runId).digest("hex"), "events")
       await rm(output)
       await symlink(canary, output)
@@ -583,13 +593,6 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       })
       await server.initialize()
       expect(await server.rpc.request("thread/list", { limit: 1 })).toHaveProperty("data")
-      const count = codex.requests.length
-      await rm(policy.codex.agentLink)
-      await expect(
-        server.rpc.request("thread/start", { cwd: workspaceRoot }),
-      ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
-      expect(codex.requests.length).toBe(count)
-      await repair("codex")
       await server.detach()
       const hostId = `${runId}-${launchId}`
       const owned = Schema.decodeUnknownSync(OwnedProcess)(
@@ -607,10 +610,17 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       )
       expect(attached.pid).toBe(server.pid)
       await attached.initialize()
+      const count = codex.requests.length
+      await rm(policy.codex.agentLink)
+      await expect(
+        attached.rpc.request("thread/start", { cwd: workspaceRoot }),
+      ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
+      expect(codex.requests.length).toBe(count)
       await attached.detach()
       expect(await sweepOrphanAppServers("workflowd-resident-", new Set(), path)).toContain(
         owned.unit,
       )
+      await repair("codex")
     } else {
       const launchId = randomUUID()
       const runId = `agent-run-resident-${randomUUID()}`
