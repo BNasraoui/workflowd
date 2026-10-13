@@ -37,7 +37,7 @@ const encodedPreview = (value: string) => {
 
 // Read messages only, never stacks, request/response bodies, headers or schema inputs.
 // Redact before truncating so a credential crossing the limit cannot leave a prefix.
-const message = (value: unknown) =>
+export const diagnosticMessage = (value: unknown) =>
   typeof value !== "string"
     ? ""
     : encodedPreview(
@@ -74,7 +74,10 @@ const classification = (value: unknown) => {
 const retainedEntries = (current: unknown): Array<typeof Entry.Type> | undefined => {
   const saved = property(current, "evidence")
   if (!Schema.is(SandboxFailureEvidence)(saved)) return undefined
-  const entries = saved.causes.map((entry) => ({ ...entry, message: message(entry.message) }))
+  const entries = saved.causes.map((entry) => ({
+    ...entry,
+    message: diagnosticMessage(entry.message),
+  }))
   if (saved.causes[0]?.stage !== saved.stage)
     entries.unshift({
       stage: saved.stage,
@@ -100,7 +103,7 @@ const causeEntry = (stage: string, current: unknown, started: number): typeof En
     message:
       errorClass === "SchemaError" || errorClass === "DecodeError"
         ? "Schema validation failed"
-        : message(property(current, "message") ?? current),
+        : diagnosticMessage(property(current, "message") ?? current),
     code: typeof code === "string" && /^E[A-Z0-9_]{1,30}$/.test(code) ? code : null,
     httpStatus: integer(
       property(current, "status") ?? property(property(current, "response"), "status"),

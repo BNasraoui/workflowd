@@ -1,8 +1,26 @@
+import {
+  isNonToolItem,
+  isToolFreeTurn,
+  providerFailure,
+  providerRetryDelay,
+} from "../provider-failure"
+import { diagnosticMessage } from "../sandbox/diagnostics"
 import { residentWorkerInstructions } from "./instructions"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
-import { Context, Effect, Exit, Layer, Option, Queue, Schedule, Schema, Semaphore } from "effect"
+import {
+  Clock,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Queue,
+  Schedule,
+  Schema,
+  Semaphore,
+} from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { CiService } from "../ci/service"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
@@ -34,7 +52,15 @@ const ThreadResult = Schema.Struct({
 })
 const TurnEvent = Schema.Struct({
   threadId: Schema.String,
-  turn: Schema.Struct({ id: Schema.String, status: Schema.String }),
+  turn: Schema.Struct({
+    id: Schema.String,
+    status: Schema.String,
+    error: Schema.optional(
+      Schema.NullOr(
+        Schema.Struct({ message: Schema.String, codexErrorInfo: Schema.optional(Schema.Unknown) }),
+      ),
+    ),
+  }),
 })
 const ItemEvent = Schema.Struct({
   threadId: Schema.String,
@@ -51,6 +77,15 @@ const History = Schema.Struct({
       Schema.Struct({
         id: Schema.String,
         status: Schema.String,
+        error: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              message: Schema.String,
+              codexErrorInfo: Schema.optional(Schema.Unknown),
+            }),
+          ),
+        ),
+        itemsView: Schema.optional(Schema.String),
         items: Schema.optional(
           Schema.Array(
             Schema.Struct({
@@ -164,6 +199,7 @@ export const ResidentCodexLive = (
         yield* Effect.tryPromise(() => process.initialize())
         return process
       })
+      const turnsWithTools = new Set<string>()
       const listeners = new Map<
         string,
         { queue: ReturnType<typeof makeEventQueue>; finish: (exit: CodexExit) => void }
@@ -204,6 +240,8 @@ export const ResidentCodexLive = (
         threadId: string,
         failed: boolean,
         finalMessage: string | null = null,
+        diagnostic: string = "resident_turn_failed",
+        failure?: { readonly message: string; readonly codexErrorInfo?: unknown },
       ) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
@@ -217,26 +255,32 @@ export const ResidentCodexLive = (
             yield* failed
               ? runs.operatorRequired({
                   runId: row.run_id,
-                  diagnostic: "resident_turn_failed",
+                  diagnostic,
                   now: new Date(),
                   finalMessage,
                 })
               : runs.complete({ runId: row.run_id, now: new Date(), finalMessage })
           }
         }
+        if (failure !== undefined) listener?.queue.push({ type: "turn.failed", ...failure })
         listener?.queue.close()
         listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
+        turnsWithTools.delete(threadId)
         listeners.delete(threadId)
       })
       const deliveryLock = yield* Semaphore.make(1)
       const completeTurn = Effect.fn("Resident.completeTurn")(function* (
         event: typeof TurnEvent.Type,
       ) {
+        const row = yield* store.read(event.threadId)
+        if (row === null || row.current_turn !== event.turn.id || row.state === "finished") return
         const queued = yield* Effect.tryPromise(() =>
           request("thread/queue/list", { threadId: event.threadId, cursor: null, limit: 1 }),
         ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Queued)))
         let queuedWork = queued.data.length > 0 || queued.nextCursor !== null
         let finalMessage: string | null = null
+        let error = event.turn.error
+        let failure = providerFailure(error?.message, error?.codexErrorInfo)
         if (!queuedWork || event.turn.status === "failed") {
           // The next submission may have left the queue before its started notification is handled.
           const history = yield* Effect.tryPromise(() =>
@@ -250,6 +294,37 @@ export const ResidentCodexLive = (
                 (item) =>
                   item.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim(),
               )?.text ?? null
+          const completed = history.thread.turns.find((turn) => turn.id === event.turn.id)
+          error ??= completed?.error
+          failure = providerFailure(error?.message, error?.codexErrorInfo)
+          if (
+            event.turn.status === "failed" &&
+            failure !== undefined &&
+            !queuedWork &&
+            history.thread.turns.at(-1)?.id === event.turn.id &&
+            !turnsWithTools.has(event.threadId) &&
+            isToolFreeTurn(completed)
+          ) {
+            // Inbox receipts bound retries even when native history omits past error fields.
+            const retryId = `provider-retry:${event.threadId}:${event.turn.id}`
+            if ((yield* store.deliveryState(retryId)) !== "pending") return
+            const counts = yield* sql<{
+              count: number
+            }>`SELECT COUNT(*) AS count FROM resident_inbox
+              WHERE thread_id = ${event.threadId} AND id LIKE 'provider-retry:%'`
+            const attempts = counts[0]?.count ?? 2
+            const delay = providerRetryDelay(attempts)
+            if (delay !== undefined) {
+              yield* store.enqueue(
+                retryId,
+                event.threadId,
+                "The provider temporarily refused the previous turn before any tool step. Continue the task from the existing conversation.",
+                (yield* Clock.currentTimeMillis) + delay,
+              )
+              yield* store.completed(event.threadId, event.turn.id, true)
+              return
+            }
+          }
           const last = history.thread.turns.at(-1)
           queuedWork ||=
             last !== undefined && last.id !== event.turn.id && last.status === "inProgress"
@@ -261,8 +336,20 @@ export const ResidentCodexLive = (
             "workflowd app-server restarted. Continue the interrupted task from its durable state. Do not repeat completed external actions.",
           )
         const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
-        if (state === "finished" || event.turn.status === "failed")
-          yield* finish(event.threadId, event.turn.status !== "completed", finalMessage)
+        if (state === "finished" || event.turn.status === "failed") {
+          const message =
+            error == null ? undefined : (failure?.message ?? diagnosticMessage(error.message))
+          yield* finish(
+            event.threadId,
+            event.turn.status !== "completed",
+            message ?? finalMessage,
+            error == null
+              ? "resident_turn_failed"
+              : `${failure?.reason ?? "resident_turn_failed"}: ${message}`,
+            // The CLI consumer must classify the native error before its own preview truncation.
+            event.turn.status === "failed" && error != null ? error : undefined,
+          )
+        }
       })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string
@@ -270,11 +357,17 @@ export const ResidentCodexLive = (
       }) {
         if (frame.method === "turn/started") {
           const event = yield* Schema.decodeUnknownEffect(TurnEvent)(frame.params)
+          turnsWithTools.delete(event.threadId)
           yield* store.started(event.threadId, event.turn.id)
           listeners.get(event.threadId)?.queue.push({ type: "turn.started" })
-        } else if (frame.method === "item/completed") {
+        } else if (frame.method === "item/started" || frame.method === "item/completed") {
           const event = yield* Schema.decodeUnknownEffect(ItemEvent)(frame.params)
-          if (event.item.type === "agentMessage" && event.item.text !== undefined)
+          if (!isNonToolItem(event.item.type)) turnsWithTools.add(event.threadId)
+          if (
+            frame.method === "item/completed" &&
+            event.item.type === "agentMessage" &&
+            event.item.text !== undefined
+          )
             listeners
               .get(event.threadId)
               ?.queue.push({ type: "agent_message", text: event.item.text })
@@ -420,7 +513,7 @@ export const ResidentCodexLive = (
           const last = history.thread.turns.at(-1)
           if (last !== undefined && last.id !== row.current_turn)
             yield* store.started(row.thread_id, last.id)
-          if (last?.status === "completed")
+          if (last?.status === "completed" || last?.status === "failed")
             yield* handle({
               method: "turn/completed",
               params: { threadId: row.thread_id, turn: last },
@@ -458,7 +551,18 @@ export const ResidentCodexLive = (
             yield* store.uncertain(message.id, message.thread_id)
             continue
           }
-          if (!message.id.startsWith("dispatch:") && !(yield* hasCustody(message.thread_id))) {
+          const run = message.id.startsWith("provider-retry:") ? yield* runs.read(row.run_id) : null
+          const retryBeforeVerification =
+            run !== null &&
+            (run.state === "spawning" || run.state === "spawned") &&
+            run.directory === row.directory &&
+            threadRuns.get(row.thread_id) === row.run_id &&
+            servers.has(row.run_id)
+          if (
+            !message.id.startsWith("dispatch:") &&
+            !retryBeforeVerification &&
+            !(yield* hasCustody(message.thread_id))
+          ) {
             yield* store.uncertain(message.id, message.thread_id)
             yield* finish(message.thread_id, true)
             continue
