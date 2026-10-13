@@ -18,8 +18,8 @@ test("completion requires bounded Unicode plain text without altering agent word
   const valid = {
     environmentId: "one",
     branch: "anything",
-    title: "雪 '$() `title`",
-    commitMessage: "Fix result\n\n雪 '$() `message`\n",
+    title: "雪 'safe' `title`",
+    commitMessage: "Fix result\n\n```sh\n雪 '$() `message`\n```\n",
     body: "## Result\n\nReadable agent description.",
   }
   expect(decode(valid)).toEqual(valid)
@@ -222,6 +222,7 @@ test("submit_result rejects taken and pending names, then accepts the agent's ot
             installationId: 1,
             workflowSha: "a".repeat(40),
             appActorId: 1,
+            agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
             tailscaleClientId: "fixture",
             tailscaleAudience: "fixture",
           },

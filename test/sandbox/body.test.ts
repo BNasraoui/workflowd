@@ -37,7 +37,6 @@ for (const body of [
   "<img src=x>",
   "@someone",
   "@org/team",
-  "```text\n@someone\n```",
   ...["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"].map(
     (keyword) => `${keyword.toUpperCase()} #123`,
   ),

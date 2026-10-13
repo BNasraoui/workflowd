@@ -1,5 +1,7 @@
 // Reviewed tooling only. No agent code, configuration or command output is executed or logged.
+import { safePublication } from "./publication.mjs"
 import assert from "node:assert/strict"
+import { setTimeout } from "node:timers/promises"
 import { createHash } from "node:crypto"
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises"
 import { join, dirname } from "node:path"
@@ -31,7 +33,7 @@ async function bytes(response, maximum) {
 
 function publicationText(value, message = false) {
   assert.equal(typeof value, "string")
-  assert.ok(value.length > 0 && value.isWellFormed())
+  assert.ok(value.length > 0 && safePublication(value))
   assert.ok(message ? Buffer.byteLength(value, "utf8") <= 10240 : [...value].length <= 200)
   assert.ok(!/[\p{Cc}\p{Cf}]/u.test(message ? value.replaceAll("\n", "") : value))
   assert.ok(message || !/[\u2028\u2029]/u.test(value))
@@ -61,9 +63,7 @@ function validateBody(value) {
   assert.equal(typeof value, "string")
   assert.ok(value.trim().length > 0 && value.isWellFormed())
   assert.ok(Buffer.byteLength(value, "utf8") <= 32768)
-  assert.ok(!/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\n", "")))
-  assert.ok(!/[<@]/u.test(value))
-  assert.ok(!/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b/iu.test(value))
+  assert.ok(safePublication(value))
 }
 
 function verifyCommit(commit, state) {
@@ -179,6 +179,38 @@ function verifyPull(pull, state) {
   return pull.number
 }
 
+// Query GitHub's parser after both creation and ambiguous-POST recovery. A
+// missing/error response is also unsafe: close the known PR before failing.
+async function verifyClosingIssues(state) {
+  failureCause = "closing issue references could not be verified"
+  try {
+    const [owner, name] = repository.split("/")
+    // Require a stable zero over three observations; allow GitHub's parser to
+    // settle between reads. Every read has the existing request timeout.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await setTimeout(2000)
+      const response = await request("/graphql", "POST", {
+        query: "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){closingIssuesReferences{totalCount}}}}",
+        variables: { owner, name, number: state.pr },
+      })
+      assert.equal(response.status, 200)
+      assert.ok(!response.data.errors)
+      const count = response.data.data.repository.pullRequest.closingIssuesReferences.totalCount
+      assert.ok(Number.isSafeInteger(count) && count >= 0)
+      if (count !== 0) failureCause = "PR contains closing issue references"
+      assert.equal(count, 0)
+    }
+  } catch (error) {
+    const cause = failureCause
+    failureCause = cause + "; PR closure failed"
+    const closed = await request(`/repos/${repository}/pulls/${state.pr}`, "PATCH", { state: "closed" })
+    assert.equal(closed.status, 200)
+    assert.equal(closed.data.state, "closed")
+    failureCause = cause + "; PR closed"
+    throw error
+  }
+}
+
 async function publish() {
   failureCause = "manifest validation failed"
   const { binding } = JSON.parse(await readFile(validated, "utf8"))
@@ -203,6 +235,7 @@ async function publish() {
   assert.ok(process.env.PUBLISH_TOKEN)
   const prefix = `/repos/${repository}`
   const state = { binding, metadata, repository, branch: metadata.branch, stage: "validated", commitSha: null, pr: null, revoked: false,
+    closingIssuesVerified: false,
     marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->` }
   publicationState = state
   await record(state)
@@ -286,6 +319,9 @@ async function publish() {
   const readback = await request(prefix + "/pulls/" + number)
   assert.equal(readback.status, 200)
   state.pr = verifyPull(readback.data, state)
+  await verifyClosingIssues(state)
+  state.closingIssuesVerified = true
+  await record(state)
   failureCause = "commit validation failed"
   const commitReadback = await request(prefix + "/git/commits/" + state.commitSha)
   assert.equal(commitReadback.status, 200)

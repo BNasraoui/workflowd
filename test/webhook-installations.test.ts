@@ -233,6 +233,7 @@ test("rejects a sandbox-only installation without storing its delivery", async (
         installationId: 999,
         workflowSha: "a".repeat(40),
         appActorId: 10,
+        agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
         tailscaleClientId: "fixture",
         tailscaleAudience: "fixture",
       },

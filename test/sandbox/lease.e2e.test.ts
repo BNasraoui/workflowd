@@ -20,9 +20,30 @@ const policy = {
   installationId: 147573449,
   workflowSha: "a".repeat(40),
   appActorId: 306741873,
+  agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
   tailscaleClientId: "THoBEY9Hwh11CNTRL-k4vtf1dX8811CNTRL",
   tailscaleAudience: "api.tailscale.com/THoBEY9Hwh11CNTRL-k4vtf1dX8811CNTRL",
 }
+
+test("sandbox policy requires a complete operator-recorded agent image digest", () => {
+  const image = `ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}`
+  expect(
+    parseSandboxRepositories(JSON.stringify([{ ...policy, agentImage: image }]))[0]?.agentImage,
+  ).toBe(image)
+  for (const agentImage of [
+    undefined,
+    "",
+    "ubuntu:24.04",
+    image.replace("@sha256:", ":"),
+    image + "x",
+    image + "\n",
+    image + "\r",
+    image + "\u2028",
+    image.replace("bnasraoui", "foreign"),
+  ]) {
+    expect(() => parseSandboxRepositories(JSON.stringify([{ ...policy, agentImage }]))).toThrow()
+  }
+})
 
 function readiness(sourcePolicy = policy) {
   return {
@@ -31,6 +52,7 @@ function readiness(sourcePolicy = policy) {
     repositoryId: sourcePolicy.repositoryId,
     workflowSha: sourcePolicy.workflowSha,
     appActorId: sourcePolicy.appActorId,
+    agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
     runId: 41,
     attempt: 1,
     peerId: "peer-1",
@@ -503,6 +525,7 @@ test("readiness metadata must match the repository, lease, run and OIDC claims",
         for (const mutation of [
           { leaseId: "foreign" },
           { repositoryId: 1 },
+          { agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "0".repeat(64) },
           { runId: 42 },
           { claims: { ...ready.claims, aud: "foreign" } },
         ]) {

@@ -1,6 +1,6 @@
 ---
 name: show-me
-description: Help the user understand the current topic visually with concise diagrams, code-shape sketches, and focused HTML artifacts.
+description: Help the user understand the current topic visually with concise diagrams, code-shape sketches, and literal text sketches.
 ---
 
 Help the user understand the current topic of conversation visually. Skip the preamble and keep prose brief. Pick the smallest view that makes the key point clear.
@@ -43,16 +43,12 @@ src/
 └── transport/      # sends API requests
 ```
 
-- Show component interaction, control flow, or data flow with Mermaid:
+- Show component interaction or data flow as a literal text diagram:
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant UI
-    participant Daemon
-    User->>UI: choose command
-    UI->>Daemon: send expanded prompt
-    Daemon-->>UI: stream result
+```text
+User -> UI: choose command
+UI -> Daemon: send expanded prompt
+Daemon -> UI: stream result
 ```
 
 - Use `diff` when the point is what changes and the surrounding shape already exists. Match the diff shape to the topic.
@@ -110,14 +106,10 @@ For a state or control-flow change:
 ```ts
 function expandSkill(command: string): string {
   const skillName = command.slice(1)
-  return `use the ${skillName} skill`
+  return "use the " + skillName + " skill"
 }
 ```
 
-- For a visual UI, layout, state comparison, or concept too dense for Mermaid, create one focused HTML artifact. Match the product's colors, type, spacing, and components; use real labels and data; support desktop and mobile; then display it inline:
-
-```task-artifact
-.humanlayer/tasks/{task-slug}/show-me-{description}.html
-```
+- For a visual UI or layout comparison, use a focused component tree or literal text sketch in a text, tsx or diff fence.
 
 - Place each visual next to the short text it supports. Keep only the calls, files, props, states, and boundaries needed to answer the user's current question.
