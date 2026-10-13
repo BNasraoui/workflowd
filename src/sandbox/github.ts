@@ -53,6 +53,7 @@ const Ready = Schema.Struct({
   repository: Schema.String,
   repositoryId: Schema.Int,
   workflowSha: Schema.String,
+  agentImage: Schema.String,
   appActorId: Schema.Int,
   runId: Schema.Int,
   attempt: Schema.Int,
@@ -492,6 +493,7 @@ export const makeSandboxGithub = (
         ready.repository !== policy.repository ||
         ready.repositoryId !== policy.repositoryId ||
         ready.workflowSha !== policy.workflowSha ||
+        ready.agentImage !== policy.agentImage ||
         ready.appActorId !== policy.appActorId ||
         ready.runId !== runId ||
         ready.attempt !== attempt ||

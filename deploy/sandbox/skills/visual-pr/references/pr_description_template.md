@@ -14,13 +14,13 @@
 
 {...short-description...}
 
-```diff|sql|json|etc
+```sql
 {Show changed SQL tables, important columns and relationships, and endpoint request/response contracts.}
 ```
 
 {...short-description...}
 
-```typescript|python|etc
+```typescript
 {show new data structures that are key to the implementation}
 ```
 

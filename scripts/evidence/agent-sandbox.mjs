@@ -815,6 +815,7 @@ export function assertLivePublication(proof) {
   assert.equal(intent.base_ref, policy.publish.baseRef)
   assert.deepEqual(intent.receipt, {
     stage: "published",
+    closingIssuesVerified: true,
     pr: pull.number,
     revoked: true,
     commitSha: pull.head.sha,
@@ -881,6 +882,7 @@ export function assertLivePublication(proof) {
   }
   const last = receipts.at(-1)
   assert.equal(last.stage, "published")
+  assert.equal(last.closingIssuesVerified, true, "Closing issue references unverified")
   assert.equal(last.pr, pull.number)
   assert.equal(last.revoked, true, "Publication token revocation unconfirmed")
   assert.equal(ref.ref, `refs/heads/${submission.branch}`)

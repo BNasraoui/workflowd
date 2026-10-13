@@ -927,6 +927,7 @@ test("migration 30 preserves lease authority, backfills cleanup pairs and is rep
         installationId: 8,
         workflowSha: "a".repeat(40),
         appActorId: 9,
+        agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
         tailscaleClientId: "client",
         tailscaleAudience: "audience",
       })

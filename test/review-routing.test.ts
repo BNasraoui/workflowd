@@ -37,6 +37,7 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: key,
         GITHUB_WEBHOOK_SECRET: "fixture",
         OPENCODE_SERVER_PASSWORD: "fixture",

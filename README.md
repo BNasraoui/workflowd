@@ -243,6 +243,7 @@ install -m 0600 deploy/workflowd.env.example "$HOME/.config/workflowd/env"
 The required installed values are:
 
 - `GITHUB_APP_ID`: numeric GitHub App ID
+- `WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS`: required in automation mode; comma-separated immutable numeric GitHub account IDs allowed to hold App installations (production: `81005232,319835875`, BNasraoui and quality-sh). Missing, empty, malformed, unsafe, or duplicate IDs prevent startup.
 - `GITHUB_PRIVATE_KEY_PATH`: absolute path to the App PEM file
 - `OPENCODE_SERVER_USERNAME`: must match the OpenCode server, normally `opencode`
 - `WORKFLOWD_OPENCODE_ATTACH_URL`: credential-free OpenCode URL reachable from reviewer tailnet machines
@@ -251,6 +252,10 @@ The required installed values are:
 - `WORKFLOWD_FIX_WORK_ENABLED`: set `true` to fix trusted agent-owned pull requests; keep `false` for review-only operation
 - `WORKFLOWD_TRUSTED_AGENT_USERS`: comma-separated allowlist of PR-author GitHub logins eligible for Fix Work; required and non-empty when Fix Work is enabled
 - `WORKFLOWD_GIT_SIGNING_KEY`: full OpenPGP fingerprint of the GitHub-registered controller key used to sign and verify Fix Work commits; required when Fix Work is enabled
+
+A public GitHub App can be installed by anyone, and those installations send validly signed webhooks. The installation guard claims the durable delivery record and returns 202 for `installation.created`, `installation.unsuspend`, `installation.new_permissions_accepted`, and `installation_repositories.added`. A daemon-scoped worker looks up each installation with an App JWT and deletes it only if GitHub reports an account outside the allowlist. A payload/account mismatch for an allowed installation is audited without deletion. Structured `installation_guard` lines record outcomes; account login is optional, and undecodable accounts (including null accounts) are audited and skipped individually.
+
+Reconciliation starts in the background and collects all `/app/installations` pages before deleting foreign installations. Successful passes run ten minutes apart; consecutive failed passes back off to an hour and reset to ten minutes after recovery. `/health` exposes `installationGuard.lastSuccessfulReconciliationAt` as Unix milliseconds (null until a pass succeeds). Background failures and defects are logged without stopping the workers. Requests time out after ten seconds and retry transient failures three times with 1/2/4-second backoff, respecting `retry-after` and `x-ratelimit-reset` within a 60-second cap per delay. GET and DELETE 404 mean already gone. Reconciliation recovers missed webhooks, crashes after a delivery claim, and exhausted retries. Execution mode does not require this setting. Installation and installation-repository events are delivered to Apps with webhooks; no extra event subscription is needed.
 
 Fix Work remains disabled by default. Existing installations that previously set `WORKFLOWD_FIX_WORK_ENABLED=true` must add at least one `WORKFLOWD_TRUSTED_AGENT_USERS` login before upgrading; startup fails closed when the allowlist is absent or empty. No database migration is required: every claimed Fix Work job, including one queued before upgrade, is rechecked against the current repository, branch-prefix, review, and author policy before the fixer runs. Removing a login takes effect after restart; queued and subsequent work for that author is disabled or left review-only.
 

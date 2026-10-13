@@ -35,7 +35,9 @@ Describe the result for the current sandbox task with a concise description that
 4. Submit the description as the required `body` argument to `submit_result`, together with `environmentId`, `branch`, `title`, and `commitMessage`.
    - Read skills and supporting files through container-use inside the environment. `{SKILLBASE}` means `/opt/workflowd/skills/visual-pr`.
    - The body must be non-empty GitHub Markdown, at most 32 KiB of UTF-8, with valid Unicode. Only newline is allowed among control characters; Unicode format characters are forbidden.
-   - Do not include raw HTML or `<`, `@` mentions, or the GitHub closing words close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved (case-insensitive, even in code examples). Rephrase these words and use fenced code or Mermaid instead of HTML.
+   - Character references, invisible characters (including variation selectors and ZWJ), link reference definitions, and issue-closing keyword/reference pairs are forbidden everywhere, including code. Ordinary prose such as "this fixes the race" is allowed. These rules also apply to title and commitMessage.
+   - In body, put literal HTML, mentions, dollar signs, and backslashes only inside fenced code. Commit messages are plain text: `<`, `@`, `$`, and backslashes are forbidden everywhere in `commitMessage`, including fences. Backslash checks include Unicode compatibility forms. Open at column zero after a blank line (or at the start) with at least three identical backticks or tildes. Close with the exact same run at column zero, with nothing after it. Indented, nested, mismatched and unclosed fences are rejected; inline code is not an exception.
+   - Use an empty info string or exactly text, diff, ts, typescript, tsx, js, json, sh, bash, python, rust, go, sql, yaml or toml. Use literal text diagrams, never math, Mermaid, GeoJSON, TopoJSON, STL or HTML artifacts.
    - A rejected submission returns a tool error; correct the body and resubmit. The publisher adds its own marker and opens the draft PR.
 
 Always read and follow `{SKILLBASE}/references/pr_description_template.md`. Do not expand the PR body beyond that template.

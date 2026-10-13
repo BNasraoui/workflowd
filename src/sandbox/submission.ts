@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path"
 import { Schema } from "effect"
 import { Database } from "bun:sqlite"
-import { SandboxCompletion } from "./config"
+import { sandboxPublicationRules, SandboxCompletion } from "./config"
 import {
   assertBridgeBinding,
   bindingDirectory,
@@ -75,7 +75,10 @@ export async function submitSandboxResult(
       content: [
         {
           type: "text",
-          text: "submit_result requires exactly {environmentId: non-empty string, branch: string, title: non-empty single-line plain text (200 characters), commitMessage: non-empty plain text (10 KiB UTF-8; newlines only), body: non-empty GitHub Markdown (32 KiB UTF-8)}. Body must be valid Unicode, with no controls except newline, no Unicode format characters, no raw HTML or <, no @ mentions, and no closing words close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved (case-insensitive, including code blocks). Correct the arguments and resubmit.",
+          text:
+            "submit_result requires exactly {environmentId, branch, title (non-empty single line, 200 characters), commitMessage (non-empty, 10 KiB UTF-8), body (non-empty Markdown, 32 KiB UTF-8)}. Valid Unicode only; no controls or format characters except newlines in message/body. " +
+            sandboxPublicationRules +
+            "Correct the arguments and resubmit.",
         },
       ],
     }

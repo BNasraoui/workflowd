@@ -1,4 +1,5 @@
 import { reviewServerId, reviewEndpointAlias, routeReviewHarness } from "./review-harness"
+import { InstallationGuard, makeInstallationGuard } from "./installation-guard"
 import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
@@ -14,7 +15,7 @@ import { Octokit } from "@octokit/rest"
 import { OpenCode } from "@opencode-ai/client/effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { SqlClient } from "effect/unstable/sql"
-import { Cause, Effect, Layer, Option, Schema } from "effect"
+import { Cause, Context, Effect, Layer, Option, Schema } from "effect"
 import { AgentHarness, OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "./agent-harness"
 import type { AppConfig } from "./config"
 import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
@@ -721,33 +722,43 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     providerLayer,
     resumeWorkerLayer,
     completionSourceLayer,
-    Layer.effect(
-      GitHub,
+    Layer.effectContext(
       Effect.tryPromise({
         try: () => readFile(config.github.privateKeyPath, "utf8"),
         catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
       }).pipe(
-        Effect.map((privateKey) => {
-          const app = new App({
-            appId: config.github.appId,
-            privateKey,
-            Octokit,
-          })
-          return new GitHubAppAdapter(
-            config.github.appId,
-            async (installationId) =>
-              new OctokitInstallationAdapter(
-                makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
-              ),
-            {
-              resolve: (reference) =>
-                (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(
-                  reference,
+        Effect.flatMap(
+          Effect.fn(function* (privateKey: string) {
+            const app = new App({
+              appId: config.github.appId,
+              privateKey,
+              Octokit,
+            })
+            const github = new GitHubAppAdapter(
+              config.github.appId,
+              async (installationId) =>
+                new OctokitInstallationAdapter(
+                  makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
                 ),
-            },
-            publicSonarRequest,
-          )
-        }),
+              {
+                resolve: (reference) =>
+                  (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(
+                    reference,
+                  ),
+              },
+              publicSonarRequest,
+            )
+            return Context.make(GitHub, github).pipe(
+              Context.add(
+                InstallationGuard,
+                yield* makeInstallationGuard(
+                  config.github.allowedInstallationAccountIds,
+                  app.octokit,
+                ),
+              ),
+            )
+          }),
+        ),
       ),
     ),
     Layer.succeed(AgentHarness, agentHarness),

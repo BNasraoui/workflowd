@@ -1,3 +1,4 @@
+import { InstallationGuard } from "../src/installation-guard"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -96,6 +97,7 @@ test.each([false, true])(
       const config = await loadConfig(
         {
           GITHUB_APP_ID: "123",
+          WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
           GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
           GITHUB_WEBHOOK_SECRET: "secret",
           OPENCODE_SERVER_PASSWORD: "password",
@@ -121,6 +123,7 @@ test.each([false, true])(
                     installationId: 147573449,
                     workflowSha: "a".repeat(40),
                     appActorId: 306741873,
+                    agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
                     tailscaleClientId: "fixture",
                     tailscaleAudience: "fixture",
                   },
@@ -139,6 +142,7 @@ test.each([false, true])(
           Effect.gen(function* () {
             const events = yield* KernelEventStore
             const jobs = yield* KernelJobStore
+            yield* InstallationGuard
             yield* WorkflowStore
             yield* WorkflowStart
             const testJobs = yield* TestJobCanary
@@ -206,6 +210,7 @@ test("composes the reusable agent harness with the live ports", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -258,6 +263,7 @@ test("composes the explicit six-contract catalog by default", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -299,6 +305,7 @@ test("composes disabled QRSPI ingress as an unauthorized service", async () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -335,6 +342,7 @@ test("keeps unrelated services available when configured QRSPI is closed", async
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: privateKeyPath,
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
@@ -402,6 +410,7 @@ test("fails live composition when the configured GitHub key cannot be read", asy
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: join(directory, "missing.pem"),
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",

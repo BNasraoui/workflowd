@@ -24,6 +24,7 @@ const policy = {
   installationId: 147573449,
   workflowSha: "a".repeat(40),
   appActorId: 306741873,
+  agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
   tailscaleClientId: "fixture",
   tailscaleAudience: "fixture",
 }
