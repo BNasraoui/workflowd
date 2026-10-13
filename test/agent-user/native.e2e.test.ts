@@ -223,7 +223,21 @@ async function nativeBoundary(simulatedManager: boolean) {
     await rm(login.benLink)
     await writeFile(login.benLink, synthetic, { mode: 0o600 })
     await chown(login.benLink, controllerUid, groupGid)
-    await relinkCredentials(policy, client, "ben")
+    await relinkCredentials(policy, client, "ben").catch(async (error: unknown) => {
+      const processes = []
+      for (const pid of (await readdir("/proc")).filter((name) => /^\d+$/.test(name))) {
+        if ((await stat(`/proc/${pid}`).catch(() => null))?.uid !== agentUid) continue
+        processes.push({
+          pid,
+          status: await readFile(`/proc/${pid}/status`, "utf8")
+            .then((text) =>
+              text.split("\n").filter((line) => /^(Name|State|PPid|NSpid):/.test(line)),
+            )
+            .catch(() => []),
+        })
+      }
+      throw new Error(JSON.stringify({ error: String(error), processes }))
+    })
   }
   const terminal = async (runId: string) => {
     const deadline = Date.now() + 45000
@@ -782,10 +796,19 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
     const state = units.get(unit)
     if (!state) return "LoadState=not-found\n"
     if (args.includes("stop")) {
-      try {
-        process.kill(-state.child.pid, "SIGKILL")
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error
+      if (state.child.exitCode === null) {
+        // Keep unshare alive to wait for namespace teardown before acknowledging stop.
+        const children = await readFile(
+          `/proc/${state.child.pid}/task/${state.child.pid}/children`,
+          "utf8",
+        ).catch(() => "")
+        for (const pid of children.trim().split(/\s+/).filter(Boolean).map(Number)) {
+          try {
+            process.kill(pid, "SIGKILL")
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error
+          }
+        }
       }
       await state.child.exited
       // In administrative coverage Bun is PID 1 and owns exited CLI helpers.
@@ -810,3 +833,140 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
     return `LoadState=loaded\nActiveState=${state.stopped ? "inactive" : "active"}\nSubState=${state.child.exitCode === null ? "running" : "exited"}\nMainPID=${state.child.exitCode === null ? state.child.pid : 0}\nInvocationID=${state.invocation}\nDescription=${state.description}\nUser=${agentUid}\nExecMainCode=1\nExecMainStatus=${state.child.exitCode ?? 0}\n`
   }
 }
+
+test("controller discovery and workspace adapters use host custody without local filesystem access", async () => {
+  const { createServer } = await import("node:net")
+  const { HostRequest, agentHostUnitName } = await import("../../src/agent-host/protocol")
+  const root = await mkdtemp(join(tmpdir(), "host-controller-"))
+  const socket = join(root, "host.sock")
+  let owned: typeof OwnedProcess.Type | null = null
+  let output: unknown = [
+    {
+      provider: "fixture",
+      model: "native-model",
+      selectionModel: "picker",
+      name: "Native",
+      efforts: [{ id: "high", description: "High" }],
+      defaultEffort: "high",
+      defaultModel: true,
+      modalities: { input: ["text"] },
+      availability: "unknown",
+    },
+  ]
+  let exitCode = 0
+  const starts: Array<Extract<typeof HostRequest.Type, { operation: "start" }>> = []
+  const stops: string[] = []
+  const host = createServer((connection) => {
+    let text = ""
+    connection.on("error", () => connection.destroy())
+    connection.on("data", (chunk) => {
+      text += chunk.toString()
+      if (!text.includes("\n")) return
+      const request = Schema.decodeUnknownSync(HostRequest)(JSON.parse(text))
+      if (request.operation === "start") {
+        starts.push(request)
+        owned = {
+          runId: request.runId,
+          launchId: randomUUID(),
+          unit: agentHostUnitName(request.runId),
+          invocationId: "fixture-invocation",
+          uid: 12345,
+          pid: 0,
+          started: new Date().toISOString(),
+          active: false,
+          exitCode,
+        }
+      }
+      if (request.operation === "stop") stops.push(request.runId)
+      connection.end(
+        JSON.stringify(
+          request.operation === "exchange"
+            ? {
+                admitted: true,
+                bytes: Buffer.from(JSON.stringify(output))
+                  .subarray(request.offset)
+                  .toString("base64"),
+              }
+            : {
+                admitted: true,
+                process:
+                  request.operation === "inspect" && request.runId !== owned?.runId ? null : owned,
+              },
+        ) + "\n",
+      )
+    })
+  })
+  await new Promise<void>((resolve) => host.listen(socket, resolve))
+  try {
+    const discovery = makeCodexDiscovery("codex:local", {
+      command: ["must-not-execute"],
+      credentialSocket: socket,
+    })
+    expect(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
+    expect(stops).toEqual([starts[0]!.runId])
+    output = { status: "unsupported" }
+    expect(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
+    output = { unsafe: "not-a-catalog" }
+    await expect(discovery.discover(AbortSignal.timeout(1000))).rejects.toThrow()
+    expect(stops).toHaveLength(3)
+    const count = starts.length
+    await expect(discovery.discover(AbortSignal.abort())).rejects.toThrow()
+    expect(starts).toHaveLength(count)
+    const input = {
+      repository: "/controller/selector",
+      directory: "/inaccessible/agent/run",
+      branch: "work",
+      base: "origin/main",
+    }
+    output = ""
+    await Effect.runPromise(agentRunWorktrees(socket).create(input))
+    await Effect.runPromise(agentRunWorktrees(socket).create(input))
+    expect(starts.at(-1)).toMatchObject({ ...input, profile: "workspace" })
+    expect(starts.at(-1)?.runId).toBe(starts.at(-2)?.runId)
+    exitCode = 1
+    const failed = await Effect.runPromise(
+      agentRunWorktrees(socket).create(input).pipe(Effect.result),
+    )
+    expect(failed._tag).toBe("Failure")
+    exitCode = 0
+    const cli = makeClaudeCli({ binary: "must-not-execute", credentialSocket: socket })
+    output = true
+    expect(
+      await Effect.runPromise(
+        cli.sessionExists({
+          nativeSessionId: "native-session",
+          directory: "/inaccessible/agent/run",
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      await Effect.runPromise(
+        cli.sessionExists({ nativeSessionId: "../invalid", directory: "/inaccessible/agent/run" }),
+      ),
+    ).toBe(false)
+    output = { result: "resumed" }
+    expect(
+      JSON.parse(
+        await Effect.runPromise(
+          cli.resume({
+            nativeSessionId: "native-session",
+            directory: "/inaccessible/agent/run",
+            prompt: "resume",
+            deliveryId: "stable-delivery",
+            timeoutMs: 1000,
+          }),
+        ),
+      ),
+    ).toEqual(output)
+    expect(await Effect.runPromise(cli.hasDelivery!("stable-delivery"))).toBe(true)
+    expect(await Effect.runPromise(cli.hasDelivery!("unknown-delivery"))).toBe(false)
+    expect(starts.at(-1)).toMatchObject({
+      profile: "claude-resume",
+      nativeSessionId: "native-session",
+      timeoutMs: 1000,
+    })
+  } finally {
+    await new Promise<void>((resolve) => host.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
+})
