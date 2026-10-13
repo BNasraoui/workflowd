@@ -18,6 +18,7 @@ jobs:
       id-token: write
     uses: ./.github/workflows/agent-sandbox.yml
     with:
+      agent-image: ${{ vars.SANDBOX_AGENT_IMAGE }}
       repository-id: "1306107007"
       app-actor-id: "306741873"
       tailscale-client-id: ${{ vars.TS_AGENT_CLIENT_ID }}

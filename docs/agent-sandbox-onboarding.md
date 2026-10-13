@@ -36,6 +36,7 @@ jobs:
     uses: BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@APPROVED_TOOLING_SHA
     with:
       tooling-sha: APPROVED_TOOLING_SHA
+      agent-image: ghcr.io/bnasraoui/workflowd-agent-base@sha256:APPROVED_IMAGE_DIGEST
       repository-id: "1286590015"
       app-actor-id: "306741873"
       tailscale-client-id: ${{ vars.TS_AGENT_CLIENT_ID }}
@@ -123,7 +124,7 @@ repo:quality-sh@319835875/provenance@1286590015:ref:refs/heads/workflowd/leases/
 
 Put its client ID and audience in target Settings → Secrets and variables → Actions → **Variables** as `TS_AGENT_CLIENT_ID` and `TS_AGENT_AUDIENCE`. Confirm audience from the credential and tailnet tests denying runner-initiated mint/ben-arch connections. Do not infer trust from variable presence.
 
-Operator adds provenance's configured alias/root and sandbox policy alongside workflowd, using repository/owner IDs above, actual opencode installation ID, actor 306741873, approved target `workflowSha`, central `toolingSha`, and its Tailscale values. `publish` supplies recorded base ref, environment ID, ghettimonster App/bot IDs and the per-repository `coAuthor` matching the caller; it has no result-branch setting or private key. Use isolated proof configuration first: workflowd proofs target the existing RPI branch at the newly published candidate so the PR contains only the agent task; provenance proofs target reviewed main after onboarding. Record that base tip as source at dispatch. Production targets main and enablement is separate. Do not register a fresh model auth store.
+Operator adds provenance's configured alias/root and sandbox policy alongside workflowd, using repository/owner IDs above, actual opencode installation ID, actor 306741873, approved target `workflowSha`, central `toolingSha`, required `agentImage` digest reference, and its Tailscale values. `publish` supplies recorded base ref, environment ID, ghettimonster App/bot IDs and the per-repository `coAuthor` matching the caller; it has no result-branch setting or private key. Use isolated proof configuration first: workflowd proofs target the existing RPI branch at the newly published candidate so the PR contains only the agent task; provenance proofs target reviewed main after onboarding. Record that base tip as source at dispatch. Production targets main and enablement is separate. Do not register a fresh model auth store.
 
 ## 6. Probes, live runs, review
 
@@ -151,3 +152,15 @@ claude --print --model claude-opus-5-5 < /tmp/workflowd-d6g-security-review.txt
 ```
 
 The review prompt requests findings only, no edits, and covers result identity, secret isolation, rules/CI, name pass-through, audit honesty, races/recovery and both repositories. Save the report; blocking findings prevent merge. If that model/auth is unavailable, review remains incomplete; do not substitute. On failure disable publishing, retain protections/custody, and reconcile; do not delete result branches or weaken rules as automatic rollback.
+
+## Recording the agent image digest
+
+After the reviewed image's publish workflow succeeds, the operator can read its registry manifest digest:
+
+```bash
+docker buildx imagetools inspect ghcr.io/bnasraoui/workflowd-agent-base:APPROVED_TOOLING_SHA
+```
+
+Record the reported `Digest: sha256:...` as the full reference `ghcr.io/bnasraoui/workflowd-agent-base@sha256:...` in the sandbox lease policy's required `agentImage` field, next to `toolingSha`. Pass that exact reference as the reusable workflow's `agent-image` input. The workflowd caller obtains the input from the operator's `SANDBOX_AGENT_IMAGE` repository variable; other callers may use a reviewed literal. Inspecting a tag is only a discovery step: no tag is accepted by the runner and there is no fallback. The runner records the full reference in readiness and the controller compares it with the persisted lease policy before connecting the agent.
+
+This code change does not set the variable, change live policies, or update workflow/action pins. Those remain separate operator rollout work. Existing policy entries without an image digest fail configuration validation until the operator records one.

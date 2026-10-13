@@ -97,7 +97,7 @@ for (const path of ["initialize", "start source helper"]) {
           `--setenv=PATH=${runner.root}:/usr/bin:/bin`,
           "bash",
           "-c",
-          `set -euo pipefail\nprintf '{"repository":"%s"}' "$2" > /run/workflowd-sandbox/identity.json\nprintf ubuntu:24.04 > /run/workflowd-sandbox/agent-image\n${invoke}`,
+          `set -euo pipefail\nprintf '{"repository":"%s"}' "$2" > /run/workflowd-sandbox/identity.json\nprintf ghcr.io/bnasraoui/workflowd-agent-base@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff > /run/workflowd-sandbox/agent-image\n${invoke}`,
           "_",
           runnerScript,
           fixtureRepository,

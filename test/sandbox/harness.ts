@@ -152,6 +152,11 @@ export async function runnerFixture() {
       wrapper,
       `#!/bin/sh
 cd /workspace/repository
+# The fixture digest stands in for the operator-published image. Keep real
+# container-use/Dagger execution on the small fixture Ubuntu image.
+if [ "$1 $2 $3" = "config base-image set" ] && [ "$4" = "ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}" ]; then
+  set -- config base-image set ubuntu:24.04
+fi
 exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"
 `,
       { mode: 0o755 },
@@ -164,7 +169,7 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DA
       `${name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
+      "mkdir -p /run/workflowd-sandbox && printf ghcr.io/bnasraoui/workflowd-agent-base@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/container-use /usr/local/bin/runner-control",
     )
     const holding = Bun.spawn(
       ["docker", "exec", `${name}-runner`, "bash", "/usr/local/bin/runner-control", "hold"],
@@ -282,6 +287,7 @@ export async function sandboxGithubFixture(
     installationId: number
     workflowSha: string
     appActorId: number
+    agentImage: string
   },
   leaseId = "lease-1",
 ) {
@@ -840,7 +846,7 @@ export async function leaseRunnerFixture(repositoryName: string) {
       `${runner.name}-runner`,
       "bash",
       "-c",
-      "mkdir -p /run/workflowd-sandbox && printf ubuntu:24.04 > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
+      "mkdir -p /run/workflowd-sandbox && printf ghcr.io/bnasraoui/workflowd-agent-base@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff > /run/workflowd-sandbox/agent-image && chown runner:runner /run/workflowd-sandbox && chmod 755 /usr/local/bin/docker /usr/local/bin/container-use",
     )
     await runner.docker(
       "exec",
@@ -960,7 +966,7 @@ export function sandboxPublicationFixture(
       const stage =
         fault === "branch collision"
           ? "validated"
-          : fault === "lost push"
+          : ["lost push", "killed publisher"].includes(fault)
             ? "pushing"
             : fault === "lost PR"
               ? "creating_pr"
@@ -971,6 +977,18 @@ export function sandboxPublicationFixture(
         branch,
         marker: `<!-- workflowd-publication:${Buffer.from(JSON.stringify(binding)).toString("base64")} -->`,
         stage,
+        closingIssuesVerified: ![
+          "unchecked PR",
+          "killed publisher",
+          "closing references",
+          "closing query malformed",
+        ].includes(fault),
+        ...(fault === "closing references"
+          ? { cause: "PR contains closing issue references; PR closed" }
+          : {}),
+        ...(fault === "closing query malformed"
+          ? { cause: "closing issue references could not be verified; PR closed" }
+          : {}),
         pr: stage === "published" ? 17 : null,
         revoked: fault !== "unrevoked",
         commitSha: "2".repeat(40),

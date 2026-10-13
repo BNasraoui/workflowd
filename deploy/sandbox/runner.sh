@@ -33,15 +33,19 @@ write_heartbeat() {
 
 configure_image() {
   local image="$1"
+  [[ "$image" =~ ^ghcr\.io/bnasraoui/workflowd-agent-base@sha256:[a-f0-9]{64}$ ]] || return 1
   # container-use reads this local configuration; its source tree still comes
   # from the exact Git commit, so this setting is not part of the agent patch.
   docker exec workflowd-sandbox-tooling sh -eu -c '
+    [ ! -L .container-use ]
+    [ ! -L .container-use/environment.json ]
     container-use config base-image set "$1"
     # Avoid container-use warning about controller-owned uncommitted changes.
     if git ls-files --error-unmatch .container-use/environment.json >/dev/null 2>&1; then
       git update-index --skip-worktree -- .container-use/environment.json
     else
-      printf "\n/.container-use/environment.json\n" >> .git/info/exclude
+      grep -qxF "/.container-use/environment.json" .git/info/exclude ||
+        printf "\n/.container-use/environment.json\n" >> .git/info/exclude
     fi
   ' _ "$image"
 }
@@ -86,14 +90,16 @@ assert all(claims.get(key) == value for key, value in expected.items()), 'OIDC c
 expected_sub = 'repo:' + os.environ['GITHUB_REPOSITORY_OWNER'] + '@' + os.environ['GITHUB_REPOSITORY_OWNER_ID'] + '/' + os.environ['GITHUB_REPOSITORY'].split('/')[1] + '@' + os.environ['GITHUB_REPOSITORY_ID'] + ':ref:' + ref
 assert claims['sub'] == expected_sub, 'Immutable OIDC subject mismatch'
 peer = json.loads(subprocess.check_output(['tailscale', 'status', '--json']))['Self']
-ready = {'leaseId': lease, 'repository': expected['repository'], 'repositoryId': int(expected['repository_id']),
+image = os.environ['SANDBOX_AGENT_IMAGE']
+assert re.fullmatch(r'ghcr\.io/bnasraoui/workflowd-agent-base@sha256:[a-f0-9]{64}', image), 'Invalid sandbox image digest'
+ready = {'agentImage': image, 'leaseId': lease, 'repository': expected['repository'], 'repositoryId': int(expected['repository_id']),
          'workflowSha': expected['sha'], 'appActorId': int(expected['actor_id']),
          'runId': int(expected['run_id']), 'attempt': int(expected['run_attempt']),
          'peerId': peer['ID'], 'address': next(ip for ip in peer['TailscaleIPs'] if ':' not in ip),
          'claims': {**expected, 'sub': claims['sub'], 'job_workflow_ref': claims['job_workflow_ref']}}
 (root / 'identity.json').write_text(json.dumps(ready))
 assert re.fullmatch('[a-f0-9]{40}', expected['job_workflow_sha'])
-(root / 'agent-image').write_text('ghcr.io/bnasraoui/workflowd-agent-base:' + expected['job_workflow_sha'])
+(root / 'agent-image').write_text(image)
 PY
     # Suppress setup output: only the fixed metadata artifact is published.
     boot >/run/workflowd-sandbox/setup.log 2>&1
