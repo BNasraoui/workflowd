@@ -1,3 +1,4 @@
+import { CredentialAdmissionReason, credentialReason } from "../agent-host/protocol"
 import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
 import type { SandboxPolicy } from "../sandbox/config"
@@ -53,6 +54,7 @@ import type { CliPort, CliPreflightError } from "./cli-process-contract"
 import { KernelSessionStore, type KernelSessionStoreError } from "./session-store"
 
 export type AgentRunRefusalReason =
+  | CredentialAdmissionReason
   | "provider_prefixed_route"
   | "unknown_route"
   | "ambiguous_route"
@@ -202,13 +204,19 @@ const abandonFailedWorktreeLaunch = (
 }
 
 const mailboxErrorMapper = (run: AgentRunRecord) => (error: AgentRunIngressError) =>
-  error instanceof AgentRunRefusalError
+  credentialReason(error) !== undefined
     ? new AgentRunRefusalError({
-        reason: error.reason,
-        detail: error.detail,
+        reason: credentialReason(error)!,
+        detail: "Credential admission refused",
         mailboxId: run.callerMailboxId,
       })
-    : error
+    : error instanceof AgentRunRefusalError
+      ? new AgentRunRefusalError({
+          reason: error.reason,
+          detail: error.detail,
+          mailboxId: run.callerMailboxId,
+        })
+      : error
 
 const worktreeFailureRecovery =
   (
@@ -315,7 +323,18 @@ const make = (options: AgentRunIngressOptions) =>
         if (provider === undefined)
           return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         const [providers, models] = yield* Effect.all(
-          [provider.listProviders({}), provider.listModels({})],
+          [
+            provider
+              .listProviders({})
+              .pipe(
+                Effect.mapError((error) =>
+                  credentialReason(error) !== undefined
+                    ? refuse(credentialReason(error)!, "Credential admission refused")
+                    : error,
+                ),
+              ),
+            provider.listModels({}),
+          ],
           { concurrency: 2 },
         )
         if (!providers.includes(route.providerID)) {
@@ -809,8 +828,9 @@ const make = (options: AgentRunIngressOptions) =>
           if (readiness._tag === "Failure") {
             const issue = readiness.failure
             return yield* new AgentRunRefusalError({
-              reason:
-                issue.kind === "systemd_unavailable"
+              reason: Schema.is(CredentialAdmissionReason)(issue.kind)
+                ? issue.kind
+                : issue.kind === "systemd_unavailable"
                   ? "systemd_unavailable"
                   : issue.kind === "not_authenticated"
                     ? "provider_not_authenticated"

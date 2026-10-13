@@ -1,3 +1,4 @@
+import { credentialReason } from "../agent-host/protocol"
 import { randomUUID } from "node:crypto"
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
@@ -354,7 +355,8 @@ const observeRemoteRow = (
     }
     if (document.success.status === "failed" || document.success.output === undefined) {
       return yield* recordClaudeObservation(request, options, "operator_required", {
-        reason: "remote_delivery_failed",
+        reason:
+          credentialReason({ reason: document.success.failureReason }) ?? "remote_delivery_failed",
         failureReason: document.success.failureReason ?? "unknown",
       })
     }
@@ -512,8 +514,10 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
       // never re-sent, so the session sees at most one duplicate request
       // for structure, not a duplicate task.
       return yield* extractOnce().pipe(
-        Effect.catch(() =>
-          extractOnce("The previous reply was not a single JSON value matching the schema."),
+        Effect.catch((error) =>
+          credentialReason(error) !== undefined
+            ? Effect.fail(error)
+            : extractOnce("The previous reply was not a single JSON value matching the schema."),
         ),
       )
     })
@@ -531,7 +535,11 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
       // The durable sent fence already stands, so the wake may have reached
       // the session; a redelivery cannot be attributed afterwards. Escalate
       // rather than guess.
-      return yield* operatorRequired(claim, options, "delivery_failed")
+      return yield* operatorRequired(
+        claim,
+        options,
+        credentialReason(answered.failure) ?? "delivery_failed",
+      )
     }
     yield* store.completeResume({
       ...authorityOf(claim, options.now()),

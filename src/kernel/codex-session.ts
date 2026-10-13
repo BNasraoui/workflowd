@@ -1,3 +1,4 @@
+import { guardCliCredentials } from "../agent-host/client"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
@@ -131,6 +132,7 @@ type CommandResult = {
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CliProcessOptions = {
+  readonly credentialSocket?: string | undefined
   readonly binary: string
   /** CLI-specific protocol; process custody and systemd ownership are shared. */
   readonly driver: {
@@ -653,15 +655,19 @@ export const makeEventQueue = () => {
 
 export type CodexCliOptions = Omit<CliProcessOptions, "driver">
 export const makeCodexCli = (options: CodexCliOptions) =>
-  makeDurableCliProcess({
-    ...options,
-    driver: {
-      name: "codex",
-      workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
-      parseEvent: parseCodexExecEvent,
-      preflight: codexPreflight(options.binary),
-    },
-  })
+  guardCliCredentials(
+    makeDurableCliProcess({
+      ...options,
+      driver: {
+        name: "codex",
+        workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
+        parseEvent: parseCodexExecEvent,
+        preflight: codexPreflight(options.binary),
+      },
+    }),
+    options.credentialSocket,
+    "codex",
+  )
 const codexPreflight = (binary: string) =>
   Effect.gen(function* () {
     yield* runWorkspaceCommand("check codex cli", [binary, "--version"]).pipe(

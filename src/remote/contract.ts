@@ -1,3 +1,4 @@
+import { CredentialAdmissionReason } from "../agent-host/protocol"
 import { Schema } from "effect"
 
 export const MAX_REMOTE_MESSAGE_BYTES = 16_384
@@ -97,14 +98,17 @@ export const RemoteHostMessage = Schema.Union([
 ])
 export type RemoteHostMessage = typeof RemoteHostMessage.Type
 
-export const ClaudeResumeFailureReason = Schema.Literals([
-  "transcript_missing",
-  "directory_not_allowed",
-  "cli_failed",
-  "cli_timeout",
-  "output_unparseable",
-  "output_oversized",
-  "execution_interrupted",
+export const ClaudeResumeFailureReason = Schema.Union([
+  CredentialAdmissionReason,
+  Schema.Literals([
+    "transcript_missing",
+    "directory_not_allowed",
+    "cli_failed",
+    "cli_timeout",
+    "output_unparseable",
+    "output_oversized",
+    "execution_interrupted",
+  ]),
 ])
 export type ClaudeResumeFailureReason = typeof ClaudeResumeFailureReason.Type
 

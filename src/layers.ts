@@ -170,6 +170,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
   const codex = Layer.succeed(
     CodexCli,
     makeCodexCli({
+      credentialSocket: config.credentialSocket,
       binary: config.agentRuns?.codexBinary ?? "codex",
       custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
       ...(config.agentRuns?.codexUnitPrefix === undefined
@@ -183,6 +184,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
       : Layer.succeed(
           ClaudeDispatchCli,
           makeClaudeDispatchCli({
+            credentialSocket: config.credentialSocket,
             binary: config.agentRuns?.claudeBinary ?? "claude",
             custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
           }),
@@ -243,7 +245,9 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
     ),
   )
-  const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
+  const openCodeAdapter = new SdkOpenCodeAdapter(
+    makeOpenCodeSdkClient(openCodeClientEffect, config.credentialSocket),
+  )
   const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
   const definitions = makeOpenCodeHarnessDefinitions({
     ...config.openCode,
@@ -384,7 +388,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const claudeCliLayer = Layer.succeed(
     ClaudeCli,
-    makeClaudeCli({ binary: config.agentRuns?.claudeBinary ?? "claude" }),
+    makeClaudeCli({
+      credentialSocket: config.credentialSocket,
+      binary: config.agentRuns?.claudeBinary ?? "claude",
+    }),
   )
   const workerIdentityLayer =
     config.workerIdentity === undefined
@@ -403,6 +410,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       : ResidentCodexLive(
           {
             ...config.residentCodex,
+            credentialSocket: config.credentialSocket,
             progressWindowMs: config.agentRuns?.progressWindowMs,
             unitPrefix:
               config.agentRuns?.codexUnitPrefix === undefined
@@ -436,6 +444,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   const claudeDispatchLayer = Layer.succeed(
     ClaudeDispatchCli,
     makeClaudeDispatchCli({
+      credentialSocket: config.credentialSocket,
       binary: config.agentRuns?.claudeBinary ?? "claude",
       custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
     }),
@@ -447,6 +456,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Effect.gen(function* () {
             const identity = yield* Effect.serviceOption(WorkerIdentity)
             return makeCodexCli({
+              credentialSocket: config.credentialSocket,
               binary: config.agentRuns?.codexBinary ?? "codex",
               ...(config.agentRuns?.codexUnitPrefix === undefined
                 ? {}
@@ -524,6 +534,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               endpointIdentity: completionSourceOptions.endpointIdentity,
               nativeExecutors: {
                 codex: makeCodexCli({
+                  credentialSocket: config.credentialSocket,
                   binary: config.agentRuns?.codexBinary ?? "codex",
                   custodyRoot: join(
                     dirname(config.storage.databasePath),
@@ -532,6 +543,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                   unitPrefix: "workflowd-sandbox-codex-",
                 }),
                 claude: makeClaudeDispatchCli({
+                  credentialSocket: config.credentialSocket,
                   binary: config.agentRuns?.claudeBinary ?? "claude",
                   custodyRoot: join(
                     dirname(config.storage.databasePath),

@@ -1,3 +1,4 @@
+import { withCredentialAdmission } from "../agent-host/client"
 import type { OpenCodeClient } from "@opencode-ai/client/effect"
 import { AbsolutePath, Agent, Location, Model, Session } from "@opencode-ai/client/effect"
 import { Data, DateTime, Effect, Filter, Option, Schema, Stream } from "effect"
@@ -540,10 +541,13 @@ export function toWireEvent(event: RawWireEvent): OpenCodeWireEvent | undefined 
 
 export function makeOpenCodeSdkClient(
   clientEffect: Effect.Effect<OpenCodeClient, Error>,
+  credentialSocket?: string,
 ): OpenCodeSdkClient {
   const withClient = <A>(
     run: (client: OpenCodeClient) => Effect.Effect<A, Error>,
   ): Effect.Effect<A, Error> => Effect.flatMap(clientEffect, run)
+  const withCredentialClient = <A>(run: (client: OpenCodeClient) => Effect.Effect<A, Error>) =>
+    withCredentialAdmission(credentialSocket, "opencode", withClient(run))
   return {
     setSessionEnvironment: (input) =>
       withClient((client) =>
@@ -553,7 +557,7 @@ export function makeOpenCodeSdkClient(
         }),
       ),
     createSession: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.session
           .create({
             ...(input.id === undefined ? {} : { id: toSessionID(input.id) }),
@@ -565,7 +569,7 @@ export function makeOpenCodeSdkClient(
           .pipe(Effect.map((session) => ({ id: session.id }))),
       ),
     promptSession: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.session
           .switchAgent({ sessionID: toSessionID(input.sessionID), agent: toAgentID(input.agent) })
           .pipe(
@@ -628,19 +632,19 @@ export function makeOpenCodeSdkClient(
           .pipe(Effect.map((outcome) => outcome.interrupted)),
       ),
     generateText: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.session
           .generate({ sessionID: toSessionID(input.sessionID), prompt: input.prompt })
           .pipe(Effect.map((generated) => generated.text)),
       ),
     listAgents: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.agent
           .list(toLocationFilter(input.directory))
           .pipe(Effect.map((agents) => agents.data.map((agent) => agent.name))),
       ),
     listModels: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.model
           .list(toLocationFilter(input.directory))
           .pipe(Effect.map((models) => models.data.map(publicOpenCodeModel))),
@@ -650,7 +654,7 @@ export function makeOpenCodeSdkClient(
     // model catalog alone cannot distinguish an authenticated route from a
     // catalogued one.
     listProviders: (input) =>
-      withClient((client) =>
+      withCredentialClient((client) =>
         client.provider
           .list(toLocationFilter(input.directory))
           .pipe(Effect.map((providers) => providers.data.map((provider) => String(provider.id)))),

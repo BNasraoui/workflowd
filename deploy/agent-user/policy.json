@@ -1,0 +1,25 @@
+{
+  "root": "/var/lib/workflowd/model-credentials",
+  "ownerUid": 0,
+  "groupGid": 2001,
+  "controllerUid": 1000,
+  "agentUid": 2001,
+  "consumerExecutables": ["/usr/local/bin/codex", "/usr/local/bin/claude", "/usr/local/bin/opencode2"],
+  "codex": {
+    "canonical": "/var/lib/workflowd/model-credentials/codex/auth.json",
+    "benLink": "/home/ben/.codex/auth.json",
+    "agentLink": "/var/lib/workflowd-agent/.codex/auth.json"
+  },
+  "claude": {
+    "canonical": "/var/lib/workflowd/model-credentials/claude/.credentials.json",
+    "benLink": "/home/ben/.claude/.credentials.json",
+    "agentLink": "/var/lib/workflowd-agent/.claude/.credentials.json"
+  },
+  "opencode": {
+    "source": "/home/ben/.local/share/opencode/opencode.db",
+    "database": "/var/lib/workflowd-agent/.local/share/opencode/opencode.db",
+    "journal": "/var/lib/workflowd/model-credentials/opencode.migration.json",
+    "agentUid": 2001,
+    "agentGid": 2001
+  }
+}

@@ -1,3 +1,4 @@
+import { credentialReason, type CredentialAdmissionReason } from "../agent-host/protocol"
 import { sandboxDiagnostic, retainSandboxFailure } from "../sandbox/diagnostics"
 import {
   type CliPort,
@@ -18,6 +19,7 @@ import type { AgentRunRecord, AgentRunStorePort } from "./agent-run-store"
 import { createAgentRunWorktree, type AgentRunWorktreesPort } from "./agent-run-worktrees"
 
 type RefusalReason =
+  | CredentialAdmissionReason
   | "provider_not_authenticated"
   | "no_first_token"
   | "run_conflict"
@@ -388,7 +390,7 @@ export const makeAgentRunCliDispatcher = (dependencies: {
             .pipe(
               (effect) => (isolated ? Effect.uninterruptible(effect) : effect),
               Effect.tapError((error) =>
-                error instanceof ExecutionSelectionError
+                error instanceof ExecutionSelectionError || credentialReason(error) !== undefined
                   ? store.abandonLaunch({ runId: run.runId, now: new Date() }).pipe(Effect.ignore)
                   : Effect.logError(`${kind} launch result uncertain; spawning custody retained`, {
                       runId: run.runId,
@@ -396,9 +398,11 @@ export const makeAgentRunCliDispatcher = (dependencies: {
                     }),
               ),
               Effect.mapError((error) =>
-                error instanceof ExecutionSelectionError
-                  ? refuse(error.reason, error.detail)
-                  : error,
+                credentialReason(error) !== undefined
+                  ? refuse(credentialReason(error)!, "Credential admission refused")
+                  : error instanceof ExecutionSelectionError
+                    ? refuse(error.reason, error.detail)
+                    : error,
               ),
             )
           const observed = yield* observeFirstToken(process, dependencies.verifyTimeoutMs, kind)

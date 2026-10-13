@@ -1,38 +1,46 @@
-# Agent user credential prerequisite
+# Agent user credential admission (draft)
 
-Phase 1 is blocked. No agent account, credential provisioning, policy or service
-configuration is installed by this change.
+Phase 1 is incomplete. Do not install or enable this draft on a live host.
 
-The installed Codex 0.159.1 file credential backend was tested using a temporary
-canonical credential file and two separate temporary homes. Updating synthetic
-API-key credentials directly preserves the link to the canonical file. A logout
-and subsequent synthetic credential write replaces the controller home's link
-with a regular file. The canonical file and the other home retain the previous
-synthetic credential. Re-login therefore does not preserve this shared-file
-layout, even before introducing another UID.
+The draft adds credential metadata checks, an admission lease held through
+handoff, and explicit offline relinking of a uniquely replaced login. Missing
+links, plain-file replacements, invalid permissions, and unfinished repairs
+refuse admission. Configuration enables the guard with
+`WORKFLOWD_AGENT_HOST_SOCKET`; absence retains the existing execution path.
 
-The evidence command emits only version information, booleans and the number of
-UIDs exercised. It uses the installed CLI with a restricted environment and
-temporary homes, suppresses client output, and deletes its fixtures afterward.
-It reads no existing provider credentials and performs no provider login or
-inference request. The CLI's API-key persistence command receives only invented
-fixture values on stdin.
+The installed-client fixtures use invented credentials and isolated homes.
+Codex 0.159.1 writes through its link, but logout followed by synthetic re-login
+replaces the link. Claude 2.1.296 refreshes through a local OAuth fixture and
+replaces its link with a private file. The tests exercise refusal and explicit
+repair rather than treating either replacement as a shared in-place refresh.
+A private network namespace denies external egress during refresh probes.
+
+The OpenCode draft checks the beta-19242 database schema, transfers credential
+rows using an offline SQLite transaction, and retains a nonsecret migration
+journal. It refuses active database consumers and unknown schemas. Its installed
+server restart/attachment test is not yet passing; OAuth provider acceptance,
+crash recovery, and sole-refresher operation are not established by this draft.
+
+CI includes a disposable-UID credential gate. Passing local same-UID tests is
+not evidence that this gate or deployment isolation works. No mint accounts,
+groups, credentials, services, or configuration were changed.
+
+Current scope blocker: the administrative TypeScript entrypoints under
+`deploy/agent-user/` are excluded by `tsconfig.json`; ESLint cannot load them
+through its project service. Project inclusion needs an approved tooling change
+before Phase 1 can pass all required checks.
+
+Focused local checks run in capped user units:
 
 ```sh
 systemd-run --user --wait --pipe --collect -p MemoryMax=6G -p MemorySwapMax=0 \
-  bun scripts/evidence/agent-user.mjs --probe-credentials
-systemd-run --user --wait --pipe --collect -p MemoryMax=6G -p MemorySwapMax=0 \
-  bun test test/agent-user/credentials.e2e.test.ts
+  --working-directory="$PWD" --setenv="PATH=$PATH" \
+  bun test test/agent-user/client-versions.test.ts \
+  test/agent-user/credentials.e2e.test.ts \
+  test/agent-user/credential-dispatch.e2e.test.ts
 ```
 
-The probe exits 1 for an incompatible layout and 2 if evidence cannot be
-collected. The E2E test deliberately requires sharing to survive re-login; it
-fails on the observed installed version. A passing prerequisite alone would
-still not establish cross-UID compatibility.
-
-This is a same-UID filesystem prerequisite, not a two-UID authentication test
-or proof about OAuth refresh. Concurrent refresh, revoked-auth diagnostics,
-atomic replacement, Claude and OpenCode compatibility, and disposable-VM tests
-remain unverified. Provisioning must remain paused pending review and a revised
-credential-sharing design. Do not share entire configuration homes, copy live
-credentials, add logins, or relax access boundaries to bypass this failure.
+The evidence script supports `--probe-credentials` and emits metadata only.
+It is not an installation or cutover command. The relink and migration programs
+are administrative entrypoints for further validation; agents receive no sudo
+or repair authority.

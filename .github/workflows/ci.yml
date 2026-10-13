@@ -181,6 +181,36 @@ jobs:
           -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
           --setenv="PATH=$PATH" --setenv="WORKFLOWD_AGENT_PROBE_NODE=$WORKFLOWD_AGENT_PROBE_NODE"
           bun test test/agent-user/client-versions.test.ts
+      - name: Prepare disposable credential identities and trusted clients
+        run: |
+          set -euo pipefail
+          sudo groupadd --gid 61000 workflowd-model-auth
+          sudo useradd --uid 61001 --gid 61000 --no-create-home --shell /usr/sbin/nologin ben-fixture
+          sudo useradd --uid 61002 --gid 61000 --no-create-home --shell /usr/sbin/nologin agent-fixture
+          sudo mkdir -p /opt/workflowd-credential-fixture/bin
+          sudo cp -rf "$HOME/.bun/install/global/node_modules" /opt/workflowd-credential-fixture/
+          sudo chown -R root:root /opt/workflowd-credential-fixture
+          sudo chmod -R go-w /opt/workflowd-credential-fixture
+          sudo install -m 0755 "$(command -v bun)" /opt/workflowd-credential-fixture/bin/bun
+          sudo install -m 0755 "$(command -v node)" /opt/workflowd-credential-fixture/bin/node
+          for client in codex claude opencode2; do
+            source=$(readlink -f "$(command -v "$client")")
+            relative=${source#"$HOME/.bun/install/global/"}
+            test "$relative" != "$source"
+            sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
+          done
+      - name: Require two-UID credential admission and repair
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
+          /opt/workflowd-credential-fixture/bin/bun test
+          test/agent-user/credentials.e2e.test.ts
+          test/agent-user/credential-dispatch.e2e.test.ts
+          test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
         run: bun run test:coverage
       - name: Require 80% changed executable line coverage

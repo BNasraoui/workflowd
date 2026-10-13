@@ -1,3 +1,4 @@
+import { CredentialAdmissionReason } from "./agent-host/protocol"
 import { Schema } from "effect"
 
 const Budget = Schema.Struct({
@@ -65,6 +66,7 @@ export const ExecutionCapabilities = Schema.Struct({
       kind: Schema.String,
       protocol: Schema.String,
       status: Schema.Literals(["available", "unavailable", "unsupported", "unauthenticated"]),
+      reason: Schema.optionalKey(CredentialAdmissionReason),
       checkedAt: Schema.String,
       observedAt: Schema.NullOr(Schema.String),
       freshUntil: Schema.NullOr(Schema.String),
