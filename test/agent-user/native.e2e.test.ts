@@ -64,11 +64,13 @@ test("native host refuses an unsupported launch profile without releasing creden
   }
 })
 
-import { chown, readFile, realpath, copyFile, readdir } from "node:fs/promises"
+import { chown, readFile, realpath, copyFile, readdir, stat } from "node:fs/promises"
 import { nativeModelFixture } from "../sandbox/native-fixture"
 import { Effect, Schema } from "effect"
 import { makeCodexCli } from "../../src/kernel/codex-session"
 import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
+import { makeCodexDiscovery } from "../../src/execution/codex"
+import { agentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
 import { launchAppServer, attachAppServer, sweepOrphanAppServers } from "../../src/resident/process"
 import { makeClaudeCli } from "../../src/kernel/claude-session"
 import { makeClaudeResumeExecutor } from "../../src/remote/claude-resume-executor"
@@ -138,6 +140,29 @@ async function nativeBoundary(simulatedManager: boolean) {
   })
   expect(build.success).toBe(true)
   await writeFile(worker, await build.outputs[0]!.text(), { mode: 0o644 })
+  const repository = join(root, "repository")
+  const git = async (args: string[]) => {
+    const child = Bun.spawn(["/usr/bin/git", ...args], {
+      env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1" },
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const stderr = await new Response(child.stderr).text()
+    if ((await child.exited) !== 0) throw new Error(stderr)
+  }
+  await git(["init", "--initial-branch=main", repository])
+  await git([
+    "-C",
+    repository,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "--allow-empty",
+    "-m",
+    "fixture",
+  ])
   const policy = {
     root: store,
     ownerUid: 0,
@@ -156,6 +181,7 @@ async function nativeBoundary(simulatedManager: boolean) {
       worker,
       codex: codex.binary,
       claude: claude.binary,
+      repositories: [{ source: "/controller/repository-selector", remote: repository }],
     },
   }
   const path = join(root, "host.sock")
@@ -314,6 +340,32 @@ async function nativeBoundary(simulatedManager: boolean) {
       )
       expect(stopped.active).toBe(false)
       expect(await readFile(`/proc/${process.pid}/status`, "utf8").catch(() => null)).toBeNull()
+      const output = join(ioRoot, createHash("sha256").update(runId).digest("hex"), "events")
+      await rm(output)
+      await symlink(canary, output)
+      await expect(
+        call({
+          operation: "exchange",
+          runId,
+          launchId: process.launchId,
+          file: "events",
+          offset: 0,
+        }),
+      ).rejects.toThrow("host_request_refused")
+      await rm(output)
+      await writeFile(output, "x".repeat(100000), { mode: 0o600 })
+      await chown(output, agentUid, groupGid)
+      const chunk = await call({
+        operation: "exchange",
+        runId,
+        launchId: process.launchId,
+        file: "events",
+        offset: 0,
+      })
+      expect(
+        Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Schema.Number) }))(chunk).data
+          .length,
+      ).toBe(65536)
       const priorCount = fixture.requests.length
       await rm(policy[client].agentLink)
       await expect(call({ ...start, runId: `${runId}-broken` })).rejects.toThrow(
@@ -321,6 +373,38 @@ async function nativeBoundary(simulatedManager: boolean) {
       )
       expect(fixture.requests.length).toBe(priorCount)
       await repair(client)
+    }
+    const discoveryId = `discovery-${randomUUID()}`
+    await call({
+      operation: "start",
+      profile: "codex-discovery",
+      runId: discoveryId,
+      directory: "",
+      prompt: "",
+      model: null,
+      timeoutMs: 30000,
+    })
+    expect((await terminal(discoveryId)).exitCode).toBe(0)
+    if (simulatedManager) {
+      const catalog = await makeCodexDiscovery("codex:local", {
+        command: ["unused"],
+        credentialSocket: path,
+      }).discover(AbortSignal.timeout(30000))
+      expect(Array.isArray(catalog)).toBe(true)
+      const input = {
+        repository: "/controller/repository-selector",
+        directory: join(workspaceRoot, "clone"),
+        branch: "agent-work",
+      }
+      await Effect.runPromise(agentRunWorktrees(path).create(input))
+      await Effect.runPromise(agentRunWorktrees(path).create(input))
+      expect((await stat(join(input.directory, ".git"))).uid).toBe(agentUid)
+      expect(await readFile(join(input.directory, ".git", "HEAD"), "utf8")).toBe(
+        "ref: refs/heads/agent-work\n",
+      )
+      expect(await readFile(join(repository, ".git", "HEAD"), "utf8")).toBe(
+        "ref: refs/heads/main\n",
+      )
     }
     claude.release()
     claude.holdAfter(Infinity)
@@ -483,6 +567,13 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       )
       await server.initialize()
       expect(await server.rpc.request("thread/list", { limit: 1 })).toHaveProperty("data")
+      const count = codex.requests.length
+      await rm(policy.codex.agentLink)
+      await expect(
+        server.rpc.request("thread/start", { cwd: workspaceRoot }),
+      ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
+      expect(codex.requests.length).toBe(count)
+      await repair("codex")
       await server.detach()
       const hostId = `${runId}-${launchId}`
       const owned = Schema.decodeUnknownSync(OwnedProcess)(

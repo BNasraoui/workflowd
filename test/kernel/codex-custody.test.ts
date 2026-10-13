@@ -292,7 +292,7 @@ test("host discovery worker exchanges the native model catalog and workspace wor
     )
     expect(await runHostWorker(input, binary)).toBe(0)
     const models = JSON.parse(await readFile(join(root, "events"), "utf8"))
-    expect(models.map((model: { model: string }) => model.model)).toEqual(["first", "second"])
+    expect(models).toMatchObject([{ model: "first" }, { model: "second" }])
     const source = join(root, "source")
     const git = async (args: string[]) => {
       const child = Bun.spawn(["git", ...args], {
