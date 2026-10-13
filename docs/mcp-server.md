@@ -8,10 +8,10 @@ no workflow state of its own — every tool call reads or writes the same
 database the coordinator and the remote-enqueue CLI use. Capability discovery
 proxies the daemon's live adapter catalogs.
 
-The server targets MCP revision **2025-11-25** using SDK 1.30.0. All seven
-tools advertise an `outputSchema` and return the corresponding
+The server targets MCP revision **2025-11-25** using SDK 1.30.0. All tools
+advertise an `outputSchema` and return the corresponding
 `structuredContent` in addition to a human-readable text rendering. Tool
-names use the SEP-986 canonical character set. The four query tools carry
+names use the SEP-986 canonical character set. The query tools carry
 `readOnlyHint`; the three receipt tools carry non-destructive and idempotency
 annotations.
 
@@ -41,12 +41,23 @@ contract so agents learn it from the schema itself.
 | Tool | Access | Purpose |
 | --- | --- | --- |
 | `job_status(job_id)` | read | Durable state of one job, plus its recorded result when complete. |
+| `list_agent_runs(status?, repository?, limit?)` | authenticated read | Dispatch runs newest first by acceptance time (default 20, max 100). Requires the same bearer token as `read_agent_mailbox`. |
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
 | `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
 | `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
+
+`list_agent_runs` returns `runs` containing `run_id`, `repository`, `route`, `model`,
+`executor`, `idempotency_key`, `status`, `end_reason`, `started_at`, and `ended_at`.
+`started_at` is the durable acceptance time, and equal timestamps are ordered by
+run ID descending. Status matches the stored lifecycle state (`accepted`, `spawning`,
+`spawned`, `verified`, `completed`, `cancelled`, `failed`, or `operator_required`).
+Repository and status filters are exact matches, applied before the limit. Active
+runs have null end fields. The idempotency key is null for historical runs and
+submissions without an explicit key; historical hashed keys cannot be recovered.
+Prompts, mailbox IDs, and final message contents are excluded from this listing.
 
 `enqueue_probe` with an explicit `probe_id` is idempotent (the same identity
 maps to the same job); omitting it generates a fresh probe identity per call.

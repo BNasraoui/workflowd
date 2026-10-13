@@ -856,6 +856,9 @@ const make = (options: AgentRunIngressOptions) =>
           baseRef: submission.baseRef,
         })
         const created = yield* store.create({
+          ...(submission.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: submission.idempotencyKey }),
           runId: identifiers.runId,
           route: resolution.route.name,
           providerId,
