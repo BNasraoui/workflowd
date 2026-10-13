@@ -217,6 +217,19 @@ jobs:
           --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
           /opt/workflowd-credential-fixture/bin/bun
           scripts/evidence/agent-user.mjs --probe-supervision
+      - name: Require two-UID native launch and recovery
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
+          /opt/workflowd-credential-fixture/bin/bun test
+          test/agent-user/native.e2e.test.ts
+          test/kernel/codex-systemd-custody.test.ts
+          test/kernel/cli-launch-uncertainty.test.ts
+          test/remote/claude-resume-runner-store.test.ts
       - name: Require two-UID credential admission and repair
         run: >-
           sudo systemd-run --wait --pipe --collect

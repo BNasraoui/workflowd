@@ -4,6 +4,18 @@ const Path = Schema.String.check(Schema.isPattern(/^\/[^\0]*$/))
 const Login = Schema.Struct({ canonical: Path, benLink: Path, agentLink: Path })
 export const CredentialPolicy = Schema.Struct({
   root: Path,
+  launch: Schema.optionalKey(
+    Schema.Struct({
+      custodyRoot: Path,
+      ioRoot: Path,
+      home: Path,
+      workspaceRoot: Path,
+      bun: Path,
+      worker: Path,
+      codex: Path,
+      claude: Path,
+    }),
+  ),
   opencode: Schema.optionalKey(OpenCodeMigrationPolicy),
   ownerUid: Schema.Int,
   groupGid: Schema.Int,

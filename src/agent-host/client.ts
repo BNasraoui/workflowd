@@ -132,3 +132,211 @@ export async function withCredentialAdmissionPromise<A>(
     await release()
   }
 }
+
+/** One request performs one bounded operation; a disconnect never cancels owned work. */
+export function requestAgentHost(path: string, request: import("./protocol").HostRequest) {
+  return new Promise<import("./protocol").OwnedProcess | null | Buffer>((resolve, reject) => {
+    const socket = connect(path)
+    let data = ""
+    let settled = false
+    const fail = (error: unknown) => {
+      settled = true
+      socket.destroy()
+      reject(normalizeError(error))
+    }
+    socket.setTimeout(15000, () => fail(new Error("agent host timed out; custody retained")))
+    socket.on("error", fail)
+    socket.on("close", () => {
+      if (!settled) fail(new Error("agent host disconnected; custody retained"))
+    })
+    socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"))
+    socket.on("data", (chunk) => {
+      data += chunk.toString()
+      if (Buffer.byteLength(data) > 100000) {
+        fail(new Error("oversized host response"))
+        return
+      }
+      if (!data.includes("\n")) return
+      try {
+        const response = Schema.decodeUnknownSync(HostResponse)(JSON.parse(data))
+        if (!response.admitted) {
+          const reason = credentialReason({ reason: response.reason })
+          throw reason
+            ? credentialRefusal(
+                request.operation === "start" && request.profile.startsWith("codex")
+                  ? "codex"
+                  : "claude",
+                reason,
+              )
+            : new Error(response.reason)
+        }
+        settled = true
+        socket.destroy()
+        resolve("process" in response ? response.process : Buffer.from(response.bytes, "base64"))
+      } catch (error) {
+        fail(error)
+      }
+    })
+  })
+}
+
+import { HostResponse, type OwnedProcess, type HostStart } from "./protocol"
+import type { CliEvent, CliRunProcess } from "../kernel/cli-process-contract"
+import { normalizeError } from "../errors"
+
+export async function inspectAgentHost(socket: string, runId: string) {
+  const response = await requestAgentHost(socket, { operation: "inspect", runId })
+  if (Buffer.isBuffer(response)) throw new Error("unexpected host exchange")
+  return response
+}
+
+async function hostBytes(
+  socket: string,
+  process: OwnedProcess,
+  file: "events" | "stderr" | "result",
+  offset: number,
+) {
+  const response = await requestAgentHost(socket, {
+    operation: "exchange",
+    runId: process.runId,
+    launchId: process.launchId,
+    file,
+    offset,
+  })
+  if (!Buffer.isBuffer(response)) throw new Error("unexpected host observation")
+  return response
+}
+
+export async function startAgentHost(socket: string, input: Omit<HostStart, "operation">) {
+  const response = await requestAgentHost(socket, { operation: "start", ...input })
+  if (!response || Buffer.isBuffer(response)) throw new Error("host did not return custody")
+  return response
+}
+
+export function observeAgentHost(
+  socket: string,
+  process: OwnedProcess,
+  parse: (line: string) => CliEvent,
+): CliRunProcess {
+  const observe = async () => {
+    const current = await inspectAgentHost(socket, process.runId)
+    if (
+      !current ||
+      current.launchId !== process.launchId ||
+      (process.invocationId !== null && current.invocationId !== process.invocationId)
+    )
+      throw new Error("host custody changed")
+    return current
+  }
+  const failure = (cause: unknown) =>
+    new WorkspaceError({ operation: "native host process", cause: normalizeError(cause) })
+  return {
+    executionId: process.unit,
+    events: {
+      async *[Symbol.asyncIterator]() {
+        let offset = 0
+        let buffered = ""
+        const decoder = new TextDecoder()
+        for (;;) {
+          const current = await observe()
+          const bytes = await hostBytes(socket, process, "events", offset)
+          offset += bytes.length
+          buffered += decoder.decode(bytes, { stream: true })
+          let end: number
+          while ((end = buffered.indexOf("\n")) >= 0) {
+            yield parse(buffered.slice(0, end))
+            buffered = buffered.slice(end + 1)
+          }
+          if (buffered.length > 10 * 1024 * 1024) throw new Error("host event exceeds output limit")
+          if (!current.active && bytes.length === 0) {
+            if (buffered) yield parse(buffered)
+            return
+          }
+          if (bytes.length === 0) await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      },
+    },
+    exited: Effect.tryPromise({
+      try: async (signal) => {
+        for (;;) {
+          signal.throwIfAborted()
+          const current = await observe()
+          if (!current.active)
+            return {
+              exitCode: current.exitCode ?? -1,
+              stderr: (await hostBytes(socket, process, "stderr", 0)).toString(),
+            }
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      },
+      catch: failure,
+    }),
+    cancel: Effect.tryPromise({
+      try: async () => {
+        await requestAgentHost(socket, {
+          operation: "stop",
+          runId: process.runId,
+          launchId: process.launchId,
+        })
+      },
+      catch: failure,
+    }),
+  }
+}
+
+export function makeHostCli(
+  socket: string,
+  client: "codex" | "claude",
+  parse: (line: string) => CliEvent,
+): Extract<CliPort, { ownership: "transient-exec" }> {
+  const failure = (cause: unknown) =>
+    new WorkspaceError({ operation: "native host launch", cause: normalizeError(cause) })
+  return {
+    ownership: "transient-exec",
+    preflight: Effect.tryPromise({
+      try: async () => {
+        // The host chooses the configured workspace for preflight.
+        const process = await startAgentHost(socket, {
+          runId: `preflight-${crypto.randomUUID()}`,
+          profile: `${client}-preflight`,
+          directory: "",
+          prompt: "",
+          model: null,
+        })
+        const result = await Effect.runPromise(observeAgentHost(socket, process, parse).exited)
+        if (result.exitCode !== 0) throw new Error("native authentication preflight failed")
+      },
+      catch: (cause) => ({
+        kind: credentialReason(cause) ?? ("cli_unusable" as const),
+        detail: normalizeError(cause).message,
+      }),
+    }),
+    spawn: (input) =>
+      Effect.tryPromise({
+        try: async () => {
+          if (input.sandboxBindingFile !== undefined)
+            throw new Error("host sandbox relay is not provisioned")
+          const process = await startAgentHost(socket, {
+            runId: input.runId,
+            profile: client,
+            directory: input.directory,
+            prompt: input.prompt,
+            model: input.model,
+            ...(input.effort === undefined ? {} : { effort: input.effort }),
+            ...(input.provider == null ? {} : { provider: input.provider }),
+          })
+          input.onSpawn?.(process.pid)
+          return observeAgentHost(socket, process, parse)
+        },
+        catch: failure,
+      }),
+    attach: (input) =>
+      Effect.tryPromise({
+        try: async () => {
+          const process = await inspectAgentHost(socket, input.runId)
+          return process === null ? null : observeAgentHost(socket, process, parse)
+        },
+        catch: failure,
+      }),
+  }
+}

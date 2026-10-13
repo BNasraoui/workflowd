@@ -1,3 +1,6 @@
+import { Schema, Effect } from "effect"
+import { dirname, join } from "node:path"
+import { HostStart } from "../agent-host/protocol"
 import { CodexRetryTurn } from "./codex-retry"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
@@ -157,9 +160,73 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
   }
 }
 
+async function runHostWorker(inputPath: string, binary: string) {
+  const request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await readFile(inputPath, "utf8")))
+  const io = dirname(inputPath)
+  const prompt = join(io, "prompt")
+  await writeFile(prompt, request.prompt, { mode: 0o600 })
+  const options: CliWorkerOptions = {
+    binary,
+    directory: request.directory,
+    promptFile: prompt,
+    resultFile: join(io, "result"),
+    eventsFile: join(io, "events"),
+    stderrFile: join(io, "stderr"),
+    maxOutputBytes: 10 * 1024 * 1024,
+    model: request.model,
+    ...(request.effort === undefined ? {} : { effort: request.effort }),
+    ...(request.provider === undefined ? {} : { provider: request.provider }),
+  }
+  if (request.profile === "codex") return runCodexWorker(options)
+  if (request.profile === "claude")
+    return (await import("./claude-worker")).runClaudeWorker(options)
+  if (request.profile === "claude-resume")
+    return runCliWorker(options, [
+      binary,
+      "-p",
+      "--resume",
+      request.nativeSessionId!,
+      "--output-format",
+      "json",
+    ])
+  if (request.profile === "codex-discovery") {
+    const { makeCodexDiscovery } = await import("../execution/codex")
+    const models = await makeCodexDiscovery("codex:local", {
+      command: [binary, "app-server", "--listen", "stdio://"],
+    }).discover(AbortSignal.timeout(30000))
+    await writeFile(options.eventsFile, JSON.stringify(models) + "\n", { mode: 0o600 })
+    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeResult(options.resultFile, 0)
+    return 0
+  }
+  const { runWorkspaceCommand } = await import("../workspace/command")
+  await Effect.runPromise(runWorkspaceCommand("host native version", [binary, "--version"]))
+  const output = await Effect.runPromise(
+    runWorkspaceCommand(
+      "host native authentication",
+      request.profile === "codex-preflight"
+        ? [binary, "login", "status"]
+        : [binary, "auth", "status"],
+    ),
+  )
+  if (
+    request.profile === "claude-preflight" &&
+    !Schema.decodeUnknownSync(Schema.Struct({ loggedIn: Schema.Boolean }))(JSON.parse(output))
+      .loggedIn
+  )
+    throw new Error("native authentication unavailable")
+  await writeFile(options.eventsFile, "", { mode: 0o600 })
+  await writeFile(options.stderrFile, "", { mode: 0o600 })
+  await writeResult(options.resultFile, 0)
+  return 0
+}
+
 if (import.meta.main) {
   try {
-    const exitCode = await runCodexWorker(parseCodexWorkerArguments(process.argv.slice(2)))
+    const exitCode =
+      process.argv[2] === "--host-input"
+        ? await runHostWorker(process.argv[3]!, process.argv[5]!)
+        : await runCodexWorker(parseCodexWorkerArguments(process.argv.slice(2)))
     process.exitCode = exitCode < 0 ? 1 : exitCode
   } catch (cause) {
     console.error(cause instanceof Error ? cause.message : String(cause))
