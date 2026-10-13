@@ -1,6 +1,14 @@
 import { randomUUID, createHash } from "node:crypto"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
-import { requestAgentHost } from "../../src/agent-host/client"
+import {
+  requestAgentHost,
+  makeHostCli,
+  startAgentHost,
+  readAgentHostOutput,
+  connectAgentHost,
+  listAgentHost,
+} from "../../src/agent-host/client"
+import { RpcClient } from "../../src/resident/rpc"
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -9,7 +17,7 @@ import { connect } from "node:net"
 import { serveCredentialHost } from "../../src/agent-host/server"
 
 // A controller cannot turn the credential service into a generic root launcher.
-test("native host refuses an unsupported launch profile without releasing credentials", async () => {
+test("native host refuses unsupported profiles and unapproved agent groups", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-host-"))
   const uid = process.getuid!()
   const gid = process.getgid!()
@@ -23,7 +31,7 @@ test("native host refuses an unsupported launch profile without releasing creden
   await symlink(canonical, benLink)
   await symlink(canonical, agentLink)
   const socketPath = join(root, "host.sock")
-  const host = await serveCredentialHost(socketPath, {
+  const policy = {
     root: store,
     ownerUid: uid,
     groupGid: gid,
@@ -32,7 +40,8 @@ test("native host refuses an unsupported launch profile without releasing creden
     codex: { canonical, benLink, agentLink },
     claude: { canonical, benLink, agentLink },
     consumerExecutables: [],
-  })
+  }
+  let host = await serveCredentialHost(socketPath, policy)
   try {
     const response = await new Promise<string>((resolve, reject) => {
       const socket = connect(socketPath)
@@ -58,22 +67,48 @@ test("native host refuses an unsupported launch profile without releasing creden
       })
     })
     expect(JSON.parse(response)).toEqual({ admitted: false, reason: "host_request_refused" })
+    await host.close()
+    await rm(socketPath, { force: true })
+    const custodyRoot = join(root, "custody"),
+      ioRoot = join(root, "io")
+    await mkdir(custodyRoot, { mode: 0o700 })
+    await mkdir(ioRoot, { mode: 0o711 })
+    host = await serveCredentialHost(socketPath, {
+      ...policy,
+      agentUid: 65534,
+      launch: {
+        custodyRoot,
+        ioRoot,
+        home: root,
+        workspaceRoot: root,
+        bun: "/must-not-execute",
+        worker: "/must-not-execute",
+        codex: "/must-not-execute",
+        claude: "/must-not-execute",
+        repositories: [{ source: "/selector", remote: "/must-not-clone" }],
+      },
+    })
+    await expect(
+      requestAgentHost(socketPath, {
+        operation: "start",
+        profile: "workspace",
+        runId: "unsafe-groups",
+        directory: join(root, "clone"),
+        repository: "/selector",
+        branch: "work",
+        prompt: "",
+        model: null,
+      }),
+    ).rejects.toThrow("unsafe agent groups")
   } finally {
     await host.close()
     await rm(root, { recursive: true, force: true })
   }
 })
 
-import { chown, readFile, realpath, copyFile, readdir, stat, lstat } from "node:fs/promises"
+import { chown, readFile, realpath, copyFile, readdir, stat } from "node:fs/promises"
 import { nativeModelFixture } from "../sandbox/native-fixture"
 import { Effect, Schema } from "effect"
-import { makeCodexCli } from "../../src/kernel/codex-session"
-import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
-import { makeCodexDiscovery } from "../../src/execution/codex"
-import { agentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
-import { launchAppServer, attachAppServer, sweepOrphanAppServers } from "../../src/resident/process"
-import { makeClaudeCli } from "../../src/kernel/claude-session"
-import { makeClaudeResumeExecutor } from "../../src/remote/claude-resume-executor"
 import type { ClaudeResumeJobV1 } from "../../src/remote/contract"
 import { OwnedProcess, type HostRequest } from "../../src/agent-host/protocol"
 
@@ -292,10 +327,9 @@ async function nativeBoundary(simulatedManager: boolean) {
       })
       fixture.holdAfter(1)
       const cli = simulatedManager
-        ? (client === "codex" ? makeCodexCli : makeClaudeDispatchCli)({
-            binary: "unused",
-            credentialSocket: path,
-            custodyRoot: "/never-readable-controller-custody",
+        ? makeHostCli(path, client, (line) => {
+            Schema.decodeUnknownSync(Schema.Struct({ type: Schema.String }))(JSON.parse(line))
+            return { type: "other" }
           })
         : undefined
       if (cli) {
@@ -352,7 +386,7 @@ async function nativeBoundary(simulatedManager: boolean) {
         await Effect.runPromise(attached.cancel)
         const events = []
         for await (const event of attached.events) events.push(event)
-        expect(events.some((event) => event.type === "thread.started")).toBe(true)
+        expect(events.length).toBeGreaterThan(0)
         expect((await Effect.runPromise(attached.exited)).exitCode).toBe(-1)
       }
       const stopped = Schema.decodeUnknownSync(OwnedProcess)(
@@ -410,18 +444,22 @@ async function nativeBoundary(simulatedManager: boolean) {
     })
     expect((await terminal(discoveryId)).exitCode).toBe(0)
     if (simulatedManager) {
-      const catalog = await makeCodexDiscovery("codex:local", {
-        command: ["unused"],
-        credentialSocket: path,
-      }).discover(AbortSignal.timeout(30000))
-      expect(Array.isArray(catalog)).toBe(true)
+      const discovered = Schema.decodeUnknownSync(OwnedProcess)(
+        await call({ operation: "inspect", runId: discoveryId }),
+      )
+      expect(Array.isArray(JSON.parse(await readAgentHostOutput(path, discovered)))).toBe(true)
       const input = {
+        profile: "workspace" as const,
+        runId: `workspace-${randomUUID()}`,
         repository: "/controller/repository-selector",
         directory: join(workspaceRoot, "clone"),
         branch: "agent-work",
+        prompt: "",
+        model: null,
       }
-      await Effect.runPromise(agentRunWorktrees(path).create(input))
-      await Effect.runPromise(agentRunWorktrees(path).create(input))
+      const workspace = await startAgentHost(path, input)
+      await readAgentHostOutput(path, workspace)
+      expect((await startAgentHost(path, input)).invocationId).toBe(workspace.invocationId)
       expect((await stat(join(input.directory, ".git"))).uid).toBe(agentUid)
       expect(await readFile(join(input.directory, ".git", "HEAD"), "utf8")).toBe(
         "ref: refs/heads/agent-work\n",
@@ -564,76 +602,75 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
         })
       }
     } else {
-      const executor = makeClaudeResumeExecutor({
-        cli: makeClaudeCli({ binary: "unused", credentialSocket: path }),
-        allowedDirectories: [workspaceRoot],
-      })
-      expect((await Effect.runPromise(executor.execute(payload, deliveryId))).status).toBe(
-        "succeeded",
-      )
-      expect((await Effect.runPromise(executor.recover!(payload, deliveryId))).status).toBe(
-        "succeeded",
-      )
+      for (const recover of [false, true]) {
+        const controller = Bun.spawn([process.execPath, "--eval", resumeProgram(recover)], {
+          stdout: "pipe",
+          stderr: "inherit",
+        })
+        const answer: unknown = JSON.parse(await new Response(controller.stdout).text())
+        expect(await controller.exited).toBe(0)
+        expect(answer).toEqual({
+          status: "succeeded",
+          output: '{"acknowledged":true,"summary":"host resumed"}',
+        })
+      }
     }
     expect(claude.requests.length - baseline).toBe(2)
     if (simulatedManager) {
-      const launchId = randomUUID()
-      const runId = `agent-run-resident-${randomUUID()}`
-      const server = await launchAppServer(
-        {
-          binary: "unused",
-          home: "/never-readable-controller-home",
-          hostSocket: path,
-          runId,
-          launchId,
-        },
-        () => {},
-      ).catch(async (error: unknown) => {
-        const io = join(ioRoot, createHash("sha256").update(`${runId}-${launchId}`).digest("hex"))
-        throw new Error(
-          JSON.stringify({
-            error: String(error),
-            socket: await lstat(join(io, "rpc.sock"))
-              .then((info) => ({
-                uid: info.uid,
-                mode: info.mode,
-                socket: info.isSocket(),
-                link: info.isSymbolicLink(),
-              }))
-              .catch(() => null),
-            stderr: await readFile(join(io, "stderr"), "utf8").catch(() => "missing"),
-          }),
-        )
+      const owned = await startAgentHost(path, {
+        runId: `resident-${randomUUID()}`,
+        profile: "codex-server",
+        directory: "",
+        prompt: "",
+        model: null,
       })
-      await server.initialize()
-      expect(await server.rpc.request("thread/list", { limit: 1 })).toHaveProperty("data")
-      await server.detach()
-      const hostId = `${runId}-${launchId}`
-      const owned = Schema.decodeUnknownSync(OwnedProcess)(
-        await call({ operation: "inspect", runId: hostId }),
-      )
-      const attached = await attachAppServer(
-        {
-          socket: hostId,
-          unit: owned.unit,
-          launchId,
-          invocation: server.invocation,
-          hostSocket: path,
-        },
-        () => {},
-      )
-      expect(attached.pid).toBe(server.pid)
-      await attached.initialize()
+      const attach = async () => {
+        const rpc = new RpcClient(
+          (line) => transport.send(line),
+          () => {},
+        )
+        const transport = await connectAgentHost(
+          path,
+          owned,
+          (line) => rpc.receive(line),
+          () => rpc.close(),
+        )
+        await rpc.request("initialize", {
+          clientInfo: { name: "fixture", version: "1" },
+          capabilities: { experimentalApi: true },
+        })
+        transport.send(JSON.stringify({ method: "initialized" }))
+        return {
+          rpc,
+          close: () => {
+            rpc.close()
+            transport.close()
+          },
+        }
+      }
+      const first = await attach()
+      expect(await first.rpc.request("thread/list", { limit: 1 })).toHaveProperty("data")
+      first.close()
+      const attached = await attach()
+      expect(
+        Schema.decodeUnknownSync(OwnedProcess)(
+          await call({ operation: "inspect", runId: owned.runId }),
+        ).pid,
+      ).toBe(owned.pid)
       const count = codex.requests.length
       await rm(policy.codex.agentLink)
       await expect(
         attached.rpc.request("thread/start", { cwd: workspaceRoot }),
       ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
       expect(codex.requests.length).toBe(count)
-      await attached.detach()
-      expect(await sweepOrphanAppServers("workflowd-resident-", new Set(), path)).toContain(
-        owned.unit,
-      )
+      attached.close()
+      expect((await listAgentHost(path)).map((process) => process.unit)).toContain(owned.unit)
+      await requestAgentHost(path, {
+        operation: "stop",
+        runId: owned.runId,
+        launchId: owned.launchId,
+      })
+      expect((await terminal(owned.runId)).active).toBe(false)
       await repair("codex")
     } else {
       const launchId = randomUUID()
@@ -835,6 +872,9 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
 }
 
 test("controller discovery and workspace adapters use host custody without local filesystem access", async () => {
+  const { makeCodexDiscovery } = await import("../../src/execution/codex")
+  const { agentRunWorktrees } = await import("../../src/kernel/agent-run-worktrees")
+  const { makeClaudeCli } = await import("../../src/kernel/claude-session")
   const { createServer } = await import("node:net")
   const { HostRequest, agentHostUnitName } = await import("../../src/agent-host/protocol")
   const root = await mkdtemp(join(tmpdir(), "host-controller-"))

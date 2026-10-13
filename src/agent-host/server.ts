@@ -301,6 +301,7 @@ function hostFailureDetail(error: unknown) {
     "host server inactive",
     "host socket unavailable",
     "unsafe host socket",
+    "unsafe agent groups",
   ])
   return error instanceof Error && safe.has(error.message) ? { detail: error.message } : {}
 }
@@ -568,6 +569,16 @@ async function inspectHostProcess(
 }
 
 async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, io: string) {
+  // SupplementaryGroups= does not erase groups from the system account database.
+  // Fail before launching if this UID could acquire any unapproved group.
+  const groups = (await hostCommand(["/usr/bin/id", "--groups", String(policy.agentUid)]))
+    .trim()
+    .split(/\s+/)
+  if (
+    !groups.length ||
+    groups.some((group) => !/^\d+$/.test(group) || Number(group) !== policy.groupGid)
+  )
+    throw new Error("unsafe agent groups")
   const launch = policy.launch!
   for (const path of [launch.bun, launch.worker, launch.codex, launch.claude])
     await trustedPath(path, policy.ownerUid, false)
