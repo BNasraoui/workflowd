@@ -9,10 +9,11 @@ import {
   open,
   rename,
   realpath,
+  readdir,
 } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { createServer } from "node:net"
 import type { Socket } from "node:net"
 import { dlopen, FFIType, ptr } from "bun:ffi"
@@ -24,6 +25,7 @@ import {
   HostRequest,
   HostStart,
   OwnedProcess,
+  agentHostUnitName,
   credentialReason,
   credentialRefusal,
 } from "./protocol"
@@ -84,7 +86,13 @@ export async function serveCredentialHost(path: string, policy: CredentialPolicy
             const request = Schema.decodeUnknownSync(HostRequest, { onExcessProperty: "error" })(
               raw,
             )
-            socket.end(JSON.stringify({ admitted: true, ...(await native(request)) }) + "\n")
+            const response = await native(request)
+            if (request.operation === "connect") {
+              if (!("process" in response) || !response.process?.active)
+                throw new Error("host server inactive")
+              await relayHostSocket(socket, policy, request.runId)
+              socket.write(JSON.stringify({ admitted: true, ...response }) + "\n")
+            } else socket.end(JSON.stringify({ admitted: true, ...response }) + "\n")
             return
           }
           const request = Schema.decodeUnknownSync(CredentialRequest, {
@@ -117,6 +125,7 @@ export async function serveCredentialHost(path: string, policy: CredentialPolicy
             JSON.stringify({
               admitted: false,
               reason: credentialReason(error) ?? "host_request_refused",
+              ...hostFailureDetail(error),
             }) + "\n",
           )
         }
@@ -147,6 +156,95 @@ export async function serveCredentialHost(path: string, policy: CredentialPolicy
   }
 }
 
+async function relayHostSocket(socket: Socket, policy: CredentialPolicy, runId: string) {
+  const path = join(policy.launch!.ioRoot, hostDigest(runId), "rpc.sock")
+  let connected: WebSocket | undefined
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const info = await lstat(path).catch(() => null)
+    if (info !== null) {
+      if (!info.isSocket() || info.uid !== policy.agentUid) throw new Error("unsafe host socket")
+      const candidate = new WebSocket(`ws+unix://${path}`)
+      try {
+        await new Promise<void>((resolve, reject) => {
+          candidate.addEventListener("open", () => resolve(), { once: true })
+          candidate.addEventListener("error", () => reject(new Error("host socket unavailable")), {
+            once: true,
+          })
+        })
+        connected = candidate
+        break
+      } catch {
+        candidate.close()
+      }
+    }
+    await Bun.sleep(50)
+  }
+  if (!connected) throw new Error("host socket unavailable")
+  const ws = connected
+  socket.setTimeout(0)
+  socket.on("close", () => ws.close())
+  ws.addEventListener("close", () => socket.destroy())
+  ws.addEventListener("message", (event) => {
+    const frame = String(event.data)
+    if (Buffer.byteLength(frame) > 2000000 || socket.writableLength > 2000000) socket.destroy()
+    else socket.write(frame + "\n")
+  })
+  let buffered = ""
+  let sending = Promise.resolve()
+  socket.on("data", (chunk) => {
+    buffered += chunk.toString()
+    if (Buffer.byteLength(buffered) > 2000000) {
+      socket.destroy()
+      return
+    }
+    let end: number
+    while ((end = buffered.indexOf("\n")) >= 0) {
+      const frame = buffered.slice(0, end)
+      buffered = buffered.slice(end + 1)
+      sending = sending
+        .then(async () => {
+          const message = Schema.decodeUnknownSync(
+            Schema.Struct({ method: Schema.optionalKey(Schema.String) }),
+          )(JSON.parse(frame))
+          const release = await credentialLock(policy, false)
+          try {
+            if (
+              [
+                "thread/start",
+                "thread/resume",
+                "turn/start",
+                "turn/steer",
+                "thread/queue/add",
+              ].includes(message.method ?? "")
+            )
+              await inspectCredentialLayout(policy, "codex")
+            if (!socket.destroyed) ws.send(frame)
+          } finally {
+            await release()
+          }
+        })
+        .catch(() => {
+          socket.destroy()
+        })
+    }
+  })
+}
+
+function hostFailureDetail(error: unknown) {
+  const safe = new Set([
+    "host path is not canonical",
+    "unsafe host path",
+    "unsafe host ancestry",
+    "unsafe host exchange file",
+    "host manager command failed; custody retained",
+    "native launch policy unavailable",
+    "host directory outside workspace policy",
+    "host invocation identity mismatch",
+    "host launch remains unconfirmed",
+  ])
+  return error instanceof Error && safe.has(error.message) ? { detail: error.message } : {}
+}
+
 const HostRecord = Schema.Struct({
   request: HostStart,
   process: OwnedProcess,
@@ -156,7 +254,7 @@ const HostRecord = Schema.Struct({
 type HostRecord = typeof HostRecord.Type
 
 const hostDigest = (value: string) => createHash("sha256").update(value).digest("hex")
-const hostUnit = (runId: string) => `workflowd-native-${hostDigest(runId).slice(0, 32)}.service`
+const hostUnit = agentHostUnitName
 
 async function trustedPath(path: string, owner: number, directory: boolean) {
   if ((await realpath(path)) !== path) throw new Error("host path is not canonical")
@@ -233,6 +331,21 @@ function nativeHost(policy: CredentialPolicy) {
       throw new Error("native launch policy unavailable")
     await trustedPath(launch.custodyRoot, policy.ownerUid, true)
     await trustedPath(launch.ioRoot, policy.ownerUid, true)
+    if (request.operation === "listOwned") {
+      const paths = (await readdir(launch.custodyRoot))
+        .filter((path) => /^[a-f0-9]{64}\.json$/.test(path))
+        .sort()
+      const processes: OwnedProcess[] = []
+      for (const name of paths.slice(request.cursor, request.cursor + 128)) {
+        const path = join(launch.custodyRoot, name)
+        const record = Schema.decodeUnknownSync(HostRecord)(
+          JSON.parse((await readHostFile(path, 300000, 0, policy.ownerUid)).toString()),
+        )
+        if (record.request.profile === "codex-server")
+          processes.push(await inspectHostProcess(record, path))
+      }
+      return { processes, next: request.cursor + 128 < paths.length ? request.cursor + 128 : null }
+    }
     const key = hostDigest(request.runId)
     const recordPath = join(launch.custodyRoot, `${key}.json`)
     const io = join(launch.ioRoot, key)
@@ -259,23 +372,35 @@ function nativeHost(policy: CredentialPolicy) {
       }
       const release = await credentialLock(policy, false)
       try {
-        await inspectCredentialLayout(
-          policy,
-          request.profile.startsWith("codex") ? "codex" : "claude",
-        )
+        if (!["claude-session", "workspace"].includes(request.profile))
+          await inspectCredentialLayout(
+            policy,
+            request.profile.startsWith("codex") ? "codex" : "claude",
+          )
         const normalized =
           request.directory === "" &&
-          (request.profile.endsWith("-preflight") || request.profile === "codex-discovery")
+          (request.profile.endsWith("-preflight") ||
+            ["codex-discovery", "codex-server"].includes(request.profile))
             ? { ...request, directory: launch.workspaceRoot }
             : request
-        await prepareHostLaunch(policy, normalized, io)
+        const repository =
+          request.profile === "workspace"
+            ? launch.repositories?.find((value) => value.source === request.repository)
+            : undefined
+        if (request.profile === "workspace" && !repository)
+          throw new Error("repository outside host policy")
+        await prepareHostLaunch(
+          policy,
+          repository === undefined ? normalized : { ...normalized, repository: repository.remote },
+          io,
+        )
         const record: HostRecord = {
           request,
           digest,
           cancelled: false,
           process: {
             runId: request.runId,
-            launchId: randomUUID(),
+            launchId: request.launchId ?? randomUUID(),
             unit: hostUnit(request.runId),
             invocationId: null,
             uid: policy.agentUid,
@@ -382,14 +507,22 @@ async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, i
   const launch = policy.launch!
   for (const path of [launch.bun, launch.worker, launch.codex, launch.claude])
     await trustedPath(path, policy.ownerUid, false)
-  const directory = await realpath(request.directory)
+  if (resolve(request.directory) !== request.directory)
+    throw new Error("host directory outside workspace policy")
+  const directory = await realpath(
+    request.profile === "workspace" ? dirname(request.directory) : request.directory,
+  )
   const workspace = await realpath(launch.workspaceRoot)
   if (
-    directory !== request.directory ||
+    directory !==
+      (request.profile === "workspace" ? dirname(request.directory) : request.directory) ||
     (directory !== workspace && !directory.startsWith(`${workspace}/`))
   )
     throw new Error("host directory outside workspace policy")
-  if (request.profile === "claude-resume" && !request.nativeSessionId)
+  if (
+    (request.profile === "claude-resume" || request.profile === "claude-session") &&
+    !request.nativeSessionId
+  )
     throw new Error("resume session required")
   await mkdir(io, { mode: 0o700 })
   const input = await open(join(io, "input"), "wx", 0o600)
@@ -411,13 +544,14 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--service-type=exec",
     `--unit=${record.process.unit}`,
     `--description=workflowd native ${record.process.launchId}`,
-    `--working-directory=${record.request.directory || launch.workspaceRoot}`,
+    `--working-directory=${record.request.profile === "workspace" ? launch.workspaceRoot : record.request.directory || launch.workspaceRoot}`,
     `--property=User=${policy.agentUid}`,
     `--property=Group=${policy.groupGid}`,
     "--property=RemainAfterExit=yes",
     "--property=SupplementaryGroups=",
     "--property=KillMode=control-group",
     "--property=TimeoutStopSec=5",
+    "--property=UMask=0077",
     "--property=NoNewPrivileges=yes",
     "--property=CapabilityBoundingSet=",
     "--property=PrivateDevices=yes",
@@ -426,7 +560,7 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--property=RestrictSUIDSGID=yes",
     "--property=MemoryMax=6G",
     "--property=MemorySwapMax=0",
-    "--property=RuntimeMaxSec=86400",
+    `--property=RuntimeMaxSec=${Math.ceil((record.request.timeoutMs ?? 86400000) / 1000)}`,
     `--property=ReadWritePaths=${launch.home} ${launch.workspaceRoot} ${io} ${policy.codex.canonical} ${policy.claude.canonical}`,
     "--setenv=WORKFLOWD_AGENT_HOST_SOCKET=host-managed",
     `--setenv=HOME=${launch.home}`,

@@ -172,3 +172,34 @@ describe("runner store claude_resume at-most-once", () => {
     expect(result.pending[0]).toMatchObject({ commandId: "cmd-1", status: "failed" })
   })
 })
+
+test("a spent Claude claim consults durable host custody before recording interruption", async () => {
+  let starts = 0
+  const recovered: string[] = []
+  const executor = {
+    execute: () =>
+      Effect.sync(() => {
+        starts++
+        return { status: "failed" as const, failureReason: "cli_failed" as const }
+      }),
+    recover: (_payload: ClaudeResumeJobV1, deliveryId: string) =>
+      Effect.sync(() => {
+        recovered.push(deliveryId)
+        return { status: "succeeded" as const, output: '{"acknowledged":true}' }
+      }),
+  }
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* deliver
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`UPDATE remote_runner_inbox SET execution_count = 1 WHERE command_id = ${command.commandId}`
+      const store = yield* RemoteRunnerStore
+      const result = yield* store.executeClaudeResume(command, now)
+      expect(result.status).toBe("succeeded")
+      expect(starts).toBe(0)
+      expect(recovered).toEqual([command.commandId])
+      yield* store.executeClaudeResume(command, now)
+      expect(recovered).toHaveLength(1)
+    }).pipe(Effect.provide(layer(executor))),
+  )
+})

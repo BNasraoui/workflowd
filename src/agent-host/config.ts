@@ -6,6 +6,9 @@ export const CredentialPolicy = Schema.Struct({
   root: Path,
   launch: Schema.optionalKey(
     Schema.Struct({
+      repositories: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ source: Path, remote: Schema.String })),
+      ),
       custodyRoot: Path,
       ioRoot: Path,
       home: Path,

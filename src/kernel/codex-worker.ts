@@ -177,9 +177,70 @@ async function runHostWorker(inputPath: string, binary: string) {
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     ...(request.provider === undefined ? {} : { provider: request.provider }),
   }
+  if (request.profile === "workspace") {
+    const { runWorkspaceCommand } = await import("../workspace/command")
+    if (
+      !request.repository ||
+      !request.branch ||
+      request.branch.startsWith("-") ||
+      request.base?.startsWith("-")
+    )
+      throw new Error("invalid workspace selection")
+    await Effect.runPromise(
+      runWorkspaceCommand("clone agent repository", [
+        "/usr/bin/git",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "clone",
+        "--no-local",
+        "--no-hardlinks",
+        "--no-checkout",
+        "--",
+        request.repository,
+        request.directory,
+      ]),
+    )
+    await Effect.runPromise(
+      runWorkspaceCommand("checkout agent branch", [
+        "/usr/bin/git",
+        "-C",
+        request.directory,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "checkout",
+        "-B",
+        request.branch,
+        request.base ?? "origin/HEAD",
+      ]),
+    )
+    await writeFile(options.eventsFile, "", { mode: 0o600 })
+    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeResult(options.resultFile, 0)
+    return 0
+  }
+  if (request.profile === "codex-server")
+    return runCliWorker(options, [
+      binary,
+      "app-server",
+      "--listen",
+      `unix://${join(io, "rpc.sock")}`,
+    ])
   if (request.profile === "codex") return runCodexWorker(options)
   if (request.profile === "claude")
     return (await import("./claude-worker")).runClaudeWorker(options)
+  if (request.profile === "claude-session") {
+    const { makeClaudeCli } = await import("./claude-session")
+    const exists = await Effect.runPromise(
+      makeClaudeCli({ binary }).sessionExists({
+        nativeSessionId: request.nativeSessionId!,
+        directory: request.directory,
+      }),
+    )
+    await writeFile(options.eventsFile, JSON.stringify(exists), { mode: 0o600 })
+    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeResult(options.resultFile, 0)
+    return 0
+  }
   if (request.profile === "claude-resume")
     return runCliWorker(options, [
       binary,

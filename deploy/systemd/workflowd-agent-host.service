@@ -1,5 +1,5 @@
 [Unit]
-Description=Workflowd credential admission
+Description=Workflowd agent host
 After=local-fs.target
 
 [Service]
@@ -14,7 +14,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN
-ReadWritePaths=/var/lib/workflowd/model-credentials /run/workflowd-agent-host
+ReadWritePaths=/var/lib/workflowd/model-credentials /var/lib/workflowd/agent-host /var/lib/workflowd/agent-io /run/workflowd-agent-host
 PrivateTmp=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX

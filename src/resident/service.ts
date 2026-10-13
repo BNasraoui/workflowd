@@ -8,10 +8,11 @@ import { diagnosticMessage } from "../sandbox/diagnostics"
 import { residentWorkerInstructions } from "./instructions"
 import {
   guardCliCredentials,
+  makeHostCli,
   withCredentialAdmission,
   withCredentialAdmissionPromise,
 } from "../agent-host/client"
-import { credentialReason } from "../agent-host/protocol"
+import { credentialReason, agentHostUnitName } from "../agent-host/protocol"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -191,13 +192,26 @@ export const ResidentCodexLive = (
           const notify = notifyFor(runId)
           let process: ServerProcess
           if (transientUnits) {
-            const unit = residentUnitName(runId, unitPrefix)
-            const socket = residentSocket(config.home, runId)
             const launchId = randomUUID()
+            const hostRunId = `${runId}-${launchId}`
+            const unit =
+              config.credentialSocket === undefined
+                ? residentUnitName(runId, unitPrefix)
+                : agentHostUnitName(hostRunId)
+            const socket =
+              config.credentialSocket === undefined ? residentSocket(config.home, runId) : hostRunId
             yield* store.prepareServer(runId, unit, launchId, socket)
             const launched = yield* Effect.tryPromise(() =>
               launchAppServer(
-                { binary, home: config.home, env, runId, unitPrefix, launchId },
+                {
+                  binary,
+                  home: config.home,
+                  env,
+                  runId,
+                  unitPrefix,
+                  launchId,
+                  hostSocket: config.credentialSocket,
+                },
                 notify,
               ),
             )
@@ -245,7 +259,13 @@ export const ResidentCodexLive = (
           yield* Effect.tryPromise({ try: () => entry.process.close(), catch: normalizeError })
         if (custody?.state === "active") {
           const stopped = yield* Effect.tryPromise(() =>
-            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+            stopAppServer(
+              custody.unit,
+              custody.launch_id,
+              custody.invocation,
+              config.credentialSocket,
+              custody.socket,
+            ),
           )
           if (!stopped.closed)
             return yield* Effect.fail(new Error("Resident unit closure unconfirmed"))
@@ -441,7 +461,9 @@ export const ResidentCodexLive = (
           if (!servers.has(row.run_id)) {
             const custody = transientUnits ? yield* store.readServer(row.run_id) : null
             if (custody?.state === "active") {
-              const unit = yield* Effect.tryPromise(() => inspectAppServerUnit(custody.unit))
+              const unit = yield* Effect.tryPromise(() =>
+                inspectAppServerUnit(custody.unit, config.credentialSocket, custody.socket),
+              )
               const mismatch =
                 unit.present &&
                 (unit.description !== `workflowd resident launch ${custody.launch_id}` ||
@@ -464,6 +486,7 @@ export const ResidentCodexLive = (
                       unit: custody.unit,
                       launchId: custody.launch_id,
                       invocation: custody.invocation,
+                      hostSocket: config.credentialSocket,
                     },
                     notifyFor(row.run_id),
                   ),
@@ -481,7 +504,13 @@ export const ResidentCodexLive = (
                   yield* Effect.tryPromise(() => attached.value.initialize())
                 } else {
                   yield* Effect.tryPromise(() =>
-                    stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+                    stopAppServer(
+                      custody.unit,
+                      custody.launch_id,
+                      custody.invocation,
+                      config.credentialSocket,
+                      custody.socket,
+                    ),
                   )
                 }
               }
@@ -557,7 +586,13 @@ export const ResidentCodexLive = (
         for (const custody of yield* store.activeServers()) {
           if ((yield* store.readRun(custody.run_id)) !== null) continue
           const stopped = yield* Effect.tryPromise(() =>
-            stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+            stopAppServer(
+              custody.unit,
+              custody.launch_id,
+              custody.invocation,
+              config.credentialSocket,
+              custody.socket,
+            ),
           )
           if (stopped.closed) yield* store.closeServer(custody.run_id)
         }
@@ -565,7 +600,9 @@ export const ResidentCodexLive = (
       yield* restore()
       if (transientUnits) {
         const active = new Set((yield* store.activeServers()).map((row) => row.unit))
-        yield* Effect.tryPromise(() => sweepOrphanAppServers(unitPrefix, active))
+        yield* Effect.tryPromise(() =>
+          sweepOrphanAppServers(unitPrefix, active, config.credentialSocket),
+        )
       }
       const flushUnlocked = Effect.fn("Resident.flush")(function* () {
         for (const message of yield* store.pending()) {
@@ -672,7 +709,13 @@ export const ResidentCodexLive = (
           const custody = yield* store.readServer(row.run_id)
           if (custody !== null)
             yield* Effect.tryPromise(() =>
-              stopAppServer(custody.unit, custody.launch_id, custody.invocation),
+              stopAppServer(
+                custody.unit,
+                custody.launch_id,
+                custody.invocation,
+                config.credentialSocket,
+                custody.socket,
+              ),
             )
         }
         yield* launch(row.run_id, entry.attempts + 1)
@@ -707,20 +750,23 @@ export const ResidentCodexLive = (
         {
           ownership: "resident-thread",
           cancelRun,
-          preflight: Effect.acquireUseRelease(
-            Effect.try(() => start({ binary, home: config.home }, () => {})),
-            (process) =>
-              Effect.tryPromise(async () => {
-                await process.initialize()
-                await process.rpc.request("thread/list", { limit: 1 })
-              }),
-            (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
-          ).pipe(
-            Effect.mapError(() => ({
-              kind: "cli_unusable" as const,
-              detail: "resident Codex app-server unavailable",
-            })),
-          ),
+          preflight:
+            config.credentialSocket === undefined
+              ? Effect.acquireUseRelease(
+                  Effect.try(() => start({ binary, home: config.home }, () => {})),
+                  (process) =>
+                    Effect.tryPromise(async () => {
+                      await process.initialize()
+                      await process.rpc.request("thread/list", { limit: 1 })
+                    }),
+                  (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
+                ).pipe(
+                  Effect.mapError(() => ({
+                    kind: "cli_unusable" as const,
+                    detail: "resident Codex app-server unavailable",
+                  })),
+                )
+              : makeHostCli(config.credentialSocket, "codex", () => ({ type: "other" })).preflight,
           spawn: (input) =>
             Effect.gen(function* () {
               if (input.runId === undefined)

@@ -26,7 +26,14 @@ export type ClaudeResumeOutcome =
   | { readonly status: "failed"; readonly failureReason: ClaudeResumeFailureReason }
 
 export type ClaudeResumeExecutorPort = {
-  readonly execute: (payload: ClaudeResumeJobV1) => Effect.Effect<ClaudeResumeOutcome>
+  readonly execute: (
+    payload: ClaudeResumeJobV1,
+    deliveryId?: string,
+  ) => Effect.Effect<ClaudeResumeOutcome>
+  readonly recover?: (
+    payload: ClaudeResumeJobV1,
+    deliveryId: string,
+  ) => Effect.Effect<ClaudeResumeOutcome>
 }
 
 /**
@@ -91,13 +98,14 @@ export const makeClaudeResumeExecutor = (options: {
    * every execution. */
   readonly allowedDirectories: ReadonlyArray<string>
 }): ClaudeResumeExecutorPort => {
-  const turn = (payload: ClaudeResumeJobV1, prompt: string) =>
+  const turn = (payload: ClaudeResumeJobV1, prompt: string, deliveryId?: string) =>
     options.cli
       .resume({
         nativeSessionId: payload.nativeSessionId,
         directory: payload.directory,
         prompt,
         timeoutMs: payload.turnTimeoutMs,
+        ...(deliveryId === undefined ? {} : { deliveryId }),
       })
       .pipe(
         Effect.map((stdout) => ({ ok: true as const, stdout })),
@@ -119,7 +127,7 @@ export const makeClaudeResumeExecutor = (options: {
       Effect.option,
     )
 
-  const execute: ClaudeResumeExecutorPort["execute"] = (payload) =>
+  const execute: ClaudeResumeExecutorPort["execute"] = (payload, deliveryId) =>
     Effect.gen(function* () {
       if (!underAllowedDirectory(payload.directory, options.allowedDirectories)) {
         return failed("directory_not_allowed")
@@ -135,11 +143,15 @@ export const makeClaudeResumeExecutor = (options: {
       const schemaObject = parseSchemaObject(payload.extractionSchemaJson)
       if (schemaObject === null) return failed("cli_failed")
 
-      const wake = yield* turn(payload, payload.prompt)
+      const wake = yield* turn(
+        payload,
+        payload.prompt,
+        deliveryId === undefined ? undefined : `${deliveryId}-wake`,
+      )
       if (!wake.ok) return failed(wake.failureReason)
       if ((yield* parseEnvelope(wake.stdout))._tag === "None") return failed("cli_failed")
 
-      const extracted = yield* extractOutput(payload, schemaObject)
+      const extracted = yield* extractOutput(payload, schemaObject, deliveryId)
       if ("outcome" in extracted) return extracted.outcome
       if (new TextEncoder().encode(extracted.json).byteLength > MAX_CLAUDE_RESUME_OUTPUT_BYTES) {
         return failed("output_oversized")
@@ -149,13 +161,16 @@ export const makeClaudeResumeExecutor = (options: {
 
   /** One extraction turn plus a single feedback retry; the wake is never
    * re-sent. Returns the JSON answer or a terminal failure outcome. */
-  const extractOutput = (payload: ClaudeResumeJobV1, schemaObject: object) =>
+  const extractOutput = (payload: ClaudeResumeJobV1, schemaObject: object, deliveryId?: string) =>
     Effect.gen(function* () {
       const extractOnce = (feedback?: string) =>
         Effect.gen(function* () {
           const extraction = yield* turn(
             payload,
             structuredExtractionPrompt(schemaObject, ...(feedback === undefined ? [] : [feedback])),
+            deliveryId === undefined
+              ? undefined
+              : `${deliveryId}-${feedback === undefined ? "extract" : "retry"}`,
           )
           if (!extraction.ok) {
             return { outcome: failed(extraction.failureReason) }
@@ -175,5 +190,20 @@ export const makeClaudeResumeExecutor = (options: {
       return { outcome: failed("output_unparseable") }
     })
 
-  return { execute }
+  const hasDelivery = options.cli.hasDelivery
+  return {
+    execute,
+    ...(hasDelivery === undefined
+      ? {}
+      : {
+          recover: (payload: ClaudeResumeJobV1, deliveryId: string) =>
+            Effect.gen(function* () {
+              const exists = yield* hasDelivery(`${deliveryId}-wake`).pipe(
+                Effect.catch(() => Effect.succeed(false)),
+              )
+              if (!exists) return failed("execution_interrupted")
+              return yield* execute(payload, deliveryId)
+            }),
+        }),
+  }
 }

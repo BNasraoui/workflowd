@@ -134,8 +134,8 @@ export async function withCredentialAdmissionPromise<A>(
 }
 
 /** One request performs one bounded operation; a disconnect never cancels owned work. */
-export function requestAgentHost(path: string, request: import("./protocol").HostRequest) {
-  return new Promise<import("./protocol").OwnedProcess | null | Buffer>((resolve, reject) => {
+function requestAgentHostResponse(path: string, request: import("./protocol").HostRequest) {
+  return new Promise<Extract<typeof HostResponse.Type, { admitted: true }>>((resolve, reject) => {
     const socket = connect(path)
     let data = ""
     let settled = false
@@ -168,11 +168,11 @@ export function requestAgentHost(path: string, request: import("./protocol").Hos
                   : "claude",
                 reason,
               )
-            : new Error(response.reason)
+            : new Error(`${response.reason}${response.detail ? `: ${response.detail}` : ""}`)
         }
         settled = true
         socket.destroy()
-        resolve("process" in response ? response.process : Buffer.from(response.bytes, "base64"))
+        resolve(response)
       } catch (error) {
         fail(error)
       }
@@ -339,4 +339,124 @@ export function makeHostCli(
         catch: failure,
       }),
   }
+}
+
+export async function readAgentHostOutput(
+  socket: string,
+  process: OwnedProcess,
+  limit = 10 * 1024 * 1024,
+  signal?: AbortSignal,
+) {
+  for (;;) {
+    signal?.throwIfAborted()
+    const current = await inspectAgentHost(socket, process.runId)
+    if (
+      !current ||
+      current.launchId !== process.launchId ||
+      current.invocationId !== process.invocationId
+    )
+      throw new Error("host custody changed")
+    if (!current.active) {
+      if (current.exitCode !== 0)
+        throw new Error("native host process failed or did not finish within its deadline")
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+  const chunks: Buffer[] = []
+  let size = 0
+  for (;;) {
+    const bytes = await hostBytes(socket, process, "events", size)
+    if (!bytes.length) return Buffer.concat(chunks).toString()
+    size += bytes.length
+    if (size > limit) throw new Error("native host output exceeds limit")
+    chunks.push(bytes)
+  }
+}
+
+export function connectAgentHost(
+  path: string,
+  process: OwnedProcess,
+  receive: (line: string) => void,
+  disconnected: () => void,
+) {
+  return new Promise<{ send: (line: string) => void; close: () => void }>((resolve, reject) => {
+    const socket = connect(path)
+    let admitted = false
+    let detached = false
+    let data = ""
+    const fail = (cause: unknown) => {
+      socket.destroy()
+      reject(normalizeError(cause))
+    }
+    socket.setTimeout(15000, () => fail(new Error("host relay timed out")))
+    socket.on("error", fail)
+    socket.on("connect", () =>
+      socket.write(
+        JSON.stringify({ operation: "connect", runId: process.runId, launchId: process.launchId }) +
+          "\n",
+      ),
+    )
+    socket.on("close", () => {
+      if (!admitted) reject(new Error("host relay closed before attachment"))
+      else if (!detached) disconnected()
+    })
+    socket.on("data", (chunk) => {
+      data += chunk.toString()
+      if (Buffer.byteLength(data) > 2000000) {
+        fail(new Error("host relay frame too large"))
+        return
+      }
+      let end: number
+      while ((end = data.indexOf("\n")) >= 0) {
+        const line = data.slice(0, end)
+        data = data.slice(end + 1)
+        try {
+          if (admitted) receive(line)
+          else {
+            const reply = Schema.decodeUnknownSync(HostResponse)(JSON.parse(line))
+            if (
+              !reply.admitted ||
+              !("process" in reply) ||
+              reply.process?.launchId !== process.launchId
+            )
+              throw new Error("host relay refused custody")
+            admitted = true
+            socket.setTimeout(0)
+            resolve({
+              send: (frame) => {
+                if (socket.destroyed) throw new Error("host relay disconnected")
+                socket.write(frame.trimEnd() + "\n")
+              },
+              close: () => {
+                detached = true
+                socket.destroy()
+              },
+            })
+          }
+        } catch (error) {
+          fail(error)
+        }
+      }
+    })
+  })
+}
+
+export async function requestAgentHost(path: string, request: import("./protocol").HostRequest) {
+  const response = await requestAgentHostResponse(path, request)
+  if ("processes" in response) throw new Error("unexpected host list response")
+  return "process" in response ? response.process : Buffer.from(response.bytes, "base64")
+}
+
+export async function listAgentHost(path: string) {
+  const processes: OwnedProcess[] = []
+  let cursor: number | null = 0
+  while (cursor !== null) {
+    const response = await requestAgentHostResponse(path, { operation: "listOwned", cursor })
+    if (!("processes" in response) || (response.next !== null && response.next <= cursor))
+      throw new Error("invalid host listing")
+    processes.push(...response.processes)
+    cursor = response.next
+  }
+  return processes
 }

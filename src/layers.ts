@@ -31,7 +31,7 @@ import {
 } from "./kernel/agent-wait-ingress"
 import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
-import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
+import { AgentRunWorktrees, agentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
@@ -212,7 +212,9 @@ function makeExecutionOnlyLayer(config: AppConfig) {
           Layer.provideMerge(claude),
           Layer.provideMerge(discovery),
           Layer.provideMerge(signals),
-          Layer.provide(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provide(
+            Layer.succeed(AgentRunWorktrees, agentRunWorktrees(config.credentialSocket)),
+          ),
         )
   return Layer.mergeAll(
     kernel,
@@ -629,7 +631,9 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(sandboxProviderLayer),
-          Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provideMerge(
+            Layer.succeed(AgentRunWorktrees, agentRunWorktrees(config.credentialSocket)),
+          ),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
           Layer.provideMerge(executionDiscoveryLayer),

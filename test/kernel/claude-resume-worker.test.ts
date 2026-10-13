@@ -563,3 +563,72 @@ describe("claude resume worker", () => {
     }
   })
 })
+
+test("local sent Claude resume recovers from its host checkpoint without another wake", async () => {
+  const observed: string[] = []
+  const turns: string[] = []
+  const deliveryId = "local-test-delivery"
+  const cli: ClaudeCliPort = {
+    sessionExists: () => Effect.succeed(true),
+    hasDelivery: (id) =>
+      Effect.sync(() => {
+        observed.push(id)
+        return id === `${deliveryId}-wake`
+      }),
+    resume: (input) =>
+      Effect.sync(() => {
+        turns.push(input.deliveryId ?? "missing")
+        return JSON.stringify({
+          result: input.deliveryId?.endsWith("-wake")
+            ? "already-delivered"
+            : '{"acknowledged":true,"summary":"reattached"}',
+        })
+      }),
+  }
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const claim = yield* store.claimResume({
+        owningHostId: "mint",
+        workerId: "old-controller",
+        now: at,
+        leaseDurationMs: 60000,
+        providerKind: "claude",
+      })
+      if (!claim) throw new Error("missing test claim")
+      const authority = {
+        requestId: claim.requestId,
+        attempt: claim.attempt,
+        owningHostId: claim.owningHostId,
+        workerId: claim.workerId,
+        claimToken: claim.claimToken,
+        expectedLeaseUntil: claim.leaseUntil,
+        now: at,
+      }
+      yield* store.checkpointResume({
+        ...authority,
+        checkpointId: "host-checkpoint",
+        checkpointVersion: 3,
+        checkpoint: {
+          deliveryId,
+          payload: {
+            kind: "claude_resume",
+            hostId: "mint",
+            nativeSessionId: native,
+            directory,
+            prompt: wake.resumePromptText,
+            extractionSchemaJson: JSON.stringify(contract.jsonSchema),
+            turnTimeoutMs: options.resumeTimeoutMs,
+          },
+        },
+      })
+      yield* store.markResumeSent(authority)
+      yield* store.releaseResume({ ...authority, runAt: at })
+      return yield* runClaudeResumeIteration(options).pipe(Effect.provideService(ClaudeCli, cli))
+    }),
+  )
+  expect(result.status).toBe("completed")
+  expect(observed).toEqual([`${deliveryId}-wake`])
+  expect(turns).toEqual([`${deliveryId}-wake`, `${deliveryId}-extract`])
+})

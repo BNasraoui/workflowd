@@ -45,5 +45,16 @@
         "user": "ben"
       }
     ]
+  },
+  "launch": {
+    "custodyRoot": "/var/lib/workflowd/agent-host",
+    "ioRoot": "/var/lib/workflowd/agent-io",
+    "home": "/var/lib/workflowd-agent",
+    "workspaceRoot": "/var/lib/workflowd-agent/workspaces",
+    "bun": "/usr/local/bin/bun",
+    "worker": "/usr/local/libexec/workflowd-native-worker.js",
+    "codex": "/usr/local/bin/codex",
+    "claude": "/usr/local/bin/claude",
+    "repositories": []
   }
 }

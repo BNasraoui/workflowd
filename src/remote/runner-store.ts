@@ -419,11 +419,17 @@ const make = Effect.gen(function* () {
         }
         return yield* storeClaudeResult(
           command,
-          claudeResult(command, { status: "failed", failureReason: "execution_interrupted" }, at),
+          claudeResult(
+            command,
+            claudeExecutor.recover === undefined
+              ? { status: "failed", failureReason: "execution_interrupted" }
+              : yield* claudeExecutor.recover(command.payload, command.commandId),
+            at,
+          ),
           at,
         )
       }
-      const outcome = yield* claudeExecutor.execute(command.payload)
+      const outcome = yield* claudeExecutor.execute(command.payload, command.commandId)
       return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
     })
 

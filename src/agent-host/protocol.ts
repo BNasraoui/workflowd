@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { Schema } from "effect"
 
 export const CredentialAdmissionReason = Schema.Literals([
@@ -58,7 +59,10 @@ export const HostStart = Schema.Struct({
     "codex-preflight",
     "claude-preflight",
     "claude-resume",
+    "claude-session",
     "codex-discovery",
+    "codex-server",
+    "workspace",
   ]),
   directory: Schema.String,
   prompt: HostText,
@@ -66,9 +70,21 @@ export const HostStart = Schema.Struct({
   effort: Schema.optionalKey(Schema.String),
   provider: Schema.optionalKey(Schema.String),
   nativeSessionId: Schema.optionalKey(HostId),
+  repository: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+  base: Schema.optionalKey(Schema.String),
+  launchId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/))),
+  timeoutMs: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86400000 })),
+  ),
 })
 export type HostStart = typeof HostStart.Type
 export const HostRequest = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("listOwned"),
+    cursor: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  }),
+  Schema.Struct({ operation: Schema.Literal("connect"), runId: HostId, launchId: Schema.String }),
   HostStart,
   Schema.Struct({ operation: Schema.Literal("inspect"), runId: HostId }),
   Schema.Struct({ operation: Schema.Literal("stop"), runId: HostId, launchId: Schema.String }),
@@ -94,7 +110,19 @@ export const OwnedProcess = Schema.Struct({
 })
 export type OwnedProcess = typeof OwnedProcess.Type
 export const HostResponse = Schema.Union([
+  Schema.Struct({
+    admitted: Schema.Literal(true),
+    processes: Schema.Array(OwnedProcess),
+    next: Schema.NullOr(Schema.Int),
+  }),
   Schema.Struct({ admitted: Schema.Literal(true), process: Schema.NullOr(OwnedProcess) }),
   Schema.Struct({ admitted: Schema.Literal(true), bytes: Schema.String }),
-  Schema.Struct({ admitted: Schema.Literal(false), reason: Schema.String }),
+  Schema.Struct({
+    admitted: Schema.Literal(false),
+    reason: Schema.String,
+    detail: Schema.optionalKey(Schema.String),
+  }),
 ])
+
+export const agentHostUnitName = (runId: string) =>
+  `workflowd-native-${createHash("sha256").update(runId).digest("hex").slice(0, 32)}.service`
