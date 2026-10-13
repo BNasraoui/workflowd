@@ -176,15 +176,13 @@ test("one-shot terminal mailbox preserves the provider error after model output"
     Effect.gen(function* () {
       const receipt = yield* register({ route: "scan", repository: "workflowd", prompt: "x" })
       const store = yield* AgentRunStore
-      const run = yield* store
-        .read(receipt.runId)
-        .pipe(
-          Effect.repeat({
-            schedule: Schedule.spaced(10),
-            until: (run) => run?.state === "operator_required",
-          }),
-          Effect.timeout(2000),
-        )
+      const run = yield* store.read(receipt.runId).pipe(
+        Effect.repeat({
+          schedule: Schedule.spaced(10),
+          until: (run) => run?.state === "operator_required",
+        }),
+        Effect.timeout(2000),
+      )
       expect(run?.diagnostic).toBe("model_at_capacity: " + message)
       const sql = yield* SqlClient.SqlClient
       const rows = yield* sql<{
