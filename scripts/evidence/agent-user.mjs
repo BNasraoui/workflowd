@@ -203,11 +203,13 @@ wait
     assert.equal(after.MainPID, before.MainPID)
     assert.equal(after.ActiveState, "active")
     await command(["systemctl", "stop", unit])
-    assert.equal((await inspect()).ActiveState, "inactive")
+    launched = false
     const stoppedBy = Date.now() + 3000
-    while (await readFile(`/proc/${descendant}/status`, "utf8").catch(() => null)) {
-      assert(Date.now() < stoppedBy, "supervision_descendant_survived_stop")
-      await delay(25)
+    for (const pid of [Number(before.MainPID), descendant]) {
+      while (await readFile(`/proc/${pid}/status`, "utf8").catch(() => null)) {
+        assert(Date.now() < stoppedBy, "supervision_process_survived_stop")
+        await delay(25)
+      }
     }
     return {
       uidCount: 2,
