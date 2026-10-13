@@ -4,7 +4,7 @@ set -eu
 [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --build-only ]; } || exit 1
 cd "$(dirname "$0")/../.."
 command -v bun >/dev/null
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 mkdir -p dist
 bun build --compile src/agent-host/server.ts --outfile dist/workflowd-agent-host
 bun build --compile deploy/agent-user/relink.ts --outfile dist/workflowd-relink-credentials

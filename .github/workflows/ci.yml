@@ -187,6 +187,14 @@ jobs:
           sudo groupadd --gid 61000 workflowd-model-auth
           sudo useradd --uid 61001 --gid 61000 --no-create-home --shell /usr/sbin/nologin ben-fixture
           sudo useradd --uid 61002 --gid 61000 --no-create-home --shell /usr/sbin/nologin agent-fixture
+          # Fixture children import reviewed source as their real UID. Grant only
+          # read/traverse access to the disposable checkout, preserving private homes.
+          directory="$PWD"
+          while [ "$directory" != / ]; do
+            sudo setfacl -m u:61001:--x,u:61002:--x "$directory"
+            directory=$(dirname "$directory")
+          done
+          sudo setfacl -R -m u:61001:rX,u:61002:rX "$PWD"
           sudo mkdir -p /opt/workflowd-credential-fixture/bin
           sudo cp -rf "$HOME/.bun/install/global/node_modules" /opt/workflowd-credential-fixture/
           sudo chown -R root:root /opt/workflowd-credential-fixture

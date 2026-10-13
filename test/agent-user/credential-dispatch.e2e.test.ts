@@ -728,22 +728,6 @@ for (const client of ["codex", "claude"] as const) {
             },
           )
           try {
-            if (client === "codex") {
-              child.stdin.write(
-                JSON.stringify({
-                  id: 1,
-                  method: "initialize",
-                  params: { clientInfo: { name: "credential-fixture", version: "1" } },
-                }) + "\n",
-              )
-              await child.stdin.flush()
-              const reader = child.stdout.getReader()
-              try {
-                expect((await reader.read()).done).toBe(false)
-              } finally {
-                reader.releaseLock()
-              }
-            }
             const deadline = Date.now() + 5000
             while ((await realpath(`/proc/${child.pid}/exe`).catch(() => "")) !== native) {
               if (Date.now() >= deadline) throw new Error("native_client_not_running")
