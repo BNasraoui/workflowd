@@ -125,6 +125,7 @@ socket.on("data", chunk => { data += chunk; if (data.includes("\\n")) { const re
 `,
       { mode: 0o644 },
     )
+    await chmod(clientScript, 0o644)
     await command(asUid(controllerUid, [process.execPath, clientScript, socket]))
     await assert.rejects(command(asUid(agentUid, [process.execPath, clientScript, socket])))
     const worker = join(root, "worker.sh")
@@ -141,6 +142,7 @@ wait
 `,
       { mode: 0o755 },
     )
+    await chmod(worker, 0o755)
     // Neither the requester nor the admission server owns this service's lifetime.
     await command([
       "systemd-run",
