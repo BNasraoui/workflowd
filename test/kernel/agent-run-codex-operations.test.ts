@@ -140,3 +140,57 @@ test("a Codex route using the CLI default model persists a valid run", async () 
   expect(receipt.modelId).toBe("<cli-default>")
   expect(codex.state.spawned[0]?.model).toBeNull()
 })
+
+for (const message of [
+  "Selected model is at capacity. Please try a different model.",
+  "Rate limit exceeded. Please retry later.",
+])
+  test(`provider refusal retains its typed reason and message: ${message}`, async () => {
+    const codex = makeCodexCli([{ type: "turn.failed", message }], 1)
+    const layer = makeLayer(makeProvider(defaultState()), worktrees([]), codex.port)
+    const refusal = await refusalOf(
+      Effect.runPromise(
+        register({ route: "scan", repository: "workflowd", prompt: "x" }).pipe(
+          Effect.provide(layer),
+        ),
+      ),
+    )
+    expect(refusal.reason).toBe(
+      message.startsWith("Selected") ? "model_at_capacity" : "provider_rate_limited",
+    )
+    expect(refusal.detail).toBe(message)
+  })
+
+test("one-shot terminal mailbox preserves the provider error after model output", async () => {
+  const { SqlClient } = await import("effect/unstable/sql")
+  const { Schedule } = await import("effect")
+  const message = "Selected model is at capacity. Please try a different model."
+  const codex = makeCodexCli(
+    [
+      { type: "agent_message", text: "Working..." },
+      { type: "turn.failed", message },
+    ],
+    1,
+  )
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const receipt = yield* register({ route: "scan", repository: "workflowd", prompt: "x" })
+      const store = yield* AgentRunStore
+      const run = yield* store
+        .read(receipt.runId)
+        .pipe(
+          Effect.repeat({
+            schedule: Schedule.spaced(10),
+            until: (run) => run?.state === "operator_required",
+          }),
+          Effect.timeout(2000),
+        )
+      expect(run?.diagnostic).toBe("model_at_capacity: " + message)
+      const sql = yield* SqlClient.SqlClient
+      const rows = yield* sql<{
+        prompt: string
+      }>`SELECT prompt FROM resident_inbox WHERE id = ${"agent-run-end-" + receipt.runId}`
+      expect(JSON.parse(rows[0]!.prompt).final_message).toBe(message)
+    }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
+  )
+})

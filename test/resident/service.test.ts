@@ -28,6 +28,7 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
     Array<{
       id: string
       status: string
+      error?: { message: string }
       items: Array<{ type: string; clientId?: string; text?: string; phase?: string }>
     }>
   >()
@@ -209,6 +210,16 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
       history.set(threadId, turns)
       notify({ method: "turn/started", params: { threadId, turn: { id, status: "inProgress" } } })
       return id
+    },
+    fail: (threadId: string, id: string, tool: boolean | "notification", message: string) => {
+      const turn = history.get(threadId)?.find((turn) => turn.id === id)
+      if (turn === undefined) throw new Error("Missing fixture turn")
+      turn.status = "failed"
+      turn.error = { message }
+      if (tool === true) turn.items.push({ type: "commandExecution" })
+      if (tool === "notification")
+        notify({ method: "item/started", params: { threadId, item: { type: "commandExecution" } } })
+      notify({ method: "turn/completed", params: { threadId, turn } })
     },
     complete: (
       threadId: string,
@@ -1040,3 +1051,95 @@ for (const status of ["completed", "failed"] as const)
       }).pipe(Effect.provide(layer(fake.factory))),
     )
   })
+
+for (const tool of [false, true, "notification"] as const)
+  test(`capacity failure retries only without a tool step: tool=${tool}`, async () => {
+    const fake = fixture()
+    const message = "Selected model is at capacity. Please try a different model."
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const now = new Date()
+        yield* prepareRun(now)
+        const worker = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        const events = worker.events[Symbol.asyncIterator]()
+        for (;;) {
+          const next = yield* Effect.promise(() => events.next())
+          if (next.value?.type === "agent_message") break
+        }
+        yield* verifyRun(now)
+        fake.fail("thread-1", "dispatch:a", tool, message)
+        yield* worker.exited
+        const run = yield* (yield* AgentRunStore).read("a")
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{
+          prompt: string
+        }>`SELECT prompt FROM resident_inbox WHERE id = 'agent-run-end-a'`
+        if (tool) {
+          expect(run?.diagnostic).toBe("model_at_capacity: " + message)
+          expect(JSON.parse(rows[0]!.prompt).final_message).toBe(message)
+        } else {
+          expect(run?.state).toBe("completed")
+          expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(2)
+        }
+      }).pipe(Effect.provide(layer(fake.factory))),
+    )
+  }, 10000)
+
+test("resident rate limits exhaust a durable two-retry budget", async () => {
+  const fake = fixture(true)
+  const message = "Rate limit exceeded. Please retry later."
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        yield* Effect.sync(
+          () => fake.calls.filter((call) => call.method === "thread/queue/add").length,
+        ).pipe(
+          Effect.repeat({ schedule: Schedule.spaced(10), until: (count) => count === attempt + 1 }),
+          Effect.timeout(5000),
+        )
+        const id = fake.startNext("thread-1")
+        fake.fail("thread-1", id, false, message)
+      }
+      yield* worker.exited
+      expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(3)
+      expect((yield* (yield* AgentRunStore).read("a"))?.diagnostic).toBe(
+        "provider_rate_limited: " + message,
+      )
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+}, 10000)
+
+test("a provider retry can run before first-token verification", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      yield* prepareRun(new Date())
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      fake.fail("thread-1", "dispatch:a", false, "Selected model is at capacity.")
+      expect((yield* worker.exited).exitCode).toBe(0)
+      expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(2)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
