@@ -636,6 +636,53 @@ adminTest("relink refuses every live agent process, even an unrelated executable
   }
 })
 
+for (const layout of ["claude", "codex-bundled", "codex-platform"] as const) {
+  adminTest(
+    `relink refuses a deleted controller executable in the ${layout} install root`,
+    async () => {
+      const { copyFile, readlink, unlink } = await import("node:fs/promises")
+      const { dirname } = await import("node:path")
+      const { policy, close } = await fixture()
+      const install = join(policy.root, "install")
+      const entrypoint = join(
+        install,
+        layout === "claude" ? "versions/current" : "@openai/codex/bin/codex.js",
+      )
+      const executable = join(
+        install,
+        layout === "claude"
+          ? "versions/previous"
+          : `@openai/${layout === "codex-bundled" ? "codex" : "codex-linux-x64"}/vendor/linux/codex/codex`,
+      )
+      await mkdir(dirname(entrypoint), { recursive: true })
+      await mkdir(dirname(executable), { recursive: true })
+      await copyFile("/bin/sleep", entrypoint)
+      await copyFile("/bin/sleep", executable)
+      const child = Bun.spawn([executable, "30"], { stdout: "ignore", stderr: "ignore" })
+      try {
+        await unlink(executable)
+        expect(await readlink(`/proc/${child.pid}/exe`)).toBe(`${executable} (deleted)`)
+        await expect(
+          relinkCredentials(
+            {
+              ...policy,
+              controllerUid: process.getuid!(),
+              agentUid: 65533,
+              consumerExecutables: [entrypoint],
+            },
+            "claude",
+            "ben",
+          ),
+        ).rejects.toMatchObject({ reason: "credential_relink_in_progress" })
+      } finally {
+        child.kill()
+        await child.exited
+        await close()
+      }
+    },
+  )
+}
+
 for (const operation of ["listProviders", "listModels"] as const) {
   test(`OpenCode ${operation} preserves credential refusal through ingress`, async () => {
     const { Effect } = await import("effect")

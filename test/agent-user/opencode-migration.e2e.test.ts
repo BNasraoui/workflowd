@@ -5,6 +5,7 @@ import {
   chmod,
   chown,
   copyFile,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
@@ -406,46 +407,79 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     const before = await readFile(policy.source)
     const victimBefore = await readFile(victim)
     const originalLstat = filesystem.lstat
-    let replaced = false
-    let observations = 0
-    function racedLstat(
-      path: import("node:fs").PathLike,
-      options?: import("node:fs").StatOptions & { bigint?: false | undefined },
-    ): Promise<import("node:fs").Stats>
-    function racedLstat(
-      path: import("node:fs").PathLike,
-      options: import("node:fs").StatOptions & { bigint: true },
-    ): Promise<import("node:fs").BigIntStats>
-    function racedLstat(
-      path: import("node:fs").PathLike,
-      options?: import("node:fs").StatOptions,
-    ): Promise<import("node:fs").Stats | import("node:fs").BigIntStats>
-    async function racedLstat(
-      path: import("node:fs").PathLike,
-      options?: import("node:fs").StatOptions,
-    ) {
-      const info = await originalLstat(path, options)
-      if (path === policy.database && ++observations === 2) {
-        replaced = true
-        await rename(destinationDirectory, retainedDirectory)
-        await symlink(victimDirectory, destinationDirectory)
+    for (const timing of ["parent", "attach"] as const) {
+      let replaced = false
+      let restored = false
+      let observations = 0
+      function racedLstat(
+        path: import("node:fs").PathLike,
+        options?: import("node:fs").StatOptions & { bigint?: false | undefined },
+      ): Promise<import("node:fs").Stats>
+      function racedLstat(
+        path: import("node:fs").PathLike,
+        options: import("node:fs").StatOptions & { bigint: true },
+      ): Promise<import("node:fs").BigIntStats>
+      function racedLstat(
+        path: import("node:fs").PathLike,
+        options?: import("node:fs").StatOptions,
+      ): Promise<import("node:fs").Stats | import("node:fs").BigIntStats>
+      async function racedLstat(
+        path: import("node:fs").PathLike,
+        options?: import("node:fs").StatOptions,
+      ) {
+        if (timing === "attach" && replaced && !restored) {
+          await rename(destinationDirectory, victimDirectory)
+          await rename(retainedDirectory, destinationDirectory)
+          restored = true
+        }
+        const info = await originalLstat(path, options)
+        // The fifth absolute-path observation is the final check before ATTACH.
+        if (path === policy.database && ++observations === (timing === "parent" ? 2 : 5)) {
+          replaced = true
+          await rename(destinationDirectory, retainedDirectory)
+          if (timing === "parent") await symlink(victimDirectory, destinationDirectory)
+          else await rename(victimDirectory, destinationDirectory)
+        }
+        return info
       }
-      return info
+      const race = spyOn(filesystem, "lstat").mockImplementation(racedLstat)
+      try {
+        await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+          reason: "opencode_grant_migration_incomplete",
+        })
+        expect(replaced).toBe(true)
+        await expect(lstat(policy.journal)).rejects.toMatchObject({ code: "ENOENT" })
+        expect(await readFile(policy.source)).toEqual(before)
+      } finally {
+        race.mockRestore()
+        if (replaced && !restored) {
+          if (timing === "parent") await rm(destinationDirectory)
+          else await rename(destinationDirectory, victimDirectory)
+          await rename(retainedDirectory, destinationDirectory)
+        }
+      }
+      expect(await readFile(victim)).toEqual(victimBefore)
     }
-    const race = spyOn(filesystem, "lstat").mockImplementation(racedLstat)
+    const originalReadFile = filesystem.readFile
+    let lateConsumer: ReturnType<typeof Bun.spawn> | undefined
+    const consumerRace = spyOn(filesystem, "readFile").mockImplementation(((
+      ...args: Parameters<typeof filesystem.readFile>
+    ) => {
+      if (args[0] === policy.journal)
+        lateConsumer = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" })
+      return originalReadFile(...args)
+    }) as typeof filesystem.readFile)
     try {
       await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
         reason: "opencode_grant_migration_incomplete",
       })
-      expect(replaced).toBe(true)
+      expect(lateConsumer).toBeDefined()
+      await expect(lstat(policy.journal)).rejects.toMatchObject({ code: "ENOENT" })
       expect(await readFile(policy.source)).toEqual(before)
-      expect(await readFile(victim)).toEqual(victimBefore)
     } finally {
-      race.mockRestore()
-      if (replaced) {
-        await rm(destinationDirectory)
-        await rename(retainedDirectory, destinationDirectory)
-      }
+      consumerRace.mockRestore()
+      lateConsumer?.kill()
+      await lateConsumer?.exited
     }
     const { migrateConfiguredOpenCode } = await import("../../deploy/agent-user/migrate-opencode")
     await expect(migrateConfiguredOpenCode(policy)).rejects.toThrow()

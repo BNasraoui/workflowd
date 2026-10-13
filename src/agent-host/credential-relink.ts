@@ -20,6 +20,7 @@ import { credentialRefusal } from "./protocol"
 
 async function resolvedConsumers(paths: readonly string[]) {
   const installed = new Set<string>()
+  const roots = new Set<string>()
   const add = async (path: string) => {
     const resolved = await realpath(path).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
@@ -33,6 +34,7 @@ async function resolvedConsumers(paths: readonly string[]) {
     if (!binary) continue
     // Claude's native installer retains previous versions; running clients may use any of them.
     if (basename(dirname(binary)) === "versions") {
+      roots.add(dirname(binary))
       for (const name of await readdir(dirname(binary))) await add(join(dirname(binary), name))
     }
     // Codex's npm launcher delegates to a platform package, or its bundled vendor tree.
@@ -47,6 +49,7 @@ async function resolvedConsumers(paths: readonly string[]) {
       ]
       for (const root of packages) {
         const vendor = join(root, "vendor")
+        roots.add(vendor)
         const targets = await readdir(vendor).catch((error: unknown) => {
           if (error instanceof Error && "code" in error && error.code === "ENOENT") return []
           throw error
@@ -58,11 +61,11 @@ async function resolvedConsumers(paths: readonly string[]) {
       }
     }
   }
-  return installed
+  return { installed, roots }
 }
 
 async function requireStopped(policy: CredentialPolicy, client: "codex" | "claude") {
-  const installed = await resolvedConsumers(policy.consumerExecutables)
+  const { installed, roots } = await resolvedConsumers(policy.consumerExecutables)
   const fail = (): never => {
     throw credentialRefusal(client, "credential_relink_in_progress")
   }
@@ -74,6 +77,12 @@ async function requireStopped(policy: CredentialPolicy, client: "codex" | "claud
     if (info.uid === policy.agentUid) fail()
     if (info.uid !== policy.controllerUid) continue
     try {
+      const target = await readlink(`${path}/exe`)
+      if (target.endsWith(" (deleted)")) {
+        const original = target.slice(0, -" (deleted)".length)
+        if (installed.has(original) || [...roots].some((root) => original.startsWith(`${root}/`)))
+          fail()
+      }
       const executable = await realpath(`${path}/exe`)
       if (installed.has(executable)) fail()
       // Script entrypoints run inside Node; resolve argv paths too, never argv display names.
