@@ -109,6 +109,7 @@ describe("persisted row decoding", () => {
             pullRequest: {
               ...samplePullRequestEvent.pullRequest,
               number: 8,
+              headRepositoryFullName: "example-owner/second",
             },
           }),
         )
@@ -211,6 +212,7 @@ describe("persisted row decoding", () => {
             pullRequest: {
               ...samplePullRequestEvent.pullRequest,
               number: 8,
+              headRepositoryFullName: "example-owner/second",
             },
           }),
         )

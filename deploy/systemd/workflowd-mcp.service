@@ -11,6 +11,9 @@ Environment=PATH=%h/.bun/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.config/workflowd/mcp.env
 LoadCredential=mcp-token:%h/.config/workflowd/mcp-token
 Environment=WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token
+# Dispatch is reserved for trusted non-OpenCode coordinators.
+LoadCredential=mcp-dispatch-token:%h/.config/workflowd/mcp-dispatch-token
+Environment=WORKFLOWD_MCP_DISPATCH_TOKEN_FILE=%d/mcp-dispatch-token
 # Lets wait_for_agent proxy to the daemon's agent-wait ingress. Drop both
 # lines (and WORKFLOWD_DAEMON_URL from mcp.env) to keep the tool disabled.
 LoadCredential=agent-wait-token:%h/.config/workflowd/agent-wait-token

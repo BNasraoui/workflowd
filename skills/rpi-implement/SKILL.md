@@ -56,10 +56,20 @@ under the old plan.
 
 1. Update the PR: set its title to the ticket title, mark it ready
    (`gh pr ready rpi/<id>`), and list the phases with their commits in the body.
-2. Only after the PR is updated, watch CI to the end (`gh pr checks <pr> --watch`). Fix failures on the same branch, only
-   within the plan's files. A resident worker that must end its turn after pushing instead
-   opens or updates the PR, publishes the report, and ends its turn. It never subscribes
-   to CI; the coordinator handles the next wake.
+2. A resident worker that must end its turn after pushing opens or updates the PR,
+   publishes the report, and ends its turn without watching or subscribing to CI; the
+   coordinator handles the next wake. This handoff takes precedence over the injected
+   resident polling default.
+   Otherwise, only after the PR is updated, run
+   `timeout 12m gh pr checks <pr> --repo <owner/repo> --required --watch --interval 60`.
+   Retry only "no checks reported" (or "no required checks reported") every 30 seconds
+   for up to 3 minutes after pushing; cap retries plus watching at 15 minutes total
+   (shorter if the configured stall window is lower). Do not rely on shell output as a
+   heartbeat. Fix failures on the same branch, only within the plan's files. Verify the
+   PR head still matches the pushed SHA. On timeout (exit 124), exhausted missing-check
+   retries, changed head, or observation errors, report the PR URL, pushed SHA, exact
+   command/error, last required-check states and links, and "CI unconfirmed; coordinator/
+   operator follow-up required", then end the turn.
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can

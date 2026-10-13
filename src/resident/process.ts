@@ -25,7 +25,7 @@ export function startAppServer(
   delete env.GITHUB_TOKEN
   delete env.GH_ENTERPRISE_TOKEN
   delete env.GITHUB_ENTERPRISE_TOKEN
-  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],enabled=false}`
   const child = Bun.spawn(
     [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
     {
@@ -323,7 +323,7 @@ export const launchAppServer = async (
     "WORKFLOWD_NATS_CREDS",
   ])
     delete environment[key]
-  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],required=true}`
+  const subscriptionConfig = `mcp_servers.workflowd_subscriptions={command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(join(import.meta.dir, "mcp.ts"))}],env_vars=["WORKFLOWD_RUN_ID","WORKFLOWD_CODEX_RESIDENT_SOCKET"],enabled=false}`
   await command([
     "systemd-run",
     "--user",

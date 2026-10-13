@@ -16,6 +16,7 @@ describe("pull request transition storage", () => {
           ...samplePullRequestEvent,
           pullRequest: {
             ...samplePullRequestEvent.pullRequest,
+            authorAssociation: "MEMBER",
             updatedAt: "2026-07-20T10:00:00.000Z",
           },
         }

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import type { Schema } from "effect"
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -276,105 +277,100 @@ test("resident delivery and remote Claude extraction retain refusal and do not r
   expect(calls).toBe(2)
 })
 
-import { createHash } from "node:crypto"
-import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer, Schema } from "effect"
-import {
-  AGENT_WAKE_CONTRACT,
-  AgentWakeResult,
-  agentWakePrompt,
-} from "../../src/kernel/agent-wait-ingress"
-import { runClaudeResumeIteration } from "../../src/kernel/claude-resume-worker"
-import {
-  ClaudeCli,
-  claudeEndpointIdentity,
-  claudeSessionCustodyId,
-} from "../../src/kernel/claude-session"
-import { KernelEventStoreLive } from "../../src/kernel/event-store"
-import { KernelJobStoreLive } from "../../src/kernel/job-store"
-import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
-import { ClaudeResumeRemoteProducerLive } from "../../src/remote/claude-resume-producer"
-import { toJsonSchemaObject } from "../../src/json"
-import { WorkflowStoreLive } from "../../src/store"
-
-const at = new Date("2026-08-31T09:00:00.000Z")
-const native = "0c0ffee0-cafe-4dad-b0ba-000000000001"
-const directory = "/home/ben/Documents/repos/workflowd"
-
-const storesLayer = (() => {
-  const bootstrap = WorkflowStoreLive.pipe(
-    Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
-  )
-  const kernel = Layer.mergeAll(
-    KernelSessionStoreLive,
-    KernelEventStoreLive,
-    KernelJobStoreLive,
-  ).pipe(Layer.provideMerge(bootstrap))
-  return ClaudeResumeRemoteProducerLive.pipe(Layer.provideMerge(kernel))
-})()
-
-const contract = {
-  name: AGENT_WAKE_CONTRACT.name,
-  version: AGENT_WAKE_CONTRACT.version,
-  schema: AgentWakeResult as Schema.Codec<unknown, unknown>,
-  jsonSchema: toJsonSchemaObject(AgentWakeResult),
-  maxOutputBytes: 16_384,
-}
-
-const options = {
-  owningHostId: "mint",
-  workerId: "test:claude-resume",
-  leaseDurationMs: 60_000,
-  heartbeatIntervalMs: 20_000,
-  resumeTimeoutMs: 5_000,
-  retryDelayMs: 1_000,
-  claudeHosts: ["ben-arch"],
-  remoteTurnTimeoutMs: 120_000,
-  now: () => at,
-  contracts: [contract],
-}
-
-const wake = agentWakePrompt("Your child finished; acknowledge.")
-
-const seed = Effect.gen(function* () {
-  const store = yield* KernelSessionStore
-  yield* store.registerResource({
-    resourceId: "claude-parent-resource",
-    owningHostId: "mint",
-    absolutePath: directory,
-    kind: "checkout",
-    createdAt: at,
-  })
-  yield* store.registerSession({
-    sessionId: claudeSessionCustodyId(native),
-    providerKind: "claude",
-    providerVersion: 1,
-    providerId: "claude-cli",
-    serverId: "mint",
-    owningHostId: "mint",
-    endpointAlias: "local-cli",
-    endpointIdentity: claudeEndpointIdentity("mint"),
-    nativeSessionId: native,
-    resourceId: "claude-parent-resource",
-    createdAt: at,
-  })
-  yield* store.registerResumeRequest({
-    requestId: "claude-resume-1",
-    sessionId: claudeSessionCustodyId(native),
-    owningHostId: "mint",
-    prompt: wake.resumePrompt,
-    promptText: wake.resumePromptText,
-    promptSha256: createHash("sha256").update(wake.resumePromptText, "utf8").digest("hex"),
-    outputContract: AGENT_WAKE_CONTRACT.name,
-    outputContractVersion: AGENT_WAKE_CONTRACT.version,
-    maxAttempts: 3,
-    runAt: at,
-    createdAt: at,
-  })
-})
-
 for (const refuseWake of [true, false]) {
   test(`same-host Claude refusal preserves its reason without replay; wake=${refuseWake}`, async () => {
+    const { createHash } = await import("node:crypto")
+    const { SqliteClient } = await import("@effect/sql-sqlite-bun")
+    const { Effect, Layer } = await import("effect")
+    const { AGENT_WAKE_CONTRACT, AgentWakeResult, agentWakePrompt } =
+      await import("../../src/kernel/agent-wait-ingress")
+    const { runClaudeResumeIteration } = await import("../../src/kernel/claude-resume-worker")
+    const { ClaudeCli, claudeEndpointIdentity, claudeSessionCustodyId } =
+      await import("../../src/kernel/claude-session")
+    const { KernelEventStoreLive } = await import("../../src/kernel/event-store")
+    const { KernelJobStoreLive } = await import("../../src/kernel/job-store")
+    const { KernelSessionStore, KernelSessionStoreLive } =
+      await import("../../src/kernel/session-store")
+    const { ClaudeResumeRemoteProducerLive } =
+      await import("../../src/remote/claude-resume-producer")
+    const { toJsonSchemaObject } = await import("../../src/json")
+    const { WorkflowStoreLive } = await import("../../src/store")
+
+    const at = new Date("2026-08-31T09:00:00.000Z")
+    const native = "0c0ffee0-cafe-4dad-b0ba-000000000001"
+    const directory = "/home/ben/Documents/repos/workflowd"
+
+    const storesLayer = (() => {
+      const bootstrap = WorkflowStoreLive.pipe(
+        Layer.provideMerge(SqliteClient.layer({ filename: ":memory:" })),
+      )
+      const kernel = Layer.mergeAll(
+        KernelSessionStoreLive,
+        KernelEventStoreLive,
+        KernelJobStoreLive,
+      ).pipe(Layer.provideMerge(bootstrap))
+      return ClaudeResumeRemoteProducerLive.pipe(Layer.provideMerge(kernel))
+    })()
+
+    const contract = {
+      name: AGENT_WAKE_CONTRACT.name,
+      version: AGENT_WAKE_CONTRACT.version,
+      schema: AgentWakeResult as Schema.Codec<unknown, unknown>,
+      jsonSchema: toJsonSchemaObject(AgentWakeResult),
+      maxOutputBytes: 16_384,
+    }
+
+    const options = {
+      owningHostId: "mint",
+      workerId: "test:claude-resume",
+      leaseDurationMs: 60_000,
+      heartbeatIntervalMs: 20_000,
+      resumeTimeoutMs: 5_000,
+      retryDelayMs: 1_000,
+      claudeHosts: ["ben-arch"],
+      remoteTurnTimeoutMs: 120_000,
+      now: () => at,
+      contracts: [contract],
+    }
+
+    const wake = agentWakePrompt("Your child finished; acknowledge.")
+
+    const seed = Effect.gen(function* () {
+      const store = yield* KernelSessionStore
+      yield* store.registerResource({
+        resourceId: "claude-parent-resource",
+        owningHostId: "mint",
+        absolutePath: directory,
+        kind: "checkout",
+        createdAt: at,
+      })
+      yield* store.registerSession({
+        sessionId: claudeSessionCustodyId(native),
+        providerKind: "claude",
+        providerVersion: 1,
+        providerId: "claude-cli",
+        serverId: "mint",
+        owningHostId: "mint",
+        endpointAlias: "local-cli",
+        endpointIdentity: claudeEndpointIdentity("mint"),
+        nativeSessionId: native,
+        resourceId: "claude-parent-resource",
+        createdAt: at,
+      })
+      yield* store.registerResumeRequest({
+        requestId: "claude-resume-1",
+        sessionId: claudeSessionCustodyId(native),
+        owningHostId: "mint",
+        prompt: wake.resumePrompt,
+        promptText: wake.resumePromptText,
+        promptSha256: createHash("sha256").update(wake.resumePromptText, "utf8").digest("hex"),
+        outputContract: AGENT_WAKE_CONTRACT.name,
+        outputContractVersion: AGENT_WAKE_CONTRACT.version,
+        maxAttempts: 3,
+        runAt: at,
+        createdAt: at,
+      })
+    })
     const { credentialRefusal } = await import("../../src/agent-host/protocol")
     const { WorkspaceError } = await import("../../src/workspace/errors")
     let calls = 0

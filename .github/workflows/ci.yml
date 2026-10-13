@@ -211,7 +211,7 @@ jobs:
           test/agent-user/credentials.e2e.test.ts
           test/agent-user/credential-dispatch.e2e.test.ts
           test/agent-user/opencode-migration.e2e.test.ts
-      - name: Require administrative migration coverage
+      - name: Require administrative credential coverage
         run: |
           mkdir -p coverage/administrative
           sudo systemd-run --wait --pipe --collect \
@@ -224,19 +224,23 @@ jobs:
             /bin/sh -c 'ip link set lo up && exec "$@"' fixture \
             /opt/workflowd-credential-fixture/bin/bun test --coverage \
             --coverage-dir=coverage/administrative \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after)' \
+            test/agent-user/client-versions.test.ts \
+            test/agent-user/credentials.e2e.test.ts \
+            test/agent-user/credential-dispatch.e2e.test.ts \
             test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
         run: |
-          # Administrative migration needs /proc access unavailable to the ordinary
-          # test UID. The preceding step enforces the unchanged Bun thresholds for
-          # that module. Every other module is checked here with the same thresholds.
+          # Migration needs privileged /proc access; refresh probes need network
+          # isolation. The preceding step checks both modules with unchanged Bun
+          # thresholds. Every other module is checked here with those thresholds.
           python3 - <<'PY'
           import os
           from pathlib import Path
           config = Path("bunfig.toml").read_text()
           key = "coveragePathIgnorePatterns = ["
           assert config.count(key) == 1
-          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",', 1)
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "test/agent-user/harness.ts",', 1)
           Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
           PY
           bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
@@ -246,14 +250,17 @@ jobs:
           # No duplicate file records may mask ordinary-suite coverage.
           python3 - <<'PY'
           from pathlib import Path
-          marker = "SF:src/agent-host/opencode-credentials.ts\n"
+          paths = ["src/agent-host/opencode-credentials.ts", "test/agent-user/harness.ts"]
           administrative = Path("coverage/administrative/lcov.info").read_text()
-          records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
-          assert len(records) == 1, "administrative migration coverage missing or duplicated"
           report = Path("coverage/lcov.info")
           ordinary = report.read_text()
-          assert marker not in ordinary.splitlines(keepends=True), "duplicate migration coverage"
-          report.write_text(ordinary + records[0] + "end_of_record\n")
+          for path in paths:
+              marker = f"SF:{path}\n"
+              records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
+              assert len(records) == 1, f"administrative coverage missing or duplicated: {path}"
+              assert marker not in ordinary.splitlines(keepends=True), f"duplicate coverage: {path}"
+              ordinary += records[0] + "end_of_record\n"
+          report.write_text(ordinary)
           PY
       - name: Require 80% changed executable line coverage
         if: github.event_name == 'pull_request'

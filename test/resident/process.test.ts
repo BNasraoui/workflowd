@@ -25,7 +25,7 @@ test("owns a stdio server and closes only its subprocess", async () => {
     expect(result).toMatchObject({
       ok: true,
       args: expect.arrayContaining([
-        expect.stringContaining("mcp_servers.workflowd_subscriptions="),
+        expect.stringMatching(/mcp_servers\.workflowd_subscriptions=\{command=.*enabled=false/),
       ]),
     })
   } finally {

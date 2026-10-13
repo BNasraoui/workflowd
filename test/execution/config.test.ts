@@ -11,6 +11,7 @@ const env = {
   GITHUB_PRIVATE_KEY_PATH: "/fixture/key",
   GITHUB_WEBHOOK_SECRET: "secret",
   OPENCODE_SERVER_PASSWORD: "secret",
+  WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
   WORKFLOWD_OPENCODE_ATTACH_URL: "http://localhost:4096",
   WORKFLOWD_HOST_ID: "box",
 }

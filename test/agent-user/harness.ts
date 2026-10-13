@@ -179,44 +179,56 @@ export async function probeCodexCredentialSharing() {
   }
 }
 
+async function isolatedRefreshProcess(identifier: string): Promise<unknown> {
+  const child = Bun.spawn(
+    [
+      "systemd-run",
+      ...(process.getuid?.() === 0 ? [] : ["--user"]),
+      "--quiet",
+      "--wait",
+      "--pipe",
+      "--collect",
+      "-p",
+      "MemoryMax=6G",
+      "-p",
+      "MemorySwapMax=0",
+      "-p",
+      "RuntimeMaxSec=120",
+      "-p",
+      "PrivateNetwork=yes",
+      ...(process.getuid?.() === 0 ? [] : ["-p", "PrivateUsers=yes"]),
+      `--setenv=PATH=${process.env.PATH}`,
+      `--working-directory=${process.cwd()}`,
+      ...[
+        "WORKFLOWD_AGENT_TEST_BEN_UID",
+        "WORKFLOWD_AGENT_TEST_AGENT_UID",
+        "WORKFLOWD_AGENT_TEST_AUTH_GID",
+      ].flatMap((key) => (process.env[key] ? [`--setenv=${key}=${process.env[key]}`] : [])),
+      process.execPath,
+      import.meta.filename,
+      "--installed-refresh",
+      identifier,
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  )
+  const output = await new Response(child.stdout).text()
+  if ((await child.exited) !== 0) throw new Error("installed_refresh_probe_failed")
+  return JSON.parse(output)
+}
+
 /** The entire protocol fixture runs in a network namespace containing only loopback. */
 export async function probeInstalledRefresh() {
   const root = await mkdtemp(join(tmpdir(), "workflowd-oauth-refresh-"))
   await chmod(root, 0o710)
   try {
-    const child = Bun.spawn(
-      [
-        "systemd-run",
-        ...(process.getuid?.() === 0 ? [] : ["--user"]),
-        "--quiet",
-        "--wait",
-        "--pipe",
-        "--collect",
-        "-p",
-        "MemoryMax=6G",
-        "-p",
-        "MemorySwapMax=0",
-        "-p",
-        "RuntimeMaxSec=120",
-        "-p",
-        "PrivateNetwork=yes",
-        ...(process.getuid?.() === 0 ? [] : ["-p", "PrivateUsers=yes"]),
-        `--setenv=PATH=${process.env.PATH}`,
-        `--working-directory=${process.cwd()}`,
-        ...[
-          "WORKFLOWD_AGENT_TEST_BEN_UID",
-          "WORKFLOWD_AGENT_TEST_AGENT_UID",
-          "WORKFLOWD_AGENT_TEST_AUTH_GID",
-        ].flatMap((key) => (process.env[key] ? [`--setenv=${key}=${process.env[key]}`] : [])),
-        process.execPath,
-        import.meta.filename,
-        "--installed-refresh",
-        root.slice(-6),
-      ],
-      { stdout: "pipe", stderr: "ignore" },
-    )
-    const output = await new Response(child.stdout).text()
-    if ((await child.exited) !== 0) throw new Error("installed_refresh_probe_failed")
+    const { networkInterfaces } = await import("node:os")
+    const isolated = Object.values(networkInterfaces())
+      .flat()
+      .every((entry) => entry?.internal)
+    const output =
+      process.getuid?.() === 0 && isolated
+        ? await installedRefresh(root.slice(-6))
+        : await isolatedRefreshProcess(root.slice(-6))
     const { Schema } = await import("effect")
     const evidence = Schema.decodeUnknownSync(
       Schema.Struct({
@@ -231,7 +243,7 @@ export async function probeInstalledRefresh() {
           repaired: Schema.Boolean,
         }),
       }),
-    )(JSON.parse(output))
+    )(output)
     const store = join(root, "claude")
     const login = {
       canonical: join(store, ".credentials.json"),

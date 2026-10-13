@@ -1141,6 +1141,7 @@ describe("WorkflowStore.executeCommand workflows", () => {
             pullRequest: {
               ...samplePullRequestEvent.pullRequest,
               headRepositoryFullName: "contributor/example",
+              authorAssociation: "COLLABORATOR",
             },
           }),
         )
