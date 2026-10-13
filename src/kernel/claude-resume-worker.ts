@@ -8,6 +8,7 @@ import { JsonValueSchema } from "../json"
 import { structuredExtractionPrompt } from "../opencode/adapter"
 import { ClaudeResumeRemoteProducer } from "../remote/claude-resume-producer"
 import { ClaudeCli, claudeHostFromEndpointIdentity } from "./claude-session"
+import { recordAgentWakeFailure } from "./agent-wake-failure"
 import { KernelJobStore, type KernelJobStoreError } from "./job-store"
 import { canonicalJson } from "./session-store-support"
 import { KernelSessionStore, type KernelSessionStoreError, type ResumeClaim } from "./session-store"
@@ -78,8 +79,10 @@ export const ClaudeResumeWorker = Context.Service<ClaudeResumeWorkerPort>(
 
 const SessionRow = Schema.Struct({
   session_id: Schema.String,
+  state: Schema.String,
   provider_kind: Schema.Literals(["opencode", "codex", "claude"]),
   owning_host_id: Schema.String,
+  server_id: Schema.String,
   endpoint_identity: Schema.String,
   native_session_id: Schema.String,
   resource_id: Schema.String,
@@ -134,8 +137,10 @@ const validateCustody = (sessionId: string, options: ClaudeResumeWorkerOptions) 
       (deliveryHost === options.owningHostId || options.claudeHosts.includes(deliveryHost))
     if (
       session.provider_kind !== "claude" ||
+      !["ready", "active"].includes(session.state) ||
       session.owning_host_id !== options.owningHostId ||
       deliveryHost === null ||
+      session.server_id !== deliveryHost ||
       !deliverable
     ) {
       return yield* Effect.fail(
@@ -187,27 +192,35 @@ const validateCustody = (sessionId: string, options: ClaudeResumeWorkerOptions) 
 const operatorRequired = (claim: ResumeClaim, options: ClaudeResumeWorkerOptions, reason: string) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
-    const at = options.now()
-    const changed = yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
+    return yield* Effect.gen(function* () {
+      const at = options.now()
+      const changed = yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
       sent_at = COALESCE(sent_at, ${at.toISOString()}), updated_at = ${at.toISOString()}
       WHERE request_id = ${claim.requestId} AND attempt = ${claim.attempt}
         AND owning_host_id = ${claim.owningHostId} AND worker_id = ${claim.workerId}
         AND claim_token = ${claim.claimToken} AND lease_until = ${claim.leaseUntil.toISOString()}
         AND state IN ('leased', 'sent') RETURNING request_id`
-    if (changed.length === 0) {
-      return yield* Effect.fail(
-        new ClaudeResumeWorkerError({
-          operation: reason,
-          cause: new Error("resume authority was lost"),
-        }),
-      )
-    }
-    yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
+      if (changed.length === 0) {
+        return yield* Effect.fail(
+          new ClaudeResumeWorkerError({
+            operation: reason,
+            cause: new Error("resume authority was lost"),
+          }),
+        )
+      }
+      yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
       updated_at = ${at.toISOString()} WHERE request_id = ${claim.requestId}
       AND state IN ('leased', 'sent')`
-    yield* sql`UPDATE kernel_sessions SET state = 'operator_required', revision = revision + 1,
+      yield* sql`UPDATE kernel_sessions SET state = 'operator_required', revision = revision + 1,
       updated_at = ${at.toISOString()} WHERE session_id = ${claim.sessionId}`
-    return { status: "operator_required" as const, requestId: claim.requestId, reason }
+      yield* recordAgentWakeFailure({
+        parentSessionId: claim.sessionId,
+        identity: claim.requestId,
+        reason,
+        now: at,
+      })
+      return { status: "operator_required" as const, requestId: claim.requestId, reason }
+    }).pipe(sql.withTransaction)
   })
 
 const RemoteJobCheckpoint = Schema.Struct({ remoteJobId: Schema.String })
@@ -235,7 +248,12 @@ const recordClaudeObservation = (
   request: typeof RecoverableRow.Type,
   options: ClaudeResumeWorkerOptions,
   disposition: "completed" | "operator_required",
-  evidence: unknown,
+  evidence: {
+    readonly reason: string
+    readonly failureReason?: string
+    readonly jobState?: string
+    readonly result?: unknown
+  },
   resultVersion?: number,
 ) =>
   Effect.gen(function* () {
@@ -255,6 +273,17 @@ const recordClaudeObservation = (
         evidence,
         observedAt,
       })
+      if (disposition === "operator_required") {
+        yield* recordAgentWakeFailure({
+          parentSessionId: request.session_id,
+          identity: request.request_id,
+          reason: evidence.reason,
+          ...(evidence.failureReason === undefined
+            ? {}
+            : { failureReason: evidence.failureReason }),
+          now: observedAt,
+        })
+      }
       if (disposition === "completed" && resultVersion !== undefined) {
         const completed = yield* Schema.decodeUnknownEffect(CompletedRemoteEvidence)(evidence)
         yield* sql`INSERT INTO kernel_resume_results (result_id, request_id, attempt, result_version,
@@ -308,18 +337,9 @@ const observeRemoteRow = (
         AND checkpoint_version = 2
       ORDER BY created_at DESC LIMIT 1`
     if (checkpointRows.length === 0) {
-      const at = options.now()
-      yield* sql`UPDATE kernel_resume_attempts SET state = 'operator_required',
-        updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
-        AND state = 'observation_required'`
-      yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required',
-        updated_at = ${at.toISOString()} WHERE request_id = ${request.request_id}
-        AND state = 'observation_required'`
-      return {
-        status: "operator_required" as const,
-        requestId: request.request_id,
+      return yield* recordClaudeObservation(request, options, "operator_required", {
         reason: "restart_unattributable",
-      }
+      })
     }
     const checkpoint = yield* Schema.decodeUnknownEffect(
       Schema.fromJsonString(RemoteJobCheckpoint),

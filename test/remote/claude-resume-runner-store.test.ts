@@ -81,6 +81,38 @@ const layer = (executor: ClaudeResumeExecutorPort) => {
 }
 
 describe("runner store claude_resume at-most-once", () => {
+  test("mint rejects both a ben-arch envelope and a ben-arch payload inside a mint envelope", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* RemoteRunnerStore
+        const localFence = { ...fence, hostId: "mint" }
+        yield* store.recordBatch(
+          "mint",
+          [{ deliveryId: "f", data: yield* encodeRemoteFence(localFence), message: localFence }],
+          now,
+        )
+        const outcomes = []
+        for (const hostId of ["ben-arch", "mint"]) {
+          const message = { ...command, commandId: `cmd-${hostId}`, hostId }
+          outcomes.push(
+            ...(yield* store.recordBatch(
+              "mint",
+              [{ deliveryId: hostId, data: yield* encodeRemoteCommand(message), message }],
+              now,
+            )),
+          )
+        }
+        return { outcomes, recoverable: yield* store.recoverReceived() }
+      }).pipe(
+        Effect.provide(
+          layer(countingExecutor({ status: "failed", failureReason: "cli_failed" }, { count: 0 })),
+        ),
+      ),
+    )
+    expect(result.outcomes.map((row) => row.disposition)).toEqual(["wrong_host", "wrong_host"])
+    expect(result.recoverable).toHaveLength(0)
+  })
+
   test("executes once, then replays the stored result on redelivery without re-running", async () => {
     const runs = { count: 0 }
     const ack = '{"acknowledged":true,"summary":"ok"}'

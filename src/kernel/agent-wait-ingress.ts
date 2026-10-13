@@ -7,6 +7,7 @@ import {
   AgentWaitSubmission,
   type AgentWaitSubmission as AgentWaitSubmissionType,
 } from "../agent-wait-contract"
+import { agentWakeMailboxId } from "./agent-wake-failure"
 import { WorkSignal } from "../work-signal"
 import {
   AgentHandoffStore,
@@ -237,7 +238,11 @@ const make = (completionSource: AgentCompletionSourceIdentity) =>
           registeredAt: now,
         })
         yield* signals.wake("agent-completion")
-        return { ...identifiers, status: registered.status }
+        return {
+          ...identifiers,
+          status: registered.status,
+          mailboxId: agentWakeMailboxId(submission.parentSessionId),
+        }
       }).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.provideService(AgentHandoffStore, handoffs),

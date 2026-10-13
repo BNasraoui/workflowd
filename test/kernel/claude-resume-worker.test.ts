@@ -164,6 +164,41 @@ const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof storesLayer>
   Effect.runPromise(effect.pipe(Effect.provide(storesLayer)))
 
 describe("claude resume worker", () => {
+  test("does not retry operator-required requests or remote jobs after custody repair", async () => {
+    const prompts: string[] = []
+    const result = await run(
+      Effect.gen(function* () {
+        yield* seedRemote()
+        const cli = cliOf(prompts, ["unused"])
+        yield* runClaudeResumeIteration(options).pipe(Effect.provideService(ClaudeCli, cli))
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required'`
+        yield* sql`UPDATE kernel_workflow_jobs SET state = 'operator_required'`
+        yield* sql`UPDATE kernel_sessions SET state = 'ready'`
+        const later = new Date(at.getTime() + 24 * 60 * 60 * 1_000)
+        const iteration = yield* runClaudeResumeIteration({ ...options, now: () => later }).pipe(
+          Effect.provideService(ClaudeCli, cli),
+        )
+        const claim = yield* (yield* KernelJobStore).claimRemote({
+          workerId: "after-restart",
+          now: later,
+          leaseDurationMs: 60_000,
+        })
+        return {
+          iteration,
+          claim,
+          requests: yield* sql`SELECT state, attempt FROM kernel_resume_requests`,
+          jobs: yield* sql`SELECT state, attempt FROM kernel_workflow_jobs`,
+        }
+      }),
+    )
+    expect(result.iteration.status).toBe("idle")
+    expect(result.claim).toBeNull()
+    expect(result.requests).toEqual([{ state: "operator_required", attempt: 1 }])
+    expect(result.jobs).toEqual([{ state: "operator_required", attempt: 0 }])
+    expect(prompts).toHaveLength(0)
+  })
+
   test("delivers the wake through the claude CLI and records the structured ack", async () => {
     const prompts: Array<string> = []
     const ack = JSON.stringify({ acknowledged: true, summary: "woken by workflowd" })
@@ -248,6 +283,48 @@ describe("claude resume worker", () => {
     )
     expect(result.iteration).toMatchObject({ status: "operator_required" })
     expect(result.request).toMatchObject({ state: "operator_required" })
+  })
+
+  test("refuses inconsistent host custody instead of running on the endpoint host", async () => {
+    const prompts: Array<string> = []
+    const result = await run(
+      Effect.gen(function* () {
+        yield* seedRemote()
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_sessions SET endpoint_identity = 'claude-cli://mint'
+        WHERE session_id = ${claudeSessionCustodyId(remoteNative)}`
+        return yield* runClaudeResumeIteration(options).pipe(
+          Effect.provideService(
+            ClaudeCli,
+            cliOf(prompts, ["ACK", JSON.stringify({ acknowledged: true, summary: "wrong host" })]),
+          ),
+        )
+      }),
+    )
+    expect(result.status).toBe("operator_required")
+    expect(prompts).toHaveLength(0)
+  })
+
+  test("does not deliver a queued wake after parent custody becomes blocked", async () => {
+    const prompts: Array<string> = []
+    const result = await run(
+      Effect.gen(function* () {
+        yield* seed
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_sessions SET state = 'operator_required'`
+        const iteration = yield* runClaudeResumeIteration(options).pipe(
+          Effect.provideService(
+            ClaudeCli,
+            cliOf(prompts, ["ACK", JSON.stringify({ acknowledged: true, summary: "unexpected" })]),
+          ),
+        )
+        const notices = yield* sql`SELECT id FROM resident_inbox`
+        return { iteration, notices }
+      }),
+    )
+    expect(result.iteration.status).toBe("operator_required")
+    expect(prompts).toHaveLength(0)
+    expect(result.notices).toHaveLength(1)
   })
 
   test("encodes claude project directories the way the CLI stores them", () => {
@@ -400,6 +477,9 @@ describe("claude resume worker", () => {
           escalated,
           request: yield* store.readResumeRequest("claude-remote-1"),
           observation: yield* store.readLatestObservation("claude-remote-1"),
+          messages: yield* (yield* SqlClient.SqlClient)<{
+            prompt: string
+          }>`SELECT prompt FROM resident_inbox WHERE mailbox_id = ${"agent-wake-mailbox-" + claudeSessionCustodyId(remoteNative)}`,
         }
       }),
     )
@@ -409,6 +489,11 @@ describe("claude resume worker", () => {
     expect(result.request).toMatchObject({ state: "operator_required" })
     expect(result.observation).toMatchObject({ disposition: "operator_required" })
     expect(String(result.observation?.evidence_json)).toContain("transcript_missing")
+    expect(JSON.parse(result.messages[0]!.prompt)).toMatchObject({
+      kind: "agent_wake_failed",
+      reason: "remote_delivery_failed",
+      failure_reason: "transcript_missing",
+    })
   })
 
   test("refuses a wake document that exceeds the remote wire budget", async () => {
