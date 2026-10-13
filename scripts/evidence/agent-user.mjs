@@ -83,7 +83,9 @@ async function probeSupervision() {
     )
   }
   try {
-    await chmod(root, 0o711)
+    // Bun resolves entrypoints by reading their directory; only public fixture
+    // code lives here. The separate controller and agent homes stay private.
+    await chmod(root, 0o755)
     for (const [directory, uid, mode] of [
       [agentHome, agentUid, 0o700],
       [controllerHome, controllerUid, 0o700],
@@ -231,7 +233,7 @@ if (process.argv.length === 3 && process.argv[2] === "--probe-supervision") {
   try {
     console.log(JSON.stringify(await probeSupervision()))
   } catch (error) {
-    // Keep client output and filesystem contents out of evidence logs.
+    // Diagnostics are bounded fixture-command errors; no model client is invoked.
     console.error(
       `Supervision probe blocked: ${error instanceof Error ? error.message : "unknown"}`,
     )
