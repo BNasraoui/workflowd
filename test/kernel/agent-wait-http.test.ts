@@ -40,6 +40,7 @@ const route = (request: Request, register: AgentWaitIngressPort["register"]) =>
   Effect.runPromise(
     routeRequest(request, {
       webhookSecret: "unused",
+      installationIds: new Set([91]),
       now,
       agentWaits: { token, register },
     }).pipe(Effect.provide(ambient)),
@@ -104,6 +105,7 @@ describe("POST /workflows/agent-waits", () => {
     const response = await Effect.runPromise(
       routeRequest(post(body, authorization), {
         webhookSecret: "unused",
+        installationIds: new Set([91]),
         now,
       }).pipe(Effect.provide(ambient)),
     )

@@ -126,6 +126,7 @@ beforeAll(async () => {
       daemonRuntime.runPromise(
         routeRequest(request, {
           webhookSecret: "",
+          installationIds: new Set(),
           now: new Date(),
           agentRuns: { token: "run-token", ...ingress },
         }),

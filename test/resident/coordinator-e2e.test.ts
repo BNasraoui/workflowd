@@ -140,7 +140,12 @@ const dispatch = (prompt: string) =>
         headers: { authorization: "Bearer secret" },
         body: JSON.stringify({ route: "native", repository: "workflowd", prompt }),
       }),
-      { webhookSecret: "", now: new Date(), agentRuns: { token: "secret", ...ingress } },
+      {
+        installationIds: new Set(),
+        webhookSecret: "",
+        now: new Date(),
+        agentRuns: { token: "secret", ...ingress },
+      },
     )
     expect(response.status).toBe(202)
     return yield* Effect.promise(() => response.json()).pipe(

@@ -17,6 +17,7 @@ test.each([
   "[]",
   "null",
   "not json",
+  '[{"repository":"owner/repo","installationId":9007199254740992}]',
   '[{"repository":"owner/repo","installationId":0}]',
   '[{"repository":"*","installationId":91}]',
   '[{"repository":"owner/repo","installationId":1.5}]',

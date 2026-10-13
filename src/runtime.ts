@@ -48,7 +48,7 @@ export class HookHttpServerStartError extends Data.TaggedError("HookHttpServerSt
 
 type ScopedHookRouteHandler<R> = (
   request: Request,
-  options: WebhookHandlerOptions,
+  options: Pick<WebhookHandlerOptions, "webhookSecret" | "maxBodyBytes" | "now">,
 ) => Effect.Effect<Response, never, R>
 
 export function superviseWorker<A extends string, E, R>(
@@ -519,6 +519,7 @@ export function startHookService(
             prAutomationEnabled: config.mode !== "execution",
             prRepositories: config.github?.prRepositories ?? [],
             installationIds,
+            ciRepositories: config.ci?.repositories ?? [],
             ...(Option.isSome(installationGuard)
               ? { installationGuard: installationGuard.value }
               : {}),

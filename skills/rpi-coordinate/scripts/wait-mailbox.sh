@@ -28,6 +28,7 @@ response_file=$(mktemp)
 trap 'rm -f "$response_file"' EXIT
 started=$SECONDS
 retry_delay=1
+connection_failures=0
 
 while true; do
 	remaining=15
@@ -48,11 +49,17 @@ while true; do
 		--header 'Accept: application/json, text/event-stream' \
 		--header "Authorization: Bearer $token" \
 		--data "$request" "$url") || request_error=$?
+	if (( request_error == 0 )); then connection_failures=0; fi
 	if (( request_error != 0 )); then
 		case "$request_error" in
 			7|28|52|56) ;;
 			*) printf 'wait-mailbox: MCP HTTP request failed (curl exit %s)\n' "$request_error" >&2; exit 1 ;;
 		esac
+		connection_failures=$(( connection_failures + 1 ))
+		if (( connection_failures >= 5 )); then
+			printf 'wait-mailbox: MCP endpoint unreachable after 5 consecutive connection failures (curl exit %s). Check WORKFLOWD_MCP_URL or ~/.config/workflowd/mcp-url; coordinators on another host must use the daemon tailnet URL.\n' "$request_error" >&2
+			exit 1
+		fi
 	elif [[ "$status" == 401 || "$status" == 403 ]]; then
 		printf 'wait-mailbox: unauthorized (MCP HTTP error %s)\n' "$status" >&2
 		exit 1

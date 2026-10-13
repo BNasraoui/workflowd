@@ -148,7 +148,7 @@ No GitHub App, ruleset, or repository secret changes are needed.
    `OPENCODE_SERVER_URL`, `WORKFLOWD_OPENCODE_ATTACH_URL` and
    `WORKFLOWD_AGENT_RUN_AGENT=remote-worker` unchanged. Reload the user manager,
    start/enable `opencode2-reviewer`, and restart `workflowd-mcp` and `workflowd`
-   after draining. Workflowd applies migration 0035. Do not restart or reconfigure
+   after draining. Workflowd applies migrations through 0036. Do not restart or reconfigure
    the shared OpenCode server unless undoing the superseded isolation drop-in.
 6. Verify the actual reviewer process is on port 4098 with both project flags,
    the isolated root, both effective read-only agent policies and an empty MCP

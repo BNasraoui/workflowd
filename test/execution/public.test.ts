@@ -23,6 +23,7 @@ const daemonHandler = (request: Request) =>
   Effect.runPromise(
     routeRequest(request, {
       webhookSecret: "unused",
+      installationIds: new Set([91]),
       now: new Date(),
       executionCapabilities: { token: "daemon-secret", list: listing },
     }).pipe(Effect.provide(testLayer)),
@@ -134,6 +135,7 @@ test("public discovery reports disabled interfaces and failed proxies without se
   const disabled = await Effect.runPromise(
     routeRequest(new Request("http://daemon/execution-capabilities"), {
       webhookSecret: "unused",
+      installationIds: new Set([91]),
       now: new Date(),
     }).pipe(Effect.provide(testLayer)),
   )
@@ -145,6 +147,7 @@ test("public discovery reports disabled interfaces and failed proxies without se
       }),
       {
         webhookSecret: "unused",
+        installationIds: new Set([91]),
         now: new Date(),
         executionCapabilities: {
           token: "daemon-secret",

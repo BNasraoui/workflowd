@@ -1486,6 +1486,10 @@ export const runStoreMigrations = Migrator.make({})({
     "0032_sandbox_ref_creation": sandboxCreationMigration,
     "0033_sandbox_publications": sandboxPublishMigration,
     "0034_sandbox_publication_receipts": sandboxPublicationReceiptMigration,
-    "0035_automatic_review_trust": automaticReviewTrustMigration,
+    "0035_agent_run_idempotency_key": Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`ALTER TABLE kernel_agent_runs ADD COLUMN idempotency_key TEXT`
+    }),
+    "0036_automatic_review_trust": automaticReviewTrustMigration,
   }),
 })

@@ -84,6 +84,7 @@ test.each(events.map((event) => [event] as const))(
           {
             webhookSecret: "secret",
             now: new Date(),
+            installationIds: new Set([91]),
             prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
             ci,
           },
@@ -117,7 +118,11 @@ test.each([
           webhookSecret: "secret",
           now: new Date(),
           prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
-          ...(installationId === 92 ? { installationIds: new Set([92]) } : {}),
+          installationIds: new Set([91, 92]),
+          ciRepositories: [
+            { repository: "example-owner/example", installationId: 91 },
+            { repository: "ci/repository", installationId: 92 },
+          ],
           ci,
         })
         expect(response.status).toBe(202)
@@ -132,13 +137,63 @@ test.each([
     ),
 )
 
+for (const event of ["pull_request", "issue_comment", "workflow_run", "check_suite"]) {
+  test.each([
+    [91, "pr/repo"],
+    [92, "ci/repo"],
+    [91, "ci/repo"],
+    [92, "pr/repo"],
+    [91, "other/repo"],
+    [93, "shared/repo"],
+  ] as const)(`routes ${event} by installation/repository pair %s %s`, (id, repository) =>
+    withStore(
+      Effect.gen(function* () {
+        const ci = yield* makeCiStore
+        const isPr = event === "pull_request" || event === "issue_comment"
+        const admitted =
+          id === 93 ||
+          (isPr ? id === 91 && repository === "pr/repo" : id === 92 && repository === "ci/repo")
+        const response = yield* handleGitHubWebhook(
+          signedRequest(event, eventPayload(event, id, repository), "pair", "secret"),
+          {
+            webhookSecret: "secret",
+            now: new Date(),
+            installationIds: new Set([91, 92, 93]),
+            prRepositories: [
+              { repository: "pr/repo", installationId: 91 },
+              { repository: "shared/repo", installationId: 93 },
+            ],
+            ciRepositories: [
+              { repository: "ci/repo", installationId: 92 },
+              { repository: "shared/repo", installationId: 93 },
+            ],
+            ci,
+          },
+        )
+        expect(response.status).toBe(202)
+        if (!admitted)
+          expect(yield* Effect.promise(() => response.json())).toMatchObject({ status: "ignored" })
+        const sql = yield* SqlClient.SqlClient
+        expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(admitted ? 1 : 0)
+        expect(yield* sql`SELECT * FROM ci_deliveries`).toHaveLength(admitted && !isPr ? 1 : 0)
+        expect(yield* sql`SELECT * FROM jobs`).toHaveLength(
+          admitted && event === "pull_request" ? 1 : 0,
+        )
+        expect(yield* sql`SELECT * FROM commands`).toHaveLength(
+          admitted && event === "issue_comment" ? 1 : 0,
+        )
+      }),
+    ),
+  )
+}
+
 test("ignores malformed foreign events before the full event decode", () =>
   withStore(
     Effect.gen(function* () {
       for (const event of events) {
         const response = yield* handleGitHubWebhook(
           signedRequest(event, '{"installation":{"id":999}}', event, "secret"),
-          { webhookSecret: "secret", now: new Date() },
+          { webhookSecret: "secret", now: new Date(), installationIds: new Set() },
         )
         expect(response.status).toBe(202)
       }
@@ -156,6 +211,7 @@ test("acknowledges installation-free ping repeatedly without persistence", () =>
           {
             webhookSecret: "secret",
             now: new Date(),
+            installationIds: new Set(),
           },
         )
         expect(response.status).toBe(202)
@@ -176,6 +232,7 @@ test("checks HMAC before interpreting an unknown installation", async () => {
     handleGitHubWebhook(request, {
       webhookSecret: "secret",
       now: new Date(),
+      installationIds: new Set(),
     }),
   )
   expect(response.status).toBe(401)
@@ -200,7 +257,7 @@ test("installation-free or invalid installation envelopes never persist", () =>
       for (const body of bodies) {
         const response = yield* handleGitHubWebhook(
           signedRequest("pull_request", body, body, "secret"),
-          { webhookSecret: "secret", now: new Date() },
+          { webhookSecret: "secret", now: new Date(), installationIds: new Set() },
         )
         expect(response.status).toBe(202)
         expect(yield* Effect.tryPromise(() => response.json())).toEqual({
@@ -346,7 +403,7 @@ test("an undecodable guard event stores nothing", () => {
       const response = yield* handleGitHubWebhook(
         signedRequest(
           "installation",
-          JSON.stringify({ action: "created", installation: { id: 10, account: null } }),
+          JSON.stringify({ action: "created", installation: { id: "invalid", account: null } }),
           "malformed-guard",
           "secret",
         ),

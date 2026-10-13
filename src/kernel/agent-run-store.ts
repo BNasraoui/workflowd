@@ -94,6 +94,7 @@ export type AgentRunRecord = {
 }
 
 export type AgentRunCreateInput = {
+  readonly idempotencyKey?: string
   readonly executorKind?: "opencode" | "codex" | "claude"
   readonly requestedSelection?: RequestedSelection
   readonly resolvedSelection?: ResolvedSelection
@@ -318,14 +319,15 @@ const make = Effect.gen(function* () {
       const mailboxId = `agent-mailbox-${randomBytes(32).toString("hex")}`
       yield* sql`INSERT INTO kernel_agent_runs (run_id, caller_mailbox_id, route, provider_id, model_id, agent,
         repository, base_ref, directory, prompt, prompt_sha256, parent_session_id, resume_prompt, state,
-        attempt, max_attempts, created_at, updated_at, executor_kind, requested_selection, resolved_selection)
+        attempt, max_attempts, created_at, updated_at, executor_kind, requested_selection, resolved_selection, idempotency_key)
         VALUES (${input.runId}, ${mailboxId}, ${input.route}, ${input.providerId}, ${input.modelId},
         ${input.agent}, ${input.repository}, ${input.baseRef ?? null}, ${input.directory}, ${input.prompt},
         ${input.promptSha256}, ${input.parentSessionId}, ${input.resumePrompt}, 'accepted', 1,
         ${input.maxAttempts}, ${input.createdAt.toISOString()}, ${input.createdAt.toISOString()},
         ${agentRunExecutorKind(input)},
         ${input.requestedSelection === undefined ? null : JSON.stringify(input.requestedSelection)},
-        ${input.resolvedSelection === undefined ? null : JSON.stringify(input.resolvedSelection)})`
+        ${input.resolvedSelection === undefined ? null : JSON.stringify(input.resolvedSelection)},
+        ${input.idempotencyKey ?? null})`
       return { status: "created" as const }
     }).pipe(sql.withTransaction)
 
