@@ -889,3 +889,48 @@ test("admitted host protocol releases leases for guarded effects and promises", 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+adminTest("relink refuses a non-dumpable agent process", async () => {
+  const { policy, close } = await fixture()
+  const command = [
+    process.execPath,
+    "--eval",
+    `
+    const { dlopen, FFIType } = await import("bun:ffi");
+    const libc = dlopen("libc.so.6", { prctl: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+    if (libc.symbols.prctl(4, 0, 0, 0, 0) !== 0) process.exit(1);
+    console.log("ready");
+    setInterval(() => {}, 1000);
+  `,
+  ]
+  const child = Bun.spawn(
+    policy.agentUid === process.getuid!()
+      ? command
+      : [
+          "/usr/bin/setpriv",
+          "--reuid",
+          String(policy.agentUid),
+          "--regid",
+          String(policy.groupGid),
+          "--clear-groups",
+          ...command,
+        ],
+    { stdout: "pipe", stderr: "ignore", env: { PATH: process.env.PATH! } },
+  )
+  try {
+    const reader = child.stdout.getReader()
+    try {
+      expect((await reader.read()).done).toBe(false)
+    } finally {
+      reader.releaseLock()
+    }
+    await expect(relinkCredentials(policy, "codex", "ben")).rejects.toMatchObject({
+      reason: "credential_relink_in_progress",
+    })
+    expect(await readFile(policy.codex.canonical, "utf8")).toBe("synthetic-generation-1")
+  } finally {
+    child.kill("SIGKILL")
+    await child.exited
+    await close()
+  }
+})
