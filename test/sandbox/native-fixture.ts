@@ -19,7 +19,8 @@ export type NativeAction = { name: string; arguments: Record<string, unknown> }
 /** Real CLI protocol, synthetic model replies and credentials; no inference provider is contacted. */
 export async function nativeModelFixture(kind: "codex" | "claude", root: string) {
   let holdAfter = Infinity
-  const gate = Promise.withResolvers<void>()
+  let gate = Promise.withResolvers<void>()
+  let reply = "native-fixture-complete"
   const requests: unknown[] = []
   const catalogs: string[][] = []
   const actions: Array<NativeAction | ((request: unknown) => NativeAction)> = []
@@ -58,9 +59,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
                 id,
                 role: "assistant",
                 status: "completed",
-                content: [
-                  { type: "output_text", text: "native-fixture-complete", annotations: [] },
-                ],
+                content: [{ type: "output_text", text: reply, annotations: [] }],
               }
             : {
                 type: "function_call",
@@ -126,7 +125,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
             : { type: "tool_use", id, name, input: {} }
         const delta =
           action === undefined
-            ? { type: "text_delta", text: "native-fixture-complete" }
+            ? { type: "text_delta", text: reply }
             : { type: "input_json_delta", partial_json: JSON.stringify(action.arguments) }
         output =
           event("message_start", {
@@ -186,7 +185,12 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
     actions,
     holdAfter: (count: number) => {
       holdAfter = count
+      gate = Promise.withResolvers<void>()
     },
+    reply: (text: string) => {
+      reply = text
+    },
+    release: () => gate.resolve(),
     close: () => {
       gate.resolve()
       return model.stop(true)

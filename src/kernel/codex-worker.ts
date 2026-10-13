@@ -160,7 +160,7 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
   }
 }
 
-async function runHostWorker(inputPath: string, binary: string) {
+export async function runHostWorker(inputPath: string, binary: string) {
   const request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await readFile(inputPath, "utf8")))
   const io = dirname(inputPath)
   const prompt = join(io, "prompt")

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
-import { parseCodexWorkerArguments, runCodexWorker } from "../../src/kernel/codex-worker"
+import {
+  parseCodexWorkerArguments,
+  runCodexWorker,
+  runHostWorker,
+} from "../../src/kernel/codex-worker"
 
 const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
   let active = false
@@ -190,6 +194,76 @@ test("reattaches to durable output without relaunching and cancels only when exp
         (command) => command[0] === "systemctl" && command.includes(pending.executionId),
       ),
     ).toBeDefined()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host worker profiles preserve stdin and keep native result files bounded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-profiles-"))
+  try {
+    const binary = join(root, "native")
+    const capture = join(root, "capture")
+    await writeFile(
+      binary,
+      `#!/bin/sh\ncase "$1" in --version) echo version;; login) exit 0;; auth) echo '{"loggedIn":true}';; *) cat > '${capture}'; echo '{"result":"native output"}';; esac\n`,
+      { mode: 0o755 },
+    )
+    for (const profile of [
+      "codex",
+      "claude",
+      "claude-resume",
+      "codex-preflight",
+      "claude-preflight",
+      "claude-session",
+      "codex-server",
+    ] as const) {
+      const input = join(root, "input")
+      await writeFile(
+        input,
+        JSON.stringify({
+          operation: "start",
+          profile,
+          runId: "worker-fixture",
+          directory: root,
+          nativeSessionId: "missing-fixture-session",
+          model: "fixture",
+          effort: "high",
+          provider: "fixture",
+          prompt: "secret stays on stdin",
+        }),
+      )
+      expect(await runHostWorker(input, binary)).toBe(0)
+      expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
+        version: 1,
+        exitCode: 0,
+      })
+      if (["codex", "claude", "claude-resume", "codex-server"].includes(profile)) {
+        expect(await readFile(capture, "utf8")).toBe("secret stays on stdin")
+        expect(await readFile(join(root, "events"), "utf8")).toContain("native output")
+      }
+      if (profile === "claude-session")
+        expect(await readFile(join(root, "events"), "utf8")).toBe("false")
+    }
+    await writeFile(
+      binary,
+      `#!/bin/sh\nif [ "$1" = --version ]; then exit 0; fi\necho '{"loggedIn":false}'\n`,
+      { mode: 0o755 },
+    )
+    await writeFile(
+      join(root, "input"),
+      JSON.stringify({
+        operation: "start",
+        profile: "claude-preflight",
+        runId: "bad-auth",
+        directory: root,
+        model: null,
+        prompt: "",
+      }),
+    )
+    await expect(runHostWorker(join(root, "input"), binary)).rejects.toThrow(
+      "native authentication unavailable",
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

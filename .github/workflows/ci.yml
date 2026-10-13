@@ -259,6 +259,7 @@ jobs:
             test/agent-user/client-versions.test.ts \
             test/agent-user/credentials.e2e.test.ts \
             test/agent-user/credential-dispatch.e2e.test.ts \
+            test/agent-user/native.e2e.test.ts \
             test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
         run: |

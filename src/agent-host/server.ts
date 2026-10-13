@@ -31,14 +31,18 @@ import {
 } from "./protocol"
 
 /** One authenticated connection holds one shared admission lease until its handoff completes. */
-export async function serveCredentialHost(path: string, policy: CredentialPolicy) {
+export async function serveCredentialHost(
+  path: string,
+  policy: CredentialPolicy,
+  supervisor: (args: string[]) => Promise<string> = hostCommand,
+) {
   const libc = dlopen("libc.so.6", {
     getsockopt: {
       args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],
       returns: FFIType.i32,
     },
   })
-  const native = nativeHost(policy)
+  const native = nativeHost(policy, supervisor)
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const server = createServer((socket) => {
@@ -191,6 +195,7 @@ async function relayHostSocket(socket: Socket, policy: CredentialPolicy, runId: 
   })
   let buffered = ""
   let sending = Promise.resolve()
+  let queuedBytes = 0
   socket.on("data", (chunk) => {
     buffered += chunk.toString()
     if (Buffer.byteLength(buffered) > 2000000) {
@@ -201,33 +206,55 @@ async function relayHostSocket(socket: Socket, policy: CredentialPolicy, runId: 
     while ((end = buffered.indexOf("\n")) >= 0) {
       const frame = buffered.slice(0, end)
       buffered = buffered.slice(end + 1)
+      const size = Buffer.byteLength(frame)
+      queuedBytes += size
+      if (queuedBytes > 2000000) {
+        socket.destroy()
+        return
+      }
       sending = sending
-        .then(async () => {
-          const message = Schema.decodeUnknownSync(
-            Schema.Struct({ method: Schema.optionalKey(Schema.String) }),
-          )(JSON.parse(frame))
-          const release = await credentialLock(policy, false)
-          try {
-            if (
-              [
-                "thread/start",
-                "thread/resume",
-                "turn/start",
-                "turn/steer",
-                "thread/queue/add",
-              ].includes(message.method ?? "")
-            )
-              await inspectCredentialLayout(policy, "codex")
-            if (!socket.destroyed) ws.send(frame)
-          } finally {
-            await release()
-          }
-        })
-        .catch(() => {
-          socket.destroy()
+        .then(() => sendHostFrame(socket, ws, policy, frame))
+        .catch(() => socket.destroy())
+        .then(() => {
+          queuedBytes -= size
         })
     }
   })
+}
+
+async function sendHostFrame(
+  socket: Socket,
+  ws: WebSocket,
+  policy: CredentialPolicy,
+  frame: string,
+) {
+  if (socket.destroyed) return
+  const message = Schema.decodeUnknownSync(
+    Schema.Struct({
+      method: Schema.optionalKey(Schema.String),
+      id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+    }),
+  )(JSON.parse(frame))
+  if (
+    !["thread/start", "thread/resume", "turn/start", "turn/steer", "thread/queue/add"].includes(
+      message.method ?? "",
+    )
+  ) {
+    ws.send(frame)
+    return
+  }
+  let release: (() => Promise<void>) | undefined
+  try {
+    release = await credentialLock(policy, false)
+    await inspectCredentialLayout(policy, "codex")
+    if (!socket.destroyed) ws.send(frame)
+  } catch (error) {
+    const reason = credentialReason(error)
+    if (!reason || message.id === undefined) throw error
+    socket.write(JSON.stringify({ id: message.id, error: { code: -32001, reason } }) + "\n")
+  } finally {
+    await release?.()
+  }
 }
 
 function hostFailureDetail(error: unknown) {
@@ -323,7 +350,7 @@ async function hostCommand(args: string[]) {
 }
 
 /** The system manager owns workers; connections own only bounded observations. */
-function nativeHost(policy: CredentialPolicy) {
+function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Promise<string>) {
   let previous: Promise<unknown> = Promise.resolve()
   const dispatch = async (request: HostRequest) => {
     const launch = policy.launch
@@ -342,7 +369,7 @@ function nativeHost(policy: CredentialPolicy) {
           JSON.parse((await readHostFile(path, 300000, 0, policy.ownerUid)).toString()),
         )
         if (record.request.profile === "codex-server")
-          processes.push(await inspectHostProcess(record, path))
+          processes.push(await inspectHostProcess(record, path, supervisor))
       }
       return { processes, next: request.cursor + 128 < paths.length ? request.cursor + 128 : null }
     }
@@ -363,7 +390,7 @@ function nativeHost(policy: CredentialPolicy) {
         saved.process.uid !== policy.agentUid)
     )
       throw new Error("forged host custody")
-    const inspect = (record: HostRecord) => inspectHostProcess(record, recordPath)
+    const inspect = (record: HostRecord) => inspectHostProcess(record, recordPath, supervisor)
     if (request.operation === "start") {
       const digest = hostDigest(JSON.stringify(request))
       if (saved) {
@@ -412,7 +439,7 @@ function nativeHost(policy: CredentialPolicy) {
         }
         // Persist the fence before the manager call. Never repeat an uncertain launch.
         await saveHostRecord(recordPath, record)
-        await hostCommand(hostLaunchCommand(policy, record, io))
+        await supervisor(hostLaunchCommand(policy, record, io))
         return { process: await inspect(record) }
       } finally {
         await release()
@@ -439,7 +466,7 @@ function nativeHost(policy: CredentialPolicy) {
     }
     const observed = await inspect(saved)
     if (request.operation === "stop" && observed.active) {
-      await hostCommand(["/usr/bin/systemctl", "stop", saved.process.unit])
+      await supervisor(["/usr/bin/systemctl", "stop", saved.process.unit])
       if ((await inspect(saved)).active) throw new Error("host cancellation unconfirmed")
       await saveHostRecord(recordPath, { ...saved, process: observed, cancelled: true })
       return { process: await inspect(saved) }
@@ -453,8 +480,12 @@ function nativeHost(policy: CredentialPolicy) {
   }
 }
 
-async function inspectHostProcess(record: HostRecord, path: string): Promise<OwnedProcess> {
-  const output = await hostCommand([
+async function inspectHostProcess(
+  record: HostRecord,
+  path: string,
+  supervisor: (args: string[]) => Promise<string>,
+): Promise<OwnedProcess> {
+  const output = await supervisor([
     "/usr/bin/systemctl",
     "show",
     record.process.unit,

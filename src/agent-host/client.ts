@@ -299,6 +299,7 @@ export function makeHostCli(
         const process = await startAgentHost(socket, {
           runId: `preflight-${crypto.randomUUID()}`,
           profile: `${client}-preflight`,
+          timeoutMs: 10000,
           directory: "",
           prompt: "",
           model: null,

@@ -59,3 +59,26 @@ test("RPC error codes distinguish unsupported discovery while messages stay reda
     rpc.close()
   }
 })
+
+test("host credential refusal survives RPC without retaining the error payload", async () => {
+  const frames: string[] = []
+  const rpc = new RpcClient(
+    (line) => frames.push(line),
+    () => {},
+  )
+  const pending = rpc.request("turn/start", {})
+  const id = JSON.parse(frames[0]!).id
+  rpc.receive(
+    JSON.stringify({
+      id,
+      error: {
+        code: -32001,
+        reason: "shared_credential_link_broken",
+        message: "synthetic-private-payload",
+      },
+    }),
+  )
+  await expect(pending).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
+  expect(await pending.catch((error) => String(error))).not.toContain("synthetic-private-payload")
+  rpc.close()
+})
