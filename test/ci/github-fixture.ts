@@ -40,6 +40,7 @@ export async function githubFixture() {
     directory,
     github: {
       allowedInstallationAccountIds: [81005232],
+      prRepositories: [],
       appId: 1,
       privateKeyPath,
       webhookSecret: "unused",

@@ -1,3 +1,5 @@
+import { webhookInstallationId } from "./webhook-installations"
+import type { PrRepositories } from "./pr-automation-config"
 import type { InstallationGuard } from "./installation-guard"
 import type { CiStore } from "./ci/store"
 import { createHash, timingSafeEqual } from "node:crypto"
@@ -59,6 +61,8 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 export type WebhookHandlerOptions = {
   readonly installationGuard?: typeof InstallationGuard.Service
   readonly prAutomationEnabled?: boolean
+  readonly installationIds?: ReadonlySet<number>
+  readonly prRepositories?: PrRepositories
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
@@ -522,6 +526,32 @@ function webhookAction(payload: unknown) {
     : null
 }
 
+function installationGateResponse(
+  payload: unknown,
+  options: WebhookHandlerOptions,
+  deliveryId: string,
+): Effect.Effect<Response | undefined> {
+  return Effect.gen(function* () {
+    const installationId = webhookInstallationId(payload)
+    const configured =
+      installationId !== undefined &&
+      (options.installationIds?.has(installationId) ??
+        options.prRepositories?.some((r) => r.installationId === installationId) ??
+        false)
+    if (!configured) {
+      yield* Effect.logDebug({ deliveryId, installationId })
+      return Response.json(
+        {
+          status: "ignored",
+          reason:
+            installationId === undefined ? "missing-installation" : "installation-not-configured",
+        },
+        { status: 202 },
+      )
+    }
+  })
+}
+
 export function handleGitHubWebhook(
   request: Request,
   options: WebhookHandlerOptions,
@@ -567,10 +597,13 @@ export function handleGitHubWebhook(
       if (outcome !== undefined) return Response.json({ status: outcome }, { status: 202 })
     }
 
+    const ignored = yield* installationGateResponse(payload, options, deliveryId)
+    if (ignored !== undefined) return ignored
+
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")
         ? Effect.succeed({ _tag: "Ignored" as const, reason: `unsupported:${eventName}` })
-        : decodeGitHubEvent(eventName, payload)
+        : decodeGitHubEvent(eventName, payload, options.prRepositories)
     const decoded = yield* decode.pipe(
       Effect.catch((error) =>
         Effect.succeed(Response.json({ error: error.message }, { status: 400 })),
