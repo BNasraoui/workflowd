@@ -1,4 +1,9 @@
-import { isNonToolItem, providerFailure, providerRetryDelay } from "../provider-failure"
+import {
+  isNonToolItem,
+  isToolFreeTurn,
+  providerFailure,
+  providerRetryDelay,
+} from "../provider-failure"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -56,6 +61,7 @@ const History = Schema.Struct({
         id: Schema.String,
         status: Schema.String,
         error: Schema.optional(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
+        itemsView: Schema.optional(Schema.String),
         items: Schema.optional(
           Schema.Array(
             Schema.Struct({
@@ -271,9 +277,8 @@ export const ResidentCodexLive = (
             failure !== undefined &&
             !queuedWork &&
             history.thread.turns.at(-1)?.id === event.turn.id &&
-            completed?.items !== undefined &&
             !turnsWithTools.has(event.threadId) &&
-            completed.items.every((item) => isNonToolItem(item.type))
+            isToolFreeTurn(completed)
           ) {
             // Inbox receipts bound retries even when native history omits past error fields.
             const retryId = `provider-retry:${event.threadId}:${event.turn.id}`

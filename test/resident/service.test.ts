@@ -29,6 +29,7 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
       id: string
       status: string
       error?: { message: string }
+      itemsView?: string
       items: Array<{ type: string; clientId?: string; text?: string; phase?: string }>
     }>
   >()
@@ -211,11 +212,17 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
       notify({ method: "turn/started", params: { threadId, turn: { id, status: "inProgress" } } })
       return id
     },
-    fail: (threadId: string, id: string, tool: boolean | "notification", message: string) => {
+    fail: (
+      threadId: string,
+      id: string,
+      tool: boolean | "notification" | "summary",
+      message: string,
+    ) => {
       const turn = history.get(threadId)?.find((turn) => turn.id === id)
       if (turn === undefined) throw new Error("Missing fixture turn")
       turn.status = "failed"
       turn.error = { message }
+      if (tool === "summary") turn.itemsView = "summary"
       if (tool === true) turn.items.push({ type: "commandExecution" })
       if (tool === "notification")
         notify({ method: "item/started", params: { threadId, item: { type: "commandExecution" } } })
@@ -1052,7 +1059,7 @@ for (const status of ["completed", "failed"] as const)
     )
   })
 
-for (const tool of [false, true, "notification"] as const)
+for (const tool of [false, true, "notification", "summary"] as const)
   test(`capacity failure retries only without a tool step: tool=${tool}`, async () => {
     const fake = fixture()
     const message = "Selected model is at capacity. Please try a different model."

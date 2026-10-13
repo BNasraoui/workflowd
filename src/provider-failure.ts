@@ -28,3 +28,16 @@ export const isNonToolItem = (type: string) =>
     "agent_message",
     "todo_list",
   ].includes(type)
+
+/** A summary can omit tools; only a fully hydrated turn proves their absence. */
+export const isToolFreeTurn = (
+  turn:
+    | {
+        readonly itemsView?: string | undefined
+        readonly items?: ReadonlyArray<{ readonly type: string }> | undefined
+      }
+    | undefined,
+) =>
+  turn?.items !== undefined &&
+  (turn.itemsView === undefined || turn.itemsView === "full") &&
+  turn.items.every((item) => isNonToolItem(item.type))
