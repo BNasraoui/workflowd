@@ -37,7 +37,8 @@ isolation, not a claim that every file in the operator's home is inaccessible.
 The config root may contain only the reviewed overlay and OpenCode's generated
 initialization files; no plugins, MCP entries, token references, or extra agents.
 The separate data store holds reviewer sessions and only explicitly selected
-provider credentials, seeded as described below without another login. The shared
+API-key credentials, seeded as described below without another login. OAuth
+providers require their own separate reviewer login; never copy their rows. The shared
 OpenCode data roots are masked. Review required provider settings individually;
 do not copy global configuration or the shared database.
 
@@ -133,6 +134,12 @@ No GitHub App, ruleset, or repository secret changes are needed.
 4. **Before restarting workflowd-mcp**, create an independent
    `~/.config/workflowd/mcp-dispatch-token` with mode `0600`. Its `LoadCredential`
    is mandatory (no `-` prefix); restarting before the file exists fails.
+
+   ```sh
+   # Generate once, with tracing disabled; preserve this file on subsequent rollouts.
+   (umask 077; openssl rand -hex 32 > "$HOME/.config/workflowd/mcp-dispatch-token")
+   ```
+
    Install the updated MCP unit, preserving deployment-path drop-ins. Ordinary
    clients keep `mcp-token`. The trusted RPI coordinator needs **both** ordinary
    and dispatch tokens and must use the coordinator channel, which selects the
@@ -160,8 +167,29 @@ No GitHub App, ruleset, or repository secret changes are needed.
    From the reviewer's mount namespace, check that listing
    `/run/user/<uid>/credentials` fails, neither `$XDG_RUNTIME_DIR/bus` nor
    `$XDG_RUNTIME_DIR/systemd/private` exists, and `systemctl --user show-environment`
-   fails. Use an operator-owned namespace probe (for example `nsenter` with the
-   required privileges), never enable reviewer shell permissions for this test.
+   fails. Run this operator-owned probe as the service owner, without `sudo`.
+   Enter both its user and mount namespaces and preserve the operator's credentials;
+   never enable reviewer shell permissions for this test:
+
+   ```sh
+   reviewer_pid=$(systemctl --user show opencode2-reviewer -p MainPID --value)
+   test "$reviewer_pid" -gt 0 || exit 1
+   nsenter -U -m -t "$reviewer_pid" --preserve-credentials -- sh -eu -c '
+     runtime="/run/user/$(id -u)"
+     export XDG_RUNTIME_DIR="$runtime"
+     export DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"
+     if ls "$runtime/credentials" >/dev/null 2>&1; then exit 1; fi
+     test ! -e "$runtime/bus"
+     test ! -e "$runtime/systemd/private"
+     if systemctl --user show-environment >/dev/null 2>&1; then exit 1; fi
+     if ls "$HOME/.config/workflowd" >/dev/null 2>&1; then exit 1; fi
+     if touch "$HOME/.config/workflowd-reviewer/.write-probe" 2>/dev/null; then
+       rm -f "$HOME/.config/workflowd-reviewer/.write-probe"
+       exit 1
+     fi
+   ' || { echo 'Reviewer isolation probe failed' >&2; exit 1; }
+   ```
+
    **Repeat these actual restriction checks after both workflowd-mcp and workflowd
    have restarted**, when their new credential copies exist. Recheck the reviewer
    after its own restart as well.
@@ -186,41 +214,85 @@ No GitHub App, ruleset, or repository secret changes are needed.
 The pinned OpenCode 2 stores credentials in the `credential` table of
 `$XDG_DATA_HOME/opencode/opencode.db`. Copying `auth.json` into a fresh data root
 is insufficient: fresh database initialization does not run the legacy import.
-No new login is required: initialize the dedicated database by starting the
-reviewer once (with intake paused), then stop it and copy **only selected provider
-credential rows** from the existing store. Do not copy its sessions, config, plugins,
-`kv` table or whole database. Select one credential per required provider; an
-ambiguous selection must be resolved explicitly by credential ID.
+**OAuth providers are unsupported for the reviewer unless they get their own
+separate login. Never copy an OAuth row:** it gives both servers the same refresh
+token, so either server's refresh can invalidate the other. Mint's `openai` and
+`anthropic` credentials are OAuth and must not be copied.
 
-For the pinned schema, this example copies one existing credential for each
-provider named on the command line (adjust paths/provider IDs to the deployment):
+For API-key providers, no new login is required: initialize the dedicated database
+by starting the reviewer once (with intake paused), then stop it and copy **only
+selected active API-key credential rows** from the existing store. Do not copy
+sessions, config, plugins, the `kv` table or the whole database. The review provider
+on mint is `zai-coding-plan`, with four credential rows and exactly one `active = 1`.
+This example filters by `active = 1`, requires exactly one match per named provider,
+parses each selected value and refuses any type other than `key` before writing.
+Missing or ambiguous active selections fail closed; resolve the selection in the
+source provider's credential management before retrying. All columns are preserved,
+including `connector_id`, `method_id` and `active`.
 
 ```sh
+set -eu
+# Keep shell tracing disabled throughout these operator steps.
 systemctl --user daemon-reload
 systemctl --user start opencode2-reviewer
-# Wait for its authenticated API to respond, confirming database initialization.
+# Poll the authenticated API for up to 30 seconds; no password in argv or output.
+python3 - <<'READY'
+import base64, json, pathlib, time, urllib.error, urllib.parse, urllib.request
+home = pathlib.Path.home()
+password = (home / ".config/workflowd/reviewer-password").read_text().strip()
+query = urllib.parse.urlencode({"location[directory]": str(home / ".local/share/workflowd/reviewer")})
+request = urllib.request.Request("http://127.0.0.1:4098/api/agent?" + query)
+request.add_header("Authorization", "Basic " + base64.b64encode(("opencode:" + password).encode()).decode())
+client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+deadline = time.monotonic() + 30
+while time.monotonic() < deadline:
+    try:
+        with client.open(request, timeout=1) as response:
+            agents = json.load(response)["data"]
+            if any(agent["id"] == "pr-reviewer" for agent in agents):
+                break
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise SystemExit("Reviewer authentication failed") from None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    time.sleep(0.25)
+else:
+    raise SystemExit("Reviewer API did not become ready within 30 seconds")
+READY
 systemctl --user stop opencode2-reviewer
+# Copy with the reviewer stopped and restrictive permissions for SQLite sidecars.
+umask 077
 python3 - "$HOME/.local/share/opencode/opencode.db" \
-  "$HOME/.local/share/workflowd/reviewer/data/opencode/opencode.db" openai <<'PY'
-import os, pathlib, sqlite3, sys
+  "$HOME/.local/share/workflowd/reviewer/data/opencode/opencode.db" zai-coding-plan <<'PY'
+import json, os, pathlib, sqlite3, sys
 source_path, target_path, *providers = sys.argv[1:]
-assert providers, "Select the required providers explicitly"
+if not providers:
+    sys.exit("Select the required providers explicitly")
 source = sqlite3.connect(pathlib.Path(source_path).as_uri() + "?mode=ro", uri=True)
+source.row_factory = sqlite3.Row
 rows = []
 for provider in providers:
     selected = source.execute(
-        "SELECT id, integration_id, label, value, time_created, time_updated "
-        "FROM credential WHERE integration_id = ?", (provider,)
+        "SELECT * FROM credential WHERE integration_id = ? AND active = 1", (provider,)
     ).fetchall()
-    assert len(selected) == 1, "Select exactly one credential per provider by ID"
+    if len(selected) != 1:
+        sys.exit("Expected exactly one active credential per selected provider")
+    try:
+        value = json.loads(selected[0]["value"])
+    except (ValueError, TypeError):
+        sys.exit("Invalid credential JSON; nothing copied")
+    if not isinstance(value, dict) or value.get("type") != "key":
+        sys.exit("Only API-key credentials may be copied; OAuth requires a separate login")
     rows.extend(selected)
 source.close()
-target = sqlite3.connect(target_path)
+columns = ", ".join('"' + name.replace('"', '""') + '"' for name in rows[0].keys())
+placeholders = ", ".join("?" for _ in rows[0].keys())
+target = sqlite3.connect(pathlib.Path(target_path).as_uri() + "?mode=rw", uri=True)
 with target:
-    assert target.execute("SELECT count(*) FROM credential").fetchone()[0] == 0, "Destination must be fresh"
-    target.executemany("INSERT INTO credential "
-        "(id, integration_id, label, value, time_created, time_updated) "
-        "VALUES (?, ?, ?, ?, ?, ?)", rows)
+    if target.execute("SELECT count(*) FROM credential").fetchone()[0] != 0:
+        sys.exit("Destination must be fresh")
+    target.executemany(f"INSERT INTO credential ({columns}) VALUES ({placeholders})", rows)
 target.close()
 os.chmod(target_path, 0o600)
 PY
@@ -231,12 +303,13 @@ Run the copy privately, without shell tracing or logging credential values.
 Verify only the selected providers are authenticated and complete one review.
 For an API key stored in legacy `auth.json`, the supported alternative is to send
 only that selected key to the dedicated server's
-`POST /api/integration/<provider>/connect/key` with body `{"key":"..."}` using a
+`POST /api/integration/zai-coding-plan/connect/key` with body `{"key":"..."}` using a
 private script that reads the key/password from files (never argv or logs).
+Use the same Basic authentication and `location[directory]` query as the readiness
+probe above, and `Content-Type: application/json`; use this path instead of copying
+database rows, while the dedicated server is running.
 The disposable test verifies this API and the dedicated credential table.
-OAuth copies share refresh-token state with the source; coordinate refresh and
-rotation to avoid two servers racing the same token. Prefer an existing API-key
-credential where available. Do not silently copy additional credentials if the
+Do not silently copy additional credentials if the
 selected provider fails. Keep generated HOME free of global skill directories.
 
 ## Regression checks
@@ -245,7 +318,7 @@ Disposable regression checks (no live unit changes):
 
 ```sh
 systemd-run --user --wait --pipe --collect \
-  -p MemoryMax=6G -p MemorySwapMax=0 \
+  -p MemoryMax=4G -p MemorySwapMax=0 \
   --working-directory="$PWD" --setenv="PATH=$PATH" \
   --setenv="XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" \
   "$(command -v bun)" test test/review-opencode.e2e.test.ts test/review-systemd.e2e.test.ts
