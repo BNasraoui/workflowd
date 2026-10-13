@@ -161,24 +161,54 @@ export async function serveCredentialHost(
 }
 
 async function relayHostSocket(socket: Socket, policy: CredentialPolicy, runId: string) {
-  const path = join(policy.launch!.ioRoot, hostDigest(runId), "rpc.sock")
+  const io = join(policy.launch!.ioRoot, hostDigest(runId))
+  // Codex 0.159.1 hashes the advertised path into its fixed /tmp/codex-daemon-UID
+  // directory. The unit bind-mounts that directory from this run's exchange.
+  // Ignore the advertised symlink entirely; never resolve an agent-selected target.
+  const path = join(io, "daemon", hostDigest(join(io, "rpc.sock")))
   let connected: WebSocket | undefined
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const info = await lstat(path).catch(() => null)
-    if (info !== null) {
-      if (!info.isSocket() || info.uid !== policy.agentUid) throw new Error("unsafe host socket")
-      const candidate = new WebSocket(`ws+unix://${path}`)
+  const deadline = Date.now() + 10000
+  for (let attempt = 0; attempt < 50 && Date.now() < deadline && !socket.destroyed; attempt++) {
+    // Linux O_PATH pins the socket inode without opening it for data access.
+    const file = await open(path, 0x200000 | constants.O_NOFOLLOW).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null
+      throw error
+    })
+    if (file !== null) {
       try {
-        await new Promise<void>((resolve, reject) => {
-          candidate.addEventListener("open", () => resolve(), { once: true })
-          candidate.addEventListener("error", () => reject(new Error("host socket unavailable")), {
-            once: true,
+        const info = await file.stat()
+        if (!info.isSocket() || info.uid !== policy.agentUid) throw new Error("unsafe host socket")
+        const candidate = new WebSocket(`ws+unix:///proc/self/fd/${file.fd}`)
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              candidate.close()
+              reject(new Error("host socket unavailable"))
+            }, 1000)
+            candidate.addEventListener(
+              "open",
+              () => {
+                clearTimeout(timer)
+                resolve()
+              },
+              { once: true },
+            )
+            candidate.addEventListener(
+              "error",
+              () => {
+                clearTimeout(timer)
+                reject(new Error("host socket unavailable"))
+              },
+              { once: true },
+            )
           })
-        })
-        connected = candidate
-        break
-      } catch {
-        candidate.close()
+          connected = candidate
+          break
+        } catch {
+          candidate.close()
+        }
+      } finally {
+        await file.close()
       }
     }
     await Bun.sleep(50)
@@ -567,6 +597,10 @@ async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, i
     await input.close()
   }
   await chown(join(io, "input"), policy.agentUid, policy.groupGid)
+  if (request.profile === "codex-server") {
+    await mkdir(join(io, "daemon"), { mode: 0o700 })
+    await chown(join(io, "daemon"), policy.agentUid, policy.groupGid)
+  }
   await chown(io, policy.agentUid, policy.groupGid)
 }
 
@@ -590,6 +624,9 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--property=CapabilityBoundingSet=",
     "--property=PrivateDevices=yes",
     "--property=ProtectSystem=strict",
+    ...(record.request.profile === "codex-server"
+      ? [`--property=BindPaths=${io}/daemon:/tmp/codex-daemon-${policy.agentUid}`]
+      : []),
     "--property=ProtectHome=yes",
     "--property=RestrictSUIDSGID=yes",
     "--property=MemoryMax=6G",

@@ -64,7 +64,7 @@ test("native host refuses an unsupported launch profile without releasing creden
   }
 })
 
-import { chown, readFile, realpath, copyFile, readdir, stat } from "node:fs/promises"
+import { chown, readFile, realpath, copyFile, readdir, stat, lstat } from "node:fs/promises"
 import { nativeModelFixture } from "../sandbox/native-fixture"
 import { Effect, Schema } from "effect"
 import { makeCodexCli } from "../../src/kernel/codex-session"
@@ -569,6 +569,14 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
         throw new Error(
           JSON.stringify({
             error: String(error),
+            socket: await lstat(join(io, "rpc.sock"))
+              .then((info) => ({
+                uid: info.uid,
+                mode: info.mode,
+                socket: info.isSocket(),
+                link: info.isSymbolicLink(),
+              }))
+              .catch(() => null),
             stderr: await readFile(join(io, "stderr"), "utf8").catch(() => "missing"),
           }),
         )
@@ -603,6 +611,52 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       expect(await sweepOrphanAppServers("workflowd-resident-", new Set(), path)).toContain(
         owned.unit,
       )
+    } else {
+      const launchId = randomUUID()
+      const runId = `agent-run-resident-${randomUUID()}`
+      const hostId = `${runId}-${launchId}`
+      const controllerProgram = async (reattach: boolean) => {
+        const owned = reattach
+          ? Schema.decodeUnknownSync(OwnedProcess)(
+              await call({ operation: "inspect", runId: hostId }),
+            )
+          : null
+        const program = `import {launchAppServer,attachAppServer} from ${JSON.stringify(join(import.meta.dir, "../../src/resident/process.ts"))};
+const server = await ${reattach ? `attachAppServer(${JSON.stringify({ socket: hostId, unit: owned!.unit, launchId, invocation: owned!.invocationId, hostSocket: path })},()=>{})` : `launchAppServer(${JSON.stringify({ binary: "unused", home: "/unreadable-home", hostSocket: path, runId, launchId })},()=>{})`};
+await server.initialize(); await server.rpc.request("thread/list",{limit:1}); console.log(JSON.stringify({pid:server.pid,invocation:server.invocation})); await server.detach();`
+        const child = Bun.spawn(
+          [
+            "/usr/bin/setpriv",
+            "--reuid",
+            String(controllerUid),
+            "--regid",
+            String(groupGid),
+            "--clear-groups",
+            process.execPath,
+            "--eval",
+            program,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        )
+        const [status, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ])
+        if (status !== 0) throw new Error(stderr)
+        return JSON.parse(stdout) as unknown
+      }
+      const first = await controllerProgram(false)
+      await host.close()
+      await rm(path, { force: true })
+      host = await serveCredentialHost(path, policy)
+      expect(await controllerProgram(true)).toEqual(first)
+      const owned = Schema.decodeUnknownSync(OwnedProcess)(
+        await call({ operation: "inspect", runId: hostId }),
+      )
+      expect(owned.uid).toBe(agentUid)
+      await call({ operation: "stop", runId: hostId, launchId })
+      expect((await terminal(hostId)).active).toBe(false)
     }
   } finally {
     for (const name of await readdir(custodyRoot)) {
@@ -666,8 +720,24 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
             return [value.slice(0, at), value.slice(at + 1)]
           }),
       )
+      const binding = args
+        .find((arg) => arg.startsWith("--property=BindPaths="))
+        ?.slice("--property=BindPaths=".length)
+        .split(":")
       const child = Bun.spawn(
         [
+          ...(binding
+            ? [
+                "/usr/bin/unshare",
+                "--mount",
+                "/bin/sh",
+                "-c",
+                'mount --make-rprivate /; mkdir -p "$1"; mount --bind "$2" "$1"; shift 2; exec "$@"',
+                "fixture",
+                binding[1]!,
+                binding[0]!,
+              ]
+            : []),
           "/usr/bin/setpriv",
           "--reuid",
           String(agentUid),
