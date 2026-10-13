@@ -42,6 +42,33 @@ const createChild = (runs: AgentRunStorePort) =>
     maxAttempts: 1,
     createdAt: new Date(),
   })
+const seedVerifiedSession = (runId: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    const sessions = yield* KernelSessionStore
+    const now = new Date()
+    yield* sessions.registerResource({
+      resourceId: "resource",
+      owningHostId: "host",
+      absolutePath: "/work",
+      kind: "worktree",
+      createdAt: now,
+    })
+    yield* sessions.registerSession({
+      sessionId: "session",
+      providerKind: "codex",
+      providerVersion: 1,
+      providerId: "codex-cli",
+      serverId: "host",
+      owningHostId: "host",
+      endpointAlias: "local-cli",
+      endpointIdentity: "codex-cli://host",
+      nativeSessionId: "thread",
+      resourceId: "resource",
+      createdAt: now,
+    })
+    yield* sql`UPDATE kernel_agent_runs SET state = 'verified', session_id = 'session', resource_id = 'resource', native_session_id = 'thread' WHERE run_id = ${runId}`
+  })
 for (const alreadyFinished of [false, true]) {
   test(`CI subscription delivers once, including replay and late registration (${alreadyFinished})`, () =>
     Effect.runPromise(
@@ -248,29 +275,7 @@ test("CI deadline expires once and ignores a later real result", () =>
         maxAttempts: 1,
         createdAt: new Date(),
       })
-      const sessions = yield* KernelSessionStore
-      const now = new Date()
-      yield* sessions.registerResource({
-        resourceId: "resource",
-        owningHostId: "host",
-        absolutePath: "/work",
-        kind: "worktree",
-        createdAt: now,
-      })
-      yield* sessions.registerSession({
-        sessionId: "session",
-        providerKind: "codex",
-        providerVersion: 1,
-        providerId: "codex-cli",
-        serverId: "host",
-        owningHostId: "host",
-        endpointAlias: "local-cli",
-        endpointIdentity: "codex-cli://host",
-        nativeSessionId: "thread",
-        resourceId: "resource",
-        createdAt: now,
-      })
-      yield* sql`UPDATE kernel_agent_runs SET state = 'verified', session_id = 'session', resource_id = 'resource', native_session_id = 'thread' WHERE run_id = 'parent'`
+      yield* seedVerifiedSession("parent")
       yield* store.attach("parent", "thread", "/work", null)
       yield* store.started("thread", "turn")
       yield* ci.watch(target, 1, ["CI"], Date.now())
@@ -494,30 +499,7 @@ for (const observed of ["none", "optional", "required"] as const) {
         const subscriptions = yield* makeSubscriptions
         const sql = yield* SqlClient.SqlClient
         yield* createChild(yield* AgentRunStore)
-        const sessions = yield* KernelSessionStore
-        const now = new Date()
-        yield* sessions.registerResource({
-          resourceId: "resource",
-          owningHostId: "host",
-          absolutePath: "/work",
-          kind: "worktree",
-          createdAt: now,
-        })
-        yield* sessions.registerSession({
-          sessionId: "session",
-          providerKind: "codex",
-          providerVersion: 1,
-          providerId: "codex-cli",
-          serverId: "host",
-          owningHostId: "host",
-          endpointAlias: "local-cli",
-          endpointIdentity: "codex-cli://host",
-          nativeSessionId: "thread",
-          resourceId: "resource",
-          createdAt: now,
-        })
-        yield* sql`UPDATE kernel_agent_runs SET state = 'verified', session_id = 'session', resource_id = 'resource', native_session_id = 'thread' WHERE run_id = 'child'`
-
+        yield* seedVerifiedSession("child")
         yield* store.attach("child", "thread", "/work", null)
         yield* store.started("thread", "turn")
         yield* ci.watch(target, 1, ["CI"], Date.now())
