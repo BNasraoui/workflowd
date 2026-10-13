@@ -40,10 +40,12 @@ export const enqueueNextAgentHandoff = (now: Date) =>
         instance.instance_id, delivery.wait_id, delivery.event_sequence,
         instance.event_cursor, instance.payload_json, event.payload_json AS event_payload_json
       FROM kernel_wait_event_deliveries AS delivery
+      JOIN kernel_waits AS wait ON wait.instance_id = delivery.instance_id
+        AND wait.wait_id = delivery.wait_id
       JOIN kernel_workflow_instances AS instance ON instance.instance_id = delivery.instance_id
       JOIN kernel_events AS event ON event.sequence = delivery.event_sequence
       WHERE instance.workflow_type = 'wait_for_agent' AND instance.workflow_version = 1
-        AND delivery.state = 'ready'
+        AND delivery.state = 'ready' AND wait.state = 'matched'
       ORDER BY delivery.event_sequence, instance.instance_id`
       for (const candidate of candidates) {
         const decoded = yield* Schema.decodeUnknownEffect(CandidateRow)(candidate, {

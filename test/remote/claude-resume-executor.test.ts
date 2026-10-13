@@ -65,10 +65,13 @@ describe("claude resume executor", () => {
   })
 
   test("refuses a directory outside the allow-list, and an unset allow-list refuses all", async () => {
-    const outside = await run(scriptedCli(["x", "y"]), payload({ directory: "/etc/secrets" }))
+    const calls: Array<string> = []
+    const cli = scriptedCli(["x", "y"], { calls })
+    const outside = await run(cli, payload({ directory: "/etc/secrets" }))
     expect(outside).toEqual({ status: "failed", failureReason: "directory_not_allowed" })
-    const noneAllowed = await run(scriptedCli(["x", "y"]), payload(), [])
+    const noneAllowed = await run(cli, payload(), [])
     expect(noneAllowed).toEqual({ status: "failed", failureReason: "directory_not_allowed" })
+    expect(calls).toHaveLength(0)
   })
 
   test("reports a missing transcript before running any turn", async () => {

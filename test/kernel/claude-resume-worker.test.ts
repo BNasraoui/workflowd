@@ -164,6 +164,41 @@ const run = <A, E>(effect: Effect.Effect<A, E, Layer.Success<typeof storesLayer>
   Effect.runPromise(effect.pipe(Effect.provide(storesLayer)))
 
 describe("claude resume worker", () => {
+  test("does not retry operator-required requests or remote jobs after custody repair", async () => {
+    const prompts: string[] = []
+    const result = await run(
+      Effect.gen(function* () {
+        yield* seedRemote()
+        const cli = cliOf(prompts, ["unused"])
+        yield* runClaudeResumeIteration(options).pipe(Effect.provideService(ClaudeCli, cli))
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_resume_requests SET state = 'operator_required'`
+        yield* sql`UPDATE kernel_workflow_jobs SET state = 'operator_required'`
+        yield* sql`UPDATE kernel_sessions SET state = 'ready'`
+        const later = new Date(at.getTime() + 24 * 60 * 60 * 1_000)
+        const iteration = yield* runClaudeResumeIteration({ ...options, now: () => later }).pipe(
+          Effect.provideService(ClaudeCli, cli),
+        )
+        const claim = yield* (yield* KernelJobStore).claimRemote({
+          workerId: "after-restart",
+          now: later,
+          leaseDurationMs: 60_000,
+        })
+        return {
+          iteration,
+          claim,
+          requests: yield* sql`SELECT state, attempt FROM kernel_resume_requests`,
+          jobs: yield* sql`SELECT state, attempt FROM kernel_workflow_jobs`,
+        }
+      }),
+    )
+    expect(result.iteration.status).toBe("idle")
+    expect(result.claim).toBeNull()
+    expect(result.requests).toEqual([{ state: "operator_required", attempt: 1 }])
+    expect(result.jobs).toEqual([{ state: "operator_required", attempt: 0 }])
+    expect(prompts).toHaveLength(0)
+  })
+
   test("delivers the wake through the claude CLI and records the structured ack", async () => {
     const prompts: Array<string> = []
     const ack = JSON.stringify({ acknowledged: true, summary: "woken by workflowd" })

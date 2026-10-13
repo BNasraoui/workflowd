@@ -235,6 +235,29 @@ describe("agent handoff reducer", () => {
     expect(result.recovered).toHaveLength(1)
   })
 
+  test("leaves an operator-consumed wait alone even with a ready delivery", async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* arrangeDelivery
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_waits SET state = 'consumed' WHERE wait_id = 'wait-child'`
+        const iteration = yield* enqueueNextAgentHandoff(at).pipe(Effect.result)
+        return {
+          iteration,
+          waits: yield* sql`SELECT state FROM kernel_waits`,
+          requests: yield* sql`SELECT request_id FROM kernel_resume_requests`,
+          jobs: yield* sql`SELECT job_id FROM kernel_workflow_jobs`,
+          messages: yield* sql`SELECT id FROM resident_inbox`,
+        }
+      }).pipe(Effect.provide(layer)),
+    )
+    expect(result.iteration).toMatchObject({ _tag: "Success", success: { status: "idle" } })
+    expect(result.waits).toEqual([{ state: "consumed" }])
+    expect(result.requests).toHaveLength(0)
+    expect(result.jobs).toHaveLength(0)
+    expect(result.messages).toHaveLength(0)
+  })
+
   test("registers exactly one saved resume request and wakes its lane after commit", async () => {
     const wakes: Array<string> = []
     const signals: WorkSignalPort = {
