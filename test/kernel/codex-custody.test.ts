@@ -268,3 +268,124 @@ test("host worker profiles preserve stdin and keep native result files bounded",
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("host discovery worker exchanges the native model catalog and workspace worker creates a separate clone", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-workspace-"))
+  try {
+    const input = join(root, "input")
+    const binary = join(root, "discovery")
+    await writeFile(
+      binary,
+      `#!${process.execPath}\nawait import(${JSON.stringify(join(import.meta.dir, "../execution/fixtures/codex-app-server.mjs"))})\n`,
+      { mode: 0o755 },
+    )
+    await writeFile(
+      input,
+      JSON.stringify({
+        operation: "start",
+        profile: "codex-discovery",
+        runId: "discovery-worker",
+        directory: root,
+        prompt: "",
+        model: null,
+      }),
+    )
+    expect(await runHostWorker(input, binary)).toBe(0)
+    const models = JSON.parse(await readFile(join(root, "events"), "utf8"))
+    expect(models.map((model: { model: string }) => model.model)).toEqual(["first", "second"])
+    const source = join(root, "source")
+    const git = async (args: string[]) => {
+      const child = Bun.spawn(["git", ...args], {
+        env: { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const stderr = await new Response(child.stderr).text()
+      if ((await child.exited) !== 0) throw new Error(stderr)
+    }
+    await git(["init", "--initial-branch=main", source])
+    await git([
+      "-C",
+      source,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "fixture",
+    ])
+    const directory = join(root, "clone")
+    const request = {
+      operation: "start",
+      profile: "workspace",
+      runId: "workspace-worker",
+      directory,
+      repository: source,
+      branch: "agent-run",
+      prompt: "",
+      model: null,
+    }
+    await writeFile(input, JSON.stringify(request))
+    expect(await runHostWorker(input, binary)).toBe(0)
+    expect((await stat(join(directory, ".git"))).isDirectory()).toBe(true)
+    expect(await readFile(join(directory, ".git", "HEAD"), "utf8")).toBe(
+      "ref: refs/heads/agent-run\n",
+    )
+    expect(
+      await readFile(join(directory, ".git", "objects", "info", "alternates"), "utf8").catch(
+        () => null,
+      ),
+    ).toBeNull()
+    await writeFile(input, JSON.stringify({ ...request, branch: "--invalid" }))
+    await expect(runHostWorker(input, binary)).rejects.toThrow("invalid workspace selection")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("the deployed worker entrypoint completes a Claude launch without a circular module wait", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-entrypoint-"))
+  try {
+    const binary = join(root, "claude")
+    await writeFile(binary, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"result"}\'\n', {
+      mode: 0o755,
+    })
+    const input = join(root, "input")
+    await writeFile(
+      input,
+      JSON.stringify({
+        operation: "start",
+        profile: "claude",
+        runId: "entrypoint",
+        directory: root,
+        prompt: "fixture",
+        model: null,
+      }),
+    )
+    const build = await Bun.build({
+      entrypoints: [join(import.meta.dir, "../../src/kernel/codex-worker.ts")],
+      target: "bun",
+    })
+    expect(build.success).toBe(true)
+    const worker = join(root, "worker.js")
+    await writeFile(worker, await build.outputs[0]!.text())
+    const child = Bun.spawn([process.execPath, worker, "--host-input", input, "--binary", binary], {
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const timer = setTimeout(() => child.kill("SIGKILL"), 1500)
+    try {
+      expect(await child.exited).toBe(0)
+      expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
+        version: 1,
+        exitCode: 0,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

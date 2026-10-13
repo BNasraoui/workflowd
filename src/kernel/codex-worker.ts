@@ -160,6 +160,32 @@ export const parseCodexWorkerArguments = (arguments_: ReadonlyArray<string>): Cl
   }
 }
 
+/** Claude Code uses its own local subscription credentials and persisted sessions. */
+export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<number> =>
+  runCliWorker(options, [
+    options.binary,
+    "--print",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    ...(options.sandboxBindingFile === undefined
+      ? [
+          "--dangerously-skip-permissions",
+          "--strict-mcp-config",
+          "--mcp-config",
+          '{"mcpServers":{}}',
+        ]
+      : await nativeSandboxArguments(
+          "claude",
+          options.binary,
+          options.directory,
+          options.sandboxBindingFile,
+        )),
+    ...(options.model === null ? [] : ["--model", options.model]),
+    ...(options.effort === undefined ? [] : ["--effort", options.effort]),
+  ])
+
 export async function runHostWorker(inputPath: string, binary: string) {
   const request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await readFile(inputPath, "utf8")))
   const io = dirname(inputPath)
@@ -226,8 +252,7 @@ export async function runHostWorker(inputPath: string, binary: string) {
       `unix://${join(io, "rpc.sock")}`,
     ])
   if (request.profile === "codex") return runCodexWorker(options)
-  if (request.profile === "claude")
-    return (await import("./claude-worker")).runClaudeWorker(options)
+  if (request.profile === "claude") return runClaudeNativeWorker(options)
   if (request.profile === "claude-session") {
     const { makeClaudeCli } = await import("./claude-session")
     const exists = await Effect.runPromise(
