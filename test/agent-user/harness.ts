@@ -1,7 +1,81 @@
 import { spawnSync } from "node:child_process"
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+
+function probeEnvironment(home: string, path = "/usr/bin:/bin") {
+  return {
+    PATH: path,
+    HOME: home,
+    CODEX_HOME: join(home, ".codex"),
+    CLAUDE_CONFIG_DIR: join(home, ".claude"),
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    XDG_STATE_HOME: join(home, "state"),
+  }
+}
+
+function runtimePath() {
+  const node = process.env.WORKFLOWD_AGENT_PROBE_NODE ?? Bun.which("node")
+  if (!node) throw new Error("client_runtime_missing")
+  return `${dirname(node)}:/usr/bin:/bin`
+}
+
+/** Only allow-listed metadata leaves the version subprocess; never raw CLI output. */
+export async function probeClientVersions() {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-client-versions-"))
+  const clients = [
+    ["codex", "codex-cli 0.159.1", /^codex-cli \d+\.\d+\.\d+$/],
+    ["claude", "2.1.296 (Claude Code)", /^\d+\.\d+\.\d+ \(Claude Code\)$/],
+    ["opencode2", "opencode2 v0.0.0-beta-19242", /^opencode2 v\d+\.\d+\.\d+-beta-\d+$/],
+  ] as const
+  try {
+    const versions = []
+    for (const [client, expected, pattern] of clients) {
+      const binary = Bun.which(client)
+      if (!binary) throw new Error(`${client}: client_binary_missing`)
+      const entrypoint = await realpath(binary)
+      const inspect = (path: string) => {
+        const result = spawnSync(binary, ["--version"], {
+          cwd: root,
+          env: probeEnvironment(root, path),
+          encoding: "utf8",
+          timeout: 15_000,
+          maxBuffer: 64 * 1024,
+        })
+        const output = result.stdout?.trim() ?? ""
+        return {
+          exitCode: result.status,
+          signal: result.signal,
+          spawnFailed: result.error !== undefined,
+          nodeAvailable: Bun.which("node", { PATH: path }) !== null,
+          version: pattern.test(output) ? output : null,
+        }
+      }
+      const original = inspect("/usr/bin:/bin")
+      const pinned = inspect(runtimePath())
+      console.log(JSON.stringify({ client, entrypoint, original, pinned }))
+      if (pinned.spawnFailed || pinned.signal || pinned.exitCode !== 0)
+        throw new Error(`${client}: client_abnormal_exit`)
+      if (pinned.version !== expected) throw new Error(`${client}: client_version_mismatch`)
+      versions.push({ client, version: pinned.version, exitCode: pinned.exitCode })
+    }
+    return versions
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
 
 /** Installed-client prerequisite probe. All credentials and homes are synthetic. */
 export async function probeCodexCredentialSharing() {
@@ -15,15 +89,7 @@ export async function probeCodexCredentialSharing() {
   const command = (home: string, args: string[], input?: string) => {
     const result = spawnSync(binary, args, {
       cwd: root,
-      env: {
-        PATH: "/usr/bin:/bin",
-        HOME: home,
-        CODEX_HOME: join(home, ".codex"),
-        XDG_CONFIG_HOME: join(home, "config"),
-        XDG_DATA_HOME: join(home, "data"),
-        XDG_CACHE_HOME: join(home, "cache"),
-        XDG_STATE_HOME: join(home, "state"),
-      },
+      env: probeEnvironment(home, runtimePath()),
       input,
       encoding: "utf8",
       timeout: 15_000,
@@ -59,8 +125,8 @@ export async function probeCodexCredentialSharing() {
     await chmod(canonical, 0o660)
     const versionResult = command(controller, ["--version"])
     const version = versionResult.stdout.trim()
-    if (versionResult.status !== 0 || !/^codex-cli \d+\.\d+\.\d+$/.test(version))
-      throw new Error("Unrecognized installed Codex version")
+    if (versionResult.status !== 0) throw new Error("codex: client_abnormal_exit")
+    if (version !== "codex-cli 0.159.1") throw new Error("codex: client_version_mismatch")
 
     login(controller, "synthetic-update")
     const directUpdateShared =
