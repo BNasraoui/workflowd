@@ -37,6 +37,7 @@ describe("test-job canary HTTP integration", () => {
           const request = (input: Request) =>
             routeRequest(input, {
               webhookSecret: "unused",
+              installationIds: new Set([91]),
               now,
               testJobs: {
                 token,
@@ -142,6 +143,7 @@ describe("test-job canary HTTP integration", () => {
           const request = (input: Request) =>
             routeRequest(input, {
               webhookSecret: "unused",
+              installationIds: new Set([91]),
               now,
               testJobs: {
                 token,
@@ -241,6 +243,7 @@ describe("test-job canary HTTP integration", () => {
               }),
               {
                 webhookSecret: "unused",
+                installationIds: new Set([91]),
                 now,
                 testJobs: {
                   token,

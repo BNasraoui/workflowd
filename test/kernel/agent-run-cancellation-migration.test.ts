@@ -25,6 +25,7 @@ test("cancellation migration preserves existing runs and indexes and widens stat
           requested_selection: null,
           resolved_selection: null,
           base_ref: null,
+          idempotency_key: null,
           caller_mailbox_id: expect.stringMatching(/^agent-mailbox-[a-f0-9]{64}$/),
         })),
       )

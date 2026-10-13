@@ -1,5 +1,5 @@
 import { ThinkingSelection, RequestedSelection, ResolvedSelection } from "../execution-selection"
-import { MAX_RECENT_JOBS } from "./queries"
+import { MAX_RECENT_JOBS, MAX_AGENT_RUNS, ListAgentRunsArguments, AgentRunSummary } from "./queries"
 import { MAX_RESUME_PROMPT_BYTES } from "../agent-wait-contract"
 import { MAX_AGENT_RUN_PROMPT_BYTES } from "../agent-run-contract"
 import { ExecutionCapabilities } from "../execution-capability-contract"
@@ -392,6 +392,20 @@ export const TOOL_DEFINITIONS = [
       idempotentHint: true,
       openWorldHint: false,
     },
+  },
+  {
+    name: "list_agent_runs",
+    description:
+      "List dispatch_agent runs newest first by acceptance time. Requires the MCP bearer token. " +
+      `Optional status and repository filters; limit 1-${MAX_AGENT_RUNS}, default 20. ` +
+      "started_at is acceptance time; ended_at and end_reason are null for active runs. " +
+      "idempotency_key is null for older runs or dispatches without an explicit key.",
+    inputSchema: { ...toJsonSchemaObject(ListAgentRunsArguments), type: "object" as const },
+    outputSchema: objectSchema(
+      { runs: { type: "array", items: toJsonSchemaObject(AgentRunSummary) } },
+      ["runs"],
+    ),
+    annotations: { ...readAnnotations },
   },
   {
     name: "read_agent_mailbox",

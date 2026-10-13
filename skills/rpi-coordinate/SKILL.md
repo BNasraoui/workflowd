@@ -56,10 +56,12 @@ nohup /path/to/rpi-coordinate/scripts/wait-mailbox.sh "$mailbox_id" >"$output" 2
 Use the installed skill's actual path in place of `/path/to/rpi-coordinate`. The waiter uses
 `WORKFLOWD_MCP_URL`, then `~/.config/workflowd/mcp-url`, then
 `http://127.0.0.1:8791/mcp`. A coordinator on another host must set the environment
-variable or config file to a reachable endpoint, such as
+variable or config file to the daemon’s tailnet URL, such as
 `https://mint.angelfish-celsius.ts.net:8791/mcp` on the tailnet.
 It uses `WORKFLOWD_MCP_TOKEN` or `~/.config/workflowd/mcp-token`. An optional second argument
-bounds the wait in seconds. Do not poll from this session.
+bounds the wait in seconds. The waiter exits non-zero after five consecutive connection
+failures and explains how to check the endpoint in stderr. A successful HTTP connection
+resets that counter, including an empty mailbox response. Do not poll from this session.
 
 ## When the mailbox message arrives
 

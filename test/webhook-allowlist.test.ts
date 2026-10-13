@@ -58,32 +58,28 @@ test.each([
       Effect.gen(function* () {
         const options = {
           webhookSecret: "secret",
+          installationIds: new Set([91, 92]),
           now,
           ...(allowed === undefined ? {} : { prRepositories: allowed }),
           ...(installationIds === undefined ? {} : { installationIds }),
         }
         const response = yield* handleGitHubWebhook(request(event, id, repo), options)
-        const installationConfigured =
-          installationIds?.has(id) ?? allowed?.some((r) => r.installationId === id) ?? false
+        const installationConfigured = options.installationIds.has(id)
         const ignored = {
           status: "ignored",
           reason: installationConfigured
-            ? "pr-repository-not-allowlisted"
+            ? "repository-not-configured"
             : "installation-not-configured",
         }
         expect(response.status).toBe(202)
         expect(yield* Effect.promise(() => response.json())).toEqual(ignored)
         const sql = yield* SqlClient.SqlClient
-        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual(
-          installationConfigured ? [{ delivery_id: "allowlist-delivery" }] : [],
-        )
+        expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([])
         expect(yield* sql`SELECT * FROM pull_requests`).toEqual([])
         expect(yield* sql`SELECT * FROM jobs`).toEqual([])
         expect(yield* sql`SELECT * FROM commands`).toEqual([])
         const duplicate = yield* handleGitHubWebhook(request(event, id, repo), options)
-        expect(yield* Effect.promise(() => duplicate.json())).toEqual(
-          installationConfigured ? { status: "duplicate" } : ignored,
-        )
+        expect(yield* Effect.promise(() => duplicate.json())).toEqual(ignored)
       }).pipe(Effect.provide(TestLayer)),
     )
   },
@@ -98,6 +94,7 @@ test.each([
     Effect.gen(function* () {
       const response = yield* handleGitHubWebhook(request("pull_request", id, repo), {
         webhookSecret: "secret",
+        installationIds: new Set([91, 92]),
         now,
         prRepositories: repositories,
       })

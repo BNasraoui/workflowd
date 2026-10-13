@@ -11,17 +11,22 @@ const Id = Schema.Number.check(
 )
 const Installation = Schema.Struct({
   id: Id,
-  account: Schema.Struct({ id: Id, login: Schema.optionalKey(Schema.String) }),
+  account: Schema.Struct({
+    id: Id,
+    login: Schema.optionalKey(Schema.String),
+    type: Schema.optionalKey(Schema.String),
+  }),
 })
 type Installation = typeof Installation.Type
-const InstallationPayload = Schema.Struct({ installation: Installation })
+const InstallationIdentity = Schema.Struct({ id: Id })
+const InstallationPayload = Schema.Struct({ installation: InstallationIdentity })
+const maxReconciliationBackoffMs = 3600000
 const isRateLimited = Schema.is(
   Schema.Struct({
     response: Schema.Struct({
       headers: Schema.Union([
         Schema.Struct({ "x-ratelimit-remaining": Schema.Literal("0") }),
         Schema.Struct({ "retry-after": Schema.String }),
-        Schema.Struct({ "x-ratelimit-reset": Schema.String }),
       ]),
     }),
   }),
@@ -96,9 +101,25 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
 ) {
   // Copy validated authority: empty/invalid lists never become "delete everything".
   const allowed = new Set(validateInstallationAccountIds(accountIds))
-  const pending = yield* Queue.unbounded<{ installation: Installation; source: string }>()
+  const pending = yield* Queue.unbounded<{
+    installation: typeof InstallationIdentity.Type
+    source: string
+  }>()
   let lastSuccessfulReconciliationAt: number | null = null
-  const health = () => Effect.sync(() => ({ lastSuccessfulReconciliationAt }))
+  let undecodableInstallations = 0
+  const health = () =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const degraded =
+        lastSuccessfulReconciliationAt === null ||
+        now - lastSuccessfulReconciliationAt > 2 * maxReconciliationBackoffMs ||
+        undecodableInstallations > 0
+      return {
+        lastSuccessfulReconciliationAt,
+        undecodableInstallations,
+        status: degraded ? ("degraded" as const) : ("ok" as const),
+      }
+    })
   const request = <A>(run: (signal: AbortSignal) => Promise<A>) =>
     Effect.tryPromise({ try: run, catch: apiError }).pipe(
       Effect.timeout("10 seconds"),
@@ -126,7 +147,10 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
     installation: Installation,
     source: string,
   ) {
-    if (allowed.has(installation.account.id)) {
+    if (
+      (installation.account.type === "User" || installation.account.type === "Organization") &&
+      allowed.has(installation.account.id)
+    ) {
       yield* audit(installation, source, "allowed")
       return "allowed" as const
     }
@@ -147,7 +171,7 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
     return outcome
   })
 
-  const verify = (hint: Installation, source: string) =>
+  const verify = (hint: typeof InstallationIdentity.Type, source: string) =>
     Effect.gen(function* () {
       const response = yield* request((signal) =>
         client.request("GET /app/installations/{installation_id}", {
@@ -157,15 +181,14 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
       )
       const verified = yield* decodeInstallation(response.data, source)
       if (verified === undefined) return "undecodable" as const
-      if (verified.account.id !== hint.account.id && allowed.has(verified.account.id)) {
-        yield* audit(verified, source, "account_mismatch_allowed")
-        return "allowed" as const
-      }
       return yield* enforce(verified, source)
     }).pipe(
       Effect.catchIf(
         (error) => error instanceof InstallationApiError && error.status === 404,
-        () => audit(hint, source, "already_gone").pipe(Effect.as("already_gone" as const)),
+        () =>
+          Effect.logInfo(
+            `installation_guard ${JSON.stringify({ installationId: hint.id, source, outcome: "already_gone" })}`,
+          ).pipe(Effect.as("already_gone" as const)),
       ),
     )
 
@@ -202,6 +225,7 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
 
   const reconcile = Effect.fn("InstallationGuard.reconcile")(function* () {
     const installations: Installation[] = []
+    let undecodable = 0
     let next = true
     for (let page = 1; next; page++) {
       const response = yield* request((signal) =>
@@ -215,6 +239,7 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
       for (const item of items) {
         const installation = yield* decodeInstallation(item, "reconcile")
         if (installation !== undefined) installations.push(installation)
+        else undecodable++
       }
       next = response.headers.link?.includes('rel="next"') === true
     }
@@ -225,7 +250,8 @@ export const makeInstallationGuard = Effect.fn("InstallationGuard.make")(functio
         Effect.catch(() => Effect.succeed(false)),
       ),
     )
-    const successful = outcomes.every(Boolean)
+    undecodableInstallations = undecodable
+    const successful = undecodable === 0 && outcomes.every(Boolean)
     if (successful) lastSuccessfulReconciliationAt = yield* Clock.currentTimeMillis
     return successful
   })
@@ -249,7 +275,7 @@ export const startInstallationGuard = Effect.fn("InstallationGuard.start")(funct
     ),
     Effect.map((successful) => {
       failures = successful ? 0 : Math.min(failures + 1, 4)
-      return Math.min(3600000, 600000 * 2 ** Math.max(0, failures - 1))
+      return Math.min(maxReconciliationBackoffMs, 600000 * 2 ** Math.max(0, failures - 1))
     }),
   )
   return yield* pass.pipe(

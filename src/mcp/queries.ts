@@ -18,6 +18,38 @@ const RecentJobRow = Schema.Struct({
   updated_at: Timestamp,
 })
 
+export const MAX_AGENT_RUNS = 100
+export const ListAgentRunsArguments = Schema.Struct({
+  status: Schema.optional(
+    Schema.Literals([
+      "accepted",
+      "spawning",
+      "spawned",
+      "verified",
+      "completed",
+      "cancelled",
+      "failed",
+      "operator_required",
+    ]),
+  ),
+  repository: Schema.optional(Schema.NonEmptyString),
+  limit: Schema.optional(
+    Schema.Int.pipe(Schema.check(Schema.isBetween({ minimum: 1, maximum: MAX_AGENT_RUNS }))),
+  ),
+})
+export const AgentRunSummary = Schema.Struct({
+  run_id: Schema.String,
+  repository: Schema.String,
+  route: Schema.String,
+  model: Schema.String,
+  executor: Schema.String,
+  idempotency_key: Schema.NullOr(Schema.String),
+  status: Schema.String,
+  end_reason: Schema.NullOr(Schema.String),
+  started_at: Timestamp,
+  ended_at: NullableTimestamp,
+})
+
 const HostDispatchRow = Schema.Struct({
   host_id: Schema.String,
   dispatch_count: Schema.Int,
@@ -64,6 +96,9 @@ export type HostHealthView = {
 export type McpQueriesError = SqlError | KernelJobStoreError | Schema.SchemaError
 
 export type McpQueriesPort = {
+  readonly listAgentRuns: (
+    input: typeof ListAgentRunsArguments.Type,
+  ) => Effect.Effect<ReadonlyArray<typeof AgentRunSummary.Type>, McpQueriesError>
   readonly jobStatus: (jobId: string) => Effect.Effect<JobStatusView | null, McpQueriesError>
   readonly listRecentJobs: (
     limit: number,
@@ -132,6 +167,26 @@ const make = Effect.gen(function* () {
       }))
     })
 
+  const listAgentRuns: McpQueriesPort["listAgentRuns"] = (input) =>
+    Effect.gen(function* () {
+      const limit = Math.min(Math.max(Math.trunc(input.limit ?? 20), 1), MAX_AGENT_RUNS)
+      const rows = yield* sql`SELECT run_id, repository, route,
+        COALESCE(json_extract(resolved_selection, '$.model'), model_id) AS model,
+        executor_kind AS executor, idempotency_key, state AS status,
+        CASE WHEN state = 'completed' THEN 'completed'
+          WHEN state = 'cancelled' THEN COALESCE(diagnostic, 'cancelled')
+          WHEN state IN ('failed', 'operator_required') THEN diagnostic
+          ELSE NULL END AS end_reason,
+        created_at AS started_at,
+        CASE WHEN state IN ('completed', 'cancelled', 'failed', 'operator_required')
+          THEN updated_at ELSE NULL END AS ended_at
+        FROM kernel_agent_runs
+        WHERE (${input.status ?? null} IS NULL OR state = ${input.status ?? null})
+          AND (${input.repository ?? null} IS NULL OR repository = ${input.repository ?? null})
+        ORDER BY created_at DESC, run_id DESC LIMIT ${limit}`
+      return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(AgentRunSummary)(row))
+    })
+
   const hostHealth: McpQueriesPort["hostHealth"] = () =>
     Effect.gen(function* () {
       const rows = yield* sql`SELECT host_id,
@@ -172,7 +227,7 @@ const make = Effect.gen(function* () {
       )
     })
 
-  return McpQueries.of({ jobStatus, listRecentJobs, hostHealth, readAgentMailbox })
+  return McpQueries.of({ jobStatus, listRecentJobs, listAgentRuns, hostHealth, readAgentMailbox })
 })
 
 export const McpQueriesLive = Layer.effect(McpQueries, make)

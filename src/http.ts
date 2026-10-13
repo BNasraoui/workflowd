@@ -1,4 +1,4 @@
-import { webhookInstallationId } from "./webhook-installations"
+import { webhookInstallationId, webhookRepositoryAllowed } from "./webhook-installations"
 import type { PrRepositories } from "./pr-automation-config"
 import type { InstallationGuard } from "./installation-guard"
 import type { CiStore } from "./ci/store"
@@ -61,8 +61,9 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 export type WebhookHandlerOptions = {
   readonly installationGuard?: typeof InstallationGuard.Service
   readonly prAutomationEnabled?: boolean
-  readonly installationIds?: ReadonlySet<number>
+  readonly installationIds: ReadonlySet<number>
   readonly prRepositories?: PrRepositories
+  readonly ciRepositories?: PrRepositories
   readonly ci?: { readonly ingest: CiStore["ingest"] }
   readonly webhookSecret: string
   readonly now: Date
@@ -83,7 +84,11 @@ function healthResponse(guard: WebhookHandlerOptions["installationGuard"]) {
     ? Effect.succeed(Response.json({ status: "ok" }))
     : guard
         .health()
-        .pipe(Effect.map((installationGuard) => Response.json({ status: "ok", installationGuard })))
+        .pipe(
+          Effect.map((installationGuard) =>
+            Response.json({ status: installationGuard.status, installationGuard }),
+          ),
+        )
 }
 
 export function routeRequest(
@@ -530,21 +535,30 @@ function installationGateResponse(
   payload: unknown,
   options: WebhookHandlerOptions,
   deliveryId: string,
+  eventName: string,
 ): Effect.Effect<Response | undefined> {
   return Effect.gen(function* () {
     const installationId = webhookInstallationId(payload)
-    const configured =
-      installationId !== undefined &&
-      (options.installationIds?.has(installationId) ??
-        options.prRepositories?.some((r) => r.installationId === installationId) ??
-        false)
-    if (!configured) {
+    const configured = installationId !== undefined && options.installationIds.has(installationId)
+    const repositories =
+      eventName === "pull_request" || eventName === "issue_comment"
+        ? (options.prRepositories ?? [])
+        : eventName === "workflow_run" || eventName === "check_suite"
+          ? (options.ciRepositories ?? [])
+          : undefined
+    const repositoryAllowed =
+      repositories === undefined || webhookRepositoryAllowed(payload, installationId, repositories)
+    if (!configured || !repositoryAllowed) {
       yield* Effect.logDebug({ deliveryId, installationId })
       return Response.json(
         {
           status: "ignored",
           reason:
-            installationId === undefined ? "missing-installation" : "installation-not-configured",
+            installationId === undefined
+              ? "missing-installation"
+              : !configured
+                ? "installation-not-configured"
+                : "repository-not-configured",
         },
         { status: 202 },
       )
@@ -597,7 +611,7 @@ export function handleGitHubWebhook(
       if (outcome !== undefined) return Response.json({ status: outcome }, { status: 202 })
     }
 
-    const ignored = yield* installationGateResponse(payload, options, deliveryId)
+    const ignored = yield* installationGateResponse(payload, options, deliveryId, eventName)
     if (ignored !== undefined) return ignored
 
     const decode =
