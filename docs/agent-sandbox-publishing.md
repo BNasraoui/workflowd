@@ -124,7 +124,9 @@ creates `validated/`. Arbitrary archive/output/repository paths are no longer CL
 parameters, and ZIP entries map to fixed output filenames. Commit identities must be
 40 lowercase hexadecimal characters before entering Git arguments. Git and Python
 use absolute system executable paths; the hosted-entrypoint fixture also runs with
-a hostile `python3` earlier on PATH. Approval fields are compared as a set because
+a hostile `python3` earlier on PATH. `result.py` refuses Python optimisation at startup.
+This includes `-O`, `-OO` and optimisation enabled through `PYTHONOPTIMIZE`.
+Its assertion checks must stay active. Approval fields are compared as a set because
 their order has no meaning. Git enables only HTTPS/file transports.
 
 One residual SonarCloud finding, `AaEZv6-2dwEzUswl_4bM` (`pythonsecurity:S8705`),
@@ -149,12 +151,15 @@ central `@SHA` ref. The independent publisher action SHA stays in the caller’s
 The base tip is recorded before dispatch. There is no
 result branch input in policy or dispatch. The agent calls `submit_result` with exactly
 `environmentId` (the result's container-use environment), `branch` (its chosen name),
-`title` (its PR title) and `commitMessage` (the single published commit's message).
-The strict final-message fallback accepts the same object, either bare or in one JSON
-fence, without surrounding prose or extra fields. Title and message are required,
-non-empty valid UTF-8 plain text. Titles have at most 200 Unicode code points and one
-line; messages have at most 10 KiB of UTF-8. Unicode control characters are forbidden,
-except LF in messages. Unpaired surrogates and title line/paragraph separators fail.
+`title` (its PR title), `commitMessage` (the single published commit's message) and
+`body` (its Markdown PR description). The agent uses the pinned `visual-pr` skill to
+write the body. The strict final-message fallback accepts the same object, either
+bare or in one JSON fence, without surrounding prose or extra fields.
+Title and message are required, non-empty valid UTF-8 plain text. The body is required
+and must contain non-whitespace text. Titles have at most 200 Unicode code points
+and one line. Messages have at most 10 KiB of UTF-8; bodies have at most 32 KiB.
+Unicode control and format characters are forbidden, except LF in messages and bodies.
+Unpaired surrogates and title line/paragraph separators fail.
 The submitted and sealed text remains unchanged. Metadata travels as JSON/API payloads,
 never shell interpolation. Branch naming remains entirely the agent's choice.
 The agent must not create Git branches inside the container or push.
@@ -162,7 +167,7 @@ The agent must not create Git branches inside the container or push.
 After session quiescence and audit acknowledgement, the fixed runner control seals the
 selected container-use result in `result.bundle` and `result.json`, verifying the exact
 environment among `refs/remotes/container-use/*` even when several exist. Only
-source/result/tree SHAs, branch, title, commit message and content digests return over SSH.
+source/result/tree SHAs, branch, title, commit message, body and content digests return over SSH.
 The controller refuses any difference between the submitted wording and sealed metadata. A missing or unknown
 environment produces an explicit operator outcome without choosing another result;
 an unchanged source explicitly produces no publication. The reusable lease job uploads
@@ -236,7 +241,7 @@ The publisher uses `POST /git/refs` once to create the agent-named branch at thi
 commit. A taken name or a race fails without updating a ref. There is no credential
 helper, authenticated git push, force/update/delete operation or automatic rename.
 The PR is a draft with the agent's title, the existing workflowd binding marker followed
-by two newlines and the unchanged commit message, and `maintainer_can_modify: false`.
+by two newlines and the unchanged agent body, and `maintainer_can_modify: false`.
 Readback checks the title, body, number, URL, open/draft state, bot login/ID, repository,
 base and squashed commit. No result branch is deleted or overwritten as rollback.
 
@@ -245,7 +250,7 @@ owned run, attempt, source, workflow identity, successful runner job, immutable 
 identity, expected custom rule and environment settings. The gate App uses a separate
 repository token with Actions read and Deployments write. Approval is an exact
 version-4 result-binding JSON comment, including the result tree SHA and sealed manifest digest.
-The manifest carries the title and commit message; its digest binds their exact bytes without
+The manifest carries the title, commit message and body; its digest binds their exact bytes without
 duplicating them in the comment. A digest mismatch or old binding version fails closed.
 Its intent is saved before POST; a lost response is
 recovered by reading the matching review, never by blindly repeating the POST. The
@@ -276,8 +281,8 @@ runner can upload artifacts too. The result bundle stays on GitHub and the publi
 
 Migration 34 stores the immutable base ref and metadata receipt. Version-4 approvals retain that base binding, run/attempt, artifact ID/archive digest,
 source/result/tree SHAs and manifest digest in compact JSON capped at 900 UTF-8 bytes before
-approval is claimed. Title and commit message remain only in the sealed manifest; its digest
-binds their exact bytes. The publisher rechecks that digest before using either field.
+approval is claimed. Title, commit message and body remain only in the sealed manifest;
+its digest binds their exact bytes. The publisher rechecks that digest before using these fields.
 Oversized bindings fail closed before any approval POST. Definitive HTTP 400/401/403/404/422
 approval rejections settle as `operator_required` with the original diagnostic; ambiguous
 failures retain approval custody and are never blindly retried. Historical canary
@@ -285,7 +290,7 @@ intents retain a null base and are never retroactively published. Recovery reuse
 receipts, checks the remote head and draft PR, and never repeats a ref or PR POST. An
 ambiguous ref creation without a successful API acknowledgement remains `operator_required`, even
 if a matching SHA exists remotely; ownership has not been proven. A known-created branch
-with a lost PR reply can recover by exact marker, title/message, author, head/tree/parent and base. Missing logs,
+with a lost PR reply can recover by exact marker, title/body, author, head/tree/parent and base. Missing logs,
 revocation failure, foreign PRs and ambiguous ownership fail closed.
 
 Cancellation before approval does not publish. After approval, cancellation/expiry stops
@@ -328,9 +333,10 @@ job from the recorded run/attempt. Only that job's log supplies publisher receip
 Its final receipt must confirm the published PR and token revocation. GitHub readback
 must show the agent-selected ref at the receipt's squashed commit and an **open draft** PR
 by `ghettimonster[bot]` (339414993), with the same repository, recorded base and
-`maintainer_can_modify: false`. The PR title/message must match the submission, and
-the published commit must have the sealed tree, the recorded source as its only parent,
-the supplied message and a verified signature. This proves tree equality without
+`maintainer_can_modify: false`. The PR title must match the submission. Its body must
+be the publication marker, two newlines and the submitted body. The published commit
+must have the sealed tree, the recorded source as its only parent, the composed message
+with the configured co-author trailer, and a verified signature. This proves tree equality without
 downloading a patch or bundle. If the base
 has moved, verification stops rather than claiming that the diff still matches.
 
@@ -352,11 +358,22 @@ changed by the verifier.
 
 ## Publication text policy
 
-Title, commitMessage and body use the same safety rules in the controller, Python sealer, and publisher; the shared corpus in `test/sandbox/publication-corpus.ts` exercises all three. Character references, control/format/default-ignorable characters (including ZWJ and variation selectors), blank braille and unassigned Unicode 15.0 code points are rejected everywhere. Outside validated fences, any line containing `]:` is rejected, including escaped/multiline labels, quoted/list definitions and multiline titles. Literal link definitions inside validated fences are allowed. LF remains allowed in message/body. Closing issue references are rejected after NFKC and full case folding and both removal and space replacement of Markdown punctuation, including inside code. Both forms are checked so emphasis cannot either hide a keyword or glue it to a preceding letter. More than two consecutive combining marks in canonical decomposition are rejected, including inside fences. The matcher requires a non-letter boundary, a closing keyword, a colon or whitespace, then an issue reference. Ordinary prose such as “this fixes the race” and words with a letter prefix such as “hotfix” are allowed.
+The controller, Python sealer and publisher apply the same rules to each publication field.
+The shared corpus in `test/sandbox/publication-corpus.ts` exercises all three validators. Character references, control/format/default-ignorable characters (including ZWJ and variation selectors), blank braille and unassigned Unicode 15.0 code points are rejected everywhere. Outside validated fences, any line containing `]:` is rejected, including escaped/multiline labels, quoted/list definitions and multiline titles. Literal link definitions inside validated fences are allowed. LF remains allowed in message/body. Closing issue references are rejected after NFKC and full case folding and both removal and space replacement of Markdown punctuation, including inside code. Both forms are checked so emphasis cannot either hide a keyword or glue it to a preceding letter. More than two consecutive combining marks in canonical decomposition are rejected, including inside fences. The matcher requires a non-letter boundary, a closing keyword, a colon or whitespace, then an issue reference. Ordinary prose such as “this fixes the race” and words with a letter prefix such as “hotfix” are allowed.
 
-Literal less-than signs, at signs, dollar signs and backslashes are allowed only inside strict column-zero fences preceded by a blank line or the start of the field. Fences must have at least three identical backticks or tildes and an exact matching closing line. Indented, nested, mismatched, unclosed or unsupported-language fences fail closed. The info string is empty or one of text, diff, ts, typescript, tsx, js, json, sh, bash, python, rust, go, sql, yaml, toml. Inline code offers no exception. No math, Mermaid, GeoJSON, TopoJSON or STL fences are accepted.
+In the PR body, literal less-than signs, at signs, dollar signs and backslashes are
+allowed only inside validated fences. Backslash checks include Unicode compatibility
+forms. Commit messages are plain text and reject these characters everywhere, even
+inside fences. Titles cannot use the fenced-code exception because they have one line.
 
-The new publisher implementation queries GitHub's `closingIssuesReferences { totalCount }` after PR creation (including recovery of a lost POST reply). It requires three zero-count observations, two seconds apart, before recording `closingIssuesVerified: true`. Requests retain their 30-second timeout, so this check is bounded. Any nonzero count or unverifiable response triggers a PR closure attempt and a failed job with a bounded diagnostic retained in workflowd's receipt. This is a bounded check for parser delay, not a guarantee against indefinite GitHub indexing delays. See [GitHub's field definition](https://docs.github.com/en/graphql/reference/pulls).
+Fences must start at column zero after a blank line or at the start of the body.
+They use at least three identical backticks or tildes. The closing line must contain
+exactly the same run at column zero and nothing else. Indented, nested, mismatched,
+unclosed or unsupported-language fences fail closed. The info string is empty or one
+of text, diff, ts, typescript, tsx, js, json, sh, bash, python, rust, go, sql, yaml, toml.
+Inline code offers no exception. No math, Mermaid, GeoJSON, TopoJSON or STL fences are accepted.
+
+The publisher queries GitHub's `closingIssuesReferences { totalCount }` after PR creation (including recovery of a lost POST reply). It requires three zero-count observations, two seconds apart, before recording `closingIssuesVerified: true`. Requests retain their 30-second timeout, so this check is bounded. Any nonzero count or unverifiable response triggers a PR closure attempt and a failed job with a bounded diagnostic retained in workflowd's receipt. This is a bounded check for parser delay, not a guarantee against indefinite GitHub indexing delays. See [GitHub's field definition](https://docs.github.com/en/graphql/reference/pulls).
 
 Controller recovery checks publication stage, revocation and commit identity before requiring the verification proof. A publisher killed before reaching the PR stage, without a recorded cause, yields `operator_required`. A receipt for a PR without verification proof fails closed; **the operator must close any unverified open draft PR** before retrying. Closure failure also requires operator closure. The proof is persisted before final commit readback, so a lost final receipt can be recovered without new App permissions.
 
@@ -364,14 +381,33 @@ Unicode policy data is pinned to 15.0.0 in `publication-unicode.json` and `casef
 
 ### Required rollout order
 
-**The GitHub parser backstop is not active in the currently pinned `agent-publish@248846d`.** That publisher never emits `closingIssuesVerified`. Deploying the new controller before updating the publisher would reject all otherwise successful publications. This PR changes no action/workflow pins. Operators must complete these steps in order:
+The workflowd caller pins `agent-publish` to
+`f74e0505155bc32aa2cedef00ba8b08ef1b90007`, updated in PR #99. That publisher
+includes the GitHub parser backstop and emits `closingIssuesVerified` after verification.
+The caller uses the local sandbox workflow. The publisher action pin, policy workflow
+SHA and agent image digest are separate settings.
 
-1. Merge this PR and record its merge commit SHA.
-2. Publish the agent image built from that merge commit.
-3. Record the image's immutable digest in each applicable `SandboxPolicy.agentImage` (see the onboarding guide).
-4. Re-pin the caller's sandbox workflow and `agent-publish` action to the merge commit, and update the corresponding policy workflow SHA. Check the Unicode runtime contract in the caller and image.
-5. Deploy the controller only after those caller pins and policies are in place.
+For future rollouts, operators must complete these steps in order:
 
-The parser backstop becomes active when callers use the updated publisher; this document describes the new implementation, not evidence that rollout has happened.
+1. Record the reviewed publisher tooling SHA and caller workflow SHA.
+2. Select a published, reviewed agent image and record its immutable digest.
+3. Set that full image reference in each applicable `SandboxPolicy.agentImage` and the caller repository's `SANDBOX_AGENT_IMAGE` variable.
+4. Update the caller workflow and publisher action pins as needed, and record the matching policy workflow SHA. Check the Unicode runtime contract in the caller and image.
+5. Deploy the controller only after compatible caller pins and policies are in place.
 
-The runner's base image is the required operator-recorded `agentImage` digest in the lease policy. See [digest discovery and rollout](agent-sandbox-onboarding.md#recording-the-agent-image-digest). Repository skills are read through the environment at `/workdir/.agents/skills` and `/workdir/.claude/skills` when present, alongside the pinned `/opt/workflowd/skills` set. Upstream skill revisions remain unchanged; Nix fetches unpacked content with `fetchFromGitHub` hashes.
+The image is selected by digest. It need not come from the caller's merge commit.
+The checked-in pins do not prove that live policies or deployment have been updated.
+An older publisher without `closingIssuesVerified` cannot satisfy the controller's
+publication checks.
+
+The workflowd caller passes `SANDBOX_AGENT_IMAGE` as the reusable workflow's
+`agent-image` input. The runner requires `ghcr.io/bnasraoui/workflowd-agent-base@sha256:`
+followed by 64 lowercase hexadecimal characters. It records the full reference as
+`agentImage` in readiness. The controller rejects readiness if that value differs
+from the lease policy's `agentImage`. Tags and missing digests have no fallback.
+See [digest discovery and rollout](agent-sandbox-onboarding.md#recording-the-agent-image-digest).
+
+Repository skills are read through the environment at `/workdir/.agents/skills` and
+`/workdir/.claude/skills` when present, alongside the pinned `/opt/workflowd/skills` set.
+Upstream skill revisions remain unchanged; Nix fetches unpacked content with
+`fetchFromGitHub` hashes.
