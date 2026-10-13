@@ -224,7 +224,7 @@ jobs:
             /bin/sh -c 'ip link set lo up && exec "$@"' fixture \
             /opt/workflowd-credential-fixture/bin/bun test --coverage \
             --coverage-dir=coverage/administrative \
-            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after)' \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
             test/agent-user/client-versions.test.ts \
             test/agent-user/credentials.e2e.test.ts \
             test/agent-user/credential-dispatch.e2e.test.ts \
@@ -232,7 +232,7 @@ jobs:
       - name: Generate Bun LCOV
         run: |
           # Migration needs privileged /proc access; refresh probes need network
-          # isolation. The preceding step checks both modules with unchanged Bun
+          # isolation. The preceding step checks administrative modules with unchanged Bun
           # thresholds. Every other module is checked here with those thresholds.
           python3 - <<'PY'
           import os
@@ -240,7 +240,7 @@ jobs:
           config = Path("bunfig.toml").read_text()
           key = "coveragePathIgnorePatterns = ["
           assert config.count(key) == 1
-          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "test/agent-user/harness.ts",', 1)
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
           Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
           PY
           bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
@@ -250,7 +250,7 @@ jobs:
           # No duplicate file records may mask ordinary-suite coverage.
           python3 - <<'PY'
           from pathlib import Path
-          paths = ["src/agent-host/opencode-credentials.ts", "test/agent-user/harness.ts"]
+          paths = ["src/agent-host/" + name + ".ts" for name in ["opencode-credentials", "credentials", "config", "credential-relink", "client", "server"]] + ["test/agent-user/harness.ts"]
           administrative = Path("coverage/administrative/lcov.info").read_text()
           report = Path("coverage/lcov.info")
           ordinary = report.read_text()

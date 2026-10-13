@@ -325,19 +325,14 @@ const make = (options: AgentRunIngressOptions) =>
         if (provider === undefined)
           return yield* refuse("executor_unavailable", "OpenCode executor is disabled")
         const [providers, models] = yield* Effect.all(
-          [
-            provider
-              .listProviders({})
-              .pipe(
-                Effect.mapError((error) =>
-                  credentialReason(error) !== undefined
-                    ? refuse(credentialReason(error)!, "Credential admission refused")
-                    : error,
-                ),
-              ),
-            provider.listModels({}),
-          ],
+          [provider.listProviders({}), provider.listModels({})],
           { concurrency: 2 },
+        ).pipe(
+          Effect.mapError((error) =>
+            credentialReason(error) !== undefined
+              ? refuse(credentialReason(error)!, "Credential admission refused")
+              : error,
+          ),
         )
         if (!providers.includes(route.providerID)) {
           return yield* refuse(

@@ -1,5 +1,15 @@
 #!/bin/sh
 set -eu
+# Build from this reviewed checkout; --build-only validates artifacts without provisioning.
+[ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --build-only ]; } || exit 1
+cd "$(dirname "$0")/../.."
+command -v bun >/dev/null
+bun install --frozen-lockfile
+mkdir -p dist
+bun build --compile src/agent-host/server.ts --outfile dist/workflowd-agent-host
+bun build --compile deploy/agent-user/relink.ts --outfile dist/workflowd-relink-credentials
+bun build --compile deploy/agent-user/migrate-opencode.ts --outfile dist/workflowd-migrate-opencode
+[ "${1:-}" != --build-only ] || exit 0
 [ "$(id -u)" = 0 ] || { echo 'Root is required' >&2; exit 1; }
 # Account/group creation and live cutover belong to the later provisioning phase.
 id ben >/dev/null

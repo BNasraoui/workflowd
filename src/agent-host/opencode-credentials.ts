@@ -1,3 +1,6 @@
+import { constants as fileConstants } from "node:fs"
+import type { FileHandle } from "node:fs/promises"
+import { credentialParent } from "./credentials"
 import { createHash } from "node:crypto"
 import { lstat, open, readFile, readdir, readlink, rename, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -11,6 +14,13 @@ export const OpenCodeMigrationPolicy = Schema.Struct({
   journal: Schema.String,
   agentUid: Schema.Int,
   agentGid: Schema.Int,
+  sourceUnits: Schema.Array(
+    Schema.Struct({
+      name: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_.@-]+\.service$/)),
+      scope: Schema.Literals(["user", "system"]),
+      user: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-z_][a-z0-9_-]*$/))),
+    }),
+  ),
 })
 export type OpenCodeMigrationPolicy = typeof OpenCodeMigrationPolicy.Type
 const Journal = Schema.Struct({
@@ -48,12 +58,14 @@ function validateSchema(db: Database, name: "main" | "destination") {
     throw refused()
 }
 
-async function requireClosed(paths: readonly string[]) {
+async function requireClosed(paths: readonly string[], agentUid: number) {
   const owners = await Promise.all(paths.map(async (path) => (await lstat(path)).uid))
   for (const pid of await readdir("/proc")) {
     if (!/^\d+$/.test(pid) || Number(pid) === process.pid) continue
     const processInfo = await stat(`/proc/${pid}`).catch(() => null)
-    if (!processInfo || !owners.includes(processInfo.uid)) continue
+    if (!processInfo) continue
+    if (processInfo.uid === agentUid) throw refused()
+    if (!owners.includes(processInfo.uid)) continue
     const descriptors = await readdir(`/proc/${pid}/fd`).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return []
       throw refused()
@@ -85,9 +97,10 @@ async function saveJournal(path: string, value: typeof Journal.Type) {
 /** Drained, schema-pinned migration. SQLite's rollback super-journal commits both databases together. */
 export async function migrateOpenCodeGrants(policy: OpenCodeMigrationPolicy) {
   let db: Database | undefined
+  const handles: FileHandle[] = []
   let stage = "consumers"
   try {
-    await requireClosed([policy.source, policy.database])
+    await requireClosed([policy.source, policy.database], policy.agentUid)
     stage = "paths"
     for (const path of [policy.source, policy.database]) {
       const info = await lstat(path)
@@ -101,6 +114,35 @@ export async function migrateOpenCodeGrants(policy: OpenCodeMigrationPolicy) {
       )
         throw refused()
     }
+    stage = "destination-record"
+    const recorded = await lstat(policy.database)
+    stage = "destination-parent"
+    const parent = await credentialParent(policy.database, policy.agentUid)
+    handles.push(parent.handle)
+    stage = "destination-open"
+    const destination = await open(
+      parent.path,
+      fileConstants.O_RDWR | fileConstants.O_NOFOLLOW | fileConstants.O_NONBLOCK,
+    )
+    handles.push(destination)
+    const verifyDestination = async () => {
+      const info = await destination.stat()
+      const named = await lstat(parent.path)
+      const absolute = await lstat(policy.database)
+      if (
+        !info.isFile() ||
+        info.nlink !== 1 ||
+        info.uid !== policy.agentUid ||
+        info.gid !== policy.agentGid ||
+        (info.mode & 0o777) !== 0o600 ||
+        [recorded, named, absolute].some(
+          (other) => !other.isFile() || other.dev !== info.dev || other.ino !== info.ino,
+        )
+      )
+        throw refused()
+    }
+    stage = "destination-verify"
+    await verifyDestination()
     stage = "open"
     db = new Database(
       policy.source,
@@ -109,7 +151,11 @@ export async function migrateOpenCodeGrants(policy: OpenCodeMigrationPolicy) {
     db.run("PRAGMA trusted_schema=OFF")
     db.run("PRAGMA wal_checkpoint(TRUNCATE)")
     db.run("PRAGMA journal_mode=DELETE")
+    // SQLite NOFOLLOW rejects /proc/self/fd aliases. Its named open is safe only in
+    // this drained interval; compare the pinned inode immediately before ATTACH.
+    await verifyDestination()
     db.run("ATTACH DATABASE ? AS destination", [policy.database])
+    await verifyDestination()
     db.run("PRAGMA destination.wal_checkpoint(TRUNCATE)")
     db.run("PRAGMA destination.journal_mode=DELETE")
     db.run("PRAGMA main.synchronous=FULL")
@@ -153,19 +199,14 @@ export async function migrateOpenCodeGrants(policy: OpenCodeMigrationPolicy) {
     stage = "finish"
     db.close()
     db = undefined
-    const destination = await open(policy.database, "r+")
-    try {
-      await destination.chown(policy.agentUid, policy.agentGid)
-      await destination.chmod(0o600)
-      await destination.sync()
-    } finally {
-      await destination.close()
-    }
+    await verifyDestination()
+    await destination.sync()
     await saveJournal(policy.journal, { phase: "moved", ids })
   } catch {
     throw Object.assign(refused(), { detail: `opencode_grant_migration_incomplete:${stage}` })
   } finally {
     db?.close()
+    await Promise.all(handles.map((handle) => handle.close()))
   }
 }
 
@@ -192,6 +233,10 @@ export async function checkOpenCodeMigration(policy: OpenCodeMigrationPolicy) {
       policy.database,
       constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_NOFOLLOW,
     )
+    for (const db of [source, destination]) {
+      db.run("PRAGMA trusted_schema=OFF")
+      db.run("PRAGMA query_only=ON")
+    }
     if (
       source.query("SELECT id FROM credential LIMIT 1").get() !== null ||
       destination.query("SELECT id FROM credential LIMIT 1").get() === null

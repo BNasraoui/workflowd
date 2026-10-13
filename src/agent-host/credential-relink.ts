@@ -5,32 +5,87 @@ import {
   readFile,
   readdir,
   readlink,
+  realpath,
   rename,
   stat,
   symlink,
   unlink,
 } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { Schema } from "effect"
 import type { CredentialPolicy } from "./config"
 import { credentialLock, credentialParent, inspectCredentialLayout } from "./credentials"
 import { credentialRefusal } from "./protocol"
 
-async function requireStopped(policy: CredentialPolicy) {
+async function resolvedConsumers(paths: readonly string[]) {
+  const installed = new Set<string>()
+  const add = async (path: string) => {
+    const resolved = await realpath(path).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
+      throw error
+    })
+    if (resolved) installed.add(resolved)
+    return resolved
+  }
+  for (const path of paths) {
+    const binary = await add(path)
+    if (!binary) continue
+    // Claude's native installer retains previous versions; running clients may use any of them.
+    if (basename(dirname(binary)) === "versions") {
+      for (const name of await readdir(dirname(binary))) await add(join(dirname(binary), name))
+    }
+    // Codex's npm launcher delegates to a platform package, or its bundled vendor tree.
+    if (basename(binary) === "codex.js") {
+      const packageRoot = dirname(dirname(binary))
+      const scope = dirname(packageRoot)
+      const packages = [
+        packageRoot,
+        ...(await readdir(scope))
+          .filter((name) => name.startsWith("codex-"))
+          .map((name) => join(scope, name)),
+      ]
+      for (const root of packages) {
+        const vendor = join(root, "vendor")
+        const targets = await readdir(vendor).catch((error: unknown) => {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") return []
+          throw error
+        })
+        for (const target of targets) {
+          await add(join(vendor, target, "codex", "codex"))
+          await add(join(vendor, target, "bin", "codex"))
+        }
+      }
+    }
+  }
+  return installed
+}
+
+async function requireStopped(policy: CredentialPolicy, client: "codex" | "claude") {
+  const installed = await resolvedConsumers(policy.consumerExecutables)
+  const fail = (): never => {
+    throw credentialRefusal(client, "credential_relink_in_progress")
+  }
   for (const entry of await readdir("/proc")) {
-    if (!/^\d+$/.test(entry)) continue
+    if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
     const path = `/proc/${entry}`
     const info = await stat(path).catch(() => null)
-    if (!info || ![policy.controllerUid, policy.agentUid].includes(info.uid)) continue
-    const executable = await readlink(`${path}/exe`).catch(() => "")
-    const arguments_ = await readFile(`${path}/cmdline`, "utf8").catch(() => "")
-    if (
-      policy.consumerExecutables.some(
-        (binary) => binary === executable || arguments_.split("\0").includes(binary),
-      )
-    )
-      throw credentialRefusal("codex", "credential_relink_in_progress")
+    if (!info) continue
+    if (info.uid === policy.agentUid) fail()
+    if (info.uid !== policy.controllerUid) continue
+    try {
+      const executable = await realpath(`${path}/exe`)
+      if (installed.has(executable)) fail()
+      // Script entrypoints run inside Node; resolve argv paths too, never argv display names.
+      const arguments_ = (await readFile(`${path}/cmdline`, "utf8")).split("\0")
+      for (const argument of arguments_.filter((value) => value.startsWith("/"))) {
+        const resolved = await realpath(argument).catch(() => undefined)
+        if (resolved && installed.has(resolved)) fail()
+      }
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue
+      fail()
+    }
   }
 }
 
@@ -85,10 +140,14 @@ async function importReplacement(
     }
     const intent = { client, source, sourceDevice: sourceInfo.dev, sourceInode: sourceInfo.ino }
     await persist(intent)
-    const input = await open(selected.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const input = await open(
+      selected.path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    )
     handles.push(input)
     const verified = await input.stat()
     if (
+      !verified.isFile() ||
       verified.ino !== sourceInfo.ino ||
       verified.dev !== sourceInfo.dev ||
       verified.size > 1024 * 1024
@@ -137,7 +196,7 @@ export async function relinkCredentials(
     throw credentialRefusal(client, "shared_credential_diverged")
   }
   try {
-    await requireStopped(policy)
+    await requireStopped(policy, client)
     const login = policy[client]
     const sourcePath = source === "ben" ? login.benLink : login.agentLink
     const otherPath = source === "ben" ? login.agentLink : login.benLink

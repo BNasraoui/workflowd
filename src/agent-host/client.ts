@@ -16,11 +16,15 @@ export function acquireCredentialAdmission(
   return new Promise((resolve, reject) => {
     const socket = connect(path)
     let admitted = false
-    const fail = () => {
+    const fail = (cause: unknown = new Error("host connection closed before admission")) => {
       socket.destroy()
-      reject(credentialRefusal(client, "shared_credential_link_broken"))
+      reject(
+        Object.assign(credentialRefusal(client, "credential_host_unreachable_or_timed_out"), {
+          detail: cause instanceof Error ? cause.message : String(cause),
+        }),
+      )
     }
-    socket.setTimeout(15000, fail)
+    socket.setTimeout(15000, () => fail(new Error("credential host timed out after 15000ms")))
     socket.on("error", fail)
     socket.once("connect", () =>
       socket.write(JSON.stringify({ operation: "checkCredentials", client }) + "\n"),
@@ -54,8 +58,8 @@ export function acquireCredentialAdmission(
               socket.end()
             }),
         )
-      } catch {
-        fail()
+      } catch (cause) {
+        fail(cause)
       }
     })
     socket.on("close", () => {
@@ -74,7 +78,18 @@ export function withCredentialAdmission<A, E, R>(
     Effect.tryPromise({
       try: () => acquireCredentialAdmission(socket, client),
       catch: (error) =>
-        credentialRefusal(client, credentialReason(error) ?? "shared_credential_link_broken"),
+        Object.assign(
+          credentialRefusal(
+            client,
+            credentialReason(error) ?? "credential_host_unreachable_or_timed_out",
+          ),
+          {
+            detail:
+              typeof error === "object" && error !== null && "detail" in error
+                ? String(error.detail)
+                : String(error),
+          },
+        ),
     }),
     () => effect,
     (release) => Effect.tryPromise(release).pipe(Effect.orDie),

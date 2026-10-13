@@ -579,6 +579,9 @@ export const makeDurableCliProcess = (
               ? []
               : ["--property=MemoryMax=6G", "--property=MemorySwapMax=0"]),
             ...forwardedEnvironment,
+            ...(options.credentialSocket === undefined
+              ? []
+              : [`--setenv=WORKFLOWD_AGENT_HOST_SOCKET=${options.credentialSocket}`]),
             ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
               ([name, value]) => `--setenv=${name}=${value}`,
             ),

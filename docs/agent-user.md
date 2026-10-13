@@ -1,6 +1,7 @@
 # Agent user credential admission (draft)
 
-Phase 1 is incomplete. Do not install or enable this draft on a live host.
+This draft covers Phase 1 credential admission. Live provisioning and cutover
+remain later phases.
 
 The draft adds credential metadata checks, an admission lease held through
 handoff, and explicit offline relinking of a uniquely replaced login. Missing
@@ -17,18 +18,44 @@ A private network namespace denies external egress during refresh probes.
 
 The OpenCode draft checks the beta-19242 database schema, transfers credential
 rows using an offline SQLite transaction, and retains a nonsecret migration
-journal. It refuses active database consumers and unknown schemas. Its installed
-server restart/attachment test is not yet passing; OAuth provider acceptance,
-crash recovery, and sole-refresher operation are not established by this draft.
+journal. It refuses unknown schemas, active database consumers, and every live
+agent-user process. The destination must already exist with agent ownership,
+mode 0600 and ancestry without group or other write (private data directories should be
+0700). Migration pins its parent and file descriptors, verifies the inode before
+SQLite ATTACH, and never changes ownership. SQLite's NOFOLLOW open rejects
+symlink ancestors; the explicit drain must remain in force through the migration.
+The installed-server restart/attachment fixture passes with invented grants;
+this does not establish acceptance of real OAuth grants by providers.
 
-CI includes a disposable-UID credential gate. Passing local same-UID tests is
-not evidence that this gate or deployment isolation works. No mint accounts,
-groups, credentials, services, or configuration were changed.
+The policy lists each previous OpenCode service with its scope and user. The
+migration entrypoint requires every listed service to be masked and inactive;
+user services are inspected through `systemctl --user -M ben@`. The template
+covers `opencode-server`, `opencode2-server`, and `opencode2-reviewer`. Operators
+must include any additional local autostart services before cutover. No live
+services are changed by these checks.
 
-Current scope blocker: the administrative TypeScript entrypoints under
-`deploy/agent-user/` are excluded by `tsconfig.json`; ESLint cannot load them
-through its project service. Project inclusion needs an approved tooling change
-before Phase 1 can pass all required checks.
+CI includes a disposable two-UID credential gate. Local tests inside a private
+user/PID namespace are administrative regressions, not cross-UID deployment
+proof. No mint accounts, groups, credentials, services, or configuration were
+changed. The entrypoints are included in the TypeScript project.
+
+Admission connections have a 15-second handshake timeout. Once admitted, the
+lease deliberately remains held until the controller closes the connection:
+expiring it while a launch/prompt is still in flight would allow relinking to
+overlap that handoff. A stalled controller can therefore block relink. Drain
+and stop the affected controller/clients before repair; process exit releases
+the socket and lock. Do not clear a lock beneath a live admission.
+
+Relink requires every agent-user process and all affected controller clients to
+be stopped. After relinking, restart affected Codex, Claude and OpenCode clients
+before admitting new work so cached grants cannot survive the repair. The
+command does not restart clients itself.
+
+`deploy/agent-user/install.sh --build-only` installs locked build dependencies
+and compiles the three binaries into `dist/`. Running it without that flag then
+installs the artifacts for already-provisioned identities and a reviewed policy.
+The host unit limits capabilities to credential traversal and socket ownership;
+its home view is read-only. Live provisioning and cutover remain later phases.
 
 Focused local checks run in capped user units:
 

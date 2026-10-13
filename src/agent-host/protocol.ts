@@ -6,6 +6,7 @@ export const CredentialAdmissionReason = Schema.Literals([
   "shared_credential_permissions_invalid",
   "credential_relink_in_progress",
   "opencode_grant_migration_incomplete",
+  "credential_host_unreachable_or_timed_out",
 ])
 export type CredentialAdmissionReason = typeof CredentialAdmissionReason.Type
 export const CredentialClient = Schema.Literals(["codex", "claude", "opencode"])
@@ -16,6 +17,7 @@ const tags = {
   shared_credential_permissions_invalid: "SharedCredentialPermissionsInvalid",
   credential_relink_in_progress: "CredentialRelinkInProgress",
   opencode_grant_migration_incomplete: "OpenCodeGrantMigrationIncomplete",
+  credential_host_unreachable_or_timed_out: "CredentialHostUnreachableOrTimedOut",
 } as const
 export type CredentialCheckError = Error & {
   readonly _tag: (typeof tags)[CredentialAdmissionReason]

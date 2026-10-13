@@ -3,6 +3,7 @@ import { probeCodexCredentialSharing, probeInstalledRefresh } from "./harness"
 
 test("installed Codex re-login breaks sharing, then production relink restores shared use", async () => {
   const evidence = await probeCodexCredentialSharing()
+  expect(evidence.uidCount).toBe(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ? 2 : 1)
   expect(evidence.directUpdateShared).toBe(true)
   expect(evidence.relogin.controllerSeesReplacement).toBe(true)
   expect(evidence.relogin.controllerLinkPreserved).toBe(false)

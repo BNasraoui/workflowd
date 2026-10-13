@@ -1,3 +1,4 @@
+import { Schema } from "effect"
 import { checkCredentialAdmission } from "../../src/agent-host/credentials"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
 import { credentialReason } from "../../src/agent-host/protocol"
@@ -16,6 +17,33 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+
+const CodexSharingEvidence = Schema.Struct({
+  refusal: Schema.optionalKey(Schema.String),
+  repaired: Schema.Boolean,
+  provider: Schema.String,
+  version: Schema.String,
+  uidCount: Schema.Number,
+  directUpdateShared: Schema.Boolean,
+  relogin: Schema.Struct({
+    controllerLinkPreserved: Schema.Boolean,
+    controllerSeesReplacement: Schema.Boolean,
+    canonicalSeesReplacement: Schema.Boolean,
+    agentSeesReplacement: Schema.Boolean,
+  }),
+})
+const RefreshEvidence = Schema.Struct({
+  egressDenied: Schema.Boolean,
+  uidCount: Schema.Number,
+  canariesDenied: Schema.Boolean,
+  codex: Schema.Struct({ refreshPersisted: Schema.Boolean }),
+  claude: Schema.Struct({
+    refreshPersisted: Schema.Boolean,
+    linkPreserved: Schema.Boolean,
+    refusal: Schema.String,
+    repaired: Schema.Boolean,
+  }),
+})
 
 function probeEnvironment(home: string, path = "/usr/bin:/bin") {
   return {
@@ -81,8 +109,46 @@ export async function probeClientVersions() {
   }
 }
 
+async function isolatedCredentialProbe(kind: "--codex-sharing" | "--refresh-probe") {
+  const child = Bun.spawn(
+    [
+      "unshare",
+      "--user",
+      "--map-root-user",
+      "--pid",
+      "--fork",
+      "--mount-proc",
+      "--net",
+      "/bin/sh",
+      "-c",
+      'mount -t tmpfs -o mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
+      "fixture",
+      process.execPath,
+      import.meta.filename,
+      kind,
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  )
+  const output = await new Response(child.stdout).text()
+  if ((await child.exited) !== 0) throw new Error("isolated_credential_probe_failed")
+  const result: unknown = JSON.parse(output)
+  return result
+}
+
 /** Installed-client prerequisite probe. All credentials and homes are synthetic. */
-export async function probeCodexCredentialSharing() {
+export async function probeCodexCredentialSharing(): Promise<typeof CodexSharingEvidence.Type> {
+  if (process.getuid!() !== 0)
+    return Schema.decodeUnknownSync(CodexSharingEvidence)(
+      await isolatedCredentialProbe("--codex-sharing"),
+    )
+  const controllerUid = Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ?? process.getuid!())
+  const agentUid = Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID ?? process.getuid!())
+  const groupGid = Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID ?? process.getgid!())
+  if (
+    process.env.WORKFLOWD_AGENT_TEST_BEN_UID &&
+    (controllerUid === agentUid || !controllerUid || !agentUid)
+  )
+    throw new Error("two_uid_fixture_invalid")
   const binary = Bun.which("codex")
   if (binary === null) throw new Error("Credential probe requires installed Codex")
   const root = await mkdtemp(join(tmpdir(), "workflowd-agent-credentials-"))
@@ -91,7 +157,21 @@ export async function probeCodexCredentialSharing() {
   const canonical = join(root, "auth.json")
   const authPath = (home: string) => join(home, ".codex", "auth.json")
   const command = (home: string, args: string[], input?: string) => {
-    const result = spawnSync(binary, args, {
+    const uid = home === controller ? controllerUid : agentUid
+    const command =
+      uid === process.getuid!()
+        ? [binary, ...args]
+        : [
+            "/usr/bin/setpriv",
+            "--reuid",
+            String(uid),
+            "--regid",
+            String(groupGid),
+            "--clear-groups",
+            binary,
+            ...args,
+          ]
+    const result = spawnSync(command[0]!, command.slice(1), {
       cwd: root,
       env: probeEnvironment(home, runtimePath()),
       input,
@@ -121,11 +201,17 @@ export async function probeCodexCredentialSharing() {
     )
   }
   try {
+    await chmod(root, 0o710)
+    await chown(root, process.getuid!(), groupGid)
     for (const home of [controller, agent]) {
       await mkdir(join(home, ".codex"), { recursive: true, mode: 0o700 })
+      const uid = home === controller ? controllerUid : agentUid
+      await chown(home, uid, groupGid)
+      await chown(join(home, ".codex"), uid, groupGid)
       await symlink(canonical, authPath(home))
     }
     await writeFile(canonical, JSON.stringify({ OPENAI_API_KEY: "synthetic-initial" }))
+    await chown(canonical, process.getuid!(), groupGid)
     await chmod(canonical, 0o660)
     const versionResult = command(controller, ["--version"])
     const version = versionResult.stdout.trim()
@@ -138,6 +224,9 @@ export async function probeCodexCredentialSharing() {
       (await contains(authPath(agent), "synthetic-update")) &&
       (await lstat(authPath(controller))).isSymbolicLink()
 
+    login(agent, "synthetic-agent-update")
+    if (!(await contains(authPath(controller), "synthetic-agent-update")))
+      throw new Error("agent_update_not_shared")
     if (command(controller, ["-c", 'cli_auth_credentials_store="file"', "logout"]).status !== 0)
       throw new Error("Synthetic credential logout failed")
     login(controller, "synthetic-relogin")
@@ -152,9 +241,9 @@ export async function probeCodexCredentialSharing() {
     const policy = {
       root,
       ownerUid: process.getuid!(),
-      groupGid: process.getgid!(),
-      controllerUid: process.getuid!(),
-      agentUid: process.getuid!(),
+      groupGid,
+      controllerUid,
+      agentUid,
       codex: loginPaths,
       claude: loginPaths,
       consumerExecutables: [],
@@ -166,11 +255,11 @@ export async function probeCodexCredentialSharing() {
     await relinkCredentials(policy, "codex", "ben")
     await checkCredentialAdmission(policy, "codex")
     return {
-      refusal,
+      ...(refusal === undefined ? {} : { refusal }),
       repaired: await contains(authPath(agent), "synthetic-relogin"),
       provider: "codex",
       version,
-      uidCount: 1,
+      uidCount: new Set([controllerUid, agentUid]).size,
       directUpdateShared,
       relogin,
     }
@@ -217,7 +306,11 @@ async function isolatedRefreshProcess(identifier: string): Promise<unknown> {
 }
 
 /** The entire protocol fixture runs in a network namespace containing only loopback. */
-export async function probeInstalledRefresh() {
+export async function probeInstalledRefresh(): Promise<typeof RefreshEvidence.Type> {
+  if (process.getuid!() !== 0)
+    return Schema.decodeUnknownSync(RefreshEvidence)(
+      await isolatedCredentialProbe("--refresh-probe"),
+    )
   const root = await mkdtemp(join(tmpdir(), "workflowd-oauth-refresh-"))
   await chmod(root, 0o710)
   try {
@@ -229,46 +322,7 @@ export async function probeInstalledRefresh() {
       process.getuid?.() === 0 && isolated
         ? await installedRefresh(root.slice(-6))
         : await isolatedRefreshProcess(root.slice(-6))
-    const { Schema } = await import("effect")
-    const evidence = Schema.decodeUnknownSync(
-      Schema.Struct({
-        egressDenied: Schema.Boolean,
-        uidCount: Schema.Number,
-        canariesDenied: Schema.Boolean,
-        codex: Schema.Struct({ refreshPersisted: Schema.Boolean }),
-        claude: Schema.Struct({
-          refreshPersisted: Schema.Boolean,
-          linkPreserved: Schema.Boolean,
-          refusal: Schema.String,
-          repaired: Schema.Boolean,
-        }),
-      }),
-    )(output)
-    const store = join(root, "claude")
-    const login = {
-      canonical: join(store, ".credentials.json"),
-      benLink: join(root, "claude-ben/.claude/.credentials.json"),
-      agentLink: join(root, "claude-agent/.claude/.credentials.json"),
-    }
-    const policy = {
-      root: store,
-      ownerUid: process.getuid!(),
-      groupGid: process.getgid!(),
-      controllerUid: process.getuid!(),
-      agentUid: process.getuid!(),
-      codex: login,
-      claude: login,
-      consumerExecutables: [],
-    }
-    if (evidence.uidCount === 2) return evidence
-    const refusal = await checkCredentialAdmission(policy, "claude").then(
-      () => "",
-      (error) => credentialReason(error) ?? "unknown",
-    )
-    await relinkCredentials(policy, "claude", "agent")
-    await checkCredentialAdmission(policy, "claude")
-    const repaired = (await readFile(login.benLink, "utf8")).includes("synthetic-rotated-refresh")
-    return { ...evidence, claude: { ...evidence.claude, refusal, repaired } }
+    return Schema.decodeUnknownSync(RefreshEvidence)(output)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -584,7 +638,7 @@ async function installedRefresh(identifier: string) {
         else {
           evidence.claude.refreshPersisted &&= oauth.claude > 0 && refreshed
           evidence.claude.linkPreserved ||= (await lstat(paths[index]!)).isSymbolicLink()
-          if (uidCount === 2) {
+          {
             const login = { canonical, benLink: paths[0]!, agentLink: paths[1]! }
             const policy = {
               root: store,
@@ -627,6 +681,19 @@ if (import.meta.main && process.argv[2] === "--installed-refresh") {
     console.log(
       JSON.stringify({ reason: credentialReason(error) ?? "installed_refresh_probe_failed" }),
     )
+    process.exitCode = 1
+  }
+}
+
+if (import.meta.main && ["--codex-sharing", "--refresh-probe"].includes(process.argv[2]!)) {
+  try {
+    const evidence =
+      process.argv[2] === "--codex-sharing"
+        ? await probeCodexCredentialSharing()
+        : await probeInstalledRefresh()
+    console.log(JSON.stringify(evidence))
+  } catch (error) {
+    console.log(JSON.stringify({ reason: credentialReason(error) ?? "credential_probe_failed" }))
     process.exitCode = 1
   }
 }

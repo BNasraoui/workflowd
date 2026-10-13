@@ -1,6 +1,19 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
+import * as filesystem from "node:fs/promises"
 import { spawnSync } from "node:child_process"
-import { chmod, chown, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import {
+  chmod,
+  chown,
+  copyFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  rename,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { networkInterfaces, tmpdir } from "node:os"
 import { join } from "node:path"
 import { Database } from "bun:sqlite"
@@ -41,7 +54,7 @@ async function runIsolated(pattern: string) {
       "--net",
       "/bin/sh",
       "-c",
-      'ip link set lo up && exec "$@"',
+      'mount -t tmpfs -o mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
       "fixture",
       process.execPath,
       "test",
@@ -49,7 +62,7 @@ async function runIsolated(pattern: string) {
       "--test-name-pattern",
       pattern,
     ],
-    { stdout: "ignore", stderr: "ignore" },
+    { stdout: "inherit", stderr: "inherit" },
   )
   expect(await child.exited).toBe(0)
 }
@@ -193,7 +206,11 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
         { cwd: home, env: fixtureEnvironment(home), timeout: 20000, stdio: "ignore" },
       )
       expect(result.status).toBe(0)
-      databases.push(join(home, "data/opencode/opencode.db"))
+      const database = join(home, "data/opencode/opencode.db")
+      await chmod(join(home, "data"), 0o700)
+      await chmod(join(home, "data/opencode"), 0o700)
+      await chmod(database, 0o600)
+      databases.push(database)
     }
     const original = await start(homes[0]!, ben)
     expect(JSON.stringify(await original.api("model")).includes("fixture")).toBe(true)
@@ -204,6 +221,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
       journal: join(root, "migration.json"),
       agentUid: agent,
       agentGid: group,
+      sourceUnits: [],
     }
     await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
       reason: "opencode_grant_migration_incomplete",
@@ -295,7 +313,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
 }, 90000)
 
 test("offline migration resumes its journal and refuses schema drift or a reactivated source", async () => {
-  if (process.getuid?.() !== 0) {
+  if (process.getuid?.() !== 0 || process.pid !== 1) {
     await runIsolated("^offline migration")
     return
   }
@@ -329,7 +347,11 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         },
       )
       expect(await child.exited).toBe(0)
-      databasePaths.push(join(home, "data/opencode/opencode.db"))
+      const database = join(home, "data/opencode/opencode.db")
+      await chmod(join(home, "data"), 0o700)
+      await chmod(join(home, "data/opencode"), 0o700)
+      await chmod(database, 0o600)
+      databasePaths.push(database)
     }
     const policy = {
       source: databasePaths[0]!,
@@ -337,6 +359,10 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
       journal: join(root, "migration.json"),
       agentUid: uid,
       agentGid: process.getgid!(),
+      sourceUnits: [
+        { name: "opencode2-server.service", scope: "user" as const, user: "ben" },
+        { name: "legacy.service", scope: "system" as const },
+      ],
     }
     const grant = JSON.stringify({
       type: "oauth",
@@ -363,7 +389,90 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
       reason: "opencode_grant_migration_incomplete",
     })
     seed()
-    await migrateOpenCodeGrants(policy)
+    await chmod(policy.database, 0o644)
+    await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+    await chmod(policy.database, 0o600)
+    const destinationDirectory = join(root, "destination/data/opencode")
+    const retainedDirectory = `${destinationDirectory}.retained`
+    const victimDirectory = join(root, "victim")
+    await mkdir(victimDirectory, { mode: 0o700 })
+    const victim = join(victimDirectory, "opencode.db")
+    const checkpoint = new Database(policy.database)
+    checkpoint.run("PRAGMA wal_checkpoint(TRUNCATE)")
+    checkpoint.close()
+    await copyFile(policy.database, victim)
+    const before = await readFile(policy.source)
+    const victimBefore = await readFile(victim)
+    const originalLstat = filesystem.lstat
+    let replaced = false
+    let observations = 0
+    function racedLstat(
+      path: import("node:fs").PathLike,
+      options?: import("node:fs").StatOptions & { bigint?: false | undefined },
+    ): Promise<import("node:fs").Stats>
+    function racedLstat(
+      path: import("node:fs").PathLike,
+      options: import("node:fs").StatOptions & { bigint: true },
+    ): Promise<import("node:fs").BigIntStats>
+    function racedLstat(
+      path: import("node:fs").PathLike,
+      options?: import("node:fs").StatOptions,
+    ): Promise<import("node:fs").Stats | import("node:fs").BigIntStats>
+    async function racedLstat(
+      path: import("node:fs").PathLike,
+      options?: import("node:fs").StatOptions,
+    ) {
+      const info = await originalLstat(path, options)
+      if (path === policy.database && ++observations === 2) {
+        replaced = true
+        await rename(destinationDirectory, retainedDirectory)
+        await symlink(victimDirectory, destinationDirectory)
+      }
+      return info
+    }
+    const race = spyOn(filesystem, "lstat").mockImplementation(racedLstat)
+    try {
+      await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+        reason: "opencode_grant_migration_incomplete",
+      })
+      expect(replaced).toBe(true)
+      expect(await readFile(policy.source)).toEqual(before)
+      expect(await readFile(victim)).toEqual(victimBefore)
+    } finally {
+      race.mockRestore()
+      if (replaced) {
+        await rm(destinationDirectory)
+        await rename(retainedDirectory, destinationDirectory)
+      }
+    }
+    const { migrateConfiguredOpenCode } = await import("../../deploy/agent-user/migrate-opencode")
+    await expect(migrateConfiguredOpenCode(policy)).rejects.toThrow()
+    const calls: string[][] = []
+    const command = async (args: readonly string[]) => {
+      calls.push([...args])
+      return {
+        stdout: args.includes("is-enabled") ? "masked" : "inactive",
+        exitCode: args.includes("is-enabled") ? 1 : 3,
+      }
+    }
+    await expect(
+      migrateConfiguredOpenCode(policy, async () => ({ stdout: "enabled", exitCode: 0 })),
+    ).rejects.toThrow()
+    await expect(
+      migrateConfiguredOpenCode(policy, async (args) =>
+        args.includes("is-enabled") ? command(args) : { stdout: "active", exitCode: 0 },
+      ),
+    ).rejects.toThrow()
+    calls.length = 0
+    await migrateConfiguredOpenCode(policy, command)
+    expect(calls).toEqual([
+      ["--user", "-M", "ben@", "is-enabled", "opencode2-server.service"],
+      ["--user", "-M", "ben@", "is-active", "opencode2-server.service"],
+      ["is-enabled", "legacy.service"],
+      ["is-active", "legacy.service"],
+    ])
     await checkOpenCodeMigration(policy)
     const journal: unknown = JSON.parse(await readFile(policy.journal, "utf8"))
     expect(journal).toEqual({ phase: "moved", ids: ["synthetic"] })
