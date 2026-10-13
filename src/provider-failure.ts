@@ -19,15 +19,7 @@ export const providerRetryDelay = (attempt: number): number | undefined =>
 
 /** Unknown item types are unsafe to replay; only known non-tool items qualify. */
 export const isNonToolItem = (type: string) =>
-  [
-    "userMessage",
-    "agentMessage",
-    "reasoning",
-    "plan",
-    "user_message",
-    "agent_message",
-    "todo_list",
-  ].includes(type)
+  ["userMessage", "agentMessage", "reasoning", "user_message", "agent_message"].includes(type)
 
 /** A summary can omit tools; only a fully hydrated turn proves their absence. */
 export const isToolFreeTurn = (

@@ -35,6 +35,7 @@ test("chunked Codex errors retry only with positive evidence of a safe turn", ()
     "mcp_tool_call",
     "file_change",
     "web_search",
+    "todo_list",
     "unknown",
   ]) {
     const turn = ready()
