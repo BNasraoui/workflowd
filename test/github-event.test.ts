@@ -23,6 +23,7 @@ const pullRequestPayload = {
     draft: false,
     state: "open",
     user: { login: "opencode-agent" },
+    author_association: "MEMBER",
     head: {
       sha: headSha,
       ref: "opencode/example-job",
@@ -64,6 +65,7 @@ describe("decodeGitHubEvent", () => {
       pullRequest: {
         number: 7,
         author: "opencode-agent",
+        authorAssociation: "MEMBER",
         baseRef: "main",
         baseSha,
         draft: false,

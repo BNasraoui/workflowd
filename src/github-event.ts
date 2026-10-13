@@ -35,6 +35,7 @@ const PullRequestPayload = Schema.Struct({
     draft: Schema.optional(Schema.Boolean),
     state: Schema.Literals(["open", "closed"]),
     user: Schema.Struct({ login: Schema.String }),
+    author_association: Schema.optional(Schema.NonEmptyString),
     head: Schema.Struct({
       sha: Schema.String,
       ref: Schema.String,
@@ -176,6 +177,9 @@ function decodeEvent(
         pullRequest: {
           number: decoded.pull_request.number,
           author: decoded.pull_request.user.login,
+          ...(decoded.pull_request.author_association === undefined
+            ? {}
+            : { authorAssociation: decoded.pull_request.author_association }),
           baseRef: decoded.pull_request.base.ref,
           baseSha: decoded.pull_request.base.sha,
           draft: decoded.pull_request.draft ?? false,

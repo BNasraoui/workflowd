@@ -1,3 +1,4 @@
+import { reviewServerId, reviewEndpointAlias, routeReviewHarness } from "./review-harness"
 import { InstallationGuard, makeInstallationGuard } from "./installation-guard"
 import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
@@ -226,21 +227,24 @@ function makeExecutionOnlyLayer(config: AppConfig) {
 }
 
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
-  const authorization = Buffer.from(
-    `${config.openCode.username}:${config.openCode.password}`,
-  ).toString("base64")
-  const openCodeHttpLayer = Layer.effect(
-    HttpClient.HttpClient,
-    Effect.map(HttpClient.HttpClient, (client) =>
-      HttpClient.mapRequest(
-        client,
-        HttpClientRequest.setHeader("authorization", `Basic ${authorization}`),
+  const openCodeHttpLayer = (password: string) =>
+    Layer.effect(
+      HttpClient.HttpClient,
+      Effect.map(HttpClient.HttpClient, (client) =>
+        HttpClient.mapRequest(
+          client,
+          HttpClientRequest.setHeader(
+            "authorization",
+            `Basic ${Buffer.from(`${config.openCode.username}:${password}`).toString("base64")}`,
+          ),
+        ),
       ),
-    ),
-  ).pipe(Layer.provide(FetchHttpClient.layer))
+    ).pipe(Layer.provide(FetchHttpClient.layer))
   const openCodeClientEffect = Effect.runSync(
     Effect.cached(
-      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(Effect.provide(openCodeHttpLayer)),
+      OpenCode.make({ baseUrl: config.openCode.baseUrl }).pipe(
+        Effect.provide(openCodeHttpLayer(config.openCode.password)),
+      ),
     ),
   )
   const openCodeAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(openCodeClientEffect))
@@ -282,7 +286,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     stageResumeContract(builtInStageContracts[4], definitions.stage),
     stageResumeContract(builtInStageContracts[5], definitions.stage),
   ]
-  const agentHarness = new OpenCodeAgentHarness(
+  const sharedHarness = new OpenCodeAgentHarness(
     openCodeAdapter,
     new TrustedAgentHarnessCatalog(Object.values(definitions)),
     {
@@ -291,6 +295,29 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
+  const reviewClient = Effect.runSync(
+    Effect.cached(
+      OpenCode.make({ baseUrl: config.openCode.reviewUrl }).pipe(
+        Effect.provide(openCodeHttpLayer(config.openCode.reviewPassword)),
+      ),
+    ),
+  )
+  const reviewAdapter = new SdkOpenCodeAdapter(makeOpenCodeSdkClient(reviewClient))
+  const reviewHarness = new OpenCodeAgentHarness(
+    reviewAdapter,
+    new TrustedAgentHarnessCatalog([definitions.review, definitions.fix]),
+    {
+      serverId: reviewServerId,
+      endpointAlias: reviewEndpointAlias,
+      pollIntervalMs: config.openCode.pollIntervalMs,
+    },
+  )
+  const agentHarness = routeReviewHarness(sharedHarness, reviewHarness)
+  const reviewAccess = new SessionAccessResolver(reviewAdapter, {
+    serverId: reviewServerId,
+    endpointAlias: reviewEndpointAlias,
+    attachUrl: config.openCode.reviewUrl,
+  })
   const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
     serverId: config.openCode.serverId,
     endpointAlias: config.openCode.endpointAlias,
@@ -719,7 +746,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                   makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
                 ),
               {
-                resolve: (reference) => sessionAccess.resolve(reference),
+                resolve: (reference) =>
+                  (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(
+                    reference,
+                  ),
               },
               publicSonarRequest,
             )

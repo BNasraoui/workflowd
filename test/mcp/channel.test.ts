@@ -71,8 +71,13 @@ const fakeHttpMcp = (script: (call: Call) => Reply) => {
   return { calls, url: `http://127.0.0.1:${server.port}/mcp` }
 }
 
-const connect = async (url: string, pollIntervalMs = 5) => {
-  const channel = createChannelMcp({ mcpUrl: url, token: "secret", pollIntervalMs })
+const connect = async (url: string, pollIntervalMs = 5, dispatch = true) => {
+  const channel = createChannelMcp({
+    mcpUrl: url,
+    token: "secret",
+    ...(dispatch ? { dispatchToken: "dispatch-secret" } : {}),
+    pollIntervalMs,
+  })
   const client = new Client({ name: "test", version: "1" })
   const events: Array<{ method: string; params?: Record<string, unknown> | undefined }> = []
   client.fallbackNotificationHandler = async (notification) => {
@@ -153,6 +158,16 @@ test("dispatch receipt tells the session to end its turn and emits exactly one e
       },
     },
   ])
+  expect(
+    http.calls
+      .filter((call) => call.name === "dispatch_agent")
+      .every((call) => call.authorization === "Bearer dispatch-secret"),
+  ).toBe(true)
+  expect(
+    http.calls
+      .filter((call) => call.name === "read_agent_mailbox")
+      .every((call) => call.authorization === "Bearer secret"),
+  ).toBe(true)
   const readsAfterEmit = reads
   await client.callTool({ name: "dispatch_agent", arguments: args })
   await ticks(5)
@@ -228,4 +243,24 @@ test("channel configuration requires a bearer and validates the poll interval", 
   await expect(
     loadChannelOptions({ WORKFLOWD_MCP_TOKEN: "a", WORKFLOWD_CHANNEL_POLL_MS: "0" }),
   ).rejects.toThrow("positive integer")
+})
+
+test("channel loads a separate dispatch credential", async () => {
+  expect(
+    await loadChannelOptions({
+      WORKFLOWD_MCP_TOKEN: "write",
+      WORKFLOWD_MCP_DISPATCH_TOKEN: "dispatch",
+    }),
+  ).toMatchObject({ token: "write", dispatchToken: "dispatch" })
+})
+
+test("channel without a dispatch credential refuses locally instead of forwarding the write token", async () => {
+  const http = fakeHttpMcp(() => ({}))
+  const { client } = await connect(http.url, 5, false)
+  const result = await client.callTool({
+    name: "dispatch_agent",
+    arguments: { route: "implement", repository: "workflowd", prompt: "Review" },
+  })
+  expect(result.isError).toBe(true)
+  expect(http.calls).toEqual([])
 })

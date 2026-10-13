@@ -1,3 +1,4 @@
+import { requireSymlinkFreeReviewTree } from "./review-tree"
 import { mkdir, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { Effect } from "effect"
@@ -134,6 +135,7 @@ export class ManagedWorkspaceLifecycle {
         "origin",
         ...refspecs,
       )
+      if (work._tag === "ReviewWork") yield* requireSymlinkFreeReviewTree(repository, pullRef)
       yield* this.remove(repository, directory)
       const retainedFixCommit =
         work._tag === "FixWork"

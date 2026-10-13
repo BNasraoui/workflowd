@@ -25,6 +25,8 @@ const daemon = (respond: () => Response, calls: Array<Call> = []): ToolCallConte
   return {
     writesConfigured: true,
     writesAuthorized: true,
+    dispatchConfigured: true,
+    dispatchAuthorized: true,
     now: () => now,
     agentRunDaemon: { baseUrl: "http://127.0.0.1:8787", token: "run-token", send },
   }
@@ -109,6 +111,8 @@ describe("dispatch_agent", () => {
           {
             writesConfigured: true,
             writesAuthorized: true,
+            dispatchConfigured: true,
+            dispatchAuthorized: true,
             now: () => now,
           },
         )
@@ -309,7 +313,7 @@ describe("dispatch_agent", () => {
     const context = daemon(() => json(receipt), calls)
 
     const unauthorized = await run(
-      callTool("dispatch_agent", args, { ...context, writesAuthorized: false }),
+      callTool("dispatch_agent", args, { ...context, dispatchAuthorized: false }),
     )
     expect(unauthorized.isError).toBe(true)
     expect(firstText(unauthorized)).toContain("unauthorized")
@@ -318,6 +322,8 @@ describe("dispatch_agent", () => {
       callTool("dispatch_agent", args, {
         writesConfigured: true,
         writesAuthorized: true,
+        dispatchConfigured: true,
+        dispatchAuthorized: true,
         now: () => now,
       }),
     )

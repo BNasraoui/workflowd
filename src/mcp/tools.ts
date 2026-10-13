@@ -44,6 +44,8 @@ export type AgentWaitDaemon = {
 export type ToolCallContext = {
   readonly writesAuthorized: boolean
   readonly writesConfigured: boolean
+  readonly dispatchAuthorized?: boolean
+  readonly dispatchConfigured?: boolean
   readonly now: () => Date
   readonly agentWaitDaemon?: AgentWaitDaemon
   readonly agentRunDaemon?: AgentWaitDaemon
@@ -373,14 +375,14 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
 
 const dispatchAgent = (args: unknown, context: ToolCallContext) =>
   Effect.gen(function* () {
-    if (!context.writesConfigured) {
+    if (context.dispatchConfigured !== true) {
       return failure(
-        "writes are disabled: no WORKFLOWD_MCP_TOKEN or WORKFLOWD_MCP_TOKEN_FILE is " +
+        "dispatch is disabled: no WORKFLOWD_MCP_DISPATCH_TOKEN or WORKFLOWD_MCP_DISPATCH_TOKEN_FILE is " +
           "configured on the server, so dispatch_agent refuses all calls",
       )
     }
-    if (!context.writesAuthorized) {
-      return failure("unauthorized: dispatch_agent requires a valid bearer token")
+    if (context.dispatchAuthorized !== true) {
+      return failure("unauthorized: dispatch_agent requires a valid dispatch bearer token")
     }
     const daemon = context.agentRunDaemon
     if (daemon === undefined) {

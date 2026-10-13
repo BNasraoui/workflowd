@@ -45,9 +45,9 @@ contract so agents learn it from the schema itself.
 | `list_recent_jobs(limit?)` | read | Most recently updated jobs, newest first (default 20, max 100). |
 | `host_health()` | read | Per-host view derived from durable dispatch rows: last runner result, pending dispatches, derivable consumer liveness. |
 | `list_execution_capabilities()` | authenticated read | Live local executor/provider/model identities and advertised thinking metadata, with source freshness and honest availability. See [discovery contract](execution-capabilities.md). |
-| `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the bearer token. |
+| `enqueue_probe(host, probe_id?)` | write | Enqueue a durable remote probe. Ack returns immediately with the job id. Requires the ordinary write bearer token. |
 | `wait_for_agent(parent_session_id, child_session_id, resume_prompt, idempotency_key?)` | write | Register a durable wait so a parent session is woken when a child session finishes. Requires the bearer token. |
-| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the bearer token. |
+| `dispatch_agent(route, repository, prompt, parent_session_id?, resume_prompt?, idempotency_key?)` | write | Dispatch a coding-agent run by intent. The runner resolves the route, pre-flights it, spawns and verifies the session, and registers it into kernel custody. Requires the dedicated dispatch bearer token. |
 
 `list_agent_runs` returns `runs` containing `run_id`, `repository`, `route`, `model`,
 `executor`, `idempotency_key`, `status`, `end_reason`, `started_at`, and `ended_at`.
@@ -256,17 +256,26 @@ receipt: end the turn after it arrives.
 
 ## Authorization
 
-The three store query tools need no credential beyond reaching the transport
-(loopback or your tailnet). Capability discovery and all write tools require a bearer token:
+The three store query tools (`job_status`, `list_recent_jobs`, `host_health`)
+need no credential beyond reaching the loopback/tailnet transport. Other tools
+use separate capability credentials:
 
-- `WORKFLOWD_MCP_TOKEN` — token value directly (development only).
-- `WORKFLOWD_MCP_TOKEN_FILE` — path to a file containing the token. The
-  shipped systemd unit provides this via `LoadCredential=mcp-token:...` and
-  `WORKFLOWD_MCP_TOKEN_FILE=%d/mcp-token`, matching the other workflowd
-  units.
+| Capability | Server configuration | Clients |
+| --- | --- | --- |
+| Probe enqueue, waits, mailbox reads, capability discovery | `WORKFLOWD_MCP_TOKEN` or `WORKFLOWD_MCP_TOKEN_FILE` | Trusted monitoring clients and coordinators |
+| `dispatch_agent` only | `WORKFLOWD_MCP_DISPATCH_TOKEN` or `WORKFLOWD_MCP_DISPATCH_TOKEN_FILE` | Trusted non-OpenCode coordinators only |
 
-When neither is set, the store queries remain available; capability discovery
-and write tools refuse every call. The token is never logged or echoed, including in error text.
+Set at most one direct/file source per capability. Empty sources disable that
+capability; there is no fallback from dispatch to the ordinary token. Startup
+rejects identical write and dispatch tokens. The systemd unit loads separate
+`mcp-token` and `mcp-dispatch-token` files. Missing dispatch configuration refuses
+all dispatches, while existing reads and ordinary writes retain their behavior.
+Tokens are never logged or echoed.
+
+No OpenCode agent configuration or environment may hold the dispatch token or
+the daemon's agent-run ingress token. The review server has no MCP servers; see
+[review isolation](review-hardening.md). Do not restore a global workflowd MCP
+entry during redeployment.
 
 `wait_for_agent` additionally needs to reach the daemon's agent-wait ingress,
 which carries its own token:
@@ -281,7 +290,8 @@ which carries its own token:
 
 - `WORKFLOWD_AGENT_RUN_TOKEN` / `WORKFLOWD_AGENT_RUN_TOKEN_FILE` — the
   daemon's `WORKFLOWD_AGENT_RUN_TOKEN`, supplied the same way. Set exactly
-  one source.
+  one source. This daemon credential is held only by services, never by agent
+  configurations; it is distinct from the client's MCP dispatch credential.
 
 A tool whose token is missing stays disabled and refuses calls with a
 message naming the missing settings. A daemon token without
@@ -295,6 +305,7 @@ mkdir -p ~/.config/workflowd
 printf 'WORKFLOWD_MCP_PORT=8791\nWORKFLOWD_DAEMON_URL=http://127.0.0.1:8787\n' \
   > ~/.config/workflowd/mcp.env
 umask 077 && openssl rand -hex 32 > ~/.config/workflowd/mcp-token
+umask 077 && openssl rand -hex 32 > ~/.config/workflowd/mcp-dispatch-token
 # Reuse the same secret the daemon loads as WORKFLOWD_AGENT_WAIT_TOKEN_FILE,
 # so both ends of the proxy agree.
 umask 077 && openssl rand -hex 32 > ~/.config/workflowd/agent-wait-token
@@ -313,23 +324,19 @@ claude mcp add --transport http workflowd https://mint.<tailnet>.ts.net:8791/mcp
   --header "Authorization: Bearer $(cat ~/.config/workflowd/mcp-token)"
 ```
 
-OpenCode (`opencode.json`):
-
-```json
-{
-  "mcp": {
-    "workflowd": {
-      "type": "remote",
-      "url": "https://mint.<tailnet>.ts.net:8791/mcp",
-      "headers": {
-        "Authorization": "Bearer {file:~/.config/workflowd/mcp-token}"
-      }
-    }
-  }
-}
-```
-
-Agents that only need read tools can omit the Authorization header entirely.
+This ordinary client credential cannot dispatch. For dispatch, use the trusted
+coordinator channel below, or a separate HTTP MCP entry in a trusted non-OpenCode
+coordinator using `mcp-dispatch-token`. Keep ordinary writes on the original
+credential. OpenCode receives neither a global workflowd MCP entry nor dispatch
+credentials. The RPI coordinator needs both credentials and must use the channel
+below, rather than a single-bearer HTTP MCP client. Dispatched workers may read
+user-scope MCP configuration (`~/.claude.json` and `~/.codex/config.toml`, or their
+configured home overrides); those configurations must never contain the dispatch
+token. Direct Claude workers use strict empty MCP configuration, without workflowd
+MCP; sandbox workers use only their owned bridge. Until separate agent users are
+available, shell-capable OpenCode agent-run workers are separated from dispatch
+credentials by configuration only, not filesystem access control.
+Unauthenticated store-query clients can omit Authorization.
 
 ## Coordinator channel
 
@@ -338,7 +345,7 @@ result inside its open session, with no resume call and no waiter script.
 `bun run mcp:channel` (`src/mcp-channel.ts`) is a stdio MCP server named
 `workflowd` that Claude Code spawns per session. It declares
 `experimental['claude/channel']`, serves the same tools as the HTTP server, and
-forwards every call to it with the bearer. After a successful `dispatch_agent`
+forwards dispatch with its dedicated bearer and other calls with the ordinary bearer. After a successful `dispatch_agent`
 it watches that receipt's `mailbox_id` for this session only, polls
 `read_agent_mailbox`, and sends exactly one `notifications/claude/channel`
 event: `content` is the terminal mailbox message as canonical JSON, and `meta`
@@ -354,7 +361,8 @@ process; if it exits, the mailbox row stays readable with `read_agent_mailbox`.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `WORKFLOWD_MCP_URL` | `http://127.0.0.1:8791/mcp` | HTTP MCP server to forward to. |
-| `WORKFLOWD_MCP_TOKEN` / `WORKFLOWD_MCP_TOKEN_FILE` | — | Bearer; set exactly one. |
+| `WORKFLOWD_MCP_TOKEN` / `WORKFLOWD_MCP_TOKEN_FILE` | — | Ordinary bearer, including mailbox reads; set exactly one. |
+| `WORKFLOWD_MCP_DISPATCH_TOKEN` / `WORKFLOWD_MCP_DISPATCH_TOKEN_FILE` | — | Dispatch bearer; set exactly one to enable dispatch. |
 | `WORKFLOWD_CHANNEL_POLL_MS` | `10000` | Mailbox poll interval (worst-case added latency). |
 
 Register it under the name `workflowd` in place of the HTTP entry (remove that
@@ -366,6 +374,7 @@ flag:
 claude mcp add workflowd \
   -e WORKFLOWD_MCP_URL=https://mint.<tailnet>.ts.net:8791/mcp \
   -e WORKFLOWD_MCP_TOKEN_FILE=$HOME/.config/workflowd/mcp-token \
+  -e WORKFLOWD_MCP_DISPATCH_TOKEN_FILE=$HOME/.config/workflowd/mcp-dispatch-token \
   -- bun /path/to/workflowd/src/mcp-channel.ts
 claude --dangerously-load-development-channels server:workflowd
 ```

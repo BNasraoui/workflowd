@@ -13,6 +13,7 @@ export const DEFAULT_CHANNEL_POLL_MS = 10_000
 export type ChannelOptions = {
   readonly mcpUrl: string
   readonly token: string
+  readonly dispatchToken?: string
   readonly pollIntervalMs: number
 }
 
@@ -84,10 +85,14 @@ export function createChannelMcp(options: ChannelOptions) {
   let closed = false
 
   const forward = async (name: string, args: unknown): Promise<ToolResult> => {
+    if (name === "dispatch_agent" && options.dispatchToken === undefined)
+      return textResult(
+        "dispatch is disabled: configure WORKFLOWD_MCP_DISPATCH_TOKEN or WORKFLOWD_MCP_DISPATCH_TOKEN_FILE",
+      )
     const response = await fetch(options.mcpUrl, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${options.token}`,
+        authorization: `Bearer ${name === "dispatch_agent" ? options.dispatchToken : options.token}`,
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
       },
