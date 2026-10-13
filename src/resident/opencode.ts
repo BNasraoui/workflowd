@@ -1,6 +1,6 @@
 import { residentWorkerInstructions } from "./instructions"
 import { workerEnvironment } from "./environment"
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { Context, Effect, Layer, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
@@ -54,15 +54,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
       const run = yield* runs.read(runId)
       if (run?.nativeSessionId == null || !(yield* custody(runId)))
         return yield* Effect.fail(new Error("OpenCode mailbox custody unavailable"))
-      const capability = randomBytes(32).toString("hex")
-      yield* inbox.attach(
-        runId,
-        run.nativeSessionId,
-        run.directory,
-        run.modelId,
-        "opencode",
-        hash(capability),
-      )
+      yield* inbox.attach(runId, run.nativeSessionId, run.directory, run.modelId, "opencode")
       yield* inbox.started(run.nativeSessionId, "dispatch")
       yield* provider.setSessionEnvironment({
         sessionID: run.nativeSessionId,
@@ -70,8 +62,6 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           // OpenCode v2 replaces the shell environment; these are not additive overrides.
           ...workerEnvironment(),
           WORKFLOWD_RUN_ID: runId,
-          WORKFLOWD_OPENCODE_RESIDENT_SOCKET: options.socket,
-          WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,
         },
       })
       return residentWorkerInstructions

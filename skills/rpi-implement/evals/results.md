@@ -1,5 +1,16 @@
 # RPI Implement Evaluation Results
 
+## 2026-10-13: Resident handoff regression (eval 5)
+
+Manual walkthrough of `resident-push.md` with both the updated skill and injected
+resident instructions; no fixture commands were executed and nothing was published.
+The expected actions remain: push the checked phase, open/update the PR against main,
+publish the implement report, then end the turn with CI handed to the coordinator.
+No subscription or `gh pr checks --watch` is called. All three eval-5 expectations
+are satisfied (3/3, author assessment; no independent model rerun). The injected
+polling default now explicitly defers to this skill handoff. Other evals were not
+rerun; their scope and approval rules are unchanged.
+
 ## 2026-10-04: Iteration 3
 
 Changes after the first real run: bead sync, a branch reset to `origin/rpi/<id>`, and the PR

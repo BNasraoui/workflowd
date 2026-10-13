@@ -484,3 +484,102 @@ for (const finalMessage of ["child summary", "x".repeat(70_000), "none"]) {
       }).pipe(Effect.provide(layer)),
     ))
 }
+
+for (const observed of ["none", "optional", "required"] as const) {
+  test(`CI wait escalates after ten minutes without a required run (${observed})`, () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* makeResidentStore
+        const ci = yield* CiService
+        const subscriptions = yield* makeSubscriptions
+        const sql = yield* SqlClient.SqlClient
+        yield* createChild(yield* AgentRunStore)
+        const sessions = yield* KernelSessionStore
+        const now = new Date()
+        yield* sessions.registerResource({
+          resourceId: "resource",
+          owningHostId: "host",
+          absolutePath: "/work",
+          kind: "worktree",
+          createdAt: now,
+        })
+        yield* sessions.registerSession({
+          sessionId: "session",
+          providerKind: "codex",
+          providerVersion: 1,
+          providerId: "codex-cli",
+          serverId: "host",
+          owningHostId: "host",
+          endpointAlias: "local-cli",
+          endpointIdentity: "codex-cli://host",
+          nativeSessionId: "thread",
+          resourceId: "resource",
+          createdAt: now,
+        })
+        yield* sql`UPDATE kernel_agent_runs SET state = 'verified', session_id = 'session', resource_id = 'resource', native_session_id = 'thread' WHERE run_id = 'child'`
+
+        yield* store.attach("child", "thread", "/work", null)
+        yield* store.started("thread", "turn")
+        yield* ci.watch(target, 1, ["CI"], Date.now())
+        if (observed !== "none")
+          yield* ci.snapshot(
+            target,
+            [
+              {
+                id: 42,
+                name: observed === "required" ? "CI" : "Optional review",
+                attempt: 1,
+                status: "in_progress",
+                conclusion: null,
+                failingJobs: [],
+              },
+            ],
+            null,
+            Date.now(),
+          )
+        const receipt = yield* subscriptions.register("thread", { kind: "ci", ...target })
+        const age = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+        yield* sql`UPDATE kernel_workflow_instances SET created_at = ${age(9)} WHERE instance_id = ${receipt.id}`
+        yield* subscriptions.reconcile()
+        expect(yield* store.deliveryState(receipt.id)).toBe("pending")
+        yield* sql`UPDATE kernel_workflow_instances SET created_at = ${age(10)} WHERE instance_id = ${receipt.id}`
+        const restarted = yield* makeSubscriptions
+        yield* restarted.reconcile()
+        yield* restarted.reconcile()
+        if (observed === "required") {
+          expect(yield* store.deliveryState(receipt.id)).toBe("pending")
+        } else {
+          expect(yield* store.deliveryState(receipt.id)).toBe("operator_required")
+          const messages = yield* sql`SELECT prompt FROM resident_inbox WHERE id = ${receipt.id}`
+          expect(messages).toHaveLength(1)
+          expect(messages[0]?.prompt).toContain(
+            "No required workflow run observed within 10 minutes",
+          )
+          expect(messages[0]?.prompt).toContain(target.sha)
+          expect((yield* (yield* AgentRunStore).read("child"))?.diagnostic).toContain(
+            "ci_wait_no_required_run",
+          )
+          yield* ci.snapshot(
+            target,
+            [
+              {
+                id: 42,
+                name: "CI",
+                attempt: 1,
+                status: "completed",
+                conclusion: "success",
+                failingJobs: [],
+              },
+            ],
+            null,
+            Date.now(),
+          )
+          yield* restarted.reconcile()
+          expect(yield* store.deliveryState(receipt.id)).toBe("operator_required")
+          expect(
+            yield* sql`SELECT id FROM resident_inbox WHERE thread_id IS NOT NULL`,
+          ).toHaveLength(1)
+        }
+      }).pipe(Effect.provide(layer)),
+    ))
+}
