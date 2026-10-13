@@ -902,10 +902,10 @@ test("controller discovery and workspace adapters use host custody without local
       command: ["must-not-execute"],
       credentialSocket: socket,
     })
-    expect(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
+    expect<unknown>(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
     expect(stops).toEqual([starts[0]!.runId])
     output = { status: "unsupported" }
-    expect(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
+    expect<unknown>(await discovery.discover(AbortSignal.timeout(1000))).toEqual(output)
     output = { unsafe: "not-a-catalog" }
     await expect(discovery.discover(AbortSignal.timeout(1000))).rejects.toThrow()
     expect(stops).toHaveLength(3)
