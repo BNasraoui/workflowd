@@ -1187,77 +1187,52 @@ test("an interrupted terminal turn does not emit agent text as a provider error"
   )
 })
 
-test("resident provider previews redact credentials and bound mailbox text", async () => {
-  const fake = fixture()
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      const resident = yield* ResidentCodex
-      const now = new Date()
-      yield* prepareRun(now)
-      const worker = yield* resident.cli.spawn({
-        runId: "a",
-        directory: "/work/a",
-        prompt: "hold",
-        model: null,
-      })
-      yield* verifyRun(now)
-      fake.fail(
-        "thread-1",
-        "dispatch:a",
-        true,
-        "Try later.\nAuthorization: Bearer sk-private-token\nhttps://private.example.test\n" +
-          "😀".repeat(1000),
-      )
-      yield* worker.exited
-      const run = yield* (yield* AgentRunStore).read("a")
-      expect(run?.diagnostic).toStartWith("model_at_capacity: Try later.")
-      const sql = yield* SqlClient.SqlClient
-      const rows = yield* sql<{
-        prompt: string
-      }>`SELECT prompt FROM resident_inbox WHERE id = 'agent-run-end-a'`
-      const final = JSON.parse(rows[0]!.prompt).final_message
-      expect(final).not.toContain("sk-private-token")
-      expect(final).not.toContain("https://")
-      expect(Buffer.byteLength(JSON.stringify(final)) - 2).toBeLessThanOrEqual(512)
-    }).pipe(Effect.provide(layer(fake.factory))),
-  )
-})
-
-test("resident and CLI classify text beyond the diagnostic preview identically", async () => {
-  const fake = fixture()
-  await Effect.runPromise(
-    Effect.gen(function* () {
-      const resident = yield* ResidentCodex
-      const now = new Date()
-      yield* prepareRun(now)
-      const worker = yield* resident.cli.spawn({
-        runId: "a",
-        directory: "/work/a",
-        prompt: "hold",
-        model: null,
-      })
-      yield* verifyRun(now)
-      fake.fail(
-        "thread-1",
-        "dispatch:a",
-        true,
-        "x".repeat(600) + " HTTP 429 Too Many Requests",
-        null,
-      )
-      yield* worker.exited
-      const run = yield* (yield* AgentRunStore).read("a")
-      expect(run?.diagnostic).toStartWith("provider_rate_limited:")
-      const failure = yield* Effect.promise(async () => {
-        for await (const event of worker.events)
-          if (event.type === "turn.failed")
-            return providerFailure(event.message, event.codexErrorInfo)
-      })
-      expect(failure?.reason).toBe("provider_rate_limited")
-      expect(run?.diagnostic).toBe(`${failure?.reason}: ${failure?.message}`)
-      expect(Buffer.byteLength(JSON.stringify(failure?.message)) - 2).toBeLessThanOrEqual(512)
-    }).pipe(Effect.provide(layer(fake.factory))),
-  )
-})
+for (const [reason, message, codexErrorInfo] of [
+  [
+    "model_at_capacity",
+    "Try later.\nAuthorization: Bearer sk-private-token\nhttps://private.example.test\n" +
+      "😀".repeat(1000),
+    "serverOverloaded",
+  ],
+  ["provider_rate_limited", "x".repeat(600) + " HTTP 429 Too Many Requests", null],
+] as const)
+  test(`resident and CLI classify before redacting and bounding previews: ${reason}`, async () => {
+    const fake = fixture()
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const resident = yield* ResidentCodex
+        const now = new Date()
+        yield* prepareRun(now)
+        const worker = yield* resident.cli.spawn({
+          runId: "a",
+          directory: "/work/a",
+          prompt: "hold",
+          model: null,
+        })
+        yield* verifyRun(now)
+        fake.fail("thread-1", "dispatch:a", true, message, codexErrorInfo)
+        yield* worker.exited
+        const run = yield* (yield* AgentRunStore).read("a")
+        const failure = yield* Effect.promise(async () => {
+          for await (const event of worker.events)
+            if (event.type === "turn.failed")
+              return providerFailure(event.message, event.codexErrorInfo)
+        })
+        expect(failure?.reason).toBe(reason)
+        expect(run?.diagnostic).toBe(`${failure?.reason}: ${failure?.message}`)
+        const sql = yield* SqlClient.SqlClient
+        const rows = yield* sql<{
+          prompt: string
+        }>`SELECT prompt FROM resident_inbox WHERE id = 'agent-run-end-a'`
+        const final = JSON.parse(rows[0]!.prompt).final_message
+        expect(final).toBe(failure?.message)
+        expect(final).toStartWith(message.slice(0, 10))
+        expect(final).not.toContain("sk-private-token")
+        expect(final).not.toContain("https://")
+        expect(Buffer.byteLength(JSON.stringify(final)) - 2).toBeLessThanOrEqual(512)
+      }).pipe(Effect.provide(layer(fake.factory))),
+    )
+  })
 
 test("resident retry backoff releases delivery for other threads and cancellation", async () => {
   const random = spyOn(Math, "random").mockReturnValue(0.5)
