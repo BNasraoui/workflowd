@@ -1,3 +1,4 @@
+import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
 import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
 import { parseInstallationAccountIds } from "./installation-policy"
 import {
@@ -36,6 +37,7 @@ interface HttpConfig {
 }
 
 interface GitHubConfig {
+  readonly prRepositories: PrRepositories
   readonly allowedInstallationAccountIds: ReadonlyArray<number>
   readonly appId: number
   readonly privateKeyPath: string
@@ -564,6 +566,7 @@ function githubSection(
 ): GitHubConfig {
   return {
     appId: positiveInteger(required(env, "GITHUB_APP_ID"), 0, "GITHUB_APP_ID"),
+    prRepositories: loadPrRepositories(env.WORKFLOWD_PR_REPOSITORIES),
     allowedInstallationAccountIds: parseInstallationAccountIds(
       env.WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS,
     ),

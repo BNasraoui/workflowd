@@ -1,8 +1,10 @@
+import { configuredWebhookInstallations } from "../src/webhook-installations"
 import { describe, expect, test } from "bun:test"
 import { loadConfig } from "../src/config"
 
 const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
+  WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
   WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
   GITHUB_WEBHOOK_SECRET: "webhook-secret",
@@ -225,6 +227,7 @@ describe("loadConfig", () => {
         maxWebhookBytes: 1_048_576,
       },
       github: {
+        prRepositories: [{ repository: "example-owner/example", installationId: 91 }],
         appId: 123,
         allowedInstallationAccountIds: [81005232, 319835875],
         privateKeyPath: "/run/credentials/github-key.pem",
@@ -496,6 +499,7 @@ describe("loadConfig", () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
         GITHUB_WEBHOOK_SECRET_FILE: "/run/credentials/webhook-secret",
@@ -627,4 +631,63 @@ describe("loadConfig", () => {
       loadConfig({ ...requiredEnvironment, [name]: value }, { home: "/home/test" }),
     ).rejects.toThrow(message)
   })
+})
+
+test("uses only PR and CI installations for webhook ingestion", async () => {
+  const config = await loadConfig(
+    {
+      ...requiredEnvironment,
+      WORKFLOWD_CI_ENABLED: "true",
+      WORKFLOWD_CI_TOKEN: "test-ci-token",
+      WORKFLOWD_CI_REPOSITORIES: JSON.stringify([
+        { repository: "ci/repo", installationId: 92, workflows: ["CI"] },
+      ]),
+      WORKFLOWD_NATS_SERVERS: "nats://127.0.0.1:4222",
+      WORKFLOWD_NATS_TOKEN: "test-token",
+      WORKFLOWD_CODEX_RESIDENT_ENABLED: "true",
+      WORKFLOWD_CODEX_RESIDENT_HOME: "/tmp/resident-home",
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: "/tmp/resident.sock",
+      WORKFLOWD_WORKER_GITHUB_ENABLED: "true",
+      WORKFLOWD_WORKER_GITHUB_DIRECTORY: "/tmp/worker-identities",
+      WORKFLOWD_WORKER_GITHUB_SOCKET: "/tmp/worker.sock",
+      WORKFLOWD_WORKER_GITHUB_REPOSITORIES: JSON.stringify([
+        {
+          name: "worker",
+          repository: "worker/repo",
+          installationId: 93,
+          permissions: { contents: "read" },
+        },
+      ]),
+      WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+      WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "sandbox=/tmp/sandbox",
+      WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([
+        {
+          alias: "sandbox",
+          repository: "sandbox/repo",
+          repositoryId: 42,
+          installationId: 94,
+          workflowSha: "a".repeat(40),
+          appActorId: 10,
+          agentImage: "ghcr.io/bnasraoui/workflowd-agent-base@sha256:" + "f".repeat(64),
+          tailscaleClientId: "fixture",
+          tailscaleAudience: "fixture",
+        },
+      ]),
+      WORKFLOWD_QRSPI_TOKEN: "qrspi-secret",
+      WORKFLOWD_QRSPI_INSTALLATION_ID: "95",
+      WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+      WORKFLOWD_QRSPI_REPOSITORY: "qrspi/repo",
+      WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+      WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/tmp/workspace",
+      WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+    },
+    { home: "/tmp" },
+  )
+  expect([...configuredWebhookInstallations(config)].sort()).toEqual([91, 92])
+  expect(config.github?.prRepositories).toEqual([
+    { repository: "example-owner/example", installationId: 91 },
+  ])
+  const execution = await loadConfig({ WORKFLOWD_MODE: "execution" }, { home: "/tmp" })
+  expect([...configuredWebhookInstallations(execution)]).toEqual([])
 })
