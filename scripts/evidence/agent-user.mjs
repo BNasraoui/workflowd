@@ -16,11 +16,15 @@ import {
 async function command(argv) {
   return await new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
       timeout: 15000,
       killSignal: "SIGKILL",
     })
     let output = ""
+    let diagnostic = ""
+    child.stderr.on("data", (chunk) => {
+      diagnostic = (diagnostic + chunk.toString()).slice(0, 2048)
+    })
     child.stdout.on("data", (chunk) => {
       output += chunk.toString()
     })
@@ -28,7 +32,9 @@ async function command(argv) {
     child.on("close", (code) =>
       code === 0
         ? resolve(output.trim())
-        : reject(new Error(`supervision_command_failed:${argv[0]}:exit=${code}`)),
+        : reject(
+            new Error(`supervision_command_failed:${argv[0]}:exit=${code}:${diagnostic.trim()}`),
+          ),
     )
   })
 }
