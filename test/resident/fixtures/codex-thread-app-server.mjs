@@ -2,7 +2,8 @@
 // for a resident workflowd thread: initialize, thread/start|read|queue/add|
 // queue/list, and turn notifications. It launches the stdio MCP server named
 // by its `-c mcp_servers.workflowd_subscriptions={...}` argv flag, as Codex
-// does, and a queued message containing `SUBSCRIBE_AGENT_RUN <run id>` runs a
+// used to do. Deliberately ignore enabled=false to exercise legacy subscriptions
+// still owned by the backend. A queued message containing `SUBSCRIBE_AGENT_RUN <run id>` runs a
 // scripted turn that calls subscribe_to_event before the turn completes; one
 // containing `HOLD_TURN` leaves its turn in progress, like a working child.
 // Every thread/queue/add is appended to $CODEX_HOME/queue-add.jsonl.

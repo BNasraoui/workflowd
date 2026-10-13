@@ -1,5 +1,6 @@
+import { residentWorkerInstructions } from "./instructions"
 import { workerEnvironment } from "./environment"
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { Context, Effect, Layer, Schedule, Schema, Semaphore } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import type { OpenCodeAdapter, OpenCodeAdapterError } from "../opencode/adapter"
@@ -53,15 +54,7 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
       const run = yield* runs.read(runId)
       if (run?.nativeSessionId == null || !(yield* custody(runId)))
         return yield* Effect.fail(new Error("OpenCode mailbox custody unavailable"))
-      const capability = randomBytes(32).toString("hex")
-      yield* inbox.attach(
-        runId,
-        run.nativeSessionId,
-        run.directory,
-        run.modelId,
-        "opencode",
-        hash(capability),
-      )
+      yield* inbox.attach(runId, run.nativeSessionId, run.directory, run.modelId, "opencode")
       yield* inbox.started(run.nativeSessionId, "dispatch")
       yield* provider.setSessionEnvironment({
         sessionID: run.nativeSessionId,
@@ -69,11 +62,9 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
           // OpenCode v2 replaces the shell environment; these are not additive overrides.
           ...workerEnvironment(),
           WORKFLOWD_RUN_ID: runId,
-          WORKFLOWD_OPENCODE_RESIDENT_SOCKET: options.socket,
-          WORKFLOWD_SUBSCRIPTION_CAPABILITY: capability,
         },
       })
-      return `You are a resident workflowd worker. After pushing, subscribe with: bun ${JSON.stringify(import.meta.dir + "/subscribe.ts")} --repo OWNER/NAME --sha HEAD_SHA (or --agent-run RUN_ID). The subscribe_to_event MCP tool in ${import.meta.dir}/mcp.ts uses the same session environment. Wait for the registration receipt, then end your turn; workflowd sends one completion message. Never print the subscription capability or poll for completion.`
+      return residentWorkerInstructions
     })
     const uncertain = Effect.fn("OpenCodeMailbox.uncertain")(function* (
       id: string,

@@ -497,9 +497,21 @@ Responses:
 
 ## Resident mailbox subscriptions
 
-Resident workers receive a per-run stdio MCP server exposing `subscribe_to_event`.
-After pushing, subscribe to CI by repository and head SHA, end the turn, then
-continue when the mailbox delivers the result. Agent-run completion selectors are
-also supported. This tool uses run-bound Unix peer authentication, not the shared
-HTTP MCP write bearer. See [agent inboxes and CI](agent-inboxes-ci.md#agent-pattern-push-subscribe-end-the-turn)
-for selectors, delivery guarantees, and the cargo shim change.
+New resident workers are not offered event subscriptions: the injected Codex
+`subscribe_to_event` MCP is disabled and OpenCode no longer receives subscription
+credentials. Existing waits still reconcile and deliver through their original
+custody checks. No live service configuration is changed.
+
+After pushing and opening/updating a PR, use
+`timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60`.
+Retry missing checks for at most three minutes after pushing; cap the whole wait
+at 15 minutes, below the default 20-minute resident stall window. On timeout or
+observation error, report the PR URL, pushed SHA, command/error, last required-check
+states/links and that CI is unconfirmed and needs follow-up, then end the turn.
+An active skill's end-turn/handoff instructions take precedence over this default.
+
+Resident coordinators use `dispatch_agent` / `read_agent_mailbox` or
+`skills/rpi-coordinate/scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for
+child runs. See [agent inboxes and CI](agent-inboxes-ci.md#agent-pattern-bounded-required-check-polling)
+for polling budgets, skill handoffs, and existing-wait escalation when no required
+workflow run appears within ten minutes.
