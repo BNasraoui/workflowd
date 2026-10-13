@@ -171,7 +171,10 @@ export const TOOL_DEFINITIONS = [
       " " +
       REFUSAL_CONTRACT +
       " Specifically: the returned wait_id is NOT a result and this tool does " +
-      "NOT block. OpenCode, Codex CLI, and Claude CLI children are supported. " +
+      "NOT block. The returned mailbox_id can be read with read_agent_mailbox " +
+      "for parent-wake delivery failures. Claude wakes start a separate claude --resume " +
+      "process; they cannot reach a live interactive session. Live Claude sessions " +
+      "should use the workflowd channel. OpenCode, Codex CLI, and Claude CLI children are supported. " +
       "The workflowd resume worker prompts the parent session with " +
       "your resume_prompt and, for a dispatched child, its terminal mailbox " +
       "result (run_id, mailbox_id, status, end_reason, and final message or " +
@@ -208,6 +211,7 @@ export const TOOL_DEFINITIONS = [
     outputSchema: withRefusal(
       objectSchema(
         {
+          mailbox_id: { type: "string" },
           wait_id: { type: "string" },
           instance_id: { type: "string" },
           status: { type: "string", enum: ["registered", "duplicate"] },

@@ -363,6 +363,7 @@ const waitForAgent = (args: unknown, context: ToolCallContext) =>
           `${input.success.parent_session_id} as wait ${receipt.success.waitId}.`
     return structured(
       {
+        mailbox_id: receipt.success.mailboxId,
         wait_id: receipt.success.waitId,
         instance_id: receipt.success.instanceId,
         status: receipt.success.status,

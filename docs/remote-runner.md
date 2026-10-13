@@ -13,6 +13,28 @@ A `claude_resume` command is no longer harmless: it makes the runner execute `cl
 
 Compared to reaching the host over SSH — which would hand the daemon an arbitrary remote shell authenticated by the daemon's key — the trust boundary here is "the host will run one fixed, argv-vector command shape for a directory it opted into, when its own broker identity receives a well-formed command," with the daemon holding no credential on the host at all.
 
+## Claude wake ownership and failures
+
+`kernel_resume_requests.owning_host_id` identifies the coordinator that owns the
+request lifecycle. For a Claude parent, `kernel_sessions.server_id` and its
+`claude-cli://<host>` endpoint identify the execution host and must agree.
+A parent on ben-arch therefore keeps coordinator custody on mint while its
+`claude_resume` job targets ben-arch. Conflicting saved custody is refused;
+a remote wake never falls back to the coordinator's local CLI.
+
+Wait consumption, resume-request creation, and handoff-job creation commit in
+one transaction. If parent custody becomes unavailable, the wait remains
+unconsumed and can proceed after custody is repaired. An `agent_wake_failed`
+message records the failure in the parent's mailbox and, for a dispatched
+child, its caller mailbox. `wait_for_agent` returns that parent `mailbox_id`;
+use `read_agent_mailbox` to read notices. Delivery failure notices include a
+bounded reason such as `cli_failed`, without prompts or raw CLI diagnostics.
+These notices do not retry an uncertain CLI delivery or repair older failed jobs.
+
+Resume-based wakes start a separate `claude --resume` process. They cannot
+reach an already live interactive session; live sessions should use the
+workflowd channel.
+
 ## NATS over Tailscale
 
 1. Bind NATS to the coordinator's Tailscale address, enable JetStream file storage, and firewall TCP 4222 to the tailnet runner identities.

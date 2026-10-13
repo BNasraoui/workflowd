@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { SqlClient } from "effect/unstable/sql"
 import { Effect, Option, Schema } from "effect"
 import { JsonValueSchema, type JsonValue } from "../json"
 import { WorkSignal } from "../work-signal"
@@ -6,6 +7,7 @@ import {
   ResumeParentAgentJobV1,
   type ResumeParentAgentJobV1 as ResumeParentAgentJob,
 } from "./agent-handoff-contract"
+import { recordAgentWakeFailure } from "./agent-wake-failure"
 import { KernelJobStore, type JobClaim, type KernelJobStorePort } from "./job-store"
 import { KernelSessionStore } from "./session-store"
 
@@ -80,44 +82,49 @@ const runParentResumeJob = (
   options: KernelJobIterationOptions,
 ) =>
   Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    const failParent = (reason: string) =>
+      Effect.gen(function* () {
+        const now = options.now()
+        yield* failOperatorRequired(jobs, claim, now, reason)
+        yield* recordAgentWakeFailure({
+          parentSessionId: input.parentSessionId,
+          identity: claim.jobId,
+          reason,
+          now,
+        })
+      }).pipe(sql.withTransaction)
     const sessionStore = yield* Effect.serviceOption(KernelSessionStore)
     const workSignal = yield* Effect.serviceOption(WorkSignal)
     if (Option.isNone(sessionStore) || Option.isNone(workSignal)) {
-      yield* failOperatorRequired(
-        jobs,
-        claim,
-        options.now(),
-        "parent resume services are unavailable",
-      )
+      yield* failParent("parent resume services are unavailable")
       return { status: "operator_required" as const, jobId: claim.jobId }
     }
-    const parentUnknown = yield* sessionStore.value.readSession(input.parentSessionId)
-    const parent = yield* Schema.decodeUnknownEffect(ParentSessionRow)(parentUnknown).pipe(
-      Effect.result,
-    )
-    if (parent._tag === "Failure" || parent.success.session_id !== input.parentSessionId) {
-      yield* failOperatorRequired(
-        jobs,
-        claim,
-        options.now(),
-        "parent session is unavailable or malformed",
+    const existing = yield* sessionStore.value.readResumeRequest(`${claim.jobId}:request`)
+    if (existing === null) {
+      const parentUnknown = yield* sessionStore.value.readSession(input.parentSessionId)
+      const parent = yield* Schema.decodeUnknownEffect(ParentSessionRow)(parentUnknown).pipe(
+        Effect.result,
       )
-      return { status: "operator_required" as const, jobId: claim.jobId }
+      if (parent._tag === "Failure" || parent.success.session_id !== input.parentSessionId) {
+        yield* failParent("parent session is unavailable or malformed")
+        return { status: "operator_required" as const, jobId: claim.jobId }
+      }
+      const registeredAt = new Date(input.registeredAt)
+      yield* sessionStore.value.registerResumeRequest({
+        requestId: `${claim.jobId}:request`,
+        sessionId: parent.success.session_id,
+        owningHostId: parent.success.owning_host_id,
+        prompt: input.resumePrompt,
+        promptText: input.resumePromptText,
+        promptSha256: createHash("sha256").update(input.resumePromptText).digest("hex"),
+        outputContract: input.outputContract,
+        outputContractVersion: input.outputContractVersion,
+        maxAttempts: claim.maxAttempts,
+        runAt: registeredAt,
+        createdAt: registeredAt,
+      })
     }
-    const registeredAt = new Date(input.registeredAt)
-    yield* sessionStore.value.registerResumeRequest({
-      requestId: `${claim.jobId}:request`,
-      sessionId: parent.success.session_id,
-      owningHostId: parent.success.owning_host_id,
-      prompt: input.resumePrompt,
-      promptText: input.resumePromptText,
-      promptSha256: createHash("sha256").update(input.resumePromptText).digest("hex"),
-      outputContract: input.outputContract,
-      outputContractVersion: input.outputContractVersion,
-      maxAttempts: claim.maxAttempts,
-      runAt: registeredAt,
-      createdAt: registeredAt,
-    })
     const postRegistration = yield* (options.afterResumeRegistered?.() ?? Effect.void).pipe(
       Effect.result,
     )
