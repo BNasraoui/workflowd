@@ -16,6 +16,8 @@ for (const mode of ["recover", "exhaust", "tool"] as const)
 const file = Bun.file(${JSON.stringify(join(root, "attempts"))});
 const attempt = (await file.exists() ? Number(await file.text()) : 0) + 1;
 await Bun.write(file, String(attempt));
+const prompt = await Bun.stdin.text();
+if (prompt !== (attempt === 1 ? "do the task" : "Continue.")) process.exit(9);
 const emit = (value) => console.log(JSON.stringify(value));
 emit({type: "thread.started", thread_id: "thread-one"});
 emit({type: "turn.started"});
@@ -25,7 +27,7 @@ if (${JSON.stringify(mode)} === "recover" && attempt === 2) {
   emit({type: "item.completed", item: {type: "agent_message", text: "done"}});
   emit({type: "turn.completed", usage: {output_tokens: 1}});
 } else {
-  emit({type: "turn.failed", error: {message: "Selected model is at capacity. Please try a different model."}});
+  emit({type: "turn.failed", error: {message: "Selected model is at capacity. Please try a different model.", codexErrorInfo: "serverOverloaded"}});
   process.exitCode = 1;
 }
 `,
@@ -49,4 +51,4 @@ if (${JSON.stringify(mode)} === "recover" && attempt === 2) {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  }, 10000)
+  }, 40000)

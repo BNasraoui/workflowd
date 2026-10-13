@@ -84,7 +84,9 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
       }
       if (field(item, "type") === "error") {
         const message = textField(item, "message")
-        return message !== null ? { type: "error", message } : { type: "other" }
+        return message !== null
+          ? { type: "error", message, codexErrorInfo: field(item, "codexErrorInfo") }
+          : { type: "other" }
       }
       return { type: "other" }
     }
@@ -101,11 +103,14 @@ export const parseCodexExecEvent = (line: string): CodexExecEvent => {
       return {
         type: "turn.failed",
         message: message ?? "codex turn failed without a message",
+        codexErrorInfo: isObject(error) ? field(error, "codexErrorInfo") : undefined,
       }
     }
     case "error": {
       const message = textField(value, "message")
-      return message !== null ? { type: "error", message } : { type: "other" }
+      return message !== null
+        ? { type: "error", message, codexErrorInfo: field(value, "codexErrorInfo") }
+        : { type: "other" }
     }
     default:
       return { type: "other" }

@@ -5,7 +5,10 @@ const Event = Schema.Struct({
   type: Schema.String,
   thread_id: Schema.optional(Schema.String),
   message: Schema.optional(Schema.String),
-  error: Schema.optional(Schema.Struct({ message: Schema.String })),
+  codexErrorInfo: Schema.optional(Schema.Unknown),
+  error: Schema.optional(
+    Schema.Struct({ message: Schema.String, codexErrorInfo: Schema.optional(Schema.Unknown) }),
+  ),
   item: Schema.optional(
     Schema.Struct({ type: Schema.String, message: Schema.optional(Schema.String) }),
   ),
@@ -59,7 +62,11 @@ export class CodexRetryTurn {
       )
         this.unsafe = true
       const message = event.error?.message ?? event.message ?? event.item?.message
-      if (message !== undefined) this.message = providerFailure(message)?.message
+      if (message !== undefined)
+        this.message = providerFailure(
+          message,
+          event.error?.codexErrorInfo ?? event.codexErrorInfo,
+        )?.message
     } catch {
       this.unsafe = true
     }

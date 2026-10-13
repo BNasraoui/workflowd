@@ -4,6 +4,7 @@ import {
   providerFailure,
   providerRetryDelay,
 } from "../provider-failure"
+import { diagnosticMessage } from "../sandbox/diagnostics"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -42,7 +43,11 @@ const TurnEvent = Schema.Struct({
   turn: Schema.Struct({
     id: Schema.String,
     status: Schema.String,
-    error: Schema.optional(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
+    error: Schema.optional(
+      Schema.NullOr(
+        Schema.Struct({ message: Schema.String, codexErrorInfo: Schema.optional(Schema.Unknown) }),
+      ),
+    ),
   }),
 })
 const ItemEvent = Schema.Struct({
@@ -60,7 +65,14 @@ const History = Schema.Struct({
       Schema.Struct({
         id: Schema.String,
         status: Schema.String,
-        error: Schema.optional(Schema.NullOr(Schema.Struct({ message: Schema.String }))),
+        error: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              message: Schema.String,
+              codexErrorInfo: Schema.optional(Schema.Unknown),
+            }),
+          ),
+        ),
         itemsView: Schema.optional(Schema.String),
         items: Schema.optional(
           Schema.Array(
@@ -217,6 +229,7 @@ export const ResidentCodexLive = (
         failed: boolean,
         finalMessage: string | null = null,
         diagnostic: string = "resident_turn_failed",
+        failure?: { readonly message: string; readonly codexErrorInfo?: unknown },
       ) {
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
@@ -237,8 +250,7 @@ export const ResidentCodexLive = (
               : runs.complete({ runId: row.run_id, now: new Date(), finalMessage })
           }
         }
-        if (failed && finalMessage !== null)
-          listener?.queue.push({ type: "turn.failed", message: finalMessage })
+        if (failure !== undefined) listener?.queue.push({ type: "turn.failed", ...failure })
         listener?.queue.close()
         listener?.finish({ exitCode: failed ? 1 : 0, stderr: "" })
         turnsWithTools.delete(threadId)
@@ -255,7 +267,8 @@ export const ResidentCodexLive = (
         ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Queued)))
         let queuedWork = queued.data.length > 0 || queued.nextCursor !== null
         let finalMessage: string | null = null
-        let failureMessage = event.turn.error?.message
+        let error = event.turn.error
+        let failure = providerFailure(error?.message, error?.codexErrorInfo)
         if (!queuedWork || event.turn.status === "failed") {
           // The next submission may have left the queue before its started notification is handled.
           const history = yield* Effect.tryPromise(() =>
@@ -270,8 +283,8 @@ export const ResidentCodexLive = (
                   item.type === "agentMessage" && item.phase !== "commentary" && item.text?.trim(),
               )?.text ?? null
           const completed = history.thread.turns.find((turn) => turn.id === event.turn.id)
-          failureMessage ??= completed?.error?.message
-          const failure = providerFailure(failureMessage)
+          error ??= completed?.error
+          failure = providerFailure(error?.message, error?.codexErrorInfo)
           if (
             event.turn.status === "failed" &&
             failure !== undefined &&
@@ -311,15 +324,21 @@ export const ResidentCodexLive = (
             "workflowd app-server restarted. Continue the interrupted task from its durable state. Do not repeat completed external actions.",
           )
         const state = yield* store.completed(event.threadId, event.turn.id, queuedWork)
-        if (state === "finished" || event.turn.status === "failed")
+        if (state === "finished" || event.turn.status === "failed") {
+          const message =
+            error == null ? undefined : (failure?.message ?? diagnosticMessage(error.message))
           yield* finish(
             event.threadId,
             event.turn.status !== "completed",
-            failureMessage ?? finalMessage,
-            failureMessage === undefined
+            message ?? finalMessage,
+            error == null
               ? "resident_turn_failed"
-              : `${providerFailure(failureMessage)?.reason ?? "resident_turn_failed"}: ${failureMessage}`,
+              : `${failure?.reason ?? "resident_turn_failed"}: ${message}`,
+            event.turn.status === "failed" && message !== undefined
+              ? { message, codexErrorInfo: error?.codexErrorInfo }
+              : undefined,
           )
+        }
       })
       const handle = Effect.fn("Resident.notification")(function* (frame: {
         readonly method: string

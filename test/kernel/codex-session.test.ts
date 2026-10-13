@@ -44,6 +44,22 @@ const parseAll = (lines: ReadonlyArray<string>): ReadonlyArray<CodexExecEvent> =
   lines.map(parseCodexExecEvent)
 
 describe("codex exec JSONL parsing", () => {
+  test("preserves structured provider error information", () => {
+    const error = { message: "Try again", codexErrorInfo: "serverOverloaded" }
+    expect(parseCodexExecEvent(JSON.stringify({ type: "turn.failed", error }))).toEqual({
+      type: "turn.failed",
+      ...error,
+    })
+    expect(parseCodexExecEvent(JSON.stringify({ type: "error", ...error }))).toEqual({
+      type: "error",
+      ...error,
+    })
+    expect(
+      parseCodexExecEvent(
+        JSON.stringify({ type: "item.completed", item: { type: "error", ...error } }),
+      ),
+    ).toEqual({ type: "error", ...error })
+  })
   test("parses a captured success turn into thread, message, and usage events", () => {
     const [thread, turn, message, completed] = parseAll(capturedSuccessTurn)
     expect(thread).toEqual({

@@ -816,7 +816,10 @@ describe("agent-run ingress", () => {
     expect(refusal.reason).toBe("provider_not_authenticated")
 
     // Provider capacity is distinct from missing model output.
-    const broken = makeCodexCli([{ type: "error", message: "model overloaded" }], 1)
+    const broken = makeCodexCli(
+      [{ type: "error", message: "model overloaded", codexErrorInfo: "serverOverloaded" }],
+      1,
+    )
     const layer2 = makeLayer(makeProvider(state), worktrees([]), broken.port)
     const refusal2 = await refusalOf(
       Effect.runPromise(
@@ -999,9 +1002,11 @@ for (const detail of [null, "turn.failed", "error"] as const) {
       }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
     )
     expect(run?.state).toBe("operator_required")
-    expect(run?.diagnostic).toBe(
-      `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: ${stderr.slice(0, 500)}`,
-    )
+    const prefix = `codex_failed: exit 2${detail === null ? "" : "; provider rejected turn"}; stderr: `
+    expect(run?.diagnostic).toStartWith(prefix + "x".repeat(400))
+    expect(
+      Buffer.byteLength(JSON.stringify(run?.diagnostic?.slice(prefix.length))) - 2,
+    ).toBeLessThanOrEqual(512)
   })
 }
 

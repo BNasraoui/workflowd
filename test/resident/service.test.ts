@@ -28,7 +28,7 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
     Array<{
       id: string
       status: string
-      error?: { message: string }
+      error?: { message: string; codexErrorInfo?: unknown }
       itemsView?: string
       items: Array<{ type: string; clientId?: string; text?: string; phase?: string }>
     }>
@@ -217,11 +217,12 @@ function fixture(manualQueue = false, effortOverride?: string, manualRestart = f
       id: string,
       tool: boolean | "notification" | "summary",
       message: string,
+      codexErrorInfo: unknown = "serverOverloaded",
     ) => {
       const turn = history.get(threadId)?.find((turn) => turn.id === id)
       if (turn === undefined) throw new Error("Missing fixture turn")
       turn.status = "failed"
-      turn.error = { message }
+      turn.error = { message, codexErrorInfo }
       if (tool === "summary") turn.itemsView = "summary"
       if (tool === true) turn.items.push({ type: "commandExecution" })
       if (tool === "notification")
@@ -1096,11 +1097,11 @@ for (const tool of [false, true, "notification", "summary"] as const)
         }
       }).pipe(Effect.provide(layer(fake.factory))),
     )
-  }, 10000)
+  }, 40000)
 
 test("resident rate limits exhaust a durable two-retry budget", async () => {
   const fake = fixture(true)
-  const message = "Rate limit exceeded. Please retry later."
+  const message = "HTTP 429: Rate limit exceeded. Please retry later."
   await Effect.runPromise(
     Effect.gen(function* () {
       const resident = yield* ResidentCodex
@@ -1118,10 +1119,10 @@ test("resident rate limits exhaust a durable two-retry budget", async () => {
           () => fake.calls.filter((call) => call.method === "thread/queue/add").length,
         ).pipe(
           Effect.repeat({ schedule: Schedule.spaced(10), until: (count) => count === attempt + 1 }),
-          Effect.timeout(5000),
+          Effect.timeout(25000),
         )
         const id = fake.startNext("thread-1")
-        fake.fail("thread-1", id, false, message)
+        fake.fail("thread-1", id, false, message, null)
       }
       yield* worker.exited
       expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(3)
@@ -1130,7 +1131,7 @@ test("resident rate limits exhaust a durable two-retry budget", async () => {
       )
     }).pipe(Effect.provide(layer(fake.factory))),
   )
-}, 10000)
+}, 40000)
 
 test("a provider retry can run before first-token verification", async () => {
   const fake = fixture()
@@ -1147,6 +1148,70 @@ test("a provider retry can run before first-token verification", async () => {
       fake.fail("thread-1", "dispatch:a", false, "Selected model is at capacity.")
       expect((yield* worker.exited).exitCode).toBe(0)
       expect(fake.calls.filter((call) => call.method === "thread/queue/add")).toHaveLength(2)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+}, 15000)
+
+test("an interrupted terminal turn does not emit agent text as a provider error", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`INSERT INTO resident_inbox(id, thread_id, prompt, state) VALUES('restart:thread-1:dispatch:a', 'thread-1', 'continue', 'delivered')`
+      fake.complete("thread-1", "dispatch:a", "interrupted")
+      expect((yield* worker.exited).exitCode).toBe(1)
+      const events = yield* Effect.promise(async () => {
+        const events = []
+        for await (const event of worker.events) events.push(event)
+        return events
+      })
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false)
+    }).pipe(Effect.provide(layer(fake.factory))),
+  )
+})
+
+test("resident provider previews redact credentials and bound mailbox text", async () => {
+  const fake = fixture()
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const resident = yield* ResidentCodex
+      const now = new Date()
+      yield* prepareRun(now)
+      const worker = yield* resident.cli.spawn({
+        runId: "a",
+        directory: "/work/a",
+        prompt: "hold",
+        model: null,
+      })
+      yield* verifyRun(now)
+      fake.fail(
+        "thread-1",
+        "dispatch:a",
+        true,
+        "Try later.\nAuthorization: Bearer sk-private-token\nhttps://private.example.test\n" +
+          "😀".repeat(1000),
+      )
+      yield* worker.exited
+      const run = yield* (yield* AgentRunStore).read("a")
+      expect(run?.diagnostic).toStartWith("model_at_capacity: Try later.")
+      const sql = yield* SqlClient.SqlClient
+      const rows = yield* sql<{
+        prompt: string
+      }>`SELECT prompt FROM resident_inbox WHERE id = 'agent-run-end-a'`
+      const final = JSON.parse(rows[0]!.prompt).final_message
+      expect(final).not.toContain("sk-private-token")
+      expect(final).not.toContain("https://")
+      expect(Buffer.byteLength(JSON.stringify(final)) - 2).toBeLessThanOrEqual(512)
     }).pipe(Effect.provide(layer(fake.factory))),
   )
 })

@@ -94,7 +94,7 @@ export async function runCliWorker(
     const child = Bun.spawn(args, {
       cwd: options.directory,
       env: process.env,
-      stdin: prompt,
+      stdin: attempt === 0 ? prompt : new TextEncoder().encode("Continue."),
       stdout: "pipe",
       stderr: "pipe",
     })

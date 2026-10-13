@@ -142,8 +142,8 @@ test("a Codex route using the CLI default model persists a valid run", async () 
 })
 
 for (const message of [
-  "Selected model is at capacity. Please try a different model.",
-  "Rate limit exceeded. Please retry later.",
+  "HTTP 503: Selected model is at capacity. Please try a different model.",
+  "HTTP 429: Rate limit exceeded. Please retry later.",
 ])
   test(`provider refusal retains its typed reason and message: ${message}`, async () => {
     const codex = makeCodexCli([{ type: "turn.failed", message }], 1)
@@ -156,7 +156,7 @@ for (const message of [
       ),
     )
     expect(refusal.reason).toBe(
-      message.startsWith("Selected") ? "model_at_capacity" : "provider_rate_limited",
+      message.startsWith("HTTP 503") ? "model_at_capacity" : "provider_rate_limited",
     )
     expect(refusal.detail).toBe(message)
   })
@@ -164,11 +164,11 @@ for (const message of [
 test("one-shot terminal mailbox preserves the provider error after model output", async () => {
   const { SqlClient } = await import("effect/unstable/sql")
   const { Schedule } = await import("effect")
-  const message = "Selected model is at capacity. Please try a different model."
+  const message = "Try later.\nAuthorization: Bearer sk-private-token\n" + "😀".repeat(1000)
   const codex = makeCodexCli(
     [
       { type: "agent_message", text: "Working..." },
-      { type: "turn.failed", message },
+      { type: "turn.failed", message, codexErrorInfo: "serverOverloaded" },
     ],
     1,
   )
@@ -183,12 +183,64 @@ test("one-shot terminal mailbox preserves the provider error after model output"
         }),
         Effect.timeout(2000),
       )
-      expect(run?.diagnostic).toBe("model_at_capacity: " + message)
+      expect(run?.diagnostic).toStartWith("model_at_capacity: Try later.")
+      expect(run?.diagnostic).not.toContain("sk-private-token")
       const sql = yield* SqlClient.SqlClient
       const rows = yield* sql<{
         prompt: string
       }>`SELECT prompt FROM resident_inbox WHERE id = ${"agent-run-end-" + receipt.runId}`
-      expect(JSON.parse(rows[0]!.prompt).final_message).toBe(message)
+      const finalMessage = JSON.parse(rows[0]!.prompt).final_message
+      expect(finalMessage).toStartWith("Try later.")
+      expect(finalMessage).not.toContain("sk-private-token")
+      expect(Buffer.byteLength(JSON.stringify(finalMessage)) - 2).toBeLessThanOrEqual(512)
     }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
   )
 })
+
+for (const output of [false, true])
+  test(`stderr cannot become a provider final message: output=${output}`, async () => {
+    const codex = makeCodexCli(
+      output ? [{ type: "agent_message", text: "Working..." }] : [],
+      1,
+      undefined,
+      undefined,
+      "HTTP 429 Authorization: Bearer sk-stderr-private",
+    )
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const result = yield* register({
+          route: "scan",
+          repository: "workflowd",
+          prompt: "stderr",
+        }).pipe(Effect.result)
+        if (!output) {
+          expect(result._tag).toBe("Failure")
+          if (result._tag === "Failure")
+            expect(result.failure).toMatchObject({ reason: "no_first_token" })
+        }
+        const store = yield* AgentRunStore
+        const { SqlClient } = yield* Effect.promise(() => import("effect/unstable/sql"))
+        const { Schedule } = yield* Effect.promise(() => import("effect"))
+        if (result._tag === "Success")
+          yield* store
+            .read(result.success.runId)
+            .pipe(
+              Effect.repeat({
+                schedule: Schedule.spaced(10),
+                until: (run) => run?.state === "operator_required",
+              }),
+              Effect.timeout(2000),
+            )
+        const rows = yield* SqlClient.SqlClient.pipe(
+          Effect.flatMap(
+            (sql) =>
+              sql<{
+                prompt: string
+              }>`SELECT prompt FROM resident_inbox WHERE id LIKE 'agent-run-end-%'`,
+          ),
+        )
+        expect(rows).toHaveLength(1)
+        expect(JSON.parse(rows[0]!.prompt).final_message).toBe(output ? "Working..." : null)
+      }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), codex.port))),
+    )
+  })
