@@ -127,6 +127,7 @@ export interface AgentRunConfig {
 }
 
 interface SharedAppConfig {
+  readonly credentialSocket?: string
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
   readonly residentCodex?: ResidentConfig
@@ -752,6 +753,9 @@ export async function loadConfig(
   const gitSigningKey = fixWorkSigningKey(env, fixWorkEnabled, configuredTrustedAgentUsers)
   const baseUrl = mode === "execution" ? undefined : openCodeBaseUrl(env)
   const hostId = workerHostId(env)
+  const credentialSocket = env.WORKFLOWD_AGENT_HOST_SOCKET
+  if (credentialSocket !== undefined && !credentialSocket.startsWith("/"))
+    throw new Error("WORKFLOWD_AGENT_HOST_SOCKET must be absolute")
   const workerIdentity = loadWorkerIdentityConfig(env)
   const residentCodex = loadResidentConfig(env)
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
@@ -764,6 +768,7 @@ export async function loadConfig(
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
+    ...(credentialSocket === undefined ? {} : { credentialSocket }),
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(executionCapabilities === undefined ? {} : { executionCapabilities }),
     ...(residentCodex === undefined ? {} : { residentCodex }),

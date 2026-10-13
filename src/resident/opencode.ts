@@ -99,7 +99,15 @@ export const makeOpenCodeMailbox = (options: Options, provider: OpenCodeMailboxP
         yield* inbox.sending(message.id)
         const outcome = yield* deliverOpenCode(provider, message, run)
         if (outcome === "delivered") yield* inbox.delivered(message.id)
-        else yield* uncertain(message.id, row.thread_id, row.run_id)
+        else {
+          yield* uncertain(message.id, row.thread_id, row.run_id)
+          if (typeof outcome === "object")
+            yield* runs.operatorRequired({
+              runId: row.run_id,
+              diagnostic: outcome.reason,
+              now: new Date(),
+            })
+        }
       }
     })
     const tick = Semaphore.withPermits(

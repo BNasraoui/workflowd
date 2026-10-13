@@ -1,3 +1,4 @@
+import { credentialReason, type CredentialAdmissionReason } from "./agent-host/protocol"
 import { Context, Effect } from "effect"
 import type {
   ExecutionCapabilities,
@@ -28,6 +29,7 @@ export type DiscoverySource = {
   readonly executor: string
   readonly kind?: string
   readonly protocol?: string
+  readonly checkCredentials?: () => Promise<void>
   /** Abort ends the observation; settle only after owned native resources have been released. */
   readonly discover: (
     signal: AbortSignal,
@@ -52,6 +54,7 @@ export function makeExecutionCapabilities(options: {
   let closing: Promise<void> | undefined
   const refreshes = new Set<{ controller: AbortController; completion: Promise<void> }>()
   type Observation = {
+    reason?: CredentialAdmissionReason
     checkedAt: number
     observedAt: number | null
     status: ExecutionCapabilities["sources"][number]["status"]
@@ -87,8 +90,10 @@ export function makeExecutionCapabilities(options: {
                   models: [],
                 }
               : { checkedAt: at, observedAt: at, status: "available", models: result }
-        } catch {
+        } catch (error) {
+          const reason = credentialReason(error)
           previous = {
+            ...(reason === undefined ? {} : { reason }),
             checkedAt: now(),
             observedAt: previous?.observedAt ?? null,
             status: "unavailable",
@@ -115,10 +120,21 @@ export function makeExecutionCapabilities(options: {
     }
     return {
       source,
-      read: () =>
-        previous && now() - previous.checkedAt < options.refreshMs
-          ? Promise.resolve(previous)
-          : refresh(),
+      read: async () => {
+        try {
+          await source.checkCredentials?.()
+        } catch (error) {
+          const reason = credentialReason(error)
+          return {
+            checkedAt: now(),
+            observedAt: previous?.observedAt ?? null,
+            status: "unavailable" as const,
+            models: [],
+            ...(reason === undefined ? {} : { reason }),
+          }
+        }
+        return previous && now() - previous.checkedAt < options.refreshMs ? previous : refresh()
+      },
     }
   })
   const list = async () => {
@@ -135,6 +151,7 @@ export function makeExecutionCapabilities(options: {
         kind: source.kind ?? source.executor,
         protocol: source.protocol ?? "unknown",
         status: observation.status,
+        ...(observation.reason === undefined ? {} : { reason: observation.reason }),
         checkedAt: new Date(observation.checkedAt).toISOString(),
         observedAt:
           observation.observedAt === null ? null : new Date(observation.observedAt).toISOString(),

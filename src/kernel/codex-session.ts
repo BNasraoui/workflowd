@@ -1,3 +1,4 @@
+import { guardCliCredentials } from "../agent-host/client"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
@@ -136,6 +137,7 @@ type CommandResult = {
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CliProcessOptions = {
+  readonly credentialSocket?: string | undefined
   readonly binary: string
   /** CLI-specific protocol; process custody and systemd ownership are shared. */
   readonly driver: {
@@ -577,6 +579,9 @@ export const makeDurableCliProcess = (
               ? []
               : ["--property=MemoryMax=6G", "--property=MemorySwapMax=0"]),
             ...forwardedEnvironment,
+            ...(options.credentialSocket === undefined
+              ? []
+              : [`--setenv=WORKFLOWD_AGENT_HOST_SOCKET=${options.credentialSocket}`]),
             ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
               ([name, value]) => `--setenv=${name}=${value}`,
             ),
@@ -658,15 +663,19 @@ export const makeEventQueue = () => {
 
 export type CodexCliOptions = Omit<CliProcessOptions, "driver">
 export const makeCodexCli = (options: CodexCliOptions) =>
-  makeDurableCliProcess({
-    ...options,
-    driver: {
-      name: "codex",
-      workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
-      parseEvent: parseCodexExecEvent,
-      preflight: codexPreflight(options.binary),
-    },
-  })
+  guardCliCredentials(
+    makeDurableCliProcess({
+      ...options,
+      driver: {
+        name: "codex",
+        workerPath: fileURLToPath(new URL("./codex-worker.ts", import.meta.url)),
+        parseEvent: parseCodexExecEvent,
+        preflight: codexPreflight(options.binary),
+      },
+    }),
+    options.credentialSocket,
+    "codex",
+  )
 const codexPreflight = (binary: string) =>
   Effect.gen(function* () {
     yield* runWorkspaceCommand("check codex cli", [binary, "--version"]).pipe(

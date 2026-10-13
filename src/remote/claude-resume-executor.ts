@@ -1,3 +1,4 @@
+import { credentialReason } from "../agent-host/protocol"
 import { Context, Effect, Schema } from "effect"
 import type { ClaudeCliPort } from "../kernel/claude-session"
 import { structuredExtractionPrompt } from "../opencode/adapter"
@@ -103,7 +104,11 @@ export const makeClaudeResumeExecutor = (options: {
         Effect.catch((error) =>
           Effect.succeed({
             ok: false as const,
-            timedOut: String(error.cause.message).includes("did not finish within"),
+            failureReason:
+              credentialReason(error) ??
+              (String(error.cause.message).includes("did not finish within")
+                ? ("cli_timeout" as const)
+                : ("cli_failed" as const)),
           }),
         ),
       )
@@ -131,7 +136,7 @@ export const makeClaudeResumeExecutor = (options: {
       if (schemaObject === null) return failed("cli_failed")
 
       const wake = yield* turn(payload, payload.prompt)
-      if (!wake.ok) return failed(wake.timedOut ? "cli_timeout" : "cli_failed")
+      if (!wake.ok) return failed(wake.failureReason)
       if ((yield* parseEnvelope(wake.stdout))._tag === "None") return failed("cli_failed")
 
       const extracted = yield* extractOutput(payload, schemaObject)
@@ -153,7 +158,7 @@ export const makeClaudeResumeExecutor = (options: {
             structuredExtractionPrompt(schemaObject, ...(feedback === undefined ? [] : [feedback])),
           )
           if (!extraction.ok) {
-            return { outcome: failed(extraction.timedOut ? "cli_timeout" : "cli_failed") }
+            return { outcome: failed(extraction.failureReason) }
           }
           const answer = yield* parseEnvelope(extraction.stdout)
           if (answer._tag === "None") return { outcome: failed("cli_failed") }

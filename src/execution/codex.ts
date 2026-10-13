@@ -1,3 +1,4 @@
+import { withCredentialAdmissionPromise } from "../agent-host/client"
 import { Schema } from "effect"
 import type { DiscoverySource, ExecutionModel } from "../execution-capabilities"
 import { RpcRequestError } from "../resident/rpc"
@@ -31,67 +32,72 @@ const Account = Schema.Struct({
 
 export function makeCodexDiscovery(
   executor: string,
-  options: { readonly command: ReadonlyArray<string>; readonly home?: string },
+  options: {
+    readonly command: ReadonlyArray<string>
+    readonly home?: string
+    readonly credentialSocket?: string | undefined
+  },
 ): DiscoverySource {
   return {
     executor,
     kind: "codex",
     protocol: "codex-app-server/model/list",
-    discover: async (signal) => {
-      const server = startCodexDiscovery(options.command, options.home, signal)
-      try {
-        await server.initialize()
-        const config = Schema.decodeUnknownSync(Config)(
-          await server.request("config/read", { includeLayers: false }),
-        )
-        const account = Schema.decodeUnknownSync(Account)(
-          await server.request("account/read", { refreshToken: false }),
-        )
-        if (account.requiresOpenaiAuth && account.account === null)
-          return { status: "unauthenticated" }
-        const models: ExecutionModel[] = []
-        let cursor: string | null = null
-        const cursors = new Set<string>()
-        do {
-          const page = Schema.decodeUnknownSync(ModelPage)(
-            await server.request("model/list", { cursor, limit: 100, includeHidden: true }),
+    discover: (signal) =>
+      withCredentialAdmissionPromise(options.credentialSocket, "codex", async () => {
+        const server = startCodexDiscovery(options.command, options.home, signal)
+        try {
+          await server.initialize()
+          const config = Schema.decodeUnknownSync(Config)(
+            await server.request("config/read", { includeLayers: false }),
           )
-          models.push(
-            ...page.data.map((model) => ({
-              provider: config.config.model_provider,
-              model: model.model,
-              selectionModel: model.id,
-              name: model.displayName,
-              efforts: model.supportedReasoningEfforts.map((effort) => ({
-                id: effort.reasoningEffort,
-                description: effort.description,
+          const account = Schema.decodeUnknownSync(Account)(
+            await server.request("account/read", { refreshToken: false }),
+          )
+          if (account.requiresOpenaiAuth && account.account === null)
+            return { status: "unauthenticated" }
+          const models: ExecutionModel[] = []
+          let cursor: string | null = null
+          const cursors = new Set<string>()
+          do {
+            const page = Schema.decodeUnknownSync(ModelPage)(
+              await server.request("model/list", { cursor, limit: 100, includeHidden: true }),
+            )
+            models.push(
+              ...page.data.map((model) => ({
+                provider: config.config.model_provider,
+                model: model.model,
+                selectionModel: model.id,
+                name: model.displayName,
+                efforts: model.supportedReasoningEfforts.map((effort) => ({
+                  id: effort.reasoningEffort,
+                  description: effort.description,
+                })),
+                defaultEffort: model.defaultReasoningEffort,
+                defaultModel: model.isDefault,
+                modalities: { input: model.inputModalities },
+                // The native model/list may use a bundled catalog. Authentication
+                // and advertisement are observations, not per-model entitlement proof.
+                availability: "unknown" as const,
               })),
-              defaultEffort: model.defaultReasoningEffort,
-              defaultModel: model.isDefault,
-              modalities: { input: model.inputModalities },
-              // The native model/list may use a bundled catalog. Authentication
-              // and advertisement are observations, not per-model entitlement proof.
-              availability: "unknown" as const,
-            })),
+            )
+            cursor = page.nextCursor
+            if (cursor !== null) {
+              if (cursors.has(cursor) || cursors.size >= 100)
+                throw new Error("Invalid Codex catalog pagination")
+              cursors.add(cursor)
+            }
+          } while (cursor !== null)
+          return models
+        } catch (error) {
+          if (
+            (error instanceof RpcRequestError && error.code === -32601) ||
+            Schema.isSchemaError(error)
           )
-          cursor = page.nextCursor
-          if (cursor !== null) {
-            if (cursors.has(cursor) || cursors.size >= 100)
-              throw new Error("Invalid Codex catalog pagination")
-            cursors.add(cursor)
-          }
-        } while (cursor !== null)
-        return models
-      } catch (error) {
-        if (
-          (error instanceof RpcRequestError && error.code === -32601) ||
-          Schema.isSchemaError(error)
-        )
-          return { status: "unsupported" }
-        throw error
-      } finally {
-        await server.close()
-      }
-    },
+            return { status: "unsupported" }
+          throw error
+        } finally {
+          await server.close()
+        }
+      }),
   }
 }

@@ -6,6 +6,12 @@ import {
 } from "../provider-failure"
 import { diagnosticMessage } from "../sandbox/diagnostics"
 import { residentWorkerInstructions } from "./instructions"
+import {
+  guardCliCredentials,
+  withCredentialAdmission,
+  withCredentialAdmissionPromise,
+} from "../agent-host/client"
+import { credentialReason } from "../agent-host/protocol"
 import { normalizeError } from "../errors"
 import { RunPeers, serveRunSocket } from "../worker-identity/peer"
 import { WorkerIdentity } from "../worker-identity/service"
@@ -106,7 +112,10 @@ type ResidentPort = {
 export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCodex")
 
 export const ResidentCodexLive = (
-  config: ResidentConfig & { readonly unitPrefix?: string },
+  config: ResidentConfig & {
+    readonly unitPrefix?: string
+    readonly credentialSocket?: string | undefined
+  },
   binary: string,
   ciConfig: CiConfig,
   start: typeof startAppServer = startAppServer,
@@ -170,35 +179,39 @@ export const ResidentCodexLive = (
           Effect.orDie,
         ),
       )
-      const launch = Effect.fn("Resident.launch")(function* (runId: string, attempts: number = 0) {
-        const env = {
-          ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
-          WORKFLOWD_RUN_ID: runId,
-          WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
-        }
-        const owned = yield* store.readRun(runId)
-        if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
-        const notify = notifyFor(runId)
-        let process: ServerProcess
-        if (transientUnits) {
-          const unit = residentUnitName(runId, unitPrefix)
-          const socket = residentSocket(config.home, runId)
-          const launchId = randomUUID()
-          yield* store.prepareServer(runId, unit, launchId, socket)
-          const launched = yield* Effect.tryPromise(() =>
-            launchAppServer(
-              { binary, home: config.home, env, runId, unitPrefix, launchId },
-              notify,
-            ),
-          )
-          process = launched
-          yield* store.adoptServer(runId, launched.invocation)
-        } else process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
-        servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
-        yield* Effect.try(() => registerPeer(runId, process.pid))
-        yield* Effect.tryPromise(() => process.initialize())
-        return process
-      })
+      const launch = Effect.fn("Resident.launch")(
+        function* (runId: string, attempts: number = 0) {
+          const env = {
+            ...(Option.isSome(identity) ? identity.value.environment(runId) : {}),
+            WORKFLOWD_RUN_ID: runId,
+            WORKFLOWD_CODEX_RESIDENT_SOCKET: config.socket,
+          }
+          const owned = yield* store.readRun(runId)
+          if (owned !== null) yield* store.recordClosure(owned.thread_id, false)
+          const notify = notifyFor(runId)
+          let process: ServerProcess
+          if (transientUnits) {
+            const unit = residentUnitName(runId, unitPrefix)
+            const socket = residentSocket(config.home, runId)
+            const launchId = randomUUID()
+            yield* store.prepareServer(runId, unit, launchId, socket)
+            const launched = yield* Effect.tryPromise(() =>
+              launchAppServer(
+                { binary, home: config.home, env, runId, unitPrefix, launchId },
+                notify,
+              ),
+            )
+            process = launched
+            yield* store.adoptServer(runId, launched.invocation)
+          } else
+            process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
+          servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
+          yield* Effect.try(() => registerPeer(runId, process.pid))
+          yield* Effect.tryPromise(() => process.initialize())
+          return process
+        },
+        (effect) => withCredentialAdmission(config.credentialSocket, "codex", effect),
+      )
       const turnsWithTools = new Set<string>()
       const listeners = new Map<
         string,
@@ -209,7 +222,17 @@ export const ResidentCodexLive = (
         const entry = runId === undefined ? undefined : servers.get(runId)
         if (entry === undefined)
           return Promise.reject(new Error("Resident run process unavailable"))
-        return entry.process.rpc.request(method, params)
+        return [
+          "thread/resume",
+          "thread/start",
+          "turn/start",
+          "thread/queue/add",
+          "turn/steer",
+        ].includes(method)
+          ? withCredentialAdmissionPromise(config.credentialSocket, "codex", () =>
+              entry.process.rpc.request(method, params),
+            )
+          : entry.process.rpc.request(method, params)
       }
       const closeServer = Effect.fn("Resident.closeServer")(function* (
         runId: string,
@@ -590,6 +613,12 @@ export const ResidentCodexLive = (
           else {
             yield* store.uncertain(message.id, message.thread_id)
             yield* finish(message.thread_id, true)
+            if (typeof outcome === "object")
+              yield* runs.operatorRequired({
+                runId: row.run_id,
+                diagnostic: outcome.reason,
+                now: new Date(),
+              })
           }
         }
       })
@@ -674,120 +703,131 @@ export const ResidentCodexLive = (
         Effect.forkScoped,
       )
 
-      const cli: CodexCliPort = {
-        ownership: "resident-thread",
-        cancelRun,
-        preflight: Effect.acquireUseRelease(
-          Effect.try(() => start({ binary, home: config.home }, () => {})),
-          (process) =>
-            Effect.tryPromise(async () => {
-              await process.initialize()
-              await process.rpc.request("thread/list", { limit: 1 })
-            }),
-          (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
-        ).pipe(
-          Effect.mapError(() => ({
-            kind: "cli_unusable" as const,
-            detail: "resident Codex app-server unavailable",
-          })),
-        ),
-        spawn: (input) =>
-          Effect.gen(function* () {
-            if (input.runId === undefined)
-              return yield* Effect.fail(new Error("Resident dispatch requires a durable run ID"))
-            const server = yield* launch(input.runId)
-            input.onSpawn?.(server.pid)
-            const thread = yield* Effect.tryPromise(() =>
-              server.rpc.request("thread/start", {
-                cwd: input.directory,
-                model: input.model,
-                ...(input.provider == null ? {} : { modelProvider: input.provider }),
-                ...(input.effort === undefined
-                  ? {}
-                  : { config: { model_reasoning_effort: input.effort } }),
-                approvalPolicy: "never",
-                sandbox: "danger-full-access",
+      const cli: CodexCliPort = guardCliCredentials(
+        {
+          ownership: "resident-thread",
+          cancelRun,
+          preflight: Effect.acquireUseRelease(
+            Effect.try(() => start({ binary, home: config.home }, () => {})),
+            (process) =>
+              Effect.tryPromise(async () => {
+                await process.initialize()
+                await process.rpc.request("thread/list", { limit: 1 })
               }),
-            ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
-            const rejectSelection = (
-              reason: "unsupported_thinking" | "model_not_available",
-              detail: string,
-            ) =>
-              Effect.gen(function* () {
-                peers.revoke(input.runId)
-                servers.delete(input.runId)
-                yield* Effect.tryPromise(() => server.close())
-                return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
-              })
-            if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
-              return yield* rejectSelection(
-                "unsupported_thinking",
-                "Native Codex did not confirm the requested reasoning effort",
-              )
-            if (input.model !== null && thread.model !== input.model)
-              return yield* rejectSelection(
-                "model_not_available",
-                "Native Codex resolved a different model",
-              )
-            if (input.provider != null && thread.modelProvider !== input.provider)
-              return yield* rejectSelection(
-                "model_not_available",
-                "Native Codex resolved a different provider",
-              )
-            const accepted = yield* runs.read(input.runId)
-            if (accepted?.resolvedSelection != null && thread.model !== undefined) {
-              yield* runs.recordResolvedSelection({
-                runId: input.runId,
-                now: new Date(),
-                selection: {
-                  ...accepted.resolvedSelection,
-                  model: thread.model,
-                  provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
-                  thinking:
-                    thread.reasoningEffort == null
-                      ? accepted.resolvedSelection.thinking
-                      : { ...accepted.resolvedSelection.thinking, effort: thread.reasoningEffort },
-                  evidence: "runtime",
-                },
-              })
-            }
-            const threadId = thread.thread.id
-            threadRuns.set(threadId, input.runId)
-            yield* store.attach(input.runId, threadId, input.directory, input.model)
-            const queue = makeEventQueue()
-            let resolveExit: (exit: CodexExit) => void = () => {}
-            const exited = new Promise<CodexExit>((resolve) => {
-              resolveExit = resolve
-            })
-            listeners.set(threadId, { queue, finish: resolveExit })
-            queue.push({ type: "thread.started", threadId })
-            const instructions = residentWorkerInstructions + "\n\n"
-            yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
-            yield* flush()
-            return {
-              events: queue.iterable,
-              executionId: threadId,
-              cancel: cancelRun(input.runId),
-              exited: Effect.tryPromise({
-                try: () => exited,
-                catch: (cause) =>
-                  new WorkspaceError({
-                    operation: "observe resident exit",
-                    cause: normalizeError(cause),
-                  }),
-              }),
-            }
-          }).pipe(
-            Effect.mapError((error) =>
-              error instanceof ExecutionSelectionError
-                ? error
-                : new WorkspaceError({
-                    operation: "resident dispatch",
-                    cause: new Error("resident dispatch failed; inspect durable inbox"),
-                  }),
-            ),
+            (process) => Effect.tryPromise(() => process.close()).pipe(Effect.orDie),
+          ).pipe(
+            Effect.mapError(() => ({
+              kind: "cli_unusable" as const,
+              detail: "resident Codex app-server unavailable",
+            })),
           ),
-      }
+          spawn: (input) =>
+            Effect.gen(function* () {
+              if (input.runId === undefined)
+                return yield* Effect.fail(new Error("Resident dispatch requires a durable run ID"))
+              const server = yield* launch(input.runId)
+              input.onSpawn?.(server.pid)
+              const thread = yield* Effect.tryPromise(() =>
+                server.rpc.request("thread/start", {
+                  cwd: input.directory,
+                  model: input.model,
+                  ...(input.provider == null ? {} : { modelProvider: input.provider }),
+                  ...(input.effort === undefined
+                    ? {}
+                    : { config: { model_reasoning_effort: input.effort } }),
+                  approvalPolicy: "never",
+                  sandbox: "danger-full-access",
+                }),
+              ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ThreadResult)))
+              const rejectSelection = (
+                reason: "unsupported_thinking" | "model_not_available",
+                detail: string,
+              ) =>
+                Effect.gen(function* () {
+                  peers.revoke(input.runId)
+                  servers.delete(input.runId)
+                  yield* Effect.tryPromise(() => server.close())
+                  return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
+                })
+              if (input.effort !== undefined && thread.reasoningEffort !== input.effort)
+                return yield* rejectSelection(
+                  "unsupported_thinking",
+                  "Native Codex did not confirm the requested reasoning effort",
+                )
+              if (input.model !== null && thread.model !== input.model)
+                return yield* rejectSelection(
+                  "model_not_available",
+                  "Native Codex resolved a different model",
+                )
+              if (input.provider != null && thread.modelProvider !== input.provider)
+                return yield* rejectSelection(
+                  "model_not_available",
+                  "Native Codex resolved a different provider",
+                )
+              const accepted = yield* runs.read(input.runId)
+              if (accepted?.resolvedSelection != null && thread.model !== undefined) {
+                yield* runs.recordResolvedSelection({
+                  runId: input.runId,
+                  now: new Date(),
+                  selection: {
+                    ...accepted.resolvedSelection,
+                    model: thread.model,
+                    provider: thread.modelProvider ?? accepted.resolvedSelection.provider,
+                    thinking:
+                      thread.reasoningEffort == null
+                        ? accepted.resolvedSelection.thinking
+                        : {
+                            ...accepted.resolvedSelection.thinking,
+                            effort: thread.reasoningEffort,
+                          },
+                    evidence: "runtime",
+                  },
+                })
+              }
+              const threadId = thread.thread.id
+              threadRuns.set(threadId, input.runId)
+              yield* store.attach(input.runId, threadId, input.directory, input.model)
+              const queue = makeEventQueue()
+              let resolveExit: (exit: CodexExit) => void = () => {}
+              const exited = new Promise<CodexExit>((resolve) => {
+                resolveExit = resolve
+              })
+              listeners.set(threadId, { queue, finish: resolveExit })
+              queue.push({ type: "thread.started", threadId })
+              const instructions = residentWorkerInstructions + "\n\n"
+              yield* store.enqueue(`dispatch:${input.runId}`, threadId, instructions + input.prompt)
+              yield* flush()
+              return {
+                events: queue.iterable,
+                executionId: threadId,
+                cancel: cancelRun(input.runId),
+                exited: Effect.tryPromise({
+                  try: () => exited,
+                  catch: (cause) =>
+                    new WorkspaceError({
+                      operation: "observe resident exit",
+                      cause: normalizeError(cause),
+                    }),
+                }),
+              }
+            }).pipe(
+              Effect.mapError((error) =>
+                error instanceof ExecutionSelectionError
+                  ? error
+                  : new WorkspaceError({
+                      operation: "resident dispatch",
+                      cause:
+                        credentialReason(error) !== undefined
+                          ? normalizeError(error)
+                          : new Error("resident dispatch failed; inspect durable inbox"),
+                    }),
+              ),
+            ),
+        },
+        config.credentialSocket,
+        "codex",
+      )
+
       const route: ResidentPort["route"] = (request, peerPid) =>
         Effect.gen(function* () {
           if (new URL(request.url).pathname !== "/subscriptions") return undefined

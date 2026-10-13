@@ -151,9 +151,16 @@ jobs:
           printf '5e983fb693623f3ea500c63e4da9aa17e90490f120edf612e25c24a34bee405c  %s\n' "$(command -v opencode2)" | sha256sum --check
       - name: Install pinned native sandbox CLIs
         run: |
-          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.289
+          bun add --global --trust @openai/codex@0.159.1 @anthropic-ai/claude-code@2.1.296
           test "$(codex --version)" = 'codex-cli 0.159.1'
-          test "$(claude --version)" = '2.1.289 (Claude Code)'
+          test "$(claude --version)" = '2.1.296 (Claude Code)'
+      - name: Pin credential probe runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.11.1
+          token: ""
+      - name: Record credential probe runtime
+        run: printf 'WORKFLOWD_AGENT_PROBE_NODE=%s\n' "$(command -v node)" >> "$GITHUB_ENV"
       - name: Prepare sandbox user namespaces
         run: |
           # This disposable Ubuntu VM must permit systemd's unprivileged namespaces.
@@ -168,8 +175,101 @@ jobs:
             -p PrivateUsers=yes -p PrivateTmp=yes -p ProtectSystem=strict \
             -p ProtectHome=tmpfs -p NoNewPrivileges=yes \
             -p MemoryMax=256M -p MemorySwapMax=0 /usr/bin/true
+      - name: Verify credential probe entrypoints
+        run: >-
+          systemd-run --user --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv="PATH=$PATH" --setenv="WORKFLOWD_AGENT_PROBE_NODE=$WORKFLOWD_AGENT_PROBE_NODE"
+          bun test test/agent-user/client-versions.test.ts
+      - name: Prepare disposable credential identities and trusted clients
+        run: |
+          set -euo pipefail
+          sudo groupadd --gid 61000 workflowd-model-auth
+          sudo useradd --uid 61001 --gid 61000 --no-create-home --shell /usr/sbin/nologin ben-fixture
+          sudo useradd --uid 61002 --gid 61000 --no-create-home --shell /usr/sbin/nologin agent-fixture
+          # Fixture children import reviewed source as their real UID. Grant only
+          # read/traverse access to the disposable checkout, preserving private homes.
+          directory="$PWD"
+          while [ "$directory" != / ]; do
+            sudo setfacl -m u:61001:--x,u:61002:--x "$directory"
+            directory=$(dirname "$directory")
+          done
+          sudo setfacl -R -m u:61001:rX,u:61002:rX "$PWD"
+          sudo mkdir -p /opt/workflowd-credential-fixture/bin
+          sudo cp -rf "$HOME/.bun/install/global/node_modules" /opt/workflowd-credential-fixture/
+          sudo chown -R root:root /opt/workflowd-credential-fixture
+          sudo chmod -R go-w /opt/workflowd-credential-fixture
+          sudo install -m 0755 "$(command -v bun)" /opt/workflowd-credential-fixture/bin/bun
+          sudo install -m 0755 "$(command -v node)" /opt/workflowd-credential-fixture/bin/node
+          for client in codex claude opencode2; do
+            source=$(readlink -f "$(command -v "$client")")
+            relative=${source#"$HOME/.bun/install/global/"}
+            test "$relative" != "$source"
+            sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
+          done
+      - name: Require two-UID credential admission and repair
+        run: >-
+          sudo systemd-run --wait --pipe --collect
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
+          /opt/workflowd-credential-fixture/bin/bun test
+          test/agent-user/credentials.e2e.test.ts
+          test/agent-user/credential-dispatch.e2e.test.ts
+          test/agent-user/opencode-migration.e2e.test.ts
+      - name: Require administrative credential coverage
+        run: |
+          mkdir -p coverage/administrative
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /usr/bin/unshare --pid --fork --mount-proc --net \
+            /bin/sh -c 'ip link set lo up && exec "$@"' fixture \
+            /opt/workflowd-credential-fixture/bin/bun test --coverage \
+            --coverage-dir=coverage/administrative \
+            --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \
+            test/agent-user/client-versions.test.ts \
+            test/agent-user/credentials.e2e.test.ts \
+            test/agent-user/credential-dispatch.e2e.test.ts \
+            test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
-        run: bun run test:coverage
+        run: |
+          # Migration needs privileged /proc access; refresh probes need network
+          # isolation. The preceding step checks administrative modules with unchanged Bun
+          # thresholds. Every other module is checked here with those thresholds.
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          config = Path("bunfig.toml").read_text()
+          key = "coveragePathIgnorePatterns = ["
+          assert config.count(key) == 1
+          config = config.replace(key, key + '\n  "src/agent-host/opencode-credentials.ts",\n  "src/agent-host/credentials.ts",\n  "src/agent-host/config.ts",\n  "src/agent-host/credential-relink.ts",\n  "src/agent-host/client.ts",\n  "src/agent-host/server.ts",\n  "test/agent-user/harness.ts",', 1)
+          Path(os.environ["RUNNER_TEMP"], "ordinary-coverage.toml").write_text(config)
+          PY
+          bun test --config="$RUNNER_TEMP/ordinary-coverage.toml" --coverage
+      - name: Include administrative coverage in shared gates
+        run: |
+          # Use the complete, independently threshold-checked administrative record.
+          # No duplicate file records may mask ordinary-suite coverage.
+          python3 - <<'PY'
+          from pathlib import Path
+          paths = ["src/agent-host/" + name + ".ts" for name in ["opencode-credentials", "credentials", "config", "credential-relink", "client", "server"]] + ["test/agent-user/harness.ts"]
+          administrative = Path("coverage/administrative/lcov.info").read_text()
+          report = Path("coverage/lcov.info")
+          ordinary = report.read_text()
+          for path in paths:
+              marker = f"SF:{path}\n"
+              records = [record for record in administrative.split("end_of_record\n") if marker in record.splitlines(keepends=True)]
+              assert len(records) == 1, f"administrative coverage missing or duplicated: {path}"
+              assert marker not in ordinary.splitlines(keepends=True), f"duplicate coverage: {path}"
+              ordinary += records[0] + "end_of_record\n"
+          report.write_text(ordinary)
+          PY
       - name: Require 80% changed executable line coverage
         if: github.event_name == 'pull_request'
         env:

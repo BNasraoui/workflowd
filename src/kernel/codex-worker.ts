@@ -111,6 +111,7 @@ export async function runCliWorker(
     const exitCode = typeof status === "number" ? status : -1
     const delay =
       retryProvider &&
+      process.env.WORKFLOWD_AGENT_HOST_SOCKET === undefined &&
       exitCode === 1 &&
       (await stat(options.eventsFile)).size < options.maxOutputBytes
         ? turn.retryDelay(attempt)

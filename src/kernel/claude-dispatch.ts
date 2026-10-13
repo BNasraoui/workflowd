@@ -1,3 +1,4 @@
+import { guardCliCredentials } from "../agent-host/client"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Schema } from "effect"
@@ -82,41 +83,46 @@ export const parseClaudeDispatchEvent = (line: string): CliEvent => {
 
 const AuthStatus = Schema.Struct({ loggedIn: Schema.Boolean })
 
-export const makeClaudeDispatchCli = (options: Omit<CliProcessOptions, "driver">): CliPort => ({
-  ...makeDurableCliProcess({
-    ...options,
-    unitPrefix: options.unitPrefix ?? "workflowd-claude-",
-    driver: {
-      name: "claude",
-      workerPath: fileURLToPath(new URL("./claude-worker.ts", import.meta.url)),
-      parseEvent: parseClaudeDispatchEvent,
-      preflight: Effect.gen(function* () {
-        yield* runWorkspaceCommand("check claude cli", [options.binary, "--version"]).pipe(
-          Effect.mapError((cause): CliPreflightError => ({
-            kind: "cli_unusable",
-            detail: `Claude CLI version check failed: ${String(cause.cause)}`,
-          })),
-        )
-        const status = yield* runWorkspaceCommand("check claude auth", [
-          options.binary,
-          "auth",
-          "status",
-        ]).pipe(
-          Effect.flatMap((stdout) =>
-            Schema.decodeUnknownEffect(Schema.fromJsonString(AuthStatus))(stdout),
-          ),
-          Effect.mapError((): CliPreflightError => ({
-            kind: "not_authenticated",
-            detail:
-              "Claude CLI authentication check failed; run claude auth login on the daemon host",
-          })),
-        )
-        if (!status.loggedIn)
-          return yield* Effect.fail({
-            kind: "not_authenticated" as const,
-            detail: "Claude CLI is not logged in; run claude auth login on the daemon host",
-          })
+export const makeClaudeDispatchCli = (options: Omit<CliProcessOptions, "driver">): CliPort =>
+  guardCliCredentials(
+    {
+      ...makeDurableCliProcess({
+        ...options,
+        unitPrefix: options.unitPrefix ?? "workflowd-claude-",
+        driver: {
+          name: "claude",
+          workerPath: fileURLToPath(new URL("./claude-worker.ts", import.meta.url)),
+          parseEvent: parseClaudeDispatchEvent,
+          preflight: Effect.gen(function* () {
+            yield* runWorkspaceCommand("check claude cli", [options.binary, "--version"]).pipe(
+              Effect.mapError((cause): CliPreflightError => ({
+                kind: "cli_unusable",
+                detail: `Claude CLI version check failed: ${String(cause.cause)}`,
+              })),
+            )
+            const status = yield* runWorkspaceCommand("check claude auth", [
+              options.binary,
+              "auth",
+              "status",
+            ]).pipe(
+              Effect.flatMap((stdout) =>
+                Schema.decodeUnknownEffect(Schema.fromJsonString(AuthStatus))(stdout),
+              ),
+              Effect.mapError((): CliPreflightError => ({
+                kind: "not_authenticated",
+                detail:
+                  "Claude CLI authentication check failed; run claude auth login on the daemon host",
+              })),
+            )
+            if (!status.loggedIn)
+              return yield* Effect.fail({
+                kind: "not_authenticated" as const,
+                detail: "Claude CLI is not logged in; run claude auth login on the daemon host",
+              })
+          }),
+        },
       }),
     },
-  }),
-})
+    options.credentialSocket,
+    "claude",
+  )

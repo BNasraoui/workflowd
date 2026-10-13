@@ -1,3 +1,4 @@
+import { withCredentialAdmission } from "../agent-host/client"
 import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -56,6 +57,7 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*$/
 export const makeClaudeCli = (options: {
   readonly binary: string
   readonly home?: string
+  readonly credentialSocket?: string | undefined
 }): ClaudeCliPort => ({
   sessionExists: (input) => {
     if (!SESSION_ID_PATTERN.test(input.nativeSessionId)) return Effect.succeed(false)
@@ -76,21 +78,31 @@ export const makeClaudeCli = (options: {
   resume: (input) =>
     // Argument-vector spawn, and the prompt rides stdin: untrusted session
     // content never appears in argv or a shell string.
-    runWorkspaceCommandBytes(
-      "wake claude session",
-      [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
-      { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
+    withCredentialAdmission(
+      options.credentialSocket,
+      "claude",
+      runWorkspaceCommandBytes(
+        "wake claude session",
+        [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
+        { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
+      ).pipe(
+        Effect.timeoutOrElse({
+          duration: input.timeoutMs,
+          orElse: () =>
+            Effect.fail(
+              new WorkspaceError({
+                operation: "wake claude session",
+                cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
+              }),
+            ),
+        }),
+        Effect.map((output) => new TextDecoder().decode(output.stdout)),
+      ),
     ).pipe(
-      Effect.timeoutOrElse({
-        duration: input.timeoutMs,
-        orElse: () =>
-          Effect.fail(
-            new WorkspaceError({
-              operation: "wake claude session",
-              cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
-            }),
-          ),
-      }),
-      Effect.map((output) => new TextDecoder().decode(output.stdout)),
+      Effect.mapError((error) =>
+        error instanceof WorkspaceError
+          ? error
+          : new WorkspaceError({ operation: "credential admission", cause: error }),
+      ),
     ),
 })

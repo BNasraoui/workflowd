@@ -1,3 +1,4 @@
+import type { CredentialAdmissionReason } from "../agent-host/protocol"
 import type { Effect } from "effect"
 import type { ExecutionSelectionError } from "../execution-selection"
 import type { WorkspaceError } from "../workspace/errors"
@@ -11,7 +12,8 @@ export type CliEvent =
   | { readonly type: "other" }
 
 export type CliPreflightError = {
-  readonly kind: "cli_unusable" | "not_authenticated" | "systemd_unavailable"
+  readonly kind:
+    "cli_unusable" | "not_authenticated" | "systemd_unavailable" | CredentialAdmissionReason
   readonly detail: string
 }
 
