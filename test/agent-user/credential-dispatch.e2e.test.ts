@@ -123,6 +123,51 @@ test("interrupted repair can resume from the selected source without choosing by
   }
 })
 
+for (const state of ["original", "removed", "linked", "replaced"] as const) {
+  test(`repair after canonical replacement handles a ${state} source without importing it again`, async () => {
+    const { policy, close } = await fixture()
+    try {
+      const { canonical, benLink, agentLink } = policy.codex
+      await rm(benLink)
+      await writeFile(benLink, "synthetic-generation-2", { mode: 0o600 })
+      const source = await lstat(benLink)
+      await writeFile(canonical, "synthetic-generation-2")
+      const staged = await lstat(canonical)
+      await writeFile(
+        join(policy.root, "codex.repair.json"),
+        JSON.stringify({
+          client: "codex",
+          source: "ben",
+          sourceDevice: source.dev,
+          sourceInode: source.ino,
+          stagedDevice: staged.dev,
+          stagedInode: staged.ino,
+        }),
+        { mode: 0o600 },
+      )
+      if (state !== "original") await rm(benLink)
+      if (state === "linked") await symlink(canonical, benLink)
+      if (state === "replaced") await symlink(agentLink, benLink)
+      await expect(checkCredentialAdmission(policy, "codex")).rejects.toMatchObject({
+        reason: "credential_relink_in_progress",
+      })
+      if (state === "replaced") {
+        await expect(relinkCredentials(policy, "codex", "ben")).rejects.toMatchObject({
+          reason: "shared_credential_diverged",
+        })
+        expect(await readFile(canonical, "utf8")).toBe("synthetic-generation-2")
+      } else {
+        await relinkCredentials(policy, "codex", "ben")
+        await checkCredentialAdmission(policy, "codex")
+        expect((await lstat(canonical)).ino).toBe(staged.ino)
+        expect(await readFile(agentLink, "utf8")).toBe("synthetic-generation-2")
+      }
+    } finally {
+      await close()
+    }
+  })
+}
+
 test("the host authenticates peer UID and checks again after successful preflight", async () => {
   const { serveCredentialHost } = await import("../../src/agent-host/server")
   const { acquireCredentialAdmission } = await import("../../src/agent-host/client")

@@ -10,6 +10,25 @@ import {
   migrateOpenCodeGrants,
 } from "../../src/agent-host/opencode-credentials"
 
+function fixtureEnvironment(home: string) {
+  return {
+    PATH: process.env.PATH!,
+    HOME: home,
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_CACHE_HOME: join(home, "cache"),
+    XDG_STATE_HOME: join(home, "state"),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_DISABLE_MODELS_FETCH: "true",
+    OPENCODE_DISABLE_AUTOUPDATE: "true",
+    OPENCODE_SERVER_PASSWORD: "synthetic-server",
+    HTTP_PROXY: "http://127.0.0.1:9",
+    HTTPS_PROXY: "http://127.0.0.1:9",
+    ALL_PROXY: "http://127.0.0.1:9",
+    NO_PROXY: "127.0.0.1,localhost",
+  }
+}
+
 /** All client configuration, grants and responses are invented fixture data. */
 test("installed OpenCode moves grants, restarts one store, and attaches without copying refresh credentials", async () => {
   const isRoot = process.getuid?.() === 0
@@ -38,7 +57,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     expect(await child.exited).toBe(0)
     return
   }
-  const ownUid = process.getuid()
+  const ownUid = process.getuid!()
   const root = await mkdtemp(join(tmpdir(), "opencode-migration-"))
   const ben = Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ?? ownUid)
   const agent = Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID ?? ownUid)
@@ -77,22 +96,6 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
           "--init-groups",
           ...args,
         ]
-  const environment = (home: string) => ({
-    PATH: process.env.PATH!,
-    HOME: home,
-    XDG_DATA_HOME: join(home, "data"),
-    XDG_CONFIG_HOME: join(home, "config"),
-    XDG_CACHE_HOME: join(home, "cache"),
-    XDG_STATE_HOME: join(home, "state"),
-    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-    OPENCODE_DISABLE_MODELS_FETCH: "true",
-    OPENCODE_DISABLE_AUTOUPDATE: "true",
-    OPENCODE_SERVER_PASSWORD: "synthetic-server",
-    HTTP_PROXY: "http://127.0.0.1:9",
-    HTTPS_PROXY: "http://127.0.0.1:9",
-    ALL_PROXY: "http://127.0.0.1:9",
-    NO_PROXY: "127.0.0.1,localhost",
-  })
   const binary = Bun.which("opencode2")!
   const running = new Set<ReturnType<typeof Bun.spawn>>()
   const start = async (home: string, uid: number) => {
@@ -101,7 +104,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     await reserve.stop(true)
     const child = Bun.spawn(
       asUser(uid, [binary, "serve", "--hostname", "127.0.0.1", "--port", String(port)]),
-      { cwd: home, env: environment(home), stdout: "ignore", stderr: "ignore" },
+      { cwd: home, env: fixtureEnvironment(home), stdout: "ignore", stderr: "ignore" },
     )
     running.add(child)
     const url = `http://127.0.0.1:${port}`
@@ -180,7 +183,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
       const result = spawnSync(
         asUser(uid, [binary, "auth", "list", "--standalone"])[0]!,
         asUser(uid, [binary, "auth", "list", "--standalone"]).slice(1),
-        { cwd: home, env: environment(home), timeout: 20000, stdio: "ignore" },
+        { cwd: home, env: fixtureEnvironment(home), timeout: 20000, stdio: "ignore" },
       )
       expect(result.status).toBe(0)
       databases.push(join(home, "data/opencode/opencode.db"))
@@ -258,7 +261,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     const restarted = await start(homes[1]!, agent)
     const attached = Bun.spawn(asUser(ben, [binary, "auth", "list", "--server", restarted.url]), {
       cwd: homes[0]!,
-      env: environment(homes[0]!),
+      env: fixtureEnvironment(homes[0]!),
       stdout: "ignore",
       stderr: "ignore",
     })
@@ -283,3 +286,103 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     await rm(root, { recursive: true, force: true })
   }
 }, 90000)
+
+test("offline migration resumes its journal and refuses schema drift or a reactivated source", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-offline-"))
+  const binary = Bun.which("opencode2")!
+  const uid = process.getuid!()
+  const databasePaths: string[] = []
+  try {
+    for (const name of ["source", "destination"]) {
+      const home = join(root, name)
+      await mkdir(home, { mode: 0o700 })
+      const child = Bun.spawn(
+        [
+          "unshare",
+          ...(uid === 0 ? [] : ["--user", "--map-root-user"]),
+          "--net",
+          "/bin/sh",
+          "-c",
+          'ip link set lo up && exec "$@"',
+          "fixture",
+          binary,
+          "auth",
+          "list",
+          "--standalone",
+        ],
+        {
+          cwd: home,
+          env: fixtureEnvironment(home),
+          stdout: "ignore",
+          stderr: "ignore",
+        },
+      )
+      expect(await child.exited).toBe(0)
+      databasePaths.push(join(home, "data/opencode/opencode.db"))
+    }
+    const policy = {
+      source: databasePaths[0]!,
+      database: databasePaths[1]!,
+      journal: join(root, "migration.json"),
+      agentUid: uid,
+      agentGid: process.getgid!(),
+    }
+    const grant = JSON.stringify({
+      type: "oauth",
+      methodID: "oauth",
+      access: "synthetic-access",
+      refresh: "synthetic-refresh",
+      expires: 1,
+    })
+    const seed = () => {
+      const db = new Database(policy.source)
+      try {
+        db.run(
+          "INSERT INTO credential (id,integration_id,label,value,active,time_created,time_updated) VALUES (?,?,?,?,?,?,?)",
+          ["synthetic", "fixture", "fixture", grant, 1, 1, 1],
+        )
+      } finally {
+        db.close()
+      }
+    }
+    await expect(checkOpenCodeMigration(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+    await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+    seed()
+    await migrateOpenCodeGrants(policy)
+    await checkOpenCodeMigration(policy)
+    const journal: unknown = JSON.parse(await readFile(policy.journal, "utf8"))
+    expect(journal).toEqual({ phase: "moved", ids: ["synthetic"] })
+    await writeFile(policy.journal, JSON.stringify({ phase: "prepared", ids: ["synthetic"] }))
+    await migrateOpenCodeGrants(policy)
+    await checkOpenCodeMigration(policy)
+    const destination = new Database(policy.database, { readonly: true })
+    try {
+      expect(destination.query("SELECT value FROM credential").all()).toEqual([{ value: grant }])
+      expect(destination.query("SELECT count(*) AS count FROM session_message").get()).toEqual({
+        count: 0,
+      })
+    } finally {
+      destination.close()
+    }
+    seed()
+    await expect(checkOpenCodeMigration(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+    await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+    const source = new Database(policy.source)
+    source.run("DELETE FROM credential")
+    source.run("ALTER TABLE credential ADD COLUMN unknown TEXT")
+    source.close()
+    await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 60000)

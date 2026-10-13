@@ -43,6 +43,88 @@ const Repair = Schema.Struct({
   stagedInode: Schema.optionalKey(Schema.Int),
 })
 
+async function importReplacement(
+  policy: CredentialPolicy,
+  client: "codex" | "claude",
+  source: "ben" | "agent",
+  selected: Awaited<ReturnType<typeof credentialParent>>,
+  canonical: Awaited<ReturnType<typeof credentialParent>>,
+  repair: typeof Repair.Type | undefined,
+) {
+  const handles: FileHandle[] = []
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  const sourceInfo = await lstat(selected.path).catch(() => null)
+  const storePath = `/proc/self/fd/${canonical.handle.fd}`
+  const journalPath = join(storePath, `${client}.repair.json`)
+  try {
+    if (
+      !sourceInfo?.isFile() ||
+      sourceInfo.nlink !== 1 ||
+      sourceInfo.uid !== (source === "ben" ? policy.controllerUid : policy.agentUid)
+    )
+      return fail()
+    if (repair && (repair.sourceDevice !== sourceInfo.dev || repair.sourceInode !== sourceInfo.ino))
+      fail()
+    const persist = async (value: typeof Repair.Type) => {
+      const temporary = `${journalPath}.next`
+      const file = await open(
+        temporary,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+        0o600,
+      )
+      try {
+        await file.writeFile(JSON.stringify(value))
+        await file.sync()
+      } finally {
+        await file.close()
+      }
+      await rename(temporary, journalPath)
+      await canonical.handle.sync()
+    }
+    const intent = { client, source, sourceDevice: sourceInfo.dev, sourceInode: sourceInfo.ino }
+    await persist(intent)
+    const input = await open(selected.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    handles.push(input)
+    const verified = await input.stat()
+    if (
+      verified.ino !== sourceInfo.ino ||
+      verified.dev !== sourceInfo.dev ||
+      verified.size > 1024 * 1024
+    )
+      fail()
+    const stagingPath = join(storePath, `${client}.staging`)
+    await unlink(stagingPath).catch((error: unknown) => {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+    })
+    const staging = await open(
+      stagingPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    )
+    handles.push(staging)
+    await staging.writeFile(await input.readFile())
+    await staging.chown(policy.ownerUid, policy.groupGid)
+    await staging.chmod(0o660)
+    await staging.sync()
+    const staged = await staging.stat()
+    await persist({ ...intent, stagedDevice: staged.dev, stagedInode: staged.ino })
+    await rename(stagingPath, canonical.path)
+    await canonical.handle.sync()
+  } finally {
+    await Promise.all(handles.map((handle) => handle.close()))
+  }
+}
+
+async function validateRepairedSource(path: string, canonical: string, repair: typeof Repair.Type) {
+  const info = await lstat(path).catch(() => null)
+  if (!info) return
+  if (info.isSymbolicLink() && (await readlink(path)) === canonical) return
+  if (info.isFile() && info.dev === repair.sourceDevice && info.ino === repair.sourceInode) return
+  throw credentialRefusal(repair.client, "shared_credential_diverged")
+}
+
 /** Administrative offline repair. Failure deliberately leaves a durable admission fence. */
 export async function relinkCredentials(
   policy: CredentialPolicy,
@@ -100,72 +182,10 @@ export async function relinkCredentials(
       target?.ino === repair.stagedInode &&
       target?.dev === repair.stagedDevice
     if (!installed) {
-      if (
-        !sourceInfo?.isFile() ||
-        sourceInfo.nlink !== 1 ||
-        sourceInfo.uid !== (source === "ben" ? policy.controllerUid : policy.agentUid)
-      )
-        return fail()
-      if (
-        repair &&
-        (repair.sourceDevice !== sourceInfo.dev || repair.sourceInode !== sourceInfo.ino)
-      )
-        fail()
-      const persist = async (value: typeof Repair.Type) => {
-        const temporary = `${journalPath}.next`
-        const file = await open(
-          temporary,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-          0o600,
-        )
-        try {
-          await file.writeFile(JSON.stringify(value))
-          await file.sync()
-        } finally {
-          await file.close()
-        }
-        await rename(temporary, journalPath)
-        await canonical.handle.sync()
-      }
-      const intent = { client, source, sourceDevice: sourceInfo.dev, sourceInode: sourceInfo.ino }
-      await persist(intent)
-      const input = await open(selected.path, constants.O_RDONLY | constants.O_NOFOLLOW)
-      handles.push(input)
-      const verified = await input.stat()
-      if (
-        verified.ino !== sourceInfo.ino ||
-        verified.dev !== sourceInfo.dev ||
-        verified.size > 1024 * 1024
-      )
-        fail()
-      const stagingPath = join(storePath, `${client}.staging`)
-      await unlink(stagingPath).catch((error: unknown) => {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
-      })
-      const staging = await open(
-        stagingPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o600,
-      )
-      handles.push(staging)
-      await staging.writeFile(await input.readFile())
-      await staging.chown(policy.ownerUid, policy.groupGid)
-      await staging.chmod(0o660)
-      await staging.sync()
-      const staged = await staging.stat()
-      await persist({ ...intent, stagedDevice: staged.dev, stagedInode: staged.ino })
-      await rename(stagingPath, canonical.path)
-      await canonical.handle.sync()
-    } else if (
-      sourceInfo &&
-      !(sourceInfo.isSymbolicLink() && (await readlink(selected.path)) === login.canonical) &&
-      !(
-        sourceInfo.isFile() &&
-        sourceInfo.dev === repair.sourceDevice &&
-        sourceInfo.ino === repair.sourceInode
-      )
-    )
-      fail()
+      await importReplacement(policy, client, source, selected, canonical, repair)
+    } else {
+      await validateRepairedSource(selected.path, login.canonical, repair)
+    }
     for (const parent of [selected, other]) {
       const temporary = `${parent.path}.workflowd-relink`
       await unlink(temporary).catch((error: unknown) => {

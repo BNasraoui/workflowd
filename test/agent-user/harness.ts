@@ -181,7 +181,7 @@ export async function probeCodexCredentialSharing() {
 
 /** The entire protocol fixture runs in a network namespace containing only loopback. */
 export async function probeInstalledRefresh() {
-  const root = await mkdtemp("/tmp/workflowd-oauth-refresh-")
+  const root = await mkdtemp(join(tmpdir(), "workflowd-oauth-refresh-"))
   await chmod(root, 0o710)
   try {
     const child = Bun.spawn(
@@ -211,7 +211,7 @@ export async function probeInstalledRefresh() {
         process.execPath,
         import.meta.filename,
         "--installed-refresh",
-        root.slice("/tmp/workflowd-oauth-refresh-".length),
+        root.slice(-6),
       ],
       { stdout: "pipe", stderr: "ignore" },
     )
@@ -264,7 +264,7 @@ export async function probeInstalledRefresh() {
 
 async function installedRefresh(identifier: string) {
   if (!/^[a-zA-Z0-9]{6}$/.test(identifier)) throw new Error("fixture_root_invalid")
-  const root = `/tmp/workflowd-oauth-refresh-${identifier}`
+  const root = join(tmpdir(), `workflowd-oauth-refresh-${identifier}`)
   const info = await lstat(root)
   if (!info.isDirectory() || info.uid !== process.getuid!() || (info.mode & 0o777) !== 0o710)
     throw new Error("fixture_root_invalid")
