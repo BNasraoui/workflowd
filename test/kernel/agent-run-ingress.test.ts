@@ -815,7 +815,7 @@ describe("agent-run ingress", () => {
     )
     expect(refusal.reason).toBe("provider_not_authenticated")
 
-    // A non-zero exit with no authentication flavor stays no_first_token.
+    // Provider capacity is distinct from missing model output.
     const broken = makeCodexCli([{ type: "error", message: "model overloaded" }], 1)
     const layer2 = makeLayer(makeProvider(state), worktrees([]), broken.port)
     const refusal2 = await refusalOf(
@@ -825,7 +825,7 @@ describe("agent-run ingress", () => {
         ),
       ),
     )
-    expect(refusal2.reason).toBe("no_first_token")
+    expect(refusal2.reason).toBe("model_at_capacity")
     expect(refusal2.detail).toContain("model overloaded")
   })
 
