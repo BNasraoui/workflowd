@@ -268,11 +268,11 @@ async function nativeBoundary(simulatedManager: boolean) {
         arguments:
           client === "codex"
             ? {
-                cmd: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                cmd: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
                 yield_time_ms: 1000,
               }
             : {
-                command: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                command: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
                 timeout: 1000,
               },
       })
@@ -294,7 +294,7 @@ async function nativeBoundary(simulatedManager: boolean) {
       units.add(process.unit)
       expect(process.uid).toBe(agentUid)
       const deadline = Date.now() + 45000
-      while (!(await readFile(proof, "utf8").catch(() => "")).includes("denied")) {
+      while (!(await readFile(proof, "utf8").catch(() => "")).includes("custody-denied")) {
         if (Date.now() > deadline) {
           const io = join(ioRoot, createHash("sha256").update(runId).digest("hex"))
           throw new Error(
@@ -309,7 +309,7 @@ async function nativeBoundary(simulatedManager: boolean) {
         }
         await Bun.sleep(100)
       }
-      expect(await readFile(proof, "utf8")).toBe(`${agentUid}\ndenied\n`)
+      expect(await readFile(proof, "utf8")).toBe(`${agentUid}\ndenied\ncustody-denied\n`)
       const descendant = Number((await readFile(`${proof}-pid`, "utf8")).trim())
       if (!simulatedManager) {
         expect(await readFile(`/proc/${descendant}/status`, "utf8")).toContain(
@@ -736,10 +736,15 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
         .split(":")
       const child = Bun.spawn(
         [
+          // A private PID namespace makes the simulated manager's stop kill
+          // descendants that create their own process groups, like a real cgroup.
+          "/usr/bin/unshare",
+          "--pid",
+          "--fork",
+          "--kill-child",
+          "--mount-proc",
           ...(binding
             ? [
-                "/usr/bin/unshare",
-                "--mount",
                 "/bin/sh",
                 "-c",
                 'mount --make-rprivate /; mkdir -p "$1"; mount --bind "$2" "$1"; shift 2; exec "$@"',
