@@ -632,3 +632,47 @@ test("local sent Claude resume recovers from its host checkpoint without another
   expect(observed).toEqual([`${deliveryId}-wake`])
   expect(turns).toEqual([`${deliveryId}-wake`, `${deliveryId}-extract`])
 })
+
+test("a local host resume checkpoints before delivery and retains its renewed lease through both turns", async () => {
+  const deliveries: string[] = []
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const sql = yield* SqlClient.SqlClient
+      const store = yield* KernelSessionStore
+      const cli: ClaudeCliPort = {
+        sessionExists: () => Effect.succeed(true),
+        hasDelivery: () => Effect.succeed(false),
+        resume: (input) =>
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              checkpoint_json: string
+            }>`SELECT checkpoint_json FROM kernel_resume_checkpoints WHERE checkpoint_version = 3`
+            expect(rows).toHaveLength(1)
+            expect(JSON.parse(rows[0]!.checkpoint_json)).toMatchObject({
+              deliveryId: input.deliveryId?.replace(/-(wake|extract)$/, ""),
+              payload: { nativeSessionId: native, directory },
+            })
+            deliveries.push(input.deliveryId!)
+            yield* Effect.sleep(30)
+            return JSON.stringify({
+              result: input.deliveryId!.endsWith("-wake")
+                ? "ACK"
+                : '{"acknowledged":true,"summary":"host completed"}',
+            })
+          }).pipe(Effect.orDie),
+      }
+      const iteration = yield* runClaudeResumeIteration({
+        ...options,
+        now: () => new Date(),
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 5,
+      }).pipe(Effect.provideService(ClaudeCli, cli))
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("completed")
+  expect(result.request?.state).toBe("completed")
+  expect(deliveries).toHaveLength(2)
+  expect(deliveries[0]?.replace(/-wake$/, "-extract")).toBe(deliveries[1])
+})

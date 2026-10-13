@@ -202,3 +202,117 @@ test("launches a detached unit and reattaches through its WebSocket", async () =
     await rm(root, { recursive: true, force: true })
   }
 }, 20000)
+
+test("host resident custody survives a relay disconnect and fences cancellation against a changed invocation", async () => {
+  const { createServer } = await import("node:net")
+  const { Schema } = await import("effect")
+  const { HostRequest, OwnedProcess, agentHostUnitName } =
+    await import("../../src/agent-host/protocol")
+  const { inspectAppServerUnit } = await import("../../src/resident/process")
+  const root = await mkdtemp(join(tmpdir(), "resident-host-"))
+  const hostSocket = join(root, "host.sock")
+  let owned: typeof OwnedProcess.Type | null = null
+  let ignoreStop = false
+  const operations: string[] = []
+  const sockets = new Set<import("node:net").Socket>()
+  const host = createServer((socket) => {
+    sockets.add(socket)
+    socket.on("close", () => sockets.delete(socket))
+    socket.on("error", () => socket.destroy())
+    let buffered = "",
+      relay = false
+    socket.on("data", (chunk) => {
+      buffered += chunk.toString()
+      let end: number
+      while ((end = buffered.indexOf("\n")) >= 0) {
+        const raw: unknown = JSON.parse(buffered.slice(0, end))
+        buffered = buffered.slice(end + 1)
+        if (relay) {
+          const frame = Schema.decodeUnknownSync(
+            Schema.Struct({ id: Schema.optionalKey(Schema.Number), method: Schema.String }),
+          )(raw)
+          if (frame.id !== undefined)
+            socket.write(JSON.stringify({ id: frame.id, result: { data: [] } }) + "\n")
+          continue
+        }
+        const request = Schema.decodeUnknownSync(HostRequest)(raw)
+        operations.push(request.operation)
+        if (request.operation === "start")
+          owned = {
+            runId: request.runId,
+            launchId: request.launchId!,
+            unit: agentHostUnitName(request.runId),
+            invocationId: "owned-invocation",
+            uid: 12345,
+            pid: 42,
+            started: new Date().toISOString(),
+            active: true,
+            exitCode: null,
+          }
+        if (request.operation === "stop" && owned && !ignoreStop)
+          owned = { ...owned, active: false, exitCode: -1 }
+        if (request.operation === "connect") {
+          relay = true
+          socket.write(JSON.stringify({ admitted: true, process: owned }) + "\n")
+        } else if (request.operation === "listOwned")
+          socket.end(
+            JSON.stringify({ admitted: true, processes: owned ? [owned] : [], next: null }) + "\n",
+          )
+        else socket.end(JSON.stringify({ admitted: true, process: owned }) + "\n")
+      }
+    })
+  })
+  await new Promise<void>((resolve) => host.listen(hostSocket, resolve))
+  try {
+    const notifications: string[] = []
+    const server = await launchAppServer(
+      { binary: "must-not-execute", home: "/must-not-read", runId: "agent-run-host", hostSocket },
+      (frame) => notifications.push(frame.method),
+    )
+    await server.initialize()
+    const runId = server.socket,
+      unit = agentHostUnitName(runId)
+    expect(server.pid).toBe(42)
+    for (const socket of sockets) socket.destroy()
+    await Bun.sleep(10)
+    expect(notifications).toContain("workflowd/disconnected")
+    const current = Schema.decodeUnknownSync(OwnedProcess)(owned)
+    const options = {
+      socket: runId,
+      unit,
+      launchId: current.launchId,
+      invocation: server.invocation,
+      hostSocket,
+    }
+    const attached = await attachAppServer(options, () => {})
+    await attached.initialize()
+    await attached.close()
+    expect(operations.filter((value) => value === "start")).toHaveLength(1)
+    await expect(attachAppServer({ ...options, invocation: "forged" }, () => {})).rejects.toThrow(
+      "resident_unit_mismatch",
+    )
+    await expect(inspectAppServerUnit("wrong-unit", hostSocket, runId)).rejects.toThrow(
+      "resident_unit_mismatch",
+    )
+    expect(await sweepOrphanAppServers("unused", new Set([unit]), hostSocket)).toEqual([])
+    ignoreStop = true
+    await expect(sweepOrphanAppServers("unused", new Set(), hostSocket)).rejects.toThrow(
+      "host orphan cancellation unconfirmed",
+    )
+    ignoreStop = false
+    expect(
+      await stopAppServer(unit, current.launchId, server.invocation, hostSocket, runId),
+    ).toEqual({ closed: true })
+    await expect(attachAppServer(options, () => {})).rejects.toThrow("resident unit inactive")
+    expect(await sweepOrphanAppServers("unused", new Set(), hostSocket)).toEqual([])
+    owned = null
+    expect((await inspectAppServerUnit(unit, hostSocket, runId)).present).toBe(false)
+    expect(
+      await stopAppServer(unit, current.launchId, server.invocation, hostSocket, runId),
+    ).toEqual({ closed: true })
+  } finally {
+    for (const socket of sockets) socket.destroy()
+    await new Promise<void>((resolve) => host.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
+})

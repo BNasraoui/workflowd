@@ -783,6 +783,22 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
         if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error
       }
       await state.child.exited
+      // In administrative coverage Bun is PID 1 and owns exited CLI helpers.
+      // Reap them before the production relink check verifies a drained agent UID.
+      if (process.pid === 1) {
+        const { dlopen, FFIType, ptr } = await import("bun:ffi")
+        const libc = dlopen("libc.so.6", {
+          waitpid: { args: [FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+        })
+        try {
+          const status = new Int32Array(1)
+          while (libc.symbols.waitpid(-1, ptr(status), 1) > 0) {
+            /* reap exited orphans */
+          }
+        } finally {
+          libc.close()
+        }
+      }
       state.stopped = true
       return ""
     }

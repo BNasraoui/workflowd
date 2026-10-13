@@ -533,6 +533,7 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
     }
     const reference = custody.success
     if (reference.host === options.owningHostId && cli.hasDelivery !== undefined) {
+      let currentClaim = claim
       const deliveryId = `local-${createHash("sha256").update(`${claim.requestId}:${claim.attempt}`).digest("hex")}`
       const payload = {
         kind: "claude_resume" as const,
@@ -544,30 +545,39 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
         turnTimeoutMs: options.resumeTimeoutMs,
       }
       yield* store.checkpointResume({
-        ...authorityOf(claim, options.now()),
+        ...authorityOf(currentClaim, options.now()),
         checkpointId: `${claim.requestId}:${claim.attempt}:host`,
         checkpointVersion: 3,
         checkpoint: { deliveryId, payload },
       })
-      yield* store.markResumeSent(authorityOf(claim, options.now()))
+      yield* store.markResumeSent(authorityOf(currentClaim, options.now()))
       const executor = makeClaudeResumeExecutor({ cli, allowedDirectories: [reference.directory] })
       const heartbeat = Effect.gen(function* () {
         while (true) {
           yield* Effect.sleep(options.heartbeatIntervalMs)
-          yield* store.heartbeatResume({
-            ...authorityOf(claim, options.now()),
-            leaseDurationMs: options.leaseDurationMs,
-          })
+          yield* store
+            .heartbeatResume({
+              ...authorityOf(currentClaim, options.now()),
+              leaseDurationMs: options.leaseDurationMs,
+            })
+            .pipe(
+              Effect.tap((renewed) =>
+                Effect.sync(() => {
+                  currentClaim = { ...currentClaim, leaseUntil: renewed.leaseUntil }
+                }),
+              ),
+              Effect.uninterruptible,
+            )
         }
       })
       const outcome = yield* Effect.raceFirst(executor.execute(payload, deliveryId), heartbeat)
       if (outcome.status === "failed")
-        return yield* operatorRequired(claim, options, outcome.failureReason)
+        return yield* operatorRequired(currentClaim, options, outcome.failureReason)
       const validated = yield* validateRemoteOutput(outcome.output, contract).pipe(Effect.result)
       if (validated._tag === "Failure")
-        return yield* operatorRequired(claim, options, "local_output_invalid")
+        return yield* operatorRequired(currentClaim, options, "local_output_invalid")
       yield* store.completeResume({
-        ...authorityOf(claim, options.now()),
+        ...authorityOf(currentClaim, options.now()),
         resultId: `${claim.requestId}:result`,
         resultVersion: contract.version,
         result: validated.success,
