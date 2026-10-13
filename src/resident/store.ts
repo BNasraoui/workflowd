@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Clock, Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 export const ResidentThread = Schema.Struct({
   run_id: Schema.String,
@@ -137,14 +137,16 @@ export const makeResidentStore = Effect.gen(function* () {
     id: string,
     threadId: string,
     prompt: string,
+    notBefore = 0,
   ) {
-    yield* sql`INSERT INTO resident_inbox(id,thread_id,prompt,state) VALUES(${id},${threadId},${prompt},'prepared') ON CONFLICT(id) DO NOTHING`
+    yield* sql`INSERT INTO resident_inbox(id,thread_id,prompt,state,not_before) VALUES(${id},${threadId},${prompt},'prepared',${notBefore}) ON CONFLICT(id) DO NOTHING`
   })
   const pending = Effect.fn("Resident.pending")(function* (
     providerKind: "codex" | "opencode" = "codex",
   ) {
+    const now = yield* Clock.currentTimeMillis
     const rows =
-      yield* sql`SELECT i.* FROM resident_inbox i JOIN resident_threads t ON t.thread_id = i.thread_id WHERE t.provider_kind = ${providerKind} AND i.state IN ('prepared','sending') ORDER BY i.rowid LIMIT 100`
+      yield* sql`SELECT i.* FROM resident_inbox i JOIN resident_threads t ON t.thread_id = i.thread_id WHERE t.provider_kind = ${providerKind} AND i.state IN ('prepared','sending') AND i.not_before <= ${now} ORDER BY i.rowid LIMIT 100`
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(Inbox)(row))
   })
   const deliveryState = Effect.fn("Resident.deliveryState")(function* (id: string) {

@@ -64,6 +64,8 @@ export type AgentRunRefusalReason =
   | "model_not_available"
   | "invalid_wait_pairing"
   | "missing_parent_session"
+  | "model_at_capacity"
+  | "provider_rate_limited"
   | "no_first_token"
   | "run_conflict"
   | "invalid_selection"

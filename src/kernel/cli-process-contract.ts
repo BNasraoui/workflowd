@@ -7,8 +7,8 @@ export type CliEvent =
   | { readonly type: "turn.started" }
   | { readonly type: "agent_message"; readonly text: string }
   | { readonly type: "turn.completed"; readonly outputTokens: number | null }
-  | { readonly type: "turn.failed"; readonly message: string }
-  | { readonly type: "error"; readonly message: string }
+  | { readonly type: "turn.failed"; readonly message: string; readonly codexErrorInfo?: unknown }
+  | { readonly type: "error"; readonly message: string; readonly codexErrorInfo?: unknown }
   | { readonly type: "other" }
 
 export type CliPreflightError = {
