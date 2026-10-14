@@ -437,7 +437,7 @@ test("controller credentials and ambient configuration never reach runner enviro
     const wrapper = join(runner.root, "capture-environment")
     await writeFile(
       wrapper,
-      '#!/bin/sh\nenv > /tmp/bridge-environment\ncd /workspace/repository\nexec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"\n',
+      '#!/bin/sh\nenv > /tmp/bridge-environment\ncd /workspace/repository\nexec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"\n',
       { mode: 0o755 },
     )
     await runner.docker("cp", wrapper, `${runner.name}-runner:/usr/local/bin/container-use`)

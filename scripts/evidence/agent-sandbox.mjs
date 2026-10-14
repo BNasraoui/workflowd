@@ -27,6 +27,15 @@ import proofTasks from "./agent-sandbox-proof.json"
 import { approvalComment } from "../../src/sandbox/publish.ts"
 import { readSandboxSubmission } from "../../src/sandbox/submission.ts"
 
+import {
+  collectListeners,
+  denialTargets,
+  assertProbeResults,
+  connectionScript,
+  executeProbe,
+  probeRunnerBoundary,
+} from "./sandbox-network.mjs"
+
 let stage = "operator policy"
 const evidence = { started: new Date().toISOString(), observations: [] }
 let output
@@ -526,57 +535,60 @@ async function reconcileCustody() {
 }
 
 async function probeDenials(row) {
+  const ssh = sandboxSshArguments(row.transport).slice(0, -1)
+  let heartbeatFailure
+  let pending = Promise.resolve()
+  const heartbeat = setInterval(() => {
+    pending = pending
+      .then(() => executeProbe([...ssh, "exec /usr/local/bin/container-use heartbeat"]))
+      .catch((error) => {
+        heartbeatFailure = error
+      })
+  }, 30000)
+  try {
+    await inspectDenials(row)
+  } finally {
+    clearInterval(heartbeat)
+    await pending
+  }
+  assert.ok(!heartbeatFailure, "Probe heartbeat failed")
+}
+
+async function inspectDenials(row) {
   stage = "deployed network denials and controls"
-  const script = `import json,socket,time
-results=[]
-for host,port in [("100.89.46.40",22),("100.89.46.40",443),("100.120.162.27",22)]:
- start=time.monotonic()
- try:
-  s=socket.create_connection((host,port),timeout=5);s.close();result="connected"
- except TimeoutError: result="timeout"
- except ConnectionRefusedError: result="refused"
- except OSError: result="other_error"
- results.append({"host":host,"port":port,"result":result,"seconds":round(time.monotonic()-start,3)})
-print(json.dumps(results))`
-  const execute = async (args) => {
-    const child = Bun.spawn(args, {
-      stdin: new Blob([script]),
-      stdout: "pipe",
-      stderr: "ignore",
-      env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent" },
-    })
-    const timer = setTimeout(() => child.kill("SIGKILL"), 25000)
-    try {
-      const [status, text] = await Promise.all([child.exited, new Response(child.stdout).text()])
-      assert.equal(status, 0, "Network probe process failed")
-      return JSON.parse(text)
-    } finally {
-      clearTimeout(timer)
-      child.kill()
-      await child.exited
-    }
-  }
-  evidence.controlsBefore = await execute(["python3", "-"])
-  evidence.denials = await execute([
-    ...sandboxSshArguments(row.transport).slice(0, -1),
-    "exec python3 -",
-  ])
-  evidence.controlsAfter = await execute(["python3", "-"])
-  for (const controls of [evidence.controlsBefore, evidence.controlsAfter]) {
-    assert.equal(controls.length, 3)
-    assert.ok(controls.every((item) => ["connected", "refused"].includes(item.result)))
-  }
-  assert.equal(evidence.denials.length, 3)
-  assert.ok(evidence.denials.every((item) => item.result === "timeout"))
+  const inventoryFile = process.env.EVIDENCE_SANDBOX_NETWORK_HOSTS
+  assert.ok(
+    inventoryFile,
+    "EVIDENCE_SANDBOX_NETWORK_HOSTS must include mint, peers and a second runner",
+  )
+  const hosts = JSON.parse(await readFile(inventoryFile, "utf8"))
+  const before = await collectListeners(hosts, row.transport.address)
+  const targets = denialTargets(before)
+  const timeout = Math.ceil(targets.length / 32) * 3000 + 30000
+  assert.ok(timeout <= 180000, "Listener inventory exceeds the bounded probe duration")
+  const script = connectionScript(targets)
+  const ssh = sandboxSshArguments(row.transport)
+  evidence.listenerInventory = before
+  evidence.controlsBefore = JSON.parse(await executeProbe(["python3", "-"], script, timeout))
+  evidence.denials = JSON.parse(
+    await executeProbe([...ssh.slice(0, -1), "exec python3 -"], script, timeout),
+  )
+  evidence.runnerBoundary = await probeRunnerBoundary(ssh, targets, timeout + 120000)
+  evidence.controlsAfter = JSON.parse(await executeProbe(["python3", "-"], script, timeout))
+  const after = await collectListeners(hosts, row.transport.address)
+  assert.deepEqual(denialTargets(after), targets, "Listener inventory changed during the probe")
+  for (const controls of [evidence.controlsBefore, evidence.controlsAfter])
+    assertProbeResults(targets, controls, "connected|refused")
+  assertProbeResults(targets, evidence.denials, "timeout")
   evidence.sshReplies = "received over the controller-initiated connection"
   stage = "runner credential inventory"
-  const inventory = `import json,os,pathlib,re,subprocess
+  const inventory =
+    (await readFile(new URL("./process-environment.py", import.meta.url), "utf8")) +
+    `
+import json,os,pathlib,re,subprocess
 deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_MCP_DISPATCH_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY|GHETTIMONSTER_PRIVATE_KEY|PUBLISH_PROBE_CANARY)$')
-env_names=set()
-for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
- try:
-  env_names.update(x.split(b'=',1)[0].decode(errors='replace') for x in p.read_bytes().split(b'\\0') if b'=' in x)
- except (PermissionError,FileNotFoundError,ProcessLookupError): pass
+process_inventory=scan_process_environments()
+env_names=set(process_inventory.pop('environmentNames'))
 tool_env=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','env'],text=True)
 env_names.update(x.split('=',1)[0] for x in tool_env.splitlines())
 paths=['.local/share/opencode/auth.json','.codex/auth.json','.claude/.credentials.json','.config/workflowd/github-app.pem','.config/workflowd/mcp-token','.config/workflowd/coordinator.creds']
@@ -587,7 +599,7 @@ mounts=json.loads(subprocess.check_output(['docker','inspect','workflowd-sandbox
 git=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','git','config','--list'],text=True)
 logs=b''.join(p.read_bytes() for p in pathlib.Path('/run/workflowd-sandbox').glob('*.log'))
 key_pattern=rb'(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}|-----BEGIN (?:RSA )?PRIVATE KEY-----)'
-print(json.dumps({'forbiddenEnvironmentNames':sorted(n for n in env_names if deny.fullmatch(n)),'credentialFiles':found,'toolingMounts':mounts,'gitCredentials':bool(re.search(r'credential\\.|extraheader',git,re.I)),'setupLogCredentialPattern':bool(re.search(key_pattern,logs)),'setupLogBytes':len(logs),'scannedHomes':['/home/runner','/root','tooling:/home/runner'],'scannedEnvironment':'readable /proc processes and tooling env'}))`
+print(json.dumps({**process_inventory,'forbiddenEnvironmentNames':sorted(n for n in env_names if deny.fullmatch(n)),'credentialFiles':found,'toolingMounts':mounts,'gitCredentials':bool(re.search(r'credential\\.|extraheader',git,re.I)),'setupLogCredentialPattern':bool(re.search(key_pattern,logs)),'setupLogBytes':len(logs),'scannedHomes':['/home/runner','/root','tooling:/home/runner'],'scannedEnvironment':'all live /proc processes and tooling env'}))`
   const child = Bun.spawn(
     [...sandboxSshArguments(row.transport).slice(0, -1), "exec sudo -n python3 -"],
     {
@@ -602,9 +614,16 @@ print(json.dumps({'forbiddenEnvironmentNames':sorted(n for n in env_names if den
     const [status, text] = await Promise.all([child.exited, new Response(child.stdout).text()])
     assert.equal(status, 0, "Runner inventory failed")
     evidence.credentials = JSON.parse(text)
+    assert.deepEqual(evidence.credentials.oidcProcesses, [])
+    assert.ok(evidence.credentials.runnerWorkers <= 1)
+    assert.ok(evidence.credentials.holdProcesses > 0)
+    assert.deepEqual(evidence.credentials.holdOidcEnvironmentNames, [])
     assert.deepEqual(evidence.credentials.forbiddenEnvironmentNames, [])
     assert.deepEqual(evidence.credentials.credentialFiles, [])
-    assert.deepEqual(evidence.credentials.toolingMounts, [])
+    assert.equal(evidence.credentials.toolingMounts.length, 1)
+    assert.equal(evidence.credentials.toolingMounts[0].Destination, "/run/workflowd-engine")
+    assert.equal(evidence.credentials.toolingMounts[0].Type, "volume")
+    assert.equal(evidence.credentials.toolingMounts[0].RW, false)
     assert.equal(evidence.credentials.gitCredentials, false)
     assert.equal(evidence.credentials.setupLogCredentialPattern, false)
   } finally {

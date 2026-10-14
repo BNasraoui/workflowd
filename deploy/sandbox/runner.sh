@@ -4,16 +4,29 @@ set -euo pipefail
 # Only bounded control and audit data reaches Actions artifacts/logs.
 # Task output stays on the SSH/container-use stream.
 boot() {
-  local image_id
+  local image_id directory subnet addresses
+  local -a runner_addresses
+  directory=$(cd "$(dirname "$0")" && pwd)
   image_id=$(DOCKER_BUILDKIT=0 docker build --quiet --memory=512m --memory-swap=512m \
     -f "$(dirname "$0")/Containerfile" "$(dirname "$0")")
-  docker network create workflowd-sandbox >/dev/null
+  docker network create -o com.docker.network.bridge.name=wfd-sandbox0 workflowd-sandbox >/dev/null
+  subnet=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' workflowd-sandbox)
+  # Install host protection before either container can run.
+  sudo bash "$directory/network.sh" host "$subnet"
+  docker volume create workflowd-sandbox-socket >/dev/null
   docker run -d --name workflowd-sandbox-engine --network workflowd-sandbox \
-    --network-alias engine --privileged --memory=4g --memory-swap=4g \
+    --privileged --memory=4g --memory-swap=4g \
+    -v workflowd-sandbox-socket:/run/workflowd-engine \
+    -v "$directory/engine.toml:/etc/dagger/engine.toml:ro" \
     registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36 \
-    --addr tcp://0.0.0.0:1234 >/dev/null
+    --addr unix:///run/workflowd-engine/engine.sock --group 65532 >/dev/null
+  addresses=$(ip -o -4 addr show | awk '$2 != "lo" {split($4, a, "/"); print a[1]}')
+  mapfile -t runner_addresses <<< "$addresses"
+  # Nested CNI traffic to the engine itself never reaches host DOCKER-USER.
+  docker exec -i workflowd-sandbox-engine sh -s -- engine "$subnet" "${runner_addresses[@]}" < "$directory/network.sh"
   docker run -d --name workflowd-sandbox-tooling --network workflowd-sandbox \
-    --memory=2g --memory-swap=2g "$image_id" >/dev/null
+    --memory=2g --memory-swap=2g --group-add 65532 \
+    -v workflowd-sandbox-socket:/run/workflowd-engine:ro "$image_id" >/dev/null
 }
 
 clone_source() {
@@ -246,7 +259,7 @@ else:
   stdio)
     exec docker exec -i workflowd-sandbox-tooling \
       env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner \
-      _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 \
+      _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock \
       /usr/local/bin/container-use stdio
     ;;
   stop)
@@ -258,6 +271,8 @@ else:
     if docker network inspect workflowd-sandbox >/dev/null 2>&1; then
       docker network rm workflowd-sandbox >/dev/null
     fi
+    docker volume rm -f workflowd-sandbox-socket >/dev/null
+    sudo bash "$(dirname "$0")/network.sh" stop
     ;;
   *)
     printf 'Unknown sandbox operation\n' >&2

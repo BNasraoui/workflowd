@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LEGACY developer convenience example: do not install on mint or re-enable its
+# timer. Production migration and the verified entrypoint: verified-deploy.md.
 # update-dev-infra — refresh a workflowd deploy checkout, restart its units,
 # link its RPI skills, and install a provenance dev build.
 #
