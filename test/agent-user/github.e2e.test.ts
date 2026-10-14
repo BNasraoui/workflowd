@@ -293,10 +293,24 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           yield* runs.claimSpawn({ runId: kind, now })
           const script = join(home, "publish.sh")
           const wrapper = `${quote(process.execPath)} ${quote(commandPath)}`
+          // A login shell can reset inherited proxy settings. Keep fixture traffic
+          // local at the tool boundary without supplying any broker identity here.
+          const fixtureNetwork = (
+            [
+              "HTTPS_PROXY",
+              "HTTP_PROXY",
+              "NO_PROXY",
+              "GIT_SSL_CAINFO",
+              "SSL_CERT_FILE",
+              "NODE_EXTRA_CA_CERTS",
+            ] as const
+          )
+            .map((key) => `export ${key}=${quote(env[key])}`)
+            .join("\n")
           yield* Effect.tryPromise(() =>
             writeFile(
               script,
-              `set -eu\nexec > ${quote(join(workspace, "publish.log"))} 2>&1\nid -u > ${quote(join(workspace, "uid"))}\n${wrapper} --git -- push https://github.com/o/r.git HEAD:refs/heads/${kind}\n${wrapper} -- api repos/o/r/pulls -f title=${kind} -f head=${kind} -f base=main --jq .number > ${quote(join(workspace, "pr"))}\n${wrapper} -- api repos/o/r/pulls/$(cat ${quote(join(workspace, "pr"))}) --jq .head.sha > ${quote(join(workspace, "sha"))}\nif ${wrapper} -- api repos/foreign/repo/pulls; then exit 20; fi\n`,
+              `set -eu\n${fixtureNetwork}\nexec > ${quote(join(workspace, "publish.log"))} 2>&1\nid -u > ${quote(join(workspace, "uid"))}\n${wrapper} --git -- push https://github.com/o/r.git HEAD:refs/heads/${kind}\n${wrapper} -- api repos/o/r/pulls -f title=${kind} -f head=${kind} -f base=main --jq .number > ${quote(join(workspace, "pr"))}\n${wrapper} -- api repos/o/r/pulls/$(cat ${quote(join(workspace, "pr"))}) --jq .head.sha > ${quote(join(workspace, "sha"))}\nif ${wrapper} -- api repos/foreign/repo/pulls; then exit 20; fi\n`,
               { mode: 0o644 },
             ),
           )
