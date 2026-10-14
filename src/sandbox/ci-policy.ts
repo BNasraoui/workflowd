@@ -107,7 +107,10 @@ export function assertProtectedPublishAction(source: string): void {
     throw new Error("Publisher action differs from the reviewed secret-isolation snapshot")
 }
 
-function assertPublishIsolation(workflow: ReturnType<typeof object>) {
+function assertPublishIsolation(
+  workflow: ReturnType<typeof object>,
+  workflows: Record<string, string>,
+) {
   const referencesSecrets = (value: unknown) =>
     /secrets\s*(?:\.|\[)|toJSON\s*\(\s*secrets\b/i.test(JSON.stringify(value))
   if (/"secrets"\s*:\s*"inherit"/i.test(JSON.stringify(workflow)))
@@ -116,6 +119,15 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
   if (referencesSecrets(ambient)) throw new Error("Workflow-level secrets are forbidden")
   for (const [name, value] of Object.entries(object(jobs))) {
     const job = object(value)
+    if (
+      job.uses !== undefined &&
+      (typeof job.uses !== "string" ||
+        !/^\.\/\.github\/workflows\/[^/]+\.ya?ml$/.test(job.uses) ||
+        !Object.hasOwn(workflows, job.uses.slice("./.github/workflows/".length)))
+    )
+      throw new Error(
+        "Reusable workflows must reference a scanned local .github/workflows YAML file",
+      )
     if (name !== "agent-publish") {
       if (job.environment !== undefined || referencesSecrets(job) || job.secrets !== undefined)
         throw new Error("Only agent-publish may attach an environment or reference secrets")
@@ -160,7 +172,7 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
 
 /** PR paths may call the two reviewed setup actions or the exact image workflow snapshot.
  * Other local/composite/reusable dependencies and inherited secrets are refused. This
- * runs against an operator-reviewed snapshot; untrusted code cannot secure its own edits.
+ * runs against the PR head to aid review; untrusted code cannot secure its own edits.
  */
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {
   let pullRequests = 0
@@ -176,7 +188,11 @@ export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>)
       continue
     }
     const workflow = object(Bun.YAML.parse(source))
-    assertPublishIsolation(workflow)
+    if (typeof workflow.on !== "object" || workflow.on === null || Array.isArray(workflow.on))
+      throw new Error(
+        `${name}: workflow on must be a mapping (for example, on: { workflow_dispatch: {} })`,
+      )
+    assertPublishIsolation(workflow, workflows)
     const triggers = object(workflow.on)
     if ("pull_request_target" in triggers || "workflow_run" in triggers)
       throw new Error("Privileged PR/downstream triggers are forbidden")

@@ -37,6 +37,8 @@ async function list(request, path, key) {
 export async function runGate(mode, env, request) {
   const sha = env.HEAD_SHA
   const revoke = env.APPROVAL_ACTION === "revoke"
+  if (revoke && (env.PR_NUMBER ?? "") !== "")
+    throw new Error("PR number must be empty for revoke")
   if (
     !["validate", "publish"].includes(mode) ||
     !["approve", "revoke"].includes(env.APPROVAL_ACTION) ||

@@ -21,6 +21,11 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
   forwarded credentials. Complete the agent Unix user work (`workflowd-3m17`)
   and operator credential/activation verification (`workflowd-bawj`) before
   calling F1 resolved. This PR does not establish that prerequisite.
+- Agents must also lack **Actions: write** through every accessible credential.
+  That permission allows dispatching and cancelling workflow runs, including
+  cancelling a pending revoke through the concurrency group below. Verify and
+  record this separately in operator bead `workflowd-bawj`; removing owner
+  credentials alone does not establish it.
 - Required environment reviewers must be supported by the repository's GitHub
   plan/visibility. If the reviewer control is unavailable, stop activation.
 - The App has only repository **Checks: Read and write**, plus GitHub's mandatory
@@ -115,7 +120,8 @@ Keep setup and approvals on a trusted workstation that does not run agents.
    the intended boundary. Do not add the App to any bypass list.
 
 10. On the still-open verification PR, dispatch `action: revoke` from `main`
-    for the same `head_sha` and approve the protected environment again. Verify
+    for the same `head_sha`, leave `pr_number` empty, and approve the protected
+    environment again. Verify
     a **newer** `Ben approval: failure` from the **same App** exists and that the
     ruleset blocks merging despite the older success. Check the PR merge box
     and ruleset evaluation, not just the newest check displayed in the UI.
@@ -129,9 +135,10 @@ Keep setup and approvals on a trusted workstation that does not run agents.
 
 Finish CI and independent review, update the branch with `main` if required,
 then dispatch and approve as in step 7. Every new head needs another dispatch
-and environment approval. Agents may request a run but cannot release it under
-the credential prerequisite above. Re-running jobs is refused (`run_attempt`
-must equal 1); start a new dispatch after resolving a refusal.
+and environment approval. Agents may ask Ben to dispatch a run; they must lack
+Actions write and cannot release the environment under the prerequisites above.
+Re-running jobs is refused (`run_attempt` must equal 1); start a new dispatch
+after resolving a refusal.
 
 Before considering rollout complete, Ben should verify on the verification PR:
 
@@ -168,9 +175,10 @@ withdraw the existing successful check.
 ### Revoke an approved SHA
 
 From **Actions → Ben approval gate → Run workflow**, choose **main**, select
-`action: revoke`, and enter the exact `head_sha`. `pr_number` is unnecessary for
-revocation. Inspect the action and SHA in the run title, then approve the same
-`ben-merge-approval` environment. The same scoped App posts a new completed
+`action: revoke`, and enter the exact `head_sha`. Leave `pr_number` empty;
+revocation refuses any non-empty value. Inspect the action and SHA in the run
+title, then approve the same `ben-merge-approval` environment. The same scoped
+App posts a new completed
 `Ben approval` check with conclusion `failure`; historical success remains in
 GitHub's record. This affects every PR using that SHA. Verify the failing check
 and blocked merge as in activation step 10.
@@ -186,6 +194,12 @@ Runs for the same SHA share a concurrency group across PRs and both actions.
 GitHub does not guarantee FIFO ordering: before revoking, cancel other pending
 or running decisions for that SHA and confirm their termination. Do not approve
 a queued approval after revocation unless intentionally restoring approval.
+Only one pending run is retained per concurrency group, even with
+`cancel-in-progress: false`. Anyone with Actions write can park an approve run
+at the environment wait and dispatch again for that SHA to cancel a pending
+revoke. Whoever retains dispatch access after credential cleanup can repeat
+this; cancelling competing runs once does not prevent it. Agents must lack
+Actions write, and operators must verify that restriction in `workflowd-bawj`.
 
 **Immediate workaround:** advance `main` through the normal reviewed process so
 strict required checks make the previously approved commit stale. Verify all
@@ -223,10 +237,17 @@ The CI Repository integrity job runs pinned actionlint on this workflow:
 `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ben-approval.yml`.
 Policy tests reject changes to the reviewed workflow's trust boundaries; a
 deliberate workflow edit requires reviewing and updating its SHA-256 snapshot
-in `src/sandbox/ci-policy.ts`. Policy also reserves the protected approval
-environment for `ben-approval.yml`: other jobs cannot attach environments,
-except the publisher which may select only the literal `agent-publish` environment.
-Dynamic environment names are refused. Full suites run in CI. Live activation tests require
+in `src/sandbox/ci-policy.ts`. For the scanned workflows, policy rejects environment
+attachments outside `ben-approval.yml`, except the publisher's literal
+`agent-publish` environment. Dynamic environment names are refused. Job-level
+reusable workflow references must match `^\./\.github/workflows/[^/]+\.ya?ml$`
+and name a file in the scanned set; references to another ref of this repository
+or another repository are rejected because their jobs cannot be inspected here.
+Use mapping-form triggers, such as `on: { workflow_dispatch: {} }`.
+
+**The policy check runs against the PR head, so a PR can change the policy and
+its snapshots. It aids review and is not a security boundary.** Ben must review
+those changes before merging. Full suites run in CI. Live activation tests require
 Ben's console setup and cannot be replaced by the local API fixtures.
 
 PR #109's former “CI unconfirmed” handoff is superseded: its head

@@ -236,6 +236,7 @@ test("revocation posts a newer failing check for the SHA without depending on PR
   f.reads.length = 0
   await runGate("validate", f.env, f.request)
   expect(f.writes).toHaveLength(1)
+  f.env.PR_NUMBER = ""
   await runGate("publish", f.env, f.request)
   expect(f.writes).toHaveLength(2)
   expect(f.writes[1]).toMatchObject({
@@ -252,6 +253,19 @@ test("revocation posts a newer failing check for the SHA without depending on PR
   expect(f.reads).toEqual(Array(2).fill(`${root}/actions/runs/123/approvals`))
 })
 
+for (const mode of ["validate", "publish"])
+  test(`revocation ${mode} refuses non-empty PR numbers before API access`, async () => {
+    for (const prNumber of ["42", "misleading title", " "]) {
+      const f = fixture()
+      Object.assign(f.env, { APPROVAL_ACTION: "revoke", PR_NUMBER: prNumber })
+      await expect(runGate(mode, f.env, f.request)).rejects.toThrow(
+        "PR number must be empty for revoke",
+      )
+      expect(f.reads).toEqual([])
+      expect(f.writes).toEqual([])
+    }
+  })
+
 for (const [key, value] of [
   ["GITHUB_REF", "refs/heads/topic"],
   ["GITHUB_RUN_ATTEMPT", "2"],
@@ -259,7 +273,7 @@ for (const [key, value] of [
 ])
   test(`revocation refuses invalid ${key} before API access`, async () => {
     const f = fixture()
-    Object.assign(f.env, { APPROVAL_ACTION: "revoke", [key]: value })
+    Object.assign(f.env, { APPROVAL_ACTION: "revoke", PR_NUMBER: "", [key]: value })
     await expect(runGate("publish", f.env, f.request)).rejects.toThrow()
     expect(f.reads).toEqual([])
     expect(f.writes).toEqual([])
@@ -268,6 +282,7 @@ for (const [key, value] of [
 test("revocation still requires Ben's protected environment approval", async () => {
   const f = fixture()
   f.env.APPROVAL_ACTION = "revoke"
+  f.env.PR_NUMBER = ""
   f.responses.set(`${root}/actions/runs/123/approvals`, [])
   await expect(runGate("publish", f.env, f.request)).rejects.toThrow(
     "recorded environment approval",
