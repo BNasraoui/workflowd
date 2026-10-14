@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
+import { Schema } from "effect"
 import { agentGitEnvironment, loadAgentGitConfig } from "../agent-git/config"
 import { workerEnvironment } from "../resident/environment"
 
@@ -18,21 +21,28 @@ export function agentOpenCodeEnvironment(
     identity.groups.some((group) => group !== gid)
   )
     throw new Error("Agent OpenCode UID or groups do not match the installed policy")
-  if (!env.WORKFLOWD_AGENT_HOME || !env.OPENCODE_SERVER_PASSWORD)
-    throw new Error("Agent OpenCode requires its own home and server authentication")
+  if (!env.WORKFLOWD_AGENT_HOME) throw new Error("Agent OpenCode requires its own home")
   return {
     ...workerEnvironment(env),
     ...agentGitEnvironment(loadAgentGitConfig(env, true)),
-    OPENCODE_SERVER_PASSWORD: env.OPENCODE_SERVER_PASSWORD,
     OPENCODE_DISABLE_AUTOUPDATE: "true",
   }
 }
 
 if (import.meta.main) {
+  const env = agentOpenCodeEnvironment(process.env)
+  // --service reads this file itself; never export authentication into /proc environ.
+  try {
+    Schema.decodeUnknownSync(Schema.Struct({ password: Schema.String.check(Schema.isNonEmpty()) }))(
+      JSON.parse(await readFile(join(env.XDG_CONFIG_HOME!, "opencode/service.json"), "utf8")),
+    )
+  } catch {
+    throw new Error("Agent OpenCode requires a service.json with server authentication")
+  }
   const child = Bun.spawn(
-    ["/usr/local/bin/opencode2", "serve", "--hostname", "127.0.0.1", "--port", "4097"],
+    ["/usr/local/bin/opencode2", "serve", "--service", "--hostname", "127.0.0.1", "--port", "4097"],
     {
-      env: agentOpenCodeEnvironment(process.env),
+      env,
       stdin: "ignore",
       stdout: "inherit",
       stderr: "inherit",

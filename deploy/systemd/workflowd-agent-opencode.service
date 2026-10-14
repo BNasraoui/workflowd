@@ -10,6 +10,7 @@ Group=workflowd-model-auth
 SupplementaryGroups=
 EnvironmentFile=/etc/workflowd/agent-git.env
 EnvironmentFile=/etc/workflowd/agent-opencode.env
+UnsetEnvironment=OPENCODE_SERVER_PASSWORD OPENCODE_PASSWORD
 Environment=WORKFLOWD_AGENT_HOME=/var/lib/workflowd-agent
 Environment=WORKFLOWD_AGENT_PATH=/usr/local/bin:/usr/bin:/bin
 Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1

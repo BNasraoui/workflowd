@@ -227,7 +227,7 @@ for (const late of [false, true])
   })
 
 for (const sending of [false, true])
-  test(`OpenCode restart recovers persisted delivery (sending=${sending})`, async () => {
+  test(`OpenCode restart as controller UID recovers persisted delivery (sending=${sending})`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "workflowd-opencode-inbox-"))
     const filename = join(directory, "test.sqlite")
     const fake = fixture()

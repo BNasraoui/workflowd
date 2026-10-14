@@ -1,5 +1,7 @@
+import { openCodePublisher } from "./github-opencode"
+import { publishThroughHost } from "./github-host"
 import { expect, test } from "bun:test"
-import { chmod, chown, mkdir, readFile, writeFile } from "node:fs/promises"
+import { chmod, chown, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createServer } from "node:http"
 import { connect } from "node:net"
@@ -33,7 +35,8 @@ async function command(argv: string[], env = process.env, cwd?: string) {
 
 test("installed Codex, Claude and OpenCode push and open PRs with run-bound App identity", async () => {
   const fixture = await githubFixture()
-  const root = fixture.directory
+  const root =
+    process.getuid!() === 0 ? await mkdtemp("/var/lib/workflowd-publish-") : fixture.directory
   const uid = Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID ?? process.getuid!())
   const gid = Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID ?? process.getgid!())
   const controllerUid = Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ?? process.getuid!())
@@ -49,7 +52,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           "--clear-groups",
           ...argv,
         ]
-  await chmod(root, 0o711)
+  await chmod(root, 0o755)
   const bare = join(root, "o/r.git")
   await mkdir(join(root, "o"))
   await command(["git", "init", "--bare", bare])
@@ -167,6 +170,13 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
   await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve))
   const address = proxy.address()
   if (!address || typeof address === "string") throw new Error("proxy unavailable")
+  let commandPath = join(import.meta.dir, "../../src/worker-identity/command.ts")
+  if (uid !== process.getuid!()) {
+    const build = await Bun.build({ entrypoints: [commandPath], target: "bun" })
+    expect(build.success).toBe(true)
+    commandPath = join(root, "github-command.js")
+    await writeFile(commandPath, await build.outputs[0]!.text(), { mode: 0o644 })
+  }
   const config = {
     directory: join(root, "broker-private"),
     socket: join(root, "broker.sock"),
@@ -227,6 +237,8 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           })
           const env = {
             ...identity.environment(kind),
+            TEST_AGENT_UID: String(uid),
+            TEST_AGENT_GID: String(gid),
             HOME: home,
             CODEX_HOME: join(home, ".codex"),
             CLAUDE_CONFIG_DIR: join(home, ".claude"),
@@ -279,7 +291,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           })
           yield* runs.claimSpawn({ runId: kind, now })
           const script = join(home, "publish.sh")
-          const wrapper = `${quote(process.execPath)} ${quote(join(import.meta.dir, "../../src/worker-identity/command.ts"))}`
+          const wrapper = `${quote(process.execPath)} ${quote(commandPath)}`
           yield* Effect.tryPromise(() =>
             writeFile(
               script,
@@ -341,7 +353,9 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
             continue
           }
           // Bun resolves modules by reading their parent directory, not just traversing it.
-          const model = yield* Effect.tryPromise(() => nativeModelFixture(kind, home))
+          const model = yield* Effect.tryPromise(() =>
+            nativeModelFixture(kind, kind === "codex" && uid !== process.getuid!() ? root : home),
+          )
           yield* Effect.tryPromise(() => chmod(model.binary, 0o755))
           const shell = `/bin/sh ${quote(script)}`
           // The model's final reply must follow command completion, even beyond a short exec yield.
@@ -352,6 +366,27 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
                 ? { cmd: `sleep 2; ${shell}`, yield_time_ms: 30000 }
                 : { command: shell, timeout: 30000 },
           })
+          if (kind === "codex" && uid !== process.getuid!()) {
+            try {
+              yield* Effect.tryPromise(() =>
+                publishThroughHost(root, home, workspace, uid, gid, model.binary, env, identity),
+              )
+              expect(yield* Effect.tryPromise(() => readFile(join(workspace, "uid"), "utf8"))).toBe(
+                `${uid}\n`,
+              )
+              expect(
+                (yield* Effect.tryPromise(() => readFile(join(workspace, "sha"), "utf8"))).trim(),
+              ).toBe(
+                yield* Effect.tryPromise(() =>
+                  command(["git", "-C", bare, "rev-parse", "refs/heads/codex"]),
+                ),
+              )
+              expect(pulls.at(-1)?.head.ref).toBe(kind)
+            } finally {
+              yield* Effect.promise(() => model.close())
+            }
+            continue
+          }
           const argv =
             kind === "codex"
               ? [
@@ -412,6 +447,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
       }).pipe(Effect.provide(live)),
     )
     expect(pulls).toHaveLength(3)
+    // Scope evidence is the token mint request; the unknown-path 403 is only fixture routing.
     expect(fixture.bodies).toEqual([
       { repositories: ["r"], permissions: { contents: "write", pull_requests: "write" } },
     ])
@@ -420,169 +456,6 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
     await new Promise<void>((resolve) => proxy.close(() => resolve()))
     await github.stop(true)
     await fixture.close()
+    if (root !== fixture.directory) await rm(root, { recursive: true, force: true })
   }
 }, 120000)
-
-async function openCodePublisher(
-  home: string,
-  workspace: string,
-  env: Record<string, string>,
-  asAgent: (argv: string[]) => string[],
-  shell: string,
-) {
-  let sent = false
-  const model = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      const body = Schema.decodeUnknownSync(
-        Schema.Struct({
-          tools: Schema.optional(
-            Schema.Array(Schema.Struct({ function: Schema.Struct({ name: Schema.String }) })),
-          ),
-        }),
-      )(await request.json())
-      const names = body.tools?.map((tool) => tool.function.name) ?? []
-      const tool = !sent && names.length > 0
-      if (tool) sent = true
-      const name = names.includes("shell") ? "shell" : "execute"
-      const args =
-        name === "shell"
-          ? { command: shell, description: "Publish fixture" }
-          : {
-              code: `return await tools.shell(${JSON.stringify({ command: shell, description: "Publish fixture" })})`,
-            }
-      const delta = tool
-        ? {
-            role: "assistant",
-            tool_calls: [
-              {
-                index: 0,
-                id: "fixture-call",
-                type: "function",
-                function: { name, arguments: JSON.stringify(args) },
-              },
-            ],
-          }
-        : { role: "assistant", content: "fixture complete" }
-      const chunk = (delta: unknown, finish_reason: string | null) =>
-        `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", model: "fixture", choices: [{ index: 0, delta, finish_reason }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`
-      return new Response(
-        chunk(delta, null) + chunk({}, tool ? "tool_calls" : "stop") + "data: [DONE]\n\n",
-        { headers: { "content-type": "text/event-stream" } },
-      )
-    },
-  })
-  const config = join(home, ".config/opencode")
-  await command(asAgent(["mkdir", "-p", config]), env)
-  const configFile = join(config, "opencode.json")
-  await writeFile(
-    configFile,
-    JSON.stringify({
-      update: "disable",
-      share: "disabled",
-      snapshots: false,
-      formatter: false,
-      lsp: false,
-      providers: {
-        fixture: {
-          package: "aisdk:@ai-sdk/openai-compatible",
-          settings: { baseURL: `${model.url.toString()}v1` },
-          models: {
-            fixture: {
-              capabilities: { tools: true, input: ["text"], output: ["text"] },
-              limit: { context: 100000, output: 1024 },
-            },
-          },
-        },
-      },
-    }),
-    { mode: 0o644 },
-  )
-  await chmod(configFile, 0o644)
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
-  const port = reservation.port!
-  await reservation.stop(true)
-  const shellEnv = {
-    ...env,
-    XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_DATA_HOME: join(home, ".local/share"),
-    XDG_CACHE_HOME: join(home, ".cache"),
-    XDG_STATE_HOME: join(home, ".local/state"),
-    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-    OPENCODE_CONFIG_PROJECT_DISABLE: "1",
-  }
-  const child = Bun.spawn(
-    asAgent([Bun.which("opencode2")!, "serve", "--hostname", "127.0.0.1", "--port", String(port)]),
-    {
-      env: {
-        ...shellEnv,
-        OPENCODE_SERVER_PASSWORD: "synthetic-server",
-        OPENCODE_DISABLE_MODELS_FETCH: "true",
-        OPENCODE_DISABLE_AUTOUPDATE: "true",
-      },
-      cwd: workspace,
-      stdout: "ignore",
-      stderr: "ignore",
-    },
-  )
-  const api = async (path: string, body?: unknown) => {
-    const response = await fetch(
-      `http://127.0.0.1:${port}/api/${path}?${new URLSearchParams({ "location[directory]": workspace }).toString()}`,
-      {
-        method: body === undefined ? "GET" : path.endsWith("/environment") ? "PUT" : "POST",
-        headers: {
-          authorization: `Basic ${Buffer.from("opencode:synthetic-server").toString("base64")}`,
-          "content-type": "application/json",
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(30000),
-      },
-    )
-    if (!response.ok)
-      throw new Error(
-        `fixture OpenCode API ${path} ${response.status}: ${(await response.text()).slice(0, 2000)}`,
-      )
-    const text = await response.text()
-    return text ? (JSON.parse(text) as unknown) : undefined
-  }
-  const close = async () => {
-    child.kill("SIGKILL")
-    await child.exited
-    await model.stop(true)
-  }
-  try {
-    const deadline = Date.now() + 15000
-    for (;;) {
-      if (
-        await api("model").then(
-          (value) => JSON.stringify(value).includes('"id":"fixture"'),
-          () => false,
-        )
-      )
-        break
-      if (Date.now() > deadline) throw new Error("fixture OpenCode startup timed out")
-      await Bun.sleep(50)
-    }
-    await api("integration/fixture/connect/key", { key: "synthetic" })
-    const session = Schema.decodeUnknownSync(
-      Schema.Struct({ data: Schema.Struct({ id: Schema.String }) }),
-    )(await api("session", { agent: "build", model: { id: "fixture", providerID: "fixture" } }))
-    return {
-      sessionId: session.data.id,
-      setEnvironment: async (variables: Readonly<Record<string, string>>) => {
-        await api(`session/${session.data.id}/environment`, {
-          variables: { ...variables, ...shellEnv },
-        })
-      },
-      prompt: async () => {
-        await api(`session/${session.data.id}/prompt`, { text: "Publish the fixture" })
-        await api(`session/${session.data.id}/wait`, {})
-      },
-      close,
-    }
-  } catch (error) {
-    await close()
-    throw error
-  }
-}

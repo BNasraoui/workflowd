@@ -17,6 +17,7 @@ test("agent OpenCode startup retains Git identity and isolates project and contr
     WORKFLOWD_AGENT_GIT_NAME: "Fixture Agent",
     WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
     OPENCODE_SERVER_PASSWORD: "synthetic-server",
+    OPENCODE_PASSWORD: "synthetic-alias",
     GH_TOKEN: "personal",
     SSH_AUTH_SOCK: "/private/socket",
     OPENCODE_CONFIG: "/private/config",
@@ -28,7 +29,8 @@ test("agent OpenCode startup retains Git identity and isolates project and contr
   expect(env.HOME).toBe("/var/lib/workflowd-agent")
   expect(env.OPENCODE_DISABLE_PROJECT_CONFIG).toBe("1")
   expect(env.OPENCODE_CONFIG_PROJECT_DISABLE).toBe("1")
-  expect(env.OPENCODE_SERVER_PASSWORD).toBe("synthetic-server")
+  expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
+  expect(env.OPENCODE_PASSWORD).toBeUndefined()
   expect(env.GH_TOKEN).toBeUndefined()
   expect(env.SSH_AUTH_SOCK).toBeUndefined()
   expect(env.OPENCODE_CONFIG).toBeUndefined()
@@ -40,9 +42,9 @@ test("agent OpenCode startup retains Git identity and isolates project and contr
     { ...identity, groups: [61000, 10] },
   ])
     expect(() => agentOpenCodeEnvironment(settings, invalid)).toThrow("UID or groups")
-  expect(() =>
-    agentOpenCodeEnvironment({ ...settings, OPENCODE_SERVER_PASSWORD: "" }, identity),
-  ).toThrow("authentication")
+  expect(
+    agentOpenCodeEnvironment({ ...settings, OPENCODE_SERVER_PASSWORD: "" }, identity).HOME,
+  ).toBe(settings.WORKFLOWD_AGENT_HOME)
 })
 
 test("agent OpenCode service checks migrated sole ownership before starting the agent UID", async () => {
@@ -52,6 +54,7 @@ test("agent OpenCode service checks migrated sole ownership before starting the 
   )
   for (const line of [
     "User=workflowd-agent",
+    "UnsetEnvironment=OPENCODE_SERVER_PASSWORD OPENCODE_PASSWORD",
     "Group=workflowd-model-auth",
     "ProtectHome=yes",
     "ProtectSystem=strict",

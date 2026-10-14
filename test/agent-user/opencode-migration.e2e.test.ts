@@ -1,3 +1,4 @@
+import { fixtureEnvironment, runIsolated } from "./opencode-fixture"
 import { expect, spyOn, test } from "bun:test"
 import * as filesystem from "node:fs/promises"
 import { spawnSync } from "node:child_process"
@@ -25,50 +26,6 @@ import {
   migrateOpenCodeGrants,
 } from "../../src/agent-host/opencode-credentials"
 
-function fixtureEnvironment(home: string) {
-  return {
-    PATH: process.env.PATH!,
-    HOME: home,
-    XDG_DATA_HOME: join(home, "data"),
-    XDG_CONFIG_HOME: join(home, "config"),
-    XDG_CACHE_HOME: join(home, "cache"),
-    XDG_STATE_HOME: join(home, "state"),
-    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-    OPENCODE_CONFIG_PROJECT_DISABLE: "1",
-    OPENCODE_DISABLE_MODELS_FETCH: "true",
-    OPENCODE_DISABLE_AUTOUPDATE: "true",
-    OPENCODE_SERVER_PASSWORD: "synthetic-server",
-    HTTP_PROXY: "http://127.0.0.1:9",
-    HTTPS_PROXY: "http://127.0.0.1:9",
-    ALL_PROXY: "http://127.0.0.1:9",
-    NO_PROXY: "127.0.0.1,localhost",
-  }
-}
-
-async function runIsolated(pattern: string) {
-  const child = Bun.spawn(
-    [
-      "unshare",
-      ...(process.getuid?.() === 0 ? [] : ["--user", "--map-root-user"]),
-      "--pid",
-      "--fork",
-      "--mount-proc",
-      "--net",
-      "/bin/sh",
-      "-c",
-      'mount -t tmpfs -o mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
-      "fixture",
-      process.execPath,
-      "test",
-      import.meta.filename,
-      "--test-name-pattern",
-      pattern,
-    ],
-    { stdout: "inherit", stderr: "inherit" },
-  )
-  expect(await child.exited).toBe(0)
-}
-
 /** All client configuration, grants and responses are invented fixture data. */
 test("installed OpenCode moves grants, restarts one store, and attaches without copying refresh credentials", async () => {
   const isRoot = process.getuid?.() === 0
@@ -76,7 +33,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     .flat()
     .every((entry) => entry?.internal)
   if (!isRoot || !egressDenied) {
-    await runIsolated("^installed OpenCode")
+    await runIsolated(import.meta.filename, "^installed OpenCode")
     return
   }
   const ownUid = process.getuid!()
@@ -344,7 +301,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
 
 test("offline migration resumes its journal and refuses schema drift or a reactivated source", async () => {
   if (process.getuid?.() !== 0 || process.pid !== 1) {
-    await runIsolated("^offline migration")
+    await runIsolated(import.meta.filename, "^offline migration")
     return
   }
   const root = await mkdtemp(join(tmpdir(), "opencode-offline-"))

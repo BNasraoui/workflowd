@@ -152,7 +152,18 @@ export const WorkerIdentityLive = (
             value,
           )
           const run = yield* store.read(row.run_id)
-          if (run && authorizeWorker(run, Date.now())) yield* prepareSession(run)
+          if (run && authorizeWorker(run, Date.now()))
+            yield* prepareSession(run).pipe(
+              Effect.catch(() => {
+                sessions.delete(run.runId)
+                return Effect.logWarning(
+                  "OpenCode worker identity recovery failed; run left unbound",
+                  {
+                    runId: run.runId,
+                  },
+                )
+              }),
+            )
         }
       }
       yield* Effect.acquireRelease(

@@ -225,9 +225,15 @@ After a drained, reviewed migration, this is the sole server for new agent runs,
 including reviews. The service checks the migration journal and the masked,
 inactive old source units before every start. Its fixed agent UID, primary group
 and supplementary groups must match `WORKFLOWD_AGENT_UID` and
-`WORKFLOWD_AGENT_GID`. The root-owned `agent-opencode.env` supplies those IDs and
-`OPENCODE_SERVER_PASSWORD`; `agent-git.env` supplies the existing Git identity
-policy. The server uses `/var/lib/workflowd-agent`, separate configuration and
+`WORKFLOWD_AGENT_GID`. The root-owned `agent-opencode.env` supplies those IDs;
+`agent-git.env` supplies the existing Git identity policy. Before activation,
+provision `/var/lib/workflowd-agent/.config/opencode/service.json` with a nonempty
+`password` field, owned by the agent UID with mode 0600 (private parent directories).
+Give the controller the same password through its existing credential file. The
+launcher validates that the password exists and uses `opencode2 serve --service`,
+which reads it directly from this file. The unit removes `OPENCODE_SERVER_PASSWORD`
+and `OPENCODE_PASSWORD`, including from the launcher's environment; remove obsolete
+password entries from `agent-opencode.env`. No password is passed in argv. The server uses `/var/lib/workflowd-agent`, separate configuration and
 transcripts, and both OpenCode project-config disable settings. The operator
 attaches to this server instead of starting another credential consumer. Migration
 and live service activation remain explicit administrative operations.
@@ -247,19 +253,55 @@ selected run ID and broker/mailbox paths, and attachment restores registration.
 OpenCode requests instead require a random run/session capability, verified
 against live session/resource custody on every request. Controller restart
 rotates capabilities for recoverable active sessions without replaying a prompt.
+If an OpenCode environment update fails during startup, that run stays unbound
+and broker requests return 403; a warning identifies the run. Native recovery and
+the controller still start. Restore OpenCode and restart the controller to rebind
+these runs. Shells holding a capability from before restart must receive the new
+session environment before they can request another token.
 Terminal or expired runs cannot obtain more tokens. Previously issued GitHub
 tokens remain valid until GitHub expires or revokes them.
 
 The trusted command obtains a repository-scoped App token for each invocation,
 clears personal GitHub/SSH and inherited Git configuration variables, and uses
 HTTPS Git with certificate verification. The agent receives no App private key,
-controller Git configuration or personal `gh` login. The existing same-agent-UID
-trust limits still apply. The model's instructions name this command for Git and
-`gh`; GitHub enforces the token's repository permissions.
+controller Git configuration or personal `gh` login. The model's instructions
+name this command for Git and `gh`; GitHub enforces the token's repository permissions.
+
+**One agent UID is not per-run or per-repository isolation.** Any agent can read
+another active OpenCode run's capability from `/proc/<pid>/environ` of its tool
+processes and obtain App tokens for that run's repository. If the shared server
+is started with `OPENCODE_SERVER_PASSWORD`, another agent can read that environment
+and drive another run's session to obtain its token. The service-file setup above
+removes that environment exposure, but the same UID can still read the password
+from `service.json` (and OpenCode's state registration file) and drive the server.
+Every repository policy is therefore reachable by every agent on this host, even
+though each issued token is scoped to the selected run's repository. Native
+process ancestry binding does not prevent agents from modifying another run's
+writable workspace. Before Phase 4, the operator must explicitly accept this
+cross-repository trust or configure one policy/equal repository permissions per host.
+
+For pinned OpenCode beta-19242, the embedded `SessionEnvironment` implementation
+stores session environments in an in-memory Map. The installed-client fixture
+sets a synthetic capability and reads every table of the live SQLite database
+(including its WAL view) as the agent UID: the database is readable, but the
+capability is absent. Session environments are not persisted there by this version.
+This does not protect tool-process environments, server credentials or secrets
+that an agent explicitly writes into a transcript. Recheck on OpenCode upgrades.
 
 Disposable CI drives the three installed clients through synthetic local model,
 HTTPS Git and GitHub API fixtures, requiring push/PR head readback under the agent
 UID. The OpenCode migration probe exercises OAuth refresh persistence and operator
-attachment without a second refresh. Resident tests require run-bound completion
-and recovery without duplicate delivery. These fixtures do not establish real
+attachment without a second refresh. Repository-scope evidence is the token mint
+request body (`repositories: ["r"]` and its permissions); the fixture's foreign-path
+403 is only routing behavior, not an independent GitHub scope-enforcement test.
+The two OpenCode restart-delivery tests run as the controller UID and verify
+recovery without duplicate delivery. The subscription-socket test crosses to the
+agent UID; the restart-delivery tests do not establish that boundary. These fixtures do not establish real
 provider acceptance or complete the Phase 4 mint cutover.
+
+
+Before Phase 4, the Claude CLI used by agents (`launch.claude`, normally
+`/usr/local/bin/claude`) must match the credential tests' pinned 2.1.296, or the
+credential refresh/relink tests must be re-run at mint's installed version
+(2.1.299 at review) and the pin raised. Ben's Claude shares that credential file:
+disable its auto-update or re-run the credential tests after each version change.

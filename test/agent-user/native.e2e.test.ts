@@ -527,6 +527,11 @@ async function nativeBoundary(simulatedManager: boolean) {
         operation: "start" as const,
         runId,
         profile: client,
+        worker: {
+          runId,
+          githubSocket: join(root, "broker.sock"),
+          githubDirectory: join(home, "worker-gh"),
+        },
         directory: workspaceRoot,
         prompt: "Run the fixture tool then finish.",
         model: client === "codex" ? "gpt-5.4" : "claude-opus-4-6",
@@ -1245,6 +1250,21 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
             return [value.slice(0, at), value.slice(at + 1)]
           }),
       )
+      const inputPath = args[args.indexOf("--host-input") + 1]!
+      const request = JSON.parse(await readFile(inputPath, "utf8"))
+      expect(env.GH_CONFIG_DIR).toBe(request.worker?.githubDirectory ?? `${env.HOME}/.config/gh`)
+      for (const key of [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "SSH_AUTH_SOCK",
+      ])
+        expect(env[key]).toBe("")
+      if (request.worker) {
+        expect(env.WORKFLOWD_RUN_ID).toBe(request.worker.runId)
+        expect(env.WORKFLOWD_WORKER_GITHUB_SOCKET).toBe(request.worker.githubSocket)
+      }
       const binding = args
         .find((arg) => arg.startsWith("--property=BindPaths="))
         ?.slice("--property=BindPaths=".length)

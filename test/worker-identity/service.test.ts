@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
+import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { WorkerIdentity, WorkerIdentityLive } from "../../src/worker-identity/service"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -24,6 +25,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
       },
     ],
   }
+  let unavailable = false
   const environments = new Map<string, Readonly<Record<string, string>>>()
   const live = WorkerIdentityLive(config, fixture.github, fixture.OctokitClass, {
     serverId: "fixture",
@@ -33,8 +35,15 @@ test("brokers by process ancestry and never writes shared capabilities", async (
     endpointAlias: "fixture",
     endpointIdentity: "http://fixture",
     setSessionEnvironment: (input) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         environments.set(input.sessionID, input.variables)
+        if (unavailable)
+          return yield* Effect.fail(
+            new OpenCodeAdapterError({
+              operation: "set environment",
+              cause: new Error("unreachable"),
+            }),
+          )
       }),
   }).pipe(
     Layer.provideMerge(AgentRunStoreLive),
@@ -194,6 +203,34 @@ test("brokers by process ancestry and never writes shared capabilities", async (
       }).pipe(Effect.provide(live)),
     )
     const previous = environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY
+    // Reviewer probe: rebuilding with an active session must survive an OpenCode outage.
+    unavailable = true
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* WorkerIdentity
+        for (const capability of [
+          previous,
+          environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY,
+        ]) {
+          expect(
+            (yield* Effect.promise(() =>
+              requestRunSocket(
+                config.socket,
+                "/workers/github/session/token",
+                JSON.stringify({ sessionId: "opencode-session", capability }),
+              ),
+            )).status,
+          ).toBe(403)
+        }
+        service.register("other", process.pid)
+        expect(
+          (yield* Effect.promise(() =>
+            requestRunSocket(config.socket, "/workers/github/other/token"),
+          )).status,
+        ).toBe(200)
+      }).pipe(Effect.provide(live)),
+    )
+    unavailable = false
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* WorkerIdentity
