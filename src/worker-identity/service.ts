@@ -7,7 +7,7 @@ import { mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Cause, Context, Effect, Layer, Redacted, Schema } from "effect"
 import type { AppConfig } from "../config"
 import { AgentRunStore, type AgentRunRecord } from "../kernel/agent-run-store"
 import { WorkspaceError } from "../workspace/errors"
@@ -154,7 +154,9 @@ export const WorkerIdentityLive = (
           const run = yield* store.read(row.run_id)
           if (run && authorizeWorker(run, Date.now()))
             yield* prepareSession(run).pipe(
-              Effect.catch(() => {
+              Effect.timeout("10 seconds"),
+              Effect.catchCause((cause) => {
+                if (Cause.hasInterrupts(cause)) return Effect.failCause(cause)
                 sessions.delete(run.runId)
                 return Effect.logWarning(
                   "OpenCode worker identity recovery failed; run left unbound",
