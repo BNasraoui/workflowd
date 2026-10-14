@@ -15,7 +15,7 @@ case "$1" in
       "$firewall" -w -N "$chain"
       "$firewall" -w -A "$chain" -o tailscale0 -j DROP
       if [ "$firewall" = iptables ]; then
-        for destination in "$subnet" 100.64.0.0/10 169.254.0.0/16 168.63.129.16/32; do
+        for destination in "$subnet" 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 168.63.129.16/32; do
           "$firewall" -w -A "$chain" -d "$destination" -j DROP
         done
       fi
@@ -46,6 +46,10 @@ case "$1" in
     done
     iptables -w -A WFD-ENGINE -j DROP
     iptables -w -I INPUT 1 -i dagger0 -j WFD-ENGINE
+    # The engine's pinned legacy ip6tables needs optional host kernel modules.
+    # Disable IPv6 in this namespace instead, including dagger0 if CNI creates
+    # it later. Agent DNS uses the IPv4 resolver above.
+    sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1 >/dev/null
     ;;
   stop)
     for firewall in iptables ip6tables; do
