@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -233,7 +233,9 @@ test("host worker profiles preserve stdin and keep native result files bounded",
           prompt: "secret stays on stdin",
         }),
       )
-      expect(await runHostWorker(input, binary)).toBe(0)
+      for (const name of ["prompt", "events", "stderr", "result"])
+        await rm(join(root, name), { force: true })
+      expect(await runHostWorker(input, binary, root)).toBe(0)
       expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
         version: 1,
         exitCode: 0,
@@ -261,7 +263,9 @@ test("host worker profiles preserve stdin and keep native result files bounded",
         prompt: "",
       }),
     )
-    await expect(runHostWorker(join(root, "input"), binary)).rejects.toThrow(
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    await expect(runHostWorker(join(root, "input"), binary, root)).rejects.toThrow(
       "native authentication unavailable",
     )
   } finally {
@@ -290,7 +294,7 @@ test("host discovery worker exchanges the native model catalog and workspace wor
         model: null,
       }),
     )
-    expect(await runHostWorker(input, binary)).toBe(0)
+    expect(await runHostWorker(input, binary, root)).toBe(0)
     const models = JSON.parse(await readFile(join(root, "events"), "utf8"))
     expect(models).toMatchObject([{ model: "first" }, { model: "second" }])
     const source = join(root, "source")
@@ -328,7 +332,9 @@ test("host discovery worker exchanges the native model catalog and workspace wor
       model: null,
     }
     await writeFile(input, JSON.stringify(request))
-    expect(await runHostWorker(input, binary)).toBe(0)
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    expect(await runHostWorker(input, binary, root)).toBe(0)
     expect((await stat(join(directory, ".git"))).isDirectory()).toBe(true)
     expect(await readFile(join(directory, ".git", "HEAD"), "utf8")).toBe(
       "ref: refs/heads/agent-run\n",
@@ -339,7 +345,9 @@ test("host discovery worker exchanges the native model catalog and workspace wor
       ),
     ).toBeNull()
     await writeFile(input, JSON.stringify({ ...request, branch: "--invalid" }))
-    await expect(runHostWorker(input, binary)).rejects.toThrow("invalid workspace selection")
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    await expect(runHostWorker(input, binary, root)).rejects.toThrow("invalid workspace selection")
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -372,6 +380,7 @@ test("the deployed worker entrypoint completes a Claude launch without a circula
     const worker = join(root, "worker.js")
     await writeFile(worker, await build.outputs[0]!.text())
     const child = Bun.spawn([process.execPath, worker, "--host-input", input, "--binary", binary], {
+      cwd: root,
       stdout: "ignore",
       stderr: "pipe",
     })
@@ -385,6 +394,63 @@ test("the deployed worker entrypoint completes a Claude launch without a circula
     } finally {
       clearTimeout(timer)
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const name of ["input", "prompt", "events", "stderr", "result"] as const) {
+  test(`host worker refuses a symlink at ${name} without touching its target`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "host-worker-links-"))
+    try {
+      const input = join(root, "input")
+      const canary = join(root, "canary")
+      const request = JSON.stringify({
+        operation: "start",
+        profile: "claude",
+        runId: "links",
+        directory: root,
+        prompt: "fixture",
+        model: null,
+      })
+      await writeFile(canary, request)
+      if (name !== "input") await writeFile(input, request)
+      await symlink(canary, join(root, name))
+      await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow()
+      expect(await readFile(canary, "utf8")).toBe(request)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test("host worker rejects input paths outside its service working directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-path-"))
+  try {
+    for (const path of ["input", join(root, "other"), `${root}/../input`, "/etc/passwd"]) {
+      await expect(runHostWorker(path, "/usr/bin/true", root)).rejects.toThrow(
+        "invalid host input path",
+      )
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host worker rejects directory and multiply linked input inodes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-inodes-"))
+  try {
+    const input = join(root, "input")
+    await mkdir(input)
+    await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow(
+      "invalid host input file",
+    )
+    await rm(input, { recursive: true })
+    await writeFile(input, "{}")
+    await link(input, join(root, "alias"))
+    await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow(
+      "invalid host input file",
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

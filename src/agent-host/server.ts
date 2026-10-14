@@ -623,7 +623,7 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--service-type=exec",
     `--unit=${record.process.unit}`,
     `--description=workflowd native ${record.process.launchId}`,
-    `--working-directory=${record.request.profile === "workspace" ? launch.workspaceRoot : record.request.directory || launch.workspaceRoot}`,
+    `--working-directory=${io}`,
     `--property=User=${policy.agentUid}`,
     `--property=Group=${policy.groupGid}`,
     "--property=RemainAfterExit=yes",

@@ -1,9 +1,9 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseClaudeDispatchEvent } from "../../src/kernel/claude-dispatch"
-import { runClaudeWorker } from "../../src/kernel/claude-worker"
+import { runClaudeWorker, runClaudeWorkerMain } from "../../src/kernel/claude-worker"
 
 test("Claude stream recognizes session identity, actual model output, usage, and errors", () => {
   const parse = (value: unknown) => parseClaudeDispatchEvent(JSON.stringify(value))
@@ -97,3 +97,51 @@ test("durable worker invokes Claude print mode directly and persists output and 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("Claude worker entrypoint reports malformed launches without starting a model", async () => {
+  const errors = spyOn(console, "error").mockImplementation(() => {})
+  try {
+    expect(await runClaudeWorkerMain(["--binary", "/usr/bin/true"])).toBe(1)
+    expect(errors).toHaveBeenCalledWith("missing --directory")
+  } finally {
+    errors.mockRestore()
+  }
+})
+
+for (const status of [0, 7]) {
+  test(`Claude worker entrypoint persists native exit ${status}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-entrypoint-"))
+    try {
+      const binary = join(root, "claude")
+      await writeFile(binary, `#!/bin/sh\ncat\necho diagnostic >&2\nexit ${status}\n`, {
+        mode: 0o700,
+      })
+      await writeFile(join(root, "prompt"), "fixture prompt")
+      const args = [
+        "--binary",
+        binary,
+        "--directory",
+        root,
+        "--prompt-file",
+        join(root, "prompt"),
+        "--events-file",
+        join(root, "events"),
+        "--stderr-file",
+        join(root, "stderr"),
+        "--result-file",
+        join(root, "result"),
+        "--max-output-bytes",
+        "1024",
+      ]
+      expect(await runClaudeWorkerMain(args)).toBe(status)
+      expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
+        version: 1,
+        exitCode: status,
+      })
+      expect(await readFile(join(root, "events"), "utf8")).toBe("fixture prompt")
+      expect(await readFile(join(root, "stderr"), "utf8")).toBe("diagnostic\n")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}

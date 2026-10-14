@@ -1,7 +1,8 @@
 import { Schema, Effect } from "effect"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import { HostStart } from "../agent-host/protocol"
 import { CodexRetryTurn } from "./codex-retry"
+import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
 
@@ -21,7 +22,10 @@ export type CliWorkerOptions = {
 
 const writeResult = async (path: string, exitCode: number) => {
   const temporary = `${path}.tmp-${process.pid}`
-  await writeFile(temporary, `${JSON.stringify({ version: 1, exitCode })}\n`, { mode: 0o600 })
+  await writeFile(temporary, `${JSON.stringify({ version: 1, exitCode })}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  })
   await rename(temporary, path)
 }
 
@@ -31,7 +35,11 @@ const drainBounded = async (
   limit: number,
   observe?: (chunk: Uint8Array) => void,
 ) => {
-  const file = await open(path, "a", 0o600)
+  const file = await open(
+    path,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+    0o600,
+  )
   limit = Math.max(0, limit - (await file.stat()).size)
   const reader = stream.getReader()
   let written = 0
@@ -89,10 +97,16 @@ export async function runCliWorker(
   retryProvider = false,
 ): Promise<number> {
   const prompt = await readFile(options.promptFile)
-  await writeFile(options.eventsFile, "", { mode: 0o600 })
+  await writeFile(options.eventsFile, "", {
+    mode: 0o600,
+    flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+  })
   let args = [...command]
   for (let attempt = 0; ; attempt++) {
-    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeFile(options.stderrFile, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
     const turn = new CodexRetryTurn()
     const child = Bun.spawn(args, {
       cwd: options.directory,
@@ -186,11 +200,29 @@ export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<
     ...(options.effort === undefined ? [] : ["--effort", options.effort]),
   ])
 
-export async function runHostWorker(inputPath: string, binary: string) {
-  const request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await readFile(inputPath, "utf8")))
-  const io = dirname(inputPath)
+export async function runHostWorker(inputPath: string, binary: string, io = process.cwd()) {
+  // systemd selects the private I/O directory; argv cannot select another file tree.
+  const input = join(io, "input")
+  if (inputPath !== input) throw new Error("invalid host input path")
+  const file = await open(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  let request: typeof HostStart.Type
+  try {
+    const info = await file.stat()
+    if (!info.isFile() || info.nlink !== 1) throw new Error("invalid host input file")
+    request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await file.readFile("utf8")))
+  } finally {
+    await file.close()
+  }
+  // A host launch owns a fresh directory. Never reuse agent-supplied output links.
+  for (const name of ["prompt", "events", "stderr", "result"]) {
+    const output = await open(join(io, name), "wx", 0o600)
+    await output.close()
+  }
   const prompt = join(io, "prompt")
-  await writeFile(prompt, request.prompt, { mode: 0o600 })
+  await writeFile(prompt, request.prompt, {
+    mode: 0o600,
+    flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+  })
   const options: CliWorkerOptions = {
     binary,
     directory: request.directory,
@@ -239,8 +271,14 @@ export async function runHostWorker(inputPath: string, binary: string) {
         request.base ?? "origin/HEAD",
       ]),
     )
-    await writeFile(options.eventsFile, "", { mode: 0o600 })
-    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeFile(options.eventsFile, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
+    await writeFile(options.stderrFile, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
     await writeResult(options.resultFile, 0)
     return 0
   }
@@ -261,8 +299,14 @@ export async function runHostWorker(inputPath: string, binary: string) {
         directory: request.directory,
       }),
     )
-    await writeFile(options.eventsFile, JSON.stringify(exists), { mode: 0o600 })
-    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeFile(options.eventsFile, JSON.stringify(exists), {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
+    await writeFile(options.stderrFile, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
     await writeResult(options.resultFile, 0)
     return 0
   }
@@ -280,8 +324,14 @@ export async function runHostWorker(inputPath: string, binary: string) {
     const models = await makeCodexDiscovery("codex:local", {
       command: [binary, "app-server", "--listen", "stdio://"],
     }).discover(AbortSignal.timeout(30000))
-    await writeFile(options.eventsFile, JSON.stringify(models) + "\n", { mode: 0o600 })
-    await writeFile(options.stderrFile, "", { mode: 0o600 })
+    await writeFile(options.eventsFile, JSON.stringify(models) + "\n", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
+    await writeFile(options.stderrFile, "", {
+      mode: 0o600,
+      flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+    })
     await writeResult(options.resultFile, 0)
     return 0
   }
@@ -301,8 +351,14 @@ export async function runHostWorker(inputPath: string, binary: string) {
       .loggedIn
   )
     throw new Error("native authentication unavailable")
-  await writeFile(options.eventsFile, "", { mode: 0o600 })
-  await writeFile(options.stderrFile, "", { mode: 0o600 })
+  await writeFile(options.eventsFile, "", {
+    mode: 0o600,
+    flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+  })
+  await writeFile(options.stderrFile, "", {
+    mode: 0o600,
+    flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+  })
   await writeResult(options.resultFile, 0)
   return 0
 }
