@@ -23,6 +23,8 @@ for (const kind of ["claude", "codex"] as const) {
     await mkdir(join(directory, `.${kind}`))
     const marker = join(root, "project-hook-ran")
     const hookMarker = join(root, "project-session-hook-ran")
+    const localMarker = join(root, "project-local-hook-ran")
+    const mcpMarker = join(root, "project-mcp-ran")
     const userMarker = join(root, "user-hook-ran")
     const hooks = (path: string) => ({
       hooks: {
@@ -35,6 +37,21 @@ for (const kind of ["claude", "codex"] as const) {
       JSON.stringify(hooks(kind === "codex" ? hookMarker : marker)),
     )
     await writeFile(join(configHome, file), JSON.stringify(hooks(userMarker)))
+    if (kind === "claude") {
+      await writeFile(
+        join(directory, ".claude/settings.local.json"),
+        JSON.stringify({
+          ...hooks(localMarker),
+          enableAllProjectMcpServers: true,
+        }),
+      )
+      await writeFile(
+        join(directory, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: { project_fixture: { command: "/usr/bin/touch", args: [mcpMarker] } },
+        }),
+      )
+    }
     if (kind === "codex") {
       // This CLI version resolves linked-worktree hook sources in the primary checkout.
       await mkdir(join(repository, ".codex"))
@@ -112,6 +129,12 @@ startup_timeout_sec=1
         expect(await Bun.file(hookMarker).exists()).toBe(true)
         await rm(hookMarker)
       }
+      if (kind === "claude") {
+        expect(await Bun.file(localMarker).exists()).toBe(true)
+        expect(await Bun.file(mcpMarker).exists()).toBe(true)
+        await rm(localMarker)
+        await rm(mcpMarker)
+      }
       await rm(marker)
       await rm(userMarker)
       expect(await (kind === "claude" ? runClaudeWorker : runCodexWorker)(options)).toBe(0)
@@ -119,6 +142,8 @@ startup_timeout_sec=1
       expect(await Bun.file(userMarker).exists()).toBe(true)
       expect(await Bun.file(marker).exists()).toBe(false)
       expect(await Bun.file(hookMarker).exists()).toBe(false)
+      expect(await Bun.file(localMarker).exists()).toBe(false)
+      expect(await Bun.file(mcpMarker).exists()).toBe(false)
       const events = (await readFile(options.eventsFile, "utf8"))
         .trim()
         .split("\n")
@@ -129,6 +154,23 @@ startup_timeout_sec=1
         const session = Schema.decodeUnknownSync(Schema.Struct({ session_id: Schema.String }))(
           events.find((event) => event.type === "system" && event.subtype === "init"),
         )
+        // Positive control on resume too: persisted sessions must not hide inert fixtures.
+        expect(
+          await runCliWorker(options, [
+            binary,
+            "-p",
+            "--resume",
+            session.session_id,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+          ]),
+        ).toBe(0)
+        for (const path of [marker, localMarker, mcpMarker, userMarker]) {
+          expect(await Bun.file(path).exists()).toBe(true)
+          await rm(path)
+        }
         const output = await Effect.runPromise(
           makeClaudeCli({ binary }).resume({
             nativeSessionId: session.session_id,
@@ -138,30 +180,72 @@ startup_timeout_sec=1
           }),
         )
         expect(output).toContain("native-fixture-complete")
-        expect(await Bun.file(marker).exists()).toBe(false)
+        expect(await Bun.file(userMarker).exists()).toBe(true)
+        for (const path of [marker, localMarker, mcpMarker])
+          expect(await Bun.file(path).exists()).toBe(false)
       } else {
-        const server = startAppServer({ binary, home: configHome }, () => {})
+        let completion = Promise.withResolvers<unknown>()
+        const server = startAppServer({ binary, home: configHome }, (frame) => {
+          if (frame.method === "turn/completed") completion.resolve(frame.params)
+        })
+        const runTurn = async (threadId: string) => {
+          completion = Promise.withResolvers<unknown>()
+          const before = fixture.requests.length
+          const timer = setTimeout(
+            () => completion.reject(new Error("Resident turn timed out")),
+            15000,
+          )
+          try {
+            const finished = completion.promise
+            await server.rpc.request("turn/start", {
+              threadId,
+              input: [{ type: "text", text: "Reply with the fixture completion." }],
+            })
+            expect(await finished).toMatchObject({ threadId, turn: { status: "completed" } })
+            expect(fixture.requests.length).toBeGreaterThan(before)
+            for (const path of [marker, hookMarker])
+              expect(await Bun.file(path).exists()).toBe(false)
+          } finally {
+            clearTimeout(timer)
+          }
+        }
         try {
           await server.initialize()
           const params = {
             cwd: directory,
             model: "fixture-model",
-            config: codexProjectConfig(directory),
+            modelProvider: "fixture",
+            config: {
+              ...codexProjectConfig(directory),
+              model_providers: {
+                fixture: {
+                  name: "fixture",
+                  base_url: `${fixture.modelUrl}v1`,
+                  wire_api: "responses",
+                  requires_openai_auth: false,
+                },
+              },
+            },
             approvalPolicy: "never",
             sandbox: "danger-full-access",
           }
           const started = await server.rpc.request("thread/start", params)
           expect(started).toMatchObject({ reasoningEffort: "high" })
+          const startedThread = Schema.decodeUnknownSync(
+            Schema.Struct({
+              thread: Schema.Struct({ id: Schema.String }),
+            }),
+          )(started)
+          await runTurn(startedThread.thread.id)
           const thread = Schema.decodeUnknownSync(Schema.Struct({ thread_id: Schema.String }))(
             events.find((event) => event.type === "thread.started"),
           )
-          // The exec thread uses the fixture provider; override it for this no-inference resume.
           const resumed = await server.rpc.request("thread/resume", {
             ...params,
-            modelProvider: "openai",
             threadId: thread.thread_id,
           })
           expect(resumed).toMatchObject({ reasoningEffort: "high" })
+          await runTurn(thread.thread_id)
           expect(await Bun.file(marker).exists()).toBe(false)
         } finally {
           await server.close()
