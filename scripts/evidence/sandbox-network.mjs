@@ -31,10 +31,11 @@ export function assertProbeResults(targets, results, expected) {
     results.map(({ host, port }) => ({ host, port })),
     targets,
   )
-  assert.ok(
-    results.every(({ result }) => expected.split("|").includes(result)),
-    "Unexpected network result",
-  )
+  for (const { host, port, result } of results)
+    assert.ok(
+      expected.split("|").includes(result),
+      `Unexpected network result for ${host}:${port}: ${result} (expected ${expected})`,
+    )
 }
 
 export async function executeProbe(args, script = "", timeout = 30000) {

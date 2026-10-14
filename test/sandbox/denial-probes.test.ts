@@ -20,7 +20,7 @@ test("denial inventory includes all listening ports and requires mint, peers and
     assertProbeResults(targets,results,'timeout')
     assert.throws(()=>assertProbeResults(targets,results.slice(1),'timeout'))
     for (const result of ['connected','refused','other_error'])
-      assert.throws(()=>assertProbeResults(targets,[{...results[0],result},...results.slice(1)],'timeout'))
+      assert.throws(()=>assertProbeResults(targets,[{...results[0],result},...results.slice(1)],'timeout'), {message:'Unexpected network result for 100.64.0.1:22: '+result+' (expected timeout)'})
     assert.throws(()=>assertProbeResults(targets,results.map(x=>({...x,port:1})),'timeout'))
     console.log('passed')
   `,
