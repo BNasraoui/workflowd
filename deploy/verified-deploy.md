@@ -1,96 +1,141 @@
 # Verified mint deployment (F3/F4)
 
-`verified-deploy.py` is an operator entrypoint. It deploys an explicit full SHA
-only after fetching `origin/main` from `BNasraoui/workflowd` and verifying:
+`verified-deploy.py` is an operator entrypoint for a full merge-result SHA on
+freshly fetched `origin/main` in `BNasraoui/workflowd`. Before stopping units or
+changing working files, it verifies **every first-parent commit** between the
+last successfully deployed SHA and the target, oldest first. Each commit needs:
 
-- The SHA is a commit reachable from the fetched main branch.
-- GitHub associates it with the merge result of a PR into this repository's main.
-  At least one human owner, member or collaborator other than the author approved
-  the final PR head. Dismissed or superseded approvals and outstanding change
-  requests fail admission. Direct pushes and intermediate rebase commits are
-  deliberately refused; select the PR's final merge-result SHA.
-- The newest `Required checks` check-run from GitHub Actions (App ID 15368) is
-  completed with conclusion `success` for that exact SHA. Missing, pending,
-  neutral, skipped, cancelled and failed results are refused.
-- That check belongs to the newest push run of `.github/workflows/ci.yml` for
-  the same SHA on main, and the workflow completed successfully. PR-head CI alone
-  is insufficient. Optional OpenCode Review is not a deploy requirement.
+- A merged PR whose merge-result SHA matches the commit and whose base is this
+  repository's main. Direct pushes and intermediate rebase commits are refused.
+- A completed, successful `Ben approval` check on that PR's final **head SHA**, from
+  the merge gate App configured by `--approval-app-id`. This is the App's numeric
+  **integration ID**, not its installation ID. The newest matching check wins;
+  missing, stale, pending and unsuccessful evidence is refused. GitHub PR reviews
+  are not required: Ben authors the PRs and cannot approve his own review. The
+  [protected environment gate from #109](../docs/ben-approval-gate.md) supplies
+  Ben's approval and enforces its independent review policy.
+- The newest `Required checks` check-run from GitHub Actions (App ID 15368),
+  completed successfully for the exact **merge SHA**. It must belong to the newest
+  successful main push run of `.github/workflows/ci.yml` for that SHA. PR-head CI
+  alone is insufficient. Missing, pending, neutral, skipped, cancelled and failed
+  results are refused. Optional OpenCode Review is not a deploy requirement.
 
-This pins the repository's existing aggregate gate, which depends on all blocking
-CI jobs. Operators must keep the main ruleset and this policy aligned if the gate
-is renamed or new required checks are added outside that aggregate. Review policy
-is deliberately conservative and does not offer an override switch. API failures,
-missing evidence and malformed responses fail closed. Paginated check-run,
-workflow-run, PR and review responses are all consumed.
+Keep main's App-pinned `Ben approval` and GitHub Actions `Required checks`
+requirements aligned with this policy. The deploy does not require a self-review
+or change GitHub settings. API errors and malformed responses fail closed.
+Pagination uses `gh api --paginate` and parses concatenated JSON pages, compatible
+with mint's gh 2.45.0; it does not use `--slurp`.
 
-The script requires a standalone clone: a real local `.git` directory, no linked
-worktrees and no object alternates. It disables global/system Git configuration,
-clears inherited Git environment overrides, uses `core.hooksPath=/dev/null` on
-commands and persists that setting in the clone. It serializes deployments using
-a lock inside `.git`.
+`--state` is an operator-owned mode-0600 file outside the checkout and skill root.
+Its parent must be operator-owned and not writable by others. The script writes
+the successful target atomically, with fsync, after install, copy, restart and
+unit-state checks. Keep this same state path for every deployment; do not seed or
+edit it to skip history. A missing state or a last-deployed SHA that is not an
+ancestor of the target refuses admission unless the operator explicitly supplies
+`--bootstrap`. Bootstrap trusts history **before** the target; the target still
+needs its own App approval and main CI. Use bootstrap only for a personally
+reviewed initial baseline or deliberate recovery/rollback, record the reason,
+and omit it on normal deployments. When state is a valid ancestor, all intervening
+first-parent commits are checked even if `--bootstrap` was supplied. Redeploying
+the same SHA rechecks its evidence. A refused earlier commit blocks the whole
+range even when the target itself is approved.
 
-After admission, it stops the three workflowd units, resets and cleans the tree,
-checks out the exact SHA detached, resets and cleans again, runs
-`bun install --frozen-lockfile`, materializes tracked `skills/rpi-*` blobs into a
-dedicated skill directory, and restarts and checks all three units. Clean uses
-`git clean -ffdx -e node_modules`; the retained dependency tree must already be
-operator-owned. It is never copied from an agent checkout. Skill symlinks and
-submodules are not accepted as skill content. Skill copies come from Git blobs,
-not dirty working files, preserve executable modes, replace old links without
-following them, and remove obsolete RPI directories in this dedicated target.
-Do not point `--skills` at a general-purpose skill home.
+The script requires a standalone clone, independent Git metadata, no worktrees or
+object alternates, and canonical HTTPS origin. It ignores global/system Git
+configuration; every wrapper command disables hooks and fsmonitor and permits
+only HTTPS transport. Before using the clone it reads local config without
+following includes and refuses `include*`, `filter.*`, `core.fsmonitor`,
+`credential.*`, `http.*`, `url.*`, worktree config, and `.git/info/attributes`.
+It serializes operators with a lock in `.git`.
 
-JSON records in `<checkout>/.git/verified-deploy.jsonl` and stdout include the
-full SHA, PR number, check/run IDs, UTC time, paths, units and outcome (`verified`,
-`deployed`, or `failed`). A verification refusal does not stop units or modify the
-working tree. An install/copy/restart failure records failure and requires operator
-recovery; there is no automatic unverified rollback. Units can remain stopped.
-Use the same entrypoint with a previously verified merge SHA to roll back.
-`is-active` checks unit state; application health still needs operator validation.
+The entrypoint replaces its child environment, uses `/usr/bin:/bin`, and loads
+only a dedicated read-only token file into `GH_TOKEN`. A temporary empty HOME,
+XDG_CONFIG_HOME and GH_CONFIG_DIR exclude the owner's gh login/config (including
+`http_unix_socket`), global bunfig and npmrc files. Inherited proxy, Git, Bun/npm
+and token overrides are cleared. It requires an absolute pinned Bun executable,
+prints tool versions, and refuses Git older than 2.34, gh older than 2.45, or Bun
+other than 1.3.14. Run it with Python 3.9+ and `-I` from a trusted shell.
+
+After admission it stops all three units, resets and cleans, checks out the exact
+SHA detached, and resets/cleans again. Clean uses `git clean -ffdx -e /node_modules`:
+only the root dependency tree survives. That retained tree must be operator-owned
+and never copied from an agent checkout. Installation uses the absolute Bun path
+with `install --frozen-lockfile --no-cache --backend=copyfile`; no shared Bun cache
+is trusted or hardlinked. Repository-local bunfig/npmrc and lifecycle policy are
+part of the reviewed commit.
+
+Tracked `skills/rpi-*` blobs are copied using NUL-delimited Git filenames, preserving
+executable modes. Symlinks/submodules are refused. The destination must already
+contain the regular marker file `.workflowd-verified-skills` before any deletion;
+create it only in a dedicated managed root. Existing links are replaced without
+following them and obsolete RPI directories are removed. Never mark a general
+skill home as managed. The three units are then restarted and checked as active.
+
+JSON records in `<checkout>/.git/verified-deploy.jsonl` and stdout contain target
+and previous SHA, bootstrap status, state path, each admitted commit's PR/head,
+approval App/check IDs, CI check/run IDs, UTC time, paths, units and outcome.
+A verification refusal leaves units running and working files untouched.
+Install/copy/restart failure records failure and requires operator recovery;
+units can remain stopped. There is no automatic unverified rollback. Unit state
+is not application health: the operator must validate that separately.
 
 ## Operator migration on mint
 
-These are manual steps; adding this code does not change the live host. Schedule
-a maintenance window and drain active work before stopping the units. Keep
-`update-dev-infra.timer` disabled. Retire its old workflowd checkout/linking path;
-`update-dev-infra.example` and `link-agent-skills.sh` are legacy developer tools,
-not production entrypoints. Do not schedule either against the new clone.
+These are manual steps; this PR changes no live host, App, credentials or ruleset.
+Drain active work in a maintenance window. Keep `update-dev-infra.timer` disabled
+and retire its old checkout/linking path. `update-dev-infra.example` and
+`link-agent-skills.sh` remain developer tools, not production entrypoints.
 
-1. Establish a distinct agent Unix account before calling the deployment isolated.
-   Processes running as the deploy owner can write its files regardless of mode
-   bits. Stop or migrate agent processes still using the operator UID. The agent
-   account must have no sudo/polkit route to become the deploy owner, no access to
-   its user systemd bus, and no writable path to its credentials, executables,
-   Git configuration, service/drop-in files or deployment entrypoint. Follow the
-   separate [agent-user runbook](../docs/agent-user.md) for the broader migration.
-2. As an operator, record the old deployed SHA and unit WorkingDirectory/ExecStart
-   settings without copying credentials into reports. Stop the three units. Move
-   the old worktree out of the service path with `git worktree move` from its owning
-   repository, or retain it in place and use the new path below. Never copy its
-   `.git` file, object store, hooks, configuration or node_modules into the clone.
-3. Create an operator-owned standalone clone under a root-owned parent. Example
-   commands below assume the existing operator account is `ben`. Keep the protected
-   parent root-owned; only the child deployment and skill directories are writable
-   by the operator. Do not grant the agent UID write ACLs or membership in a group
-   with write permission. The GitHub credential used for verification needs only
-   read access to repository contents, checks, Actions and pull requests.
+1. Establish a separate agent Unix UID; stop/migrate agents still running as Ben.
+   Ownership cannot isolate same-UID processes. Deny sudo/polkit escalation and
+   access to the operator's user systemd bus, including `systemctl --user
+   set-environment`. Deny writes to `~/.config/environment.d`, units/drop-ins,
+   executables, Git configuration, deployment entrypoint and all their ancestors.
+   Audit inherited systemd manager variables before launching the entrypoint:
+   environment.d and set-environment values reach transient units, and can affect
+   the interpreter before its own sanitization. Agents must **not read** Ben's
+   `~/.config/gh/hosts.yml`, any owner `GH_TOKEN`/`GITHUB_TOKEN`, workflowd env files
+   (including `~/.config/workflowd/env` and rollout overrides), or approval/admin
+   credentials. Also deny writes to gh `config.yml`, whose `http_unix_socket` can
+   redirect API traffic. Follow the [agent-user runbook](../docs/agent-user.md).
+2. Record the existing deployed SHA and unit WorkingDirectory/ExecStart without
+   copying secrets into reports. Stop the three units. Move the old worktree out
+   of the service path with its owning repository's `git worktree move`, or retain
+   it and use the new path below. Do not copy its Git metadata, hooks, configuration
+   or node_modules into the new clone.
+3. Create protected operator directories under a root-owned parent. Example owner:
+   `ben`. Deny agent write ACLs/group access and replacement via ancestors.
 
    ```bash
    sudo install -d -o root -g root -m 0755 /opt/workflowd
    sudo install -d -o ben -g ben -m 0755 /opt/workflowd/deploy /opt/workflowd/skills
-   umask 022
-   env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-     git -c core.hooksPath=/dev/null clone --no-checkout \
-       --config core.hooksPath=/dev/null \
+   sudo install -d -o ben -g ben -m 0700 /opt/workflowd/operator
+   install -m 0644 /dev/null /opt/workflowd/skills/.workflowd-verified-skills
+   env -i PATH=/usr/bin:/bin HOME=/opt/workflowd/operator \
+     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+     git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+       -c protocol.allow=never -c protocol.https.allow=always \
+       clone --no-checkout --config core.hooksPath=/dev/null \
        https://github.com/BNasraoui/workflowd.git /opt/workflowd/deploy
    ```
 
-4. Bootstrap the entrypoint as a separately reviewed, root-owned file outside the
-   checkout. Obtain this PR's merged script from a trusted operator session, verify
-   its SHA and review/CI evidence, and install it as below. Do not execute a script
-   supplied by an agent worktree to establish the trust boundary. Future entrypoint
-   updates need the same operator review; deployments do not overwrite this copy.
+   Provision a **dedicated fine-grained read-only GitHub token**, restricted to this
+   repository with Contents, Checks, Actions and Pull requests read permissions
+   (plus mandatory Metadata). Store it as `/opt/workflowd/operator/github-token`,
+   owned by Ben, mode 0600. Provision from a trusted operator session without
+   putting the value in shell history, argv, reports or logs. Never copy the
+   owner's gh login or use its approval/admin token. The deploy reads this file
+   into GH_TOKEN itself; inherited GH_TOKEN/GITHUB_TOKEN are discarded. Keep the
+   last-deployed file absent until the first successful bootstrap deployment.
+4. Activate #109's [Ben approval gate](../docs/ben-approval-gate.md) from a trusted
+   workstation: dedicated Checks-write App, protected `ben-merge-approval`
+   environment with Ben as reviewer, exact main branch selection, and App-pinned
+   `Ben approval` in the main ruleset alongside `Required checks`, strict checks
+   and no bypass. Do not raise the required PR review count to force a self-review.
+   Record the App's integration ID for the command below. Obtain this PR's merged
+   entrypoint from a trusted operator session, verify its evidence, and separately
+   review/install it outside the clone. Future entrypoint updates require the same
+   review; deployment does not overwrite the protected copy.
 
    ```bash
    sudo install -d -o root -g root -m 0755 /usr/local/libexec/workflowd
@@ -98,51 +143,60 @@ not production entrypoints. Do not schedule either against the new clone.
      /usr/local/libexec/workflowd/verified-deploy.py
    ```
 
-5. Repoint the existing operator user units `workflowd.service`,
-   `workflowd-runner.service` and `workflowd-mcp.service` to
-   `/opt/workflowd/deploy`. Inspect both WorkingDirectory and any absolute ExecStart
-   paths, including drop-ins. Preserve credentials and environment configuration;
-   do not copy secrets into the clone. Run `systemctl --user daemon-reload`.
-   All three units must exist; the script does not silently skip missing units.
-6. Use operator-installed Git, Python 3.9+, gh and pinned Bun (currently 1.3.14),
-   all outside agent-writable paths. Execute from a trusted working directory,
-   with a trusted PATH and operator gh configuration. Choose a reviewed merged
-   SHA whose **post-merge main CI has finished**, then deploy in a capped unit:
+   Install pinned Bun 1.3.14 as `/opt/workflowd/bin/bun` in a root/operator-owned
+   directory with protected ancestors. Do not use an agent-writable `~/.bun/bin`.
+5. Repoint `workflowd.service`, `workflowd-runner.service` and
+   `workflowd-mcp.service` WorkingDirectory and absolute ExecStart paths to the
+   protected clone and binaries. Preserve operator-owned credential/env files
+   outside the clone. Run `systemctl --user daemon-reload`. All three units must
+   exist. Audit any service Bun configuration/cache separately; deploy isolation
+   does not rewrite service environments.
+6. Choose an approved merged SHA after its **post-merge main CI finishes**. The
+   first baseline must itself have a successful App check on its PR head; legacy
+   merges without this evidence cannot be deployed, even with bootstrap. Personally
+   audit the earlier history trusted by the initial bootstrap and record why.
+   Run from a trusted operator session using the explicit paths below:
 
    ```bash
    cd /opt/workflowd
    deploy_sha=FULL_40_CHARACTER_MERGE_SHA
+   approval_app_id=NUMERIC_MERGE_GATE_APP_ID
    systemd-run --user --wait --pipe --collect \
      -p MemoryMax=4G -p MemorySwapMax=0 \
-     --working-directory=/opt/workflowd \
-     --setenv="PATH=$PATH" \
+     --working-directory=/opt/workflowd --setenv=PATH=/usr/bin:/bin \
      /usr/bin/python3 -I /usr/local/libexec/workflowd/verified-deploy.py \
-       "$deploy_sha" --checkout /opt/workflowd/deploy --skills /opt/workflowd/skills
+       "$deploy_sha" --checkout /opt/workflowd/deploy --skills /opt/workflowd/skills \
+       --state /opt/workflowd/operator/last-deployed \
+       --github-token-file /opt/workflowd/operator/github-token \
+       --approval-app-id "$approval_app_id" --bun /opt/workflowd/bin/bun --bootstrap
    ```
 
-7. Configure harness skill discovery to read `/opt/workflowd/skills`, or replace
-   each old RPI link in the managed harness skill roots with a link to its
-   `/opt/workflowd/skills/rpi-*` copy. Those destinations contain verified files,
-   not symlinks into a writable source tree. Protect managed skill roots and their
-   ancestors from the agent UID too; remove old links to agent worktrees. Do not
-   run the legacy linker afterward. If harness homes must remain agent-writable,
-   use a separate operator-owned skill search directory/read-only mount and do
-   not treat skills discovered in writable homes as trusted policy.
-8. Confirm the new HEAD, `.git` directory, `core.hooksPath`, successful deployment
-   record, unit state and application health. Review ownership, mode bits and ACLs
-   on the checkout (including `.git` and node_modules), skill copies and every
-   ancestor with `namei -l` and `getfacl`. As the future agent account, verify read
-   access where needed and **no write access** to those paths, the entrypoint,
-   service configuration or their parents. Do not grant write/traverse exceptions
-   that permit replacement through an ancestor. Keep runtime state in separate
-   explicitly writable directories. Retire the old worktree only after validation.
+   **Remove `--bootstrap` on every normal subsequent deployment.** Keep the App ID
+   and state path in operator-owned launch configuration. For rollback, explicitly
+   bootstrap a previously approved merge SHA after checking its current evidence;
+   do not edit state manually or run the legacy deploy path.
+7. Configure harness discovery or protected links to `/opt/workflowd/skills/rpi-*`.
+   Remove old agent-worktree links; do not run the legacy linker again. Protect
+   harness skill roots and ancestors too. If harness homes must be agent-writable,
+   use a separate read-only/operator-owned skill search root and do not treat
+   writable-home skills as trusted policy.
+8. Verify HEAD, state SHA, full range evidence in the deployment log, unit status
+   and application health. Audit ownership, modes and ACLs with `namei -l` and
+   `getfacl`, including `.git`, node_modules, marker/skills, state/token parents,
+   executables and service configuration. Confirm hooks/fsmonitor are disabled and
+   prohibited local Git config/attributes absent. Audit `~/.bunfig.toml`,
+   `$XDG_CONFIG_HOME/.bunfig.toml`, `~/.npmrc`, gh hosts/config, and Bun install cache
+   (`~/.bun/install/cache` or BUN_INSTALL_CACHE_DIR). The deploy ignores global
+   files and uses no cache; services or manual commands may still use them. If a
+   cache is later enabled, it must be operator-owned (for example under
+   `/opt/workflowd`) and installs must retain `--backend=copyfile`. As the agent UID,
+   prove no secret read access and no writes to these files or replaceable ancestors.
+   Keep runtime state in explicitly writable separate directories. Retire the old
+   worktree only after validation.
 
-The script enforces Git and GitHub admission; Unix account, ACL and service-bus
-isolation are operator prerequisites, not properties a same-UID script can create.
-The clone must never become a worktree source for agents. GitHub console follow-up:
-require at least one approval of the final PR head (dismiss stale approvals),
-retain the GitHub Actions `Required checks` gate, and restrict bypass permissions. No ruleset, App, environment or secret changes
-are made by this PR. Deployment requires separate operator action after merging.
+Unix accounts, ACLs, token scope, the operator shell and user-bus isolation are
+operator prerequisites; a same-UID script cannot establish them. Never use the
+protected clone as an agent worktree source.
 
 ## Tests
 
@@ -152,10 +206,9 @@ systemd-run --user --wait --pipe --collect \
   python3 -B -m unittest discover -s test/deploy -v
 ```
 
-The existing Deployment (systemd) CI job runs these tests, and `Required checks`
-already depends on that job. Tests use disposable Git repositories and offline
-GitHub fixtures; they never restart host units or install dependencies.
-
-API contracts: [check-runs](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference),
-[workflow runs](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow),
-and [PR reviews](https://docs.github.com/en/rest/pulls/reviews#list-reviews-for-a-pull-request).
+Deployment (systemd) CI runs these focused tests. They use disposable repositories,
+offline GitHub fixtures and the **real installed gh argument list**, with a local
+Unix HTTP socket for paginated responses. No host units restart, no credentials
+are read, and no external GitHub API is called. Tests cover App/head binding,
+unchanged CI/suite checks, range refusal, bootstrap, state persistence, environment
+isolation, Git configuration, cleanup and skill copying.

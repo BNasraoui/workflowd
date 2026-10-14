@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'deploy' / 'verified-deploy.py'
 SHA = 'a' * 40
@@ -31,10 +32,11 @@ def pr():
                 head={'sha': HEAD}, user={'login': 'author'})
 
 
-def review(**updates):
-    return dict(id=1, state='APPROVED', commit_id=HEAD,
-                user={'login': 'reviewer', 'type': 'User'},
-                author_association='MEMBER') | updates
+APP_ID = 98765
+
+
+def approval(**updates):
+    return check(name='Ben approval', head_sha=HEAD, app={'id': APP_ID}) | updates
 
 
 class VerificationTests(unittest.TestCase):
@@ -72,31 +74,39 @@ class VerificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.verify_workflow([run, run | {'id': 31, 'status': 'queued'}], check(), SHA)
 
-    def test_reviewed_merge_is_accepted(self):
-        d.verify_review(pr(), [review()], SHA)
+    def test_owner_authored_merge_uses_app_approval(self):
+        self.assertEqual(d.verify_approval(pr(), [approval()], SHA, APP_ID)['id'], 10)
 
     def test_unmerged_or_different_merge_is_refused(self):
         for change in [dict(merged_at=None), dict(merge_commit_sha=HEAD),
                        dict(base={'ref': 'other', 'repo': {'full_name': 'BNasraoui/workflowd'}})]:
             with self.subTest(change=change), self.assertRaises(ValueError):
-                d.verify_review(pr() | change, [review()], SHA)
+                d.verify_approval(pr() | change, [approval()], SHA, APP_ID)
 
-    def test_missing_stale_dismissed_untrusted_or_self_review_is_refused(self):
-        cases = [[], [review(commit_id=SHA)], [review(state='DISMISSED')],
-                 [review(author_association='CONTRIBUTOR')],
-                 [review(user={'login': 'bot', 'type': 'Bot'})],
-                 [review(user={'login': 'author', 'type': 'User'})],
-                 [review(), review(id=2, state='CHANGES_REQUESTED')],
-                 [review(), review(id=2, state='DISMISSED')]]
+    def test_missing_stale_wrong_app_or_unsuccessful_approval_is_refused(self):
+        cases = [[], [approval(head_sha=SHA)], [approval(app={'id': 15368})],
+                 [approval(name='Other')], [approval(status='queued')],
+                 [approval(conclusion='failure')], [approval(conclusion='neutral')],
+                 [approval(), approval(id=11, conclusion='cancelled')]]
         for rows in cases:
             with self.subTest(rows=rows), self.assertRaises(ValueError):
-                d.verify_review(pr(), rows, SHA)
+                d.verify_approval(pr(), rows, SHA, APP_ID)
 
-    def test_comment_does_not_replace_approval_and_outstanding_change_blocks(self):
-        d.verify_review(pr(), [review(), review(id=2, state='COMMENTED')], SHA)
-        with self.assertRaises(ValueError):
-            d.verify_review(pr(), [review(), review(id=2, state='CHANGES_REQUESTED',
-                            user={'login': 'second', 'type': 'User'})], SHA)
+    def test_remote_verification_requests_approval_on_pr_head_and_ci_on_merge(self):
+        run = dict(id=30, head_sha=SHA, head_branch='main', event='push',
+                   path='.github/workflows/ci.yml', status='completed', conclusion='success',
+                   check_suite_id=20, repository={'full_name': 'BNasraoui/workflowd'})
+        responses = {
+            f'commits/{SHA}/check-runs?filter=all&per_page=100': [check()],
+            f'actions/workflows/ci.yml/runs?head_sha={SHA}&event=push&per_page=100': [run],
+            f'commits/{SHA}/pulls?per_page=100': [pr()],
+            f'commits/{HEAD}/check-runs?filter=all&per_page=100': [approval()],
+        }
+        with patch.object(d, 'api', side_effect=lambda endpoint, key=None: responses[endpoint]):
+            evidence = d.verify_remote(SHA, APP_ID)
+        self.assertEqual(evidence['pr_head'], HEAD)
+        self.assertEqual(evidence['sha'], SHA)
+        self.assertEqual(evidence['approval_app_id'], APP_ID)
 
 
 if __name__ == '__main__':
