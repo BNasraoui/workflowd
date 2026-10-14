@@ -344,11 +344,12 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           const model = yield* Effect.tryPromise(() => nativeModelFixture(kind, home))
           yield* Effect.tryPromise(() => chmod(model.binary, 0o755))
           const shell = `/bin/sh ${quote(script)}`
+          // The model's final reply must follow command completion, even beyond a short exec yield.
           model.actions.push({
             name: kind === "codex" ? "exec_command" : "Bash",
             arguments:
               kind === "codex"
-                ? { cmd: shell, yield_time_ms: 1000 }
+                ? { cmd: `sleep 2; ${shell}`, yield_time_ms: 30000 }
                 : { command: shell, timeout: 30000 },
           })
           const argv =
