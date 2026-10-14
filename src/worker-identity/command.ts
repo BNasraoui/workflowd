@@ -16,7 +16,8 @@ export async function runWorkerCommand(
   const git = args[0] === "--git"
   if (git && args[1] !== "--") throw new Error("Expected -- before git arguments")
   const command = args.slice(git ? 2 : args[0] === "--" ? 1 : 0)
-  if (command.length === 0) throw new Error("Worker command arguments missing")
+  if (command.length === 0)
+    throw new Error("Expected arguments before requesting worker credentials")
   const response = await io.request(
     socket,
     `/workers/github/${encodeURIComponent(runId)}/token`,
