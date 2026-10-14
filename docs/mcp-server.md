@@ -511,12 +511,37 @@ New resident workers are not offered event subscriptions: the injected Codex
 credentials. Existing waits still reconcile and deliver through their original
 custody checks. No live service configuration is changed.
 
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
+
 After pushing and opening/updating a PR, use
 `timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60`.
-Retry missing checks for at most three minutes after pushing; cap the whole wait
-at 15 minutes, below the default 20-minute resident stall window. On timeout or
-observation error, report the PR URL, pushed SHA, command/error, last required-check
-states/links and that CI is unconfirmed and needs follow-up, then end the turn.
+Retry missing checks or transient observation errors every 30 seconds for at most
+three minutes per cycle; cap each retry/watch cycle at 15 minutes, below the default
+20-minute stall window (shorten it for a lower configured window). Shell output
+is not a stall heartbeat. Missing/pending checks, watch timeouts, and transient
+errors such as "error connecting to api.github.com" mean CI is still running for
+scheduling purposes: continue remaining work and re-check in bounded cycles,
+returning to task work and progress updates between cycles. Never run back-to-back
+blocking waits without returning to task work in between; no single cycle may
+exceed the budget.
+
+Any other observation error means CI is unverified: continue remaining work and
+report it at handoff. Observation errors do not count as confirmed failures.
+The verified result must be for the last pushed head SHA; results for earlier SHAs
+do not verify it. At an early stop, provide the same report as at final handoff
+plus the failing check's link, if applicable.
+
+Verify the pushed head SHA before reporting CI; a changed head must be reported
+without attributing its checks to the pushed SHA. End only at final handoff, an
+active skill's explicit end-turn instruction, or after three unsuccessful repair
+attempts for the same confirmed failure. Missing/pending checks, timeouts, and
+transient observation errors do not count as failures. Once remaining work is
+complete, make one final bounded cycle and hand off. Report the PR URL, pushed SHA,
+and verified required CI result, or CI as unverified and needing follow-up with
+the exact command/error and last required-check states/links (or explicitly none).
 An active skill's end-turn/handoff instructions take precedence over this default.
 
 Resident coordinators use `dispatch_agent` / `read_agent_mailbox` or

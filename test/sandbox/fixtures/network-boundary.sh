@@ -30,6 +30,10 @@ ip -n target route add default via 192.0.2.1
 ip route add 100.64.0.0/10 via 192.0.2.2
 ip route add 169.254.0.0/16 via 192.0.2.2
 ip route add 168.63.129.16/32 via 192.0.2.2
+for address in 10.23.0.2 172.20.0.2 192.168.23.2; do
+  ip -n target addr add "$address/32" dev peer
+  ip route add "$address/32" via 192.0.2.2
+done
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
 ip netns exec agent sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null
@@ -63,7 +67,7 @@ probe() {
   destination=$1
   ip netns exec agent ping -c 1 -W 2 "$destination" >/dev/null 2>&1
 }
-for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16; do probe "$address"; done
+for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16 10.23.0.2 172.20.0.2 192.168.23.2; do probe "$address"; done
 probe 2001:db8:30::1
 probe 2001:db8:1::1
 probe 2001:db8:1::2
@@ -74,7 +78,7 @@ for address in 2001:db8:30::1 2001:db8:1::1; do
   if probe "$address"; then exit 1; fi
 done
 ip6tables -nvxL WFD-HOST | awk '$3 == "DROP" {n += $1} END {exit !(n > 0)}'
-for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16; do
+for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16 10.23.0.2 172.20.0.2 192.168.23.2; do
   if probe "$address"; then exit 1; fi
 done
 # Both INPUT and forwarding must record actual drops, not just rule presence.
@@ -95,5 +99,5 @@ for firewall in iptables ip6tables; do
 done
 sh /network.sh stop
 sh /network.sh stop
-for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16; do probe "$address"; done
+for address in 172.30.0.1 192.0.2.1 172.17.0.1 100.64.0.9 169.254.169.254 169.254.1.1 168.63.129.16 10.23.0.2 172.20.0.2 192.168.23.2; do probe "$address"; done
 printf 'network-boundary-passed\n'

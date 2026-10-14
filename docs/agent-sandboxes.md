@@ -251,25 +251,41 @@ The pinned engine exposes a Unix socket shared only with tooling. It has no TCP
 control listener and rejects `insecureRootCapabilities`. Agent containers never
 receive the socket volume. The disposable VM installs owned `DOCKER-USER` rules
 before booting tooling: forwarded container traffic cannot reach the bridge subnet,
-`100.64.0.0/10`, `169.254.0.0/16`, or Azure's `168.63.129.16`. Both IPv4 and IPv6
+`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+`169.254.0.0/16`, or Azure's `168.63.129.16`. No forwarded RFC1918 exception
+is needed: Dagger DNS stays inside the engine and tooling uses the Unix socket. Both IPv4 and IPv6
 forwarding from the sandbox bridge to `tailscale0` are dropped, including accepted
 subnet routes outside the tailnet address range. Both families' INPUT chains accept
 only `ESTABLISHED,RELATED` traffic from that bridge and drop everything else,
 covering every runner address rather than a destination list. Docker's resolver
 runs inside each container namespace and does not require a host INPUT exception.
 
-Inside the engine, INPUT allows only Dagger's DNS resolver. Protected forwarded
+Inside the engine, IPv4 INPUT allows only Dagger's DNS resolver. IPv6 is disabled
+in that network namespace for existing and future interfaces, including `dagger0`;
+the agent resolver uses IPv4. This avoids depending on optional legacy ip6tables
+kernel modules in the pinned engine. Protected forwarded
 destinations (including all non-loopback runner IPv4 addresses captured at boot and
 `172.17.0.1`) are dropped through `CNI-ADMIN`, which CNI evaluates before its own
 ACCEPT rules. The tests and live verifier require increasing DROP counters;
 rule presence alone is insufficient. Stop removes the owned VM rules and socket
-volume. These scripts must never be applied to mint or another controller host.
+volume. Agents also have Dagger session API access: `http()` asks the engine
+itself to open a connection, bypassing the engine's `dagger0` firewall entirely.
+**This path relies on the host layer alone.** Both the live verifier and combined
+E2E exercise it; an API error or connection refusal is not a successful denial.
+The combined E2E routes synthetic destinations through a throwaway runner network
+namespace attached to the real pinned engine. It runs the actual host rules,
+checks reachable HTTP controls before installation, then tests API and nested
+container denials, public egress and host IPv6 counters. These scripts must never be applied to mint or another controller host.
 
 The hold step launches through `env -u` because the Actions runner injects OIDC
 request variables after step-level environment overrides. The in-repo Tailscale
 bootstrap installs checksum-pinned 1.94.2 binaries and starts `tailscaled` as a
 systemd service with both request variables removed. Only the short-lived join
-client receives the federated token, and the join uses `--accept-routes=false`
+client receives the federated token on stdin using `--id-token=file:/dev/stdin`.
+The token is never in sudo's argv or journal command record, nor saved to disk
+([pinned CLI file support](https://github.com/tailscale/tailscale/blob/v1.94.2/cmd/tailscale/cli/up.go#L196-L217)). Cleanup attempts
+Tailscale logout even if stopping containers fails, retaining a failing step status.
+The join uses `--accept-routes=false`
 and `--accept-dns=false`. The verifier scans all live process environments and
 rejects OIDC request variables in any executable other than `Runner.Worker`;
 it records names only and fails on unreadable live processes. GitHub's job-level
@@ -303,16 +319,25 @@ Run the existing `--probe-denials` command in a capped user unit with
 `MemoryMax=4G` and `MemorySwapMax=0`. It records controller controls before and
 after, timeout denials from the runner host and a real container-use/Dagger
 container, and process environment variable names. From Dagger it also probes
-every non-loopback runner IPv4 address, the sandbox Docker gateway, `172.17.0.1`,
+every non-loopback runner IPv4 address, the sandbox Docker gateway, the runner's
+default gateway, `172.17.0.1`,
 `169.254.169.254`, `168.63.129.16`, and the engine control address. Loopback inside
 Dagger denotes the agent container itself, so it is not a runner-local target.
-Tooling separately probes the runner addresses to exercise host INPUT. Both
+Tooling separately probes the runner addresses and tailnet peers to exercise host
+INPUT and the `tailscale0` forwarding drop. Dagger `http()` probes the same targets
+and requires server-reported TCP dial timeouts, using unique URLs to avoid caching. Both
 container contexts must resolve public DNS, all protected TCP probes must time
 out, and host/engine DROP counters must increase. The verifier captures
 `ip route show table 52` before and after and rejects accepted routes outside
-`100.64.0.0/10`. It retains both families' firewall counters; isolated namespace
-tests exercise IPv6 INPUT and Tailscale forwarding as well.
+`100.64.0.0/10`. It asserts both families' host INPUT and specific `tailscale0` DROP counters,
+and confirms the engine still has IPv6 disabled. For IPv6, a temporary source
+namespace attaches to the runner sandbox bridge with a private probe address and
+static neighbor entry. It probes bridge INPUT and an inventoried tailnet IPv6 peer,
+briefly enabling IPv6 forwarding, then restores every interface's prior setting and
+removes the probe namespace, link and address. These probes use ICMPv6 and require
+counter increases, even on otherwise IPv4-only runners.
 Connection-refused responses count only as controller reachability controls,
-never as successful denials. This is TCP/IPv4 evidence, not UDP or IPv6 coverage.
+never as successful denials. The main connection inventory is TCP/IPv4; the separate IPv6 probes cover INPUT
+and Tailscale forwarding, not every peer listener or UDP.
 Release the second runner using its existing custody workflow afterward. No App,
 environment, secret, ruleset or mint firewall changes are required by this PR.

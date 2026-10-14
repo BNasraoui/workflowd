@@ -79,6 +79,8 @@ jobs:
       - name: Release disposable containers
         if: always()
         run: |
-          bash deploy/sandbox/runner.sh stop
-          sudo tailscale logout
-          sudo systemctl stop workflowd-tailscaled
+          status=0
+          bash deploy/sandbox/runner.sh stop || status=$?
+          sudo tailscale logout || status=$?
+          sudo systemctl stop workflowd-tailscaled || status=$?
+          exit "$status"
