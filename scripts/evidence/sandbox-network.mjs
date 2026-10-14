@@ -64,8 +64,8 @@ export async function collectListeners(hosts, runnerAddress) {
     .flatMap((peer) => peer.TailscaleIPs.filter((address) => isIP(address) === 4))
     .filter((address) => address !== runnerAddress)
   assert.deepEqual(
-    hosts.map((host) => host.address).sort(),
-    addresses.sort(),
+    hosts.map((host) => host.address).toSorted((a, b) => a.localeCompare(b)),
+    addresses.toSorted((a, b) => a.localeCompare(b)),
     "Tailnet inventory is incomplete",
   )
   const inventory = []

@@ -27,7 +27,10 @@ ip route add 169.254.169.254/32 via 192.0.2.2
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 iptables -N DOCKER-USER
 iptables -A FORWARD -j DOCKER-USER
-probe() { ip netns exec agent ping -c 1 -W 1 "$1" >/dev/null 2>&1; }
+probe() {
+  destination=$1
+  ip netns exec agent ping -c 1 -W 1 "$destination" >/dev/null 2>&1
+}
 for address in 172.30.0.1 100.64.0.9 169.254.169.254; do probe "$address"; done
 sh /network.sh host 172.30.0.0/24
 for address in 172.30.0.1 100.64.0.9 169.254.169.254; do

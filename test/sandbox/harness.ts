@@ -111,7 +111,11 @@ export async function runnerFixture() {
       "--group",
       "65532",
     )
-    await docker("cp", "deploy/sandbox/network.sh", `${name}-engine:/tmp/network.sh`)
+    await docker(
+      "cp",
+      "deploy/sandbox/network.sh",
+      `${name}-engine:/usr/local/bin/workflowd-network`,
+    )
     const subnet = await docker(
       "network",
       "inspect",
@@ -119,7 +123,14 @@ export async function runnerFixture() {
       "{{(index .IPAM.Config 0).Subnet}}",
       name,
     )
-    await docker("exec", `${name}-engine`, "sh", "/tmp/network.sh", "engine", subnet)
+    await docker(
+      "exec",
+      `${name}-engine`,
+      "sh",
+      "/usr/local/bin/workflowd-network",
+      "engine",
+      subnet,
+    )
     await docker(
       "run",
       "-d",
