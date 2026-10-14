@@ -1,11 +1,18 @@
 import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
+import { createServer, type Socket } from "node:net"
+import { OpenCode } from "@opencode-ai/client/effect"
+import { FetchHttpClient } from "effect/unstable/http"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
-import { OpenCodeAdapterError } from "../../src/opencode/adapter"
+import {
+  makeOpenCodeSdkClient,
+  SdkOpenCodeAdapter,
+  OpenCodeAdapterError,
+} from "../../src/opencode/adapter"
 import { WorkerIdentity, WorkerIdentityLive } from "../../src/worker-identity/service"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -26,6 +33,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
     ],
   }
   let unavailable = false
+  let adapter: SdkOpenCodeAdapter | undefined
   const environments = new Map<string, Readonly<Record<string, string>>>()
   const live = WorkerIdentityLive(config, fixture.github, fixture.OctokitClass, {
     serverId: "fixture",
@@ -37,6 +45,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
     setSessionEnvironment: (input) =>
       Effect.gen(function* () {
         environments.set(input.sessionID, input.variables)
+        if (adapter) return yield* adapter.setSessionEnvironment(input)
         if (unavailable)
           return yield* Effect.fail(
             new OpenCodeAdapterError({
@@ -122,7 +131,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
           )).status,
         ).toBe(403)
         expect(fixture.bodies).toEqual([{ repositories: ["r"], permissions: { actions: "read" } }])
-        const nativeSessionId = "opencode-session"
+        const nativeSessionId = "ses_fixture"
         const custody = yield* KernelSessionStore
         yield* custody.registerResource({
           resourceId: "resource",
@@ -202,7 +211,7 @@ test("brokers by process ancestry and never writes shared capabilities", async (
         expect(yield* service.nativeRun("claude-session", fixture.directory)).toBeNull()
       }).pipe(Effect.provide(live)),
     )
-    const previous = environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY
+    const previous = environments.get("ses_fixture")!.WORKFLOWD_WORKER_CAPABILITY
     // Reviewer probe: rebuilding with an active session must survive an OpenCode outage.
     unavailable = true
     await Effect.runPromise(
@@ -210,14 +219,14 @@ test("brokers by process ancestry and never writes shared capabilities", async (
         const service = yield* WorkerIdentity
         for (const capability of [
           previous,
-          environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY,
+          environments.get("ses_fixture")!.WORKFLOWD_WORKER_CAPABILITY,
         ]) {
           expect(
             (yield* Effect.promise(() =>
               requestRunSocket(
                 config.socket,
                 "/workers/github/session/token",
-                JSON.stringify({ sessionId: "opencode-session", capability }),
+                JSON.stringify({ sessionId: "ses_fixture", capability }),
               ),
             )).status,
           ).toBe(403)
@@ -231,18 +240,79 @@ test("brokers by process ancestry and never writes shared capabilities", async (
       }).pipe(Effect.provide(live)),
     )
     unavailable = false
+    // Real SDK probes: a server that never answers, then a persisted malformed ID.
+    const connections = new Set<Socket>()
+    let received = false
+    const listener = createServer((connection) => {
+      connections.add(connection)
+      connection.on("data", () => {
+        received = true
+      })
+      connection.on("close", () => connections.delete(connection))
+    })
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve))
+    try {
+      const address = listener.address()
+      if (!address || typeof address === "string") throw new Error("Missing TCP address")
+      adapter = new SdkOpenCodeAdapter(
+        makeOpenCodeSdkClient(
+          OpenCode.make({ baseUrl: `http://127.0.0.1:${address.port}` }).pipe(
+            Effect.provide(FetchHttpClient.layer),
+          ),
+        ),
+      )
+      for (const sessionId of ["ses_fixture", "malformed"]) {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const service = yield* WorkerIdentity
+            for (const capability of [
+              previous,
+              environments.get(sessionId)!.WORKFLOWD_WORKER_CAPABILITY,
+            ]) {
+              expect(
+                (yield* Effect.promise(() =>
+                  requestRunSocket(
+                    config.socket,
+                    "/workers/github/session/token",
+                    JSON.stringify({ sessionId, capability }),
+                  ),
+                )).status,
+              ).toBe(403)
+            }
+            service.register("other", process.pid)
+            expect(
+              (yield* Effect.promise(() =>
+                requestRunSocket(config.socket, "/workers/github/other/token"),
+              )).status,
+            ).toBe(200)
+            const sql = yield* SqlClient.SqlClient
+            const next = sessionId === "ses_fixture" ? "malformed" : "ses_fixture"
+            yield* sql`UPDATE kernel_sessions SET native_session_id=${next} WHERE session_id='session-record'`
+            yield* sql`UPDATE kernel_agent_runs SET native_session_id=${next} WHERE run_id='session'`
+          }).pipe(Effect.provide(live), Effect.timeout("12 seconds")),
+        )
+        expect(received).toBe(sessionId === "ses_fixture")
+        received = false
+      }
+    } finally {
+      adapter = undefined
+      for (const connection of connections) connection.destroy()
+      await new Promise<void>((resolve, reject) =>
+        listener.close((error) => (error ? reject(error) : resolve())),
+      )
+    }
     await Effect.runPromise(
       Effect.gen(function* () {
         yield* WorkerIdentity
         const runs = yield* AgentRunStore
-        const env = environments.get("opencode-session")!
+        const env = environments.get("ses_fixture")!
         expect(env.WORKFLOWD_WORKER_CAPABILITY).not.toBe(previous)
         const request = (capability: string | undefined) =>
           Effect.promise(() =>
             requestRunSocket(
               config.socket,
               "/workers/github/session/token",
-              JSON.stringify({ sessionId: "opencode-session", capability }),
+              JSON.stringify({ sessionId: "ses_fixture", capability }),
             ),
           )
         expect((yield* request(previous)).status).toBe(403)
@@ -254,4 +324,4 @@ test("brokers by process ancestry and never writes shared capabilities", async (
   } finally {
     await fixture.close()
   }
-})
+}, 30_000)
