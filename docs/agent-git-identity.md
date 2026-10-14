@@ -23,6 +23,16 @@ paths. OpenCode receives them through its session environment API, including whe
 resident mailbox setup replaces that environment. Local and remote Claude resume
 processes use the same configuration.
 
+With agent-user isolation enabled, the root host loads these variables from
+`/etc/workflowd/agent-git.env` (root-owned, mode 0600). It requires a complete
+identity whenever launch policy is enabled. `HostStart` accepts no caller-selected
+identity or environment: `hostLaunchCommand` injects the four Git identity
+variables into every fixed profile, including workspace creation, discovery,
+preflight, Codex resident servers and Claude resume. The private worker input
+carries the blocklist; it is not placed in unit arguments or protocol replies.
+The controller and remote runner must also retain their identity configuration
+for paths that do not use the host socket.
+
 ## Git hooks
 
 After creating an agent worktree, workflowd installs its guard under that
@@ -42,13 +52,18 @@ fails instead of launching an unguarded run.
 The guard checks Git's effective author and committer in `pre-commit`,
 `prepare-commit-msg`, and `commit-msg`. This catches an explicit `--author` and
 keeps the commit check active with `--no-verify`. `pre-push` separately runs
-`git log --format='%ae%n%ce'` over each advertised old-to-new range. New refs check
-reachable commits excluding the destination remote’s fetched tracking refs, so
-blocked authors already in the base history do not prevent every new branch.
+`git log --format='%ae%n%ce'` over commits reachable from each pushed tip,
+excluding the advertised old tip for existing refs and any ref under
+`refs/remotes/`, including refs for unconfigured remotes (`--not --remotes`).
+Published blocked history brought in by rebasing or merging onto a newer main
+therefore does not prevent pushes to new or existing branches. Every scan disables
+replace objects and ignores graft files, including an inherited `GIT_GRAFT_FILE`,
+so they cannot hide the original commit metadata or ancestry.
 Keep these refs current with a fetch before pushing (dispatch fetches origin
-before creating worktrees). A URL destination with no matching tracking refs
-conservatively checks all reachable history. Deletions need no scan. An unknown
-old object or failed history inspection refuses the push; fetch before retrying.
+before creating worktrees). URL destinations and named remotes use the same
+exclusion, checking commits not reachable from any remote-tracking ref.
+Deletions need no scan. An unknown old object or failed history inspection refuses
+the push; fetch before retrying.
 
 Workflowd runs the identity check before chaining the original repository hook.
 Other Git hooks are forwarded, and pre-push forwards the original stdin unchanged.
@@ -67,9 +82,10 @@ against an agent that can change Git configuration, local refs, or hook files:
 - The same Unix user can change the guard files or remove the conditional
   `includeIf` configuration.
 - Fake `refs/remotes/<remote>/*` tracking refs can exclude blocked commits from
-  the new-ref scan, even with hooks enabled. The exclusion trusts writable local
-  refs; another remote with the same URL and fabricated tracking history has the
-  same limitation. Fetching is operational hygiene, not an enforcement boundary.
+  push scans, even with hooks enabled. The exclusion trusts any ref under
+  `refs/remotes/`, including refs for unconfigured remotes, regardless of the push
+  destination or remote URL.
+  Fetching is operational hygiene, not an enforcement boundary.
 - API-created commits, such as GitHub Git commits or Contents API writes through
   `gh api`, never pass through local hooks.
 - `git commit-tree` and cherry-pick can create or preserve metadata that the
@@ -82,9 +98,17 @@ configuration, cover every repository agents work in, and avoid exposing identit
 values in repositories or check output. It is not implemented by this PR.
 
 Fix Work workspaces receive the configured identity through OpenCode but do not
-install this guard. PR #106's agent-host launch paths must preserve both identity
-propagation and guard installation; whichever PR merges second must reconcile
-those paths, including `HostStart` and `hostLaunchCommand`.
+install this guard.
+
+The root host creates independent clones through the agent-UID workspace worker.
+That worker installs the same guard after checkout. Native launch and Claude
+resume refresh guards in marked workspaces as the agent UID, preserving original
+hooks. The hooks directory and executables are mode 0700; marker, previous-hook
+record and blocklist are mode 0600, owned by the agent. This makes the private
+policy readable by that user without widening it to other users. Root never runs
+Git against agent-writable metadata. The agent can still change its own hooks or
+Git configuration, within the same documented limits above; this is not a
+root-enforced or server-side policy.
 
 ## Claude account context investigation
 
@@ -110,7 +134,7 @@ billing paths, or set an unsupported flag. The Git guard remains necessary.
 ## Operator rollout
 
 1. Set all three variables in the effective environment file for each daemon,
-   including execution-mode daemons, and Claude runner. Read the approved identity
+   including execution-mode daemons, the root agent host, and Claude runner. Read the approved identity
    from host configuration and choose the blocklist there; do not copy values
    into this repository or PR text.
 2. Drain active runs, including resident processes, before restarting the updated

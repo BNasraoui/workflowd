@@ -357,7 +357,7 @@ const make = Effect.gen(function* () {
 
   const claudeResult = (
     command: RemoteCommand,
-    outcome: ClaudeResumeOutcome,
+    outcome: Exclude<ClaudeResumeOutcome, { status: "pending" }>,
     at: Date,
   ): RemoteResult => ({
     version: 1,
@@ -371,7 +371,10 @@ const make = Effect.gen(function* () {
     status: outcome.status,
     ...(outcome.status === "succeeded"
       ? { output: outcome.output }
-      : { failureReason: outcome.failureReason }),
+      : {
+          failureReason: outcome.failureReason,
+          ...(outcome.failureDetail === undefined ? {} : { failureDetail: outcome.failureDetail }),
+        }),
     observedAt: at.toISOString(),
   })
 
@@ -393,8 +396,8 @@ const make = Effect.gen(function* () {
    * transaction records the result. A redelivery finds the claim spent and
    * replays the stored result; a claim spent with no stored result means a
    * previous execution was interrupted mid-flight — its effects on the
-   * session are unknowable, so the runner reports execution_interrupted
-   * rather than ever running the wake a second time.
+   * session require protected host custody for recovery. Without it the runner
+   * reports execution_interrupted; it never repeats an untracked wake.
    */
   const executeClaudeResume: RemoteRunnerStorePort["executeClaudeResume"] = (command, at) =>
     Effect.gen(function* () {
@@ -417,13 +420,23 @@ const make = Effect.gen(function* () {
             ),
           )
         }
-        return yield* storeClaudeResult(
-          command,
-          claudeResult(command, { status: "failed", failureReason: "execution_interrupted" }, at),
-          at,
-        )
+        const outcome =
+          claudeExecutor.recover === undefined
+            ? { status: "failed" as const, failureReason: "execution_interrupted" as const }
+            : yield* claudeExecutor.recover(command.payload, command.commandId)
+        if (outcome.status === "pending")
+          return yield* new RemoteRunnerDataError({
+            key: command.commandId,
+            message: "host observation pending; custody retained",
+          })
+        return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
       }
-      const outcome = yield* claudeExecutor.execute(command.payload)
+      const outcome = yield* claudeExecutor.execute(command.payload, command.commandId)
+      if (outcome.status === "pending")
+        return yield* new RemoteRunnerDataError({
+          key: command.commandId,
+          message: "host observation pending; custody retained",
+        })
       return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
     })
 

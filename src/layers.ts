@@ -31,7 +31,7 @@ import {
 } from "./kernel/agent-wait-ingress"
 import { KernelJobStore, KernelJobStoreLive } from "./kernel/job-store"
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
-import { AgentRunWorktrees, gitAgentRunWorktrees } from "./kernel/agent-run-worktrees"
+import { AgentRunWorktrees, agentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
@@ -216,7 +216,11 @@ function makeExecutionOnlyLayer(config: AppConfig) {
           Layer.provideMerge(signals),
           Layer.provide(
             Layer.succeed(AgentRunWorktrees, {
-              create: (input) => gitAgentRunWorktrees.create({ ...input, git: config.agentGit }),
+              create: (input) =>
+                agentRunWorktrees(config.credentialSocket).create({
+                  ...input,
+                  git: config.agentGit,
+                }),
             }),
           ),
         )
@@ -644,7 +648,11 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(sandboxProviderLayer),
           Layer.provideMerge(
             Layer.succeed(AgentRunWorktrees, {
-              create: (input) => gitAgentRunWorktrees.create({ ...input, git: config.agentGit }),
+              create: (input) =>
+                agentRunWorktrees(config.credentialSocket).create({
+                  ...input,
+                  git: config.agentGit,
+                }),
             }),
           ),
           Layer.provideMerge(claudeCliLayer),

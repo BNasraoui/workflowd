@@ -142,6 +142,7 @@ const storedResultJson = (result: RemoteResult, hostId: string): string =>
           status: result.status,
           ...(result.output === undefined ? {} : { output: result.output }),
           ...(result.failureReason === undefined ? {} : { failureReason: result.failureReason }),
+          ...(result.failureDetail === undefined ? {} : { failureDetail: result.failureDetail }),
         }
       : { kind: "remote_probe", hostId, status: result.status },
   )

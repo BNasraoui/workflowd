@@ -1,10 +1,14 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { makeCodexCli, type CodexExecEvent } from "../../src/kernel/codex-session"
-import { parseCodexWorkerArguments, runCodexWorker } from "../../src/kernel/codex-worker"
+import {
+  parseCodexWorkerArguments,
+  runCodexWorker,
+  runHostWorker,
+} from "../../src/kernel/codex-worker"
 
 const fakeSystemd = (commands: ReadonlyArray<string>[]) => {
   let active = false
@@ -190,6 +194,275 @@ test("reattaches to durable output without relaunching and cancels only when exp
         (command) => command[0] === "systemctl" && command.includes(pending.executionId),
       ),
     ).toBeDefined()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host worker profiles preserve stdin and keep native result files bounded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-profiles-"))
+  try {
+    const binary = join(root, "native")
+    const capture = join(root, "capture")
+    await writeFile(
+      binary,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${capture}-args'\ncase "$1" in --version) echo version;; login) exit 0;; auth) echo '{"loggedIn":true}';; *) cat > '${capture}'; echo '{"result":"native output"}';; esac\n`,
+      { mode: 0o755 },
+    )
+    for (const profile of [
+      "codex",
+      "claude",
+      "claude-resume",
+      "codex-preflight",
+      "claude-preflight",
+      "claude-session",
+      "codex-server",
+    ] as const) {
+      const input = join(root, "input")
+      await writeFile(
+        input,
+        JSON.stringify({
+          operation: "start",
+          profile,
+          runId: "worker-fixture",
+          directory: root,
+          nativeSessionId: "missing-fixture-session",
+          model: "fixture",
+          effort: "high",
+          provider: "fixture",
+          prompt: "secret stays on stdin",
+        }),
+      )
+      for (const name of ["prompt", "events", "stderr", "result"])
+        await rm(join(root, name), { force: true })
+      expect(await runHostWorker(input, binary, root)).toBe(0)
+      expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
+        version: 1,
+        exitCode: 0,
+      })
+      if (["codex", "claude", "claude-resume", "codex-server"].includes(profile)) {
+        expect(await readFile(capture, "utf8")).toBe("secret stays on stdin")
+        expect(await readFile(join(root, "events"), "utf8")).toContain("native output")
+      }
+      if (profile === "codex-server")
+        expect((await readFile(`${capture}-args`, "utf8")).split("\n")).toContain(
+          `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+        )
+      if (profile === "claude-session")
+        expect(await readFile(join(root, "events"), "utf8")).toBe("false")
+    }
+    await writeFile(
+      binary,
+      `#!/bin/sh\nif [ "$1" = --version ]; then exit 0; fi\necho '{"loggedIn":false}'\n`,
+      { mode: 0o755 },
+    )
+    await writeFile(
+      join(root, "input"),
+      JSON.stringify({
+        operation: "start",
+        profile: "claude-preflight",
+        runId: "bad-auth",
+        directory: root,
+        model: null,
+        prompt: "",
+      }),
+    )
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    await expect(runHostWorker(join(root, "input"), binary, root)).rejects.toThrow(
+      "native authentication unavailable",
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host discovery worker exchanges the native model catalog and workspace worker creates a separate clone", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-workspace-"))
+  try {
+    const input = join(root, "input")
+    const binary = join(root, "discovery")
+    await writeFile(
+      binary,
+      `#!${process.execPath}\nawait Bun.write(${JSON.stringify(join(root, "args"))}, JSON.stringify(process.argv.slice(2)));\nawait import(${JSON.stringify(join(import.meta.dir, "../execution/fixtures/codex-app-server.mjs"))})\n`,
+      { mode: 0o755 },
+    )
+    await writeFile(
+      input,
+      JSON.stringify({
+        operation: "start",
+        profile: "codex-discovery",
+        runId: "discovery-worker",
+        directory: root,
+        prompt: "",
+        model: null,
+      }),
+    )
+    expect(await runHostWorker(input, binary, root)).toBe(0)
+    expect(JSON.parse(await readFile(join(root, "args"), "utf8"))).toContain(
+      `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+    )
+    const models = JSON.parse(await readFile(join(root, "events"), "utf8"))
+    expect(models).toMatchObject([{ model: "first" }, { model: "second" }])
+    const source = join(root, "source")
+    const git = async (args: string[]) => {
+      const child = Bun.spawn(["git", ...args], {
+        env: { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const stderr = await new Response(child.stderr).text()
+      if ((await child.exited) !== 0) throw new Error(stderr)
+    }
+    await git(["init", "--initial-branch=main", source])
+    await git([
+      "-C",
+      source,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "fixture",
+    ])
+    const directory = join(root, "clone")
+    const request = {
+      operation: "start",
+      profile: "workspace",
+      runId: "workspace-worker",
+      git: { name: "Agent", email: "agent@example.test", blockedEmails: ["blocked@example.test"] },
+      directory,
+      repository: source,
+      branch: "agent-run",
+      prompt: "",
+      model: null,
+    }
+    await writeFile(input, JSON.stringify(request))
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    expect(await runHostWorker(input, binary, root)).toBe(0)
+    expect((await stat(join(directory, ".git"))).isDirectory()).toBe(true)
+    const hooks = join(directory, ".git", "workflowd-hooks")
+    expect(await readFile(join(hooks, "agent-worktree"), "utf8")).toBe("")
+    expect(await readFile(join(hooks, "blocked-emails"), "utf8")).toBe("blocked@example.test\n")
+    expect((await stat(join(hooks, "blocked-emails"))).mode & 0o777).toBe(0o600)
+    expect(await readFile(join(directory, ".git", "HEAD"), "utf8")).toBe(
+      "ref: refs/heads/agent-run\n",
+    )
+    expect(
+      await readFile(join(directory, ".git", "objects", "info", "alternates"), "utf8").catch(
+        () => null,
+      ),
+    ).toBeNull()
+    await writeFile(input, JSON.stringify({ ...request, branch: "--invalid" }))
+    for (const name of ["prompt", "events", "stderr", "result"])
+      await rm(join(root, name), { force: true })
+    await expect(runHostWorker(input, binary, root)).rejects.toThrow("invalid workspace selection")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("the deployed worker entrypoint completes a Claude launch without a circular module wait", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-entrypoint-"))
+  try {
+    const binary = join(root, "claude")
+    await writeFile(binary, '#!/bin/sh\ncat >/dev/null\necho \'{"type":"result"}\'\n', {
+      mode: 0o755,
+    })
+    const input = join(root, "input")
+    await writeFile(
+      input,
+      JSON.stringify({
+        operation: "start",
+        profile: "claude",
+        runId: "entrypoint",
+        directory: root,
+        prompt: "fixture",
+        model: null,
+      }),
+    )
+    const build = await Bun.build({
+      entrypoints: [join(import.meta.dir, "../../src/kernel/codex-worker.ts")],
+      target: "bun",
+    })
+    expect(build.success).toBe(true)
+    const worker = join(root, "worker.js")
+    await writeFile(worker, await build.outputs[0]!.text())
+    const child = Bun.spawn([process.execPath, worker, "--host-input", input, "--binary", binary], {
+      cwd: root,
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const timer = setTimeout(() => child.kill("SIGKILL"), 1500)
+    try {
+      expect(await child.exited).toBe(0)
+      expect(JSON.parse(await readFile(join(root, "result"), "utf8"))).toEqual({
+        version: 1,
+        exitCode: 0,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+for (const name of ["input", "prompt", "events", "stderr", "result"] as const) {
+  test(`host worker refuses a symlink at ${name} without touching its target`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "host-worker-links-"))
+    try {
+      const input = join(root, "input")
+      const canary = join(root, "canary")
+      const request = JSON.stringify({
+        operation: "start",
+        profile: "claude",
+        runId: "links",
+        directory: root,
+        prompt: "fixture",
+        model: null,
+      })
+      await writeFile(canary, request)
+      if (name !== "input") await writeFile(input, request)
+      await symlink(canary, join(root, name))
+      await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow()
+      expect(await readFile(canary, "utf8")).toBe(request)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test("host worker rejects input paths outside its service working directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-path-"))
+  try {
+    for (const path of ["input", join(root, "other"), `${root}/../input`, "/etc/passwd"]) {
+      await expect(runHostWorker(path, "/usr/bin/true", root)).rejects.toThrow(
+        "invalid host input path",
+      )
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host worker rejects directory and multiply linked input inodes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-worker-inodes-"))
+  try {
+    const input = join(root, "input")
+    await mkdir(input)
+    await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow(
+      "invalid host input file",
+    )
+    await rm(input, { recursive: true })
+    await writeFile(input, "{}")
+    await link(input, join(root, "alias"))
+    await expect(runHostWorker(input, "/usr/bin/true", root)).rejects.toThrow(
+      "invalid host input file",
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

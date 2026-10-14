@@ -19,7 +19,8 @@ export type NativeAction = { name: string; arguments: Record<string, unknown> }
 /** Real CLI protocol, synthetic model replies and credentials; no inference provider is contacted. */
 export async function nativeModelFixture(kind: "codex" | "claude", root: string) {
   let holdAfter = Infinity
-  const gate = Promise.withResolvers<void>()
+  let gate = Promise.withResolvers<void>()
+  let reply = "native-fixture-complete"
   const requests: unknown[] = []
   const catalogs: string[][] = []
   const actions: Array<NativeAction | ((request: unknown) => NativeAction)> = []
@@ -58,9 +59,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
                 id,
                 role: "assistant",
                 status: "completed",
-                content: [
-                  { type: "output_text", text: "native-fixture-complete", annotations: [] },
-                ],
+                content: [{ type: "output_text", text: reply, annotations: [] }],
               }
             : {
                 type: "function_call",
@@ -126,7 +125,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
             : { type: "tool_use", id, name, input: {} }
         const delta =
           action === undefined
-            ? { type: "text_delta", text: "native-fixture-complete" }
+            ? { type: "text_delta", text: reply }
             : { type: "input_json_delta", partial_json: JSON.stringify(action.arguments) }
         output =
           event("message_start", {
@@ -176,17 +175,23 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
       : []
   await writeFile(
     path,
-    `#!${process.execPath}\nconst args=process.argv.slice(2); const i=args.indexOf("exec"); if(i>=0) args.splice(i+1,0,...${JSON.stringify(config)}); const child=Bun.spawn([${JSON.stringify(binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit",env:{...process.env,ANTHROPIC_BASE_URL:${JSON.stringify(model.url.toString())},ANTHROPIC_AUTH_TOKEN:"fixture-only",ANTHROPIC_API_KEY:"fixture-only",CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1"}});process.exitCode=await child.exited\n`,
+    `#!${process.execPath}\nconst args=process.argv.slice(2); const i=args.indexOf("exec"), j=args.indexOf("app-server"); if(i>=0) args.splice(i+1,0,...${JSON.stringify(config)}); else if(j>=0) args.splice(j,0,...${JSON.stringify(config)}); const child=Bun.spawn([${JSON.stringify(binary)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit",env:{...process.env,ANTHROPIC_BASE_URL:${JSON.stringify(model.url.toString())},ANTHROPIC_AUTH_TOKEN:"fixture-only",ANTHROPIC_API_KEY:"fixture-only",CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:"1"}});process.exitCode=await child.exited\n`,
     { mode: 0o755 },
   )
   return {
     binary: path,
+    modelUrl: model.url.toString(),
     requests,
     catalogs,
     actions,
     holdAfter: (count: number) => {
       holdAfter = count
+      gate = Promise.withResolvers<void>()
     },
+    reply: (text: string) => {
+      reply = text
+    },
+    release: () => gate.resolve(),
     close: () => {
       gate.resolve()
       return model.stop(true)

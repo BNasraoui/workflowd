@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto"
+import { startAgentHost, readAgentHostOutput } from "../agent-host/client"
+import { normalizeError } from "../errors"
 import type { AgentGitConfig } from "../agent-git/config"
 import { installAgentGitGuard } from "../agent-git/guard"
 import { Context, Data, Effect } from "effect"
@@ -125,3 +128,32 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
       }),
     ),
 }
+
+/** Native agent clones are created by the agent UID; the controller never runs Git in them. */
+export const agentRunWorktrees = (socket: string | undefined): AgentRunWorktreesPort =>
+  socket === undefined
+    ? gitAgentRunWorktrees
+    : {
+        create: (input) =>
+          Effect.tryPromise({
+            try: async (signal) => {
+              const process = await startAgentHost(socket, {
+                profile: "workspace",
+                runId: `workspace-${randomUUID()}`,
+                directory: input.directory,
+                repository: input.repository,
+                branch: input.branch,
+                ...(input.base === undefined ? {} : { base: input.base }),
+                prompt: "",
+                model: null,
+                timeoutMs: 60000,
+              })
+              await readAgentHostOutput(socket, process, 1024, signal)
+            },
+            catch: (cause) =>
+              new WorkspaceError({
+                operation: "create agent-run worktree",
+                cause: normalizeError(cause),
+              }),
+          }),
+      }

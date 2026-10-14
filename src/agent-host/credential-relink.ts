@@ -1,4 +1,4 @@
-import { constants } from "node:fs"
+import { constants, type Stats } from "node:fs"
 import {
   lstat,
   open,
@@ -16,10 +16,12 @@ import { basename, dirname, join } from "node:path"
 import { Schema } from "effect"
 import type { CredentialPolicy } from "./config"
 import { credentialLock, credentialParent, inspectCredentialLayout } from "./credentials"
-import { credentialRefusal } from "./protocol"
+import { credentialRefusal, credentialReason, OwnedProcess } from "./protocol"
+import { dlopen, FFIType, ptr } from "bun:ffi"
 
 async function resolvedConsumers(paths: readonly string[]) {
   const installed = new Set<string>()
+  const roots = new Set<string>()
   const add = async (path: string) => {
     const resolved = await realpath(path).catch((error: unknown) => {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
@@ -33,6 +35,7 @@ async function resolvedConsumers(paths: readonly string[]) {
     if (!binary) continue
     // Claude's native installer retains previous versions; running clients may use any of them.
     if (basename(dirname(binary)) === "versions") {
+      roots.add(dirname(binary))
       for (const name of await readdir(dirname(binary))) await add(join(dirname(binary), name))
     }
     // Codex's npm launcher delegates to a platform package, or its bundled vendor tree.
@@ -47,6 +50,7 @@ async function resolvedConsumers(paths: readonly string[]) {
       ]
       for (const root of packages) {
         const vendor = join(root, "vendor")
+        roots.add(vendor)
         const targets = await readdir(vendor).catch((error: unknown) => {
           if (error instanceof Error && "code" in error && error.code === "ENOENT") return []
           throw error
@@ -58,14 +62,48 @@ async function resolvedConsumers(paths: readonly string[]) {
       }
     }
   }
-  return installed
+  return { installed, roots }
 }
 
-async function requireStopped(policy: CredentialPolicy, client: "codex" | "claude") {
-  const installed = await resolvedConsumers(policy.consumerExecutables)
+async function requireIdleCustody(policy: CredentialPolicy, client: "codex" | "claude") {
   const fail = (): never => {
     throw credentialRefusal(client, "credential_relink_in_progress")
   }
+  if (policy.launch) {
+    const custody = await credentialParent(
+      join(policy.launch.custodyRoot, "record"),
+      policy.ownerUid,
+    )
+    try {
+      for (const name of await readdir(`/proc/self/fd/${custody.handle.fd}`)) {
+        if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+        const file = await open(
+          join(`/proc/self/fd/${custody.handle.fd}`, name),
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        )
+        try {
+          const info = await file.stat()
+          if (!info.isFile() || info.uid !== policy.ownerUid || info.size > 300000) fail()
+          const record = Schema.decodeUnknownSync(Schema.Struct({ process: OwnedProcess }))(
+            JSON.parse(await file.readFile("utf8")),
+          )
+          if (record.process.active || record.process.exitCode === null) fail()
+        } finally {
+          await file.close()
+        }
+      }
+    } finally {
+      await custody.handle.close()
+    }
+  }
+}
+
+async function requireStopped(policy: CredentialPolicy, client: "codex" | "claude") {
+  const { installed, roots } = await resolvedConsumers(policy.consumerExecutables)
+  const fail = (): never => {
+    throw credentialRefusal(client, "credential_relink_in_progress")
+  }
+  await requireIdleCustody(policy, client)
   for (const entry of await readdir("/proc")) {
     if (!/^\d+$/.test(entry) || Number(entry) === process.pid) continue
     const path = `/proc/${entry}`
@@ -74,6 +112,12 @@ async function requireStopped(policy: CredentialPolicy, client: "codex" | "claud
     if (info.uid === policy.agentUid) fail()
     if (info.uid !== policy.controllerUid) continue
     try {
+      const target = await readlink(`${path}/exe`)
+      if (target.endsWith(" (deleted)")) {
+        const original = target.slice(0, -" (deleted)".length)
+        if (installed.has(original) || [...roots].some((root) => original.startsWith(`${root}/`)))
+          fail()
+      }
       const executable = await realpath(`${path}/exe`)
       if (installed.has(executable)) fail()
       // Script entrypoints run inside Node; resolve argv paths too, never argv display names.
@@ -163,7 +207,15 @@ async function importReplacement(
       0o600,
     )
     handles.push(staging)
-    await staging.writeFile(await input.readFile())
+    const bytes = Buffer.alloc(1024 * 1024 + 1)
+    let size = 0
+    while (size < bytes.length) {
+      const { bytesRead } = await input.read(bytes, size, bytes.length - size, null)
+      if (bytesRead === 0) break
+      size += bytesRead
+    }
+    if (size > 1024 * 1024) fail()
+    await staging.writeFile(bytes.subarray(0, size))
     await staging.chown(policy.ownerUid, policy.groupGid)
     await staging.chmod(0o660)
     await staging.sync()
@@ -171,6 +223,7 @@ async function importReplacement(
     await persist({ ...intent, stagedDevice: staged.dev, stagedInode: staged.ino })
     await rename(stagingPath, canonical.path)
     await canonical.handle.sync()
+    return intent
   } finally {
     await Promise.all(handles.map((handle) => handle.close()))
   }
@@ -184,11 +237,137 @@ async function validateRepairedSource(path: string, canonical: string, repair: t
   throw credentialRefusal(repair.client, "shared_credential_diverged")
 }
 
+function validAutomaticStore(
+  policy: CredentialPolicy,
+  client: "codex" | "claude",
+  directory: Stats,
+  canonical: Stats,
+) {
+  return (
+    [policy.root, join(policy.root, client)].includes(dirname(policy[client].canonical)) &&
+    directory.uid === policy.ownerUid &&
+    directory.gid === policy.groupGid &&
+    (directory.mode & 0o777) === 0o710 &&
+    canonical.isFile() &&
+    canonical.nlink === 1 &&
+    canonical.uid === policy.ownerUid &&
+    canonical.gid === policy.groupGid &&
+    (canonical.mode & 0o777) === 0o660
+  )
+}
+
+function newerPrivateLogin(info: Stats, canonical: Stats, uid: number) {
+  return (
+    info.isFile() &&
+    info.nlink === 1 &&
+    info.uid === uid &&
+    (info.mode & 0o777) === 0o600 &&
+    info.size > 0 &&
+    info.size <= 1024 * 1024 &&
+    info.mtimeMs > canonical.mtimeMs
+  )
+}
+
+const absentOrStat = (path: string) =>
+  lstat(path).catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null
+    throw error
+  })
+
+/** Select only a private newer replacement beside an unchanged canonical link.
+ * Runs under the same exclusive lock as the journaled repair; never resumes a journal automatically.
+ */
+async function automaticSource(policy: CredentialPolicy, client: "codex" | "claude") {
+  const login = policy[client]
+  const handles: FileHandle[] = []
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  try {
+    const store = await credentialParent(login.canonical, policy.ownerUid)
+    handles.push(store.handle)
+    const directory = await store.handle.stat()
+    const canonical = await lstat(store.path)
+    if (!validAutomaticStore(policy, client, directory, canonical)) fail()
+    for (const name of [
+      `${client}.repair.json`,
+      `${client}.repair.json.next`,
+      `${client}.staging`,
+    ]) {
+      if (await absentOrStat(join(`/proc/self/fd/${store.handle.fd}`, name))) fail()
+    }
+    let selected: typeof Repair.Type | undefined
+    for (const [source, path, uid] of [
+      ["ben", login.benLink, policy.controllerUid],
+      ["agent", login.agentLink, policy.agentUid],
+    ] as const) {
+      const parent = await credentialParent(path, uid)
+      handles.push(parent.handle)
+      if (await absentOrStat(`${parent.path}.workflowd-relink`)) fail()
+      const info = await lstat(parent.path)
+      if (info.isSymbolicLink()) {
+        if ((await readlink(parent.path)) !== login.canonical) fail()
+      } else {
+        if (selected || !newerPrivateLogin(info, canonical, uid)) fail()
+        selected = { client, source, sourceDevice: info.dev, sourceInode: info.ino }
+      }
+    }
+    return selected ?? fail()
+  } finally {
+    await Promise.all(handles.map((handle) => handle.close()))
+  }
+}
+
+/** Admission stays locked through handoff, including after an automatic repair. */
+export async function admitHostCredentials(policy: CredentialPolicy, client: "codex" | "claude") {
+  let release = await credentialLock(policy, false)
+  try {
+    try {
+      await inspectCredentialLayout(policy, client)
+    } catch (error) {
+      if (credentialReason(error) !== "shared_credential_diverged") throw error
+      await release()
+      release = async () => {}
+      await relinkCredentials(policy, client, "auto")
+      release = await credentialLock(policy, false)
+      await inspectCredentialLayout(policy, client)
+    }
+    return release
+  } catch (error) {
+    await release()
+    throw error
+  }
+}
+
+async function loadRepair(
+  path: string,
+  ownerUid: number,
+  client: "codex" | "claude",
+  source: "ben" | "agent",
+  automatic: boolean,
+) {
+  const existing = await absentOrStat(path)
+  if (!existing) return undefined
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  if (
+    automatic ||
+    !existing.isFile() ||
+    existing.uid !== ownerUid ||
+    (existing.mode & 0o777) !== 0o600
+  )
+    fail()
+  const repair = Schema.decodeUnknownSync(Repair)(JSON.parse(await readFile(path, "utf8")))
+  if (repair.client !== client || repair.source !== source) fail()
+  return repair
+}
+
 /** Administrative offline repair. Failure deliberately leaves a durable admission fence. */
 export async function relinkCredentials(
   policy: CredentialPolicy,
   client: "codex" | "claude",
-  source: "ben" | "agent",
+  requestedSource: "ben" | "agent" | "auto",
 ) {
   const release = await credentialLock(policy, true)
   const handles: FileHandle[] = []
@@ -196,6 +375,8 @@ export async function relinkCredentials(
     throw credentialRefusal(client, "shared_credential_diverged")
   }
   try {
+    const automatic = requestedSource === "auto" ? await automaticSource(policy, client) : undefined
+    const source = automatic?.source ?? (requestedSource === "agent" ? "agent" : "ben")
     await requireStopped(policy, client)
     const login = policy[client]
     const sourcePath = source === "ben" ? login.benLink : login.agentLink
@@ -221,16 +402,14 @@ export async function relinkCredentials(
       fail()
     const storePath = `/proc/self/fd/${canonical.handle.fd}`
     const journalPath = join(storePath, `${client}.repair.json`)
-    const existing = await lstat(journalPath).catch(() => null)
-    if (
-      existing &&
-      (!existing.isFile() || existing.uid !== policy.ownerUid || (existing.mode & 0o777) !== 0o600)
+    const repair = await loadRepair(
+      journalPath,
+      policy.ownerUid,
+      client,
+      source,
+      automatic !== undefined,
     )
-      fail()
-    const repair = existing
-      ? Schema.decodeUnknownSync(Repair)(JSON.parse(await readFile(journalPath, "utf8")))
-      : undefined
-    if (repair && (repair.client !== client || repair.source !== source)) fail()
+    if (automatic && !otherInfo) fail()
     if (!repair && sourceInfo?.isSymbolicLink()) {
       await inspectCredentialLayout(policy, client)
       return
@@ -240,20 +419,37 @@ export async function relinkCredentials(
       repair?.stagedInode !== undefined &&
       target?.ino === repair.stagedInode &&
       target?.dev === repair.stagedDevice
+    let imported = repair
     if (!installed) {
-      await importReplacement(policy, client, source, selected, canonical, repair)
+      await requireStopped(policy, client)
+      imported = await importReplacement(
+        policy,
+        client,
+        source,
+        selected,
+        canonical,
+        repair ?? automatic,
+      )
     } else {
       await validateRepairedSource(selected.path, login.canonical, repair)
     }
-    for (const parent of [selected, other]) {
-      const temporary = `${parent.path}.workflowd-relink`
-      await unlink(temporary).catch((error: unknown) => {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
-      })
-      await symlink(login.canonical, temporary)
-      await rename(temporary, parent.path)
-      await parent.handle.sync()
-    }
+    // Recovery may already have linked or removed the selected entry. A fresh import
+    // must still name the exact source inode pinned in the durable journal.
+    const expectedSource = installed ? sourceInfo : await lstat(selected.path)
+    if (
+      !installed &&
+      (expectedSource?.dev !== imported?.sourceDevice ||
+        expectedSource?.ino !== imported?.sourceInode)
+    )
+      fail()
+    await replaceCredentialLinks(
+      [
+        { parent: selected, expected: expectedSource },
+        { parent: other, expected: otherInfo },
+      ],
+      login.canonical,
+      client,
+    )
     await inspectCredentialLayout(policy, client, true)
     await unlink(journalPath)
     await canonical.handle.sync()
@@ -263,5 +459,71 @@ export async function relinkCredentials(
   } finally {
     await Promise.all(handles.map((handle) => handle.close()))
     await release()
+  }
+}
+
+type Entry = {
+  parent: Awaited<ReturnType<typeof credentialParent>>
+  expected: Stats | null
+}
+
+async function unchanged(path: string, expected: Stats | null, canonical: string) {
+  const current = await absentOrStat(path)
+  if (!expected) return current === null
+  if (!current || current.dev !== expected.dev || current.ino !== expected.ino) return false
+  return !expected.isSymbolicLink() || (await readlink(path)) === canonical
+}
+
+/** Exchange preserves a login arriving between the last check and the rename. */
+async function replaceCredentialLinks(
+  entries: Entry[],
+  canonical: string,
+  client: "codex" | "claude",
+) {
+  const libc = dlopen("libc.so.6", {
+    renameat2: {
+      args: [FFIType.i32, FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32],
+      returns: FFIType.i32,
+    },
+  })
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  const rename = (from: string, to: string, flags: number) => {
+    const source = Buffer.from(`${from}\0`)
+    const target = Buffer.from(`${to}\0`)
+    if (libc.symbols.renameat2(-100, ptr(source), -100, ptr(target), flags) !== 0) fail()
+  }
+  try {
+    for (const entry of entries) {
+      const temporary = `${entry.parent.path}.workflowd-relink`
+      const leftover = await absentOrStat(temporary)
+      if (leftover) {
+        // A crash may leave an unvalidated swapped-out login here. Never erase it.
+        if (!leftover.isSymbolicLink() || (await readlink(temporary)) !== canonical) fail()
+        await unlink(temporary)
+      }
+      await symlink(canonical, temporary)
+      const replacement = await lstat(temporary)
+      // Recheck BOTH sides before EACH rename, including the already repaired source.
+      for (const other of entries)
+        if (!(await unchanged(other.parent.path, other.expected, canonical))) fail()
+      if (entry.expected) {
+        rename(temporary, entry.parent.path, 2) // RENAME_EXCHANGE
+        if (!(await unchanged(temporary, entry.expected, canonical))) {
+          rename(temporary, entry.parent.path, 2)
+          await entry.parent.handle.sync()
+          fail()
+        }
+        await unlink(temporary)
+      } else {
+        // Explicit journal recovery may recreate a missing link, never overwrite a new login.
+        rename(temporary, entry.parent.path, 1) // RENAME_NOREPLACE
+      }
+      entry.expected = replacement
+      await entry.parent.handle.sync()
+    }
+  } finally {
+    libc.close()
   }
 }
