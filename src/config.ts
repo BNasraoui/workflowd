@@ -701,6 +701,14 @@ function workerSection(
   }
 }
 
+function agentGitSection(
+  env: Record<string, string | undefined>,
+  required: boolean,
+): Pick<SharedAppConfig, "agentGit"> {
+  const agentGit = loadAgentGitConfig(env, required)
+  return agentGit === undefined ? {} : { agentGit }
+}
+
 type ConfigFor<E> = "WORKFLOWD_MODE" extends keyof E
   ? E extends { readonly WORKFLOWD_MODE: "execution" }
     ? Extract<AppConfig, { mode: "execution" }>
@@ -763,12 +771,10 @@ export async function loadConfig(
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
-  const agentGit = loadAgentGitConfig(
+  const gitIdentity = agentGitSection(
     env,
     mode !== "execution" &&
-      (agentRuns !== undefined ||
-        residentCodex !== undefined ||
-        residentOpenCodeSocket !== undefined),
+      [agentRuns, residentCodex, residentOpenCodeSocket].some((executor) => executor !== undefined),
   )
   const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
     ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),
@@ -777,7 +783,7 @@ export async function loadConfig(
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
-    ...(agentGit === undefined ? {} : { agentGit }),
+    ...gitIdentity,
     ...(credentialSocket === undefined ? {} : { credentialSocket }),
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(executionCapabilities === undefined ? {} : { executionCapabilities }),
