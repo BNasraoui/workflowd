@@ -51,6 +51,9 @@ const receive = async (line: string) => {
     startedHere = true
     result = {
       thread: { id: "fixture-thread" },
+      git: Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => /^GIT_(AUTHOR|COMMITTER)_/.test(key)),
+      ),
       model: "fixture",
       modelProvider: "fixture",
       reasoningEffort: null,
