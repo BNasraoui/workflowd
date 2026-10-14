@@ -1,5 +1,6 @@
 """Offline policy tests; no GitHub access or service mutations."""
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -77,6 +78,10 @@ class VerificationTests(unittest.TestCase):
     def test_owner_authored_merge_uses_app_approval(self):
         self.assertEqual(d.verify_approval(pr(), [approval()], SHA, APP_ID)['id'], 10)
 
+    def test_github_actions_cannot_be_configured_as_approval_app(self):
+        with self.assertRaisesRegex(ValueError, 'GitHub Actions'):
+            d.verify_approval(pr(), [approval(app={'id': 15368})], SHA, 15368)
+
     def test_unmerged_or_different_merge_is_refused(self):
         for change in [dict(merged_at=None), dict(merge_commit_sha=HEAD),
                        dict(base={'ref': 'other', 'repo': {'full_name': 'BNasraoui/workflowd'}})]:
@@ -102,8 +107,11 @@ class VerificationTests(unittest.TestCase):
             f'commits/{SHA}/pulls?per_page=100': [pr()],
             f'commits/{HEAD}/check-runs?filter=all&per_page=100': [approval()],
         }
-        with patch.object(d, 'api', side_effect=lambda endpoint, key=None: responses[endpoint]):
+        with patch.object(d, 'api', side_effect=lambda endpoint, key=None, token=None: responses[endpoint]), \
+             patch.object(d, 'command', return_value=json.dumps({'commit': {'tree': {'sha': 'c' * 40}}})) as call:
             evidence = d.verify_remote(SHA, APP_ID)
+        self.assertEqual(evidence['tree'], 'c' * 40)
+        self.assertIn(f'repos/{d.REPO}/commits/{SHA}', call.call_args.args)
         self.assertEqual(evidence['pr_head'], HEAD)
         self.assertEqual(evidence['sha'], SHA)
         self.assertEqual(evidence['approval_app_id'], APP_ID)

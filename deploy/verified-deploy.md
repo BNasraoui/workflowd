@@ -6,10 +6,11 @@ changing working files, it verifies **every first-parent commit** between the
 last successfully deployed SHA and the target, oldest first. Each commit needs:
 
 - A merged PR whose merge-result SHA matches the commit and whose base is this
-  repository's main. Direct pushes and intermediate rebase commits are refused.
+  repository's main. Direct pushes and rebase merges are refused.
 - A completed, successful `Ben approval` check on that PR's final **head SHA**, from
   the merge gate App configured by `--approval-app-id`. This is the App's numeric
-  **integration ID**, not its installation ID. The newest matching check wins;
+  **integration ID**, not its installation ID. GitHub Actions (15368) is refused
+  as the approval App. The newest matching check wins;
   missing, stale, pending and unsuccessful evidence is refused. GitHub PR reviews
   are not required: Ben authors the PRs and cannot approve his own review. The
   [protected environment gate from #109](../docs/ben-approval-gate.md) supplies
@@ -45,12 +46,18 @@ The script requires a standalone clone, independent Git metadata, no worktrees o
 object alternates, and canonical HTTPS origin. It ignores global/system Git
 configuration; every wrapper command disables hooks and fsmonitor and permits
 only HTTPS transport. Before using the clone it reads local config without
-following includes and refuses `include*`, `filter.*`, `core.fsmonitor`,
-`credential.*`, `http.*`, `url.*`, worktree config, and `.git/info/attributes`.
-It serializes operators with a lock in `.git`.
+following includes and allows only `core.repositoryformatversion`, `core.filemode`,
+`core.bare`, `core.logallrefupdates`, `core.hooksPath`, `remote.origin.url` and
+`remote.origin.fetch`. All other local keys are refused. It disables object
+replacement and grafts with `GIT_NO_REPLACE_OBJECTS=1` and
+`GIT_GRAFT_FILE=/dev/null`, and refuses `.git/refs/replace`, `.git/info/grafts`,
+`.git/info/sparse-checkout` and `.git/info/attributes`, including dangling symlinks.
+It serializes operators with a lock in `.git`; both lock and log files are opened
+with `O_NOFOLLOW` so symlinks are refused.
 
 The entrypoint replaces its child environment, uses `/usr/bin:/bin`, and loads
-only a dedicated read-only token file into `GH_TOKEN`. A mode-0700 temporary home under `/opt/workflowd/operator`,
+only a dedicated read-only token file into `GH_TOKEN` for `gh` calls. Git, Bun and
+systemctl never receive the token in their environment. A mode-0700 temporary home under `/opt/workflowd/operator`,
 used for HOME, XDG_CONFIG_HOME and GH_CONFIG_DIR exclude the owner's gh login/config (including
 `http_unix_socket`), global bunfig and npmrc files. Inherited proxy, Git, Bun/npm
 and token overrides are cleared. It requires an absolute pinned Bun executable,
@@ -58,9 +65,11 @@ prints tool versions, and refuses Git older than 2.34, gh older than 2.45, or Bu
 other than 1.3.14. Run it with Python 3.9+ and `-I` from a trusted shell.
 
 After admission it stops all three units, resets and cleans, checks out the exact
-SHA detached, and resets/cleans again. Clean uses `git clean -ffdx -e /node_modules`:
-only the root dependency tree survives. That retained tree must be operator-owned
-and never copied from an agent checkout. Installation uses the absolute Bun path
+SHA detached, and resets/cleans again with `git clean -ffdx` (no dependency
+exclusion). It compares `HEAD^{tree}` with `commit.tree.sha` fetched from GitHub's
+commit API; a mismatch stops deployment before install or restart. It removes
+root `node_modules` before every install, including tracked files, and unlinks
+symlinks without following them. Installation uses the absolute Bun path
 with `install --frozen-lockfile --no-cache --backend=copyfile`; no shared Bun cache
 is trusted or hardlinked. Repository-local bunfig/npmrc and lifecycle policy are
 part of the reviewed commit.
@@ -74,8 +83,9 @@ skill home as managed. The three units are then restarted and checked as active.
 
 JSON records in `<checkout>/.git/verified-deploy.jsonl` and stdout contain target
 and previous SHA, bootstrap status, state path, each admitted commit's PR/head,
-approval App/check IDs, CI check/run IDs, UTC time, paths, units and outcome.
-A verification refusal leaves units running and working files untouched.
+approval App/check IDs, GitHub tree SHA, CI check/run IDs, UTC time, paths, units and outcome.
+An admission refusal leaves units running and working files untouched. A tree
+mismatch after checkout leaves units stopped and records failure.
 Install/copy/restart failure records failure and requires operator recovery;
 units can remain stopped. There is no automatic unverified rollback. Unit state
 is not application health: the operator must validate that separately.
@@ -118,7 +128,11 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
        -c protocol.allow=never -c protocol.https.allow=always \
        clone --no-checkout --config core.hooksPath=/dev/null \
        https://github.com/BNasraoui/workflowd.git /opt/workflowd/deploy
+   git -C /opt/workflowd/deploy config --local --remove-section branch.main
    ```
+
+   Remove the clone-created `branch.main` tracking settings as shown: deployment
+   uses detached SHAs, and those settings are outside its local config allow-list.
 
    Provision a **dedicated fine-grained read-only GitHub token**, restricted to this
    repository with Contents, Checks, Actions and Pull requests read permissions
@@ -126,13 +140,20 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
    owned by Ben, mode 0600. Provision from a trusted operator session without
    putting the value in shell history, argv, reports or logs. Never copy the
    owner's gh login or use its approval/admin token. The deploy reads this file
-   into GH_TOKEN itself; inherited GH_TOKEN/GITHUB_TOKEN are discarded. Keep the
+   into GH_TOKEN only for gh calls; inherited GH_TOKEN/GITHUB_TOKEN are discarded. Keep the
    last-deployed file absent until the first successful bootstrap deployment.
 4. Activate #109's [Ben approval gate](../docs/ben-approval-gate.md) from a trusted
    workstation: dedicated Checks-write App, protected `ben-merge-approval`
    environment with Ben as reviewer, exact main branch selection, and App-pinned
    `Ben approval` in the main ruleset alongside `Required checks`, strict checks
-   and no bypass. Do not raise the required PR review count to force a self-review.
+   and no bypass. **Limit merge methods to merge and squash; rebase merges can
+   never be deployed.** Do not raise the required PR review count to force a self-review.
+   Before the first `--bootstrap`, record the selected full merge SHA, PR URL,
+   App approval and main CI links, the earlier history personally audited, and
+   why that SHA is an acceptable trust baseline. Add this rationale to the rollout
+   Bead with `bd comment <rollout-bead> 'Bootstrap baseline <SHA>: <reason and evidence>'`
+   from the trusted workstation; retain it with the operator deployment record.
+   The automatic log records bootstrap use but does not explain the operator's choice.
    Record the App's integration ID for the command below. Obtain this PR's merged
    entrypoint from a trusted operator session, verify its evidence, and separately
    review/install it outside the clone. Future entrypoint updates require the same
@@ -155,7 +176,8 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
 6. Choose an approved merged SHA after its **post-merge main CI finishes**. The
    first baseline must itself have a successful App check on its PR head; legacy
    merges without this evidence cannot be deployed, even with bootstrap. Personally
-   audit the earlier history trusted by the initial bootstrap and record why.
+   audit the earlier history trusted by the initial bootstrap and record why as
+   described in step 4.
    Run from a trusted operator session using the explicit paths below:
 
    ```bash
@@ -184,7 +206,7 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
    and application health. Audit ownership, modes and ACLs with `namei -l` and
    `getfacl`, including `.git`, node_modules, marker/skills, state/token parents,
    executables and service configuration. Confirm hooks/fsmonitor are disabled and
-   prohibited local Git config/attributes absent. Audit `~/.bunfig.toml`,
+   prohibited local Git config and replacement/graft/sparse/attribute files absent. Audit `~/.bunfig.toml`,
    `$XDG_CONFIG_HOME/.bunfig.toml`, `~/.npmrc`, gh hosts/config, and Bun install cache
    (`~/.bun/install/cache` or BUN_INSTALL_CACHE_DIR). The deploy ignores global
    files and uses no cache; services or manual commands may still use them. If a

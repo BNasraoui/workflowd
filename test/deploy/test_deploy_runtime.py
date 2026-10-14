@@ -40,8 +40,8 @@ class RuntimeTests(unittest.TestCase):
                 thread.start()
                 try:
                     with patch.dict(os.environ, {'PATH': '/usr/bin:/bin', 'HOME': directory,
-                                                'GH_CONFIG_DIR': directory, 'GH_TOKEN': 'fixture'}, clear=True):
-                        self.assertEqual(d.api('fixture', 'check_runs'), [{'id': 1}, {'id': 2}])
+                                                'GH_CONFIG_DIR': directory}, clear=True):
+                        self.assertEqual(d.api('fixture', 'check_runs', token='fixture'), [{'id': 1}, {'id': 2}])
                 finally:
                     server.shutdown()
                     thread.join()
@@ -59,8 +59,11 @@ class RuntimeTests(unittest.TestCase):
                                          'PATH': '/agent/bin', 'HOME': '/owner',
                                          'BUN_INSTALL_CACHE_DIR': '/agent/cache',
                                          'GIT_CONFIG_COUNT': '1', 'HTTPS_PROXY': 'evil'}, clear=True):
-                d.configure_environment(token, isolated)
-                self.assertEqual(os.environ['GH_TOKEN'], 'dedicated-read-only-fixture')
+                dedicated_token = d.configure_environment(token, isolated)
+                self.assertEqual(dedicated_token, 'dedicated-read-only-fixture')
+                self.assertNotIn('GH_TOKEN', os.environ)
+                self.assertEqual(os.environ['GIT_NO_REPLACE_OBJECTS'], '1')
+                self.assertEqual(os.environ['GIT_GRAFT_FILE'], '/dev/null')
                 self.assertEqual(os.environ['PATH'], '/usr/bin:/bin')
                 for key in ['HOME', 'XDG_CONFIG_HOME', 'GH_CONFIG_DIR']:
                     self.assertEqual(os.environ[key], str(isolated))
@@ -103,7 +106,9 @@ class RuntimeTests(unittest.TestCase):
                     '--approval-app-id', '98765', '--bun', str(root / 'bun')]
             observed = []
 
-            def deploy(checkout, sha, target, actual_state, app_id, bun, bootstrap):
+            def deploy(checkout, sha, target, actual_state, app_id, bun, bootstrap, token=None):
+                self.assertEqual(token, 'fixture')
+                self.assertNotIn('GH_TOKEN', os.environ)
                 observed.append(actual_state)
                 self.assertEqual(actual_state, state)
                 self.assertEqual(Path(os.environ['HOME']).parent, root)
@@ -114,3 +119,23 @@ class RuntimeTests(unittest.TestCase):
                  patch.object(d, 'check_toolchain'), patch.object(d, 'deploy', side_effect=deploy):
                 d.main()
             self.assertEqual(observed, [state])
+
+    def test_token_is_only_in_gh_subprocess_environment(self):
+        with patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), \
+             patch.object(d.subprocess, 'run') as run:
+            run.return_value.stdout = '[]'
+            d.api('fixture', token='dedicated-fixture')
+            self.assertEqual(run.call_args.kwargs['env']['GH_TOKEN'], 'dedicated-fixture')
+            self.assertNotIn('GH_TOKEN', os.environ)
+            for executable in ['git', '/operator/bun', 'systemctl']:
+                d.command(executable, '--version')
+                self.assertNotIn('GH_TOKEN', run.call_args.kwargs.get('env') or os.environ)
+
+    def test_cli_rejects_actions_app_before_deploy(self):
+        argv = ['verified-deploy.py', 'a' * 40, '--checkout', '/unused',
+                '--skills', '/unused', '--github-token-file', '/unused',
+                '--approval-app-id', '15368', '--bun', '/unused']
+        with patch.object(d.sys, 'argv', argv), patch.object(d, 'deploy') as deploy:
+            with self.assertRaisesRegex(ValueError, 'GitHub Actions'):
+                d.main()
+            deploy.assert_not_called()

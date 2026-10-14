@@ -50,6 +50,7 @@ def verify_workflow(rows, check, sha):
 
 
 def verify_approval(pr, checks, sha, app_id):
+    require(app_id != 15368, 'GitHub Actions cannot be the approval App')
     require(pr.get('merged_at') and pr.get('merge_commit_sha') == sha
             and pr.get('base', {}).get('ref') == 'main'
             and pr.get('base', {}).get('repo', {}).get('full_name') == REPO,
@@ -65,8 +66,9 @@ def verify_approval(pr, checks, sha, app_id):
     return approval
 
 
-def command(*args, cwd=None):
+def command(*args, cwd=None, token=None):
     return subprocess.run(args, cwd=cwd, check=True, text=True,
+                          env=os.environ | {'GH_TOKEN': token} if args[0] == 'gh' and token else None,
                           stdout=subprocess.PIPE).stdout.strip()
 
 
@@ -76,9 +78,9 @@ def git(checkout, *args):
                    '-C', str(checkout), *args)
 
 
-def api(endpoint, key=None):
+def api(endpoint, key=None, token=None):
     output = command('gh', 'api', '--hostname', 'github.com', '--paginate',
-                     f'repos/{REPO}/{endpoint}')
+                     f'repos/{REPO}/{endpoint}', token=token)
     require(output, 'Empty GitHub response')
     rows = []
     decoder = json.JSONDecoder()
@@ -91,19 +93,23 @@ def api(endpoint, key=None):
     return rows
 
 
-def verify_remote(sha, app_id):
-    checks = api(f'commits/{sha}/check-runs?filter=all&per_page=100', 'check_runs')
+def verify_remote(sha, app_id, token=None):
+    checks = api(f'commits/{sha}/check-runs?filter=all&per_page=100', 'check_runs', token=token)
     check = verify_checks(checks, sha)
     runs = api(f'actions/workflows/ci.yml/runs?head_sha={sha}&event=push&per_page=100',
-               'workflow_runs')
+               'workflow_runs', token=token)
     run = verify_workflow(runs, check, sha)
-    for pr in api(f'commits/{sha}/pulls?per_page=100'):
+    for pr in api(f'commits/{sha}/pulls?per_page=100', token=token):
         if pr.get('merge_commit_sha') != sha or not pr.get('merged_at'):
             continue
         approvals = api(f'commits/{pr["head"]["sha"]}/check-runs?filter=all&per_page=100',
-                        'check_runs')
+                        'check_runs', token=token)
         approval = verify_approval(pr, approvals, sha, app_id)
-        return {'sha': sha, 'pr': pr['number'], 'pr_head': pr['head']['sha'],
+        commit = json.loads(command('gh', 'api', '--hostname', 'github.com',
+                                    f'repos/{REPO}/commits/{sha}', token=token))
+        tree = commit['commit']['tree']['sha']
+        require(re.fullmatch(r'[0-9a-f]{40}', tree), 'Invalid GitHub commit tree SHA')
+        return {'sha': sha, 'tree': tree, 'pr': pr['number'], 'pr_head': pr['head']['sha'],
                 'approval_id': approval['id'], 'approval_app_id': app_id,
                 'check_id': check['id'], 'run_id': run['id']}
     raise ValueError('No merged PR found for the exact deployment SHA')
@@ -113,15 +119,17 @@ def standalone(checkout):
     metadata = checkout / '.git'
     require(metadata.is_dir() and not metadata.is_symlink(),
             'Deployment requires a standalone clone with its own .git directory')
+    for relative in ('refs/replace', 'info/grafts', 'info/sparse-checkout', 'info/attributes'):
+        path = metadata / relative
+        require(not path.exists() and not path.is_symlink(),
+                f'Local .git/{relative} is forbidden')
+    allowed = {'core.repositoryformatversion', 'core.filemode', 'core.bare',
+               'core.logallrefupdates', 'core.hookspath',
+               'remote.origin.url', 'remote.origin.fetch'}
     config = git(checkout, 'config', '--local', '--no-includes', '--null', '--list')
-    for entry in config.split('\0'):
+    for entry in filter(None, config.split('\0')):
         key = entry.split('\n', 1)[0].lower()
-        require(not key.startswith(('include', 'filter.', 'credential.', 'http.', 'url.'))
-                and key != 'core.fsmonitor' and key != 'extensions.worktreeconfig',
-                f'Unsafe local Git config: {key}')
-    attributes = metadata / 'info/attributes'
-    require(not attributes.exists() and not attributes.is_symlink(),
-            'Local .git/info/attributes is forbidden')
+        require(key in allowed, f'Unsafe local Git config: {key}')
     require(Path(git(checkout, 'rev-parse', '--show-toplevel')).resolve() == checkout,
             'Deployment path must be the clone root')
     common = Path(git(checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
@@ -238,17 +246,22 @@ def copy_skills(checkout, sha, target):
                 shutil.rmtree(old)
 
 
-def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False):
+def append_file(path):
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
+                             0o600), 'a')
+
+
+def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, token=None):
     standalone(checkout)
     require_skill_target(skill_target)
     # The lock lives outside the worktree cleaned below and serializes operators.
-    with (checkout / '.git/verified-deploy.lock').open('a') as lock:
+    with append_file(checkout / '.git/verified-deploy.lock') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         git(checkout, 'fetch', '--no-tags', '--prune', 'origin',
             '+refs/heads/main:refs/remotes/origin/main')
         verify_main(checkout, sha)
         commits = deployment_commits(checkout, sha, state, bootstrap)
-        evidence = [verify_remote(commit, app_id) for commit in commits]
+        evidence = [verify_remote(commit, app_id, token=token) for commit in commits]
         record = {'sha': sha, 'evidence': evidence, 'bootstrap': bootstrap,
                   'previous_sha': private_file(state) if state.exists() else None,
                   'state': str(state), 'checkout': str(checkout),
@@ -258,7 +271,7 @@ def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False):
         def log(status):
             row = record | {'status': status, 'at': datetime.datetime.now(
                 datetime.timezone.utc).isoformat()}
-            with log_path.open('a') as output:
+            with append_file(log_path) as output:
                 output.write(json.dumps(row) + '\n')
                 output.flush()
                 os.fsync(output.fileno())
@@ -269,10 +282,17 @@ def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False):
             # Stop readers before mutating their working directory.
             command('systemctl', '--user', 'stop', *UNITS)
             git(checkout, 'reset', '--hard', 'HEAD')
-            git(checkout, 'clean', '-ffdx', '-e', '/node_modules')
+            git(checkout, 'clean', '-ffdx')
             git(checkout, 'checkout', '--force', '--detach', sha)
             git(checkout, 'reset', '--hard', sha)
-            git(checkout, 'clean', '-ffdx', '-e', '/node_modules')
+            git(checkout, 'clean', '-ffdx')
+            require(git(checkout, 'rev-parse', 'HEAD^{tree}') == evidence[-1]['tree'],
+                    'Checked-out tree differs from the GitHub commit tree')
+            dependencies = checkout / 'node_modules'
+            if dependencies.is_symlink() or dependencies.is_file():
+                dependencies.unlink()
+            elif dependencies.exists():
+                shutil.rmtree(dependencies)
             subprocess.run([str(bun), 'install', '--frozen-lockfile', '--no-cache',
                             '--backend=copyfile'], cwd=checkout, check=True)
             copy_skills(checkout, sha, skill_target)
@@ -306,11 +326,13 @@ def configure_environment(token_file, isolated_home):
     os.environ.clear()
     os.environ.update(PATH='/usr/bin:/bin', HOME=str(isolated_home),
                       XDG_CONFIG_HOME=str(isolated_home), GH_CONFIG_DIR=str(isolated_home),
-                      GH_TOKEN=token, GH_PROMPT_DISABLED='1',
+                      GH_PROMPT_DISABLED='1',
                       GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
-                      GIT_TERMINAL_PROMPT='0',
+                      GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1',
+                      GIT_GRAFT_FILE='/dev/null',
                       XDG_RUNTIME_DIR=f'/run/user/{os.geteuid()}',
                       DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{os.geteuid()}/bus')
+    return token
 
 
 def main():
@@ -326,6 +348,7 @@ def main():
     parser.add_argument('--bootstrap', action='store_true',
                         help='explicitly trust history before target; target still needs approval and CI')
     args = parser.parse_args()
+    require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
     require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
     require(args.bun.is_absolute(), 'Bun path must be absolute')
     checkout = args.checkout.resolve()
@@ -344,10 +367,10 @@ def main():
     # tokens, Bun/npm overrides and global gh/Bun configuration paths.
     require_state_directory(DEPLOY_STATE)
     with tempfile.TemporaryDirectory(prefix='.deploy-home-', dir=DEPLOY_STATE.parent) as isolated:
-        configure_environment(args.github_token_file, Path(isolated))
+        token = configure_environment(args.github_token_file, Path(isolated))
         check_toolchain(args.bun)
         deploy(checkout, args.sha, target, DEPLOY_STATE, args.approval_app_id,
-               args.bun, args.bootstrap)
+               args.bun, args.bootstrap, token=token)
 
 
 if __name__ == '__main__':

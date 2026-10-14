@@ -1,5 +1,6 @@
 """Real disposable Git repositories; only GitHub, Bun and systemd are mocked."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -17,8 +18,6 @@ class CheckoutTests(unittest.TestCase):
         self.repo = self.root / 'deploy'
         self.repo.mkdir()
         d.git(self.repo, 'init', '-q', '-b', 'main')
-        d.git(self.repo, 'config', 'user.name', 'Fixture')
-        d.git(self.repo, 'config', 'user.email', 'fixture')
         d.git(self.repo, 'remote', 'add', 'origin', d.REMOTE)
         skill = self.repo / 'skills/rpi-example'
         skill.mkdir(parents=True)
@@ -35,7 +34,8 @@ class CheckoutTests(unittest.TestCase):
 
     def commit(self):
         d.git(self.repo, 'add', '.')
-        d.git(self.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture')
+        d.git(self.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture',
+              '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture')
 
     def test_standalone_clone_and_main_membership(self):
         d.standalone(self.repo)
@@ -86,7 +86,8 @@ class CheckoutTests(unittest.TestCase):
     def test_skill_submodule_is_refused(self):
         d.git(self.repo, 'update-index', '--add', '--cacheinfo',
               f'160000,{self.sha},skills/rpi-nested')
-        d.git(self.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule fixture')
+        d.git(self.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture',
+              '-c', 'commit.gpgsign=false', 'commit', '-qm', 'submodule fixture')
         with self.assertRaises(ValueError):
             d.copy_skills(self.repo, d.git(self.repo, 'rev-parse', 'HEAD'), self.skills)
 
@@ -99,8 +100,8 @@ class CheckoutTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 d.verify_remote(self.sha, APP_ID)
 
-    def run_deploy(self, verification_error=None, install_error=False):
-        events = []
+    def run_deploy(self, verification_error=None, install_error=False, tree=None):
+        events = self.events = []
         real_command = d.command
         real_run = subprocess.run
 
@@ -119,7 +120,7 @@ class CheckoutTests(unittest.TestCase):
                 self.assertEqual(d.git(self.repo, 'rev-parse', 'HEAD'), self.sha)
                 self.assertEqual((self.repo / 'tracked').read_text(), 'reviewed file\n')
                 self.assertFalse((self.repo / 'untracked').exists())
-                self.assertTrue((self.repo / 'node_modules/keep').exists())
+                self.assertFalse((self.repo / 'node_modules').exists())
                 self.assertFalse((self.repo / 'pkg/node_modules/evil.js').exists())
                 if install_error:
                     raise subprocess.CalledProcessError(1, 'bun')
@@ -129,7 +130,8 @@ class CheckoutTests(unittest.TestCase):
         with patch.object(d, 'command', side_effect=command), \
              patch.object(d.subprocess, 'run', side_effect=run), \
              patch.object(d, 'verify_remote', side_effect=verification_error,
-                          return_value={'pr': 42, 'check_id': 10, 'run_id': 30}):
+                          return_value={'pr': 42, 'check_id': 10, 'run_id': 30,
+                                        'tree': tree or d.git(self.repo, 'rev-parse', f'{self.sha}^{{tree}}')}):
             if verification_error or install_error:
                 with self.assertRaises((ValueError, subprocess.CalledProcessError)):
                     d.deploy(self.repo, self.sha, self.skills, self.state, APP_ID, self.bun, bootstrap=True)
@@ -172,7 +174,8 @@ class CheckoutTests(unittest.TestCase):
         previous = self.sha
         self.state.write_text(previous + '\n')
         self.state.chmod(0o600)
-        d.git(self.repo, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'next merge')
+        d.git(self.repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture',
+              '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-qm', 'next merge')
         self.sha = d.git(self.repo, 'rev-parse', 'HEAD')
         d.git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.sha)
         self.dirty()
@@ -205,6 +208,99 @@ class CheckoutTests(unittest.TestCase):
         (self.repo / '.git/info/attributes').touch()
         with self.assertRaisesRegex(ValueError, 'attributes'):
             d.standalone(self.repo)
+
+    def test_replacement_refs_grafts_and_sparse_checkout_are_refused(self):
+        for relative in ['refs/replace', 'info/grafts', 'info/sparse-checkout']:
+            with self.subTest(relative=relative):
+                path = self.repo / '.git' / relative
+                if relative == 'refs/replace':
+                    path.mkdir()
+                else:
+                    path.touch()
+                try:
+                    with self.assertRaisesRegex(ValueError, 'forbidden'):
+                        d.standalone(self.repo)
+                finally:
+                    path.rmdir() if path.is_dir() else path.unlink()
+                # Dangling symlinks must also be refused.
+                path.symlink_to(self.root / 'absent')
+                try:
+                    with self.assertRaisesRegex(ValueError, 'forbidden'):
+                        d.standalone(self.repo)
+                finally:
+                    path.unlink()
+
+    def test_local_configuration_is_an_allow_list(self):
+        for key, value in [('core.sparseCheckout', 'true'), ('core.symlinks', 'false'),
+                           ('remote.origin.proxy', 'http://localhost:1'),
+                           ('user.name', 'Unexpected'), ('new.setting', 'unknown')]:
+            with self.subTest(key=key):
+                d.git(self.repo, 'config', '--local', key, value)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'config'):
+                        d.standalone(self.repo)
+                finally:
+                    d.git(self.repo, 'config', '--local', '--unset', key)
+        d.standalone(self.repo)
+        d.standalone(self.repo)  # The persisted hooksPath remains allowed.
+
+    def test_tracked_node_modules_is_also_removed_before_install(self):
+        (self.repo / 'node_modules').mkdir()
+        (self.repo / 'node_modules/keep').write_text('stale dependency')
+        self.commit()
+        self.sha = d.git(self.repo, 'rev-parse', 'HEAD')
+        d.git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.sha)
+        self.assertEqual(self.run_deploy(), ['stop', 'install', 'restart', 'is-active'])
+
+    def test_environment_disables_packed_replace_refs_and_grafted_history(self):
+        original = self.sha
+        commits = []
+        for content in ['middle', 'EVIL']:
+            (self.repo / 'tracked').write_text(content)
+            self.commit()
+            commits.append(d.git(self.repo, 'rev-parse', 'HEAD'))
+        d.git(self.repo, 'replace', original, commits[-1])
+        d.git(self.repo, 'pack-refs', '--all', '--prune')
+        self.assertEqual(d.git(self.repo, 'show', f'{original}:tracked'), 'EVIL')
+        (self.repo / '.git/info/grafts').write_text(f'{commits[-1]} {original}\n')
+        token = self.root / 'token'
+        token.write_text('fixture')
+        token.chmod(0o600)
+        with patch.dict(os.environ):
+            d.configure_environment(token, self.root)
+            self.assertEqual(d.git(self.repo, 'show', f'{original}:tracked'), 'reviewed file')
+            self.assertEqual(d.git(self.repo, 'rev-list', '--first-parent', '--reverse',
+                                   f'{original}..{commits[-1]}').splitlines(), commits)
+
+    def test_checkout_tree_must_match_github_before_install_or_restart(self):
+        self.dirty()
+        with self.assertRaisesRegex(ValueError, 'tree'):
+            self.run_deploy(tree='f' * 40)
+        self.assertEqual(self.events, ['stop'])
+        self.assertFalse(self.state.exists())
+        rows = [json.loads(line) for line in
+                (self.repo / '.git/verified-deploy.jsonl').read_text().splitlines()]
+        self.assertEqual([row['status'] for row in rows], ['verified', 'failed'])
+
+    def test_lock_and_log_symlinks_are_refused_before_stop(self):
+        self.dirty()
+        victim = self.root / 'operator-file'
+        victim.write_text('untouched')
+        for name in ['verified-deploy.lock', 'verified-deploy.jsonl']:
+            for target in [victim, self.root / 'absent']:
+                with self.subTest(name=name, target=target):
+                    link = self.repo / '.git' / name
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(target)
+                    try:
+                        with self.assertRaises(OSError):
+                            self.run_deploy()
+                        self.assertEqual(self.events, [])
+                        self.assertEqual(victim.read_text(), 'untouched')
+                        self.assertFalse((self.root / 'absent').exists())
+                        self.assertEqual((self.repo / 'tracked').read_text(), 'dirty\n')
+                    finally:
+                        link.unlink()
 
     def test_git_wrapper_disables_fsmonitor_commands(self):
         witness = self.root / 'executed'
@@ -244,7 +340,7 @@ class CheckoutTests(unittest.TestCase):
         d.git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.sha)
         visited = []
 
-        def verify(sha, app_id):
+        def verify(sha, app_id, token=None):
             visited.append(sha)
             if sha == bad:
                 raise ValueError('unapproved earlier merge')
