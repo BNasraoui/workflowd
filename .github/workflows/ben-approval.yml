@@ -1,0 +1,62 @@
+name: Ben approval gate
+run-name: "Ben approval for PR #${{ inputs.pr_number }} at ${{ inputs.head_sha }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number targeting main
+        required: true
+        type: string
+      head_sha:
+        description: Exact 40-character lowercase PR head SHA reviewed by Ben
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ben-approval-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    if: github.repository == 'BNasraoui/workflowd' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ben-merge-approval
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+    steps:
+      - name: Load gate from the dispatched main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy/approval-gate
+      - name: Validate approval and visible reviews before minting
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node deploy/approval-gate/check.mjs validate
+      - name: Mint repository-scoped Checks token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.BEN_APPROVAL_APP_ID }}
+          private-key: ${{ secrets.BEN_APPROVAL_PRIVATE_KEY }}
+          owner: BNasraoui
+          repositories: workflowd
+          permission-checks: write
+          skip-token-revoke: false
+      - name: Revalidate and post App check on exact head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+        run: node deploy/approval-gate/check.mjs publish
