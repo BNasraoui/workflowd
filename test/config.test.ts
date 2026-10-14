@@ -4,6 +4,8 @@ import { loadConfig } from "../src/config"
 
 const requiredEnvironment: Record<string, string | undefined> = {
   GITHUB_APP_ID: "123",
+  WORKFLOWD_AGENT_GIT_NAME: "Agent",
+  WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
   WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
   WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
   GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",
@@ -49,12 +51,30 @@ describe("loadConfig", () => {
       WORKFLOWD_MODE: "execution",
       WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
       WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+      WORKFLOWD_AGENT_GIT_NAME: "Agent",
+      WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
     })
     expect(config.mode).toBe("execution")
     expect(config.agentRuns?.routes).toEqual([])
     expect(config.executionCapabilities?.codexEnabled).toBe(true)
     expect(config.github).toBeUndefined()
     expect(config.openCode).toBeUndefined()
+  })
+  test("execution dispatch requires a complete agent git identity", async () => {
+    for (const identity of [
+      {},
+      { WORKFLOWD_AGENT_GIT_NAME: "Agent" },
+      { WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test" },
+    ]) {
+      await expect(
+        loadConfig({
+          WORKFLOWD_MODE: "execution",
+          WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
+          WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+          ...identity,
+        }),
+      ).rejects.toThrow("WORKFLOWD_AGENT_GIT")
+    }
   })
   test("loads Claude CLI-only dispatch routes and validates their syntax", async () => {
     const base = {
@@ -222,6 +242,7 @@ describe("loadConfig", () => {
     )
 
     expect(config).toEqual({
+      agentGit: { name: "Agent", email: "agent@example.test", blockedEmails: [] },
       http: {
         host: "127.0.0.1",
         port: 8787,
@@ -501,6 +522,8 @@ describe("loadConfig", () => {
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_AGENT_GIT_NAME: "Agent",
+        WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
         WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/run/credentials/github-key.pem",

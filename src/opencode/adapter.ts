@@ -1,3 +1,5 @@
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
+import { workerEnvironment } from "../resident/environment"
 import { withCredentialAdmission } from "../agent-host/client"
 import type { OpenCodeClient } from "@opencode-ai/client/effect"
 import { AbsolutePath, Agent, Location, Model, Session } from "@opencode-ai/client/effect"
@@ -274,15 +276,34 @@ function parseStructuredText(text: string): JsonValue {
 }
 
 export class SdkOpenCodeAdapter implements OpenCodeAdapter {
-  constructor(private readonly client: OpenCodeSdkClient) {}
+  constructor(
+    private readonly client: OpenCodeSdkClient,
+    private readonly git?: AgentGitConfig,
+  ) {}
 
   readonly setSessionEnvironment = (input: {
     readonly sessionID: string
     readonly variables: Readonly<Record<string, string>>
-  }) => this.call("set session environment", this.client.setSessionEnvironment(input))
+  }) =>
+    this.call(
+      "set session environment",
+      this.client.setSessionEnvironment({
+        ...input,
+        variables: { ...input.variables, ...agentGitEnvironment(this.git) },
+      }),
+    )
 
   readonly createSession: OpenCodeAdapter["createSession"] = (input) =>
-    this.call("create session", this.client.createSession(input))
+    this.call("create session", this.client.createSession(input)).pipe(
+      Effect.tap((session) =>
+        this.git === undefined
+          ? Effect.void
+          : this.setSessionEnvironment({
+              sessionID: session.id,
+              variables: { ...workerEnvironment(), ...agentGitEnvironment(this.git) },
+            }),
+      ),
+    )
 
   readonly promptSession: OpenCodeAdapter["promptSession"] = (input) =>
     this.call(

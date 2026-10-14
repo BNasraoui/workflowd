@@ -39,6 +39,8 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
     const config = await loadConfig(
       {
         GITHUB_APP_ID: "123",
+        WORKFLOWD_AGENT_GIT_NAME: "Agent",
+        WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
         WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example/repo","installationId":1}]',
         WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: key,

@@ -1,4 +1,5 @@
 import { guardCliCredentials, makeHostCli } from "../agent-host/client"
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
@@ -137,6 +138,7 @@ type CommandResult = {
 type RunCommand = (command: ReadonlyArray<string>) => Promise<CommandResult>
 
 export type CliProcessOptions = {
+  readonly git?: AgentGitConfig | undefined
   readonly credentialSocket?: string | undefined
   readonly binary: string
   /** CLI-specific protocol; process custody and systemd ownership are shared. */
@@ -589,6 +591,9 @@ export const makeDurableCliProcess = (
               ? []
               : [`--setenv=WORKFLOWD_AGENT_HOST_SOCKET=${options.credentialSocket}`]),
             ...Object.entries(options.identity?.environment(input.runId) ?? {}).map(
+              ([name, value]) => `--setenv=${name}=${value}`,
+            ),
+            ...Object.entries(agentGitEnvironment(options.git)).map(
               ([name, value]) => `--setenv=${name}=${value}`,
             ),
             process.execPath,

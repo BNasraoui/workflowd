@@ -31,6 +31,7 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
       makeClaudeResumeExecutor({
         cli: makeClaudeCli({
           binary: config.claudeBinary,
+          git: config.agentGit,
           credentialSocket: (options.env ?? process.env).WORKFLOWD_AGENT_HOST_SOCKET,
         }),
         allowedDirectories: config.claudeDirectories,

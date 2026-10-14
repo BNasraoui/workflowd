@@ -24,6 +24,8 @@ test("real execution-only daemon starts with native Codex discovery and no PR co
     )
     const config = await loadConfig({
       WORKFLOWD_MODE: "execution",
+      WORKFLOWD_AGENT_GIT_NAME: "Agent",
+      WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
       WORKFLOWD_AGENT_RUN_TOKEN: "native-secret",
       WORKFLOWD_AGENT_RUN_REPOSITORIES: `fixture=${root}`,
       WORKFLOWD_AGENT_RUN_CODEX_BIN: binary,
@@ -78,6 +80,8 @@ test("daemon entry point loads execution-only config, serves HTTP and releases o
     program = Effect.runPromiseExit(
       mainProgram({
         WORKFLOWD_MODE: "execution",
+        WORKFLOWD_AGENT_GIT_NAME: "Agent",
+        WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
         WORKFLOWD_HOST: "127.0.0.1",
         WORKFLOWD_PORT: String(port),
         WORKFLOWD_AGENT_RUN_TOKEN: "native-secret",

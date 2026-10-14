@@ -1,4 +1,5 @@
 import { requireAgentHostSocket } from "../agent-host/config"
+import { loadAgentGitConfig, type AgentGitConfig } from "../agent-git/config"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { loadRemoteNatsAuth } from "./auth"
@@ -6,6 +7,7 @@ import type { RemoteNatsAuth } from "./auth"
 import { parseNatsServers } from "./nats-url"
 
 export type RemoteProcessConfig = {
+  readonly agentGit?: AgentGitConfig
   readonly servers: ReadonlyArray<string>
   readonly auth: RemoteNatsAuth
   readonly hostId: string
@@ -50,7 +52,9 @@ export async function loadRemoteProcessConfig(
       )
     }
   }
+  const agentGit = loadAgentGitConfig(env, claudeDirectories.length > 0)
   return {
+    ...(agentGit === undefined ? {} : { agentGit }),
     servers,
     auth,
     hostId: hostId(env.WORKFLOWD_REMOTE_HOST_ID),

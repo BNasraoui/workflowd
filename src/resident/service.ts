@@ -1,3 +1,4 @@
+import type { AgentGitConfig } from "../agent-git/config"
 import {
   isNonToolItem,
   isToolFreeTurn,
@@ -114,6 +115,7 @@ export const ResidentCodex = Context.Service<ResidentPort>("workflowd/ResidentCo
 
 export const ResidentCodexLive = (
   config: ResidentConfig & {
+    readonly git?: AgentGitConfig | undefined
     readonly unitPrefix?: string
     readonly credentialSocket?: string | undefined
   },
@@ -211,6 +213,7 @@ export const ResidentCodexLive = (
                   unitPrefix,
                   launchId,
                   hostSocket: config.credentialSocket,
+                  git: config.git,
                 },
                 notify,
               ),
@@ -218,7 +221,9 @@ export const ResidentCodexLive = (
             process = launched
             yield* store.adoptServer(runId, launched.invocation)
           } else
-            process = yield* Effect.try(() => start({ binary, home: config.home, env }, notify))
+            process = yield* Effect.try(() =>
+              start({ binary, home: config.home, env, git: config.git }, notify),
+            )
           servers.set(runId, { process, disconnected: false, attempts, lastEventAt: Date.now() })
           yield* Effect.try(() => registerPeer(runId, process.pid))
           yield* Effect.tryPromise(() => process.initialize())
