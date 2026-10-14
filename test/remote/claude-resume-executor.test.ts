@@ -206,7 +206,7 @@ test("host refusal during transcript or custody observation retains its reason",
     status: "failed",
     failureReason: "host_request_refused",
     failureDetail: "host_request_refused: forged host custody",
-  }
+  } as const
   expect(await Effect.runPromise(executor.execute(payload(), "delivery"))).toEqual(expected)
   expect(await Effect.runPromise(executor.recover!(payload(), "delivery"))).toEqual(expected)
 })
