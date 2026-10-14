@@ -1,4 +1,4 @@
-import { installAgentGitGuard } from "../agent-git/guard"
+import { refreshAgentGitGuard } from "../agent-git/guard"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import { withCredentialAdmission } from "../agent-host/client"
 import { stat } from "node:fs/promises"
@@ -84,7 +84,7 @@ export const makeClaudeCli = (options: {
     withCredentialAdmission(
       options.credentialSocket,
       "claude",
-      installAgentGitGuard(input.directory, options.git)
+      refreshAgentGitGuard(input.directory, options.git)
         .pipe(
           Effect.andThen(
             runWorkspaceCommandBytes(

@@ -1,10 +1,36 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { loadConfig } from "../src/config"
 import { gitAgentRunWorktrees } from "../src/kernel/agent-run-worktrees"
+
+const run = async (cwd: string, args: string[], env: Record<string, string> = {}) => {
+  const child = Bun.spawn(["git", ...args], {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "Agent",
+      GIT_AUTHOR_EMAIL: "agent@example.test",
+      GIT_COMMITTER_NAME: "Agent",
+      GIT_COMMITTER_EMAIL: "agent@example.test",
+      ...env,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  return {
+    code: await child.exited,
+    output: (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()),
+  }
+}
+const ok = async (cwd: string, args: string[]) => {
+  const result = await run(cwd, args)
+  expect(result).toMatchObject({ code: 0 })
+  return result.output.trim()
+}
 
 const identity = {
   WORKFLOWD_AGENT_GIT_NAME: "Workflow Agent",
@@ -47,31 +73,6 @@ test("worktree guard blocks explicit author and committer at commit and push, pr
   const root = await mkdtemp(join(tmpdir(), "workflowd-git-"))
   const repo = join(root, "repo"),
     directory = join(root, "worktree")
-  const run = async (cwd: string, args: string[], env: Record<string, string> = {}) => {
-    const child = Bun.spawn(["git", ...args], {
-      cwd,
-      env: {
-        ...process.env,
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_AUTHOR_NAME: "Agent",
-        GIT_AUTHOR_EMAIL: "agent@example.test",
-        GIT_COMMITTER_NAME: "Agent",
-        GIT_COMMITTER_EMAIL: "agent@example.test",
-        ...env,
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    return {
-      code: await child.exited,
-      output: (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()),
-    }
-  }
-  const ok = async (cwd: string, args: string[]) => {
-    const result = await run(cwd, args)
-    expect(result).toMatchObject({ code: 0 })
-    return result.output.trim()
-  }
   try {
     await mkdir(repo)
     await ok(repo, ["init", "-b", "main"])
@@ -209,16 +210,47 @@ test("worktree guard blocks explicit author and committer at commit and push, pr
   }
 })
 
-test("Claude resume uses the host identity and guards an existing session worktree", async () => {
-  const { makeClaudeCli } = await import("../src/kernel/claude-session")
-  const root = await mkdtemp(join(tmpdir(), "claude-git-resume-"))
-  try {
-    const init = Bun.spawn(["git", "init", root], { stdout: "ignore", stderr: "pipe" })
-    expect(await init.exited).toBe(0)
-    const binary = join(root, "claude-fixture")
-    await writeFile(
-      binary,
-      `#!/bin/sh
+test.each(["non-git", "checkout", "worktree", "managed"])(
+  "Claude resume pins identity and only refreshes managed guards: %s",
+  async (kind) => {
+    const { makeClaudeCli } = await import("../src/kernel/claude-session")
+    const root = await mkdtemp(join(tmpdir(), "claude-git-resume-"))
+    const git = {
+      name: "Agent",
+      email: "agent@example.test",
+      blockedEmails: ["blocked@example.test"],
+    }
+    try {
+      let directory = root
+      if (kind !== "non-git") {
+        await ok(root, ["init", "-b", "main"])
+        await ok(root, ["commit", "--allow-empty", "-m", "seed"])
+      }
+      if (kind === "managed") {
+        await ok(root, ["init", "--bare", "-b", "main", join(root, "remote")])
+        await ok(root, ["remote", "add", "origin", join(root, "remote")])
+        await ok(root, ["push", "origin", "main"])
+        directory = join(root, "agent")
+        await Effect.runPromise(
+          gitAgentRunWorktrees.create({ repository: root, directory, branch: "agent", git }),
+        )
+        const hooks = await ok(directory, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "hooks",
+        ])
+        await rm(join(hooks, "blocked-emails"))
+      } else if (kind === "worktree") {
+        directory = join(root, "operator")
+        await ok(root, ["worktree", "add", "-b", "operator", directory])
+      }
+      const before =
+        kind === "non-git" ? undefined : await readFile(join(root, ".git", "config"), "utf8")
+      const binary = join(root, "claude-fixture")
+      await writeFile(
+        binary,
+        `#!/bin/sh
 prompt=$(cat)
 if [ "$prompt" = identity ]; then
   printf '%s\\n' "$GIT_AUTHOR_NAME" "$GIT_AUTHOR_EMAIL" "$GIT_COMMITTER_NAME" "$GIT_COMMITTER_EMAIL"
@@ -226,22 +258,58 @@ else
   git commit --allow-empty --author='Blocked <blocked@example.test>' -m blocked
 fi
 `,
-      { mode: 0o700 },
+        { mode: 0o700 },
+      )
+      const port = makeClaudeCli({ binary, git })
+      const input = { nativeSessionId: "fixture", directory, timeoutMs: 5000 }
+      expect(await Effect.runPromise(port.resume({ ...input, prompt: "identity" }))).toBe(
+        "Agent\nagent@example.test\nAgent\nagent@example.test\n",
+      )
+      if (before !== undefined) {
+        expect(await readFile(join(root, ".git", "config"), "utf8")).toBe(before)
+        const outcome = await Effect.runPromise(
+          port.resume({ ...input, prompt: "commit" }).pipe(Effect.result),
+        )
+        expect(outcome._tag).toBe(kind === "managed" ? "Failure" : "Success")
+        if (outcome._tag === "Failure")
+          expect(outcome.failure.cause.message).toContain("workflowd: blocked git identity")
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test("an empty blocklist permits pushes whose ranges contain no new commits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-git-empty-"))
+  const directory = join(root, "agent")
+  try {
+    await ok(root, ["init", "-b", "main"])
+    await ok(root, ["commit", "--allow-empty", "-m", "seed"])
+    await ok(root, ["init", "--bare", "-b", "main", join(root, "remote")])
+    await ok(root, ["remote", "add", "origin", join(root, "remote")])
+    await ok(root, ["push", "origin", "main"])
+    await Effect.runPromise(
+      gitAgentRunWorktrees.create({
+        repository: root,
+        directory,
+        branch: "agent",
+        git: { name: "Agent", email: "agent@example.test", blockedEmails: [] },
+      }),
     )
-    const port = makeClaudeCli({
-      binary,
-      git: { name: "Agent", email: "agent@example.test", blockedEmails: ["blocked@example.test"] },
-    })
-    const input = { nativeSessionId: "fixture", directory: root, timeoutMs: 5000 }
-    expect(await Effect.runPromise(port.resume({ ...input, prompt: "identity" }))).toBe(
-      "Agent\nagent@example.test\nAgent\nagent@example.test\n",
-    )
-    const outcome = await Effect.runPromise(
-      port.resume({ ...input, prompt: "commit" }).pipe(Effect.result),
-    )
-    expect(outcome._tag).toBe("Failure")
-    if (outcome._tag === "Failure")
-      expect(outcome.failure.cause.message).toContain("workflowd: blocked git identity")
+    await ok(directory, ["push", "origin", "HEAD:refs/heads/agent"])
+    const hooks = await ok(directory, [
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "hooks",
+    ])
+    expect(await readFile(join(hooks, "blocked-emails"), "utf8")).toBe("")
+    // Ignore blank policy lines left by older installations as well.
+    await writeFile(join(hooks, "blocked-emails"), "\n")
+    await ok(directory, ["push", "origin", "HEAD:refs/heads/another"])
+    await ok(directory, ["commit", "--allow-empty", "-m", "new commit"])
+    await ok(directory, ["push", "origin", "HEAD:refs/heads/agent"])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

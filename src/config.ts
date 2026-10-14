@@ -773,8 +773,7 @@ export async function loadConfig(
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
   const gitIdentity = agentGitSection(
     env,
-    mode !== "execution" &&
-      [agentRuns, residentCodex, residentOpenCodeSocket].some((executor) => executor !== undefined),
+    [agentRuns, residentCodex, residentOpenCodeSocket].some((executor) => executor !== undefined),
   )
   const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
     ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),

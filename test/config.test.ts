@@ -51,12 +51,30 @@ describe("loadConfig", () => {
       WORKFLOWD_MODE: "execution",
       WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
       WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+      WORKFLOWD_AGENT_GIT_NAME: "Agent",
+      WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
     })
     expect(config.mode).toBe("execution")
     expect(config.agentRuns?.routes).toEqual([])
     expect(config.executionCapabilities?.codexEnabled).toBe(true)
     expect(config.github).toBeUndefined()
     expect(config.openCode).toBeUndefined()
+  })
+  test("execution dispatch requires a complete agent git identity", async () => {
+    for (const identity of [
+      {},
+      { WORKFLOWD_AGENT_GIT_NAME: "Agent" },
+      { WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test" },
+    ]) {
+      await expect(
+        loadConfig({
+          WORKFLOWD_MODE: "execution",
+          WORKFLOWD_AGENT_RUN_TOKEN: "execution-secret",
+          WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repository",
+          ...identity,
+        }),
+      ).rejects.toThrow("WORKFLOWD_AGENT_GIT")
+    }
   })
   test("loads Claude CLI-only dispatch routes and validates their syntax", async () => {
     const base = {

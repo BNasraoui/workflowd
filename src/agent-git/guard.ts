@@ -5,11 +5,29 @@ import { mkdir, writeFile, readFile, rename, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { Effect } from "effect"
 import { runWorkspaceCommand } from "../workspace/command"
+import { pathExists } from "../workspace/filesystem"
 import { WorkspaceError } from "../workspace/errors"
 import type { AgentGitConfig } from "./config"
 import { guardedHook, identityGuard } from "./hooks"
 
 const locks = new ScopedKeyedLock()
+
+/** Parent sessions may belong to operator checkouts or non-Git directories. */
+export const refreshAgentGitGuard = (directory: string, config: AgentGitConfig | undefined) =>
+  Effect.gen(function* () {
+    if (config === undefined) return
+    const gitDir = yield* runWorkspaceCommand("locate agent git guard", [
+      "git",
+      "-C",
+      directory,
+      "rev-parse",
+      "--absolute-git-dir",
+    ]).pipe(Effect.result)
+    if (gitDir._tag === "Failure") return
+    if (yield* pathExists(join(gitDir.success, "workflowd-hooks", "agent-worktree")))
+      yield* installAgentGitGuard(directory, config)
+  })
+
 const writeAtomic = async (path: string, content: string, options: { mode: number }) => {
   const temporary = `${path}.${randomUUID()}`
   try {
@@ -38,9 +56,14 @@ export const installAgentGitGuard = (directory: string, config: AgentGitConfig |
           const original =
             previous === hooks ? await readFile(previousFile, "utf8") : resolve(directory, previous)
           await writeAtomic(previousFile, original, { mode: 0o600 })
-          await writeAtomic(join(hooks, "blocked-emails"), config.blockedEmails.join("\n") + "\n", {
-            mode: 0o600,
-          })
+          await writeAtomic(
+            join(hooks, "blocked-emails"),
+            config.blockedEmails.map((email) => `${email}\n`).join(""),
+            {
+              mode: 0o600,
+            },
+          )
+          await writeAtomic(join(hooks, "agent-worktree"), "", { mode: 0o600 })
           const guard = join(hooks, "identity-guard")
           await writeAtomic(guard, identityGuard, { mode: 0o700 })
           for (const hook of [

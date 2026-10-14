@@ -676,6 +676,8 @@ test("application configuration requires known aliases and exposes the sandbox p
   const { loadConfig } = await import("../../src/config")
   const env = {
     WORKFLOWD_MODE: "execution",
+    WORKFLOWD_AGENT_GIT_NAME: "Agent",
+    WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
     WORKFLOWD_AGENT_RUN_TOKEN: "test-token",
     WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/repo",
     WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([policy]),

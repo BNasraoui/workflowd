@@ -5,6 +5,7 @@ blocked="$(dirname "$0")/blocked-emails"
 [ -r "$blocked" ] || { echo 'workflowd: git identity policy unavailable' >&2; exit 1; }
 check_emails() {
   while IFS= read -r email; do
+    [ -n "$email" ] || continue
     normalized=$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')
     if grep -Fqx -- "$normalized" "$blocked"; then
       echo 'workflowd: blocked git identity; use the operator-configured agent identity' >&2
