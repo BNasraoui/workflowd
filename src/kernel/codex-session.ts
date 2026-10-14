@@ -1,5 +1,5 @@
+import { guardCliCredentials, makeHostCli } from "../agent-host/client"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import { guardCliCredentials } from "../agent-host/client"
 import type { CliPort, CliEvent, CliPreflightError } from "./cli-process-contract"
 import { createHash } from "node:crypto"
 import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
@@ -235,6 +235,12 @@ const commandFailure = (operation: string, result: CommandResult) =>
 export const makeDurableCliProcess = (
   options: CliProcessOptions,
 ): Extract<CliPort, { readonly ownership: "transient-exec" }> => {
+  if (options.credentialSocket !== undefined)
+    return makeHostCli(
+      options.credentialSocket,
+      options.driver.name === "claude" ? "claude" : "codex",
+      options.driver.parseEvent,
+    )
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(unitPrefix)) throw new Error("invalid unit prefix")

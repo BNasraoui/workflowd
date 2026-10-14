@@ -99,6 +99,7 @@ export const RemoteHostMessage = Schema.Union([
 export type RemoteHostMessage = typeof RemoteHostMessage.Type
 
 export const ClaudeResumeFailureReason = Schema.Union([
+  Schema.Literal("host_request_refused"),
   CredentialAdmissionReason,
   Schema.Literals([
     "transcript_missing",
@@ -134,6 +135,7 @@ export const RemoteClaudeResumeResult = Schema.Struct({
   status: Schema.Literals(["succeeded", "failed"]),
   output: Schema.optional(utf8Bounded(MAX_CLAUDE_RESUME_OUTPUT_BYTES)),
   failureReason: Schema.optional(ClaudeResumeFailureReason),
+  failureDetail: Schema.optional(utf8Bounded(1024)),
 }).pipe(
   Schema.check(
     Schema.makeFilter((value) => {

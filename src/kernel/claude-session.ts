@@ -1,10 +1,16 @@
+import {
+  withCredentialAdmission,
+  startAgentHost,
+  inspectAgentHost,
+  readAgentHostOutput,
+} from "../agent-host/client"
+import { createHash } from "node:crypto"
 import { refreshAgentGitGuard } from "../agent-git/guard"
 import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
-import { withCredentialAdmission } from "../agent-host/client"
 import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { Context, Effect } from "effect"
+import { Context, Effect, Schema } from "effect"
 import { runWorkspaceCommandBytes } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
 
@@ -37,6 +43,7 @@ export const encodeClaudeProjectDir = (directory: string) =>
   directory.replace(/[^A-Za-z0-9-]/g, "-")
 
 export type ClaudeCliPort = {
+  readonly hasDelivery?: (deliveryId: string) => Effect.Effect<boolean, WorkspaceError>
   /** True when the session transcript exists for this working directory. */
   readonly sessionExists: (input: {
     readonly nativeSessionId: string
@@ -48,6 +55,7 @@ export type ClaudeCliPort = {
     readonly directory: string
     readonly prompt: string
     readonly timeoutMs: number
+    readonly deliveryId?: string
   }) => Effect.Effect<string, WorkspaceError>
 }
 
@@ -61,71 +69,127 @@ export const makeClaudeCli = (options: {
   readonly binary: string
   readonly home?: string
   readonly credentialSocket?: string | undefined
-}): ClaudeCliPort => ({
-  sessionExists: (input) => {
-    if (!SESSION_ID_PATTERN.test(input.nativeSessionId)) return Effect.succeed(false)
-    const transcript = join(
-      options.home ?? homedir(),
-      ".claude",
-      "projects",
-      encodeClaudeProjectDir(input.directory),
-      `${input.nativeSessionId}.jsonl`,
-    )
-    return Effect.promise(() =>
-      stat(transcript).then(
-        (info) => info.isFile(),
-        () => false,
-      ),
-    )
-  },
-  resume: (input) =>
-    // Argument-vector spawn, and the prompt rides stdin: untrusted session
-    // content never appears in argv or a shell string.
-    withCredentialAdmission(
-      options.credentialSocket,
-      "claude",
-      refreshAgentGitGuard(input.directory, options.git)
-        .pipe(
-          Effect.andThen(
-            runWorkspaceCommandBytes(
-              "wake claude session",
-              [
-                options.binary,
-                "--setting-sources",
-                "user",
-                "-p",
-                "--resume",
-                input.nativeSessionId,
-                "--output-format",
-                "json",
-              ],
-              {
-                env: agentGitEnvironment(options.git),
-                cwd: input.directory,
-                stdin: input.prompt,
-                maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES,
-              },
+}): ClaudeCliPort =>
+  options.credentialSocket === undefined
+    ? {
+        sessionExists: (input) => {
+          if (!SESSION_ID_PATTERN.test(input.nativeSessionId)) return Effect.succeed(false)
+          const transcript = join(
+            options.home ?? homedir(),
+            ".claude",
+            "projects",
+            encodeClaudeProjectDir(input.directory),
+            `${input.nativeSessionId}.jsonl`,
+          )
+          return Effect.promise(() =>
+            stat(transcript).then(
+              (info) => info.isFile(),
+              () => false,
+            ),
+          )
+        },
+        resume: (input) =>
+          // Argument-vector spawn, and the prompt rides stdin: untrusted session
+          // content never appears in argv or a shell string.
+          withCredentialAdmission(
+            options.credentialSocket,
+            "claude",
+            refreshAgentGitGuard(input.directory, options.git)
+              .pipe(
+                Effect.andThen(
+                  runWorkspaceCommandBytes(
+                    "wake claude session",
+                    [
+                      options.binary,
+                      "--setting-sources",
+                      "user",
+                      "-p",
+                      "--resume",
+                      input.nativeSessionId,
+                      "--output-format",
+                      "json",
+                    ],
+                    {
+                      env: agentGitEnvironment(options.git),
+                      cwd: input.directory,
+                      stdin: input.prompt,
+                      maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES,
+                    },
+                  ),
+                ),
+              )
+              .pipe(
+                Effect.timeoutOrElse({
+                  duration: input.timeoutMs,
+                  orElse: () =>
+                    Effect.fail(
+                      new WorkspaceError({
+                        operation: "wake claude session",
+                        cause: new Error(
+                          `claude resume did not finish within ${input.timeoutMs}ms`,
+                        ),
+                      }),
+                    ),
+                }),
+                Effect.map((output) => new TextDecoder().decode(output.stdout)),
+              ),
+          ).pipe(
+            Effect.mapError((error) =>
+              error instanceof WorkspaceError
+                ? error
+                : new WorkspaceError({ operation: "credential admission", cause: error }),
             ),
           ),
-        )
-        .pipe(
-          Effect.timeoutOrElse({
-            duration: input.timeoutMs,
-            orElse: () =>
-              Effect.fail(
-                new WorkspaceError({
-                  operation: "wake claude session",
-                  cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
-                }),
-              ),
-          }),
-          Effect.map((output) => new TextDecoder().decode(output.stdout)),
-        ),
-    ).pipe(
-      Effect.mapError((error) =>
-        error instanceof WorkspaceError
-          ? error
-          : new WorkspaceError({ operation: "credential admission", cause: error }),
-      ),
-    ),
-})
+      }
+    : hostClaudeCli(options.credentialSocket)
+
+function hostClaudeCli(socket: string): ClaudeCliPort {
+  const hostId = (deliveryId: string) =>
+    `claude-turn-${createHash("sha256").update(deliveryId).digest("hex")}`
+  const failure = (cause: unknown) =>
+    new WorkspaceError({
+      operation: "wake claude session",
+      cause: cause instanceof Error ? cause : new Error(String(cause)),
+    })
+  return {
+    hasDelivery: (deliveryId) =>
+      Effect.tryPromise({
+        try: async () => (await inspectAgentHost(socket, hostId(deliveryId))) !== null,
+        catch: failure,
+      }),
+    sessionExists: (input) =>
+      Effect.tryPromise({
+        try: async () => {
+          if (!SESSION_ID_PATTERN.test(input.nativeSessionId)) return false
+          const process = await startAgentHost(socket, {
+            profile: "claude-session",
+            runId: `session-${crypto.randomUUID()}`,
+            directory: input.directory,
+            nativeSessionId: input.nativeSessionId,
+            prompt: "",
+            model: null,
+          })
+          return Schema.decodeUnknownSync(Schema.Boolean)(
+            JSON.parse(await readAgentHostOutput(socket, process)),
+          )
+        },
+        catch: failure,
+      }),
+    resume: (input) =>
+      Effect.tryPromise({
+        try: async (signal) => {
+          const process = await startAgentHost(socket, {
+            profile: "claude-resume",
+            runId: hostId(input.deliveryId ?? `resume-${crypto.randomUUID()}`),
+            directory: input.directory,
+            nativeSessionId: input.nativeSessionId,
+            prompt: input.prompt,
+            model: null,
+            timeoutMs: input.timeoutMs,
+          })
+          return readAgentHostOutput(socket, process, MAX_CLAUDE_STDOUT_BYTES, signal)
+        },
+        catch: failure,
+      }),
+  }
+}

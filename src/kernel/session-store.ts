@@ -569,7 +569,7 @@ const make = Effect.gen(function* () {
       const leaseUntil = yield* leaseDeadline(input.now, ms)
       const rows =
         yield* sql`UPDATE kernel_resume_attempts SET lease_until = ${leaseUntil.toISOString()},
-      updated_at = ${input.now.toISOString()} WHERE ${resumeWhere(input)} AND state = 'leased' RETURNING request_id`
+      updated_at = ${input.now.toISOString()} WHERE ${resumeWhere(input)} AND state IN ('leased', 'sent') RETURNING request_id`
       if (rows.length === 0) return yield* denied(input.requestId)
       return { leaseUntil }
     }).pipe(sql.withTransaction)

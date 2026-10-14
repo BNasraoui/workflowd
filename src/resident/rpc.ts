@@ -1,10 +1,14 @@
+import { credentialReason, type CredentialAdmissionReason } from "../agent-host/protocol"
 import { Option, Schema } from "effect"
 const RpcErrorCode = Schema.Struct({ code: Schema.Int })
 
 /** Carries the protocol category, never the server's potentially sensitive payload. */
 export class RpcRequestError extends Error {
-  constructor(readonly code: number | undefined) {
-    super("Codex app-server rejected request")
+  constructor(
+    readonly code: number | undefined,
+    readonly reason?: CredentialAdmissionReason,
+  ) {
+    super(reason ?? "Codex app-server rejected request")
   }
 }
 const Frame = Schema.Struct({
@@ -58,7 +62,12 @@ export class RpcClient {
       this.pending.delete(frame.id)
       if (frame.error !== undefined) {
         const error = Schema.decodeUnknownOption(RpcErrorCode)(frame.error)
-        pending.reject(new RpcRequestError(Option.isSome(error) ? error.value.code : undefined))
+        pending.reject(
+          new RpcRequestError(
+            Option.isSome(error) ? error.value.code : undefined,
+            credentialReason(frame.error),
+          ),
+        )
       } else pending.resolve(frame.result)
     } else if (frame.method !== undefined)
       this.notify({ method: frame.method, params: frame.params })

@@ -1,11 +1,12 @@
 [Unit]
-Description=Workflowd credential admission
+Description=Workflowd agent host
 After=local-fs.target
 
 [Service]
 Type=simple
 User=root
 Group=root
+EnvironmentFile=/etc/workflowd/agent-git.env
 ExecStart=/usr/local/libexec/workflowd-agent-host
 RuntimeDirectory=workflowd-agent-host
 RuntimeDirectoryMode=0755
@@ -13,8 +14,9 @@ UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN
-ReadWritePaths=/var/lib/workflowd/model-credentials /run/workflowd-agent-host
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_CHOWN CAP_SYS_PTRACE
+ReadWritePaths=/var/lib/workflowd/model-credentials /var/lib/workflowd/agent-host /var/lib/workflowd/agent-io /run/workflowd-agent-host
+ReadWritePaths=-/home/ben/.codex -/home/ben/.claude -/var/lib/workflowd-agent/.codex -/var/lib/workflowd-agent/.claude
 PrivateTmp=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX

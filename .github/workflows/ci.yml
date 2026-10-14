@@ -125,7 +125,7 @@ jobs:
   tests:
     name: Tests and changed-line coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions: {}
     steps:
       - name: Anonymous checkout
@@ -211,7 +211,7 @@ jobs:
             test "$relative" != "$source"
             sudo ln -s "/opt/workflowd-credential-fixture/$relative" "/opt/workflowd-credential-fixture/bin/$client"
           done
-      - name: Require two-UID credential admission and repair
+      - name: Probe two-UID native supervision prerequisites
         run: >-
           sudo systemd-run --wait --pipe --collect
           -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
@@ -219,10 +219,60 @@ jobs:
           --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
           --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
           --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
-          /opt/workflowd-credential-fixture/bin/bun test
-          test/agent-user/credentials.e2e.test.ts
-          test/agent-user/credential-dispatch.e2e.test.ts
-          test/agent-user/opencode-migration.e2e.test.ts
+          /opt/workflowd-credential-fixture/bin/bun
+          scripts/evidence/agent-user.mjs --probe-supervision
+      - name: Require two-UID native launch and recovery
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_DEPLOYED_TEST=1 \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/native.e2e.test.ts \
+          test/kernel/codex-systemd-custody.test.ts \
+          test/kernel/cli-launch-uncertainty.test.ts \
+          test/remote/claude-resume-runner-store.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-native-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-native-tests.xml').findall('.//testcase')
+          for name in [
+              'two-UID native services retain custody across controller restart and refuse forged launches',
+              'the host native protocol uses bounded custody with a simulated manager and real UID children',
+          ]:
+              matching = [case for case in cases if case.get('name') == name]
+              assert len(matching) == 1 and len(matching[0]) == 0, f'Missing or unsuccessful required test: {name}'
+          PYTEST
+      - name: Require two-UID credential admission and repair
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/credentials.e2e.test.ts \
+          test/agent-user/credential-dispatch.e2e.test.ts \
+          test/agent-user/opencode-migration.e2e.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-credential-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-credential-tests.xml').findall('.//testcase')
+          assert len(cases) >= 58, f'Expected at least 58 credential tests, got {len(cases)}'
+          assert all(len(case) == 0 for case in cases), 'Credential tests failed or skipped'
+          for name in [
+              'a replaced login refuses even with identical bytes; explicit relink restores both links',
+              'relink auto preserves an opposite-side login replaced during import',
+              'relink ben preserves an opposite-side login replaced during import',
+              'relink caps a source that grows after its size check',
+              'relink refuses an active or uncertain unit recorded in host custody',
+          ]:
+              assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
+          PYTEST
       - name: Require administrative credential coverage
         run: |
           mkdir -p coverage/administrative
@@ -240,6 +290,7 @@ jobs:
             test/agent-user/client-versions.test.ts \
             test/agent-user/credentials.e2e.test.ts \
             test/agent-user/credential-dispatch.e2e.test.ts \
+            test/agent-user/native.e2e.test.ts \
             test/agent-user/opencode-migration.e2e.test.ts
       - name: Generate Bun LCOV
         run: |

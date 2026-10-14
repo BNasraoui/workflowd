@@ -564,3 +564,168 @@ describe("claude resume worker", () => {
     }
   })
 })
+
+test("local sent Claude resume recovers from its host checkpoint without another wake", async () => {
+  const observed: string[] = []
+  const turns: string[] = []
+  const deliveryId = "local-test-delivery"
+  const cli: ClaudeCliPort = {
+    sessionExists: () => Effect.succeed(true),
+    hasDelivery: (id) =>
+      Effect.sync(() => {
+        observed.push(id)
+        return id === `${deliveryId}-wake`
+      }),
+    resume: (input) =>
+      Effect.sync(() => {
+        turns.push(input.deliveryId ?? "missing")
+        return JSON.stringify({
+          result: input.deliveryId?.endsWith("-wake")
+            ? "already-delivered"
+            : '{"acknowledged":true,"summary":"reattached"}',
+        })
+      }),
+  }
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const claim = yield* store.claimResume({
+        owningHostId: "mint",
+        workerId: "old-controller",
+        now: at,
+        leaseDurationMs: 60000,
+        providerKind: "claude",
+      })
+      if (!claim) throw new Error("missing test claim")
+      const authority = {
+        requestId: claim.requestId,
+        attempt: claim.attempt,
+        owningHostId: claim.owningHostId,
+        workerId: claim.workerId,
+        claimToken: claim.claimToken,
+        expectedLeaseUntil: claim.leaseUntil,
+        now: at,
+      }
+      yield* store.checkpointResume({
+        ...authority,
+        checkpointId: "host-checkpoint",
+        checkpointVersion: 3,
+        checkpoint: {
+          deliveryId,
+          payload: {
+            kind: "claude_resume",
+            hostId: "mint",
+            nativeSessionId: native,
+            directory,
+            prompt: wake.resumePromptText,
+            extractionSchemaJson: JSON.stringify(contract.jsonSchema),
+            turnTimeoutMs: options.resumeTimeoutMs,
+          },
+        },
+      })
+      yield* store.markResumeSent(authority)
+      yield* store.releaseResume({ ...authority, runAt: at })
+      return yield* runClaudeResumeIteration(options).pipe(Effect.provideService(ClaudeCli, cli))
+    }),
+  )
+  expect(result.status).toBe("completed")
+  expect(observed).toEqual([`${deliveryId}-wake`])
+  expect(turns).toEqual([`${deliveryId}-wake`, `${deliveryId}-extract`])
+})
+
+test("a local host resume checkpoints before delivery and retains its renewed lease through both turns", async () => {
+  const deliveries: string[] = []
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const sql = yield* SqlClient.SqlClient
+      const store = yield* KernelSessionStore
+      const cli: ClaudeCliPort = {
+        sessionExists: () => Effect.succeed(true),
+        hasDelivery: () => Effect.succeed(false),
+        resume: (input) =>
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              checkpoint_json: string
+            }>`SELECT checkpoint_json FROM kernel_resume_checkpoints WHERE checkpoint_version = 3`
+            expect(rows).toHaveLength(1)
+            expect(JSON.parse(rows[0]!.checkpoint_json)).toMatchObject({
+              deliveryId: input.deliveryId?.replace(/-(wake|extract)$/, ""),
+              payload: { nativeSessionId: native, directory },
+            })
+            deliveries.push(input.deliveryId!)
+            yield* Effect.sleep(30)
+            return JSON.stringify({
+              result: input.deliveryId!.endsWith("-wake")
+                ? "ACK"
+                : '{"acknowledged":true,"summary":"host completed"}',
+            })
+          }).pipe(Effect.orDie),
+      }
+      const iteration = yield* runClaudeResumeIteration({
+        ...options,
+        now: () => new Date(),
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 5,
+      }).pipe(Effect.provideService(ClaudeCli, cli))
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("completed")
+  expect(result.request?.state).toBe("completed")
+  expect(deliveries).toHaveLength(2)
+  expect(deliveries[0]?.replace(/-wake$/, "-extract")).toBe(deliveries[1])
+})
+
+test("a non-host local resume carries renewed authority through multiple heartbeats", async () => {
+  let turns = 0
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const cli: ClaudeCliPort = {
+        sessionExists: () => Effect.succeed(true),
+        resume: () =>
+          Effect.gen(function* () {
+            turns++
+            yield* Effect.sleep(40)
+            return JSON.stringify({
+              result: turns === 1 ? "ACK" : '{"acknowledged":true,"summary":"done"}',
+            })
+          }),
+      }
+      const iteration = yield* runClaudeResumeIteration({
+        ...options,
+        now: () => new Date(),
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 5,
+      }).pipe(Effect.provideService(ClaudeCli, cli))
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("completed")
+  expect(result.request?.state).toBe("completed")
+  expect(turns).toBe(2)
+})
+
+test("an unavailable host during local custody preflight releases for retry", async () => {
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const iteration = yield* runClaudeResumeIteration(options).pipe(
+        Effect.provideService(
+          ClaudeCli,
+          makeClaudeCli({
+            binary: "must-not-run",
+            credentialSocket: `/tmp/absent-host-${crypto.randomUUID()}.sock`,
+          }),
+        ),
+      )
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("idle")
+  expect(result.request?.state).toBe("ready")
+})

@@ -23,6 +23,16 @@ paths. OpenCode receives them through its session environment API, including whe
 resident mailbox setup replaces that environment. Local and remote Claude resume
 processes use the same configuration.
 
+With agent-user isolation enabled, the root host loads these variables from
+`/etc/workflowd/agent-git.env` (root-owned, mode 0600). It requires a complete
+identity whenever launch policy is enabled. `HostStart` accepts no caller-selected
+identity or environment: `hostLaunchCommand` injects the four Git identity
+variables into every fixed profile, including workspace creation, discovery,
+preflight, Codex resident servers and Claude resume. The private worker input
+carries the blocklist; it is not placed in unit arguments or protocol replies.
+The controller and remote runner must also retain their identity configuration
+for paths that do not use the host socket.
+
 ## Git hooks
 
 After creating an agent worktree, workflowd installs its guard under that
@@ -88,9 +98,17 @@ configuration, cover every repository agents work in, and avoid exposing identit
 values in repositories or check output. It is not implemented by this PR.
 
 Fix Work workspaces receive the configured identity through OpenCode but do not
-install this guard. PR #106's agent-host launch paths must preserve both identity
-propagation and guard installation; whichever PR merges second must reconcile
-those paths, including `HostStart` and `hostLaunchCommand`.
+install this guard.
+
+The root host creates independent clones through the agent-UID workspace worker.
+That worker installs the same guard after checkout. Native launch and Claude
+resume refresh guards in marked workspaces as the agent UID, preserving original
+hooks. The hooks directory and executables are mode 0700; marker, previous-hook
+record and blocklist are mode 0600, owned by the agent. This makes the private
+policy readable by that user without widening it to other users. Root never runs
+Git against agent-writable metadata. The agent can still change its own hooks or
+Git configuration, within the same documented limits above; this is not a
+root-enforced or server-side policy.
 
 ## Claude account context investigation
 
@@ -116,7 +134,7 @@ billing paths, or set an unsupported flag. The Git guard remains necessary.
 ## Operator rollout
 
 1. Set all three variables in the effective environment file for each daemon,
-   including execution-mode daemons, and Claude runner. Read the approved identity
+   including execution-mode daemons, the root agent host, and Claude runner. Read the approved identity
    from host configuration and choose the blocklist there; do not copy values
    into this repository or PR text.
 2. Drain active runs, including resident processes, before restarting the updated

@@ -1,40 +1,15 @@
-import { parseCodexWorkerArguments, runCliWorker, type CliWorkerOptions } from "./codex-worker"
-import { nativeSandboxArguments } from "../sandbox/native"
+import { parseCodexWorkerArguments, runClaudeNativeWorker } from "./codex-worker"
 
-/** Claude Code uses its own local subscription credentials and persisted sessions. */
-export const runClaudeWorker = async (options: CliWorkerOptions): Promise<number> =>
-  runCliWorker(options, [
-    options.binary,
-    "--print",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    ...(options.sandboxBindingFile === undefined
-      ? [
-          "--setting-sources",
-          "user",
-          "--dangerously-skip-permissions",
-          "--strict-mcp-config",
-          "--mcp-config",
-          '{"mcpServers":{}}',
-        ]
-      : await nativeSandboxArguments(
-          "claude",
-          options.binary,
-          options.directory,
-          options.sandboxBindingFile,
-        )),
-    ...(options.model === null ? [] : ["--model", options.model]),
-    ...(options.effort === undefined ? [] : ["--effort", options.effort]),
-  ])
+export const runClaudeWorker = runClaudeNativeWorker
 
-if (import.meta.main) {
+export async function runClaudeWorkerMain(arguments_: ReadonlyArray<string>): Promise<number> {
   try {
-    const exitCode = await runClaudeWorker(parseCodexWorkerArguments(process.argv.slice(2)))
-    process.exitCode = exitCode < 0 ? 1 : exitCode
+    const exitCode = await runClaudeWorker(parseCodexWorkerArguments(arguments_))
+    return exitCode < 0 ? 1 : exitCode
   } catch (cause) {
     console.error(cause instanceof Error ? cause.message : String(cause))
-    process.exitCode = 1
+    return 1
   }
 }
+
+if (import.meta.main) process.exitCode = await runClaudeWorkerMain(process.argv.slice(2))

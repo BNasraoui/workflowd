@@ -7,6 +7,7 @@ command -v bun >/dev/null
 bun install --frozen-lockfile --ignore-scripts
 mkdir -p dist
 bun build --compile src/agent-host/server.ts --outfile dist/workflowd-agent-host
+bun build --target=bun src/kernel/codex-worker.ts --outfile dist/workflowd-native-worker.js
 bun build --compile deploy/agent-user/relink.ts --outfile dist/workflowd-relink-credentials
 bun build --compile deploy/agent-user/migrate-opencode.ts --outfile dist/workflowd-migrate-opencode
 [ "${1:-}" != --build-only ] || exit 0
@@ -26,6 +27,10 @@ install -d -o root -g workflowd-model-auth -m 0710 \
   /var/lib/workflowd/model-credentials \
   /var/lib/workflowd/model-credentials/codex \
   /var/lib/workflowd/model-credentials/claude
+install -d -o root -g root -m 0700 /var/lib/workflowd/agent-host
+install -d -o root -g root -m 0711 /var/lib/workflowd/agent-io
+install -d -o workflowd-agent -g workflowd-model-auth -m 0700 /var/lib/workflowd-agent/workspaces /var/lib/workflowd-agent/workspaces/agent-runs
+install -o root -g root -m 0644 dist/workflowd-native-worker.js /usr/local/libexec/workflowd-native-worker.js
 install -o root -g root -m 0755 dist/workflowd-agent-host /usr/local/libexec/workflowd-agent-host
 install -o root -g root -m 0755 dist/workflowd-relink-credentials /usr/local/sbin/workflowd-relink-credentials
 install -o root -g root -m 0755 dist/workflowd-migrate-opencode /usr/local/sbin/workflowd-migrate-opencode

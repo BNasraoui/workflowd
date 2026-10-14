@@ -1,3 +1,4 @@
+import { requireAgentHostSocket } from "./agent-host/config"
 import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
 import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
@@ -764,8 +765,7 @@ export async function loadConfig(
   const baseUrl = mode === "execution" ? undefined : openCodeBaseUrl(env)
   const hostId = workerHostId(env)
   const credentialSocket = env.WORKFLOWD_AGENT_HOST_SOCKET
-  if (credentialSocket !== undefined && !credentialSocket.startsWith("/"))
-    throw new Error("WORKFLOWD_AGENT_HOST_SOCKET must be absolute")
+  await requireAgentHostSocket(credentialSocket)
   const workerIdentity = loadWorkerIdentityConfig(env)
   const residentCodex = loadResidentConfig(env)
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)

@@ -312,6 +312,8 @@ adminTest("refused installed Codex and Claude dispatch start no unit or process"
   try {
     await rm(policy.codex.benLink)
     await writeFile(policy.codex.benLink, "replacement", { mode: 0o600 })
+    const { utimes } = await import("node:fs/promises")
+    await utimes(policy.codex.benLink, 1, 1)
     for (const client of ["codex", "claude"]) {
       const binary = Bun.which(client)
       expect(binary).not.toBeNull()
@@ -636,6 +638,53 @@ adminTest("relink refuses every live agent process, even an unrelated executable
   }
 })
 
+for (const layout of ["claude", "codex-bundled", "codex-platform"] as const) {
+  adminTest(
+    `relink refuses a deleted controller executable in the ${layout} install root`,
+    async () => {
+      const { copyFile, readlink, unlink } = await import("node:fs/promises")
+      const { dirname } = await import("node:path")
+      const { policy, close } = await fixture()
+      const install = join(policy.root, "install")
+      const entrypoint = join(
+        install,
+        layout === "claude" ? "versions/current" : "@openai/codex/bin/codex.js",
+      )
+      const executable = join(
+        install,
+        layout === "claude"
+          ? "versions/previous"
+          : `@openai/${layout === "codex-bundled" ? "codex" : "codex-linux-x64"}/vendor/linux/codex/codex`,
+      )
+      await mkdir(dirname(entrypoint), { recursive: true })
+      await mkdir(dirname(executable), { recursive: true })
+      await copyFile("/bin/sleep", entrypoint)
+      await copyFile("/bin/sleep", executable)
+      const child = Bun.spawn([executable, "30"], { stdout: "ignore", stderr: "ignore" })
+      try {
+        await unlink(executable)
+        expect(await readlink(`/proc/${child.pid}/exe`)).toBe(`${executable} (deleted)`)
+        await expect(
+          relinkCredentials(
+            {
+              ...policy,
+              controllerUid: process.getuid!(),
+              agentUid: 65533,
+              consumerExecutables: [entrypoint],
+            },
+            "claude",
+            "ben",
+          ),
+        ).rejects.toMatchObject({ reason: "credential_relink_in_progress" })
+      } finally {
+        child.kill()
+        await child.exited
+        await close()
+      }
+    },
+  )
+}
+
 for (const operation of ["listProviders", "listModels"] as const) {
   test(`OpenCode ${operation} preserves credential refusal through ingress`, async () => {
     const { Effect } = await import("effect")
@@ -918,3 +967,341 @@ adminTest("relink refuses a non-dumpable agent process", async () => {
     await close()
   }
 })
+
+for (const client of ["codex", "claude"] as const)
+  for (const source of ["ben", "agent"] as const) {
+    adminTest(
+      `the host automatically relinks a newer ${source} ${client} login with the other link intact`,
+      async () => {
+        const { serveCredentialHost } = await import("../../src/agent-host/server")
+        const { utimes } = await import("node:fs/promises")
+        const { policy, close } = await fixture()
+        const socket = join(policy.root, "auto.sock")
+        const host = await serveCredentialHost(socket, policy)
+        try {
+          const login = policy[client]
+          const selected = source === "ben" ? login.benLink : login.agentLink
+          await utimes(login.canonical, 1, 1)
+          await rm(selected)
+          await writeFile(selected, "synthetic-new-login", { mode: 0o600 })
+          await chown(
+            selected,
+            source === "ben" ? policy.controllerUid : policy.agentUid,
+            policy.groupGid,
+          )
+          // No credential bytes may be returned by the host protocol.
+          if (policy.agentUid === policy.controllerUid) {
+            const { admitHostCredentials } = await import("../../src/agent-host/credential-relink")
+            await (
+              await admitHostCredentials(policy, client)
+            )()
+          } else {
+            expect(
+              await asIdentity(
+                policy.controllerUid,
+                policy.groupGid,
+                admissionCode.replaceAll('"codex"', JSON.stringify(client)),
+                { SOCKET: socket, CLIENT_MODULE: clientModule },
+              ),
+            ).toEqual({ admitted: true })
+          }
+          await checkCredentialAdmission(policy, client)
+          expect(await readFile(login.canonical, "utf8")).toBe("synthetic-new-login")
+          expect((await lstat(login.benLink)).isSymbolicLink()).toBe(true)
+          expect((await lstat(login.agentLink)).isSymbolicLink()).toBe(true)
+          expect(
+            await lstat(join(policy.root, `${client}.repair.json`)).catch(() => null),
+          ).toBeNull()
+        } finally {
+          await host.close()
+          await close()
+        }
+      },
+    )
+  }
+
+for (const state of [
+  "both changed",
+  "wrong link",
+  "missing other",
+  "older",
+  "equal timestamp",
+  "hardlink",
+  "permissions",
+  "wrong owner",
+  "journal",
+  "staging",
+  "pending link",
+  "unsafe parent",
+  "canonical permissions",
+  "canonical missing",
+  "empty",
+  "oversize",
+  "active agent",
+  "active controller",
+  "admission lease",
+] as const) {
+  adminTest(
+    `the host refuses automatic relink for ${state} without changing credential bytes`,
+    async () => {
+      const { admitHostCredentials } = await import("../../src/agent-host/credential-relink")
+      const { credentialLock } = await import("../../src/agent-host/credentials")
+      const { utimes, link } = await import("node:fs/promises")
+      const { policy, close } = await fixture()
+      const login = policy.claude
+      let release: (() => Promise<void>) | undefined
+      let child: ReturnType<typeof Bun.spawn> | undefined
+      try {
+        await utimes(login.canonical, 10, 10)
+        await rm(login.benLink)
+        await writeFile(login.benLink, "synthetic-new-login", { mode: 0o600 })
+        await chown(login.benLink, policy.controllerUid, policy.groupGid)
+        if (["both changed", "wrong link", "missing other"].includes(state))
+          await rm(login.agentLink)
+        if (state === "both changed")
+          await writeFile(login.agentLink, "competing-login", { mode: 0o600 })
+        if (state === "wrong link") await symlink(login.benLink, login.agentLink)
+        if (state === "older" || state === "equal timestamp")
+          await utimes(login.benLink, 1, state === "older" ? 1 : 10)
+        if (state === "hardlink") await link(login.benLink, `${login.benLink}.copy`)
+        if (state === "permissions") await chmod(login.benLink, 0o644)
+        if (state === "journal")
+          await writeFile(join(policy.root, "claude.repair.json"), "{}", { mode: 0o600 })
+        if (state === "staging")
+          await writeFile(join(policy.root, "claude.staging"), "competing-login")
+        if (state === "pending link")
+          await symlink(login.canonical, `${login.benLink}.workflowd-relink`)
+        if (state === "unsafe parent") await chmod(join(policy.root, "..", "ben"), 0o777)
+        if (state === "canonical permissions") await chmod(login.canonical, 0o666)
+        if (state === "canonical missing") await rm(login.canonical)
+        if (state === "empty") await writeFile(login.benLink, "")
+        if (state === "oversize") await writeFile(login.benLink, "x".repeat(1024 * 1024 + 1))
+        const source = await lstat(login.benLink)
+        const before = await readFile(login.canonical, "utf8").catch(() => null)
+        const effective = { ...policy, consumerExecutables: [] as string[] }
+        if (state === "wrong owner") effective.controllerUid = 65533
+        if (state === "active agent" || state === "active controller") {
+          const uid = state === "active agent" ? policy.agentUid : policy.controllerUid
+          const args = ["/bin/sleep", "30"]
+          child = Bun.spawn(
+            uid === process.getuid!()
+              ? args
+              : [
+                  "/usr/bin/setpriv",
+                  "--reuid",
+                  String(uid),
+                  "--regid",
+                  String(policy.groupGid),
+                  "--clear-groups",
+                  ...args,
+                ],
+            { stdout: "ignore", stderr: "ignore" },
+          )
+          const { stat } = await import("node:fs/promises")
+          const deadline = Date.now() + 3000
+          while ((await stat(`/proc/${child.pid}`)).uid !== uid) {
+            if (Date.now() > deadline) throw new Error("fixture UID transition timed out")
+            await Bun.sleep(5)
+          }
+          if (state === "active controller") {
+            if (effective.agentUid === effective.controllerUid) effective.agentUid = 65533
+            effective.consumerExecutables = ["/bin/sleep"]
+          }
+        }
+        if (state === "admission lease") release = await credentialLock(policy, false)
+        await expect(admitHostCredentials(effective, "claude")).rejects.toMatchObject({
+          reason: ["active agent", "active controller", "admission lease", "journal"].includes(
+            state,
+          )
+            ? "credential_relink_in_progress"
+            : expect.stringMatching(/shared_credential_|credential_relink_in_progress/),
+        })
+        expect(await readFile(login.canonical, "utf8").catch(() => null)).toBe(before)
+        expect((await lstat(login.benLink)).ino).toBe(source.ino)
+      } finally {
+        await release?.()
+        child?.kill()
+        if (child) await child.exited
+        await close()
+      }
+    },
+  )
+}
+
+for (const source of ["auto", "ben"] as const) {
+  adminTest(
+    `relink ${source} preserves an opposite-side login replaced during import`,
+    async () => {
+      const { spyOn } = await import("bun:test")
+      const filesystem = await import("node:fs/promises")
+      const { policy, close } = await fixture()
+      await filesystem.utimes(policy.codex.canonical, 1, 1)
+      await rm(policy.codex.benLink)
+      await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+      await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+      const original = filesystem.rename
+      let raced = false
+      const race = spyOn(filesystem, "rename").mockImplementation(async (from, to) => {
+        await original(from, to)
+        if (String(from).endsWith("codex.staging")) {
+          raced = true
+          await rm(policy.codex.agentLink)
+          await writeFile(policy.codex.agentLink, "concurrent-login", { mode: 0o600 })
+        }
+      })
+      try {
+        await expect(relinkCredentials(policy, "codex", source)).rejects.toMatchObject({
+          reason: "shared_credential_diverged",
+        })
+        expect(raced).toBe(true)
+        expect(await readFile(policy.codex.agentLink, "utf8")).toBe("concurrent-login")
+        expect((await lstat(policy.codex.agentLink)).isFile()).toBe(true)
+        expect((await lstat(join(policy.root, "codex.repair.json"))).isFile()).toBe(true)
+      } finally {
+        race.mockRestore()
+        await close()
+      }
+    },
+  )
+}
+
+adminTest("relink caps a source that grows after its size check", async () => {
+  const { spyOn } = await import("bun:test")
+  const filesystem = await import("node:fs/promises")
+  const { policy, close } = await fixture()
+  await rm(policy.codex.benLink)
+  await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+  await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+  const original = filesystem.open
+  const race = spyOn(filesystem, "open").mockImplementation(async (path, flags, mode) => {
+    if (String(path).endsWith("codex.staging"))
+      await writeFile(policy.codex.benLink, Buffer.alloc(1024 * 1024 + 1))
+    return original(path, flags, mode)
+  })
+  try {
+    await expect(relinkCredentials(policy, "codex", "ben")).rejects.toMatchObject({
+      reason: "shared_credential_diverged",
+    })
+    expect(await readFile(policy.codex.canonical, "utf8")).toBe("synthetic-generation-1")
+  } finally {
+    race.mockRestore()
+    await close()
+  }
+})
+
+adminTest("relink refuses an active or uncertain unit recorded in host custody", async () => {
+  const { agentHostUnitName } = await import("../../src/agent-host/protocol")
+  const { policy, close } = await fixture()
+  const custodyRoot = join(policy.root, "custody")
+  await mkdir(custodyRoot, { mode: 0o700 })
+  const launch = {
+    custodyRoot,
+    ioRoot: policy.root,
+    home: policy.root,
+    workspaceRoot: policy.root,
+    bun: process.execPath,
+    worker: "/unused",
+    codex: "/unused",
+    claude: "/unused",
+  }
+  try {
+    await rm(policy.codex.benLink)
+    await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+    await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+    const { createHash } = await import("node:crypto")
+    const path = join(custodyRoot, `${createHash("sha256").update("live").digest("hex")}.json`)
+    for (const active of [true, false]) {
+      await writeFile(
+        path,
+        JSON.stringify({
+          process: {
+            runId: "live",
+            unit: agentHostUnitName("live"),
+            launchId: "launch",
+            invocationId: active ? "invocation" : null,
+            uid: policy.agentUid,
+            pid: 0,
+            started: new Date().toISOString(),
+            active,
+            exitCode: null,
+          },
+        }),
+        { mode: 0o600 },
+      )
+      await expect(relinkCredentials({ ...policy, launch }, "codex", "ben")).rejects.toMatchObject({
+        reason: "credential_relink_in_progress",
+      })
+      expect(await readFile(policy.codex.canonical, "utf8")).toBe("synthetic-generation-1")
+    }
+  } finally {
+    await close()
+  }
+})
+
+adminTest("relink swaps back a source replaced after the final path check", async () => {
+  const { spyOn } = await import("bun:test")
+  const filesystem = await import("node:fs/promises")
+  const { policy, close } = await fixture()
+  await filesystem.utimes(policy.codex.canonical, 1, 1)
+  await rm(policy.codex.benLink)
+  await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+  await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+  const otherInode = (await lstat(policy.codex.agentLink)).ino
+  const original = filesystem.readlink
+  let raced = false
+  const race = spyOn(filesystem, "readlink").mockImplementation(
+    new Proxy(original, {
+      async apply(target, _receiver, args: unknown[]) {
+        const path = args[0]
+        if (typeof path !== "string" || args.length !== 1)
+          throw new Error("unexpected readlink arguments")
+        const result = await target(path)
+        const info = await lstat(path).catch(() => null)
+        if (
+          !raced &&
+          info?.ino === otherInode &&
+          (await lstat(`${policy.codex.benLink}.workflowd-relink`).catch(() => null))
+        ) {
+          raced = true
+          const fresh = `${policy.codex.benLink}.login`
+          await writeFile(fresh, "concurrent-login", { mode: 0o600 })
+          await filesystem.rename(fresh, policy.codex.benLink)
+        }
+        return result
+      },
+    }),
+  )
+  try {
+    await expect(relinkCredentials(policy, "codex", "auto")).rejects.toMatchObject({
+      reason: "shared_credential_diverged",
+    })
+    expect(raced).toBe(true)
+    expect((await lstat(policy.codex.benLink)).isFile()).toBe(true)
+    expect(await readFile(policy.codex.benLink, "utf8")).toBe("concurrent-login")
+    expect((await lstat(join(policy.root, "codex.repair.json"))).isFile()).toBe(true)
+  } finally {
+    race.mockRestore()
+    await close()
+  }
+})
+
+adminTest(
+  "relink preserves an unvalidated displaced login left by an interrupted exchange",
+  async () => {
+    const { policy, close } = await fixture()
+    try {
+      await rm(policy.codex.benLink)
+      await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+      await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+      const displaced = `${policy.codex.benLink}.workflowd-relink`
+      await writeFile(displaced, "concurrent-login", { mode: 0o600 })
+      await expect(relinkCredentials(policy, "codex", "ben")).rejects.toMatchObject({
+        reason: "shared_credential_diverged",
+      })
+      expect(await readFile(displaced, "utf8")).toBe("concurrent-login")
+      expect((await lstat(join(policy.root, "codex.repair.json"))).isFile()).toBe(true)
+    } finally {
+      await close()
+    }
+  },
+)
