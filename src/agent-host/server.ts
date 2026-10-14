@@ -606,19 +606,18 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
     }
   }
   let sweeping = false
-  const timer = setInterval(
-    () => {
-      if (sweeping) return
-      sweeping = true
-      collecting = collect()
-        .catch(() => {})
-        .finally(() => {
-          sweeping = false
-        })
-    },
-    Math.min(60000, policy.launch?.retentionMs ?? 60000),
-  )
+  const sweep = () => {
+    if (sweeping) return
+    sweeping = true
+    collecting = collect()
+      .catch(() => {})
+      .finally(() => {
+        sweeping = false
+      })
+  }
+  const timer = setInterval(sweep, Math.min(60000, policy.launch?.retentionMs ?? 60000))
   timer.unref()
+  sweep()
   return {
     request: requestOwned,
     close: async () => {
