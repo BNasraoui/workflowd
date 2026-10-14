@@ -20,11 +20,12 @@ case "$1" in
     printf '%s\\n' "$author" "$committer" | sed 's/.*<\\([^>]*\\)>.*/\\1/' | check_emails
     ;;
   push)
+    export GIT_NO_REPLACE_OBJECTS=1 GIT_GRAFT_FILE=/dev/null
     while read -r local_ref local_oid remote_ref remote_oid; do
       case "$local_oid" in *[!0]*) ;; *) continue ;; esac
       case "$remote_oid" in
-        *[!0]*) emails=$(git log --format='%ae%n%ce' "$remote_oid..$local_oid" --) || exit 1 ;;
-        *) emails=$(git log --format='%ae%n%ce' "$local_oid" --not --remotes --) || exit 1 ;;
+        *[!0]*) emails=$(git -c advice.graftFileDeprecated=false log --format='%ae%n%ce' "$local_oid" --not "$remote_oid" --remotes --) || exit 1 ;;
+        *) emails=$(git -c advice.graftFileDeprecated=false log --format='%ae%n%ce' "$local_oid" --not --remotes --) || exit 1 ;;
       esac
       printf '%s\\n' "$emails" | check_emails || exit 1
     done
