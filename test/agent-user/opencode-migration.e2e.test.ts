@@ -530,7 +530,8 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
       }
       expect(await readFile(victim)).toEqual(victimBefore)
     }
-    const { migrateConfiguredOpenCode } = await import("../../deploy/agent-user/migrate-opencode")
+    const { migrateConfiguredOpenCode, checkConfiguredOpenCode } =
+      await import("../../deploy/agent-user/migrate-opencode")
     await expect(migrateConfiguredOpenCode(policy)).rejects.toThrow()
     const calls: string[][] = []
     const command = async (args: readonly string[]) => {
@@ -559,7 +560,17 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     await checkOpenCodeMigration(policy)
     const journal: unknown = JSON.parse(await readFile(policy.journal, "utf8"))
     expect(journal).toEqual({ phase: "moved", ids: ["synthetic"] })
+    await checkConfiguredOpenCode(policy, command)
+    await expect(
+      checkConfiguredOpenCode(policy, async (args) =>
+        args.includes("is-enabled") ? command(args) : { stdout: "active", exitCode: 0 },
+      ),
+    ).rejects.toThrow("masked and stopped")
+    expect(JSON.parse(await readFile(policy.journal, "utf8"))).toEqual(journal)
     await writeFile(policy.journal, JSON.stringify({ phase: "prepared", ids: ["synthetic"] }))
+    await expect(checkConfiguredOpenCode(policy, command)).rejects.toMatchObject({
+      reason: "opencode_grant_migration_incomplete",
+    })
     await migrateOpenCodeGrants(policy)
     await checkOpenCodeMigration(policy)
     const destination = new Database(policy.database, { readonly: true })

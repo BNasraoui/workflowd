@@ -639,6 +639,14 @@ function nativeHost(
   }
 }
 
+async function settleAbsentLaunch(record: HostRecord, path: string, launchFailed: boolean) {
+  const age = Date.now() - Date.parse(record.process.started)
+  if (!launchFailed && !(age >= 60000)) throw new Error("host launch remains unconfirmed")
+  const neverLaunched = { ...record.process, active: false, pid: 0, exitCode: -1 }
+  await saveHostRecord(path, { ...record, process: neverLaunched })
+  return neverLaunched
+}
+
 async function inspectHostProcess(
   record: HostRecord,
   path: string,
@@ -663,13 +671,8 @@ async function inspectHostProcess(
   )
   const present = fields.LoadState !== "not-found"
   if (!present && record.process.exitCode !== null) return record.process
-  if (!present && record.process.invocationId === null) {
-    const age = Date.now() - Date.parse(record.process.started)
-    if (!launchFailed && !(age >= 60000)) throw new Error("host launch remains unconfirmed")
-    const neverLaunched = { ...record.process, active: false, pid: 0, exitCode: -1 }
-    await saveHostRecord(path, { ...record, process: neverLaunched })
-    return neverLaunched
-  }
+  if (!present && record.process.invocationId === null)
+    return settleAbsentLaunch(record, path, launchFailed)
   if (
     present &&
     (fields.Description !== `workflowd native ${record.process.launchId}` ||

@@ -33,6 +33,12 @@ export async function migrateConfiguredOpenCode(policy: OpenCodeMigrationPolicy,
   await migrateOpenCodeGrants(policy)
 }
 
+export async function checkConfiguredOpenCode(policy: OpenCodeMigrationPolicy,
+  inspectUnit: (args: readonly string[]) => Promise<{ stdout: string; exitCode: number }> = systemctl) {
+  await checkOpenCodeSourceUnits(policy, inspectUnit)
+  await checkOpenCodeMigration(policy)
+}
+
 if (import.meta.main) {
   try {
     if (process.getuid?.() !== 0 || !(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === "--check"))) throw new Error("invalid invocation")
@@ -44,10 +50,8 @@ if (import.meta.main) {
       throw new Error("migration not configured")
     const release = await credentialLock(policy, true)
     try {
-      if (process.argv[2] === "--check") {
-        await checkOpenCodeSourceUnits(policy.opencode)
-        await checkOpenCodeMigration(policy.opencode)
-      } else await migrateConfiguredOpenCode(policy.opencode)
+      if (process.argv[2] === "--check") await checkConfiguredOpenCode(policy.opencode)
+      else await migrateConfiguredOpenCode(policy.opencode)
     } finally { await release() }
     console.log("opencode_grant_migration_complete")
   } catch {
