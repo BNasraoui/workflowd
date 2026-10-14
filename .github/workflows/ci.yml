@@ -113,6 +113,8 @@ jobs:
           bun-version: 1.3.14
           token: ""
           no-cache: true
+      - name: Verify deployment admission and checkout isolation
+        run: python3 -B -m unittest discover -s test/deploy -v
       - name: Verify systemd unit
         run: >-
           systemd-analyze --user --recursive-errors=no --man=no --generators=no
