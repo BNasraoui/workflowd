@@ -340,7 +340,8 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
             }
             continue
           }
-          const model = yield* Effect.tryPromise(() => nativeModelFixture(kind, root))
+          // Bun resolves modules by reading their parent directory, not just traversing it.
+          const model = yield* Effect.tryPromise(() => nativeModelFixture(kind, home))
           yield* Effect.tryPromise(() => chmod(model.binary, 0o755))
           const shell = `/bin/sh ${quote(script)}`
           model.actions.push({
