@@ -127,6 +127,8 @@ export async function publishThroughHost(
     try {
       const result = await Effect.runPromise(process.exited)
       expect(result).toMatchObject({ exitCode: 0 })
+      if (!(await Bun.file(join(workspace, "sha")).exists()))
+        throw new Error(await readFile(join(workspace, "publish.log"), "utf8"))
     } finally {
       await Effect.runPromise(process.cancel)
     }

@@ -178,6 +178,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
     await writeFile(commandPath, await build.outputs[0]!.text(), { mode: 0o644 })
   }
   const config = {
+    home: join(root, "codex"),
     directory: join(root, "broker-private"),
     socket: join(root, "broker.sock"),
     peer: { controllerUid, agentUid: uid, groupGid: gid },
@@ -295,7 +296,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
           yield* Effect.tryPromise(() =>
             writeFile(
               script,
-              `set -eu\nid -u > ${quote(join(workspace, "uid"))}\n${wrapper} --git -- push https://github.com/o/r.git HEAD:refs/heads/${kind}\n${wrapper} -- api repos/o/r/pulls -f title=${kind} -f head=${kind} -f base=main --jq .number > ${quote(join(workspace, "pr"))}\n${wrapper} -- api repos/o/r/pulls/$(cat ${quote(join(workspace, "pr"))}) --jq .head.sha > ${quote(join(workspace, "sha"))}\nif ${wrapper} -- api repos/foreign/repo/pulls; then exit 20; fi\n`,
+              `set -eu\nexec > ${quote(join(workspace, "publish.log"))} 2>&1\nid -u > ${quote(join(workspace, "uid"))}\n${wrapper} --git -- push https://github.com/o/r.git HEAD:refs/heads/${kind}\n${wrapper} -- api repos/o/r/pulls -f title=${kind} -f head=${kind} -f base=main --jq .number > ${quote(join(workspace, "pr"))}\n${wrapper} -- api repos/o/r/pulls/$(cat ${quote(join(workspace, "pr"))}) --jq .head.sha > ${quote(join(workspace, "sha"))}\nif ${wrapper} -- api repos/foreign/repo/pulls; then exit 20; fi\n`,
               { mode: 0o644 },
             ),
           )
