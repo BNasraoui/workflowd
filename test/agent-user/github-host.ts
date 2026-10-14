@@ -1,5 +1,14 @@
 import { expect } from "bun:test"
-import { chmod, chown, mkdir, readFile, symlink, writeFile } from "node:fs/promises"
+import {
+  chmod,
+  chown,
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { serveCredentialHost } from "../../src/agent-host/server"
@@ -40,6 +49,11 @@ export async function publishThroughHost(
     await symlink(canonical, agentLink)
     return { canonical, benLink, agentLink }
   }
+  // Hosted runners may install Bun beneath a writable tool-cache ancestor.
+  // Match nativeBoundary's root-owned runtime copy instead of weakening host admission.
+  const runtime = join(root, "bun")
+  await copyFile(await realpath(process.execPath), runtime)
+  await chmod(runtime, 0o755)
   const worker = join(root, "host-worker.js")
   const build = await Bun.build({
     entrypoints: [join(import.meta.dir, "../../src/kernel/codex-worker.ts")],
@@ -87,7 +101,7 @@ export async function publishThroughHost(
         ioRoot,
         home,
         workspaceRoot: workspace,
-        bun: process.execPath,
+        bun: runtime,
         worker,
         codex: binary,
         claude: binary,
