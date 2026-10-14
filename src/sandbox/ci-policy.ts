@@ -160,7 +160,17 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
  */
 export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>): void {
   let pullRequests = 0
-  for (const source of Object.values(workflows)) {
+  for (const [name, source] of Object.entries(workflows)) {
+    if (name === "ben-approval.yml") {
+      // Reviewed main-only dispatch, protected environment, pinned actions,
+      // read-only workflow token, and single scoped App-key consumer.
+      if (
+        createHash("sha256").update(source).digest("hex") !==
+        "55346a10f19ab2edcbe312af115f368756c667f967ed67fa013b2c60c542d948"
+      )
+        throw new Error("Approval workflow differs from the reviewed secret-isolation snapshot")
+      continue
+    }
     const workflow = object(Bun.YAML.parse(source))
     assertPublishIsolation(workflow)
     const triggers = object(workflow.on)
