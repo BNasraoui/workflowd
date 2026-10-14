@@ -287,6 +287,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
               { mode: 0o644 },
             ),
           )
+          yield* Effect.tryPromise(() => chmod(script, 0o644))
           if (kind === "opencode") {
             const server = yield* Effect.tryPromise(() =>
               openCodePublisher(home, workspace, env, asAgent, `/bin/sh ${quote(script)}`),
@@ -340,6 +341,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
             continue
           }
           const model = yield* Effect.tryPromise(() => nativeModelFixture(kind, root))
+          yield* Effect.tryPromise(() => chmod(model.binary, 0o755))
           const shell = `/bin/sh ${quote(script)}`
           model.actions.push({
             name: kind === "codex" ? "exec_command" : "Bash",
@@ -495,6 +497,7 @@ async function openCodePublisher(
     }),
     { mode: 0o644 },
   )
+  await chmod(configFile, 0o644)
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
   const port = reservation.port!
   await reservation.stop(true)

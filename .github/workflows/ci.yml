@@ -279,6 +279,7 @@ jobs:
       - name: Require agent OpenCode migration and three-client App publishing
         run: |
           set -euo pipefail
+          sudo systemctl start user@0.service
           sudo systemd-run --wait --pipe --collect \
             -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
             --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
@@ -288,6 +289,8 @@ jobs:
             /opt/workflowd-credential-fixture/bin/bun scripts/evidence/agent-user.mjs --probe-opencode
           sudo systemd-run --wait --pipe --collect \
             -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=XDG_RUNTIME_DIR=/run/user/0 \
+            --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus \
             --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
             --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
             --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
