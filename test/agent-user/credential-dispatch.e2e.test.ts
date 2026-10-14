@@ -94,8 +94,7 @@ adminTest(
         reason: "shared_credential_diverged",
       })
       await writeFile(policy.codex.benLink, "synthetic-generation-2")
-      if ((await lstat(policy.codex.benLink).catch(() => null))?.isFile())
-        await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+      await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
       await relinkCredentials(policy, "codex", "ben")
       await checkCredentialAdmission(policy, "codex")
       expect((await lstat(policy.codex.benLink)).isSymbolicLink()).toBe(true)
@@ -167,6 +166,7 @@ adminTest(
     try {
       await rm(policy.codex.benLink)
       await writeFile(policy.codex.benLink, "synthetic-generation-2", { mode: 0o600 })
+      await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
       const source = await lstat(policy.codex.benLink)
       await writeFile(
         join(policy.root, "codex.repair.json"),
@@ -175,11 +175,12 @@ adminTest(
           source: "ben",
           sourceDevice: source.dev,
           sourceInode: source.ino,
+          sourceCtimeMs: source.ctimeMs,
+          sourceMtimeMs: source.mtimeMs,
+          sourceSize: source.size,
         }),
         { mode: 0o600 },
       )
-      if ((await lstat(policy.codex.benLink).catch(() => null))?.isFile())
-        await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
       await relinkCredentials(policy, "codex", "ben")
       await checkCredentialAdmission(policy, "codex")
       expect(await readFile(policy.codex.agentLink, "utf8")).toBe("synthetic-generation-2")
@@ -198,6 +199,7 @@ for (const state of ["original", "removed", "linked", "replaced"] as const) {
         const { canonical, benLink, agentLink } = policy.codex
         await rm(benLink)
         await writeFile(benLink, "synthetic-generation-2", { mode: 0o600 })
+        await chown(benLink, policy.controllerUid, policy.groupGid)
         const source = await lstat(benLink)
         await writeFile(canonical, "synthetic-generation-2")
         const staged = await lstat(canonical)
@@ -208,6 +210,9 @@ for (const state of ["original", "removed", "linked", "replaced"] as const) {
             source: "ben",
             sourceDevice: source.dev,
             sourceInode: source.ino,
+            sourceCtimeMs: source.ctimeMs,
+            sourceMtimeMs: source.mtimeMs,
+            sourceSize: source.size,
             stagedDevice: staged.dev,
             stagedInode: staged.ino,
           }),
@@ -226,7 +231,7 @@ for (const state of ["original", "removed", "linked", "replaced"] as const) {
           expect(await readFile(canonical, "utf8")).toBe("synthetic-generation-2")
         } else {
           if ((await lstat(policy.codex.benLink).catch(() => null))?.isFile())
-            await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+            expect((await lstat(policy.codex.benLink)).uid).toBe(policy.controllerUid)
           await relinkCredentials(policy, "codex", "ben")
           await checkCredentialAdmission(policy, "codex")
           expect((await lstat(canonical)).ino).toBe(staged.ino)
@@ -1304,4 +1309,75 @@ adminTest(
       await close()
     }
   },
+)
+
+adminTest(
+  "relink preserves a source rewritten in place by a concurrent watcher",
+  async () => {
+    const { Worker } = await import("node:worker_threads")
+    const { spyOn } = await import("bun:test")
+    const filesystem = await import("node:fs/promises")
+    const { policy, close } = await fixture()
+    await rm(policy.codex.benLink)
+    await writeFile(policy.codex.benLink, "selected-login", { mode: 0o600 })
+    await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
+    const before = await lstat(policy.codex.benLink)
+    const state = new Int32Array(new SharedArrayBuffer(4))
+    const watcher = new Worker(
+      `
+    const { parentPort, workerData } = require("node:worker_threads");
+    const fs = require("node:fs");
+    const original = fs.statSync(workerData.canonical).ino;
+    const state = new Int32Array(workerData.state);
+    Atomics.store(state, 0, 1);
+    const deadline = Date.now() + 5000;
+    const timer = setInterval(() => {
+      if (Date.now() > deadline) throw new Error("canonical exchange not observed");
+      if (fs.statSync(workerData.canonical).ino === original) return;
+      clearInterval(timer);
+      fs.writeFileSync(workerData.source, "concurrent-new");
+      Atomics.store(state, 0, 2);
+    }, 1);
+  `,
+      {
+        eval: true,
+        workerData: {
+          canonical: policy.codex.canonical,
+          source: policy.codex.benLink,
+          state: state.buffer,
+        },
+      },
+    )
+    const waitFor = async (value: number) => {
+      const deadline = Date.now() + 6000
+      while (Atomics.load(state, 0) < value) {
+        if (Date.now() > deadline) throw new Error("watcher did not reach barrier")
+        await Bun.sleep(1)
+      }
+    }
+    await waitFor(1)
+    const original = filesystem.rename
+    const barrier = spyOn(filesystem, "rename").mockImplementation(async (from, to) => {
+      await original(from, to)
+      if (String(from).endsWith("codex.staging")) await waitFor(2)
+    })
+    try {
+      await expect(relinkCredentials(policy, "codex", "ben")).rejects.toMatchObject({
+        reason: "shared_credential_diverged",
+      })
+      expect((await lstat(policy.codex.benLink)).ino).toBe(before.ino)
+      expect(await readFile(policy.codex.benLink, "utf8")).toBe("concurrent-new")
+      const journal = JSON.parse(await readFile(join(policy.root, "codex.repair.json"), "utf8"))
+      expect(journal).toMatchObject({
+        sourceCtimeMs: before.ctimeMs,
+        sourceMtimeMs: before.mtimeMs,
+        sourceSize: before.size,
+      })
+    } finally {
+      barrier.mockRestore()
+      void watcher.terminate()
+      await close()
+    }
+  },
+  10000,
 )

@@ -1,8 +1,11 @@
+import { KernelSessionStore, KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { expect, test } from "bun:test"
 import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
+import { SqlClient } from "effect/unstable/sql"
+import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { WorkerIdentity, WorkerIdentityLive } from "../../src/worker-identity/service"
 import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -22,10 +25,31 @@ test("brokers by process ancestry and never writes shared capabilities", async (
       },
     ],
   }
-  const live = WorkerIdentityLive(config, fixture.github, fixture.OctokitClass).pipe(
+  let unavailable = false
+  const environments = new Map<string, Readonly<Record<string, string>>>()
+  const live = WorkerIdentityLive(config, fixture.github, fixture.OctokitClass, {
+    serverId: "fixture",
+    owningHostId: "fixture",
+    providerId: "fixture",
+    providerVersion: 1,
+    endpointAlias: "fixture",
+    endpointIdentity: "http://fixture",
+    setSessionEnvironment: (input) =>
+      Effect.gen(function* () {
+        environments.set(input.sessionID, input.variables)
+        if (unavailable)
+          return yield* Effect.fail(
+            new OpenCodeAdapterError({
+              operation: "set environment",
+              cause: new Error("unreachable"),
+            }),
+          )
+      }),
+  }).pipe(
     Layer.provideMerge(AgentRunStoreLive),
+    Layer.provideMerge(KernelSessionStoreLive),
     Layer.provideMerge(WorkflowStoreLive),
-    Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    Layer.provideMerge(SqliteClient.layer({ filename: join(fixture.directory, "identity.db") })),
   )
   try {
     await Effect.runPromise(
@@ -33,11 +57,11 @@ test("brokers by process ancestry and never writes shared capabilities", async (
         const service = yield* WorkerIdentity
         const runs = yield* AgentRunStore
         const now = new Date()
-        for (const runId of ["run", "other"]) {
+        for (const runId of ["run", "other", "session"]) {
           yield* runs.create({
             runId,
             route: "r",
-            providerId: "codex-cli",
+            providerId: runId === "session" ? "opencode" : "claude-cli",
             modelId: "model",
             agent: "build",
             repository: "repo",
@@ -98,7 +122,133 @@ test("brokers by process ancestry and never writes shared capabilities", async (
           )).status,
         ).toBe(403)
         expect(fixture.bodies).toEqual([{ repositories: ["r"], permissions: { actions: "read" } }])
+        const nativeSessionId = "opencode-session"
+        const custody = yield* KernelSessionStore
+        yield* custody.registerResource({
+          resourceId: "resource",
+          owningHostId: "fixture",
+          absolutePath: fixture.directory,
+          kind: "worktree",
+          createdAt: now,
+        })
+        yield* custody.registerSession({
+          sessionId: "session-record",
+          nativeSessionId,
+          resourceId: "resource",
+          owningHostId: "fixture",
+          providerKind: "opencode",
+          providerVersion: 1,
+          providerId: "fixture",
+          serverId: "fixture",
+          endpointAlias: "fixture",
+          endpointIdentity: "http://fixture",
+          createdAt: now,
+        })
+        yield* runs.markSpawned({
+          runId: "session",
+          resourceId: "resource",
+          sessionId: "session-record",
+          nativeSessionId,
+          now,
+        })
+        yield* service.provision((yield* runs.read("session"))!)
+        const capability = environments.get(nativeSessionId)!.WORKFLOWD_WORKER_CAPABILITY!
+        expect(environments.get(nativeSessionId)?.WORKFLOWD_WORKER_SESSION_ID).toBe(nativeSessionId)
+        const request = (runId: string, value = capability, sessionId = nativeSessionId) =>
+          Effect.promise(() =>
+            requestRunSocket(
+              config.socket,
+              `/workers/github/${runId}/token`,
+              JSON.stringify({ capability: value, sessionId }),
+            ),
+          )
+        expect((yield* request("session")).status).toBe(200)
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`UPDATE kernel_sessions SET endpoint_identity='http://foreign' WHERE session_id='session-record'`
+        expect((yield* request("session")).status).toBe(403)
+        yield* sql`UPDATE kernel_sessions SET endpoint_identity='http://fixture' WHERE session_id='session-record'`
+
+        expect((yield* request("run")).status).toBe(403)
+        expect((yield* request("session", "0".repeat(64))).status).toBe(403)
+        expect((yield* request("session", capability, "foreign-session")).status).toBe(403)
+        const rotated = service.bindSession("session", nativeSessionId)
+        expect((yield* request("session")).status).toBe(403)
+        expect((yield* request("session", rotated)).status).toBe(200)
+        service.revoke("session")
+        expect((yield* request("session", rotated)).status).toBe(403)
+        yield* custody.registerSession({
+          sessionId: "claude-record",
+          nativeSessionId: "claude-session",
+          resourceId: "resource",
+          owningHostId: "fixture",
+          providerKind: "claude",
+          providerVersion: 1,
+          providerId: "claude-cli",
+          serverId: "fixture",
+          endpointAlias: "fixture",
+          endpointIdentity: "claude-cli://fixture",
+          createdAt: now,
+        })
+        yield* runs.markSpawned({
+          runId: "run",
+          resourceId: "resource",
+          sessionId: "claude-record",
+          nativeSessionId: "claude-session",
+          now,
+        })
+        expect(yield* service.nativeRun("claude-session", fixture.directory)).toBe("run")
+        expect(yield* service.nativeRun("claude-session", "/foreign")).toBeNull()
         yield* runs.fail({ runId: "run", diagnostic: "done", now })
+        expect(yield* service.nativeRun("claude-session", fixture.directory)).toBeNull()
+      }).pipe(Effect.provide(live)),
+    )
+    const previous = environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY
+    // Reviewer probe: rebuilding with an active session must survive an OpenCode outage.
+    unavailable = true
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* WorkerIdentity
+        for (const capability of [
+          previous,
+          environments.get("opencode-session")!.WORKFLOWD_WORKER_CAPABILITY,
+        ]) {
+          expect(
+            (yield* Effect.promise(() =>
+              requestRunSocket(
+                config.socket,
+                "/workers/github/session/token",
+                JSON.stringify({ sessionId: "opencode-session", capability }),
+              ),
+            )).status,
+          ).toBe(403)
+        }
+        service.register("other", process.pid)
+        expect(
+          (yield* Effect.promise(() =>
+            requestRunSocket(config.socket, "/workers/github/other/token"),
+          )).status,
+        ).toBe(200)
+      }).pipe(Effect.provide(live)),
+    )
+    unavailable = false
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* WorkerIdentity
+        const runs = yield* AgentRunStore
+        const env = environments.get("opencode-session")!
+        expect(env.WORKFLOWD_WORKER_CAPABILITY).not.toBe(previous)
+        const request = (capability: string | undefined) =>
+          Effect.promise(() =>
+            requestRunSocket(
+              config.socket,
+              "/workers/github/session/token",
+              JSON.stringify({ sessionId: "opencode-session", capability }),
+            ),
+          )
+        expect((yield* request(previous)).status).toBe(403)
+        expect((yield* request(env.WORKFLOWD_WORKER_CAPABILITY)).status).toBe(200)
+        yield* runs.fail({ runId: "session", diagnostic: "finished", now: new Date() })
+        expect((yield* request(env.WORKFLOWD_WORKER_CAPABILITY)).status).toBe(403)
       }).pipe(Effect.provide(live)),
     )
   } finally {

@@ -3,7 +3,7 @@ import { lstat, readFile } from "node:fs/promises"
 import { Schema } from "effect"
 import { CredentialPolicy } from "../../src/agent-host/config"
 import { credentialLock } from "../../src/agent-host/credentials"
-import { migrateOpenCodeGrants, type OpenCodeMigrationPolicy } from "../../src/agent-host/opencode-credentials"
+import { checkOpenCodeMigration, migrateOpenCodeGrants, type OpenCodeMigrationPolicy } from "../../src/agent-host/opencode-credentials"
 
 async function systemctl(args: readonly string[]) {
   const command = Bun.spawn(["/usr/bin/systemctl", ...args], { stdout: "pipe", stderr: "ignore" })
@@ -11,7 +11,7 @@ async function systemctl(args: readonly string[]) {
   return { stdout, exitCode: await command.exited }
 }
 
-export async function migrateConfiguredOpenCode(
+export async function checkOpenCodeSourceUnits(
   policy: OpenCodeMigrationPolicy,
   inspectUnit: (args: readonly string[]) => Promise<{ stdout: string; exitCode: number }> = systemctl,
 ) {
@@ -25,12 +25,23 @@ export async function migrateConfiguredOpenCode(
       active.stdout !== "inactive" || active.exitCode !== 3)
       throw new Error("source server must be masked and stopped")
   }
+}
+
+export async function migrateConfiguredOpenCode(policy: OpenCodeMigrationPolicy,
+  inspectUnit: (args: readonly string[]) => Promise<{ stdout: string; exitCode: number }> = systemctl) {
+  await checkOpenCodeSourceUnits(policy, inspectUnit)
   await migrateOpenCodeGrants(policy)
+}
+
+export async function checkConfiguredOpenCode(policy: OpenCodeMigrationPolicy,
+  inspectUnit: (args: readonly string[]) => Promise<{ stdout: string; exitCode: number }> = systemctl) {
+  await checkOpenCodeSourceUnits(policy, inspectUnit)
+  await checkOpenCodeMigration(policy)
 }
 
 if (import.meta.main) {
   try {
-    if (process.getuid?.() !== 0 || process.argv.length !== 2) throw new Error("invalid invocation")
+    if (process.getuid?.() !== 0 || !(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === "--check"))) throw new Error("invalid invocation")
     const path = "/etc/workflowd/agent-host.json"
     const info = await lstat(path)
     if (!info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0) throw new Error("unsafe policy")
@@ -38,7 +49,10 @@ if (import.meta.main) {
     if (policy.ownerUid !== 0 || !policy.opencode || policy.agentUid === 0 || policy.agentUid === policy.controllerUid || policy.opencode.agentUid !== policy.agentUid)
       throw new Error("migration not configured")
     const release = await credentialLock(policy, true)
-    try { await migrateConfiguredOpenCode(policy.opencode) } finally { await release() }
+    try {
+      if (process.argv[2] === "--check") await checkConfiguredOpenCode(policy.opencode)
+      else await migrateConfiguredOpenCode(policy.opencode)
+    } finally { await release() }
     console.log("opencode_grant_migration_complete")
   } catch {
     console.error("opencode_grant_migration_incomplete")

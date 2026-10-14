@@ -3,6 +3,7 @@ import { InstallationGuard, makeInstallationGuard } from "./installation-guard"
 import { OpenCodeMailboxLive } from "./resident/opencode"
 import { ResidentCodex, ResidentCodexLive } from "./resident/service"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
+import { loadRunSocketPolicy } from "./worker-identity/peer"
 import { CiServiceLive } from "./ci/service"
 import { readFile } from "node:fs/promises"
 import { SandboxDispatch, makeSandboxDispatch } from "./sandbox/dispatch"
@@ -312,13 +313,20 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const reviewClient = Effect.runSync(
     Effect.cached(
-      OpenCode.make({ baseUrl: config.openCode.reviewUrl }).pipe(
-        Effect.provide(openCodeHttpLayer(config.openCode.reviewPassword)),
+      OpenCode.make({
+        baseUrl: config.credentialSocket ? config.openCode.baseUrl : config.openCode.reviewUrl,
+      }).pipe(
+        Effect.provide(
+          openCodeHttpLayer(
+            config.credentialSocket ? config.openCode.password : config.openCode.reviewPassword,
+          ),
+        ),
       ),
     ),
   )
   const reviewAdapter = new SdkOpenCodeAdapter(
     makeOpenCodeSdkClient(reviewClient, config.credentialSocket),
+    config.agentGit,
   )
   const reviewHarness = new OpenCodeAgentHarness(
     reviewAdapter,
@@ -329,11 +337,14 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
       pollIntervalMs: config.openCode.pollIntervalMs,
     },
   )
-  const agentHarness = routeReviewHarness(sharedHarness, reviewHarness)
+  // Agent-host deployments use the one migrated server for every new OpenCode run.
+  const agentHarness = config.credentialSocket
+    ? sharedHarness
+    : routeReviewHarness(sharedHarness, reviewHarness)
   const reviewAccess = new SessionAccessResolver(reviewAdapter, {
     serverId: reviewServerId,
     endpointAlias: reviewEndpointAlias,
-    attachUrl: config.openCode.reviewUrl,
+    attachUrl: config.credentialSocket ? config.openCode.attachUrl : config.openCode.reviewUrl,
   })
   const sessionAccess = new SessionAccessResolver(openCodeAdapter, {
     serverId: config.openCode.serverId,
@@ -426,20 +437,28 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     Layer.provideMerge(storeLayer),
     Layer.provideMerge(workSignalLayer),
   )
-  const claudeCliLayer = Layer.succeed(
-    ClaudeCli,
-    makeClaudeCli({
-      credentialSocket: config.credentialSocket,
-      git: config.agentGit,
-      binary: config.agentRuns?.claudeBinary ?? "claude",
-    }),
-  )
   const workerIdentityLayer =
     config.workerIdentity === undefined
       ? Layer.empty
-      : WorkerIdentityLive(config.workerIdentity, config.github).pipe(
+      : WorkerIdentityLive(config.workerIdentity, config.github, undefined, {
+          ...completionSourceOptions,
+          setSessionEnvironment: openCodeAdapter.setSessionEnvironment,
+        }).pipe(
+          Layer.provide(storeLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
         )
+  const claudeCliLayer = Layer.effect(
+    ClaudeCli,
+    Effect.gen(function* () {
+      const identity = yield* Effect.serviceOption(WorkerIdentity)
+      return makeClaudeCli({
+        credentialSocket: config.credentialSocket,
+        git: config.agentGit,
+        binary: config.agentRuns?.claudeBinary ?? "claude",
+        ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+      })
+    }),
+  ).pipe(Layer.provide(workerIdentityLayer))
   const ciLive =
     config.ci === undefined
       ? undefined
@@ -474,6 +493,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           {
             ...completionSourceOptions,
             socket: config.residentOpenCodeSocket,
+            peer: config.workerIdentity?.peer ?? loadRunSocketPolicy(process.env),
             repositories: config.ci.repositories,
           },
           openCodeAdapter,
@@ -483,15 +503,19 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provide(storeLayer),
         )
   const residentLayer = residentLive ?? Layer.empty
-  const claudeDispatchLayer = Layer.succeed(
+  const claudeDispatchLayer = Layer.effect(
     ClaudeDispatchCli,
-    makeClaudeDispatchCli({
-      credentialSocket: config.credentialSocket,
-      git: config.agentGit,
-      binary: config.agentRuns?.claudeBinary ?? "claude",
-      custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+    Effect.gen(function* () {
+      const identity = yield* Effect.serviceOption(WorkerIdentity)
+      return makeClaudeDispatchCli({
+        ...(Option.isSome(identity) ? { identity: identity.value } : {}),
+        credentialSocket: config.credentialSocket,
+        git: config.agentGit,
+        binary: config.agentRuns?.claudeBinary ?? "claude",
+        custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
+      })
     }),
-  )
+  ).pipe(Layer.provide(workerIdentityLayer))
   const codexCliLayer =
     residentLive === undefined
       ? Layer.effect(

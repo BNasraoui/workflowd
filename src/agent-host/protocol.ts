@@ -65,6 +65,14 @@ export const HostStart = Schema.Struct({
     "workspace",
   ]),
   directory: Schema.String,
+  worker: Schema.optional(
+    Schema.Struct({
+      runId: HostId,
+      githubSocket: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\/[^\0\n]*$/))),
+      githubDirectory: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\/[^\0\n]*$/))),
+      residentSocket: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\/[^\0\n]*$/))),
+    }),
+  ),
   prompt: HostText,
   model: Schema.NullOr(Schema.String),
   effort: Schema.optionalKey(Schema.String),

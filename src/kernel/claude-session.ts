@@ -1,5 +1,6 @@
 import {
   withCredentialAdmission,
+  hostWorkerIdentity,
   startAgentHost,
   inspectAgentHost,
   readAgentHostOutput,
@@ -67,6 +68,14 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*$/
 export const makeClaudeCli = (options: {
   readonly git?: AgentGitConfig | undefined
   readonly binary: string
+  readonly identity?: {
+    nativeRun: (
+      sessionId: string,
+      directory: string,
+    ) => Effect.Effect<string | null, WorkspaceError>
+    environment: (runId: string) => Readonly<Record<string, string>>
+    register: (runId: string, pid: number) => void
+  }
   readonly home?: string
   readonly credentialSocket?: string | undefined
 }): ClaudeCliPort =>
@@ -141,9 +150,12 @@ export const makeClaudeCli = (options: {
             ),
           ),
       }
-    : hostClaudeCli(options.credentialSocket)
+    : hostClaudeCli(options.credentialSocket, options.identity)
 
-function hostClaudeCli(socket: string): ClaudeCliPort {
+function hostClaudeCli(
+  socket: string,
+  identity?: Parameters<typeof makeClaudeCli>[0]["identity"],
+): ClaudeCliPort {
   const hostId = (deliveryId: string) =>
     `claude-turn-${createHash("sha256").update(deliveryId).digest("hex")}`
   const failure = (cause: unknown) =>
@@ -178,8 +190,14 @@ function hostClaudeCli(socket: string): ClaudeCliPort {
     resume: (input) =>
       Effect.tryPromise({
         try: async (signal) => {
+          const runId = identity
+            ? await Effect.runPromise(identity.nativeRun(input.nativeSessionId, input.directory))
+            : null
           const process = await startAgentHost(socket, {
             profile: "claude-resume",
+            ...(runId && identity
+              ? { worker: hostWorkerIdentity(identity.environment(runId)) }
+              : {}),
             runId: hostId(input.deliveryId ?? `resume-${crypto.randomUUID()}`),
             directory: input.directory,
             nativeSessionId: input.nativeSessionId,
@@ -187,6 +205,7 @@ function hostClaudeCli(socket: string): ClaudeCliPort {
             model: null,
             timeoutMs: input.timeoutMs,
           })
+          if (runId && process.pid > 0) identity?.register(runId, process.pid)
           return readAgentHostOutput(socket, process, MAX_CLAUDE_STDOUT_BYTES, signal)
         },
         catch: failure,

@@ -1,6 +1,8 @@
+import { loadRunSocketPolicy, type RunSocketPolicy } from "../worker-identity/peer"
 import { isAbsolute, resolve } from "node:path"
 import { homedir } from "node:os"
 export type ResidentConfig = {
+  readonly peer?: RunSocketPolicy | undefined
   readonly home: string
   readonly socket: string
   readonly progressWindowMs?: number | undefined
@@ -22,7 +24,7 @@ export function loadResidentConfig(
   if (!isAbsolute(socket)) throw new Error("WORKFLOWD_CODEX_RESIDENT_SOCKET must be absolute")
   if (env.WORKFLOWD_CI_ENABLED !== "true")
     throw new Error("Resident CI inboxes require WORKFLOWD_CI_ENABLED=true")
-  return { home, socket }
+  return { home, socket, peer: loadRunSocketPolicy(env) }
 }
 
 export function loadOpenCodeResidentSocket(

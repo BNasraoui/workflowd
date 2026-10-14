@@ -269,7 +269,48 @@ jobs:
               'relink auto preserves an opposite-side login replaced during import',
               'relink ben preserves an opposite-side login replaced during import',
               'relink caps a source that grows after its size check',
+              'relink swaps back a source replaced after the final path check',
+              'relink preserves an unvalidated displaced login left by an interrupted exchange',
+              'relink preserves a source rewritten in place by a concurrent watcher',
               'relink refuses an active or uncertain unit recorded in host custody',
+          ]:
+              assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
+          PYTEST
+      - name: Require agent OpenCode migration and three-client App publishing
+        run: |
+          set -euo pipefail
+          sudo systemctl start user@0.service
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /opt/workflowd-credential-fixture/bin/bun scripts/evidence/agent-user.mjs --probe-opencode
+          sudo systemd-run --wait --pipe --collect \
+            -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+            --setenv=XDG_RUNTIME_DIR=/run/user/0 \
+            --setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus \
+            --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+            --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+            --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+            --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+            /opt/workflowd-credential-fixture/bin/bun test \
+            test/agent-user/github.e2e.test.ts test/agent-user/opencode.e2e.test.ts \
+            test/worker-identity test/resident \
+            --reporter=junit --reporter-outfile=/tmp/workflowd-publishing-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-publishing-tests.xml').findall('.//testcase')
+          assert all(len(case) == 0 for case in cases), 'Publishing tests failed or skipped'
+          for name in [
+              'installed Codex, Claude and OpenCode push and open PRs with run-bound App identity',
+              'agent OpenCode startup retains Git identity and isolates project and controller configuration',
+              'agent OpenCode service checks migrated sole ownership before starting the agent UID',
+              'OpenCode recovered mailbox prompts refuse before provider I/O when migration admission fails',
+              'OpenCode agent-run completion crosses the run-bound subscription socket',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=false)',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=true)',
           ]:
               assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
           PYTEST
