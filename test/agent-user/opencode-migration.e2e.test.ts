@@ -34,6 +34,7 @@ function fixtureEnvironment(home: string) {
     XDG_CACHE_HOME: join(home, "cache"),
     XDG_STATE_HOME: join(home, "state"),
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_CONFIG_PROJECT_DISABLE: "1",
     OPENCODE_DISABLE_MODELS_FETCH: "true",
     OPENCODE_DISABLE_AUTOUPDATE: "true",
     OPENCODE_SERVER_PASSWORD: "synthetic-server",
@@ -87,10 +88,26 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
   await chmod(root, 0o710)
   let modelRequests = 0
   let migratedGrantUsed = false
+  let refreshes = 0
   const model = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch: (request) => {
+    fetch: async (request) => {
+      const path = new URL(request.url).pathname
+      if (path === "/auth/device/token") {
+        const body = Schema.decodeUnknownSync(
+          Schema.Struct({ grant_type: Schema.String, refresh_token: Schema.String }),
+        )(await request.json())
+        expect(body.grant_type).toBe("refresh_token")
+        expect(body.refresh_token).toBe("synthetic-refresh")
+        refreshes++
+        return Response.json({
+          access_token: "synthetic-rotated-access",
+          refresh_token: "synthetic-rotated-refresh",
+          expires_in: 3600,
+        })
+      }
+      if (path === "/api/v2/config") return Response.json({ providers: {} })
       modelRequests++
       migratedGrantUsed ||=
         request.headers.get("authorization") === "Bearer synthetic-existing-grant"
@@ -234,17 +251,18 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
       "INSERT INTO credential (id,integration_id,label,value,connector_id,method_id,active,time_created,time_updated) VALUES (?,?,?,?,?,?,?,?,?)",
       [
         "synthetic-oauth",
-        "fixture-oauth",
+        "opencode",
         "fixture",
         JSON.stringify({
           type: "oauth",
-          methodID: "oauth",
+          methodID: "device",
           access: "synthetic-access",
           refresh: "synthetic-refresh",
           expires: 1,
+          metadata: { server: model.url.toString().replace(/\/$/, "") },
         }),
-        "fixture",
-        "oauth",
+        "opencode",
+        "device",
         1,
         1,
         1,
@@ -271,6 +289,16 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     destination.close()
     await migrateOpenCodeGrants(policy)
     const shared = await start(homes[1]!, agent)
+    expect(refreshes).toBe(1)
+    const refreshed = new Database(policy.database, { readonly: true })
+    expect(
+      JSON.parse(
+        Schema.decodeUnknownSync(Schema.Struct({ value: Schema.String }))(
+          refreshed.query("SELECT value FROM credential WHERE id='synthetic-oauth'").get(),
+        ).value,
+      ),
+    ).toMatchObject({ access: "synthetic-rotated-access", refresh: "synthetic-rotated-refresh" })
+    refreshed.close()
     const session = Schema.decodeUnknownSync(
       Schema.Struct({ data: Schema.Struct({ id: Schema.String }) }),
     )(
@@ -292,6 +320,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
       stderr: "ignore",
     })
     expect(await attached.exited).toBe(0)
+    expect(refreshes).toBe(1)
     await checkOpenCodeMigration(policy)
     await restarted.stop()
     expect((await stat(policy.database)).uid).toBe(agent)

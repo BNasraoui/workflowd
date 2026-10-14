@@ -8,7 +8,7 @@ import type { OpenCodeCompletionSourceOptions } from "../kernel/opencode-complet
 import { AgentRunStore } from "../kernel/agent-run-store"
 import { CiService } from "../ci/service"
 import type { CiConfig } from "../ci/config"
-import { serveRunSocket } from "../worker-identity/peer"
+import { serveRunSocket, type RunSocketPolicy } from "../worker-identity/peer"
 import { makeResidentStore } from "./store"
 import { EventSelector, makeSubscriptions } from "./subscriptions"
 import { deliverOpenCode } from "./opencode-delivery"
@@ -20,6 +20,7 @@ export type OpenCodeMailboxProvider = Pick<OpenCodeAdapter, "sessionExists" | "p
   }) => Effect.Effect<void, OpenCodeAdapterError>
 }
 type Options = Omit<OpenCodeCompletionSourceOptions, "now" | "observationTimeoutMs"> & {
+  readonly peer?: RunSocketPolicy | undefined
   readonly socket: string
   readonly repositories: CiConfig["repositories"]
 }
@@ -185,7 +186,11 @@ export const OpenCodeMailboxLive = (options: Options, provider: OpenCodeMailboxP
       const mailbox = yield* makeOpenCodeMailbox(options, provider)
       yield* Effect.acquireRelease(
         Effect.tryPromise(() =>
-          serveRunSocket(options.socket, (request) => Effect.runPromise(mailbox.route(request))),
+          serveRunSocket(
+            options.socket,
+            (request) => Effect.runPromise(mailbox.route(request)),
+            options.peer,
+          ),
         ),
         (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )

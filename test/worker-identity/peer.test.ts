@@ -57,3 +57,28 @@ test("socket authenticates two concurrent process trees and denies outsiders", a
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("socket UID policy denies a foreign UID even with filesystem access", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-peer-policy-"))
+  const socket = join(directory, "broker.sock")
+  let routed = false
+  const server = await serveRunSocket(
+    socket,
+    async () => {
+      routed = true
+      return new Response(null, { status: 200 })
+    },
+    {
+      controllerUid: process.getuid!() + 1,
+      agentUid: process.getuid!() + 2,
+      groupGid: process.getgid!(),
+    },
+  )
+  try {
+    expect((await requestRunSocket(socket, "/test")).status).toBe(403)
+    expect(routed).toBe(false)
+  } finally {
+    await server.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})

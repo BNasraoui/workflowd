@@ -138,6 +138,9 @@ const Repair = Schema.Struct({
   source: Schema.Literals(["ben", "agent"]),
   sourceDevice: Schema.Int,
   sourceInode: Schema.Int,
+  sourceCtimeMs: Schema.Number,
+  sourceMtimeMs: Schema.Number,
+  sourceSize: Schema.Int,
   stagedDevice: Schema.optionalKey(Schema.Int),
   stagedInode: Schema.optionalKey(Schema.Int),
 })
@@ -182,8 +185,6 @@ async function importReplacement(
       await rename(temporary, journalPath)
       await canonical.handle.sync()
     }
-    const intent = { client, source, sourceDevice: sourceInfo.dev, sourceInode: sourceInfo.ino }
-    await persist(intent)
     const input = await open(
       selected.path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -197,6 +198,9 @@ async function importReplacement(
       verified.size > 1024 * 1024
     )
       fail()
+    const intent = { client, source, ...sourceSnapshot(verified) }
+    if (repair && !sameSource(verified, repair)) fail()
+    await persist(intent)
     const stagingPath = join(storePath, `${client}.staging`)
     await unlink(stagingPath).catch((error: unknown) => {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
@@ -233,7 +237,7 @@ async function validateRepairedSource(path: string, canonical: string, repair: t
   const info = await lstat(path).catch(() => null)
   if (!info) return
   if (info.isSymbolicLink() && (await readlink(path)) === canonical) return
-  if (info.isFile() && info.dev === repair.sourceDevice && info.ino === repair.sourceInode) return
+  if (info.isFile() && sameSource(info, repair)) return
   throw credentialRefusal(repair.client, "shared_credential_diverged")
 }
 
@@ -309,7 +313,7 @@ async function automaticSource(policy: CredentialPolicy, client: "codex" | "clau
         if ((await readlink(parent.path)) !== login.canonical) fail()
       } else {
         if (selected || !newerPrivateLogin(info, canonical, uid)) fail()
-        selected = { client, source, sourceDevice: info.dev, sourceInode: info.ino }
+        selected = { client, source, ...sourceSnapshot(info) }
       }
     }
     return selected ?? fail()
@@ -436,11 +440,7 @@ export async function relinkCredentials(
     // Recovery may already have linked or removed the selected entry. A fresh import
     // must still name the exact source inode pinned in the durable journal.
     const expectedSource = installed ? sourceInfo : await lstat(selected.path)
-    if (
-      !installed &&
-      (expectedSource?.dev !== imported?.sourceDevice ||
-        expectedSource?.ino !== imported?.sourceInode)
-    )
+    if (!installed && (!expectedSource || !imported || !sameSource(expectedSource, imported)))
       fail()
     await replaceCredentialLinks(
       [
@@ -467,11 +467,41 @@ type Entry = {
   expected: Stats | null
 }
 
-async function unchanged(path: string, expected: Stats | null, canonical: string) {
+function sourceSnapshot(info: Stats) {
+  return {
+    sourceDevice: info.dev,
+    sourceInode: info.ino,
+    sourceCtimeMs: info.ctimeMs,
+    sourceMtimeMs: info.mtimeMs,
+    sourceSize: info.size,
+  }
+}
+
+function sameSource(info: Stats, expected: ReturnType<typeof sourceSnapshot>) {
+  return (
+    info.dev === expected.sourceDevice &&
+    info.ino === expected.sourceInode &&
+    info.ctimeMs === expected.sourceCtimeMs &&
+    info.mtimeMs === expected.sourceMtimeMs &&
+    info.size === expected.sourceSize
+  )
+}
+
+async function unchanged(
+  path: string,
+  expected: Stats | null,
+  canonical: string,
+  exchangedCtime?: number,
+) {
   const current = await absentOrStat(path)
   if (!expected) return current === null
   if (!current || current.dev !== expected.dev || current.ino !== expected.ino) return false
-  return !expected.isSymbolicLink() || (await readlink(path)) === canonical
+  if (expected.isFile())
+    return sameSource(current, {
+      ...sourceSnapshot(expected),
+      sourceCtimeMs: exchangedCtime ?? expected.ctimeMs,
+    })
+  return expected.isSymbolicLink() && (await readlink(path)) === canonical
 }
 
 /** Exchange preserves a login arriving between the last check and the rename. */
@@ -510,7 +540,10 @@ async function replaceCredentialLinks(
         if (!(await unchanged(other.parent.path, other.expected, canonical))) fail()
       if (entry.expected) {
         rename(temporary, entry.parent.path, 2) // RENAME_EXCHANGE
-        if (!(await unchanged(temporary, entry.expected, canonical))) {
+        // Linux updates both exchanged inodes' ctime to the same rename timestamp.
+        // mtime and size must still match the imported handle; a later write changes ctime again.
+        const exchanged = await lstat(entry.parent.path)
+        if (!(await unchanged(temporary, entry.expected, canonical, exchanged.ctimeMs))) {
           rename(temporary, entry.parent.path, 2)
           await entry.parent.handle.sync()
           fail()

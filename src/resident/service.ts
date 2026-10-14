@@ -164,13 +164,17 @@ export const ResidentCodexLive = (
         peers.register(runId, pid)
         if (Option.isSome(identity)) identity.value.register(runId, pid)
       }
+      const revokePeer = (runId: string) => {
+        peers.revoke(runId)
+        if (Option.isSome(identity)) identity.value.revoke(runId)
+      }
       yield* Effect.addFinalizer(() =>
         Effect.forEach(
           [...servers.entries()],
           ([runId, entry]) =>
             Effect.gen(function* () {
               yield* Effect.tryPromise(() => entry.process.close())
-              peers.revoke(runId)
+              revokePeer(runId)
               const row = yield* store.readRun(runId)
               if (row !== null) listeners.get(row.thread_id)?.queue.close()
             }).pipe(Effect.exit),
@@ -295,7 +299,7 @@ export const ResidentCodexLive = (
         const row = yield* store.read(threadId)
         const listener = listeners.get(threadId)
         if (row !== null) {
-          peers.revoke(row.run_id)
+          revokePeer(row.run_id)
           yield* closeServer(row.run_id, threadId, row.closure_confirmed === 1)
           servers.delete(row.run_id)
           threadRuns.delete(threadId)
@@ -681,7 +685,7 @@ export const ResidentCodexLive = (
                 return yield* Effect.fail(
                   new Error("Resident run/thread custody is missing; closure unconfirmed"),
                 )
-              peers.revoke(runId)
+              revokePeer(runId)
               yield* store.revokeDelivery(row.thread_id)
               yield* finish(row.thread_id, true)
             }),
@@ -712,7 +716,7 @@ export const ResidentCodexLive = (
           yield* finish(row.thread_id, true)
           return
         }
-        peers.revoke(row.run_id)
+        revokePeer(row.run_id)
         yield* Effect.tryPromise(() => entry.process.close())
         if (transientUnits) {
           const custody = yield* store.readServer(row.run_id)
@@ -800,7 +804,7 @@ export const ResidentCodexLive = (
                 detail: string,
               ) =>
                 Effect.gen(function* () {
-                  peers.revoke(input.runId)
+                  revokePeer(input.runId)
                   servers.delete(input.runId)
                   yield* Effect.tryPromise(() => server.close())
                   return yield* Effect.fail(new ExecutionSelectionError({ reason, detail }))
@@ -938,7 +942,11 @@ export const ResidentCodexLive = (
         }).pipe(Effect.catch(() => Effect.succeed(new Response(null, { status: 409 }))))
       yield* Effect.acquireRelease(
         Effect.tryPromise(() =>
-          serveRunSocket(config.socket, (request, pid) => Effect.runPromise(route(request, pid))),
+          serveRunSocket(
+            config.socket,
+            (request, pid) => Effect.runPromise(route(request, pid)),
+            config.peer,
+          ),
         ),
         (server) => Effect.tryPromise(() => server.close()).pipe(Effect.orDie),
       )

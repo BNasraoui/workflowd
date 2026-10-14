@@ -1,0 +1,38 @@
+[Unit]
+Description=Workflowd shared agent OpenCode server
+After=local-fs.target workflowd-agent-host.service
+Requires=workflowd-agent-host.service
+
+[Service]
+Type=simple
+User=workflowd-agent
+Group=workflowd-model-auth
+SupplementaryGroups=
+EnvironmentFile=/etc/workflowd/agent-git.env
+EnvironmentFile=/etc/workflowd/agent-opencode.env
+Environment=WORKFLOWD_AGENT_HOME=/var/lib/workflowd-agent
+Environment=WORKFLOWD_AGENT_PATH=/usr/local/bin:/usr/bin:/bin
+Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1
+Environment=OPENCODE_CONFIG_PROJECT_DISABLE=1
+ExecStartPre=+/usr/local/sbin/workflowd-migrate-opencode --check
+ExecStart=/usr/local/bin/bun /usr/local/libexec/workflowd-agent-opencode.js
+WorkingDirectory=/var/lib/workflowd-agent
+UMask=0077
+KillMode=control-group
+TimeoutStopSec=5
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProtectHome=yes
+RestrictSUIDSGID=yes
+InaccessiblePaths=-/run/docker.sock -/run/tailscale -/etc/workflowd -/run/credentials -/var/lib/workflowd/controller -/var/lib/workflowd/nats
+ReadWritePaths=/var/lib/workflowd-agent
+MemoryMax=6G
+MemorySwapMax=0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -240,6 +240,7 @@ export const makeDurableCliProcess = (
       options.credentialSocket,
       options.driver.name === "claude" ? "claude" : "codex",
       options.driver.parseEvent,
+      options.identity,
     )
   const pollIntervalMs = options.pollIntervalMs ?? 100
   const unitPrefix = options.unitPrefix ?? "workflowd-agent-"

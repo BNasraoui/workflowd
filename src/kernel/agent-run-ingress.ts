@@ -475,7 +475,7 @@ const make = (options: AgentRunIngressOptions) =>
             },
             text: isolated
               ? run.prompt
-              : `${mailboxInstructions}\n\n${yield* workerPrompt(run)}`.trim(),
+              : `${mailboxInstructions}\n\n${yield* workerPrompt((yield* store.read(run.runId)) ?? run)}`.trim(),
           })
         }
         const outputTokens = yield* verifyFirstToken(nativeSessionId)

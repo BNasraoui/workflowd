@@ -1,3 +1,4 @@
+import { hostWorkerIdentity } from "../agent-host/client"
 import {
   startAgentHost,
   inspectAgentHost,
@@ -407,6 +408,7 @@ export const launchAppServer = async (
       runId,
       launchId,
       profile: "codex-server",
+      ...(options.env ? { worker: hostWorkerIdentity(options.env) } : {}),
       directory: "",
       prompt: "",
       model: null,

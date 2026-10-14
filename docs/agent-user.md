@@ -1,6 +1,6 @@
-# Agent user credential admission and native launch (draft)
+# Agent user credential admission and execution (draft)
 
-This draft covers credential admission and Phase 2 native agent launch. Live
+This draft covers credential admission, native agent launch, and Phase 3 shared OpenCode and App publishing. Live
 provisioning and cutover remain later phases.
 
 The draft adds credential metadata checks, an admission lease held through
@@ -55,7 +55,7 @@ before admitting new work so cached grants cannot survive the repair. The
 command does not restart clients itself.
 
 `deploy/agent-user/install.sh --build-only` installs locked build dependencies
-and compiles the three binaries into `dist/`. Running it without that flag then
+and compiles the host, administrative commands and trusted worker entrypoints into `dist/`. Running it without that flag then
 installs the artifacts for already-provisioned identities and a reviewed policy.
 The host unit limits capabilities to DAC traversal/access, ownership changes,
 and cross-UID process inspection (`CAP_SYS_PTRACE`) for fail-closed consumer
@@ -184,7 +184,7 @@ Rollout must allow an idle repair window: automatic relink refuses while **any
 agent unit** or the operator's **Claude or Codex** runs, including unrelated
 runs. Active or unconfirmed host custody is an additional fence even if a process
 scan misses a consumer. Finished custody is reconciled by host inspection and
-collection; unresolved launches require operator investigation. Expect
+collection. A failed systemd launch with a confirmed absent unit is recorded as never launched. An absent record without an InvocationID receives a 60-second grace period before that reconciliation; inspection failures and unknown units remain fenced. Expect
 `credential_relink_in_progress` until consumers are idle and custody is resolved.
 No automatic relink stops consumers for the operator.
 
@@ -192,6 +192,7 @@ Both manual and automatic repair recheck both paths immediately before each link
 replacement. Linux `renameat2(RENAME_EXCHANGE)` retains the displaced entry for
 validation and swaps it back on a race; a mismatch keeps the repair journal and
 refuses admission. Explicit recovery of a missing link uses `RENAME_NOREPLACE`.
+The journal records device/inode, ctime, mtime and size from the import handle's fstat. Those values must still match before each exchange. The displaced entry must retain the imported mtime and size; its ctime must match the exchange timestamp on the replacement symlink (Linux changes ctime during exchange). An in-place rewrite therefore retains the journal and refuses admission.
 Import reads at most 1 MiB + 1 bytes and refuses an oversized source, including
 one that grows after inspection. A login arriving during import is preserved;
 the journal fences the already imported canonical value for explicit recovery.
@@ -215,3 +216,50 @@ Claude launch and both host/local resume use `--setting-sources user`, while
 sandboxed Claude keeps empty setting sources. Host Codex app-server and model
 discovery pass the same untrusted-project configuration arguments as the resident
 launcher. See [Agent project config](agent-project-config.md).
+
+
+## Shared OpenCode and App publishing
+
+The installer supplies `workflowd-agent-opencode.service` without starting it.
+After a drained, reviewed migration, this is the sole server for new agent runs,
+including reviews. The service checks the migration journal and the masked,
+inactive old source units before every start. Its fixed agent UID, primary group
+and supplementary groups must match `WORKFLOWD_AGENT_UID` and
+`WORKFLOWD_AGENT_GID`. The root-owned `agent-opencode.env` supplies those IDs and
+`OPENCODE_SERVER_PASSWORD`; `agent-git.env` supplies the existing Git identity
+policy. The server uses `/var/lib/workflowd-agent`, separate configuration and
+transcripts, and both OpenCode project-config disable settings. The operator
+attaches to this server instead of starting another credential consumer. Migration
+and live service activation remain explicit administrative operations.
+
+The controller's agent-host configuration must also set `WORKFLOWD_AGENT_HOME`,
+`WORKFLOWD_AGENT_UID`, `WORKFLOWD_AGENT_GID`, and the trusted
+`WORKFLOWD_WORKER_GITHUB_COMMAND=/usr/local/libexec/workflowd-worker-github.js`.
+Place the GitHub and mailbox sockets in the installed
+`/var/lib/workflowd/agent-access` directory. Its controller ownership and group
+search permission permit agent connections without exposing the controller DB or
+App key. Socket files are group-accessible, but kernel peer credentials admit
+only the controller and agent UIDs; other group members cannot use them.
+
+Native broker requests additionally require ancestry beneath the registered run
+process and its original process birth time. The host protocol carries only the
+selected run ID and broker/mailbox paths, and attachment restores registration.
+OpenCode requests instead require a random run/session capability, verified
+against live session/resource custody on every request. Controller restart
+rotates capabilities for recoverable active sessions without replaying a prompt.
+Terminal or expired runs cannot obtain more tokens. Previously issued GitHub
+tokens remain valid until GitHub expires or revokes them.
+
+The trusted command obtains a repository-scoped App token for each invocation,
+clears personal GitHub/SSH and inherited Git configuration variables, and uses
+HTTPS Git with certificate verification. The agent receives no App private key,
+controller Git configuration or personal `gh` login. The existing same-agent-UID
+trust limits still apply. The model's instructions name this command for Git and
+`gh`; GitHub enforces the token's repository permissions.
+
+Disposable CI drives the three installed clients through synthetic local model,
+HTTPS Git and GitHub API fixtures, requiring push/PR head readback under the agent
+UID. The OpenCode migration probe exercises OAuth refresh persistence and operator
+attachment without a second refresh. Resident tests require run-bound completion
+and recovery without duplicate delivery. These fixtures do not establish real
+provider acceptance or complete the Phase 4 mint cutover.

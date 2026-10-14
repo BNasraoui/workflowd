@@ -300,10 +300,29 @@ export function observeAgentHost(
   }
 }
 
+export function hostWorkerIdentity(env: Readonly<Record<string, string>>) {
+  const runId = env.WORKFLOWD_RUN_ID
+  if (!runId) return undefined
+  return {
+    runId,
+    ...(env.WORKFLOWD_WORKER_GITHUB_SOCKET
+      ? { githubSocket: env.WORKFLOWD_WORKER_GITHUB_SOCKET }
+      : {}),
+    ...(env.GH_CONFIG_DIR ? { githubDirectory: env.GH_CONFIG_DIR } : {}),
+    ...(env.WORKFLOWD_CODEX_RESIDENT_SOCKET
+      ? { residentSocket: env.WORKFLOWD_CODEX_RESIDENT_SOCKET }
+      : {}),
+  }
+}
+
 export function makeHostCli(
   socket: string,
   client: "codex" | "claude",
   parse: (line: string) => CliEvent,
+  identity?: {
+    environment: (runId: string) => Readonly<Record<string, string>>
+    register: (runId: string, pid: number) => void
+  },
 ): Extract<CliPort, { ownership: "transient-exec" }> {
   const failure = (cause: unknown) =>
     new WorkspaceError({ operation: "native host launch", cause: normalizeError(cause) })
@@ -336,12 +355,14 @@ export function makeHostCli(
           const process = await startAgentHost(socket, {
             runId: input.runId,
             profile: client,
+            ...(identity ? { worker: hostWorkerIdentity(identity.environment(input.runId)) } : {}),
             directory: input.directory,
             prompt: input.prompt,
             model: input.model,
             ...(input.effort === undefined ? {} : { effort: input.effort }),
             ...(input.provider == null ? {} : { provider: input.provider }),
           })
+          if (process.pid > 0) identity?.register(input.runId, process.pid)
           input.onSpawn?.(process.pid)
           return observeAgentHost(socket, process, parse)
         },
@@ -351,6 +372,7 @@ export function makeHostCli(
       Effect.tryPromise({
         try: async () => {
           const process = await inspectAgentHost(socket, input.runId)
+          if (process && process.pid > 0) identity?.register(input.runId, process.pid)
           return process === null ? null : observeAgentHost(socket, process, parse)
         },
         catch: failure,

@@ -24,3 +24,33 @@ test("identity is opt-in and validates its boundary without exposing secrets", a
     expect(() => loadWorkerIdentityConfig({ ...env, ...override })).toThrow()
   }
 })
+
+test("agent-host broker configuration requires a distinct UID, shared group, own home and trusted command", () => {
+  const hosted = {
+    ...env,
+    WORKFLOWD_AGENT_HOST_SOCKET: "/run/host.sock",
+    WORKFLOWD_AGENT_HOME: "/var/lib/agent",
+    WORKFLOWD_AGENT_UID: String(process.getuid!() + 10000),
+    WORKFLOWD_AGENT_GID: "61000",
+    WORKFLOWD_WORKER_GITHUB_COMMAND: "/usr/local/libexec/worker-github.js",
+  }
+  expect(loadWorkerIdentityConfig(hosted)).toMatchObject({
+    home: hosted.WORKFLOWD_AGENT_HOME,
+    command: hosted.WORKFLOWD_WORKER_GITHUB_COMMAND,
+    peer: {
+      controllerUid: process.getuid!(),
+      agentUid: process.getuid!() + 10000,
+      groupGid: 61000,
+    },
+  })
+  for (const override of [
+    { WORKFLOWD_AGENT_UID: "0" },
+    { WORKFLOWD_AGENT_UID: String(process.getuid!()) },
+    { WORKFLOWD_AGENT_GID: "-1" },
+    { WORKFLOWD_AGENT_HOME: undefined },
+    { WORKFLOWD_AGENT_HOME: "relative" },
+    { WORKFLOWD_WORKER_GITHUB_COMMAND: undefined },
+    { WORKFLOWD_WORKER_GITHUB_COMMAND: "relative" },
+  ])
+    expect(() => loadWorkerIdentityConfig({ ...hosted, ...override })).toThrow()
+})

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto"
 import { OpenCodeAdapterError } from "../../src/opencode/adapter"
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import { requestRunSocket } from "../../src/worker-identity/socket-client"
 import { SqlClient } from "effect/unstable/sql"
 import { KernelEventStoreLive } from "../../src/kernel/event-store"
 import { AgentRunStore, AgentRunStoreLive } from "../../src/kernel/agent-run-store"
@@ -297,10 +298,57 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
   const { OpenCodeMailbox, OpenCodeMailboxLive } = await import("../../src/resident/opencode")
   const { subscribeToEvent } = await import("../../src/resident/subscribe")
   const directory = await mkdtemp(join(tmpdir(), "workflowd-opencode-socket-"))
+  const peer =
+    process.env.WORKFLOWD_AGENT_TEST_AGENT_UID === undefined
+      ? undefined
+      : {
+          controllerUid: process.getuid!(),
+          agentUid: Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID),
+          groupGid: Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID),
+        }
+  await chmod(directory, 0o711)
+  const requestAs =
+    (uid: number): typeof requestRunSocket =>
+    async (socket, path, body) => {
+      const child = Bun.spawn(
+        [
+          "/usr/bin/setpriv",
+          "--reuid",
+          String(uid),
+          "--regid",
+          String(peer!.groupGid),
+          "--clear-groups",
+          process.execPath,
+          "-e",
+          `
+      const { requestRunSocket } = await import(process.env.CLIENT);
+      const response = await requestRunSocket(process.env.SOCKET, process.env.ROUTE, process.env.BODY);
+      console.log(JSON.stringify({ status: response.status, body: await response.text() }));
+    `,
+        ],
+        {
+          env: {
+            CLIENT: join(import.meta.dir, "../../src/worker-identity/socket-client.ts"),
+            SOCKET: socket,
+            ROUTE: path,
+            BODY: body,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const output = await new Response(child.stdout).text()
+      expect(await child.exited).toBe(0)
+      const response = Schema.decodeUnknownSync(
+        Schema.Struct({ status: Schema.Number, body: Schema.String }),
+      )(JSON.parse(output))
+      return new Response(response.body, { status: response.status })
+    }
+  const request = peer ? requestAs(peer.agentUid) : requestRunSocket
   const fake = fixture()
   try {
     const live = OpenCodeMailboxLive(
-      { ...options, socket: join(directory, "mailbox.sock") },
+      { ...options, peer, socket: join(directory, "mailbox.sock") },
       fake.provider,
     ).pipe(Layer.provideMerge(layer()))
     await Effect.runPromise(
@@ -317,8 +365,17 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
           WORKFLOWD_OPENCODE_RESIDENT_SOCKET: join(directory, "mailbox.sock"),
         }
         const receipt = yield* Effect.tryPromise(() =>
-          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env),
+          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env, request),
         )
+        if (peer) {
+          // This UID has the socket's filesystem group but is neither authorized peer UID.
+          const outsider = requestAs(Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID))
+          expect(
+            (yield* Effect.tryPromise(() =>
+              outsider(env.WORKFLOWD_OPENCODE_RESIDENT_SOCKET, "/subscriptions", "{}"),
+            )).status,
+          ).toBe(403)
+        }
         expect(receipt.deliveryState).toBe("pending")
         yield* runs.complete({ runId: "child", now: new Date() })
         yield* mailbox.tick
@@ -327,7 +384,7 @@ test("OpenCode agent-run completion crosses the run-bound subscription socket", 
         expect(fake.prompts[0]?.text).toContain('"summaryPointer":"ses_child"')
         expect(fake.prompts[0]?.text).toContain('"status":"completed"')
         const duplicate = yield* Effect.tryPromise(() =>
-          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env),
+          subscribeToEvent({ kind: "agent_run", run_id: "child" }, env, request),
         )
         expect(duplicate.id).toBe(receipt.id)
         expect(duplicate.deliveryState).toBe("delivered")

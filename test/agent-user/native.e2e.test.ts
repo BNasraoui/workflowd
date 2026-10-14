@@ -433,6 +433,23 @@ async function nativeBoundary(simulatedManager: boolean) {
     }
   }
   try {
+    if (simulatedManager) {
+      await expect(
+        call({
+          operation: "start",
+          runId: "failed-manager",
+          profile: "codex-preflight",
+          directory: "",
+          prompt: "",
+          model: null,
+        }),
+      ).rejects.toThrow()
+      expect(await call({ operation: "inspect", runId: "failed-manager" })).toMatchObject({
+        exitCode: -1,
+        active: false,
+        invocationId: null,
+      })
+    }
     // Exercise automatic relink through the installed unit's real capability and
     // filesystem restrictions, with an authenticated controller-UID caller.
     for (const client of ["codex", "claude"] as const) {
@@ -1217,6 +1234,7 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
       const value = (prefix: string) =>
         args.find((arg) => arg.startsWith(prefix))!.slice(prefix.length)
       const unit = value("--unit=")
+      if (unit === agentHostUnitName("failed-manager")) throw new Error("synthetic manager refusal")
       const at = args.findIndex((arg, index) => index > 0 && !arg.startsWith("--"))
       const env = Object.fromEntries(
         args
@@ -1357,7 +1375,7 @@ test("controller discovery and workspace adapters use host custody without local
           unit: agentHostUnitName(request.runId),
           invocationId: "fixture-invocation",
           uid: 12345,
-          pid: 0,
+          pid: 123,
           started: new Date().toISOString(),
           active: false,
           exitCode,
@@ -1384,6 +1402,36 @@ test("controller discovery and workspace adapters use host custody without local
   })
   await new Promise<void>((resolve) => host.listen(socket, resolve))
   try {
+    const registrations: Array<[string, number]> = []
+    const identity = {
+      environment: (runId: string) => ({
+        WORKFLOWD_RUN_ID: runId,
+        WORKFLOWD_WORKER_GITHUB_SOCKET: "/run/broker.sock",
+        GH_CONFIG_DIR: "/agent/gh",
+      }),
+      register: (runId: string, pid: number) => {
+        registrations.push([runId, pid])
+      },
+    }
+    const native = makeHostCli(socket, "claude", () => ({ type: "other" }), identity)
+    const nativeInput = {
+      runId: "bound-native",
+      directory: "/agent/run",
+      prompt: "task",
+      model: null,
+    }
+    await Effect.runPromise(native.spawn(nativeInput))
+    expect(starts.at(-1)?.worker).toEqual({
+      runId: "bound-native",
+      githubSocket: "/run/broker.sock",
+      githubDirectory: "/agent/gh",
+    })
+    await Effect.runPromise(native.attach(nativeInput))
+    expect(registrations).toEqual([
+      ["bound-native", 123],
+      ["bound-native", 123],
+    ])
+    starts.length = 0
     const discovery = makeCodexDiscovery("codex:local", {
       command: ["must-not-execute"],
       credentialSocket: socket,
@@ -1415,7 +1463,11 @@ test("controller discovery and workspace adapters use host custody without local
     )
     expect(failed._tag).toBe("Failure")
     exitCode = 0
-    const cli = makeClaudeCli({ binary: "must-not-execute", credentialSocket: socket })
+    const cli = makeClaudeCli({
+      binary: "must-not-execute",
+      credentialSocket: socket,
+      identity: { ...identity, nativeRun: () => Effect.succeed("bound-resume") },
+    })
     output = true
     expect(
       await Effect.runPromise(
@@ -1450,7 +1502,13 @@ test("controller discovery and workspace adapters use host custody without local
       profile: "claude-resume",
       nativeSessionId: "native-session",
       timeoutMs: 1000,
+      worker: {
+        runId: "bound-resume",
+        githubSocket: "/run/broker.sock",
+        githubDirectory: "/agent/gh",
+      },
     })
+    expect(registrations.at(-1)).toEqual(["bound-resume", 123])
   } finally {
     await new Promise<void>((resolve) => host.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
@@ -1487,7 +1545,7 @@ test("the host persists terminal status before unloading the cgroup and inspects
     },
   }
   const records = new Map<string, { unit: string; launchId: string }>()
-  for (const runId of ["slow", "finished", "failed", "mismatch"]) {
+  for (const runId of ["slow", "finished", "failed", "mismatch", "never-launched", "uncertain"]) {
     const key = createHash("sha256").update(runId).digest("hex")
     const unit = agentHostUnitName(runId)
     const launchId = randomUUID()
@@ -1507,10 +1565,12 @@ test("the host persists terminal status before unloading the cgroup and inspects
           runId,
           unit,
           launchId,
-          invocationId: "fixture",
+          invocationId: ["never-launched", "uncertain"].includes(runId) ? null : "fixture",
           uid: 61002,
           pid: 123,
-          started: new Date().toISOString(),
+          started: new Date(
+            runId === "never-launched" ? Date.now() - 120000 : Date.now(),
+          ).toISOString(),
           active: true,
           exitCode: null,
         },
@@ -1535,7 +1595,8 @@ test("the host persists terminal status before unloading the cgroup and inspects
       stopped.add(runId)
       return ""
     }
-    if (stopped.has(runId)) return "LoadState=not-found\n"
+    if (stopped.has(runId) || ["never-launched", "uncertain"].includes(runId))
+      return "LoadState=not-found\n"
     if (runId === "slow") {
       enteredSlow()
       await slow
@@ -1553,6 +1614,17 @@ test("the host persists terminal status before unloading the cgroup and inspects
     await pending
     expect(completed).toMatchObject({ active: false, exitCode: 0 })
     expect(stopped.has("finished")).toBe(true)
+    expect(
+      await requestAgentHost(path, { operation: "inspect", runId: "never-launched" }),
+    ).toMatchObject({ active: false, exitCode: -1, invocationId: null, pid: 0 })
+    await expect(
+      requestAgentHost(path, { operation: "inspect", runId: "uncertain" }),
+    ).rejects.toThrow()
+    const neverPath = join(
+      custodyRoot,
+      `${createHash("sha256").update("never-launched").digest("hex")}.json`,
+    )
+    expect(JSON.parse(await readFile(neverPath, "utf8")).process.exitCode).toBe(-1)
     expect(await requestAgentHost(path, { operation: "inspect", runId: "finished" })).toMatchObject(
       { exitCode: 0 },
     )

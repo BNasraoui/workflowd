@@ -231,7 +231,22 @@ wait
   }
 }
 
-if (process.argv.length === 3 && process.argv[2] === "--probe-supervision") {
+if (process.argv.length === 3 && process.argv[2] === "--probe-opencode") {
+  process.exitCode = await new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "test",
+        "test/agent-user/opencode-migration.e2e.test.ts",
+        "--test-name-pattern",
+        "^installed OpenCode",
+      ],
+      { stdio: "inherit" },
+    )
+    child.once("error", reject)
+    child.once("exit", (code) => resolve(code ?? 1))
+  })
+} else if (process.argv.length === 3 && process.argv[2] === "--probe-supervision") {
   try {
     console.log(JSON.stringify(await probeSupervision()))
   } catch (error) {
@@ -243,7 +258,7 @@ if (process.argv.length === 3 && process.argv[2] === "--probe-supervision") {
   }
 } else if (process.argv.length !== 3 || process.argv[2] !== "--probe-credentials") {
   console.error(
-    "Usage: bun scripts/evidence/agent-user.mjs --probe-credentials|--probe-supervision",
+    "Usage: bun scripts/evidence/agent-user.mjs --probe-credentials|--probe-supervision|--probe-opencode",
   )
   process.exitCode = 2
 } else {

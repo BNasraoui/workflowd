@@ -525,7 +525,13 @@ function nativeHost(
         }
         // Persist the fence before the manager call. Never repeat an uncertain launch.
         await saveHostRecord(recordPath, record)
-        await supervisor(hostLaunchCommand(policy, record, io, git))
+        try {
+          await supervisor(hostLaunchCommand(policy, record, io, git))
+        } catch (error) {
+          // A failed manager call is terminal only if a fresh observation proves absence.
+          await inspectHostProcess(record, recordPath, supervisor, true).catch(() => {})
+          throw error
+        }
         return { process: await inspect(record) }
       } finally {
         await release()
@@ -637,6 +643,7 @@ async function inspectHostProcess(
   record: HostRecord,
   path: string,
   supervisor: (args: string[]) => Promise<string>,
+  launchFailed = false,
 ): Promise<OwnedProcess> {
   const output = await supervisor([
     "/usr/bin/systemctl",
@@ -656,8 +663,13 @@ async function inspectHostProcess(
   )
   const present = fields.LoadState !== "not-found"
   if (!present && record.process.exitCode !== null) return record.process
-  if (!present && record.process.invocationId === null)
-    throw new Error("host launch remains unconfirmed")
+  if (!present && record.process.invocationId === null) {
+    const age = Date.now() - Date.parse(record.process.started)
+    if (!launchFailed && !(age >= 60000)) throw new Error("host launch remains unconfirmed")
+    const neverLaunched = { ...record.process, active: false, pid: 0, exitCode: -1 }
+    await saveHostRecord(path, { ...record, process: neverLaunched })
+    return neverLaunched
+  }
   if (
     present &&
     (fields.Description !== `workflowd native ${record.process.launchId}` ||
@@ -793,6 +805,17 @@ function hostLaunchCommand(
     `--property=RuntimeMaxSec=${Math.ceil((record.request.timeoutMs ?? 86400000) / 1000)}`,
     `--property=ReadWritePaths=${launch.home} ${launch.workspaceRoot} ${io} ${policy.codex.canonical} ${policy.claude.canonical}`,
     ...Object.entries(agentGitEnvironment(git)).map(([key, value]) => `--setenv=${key}=${value}`),
+    ...Object.entries({
+      WORKFLOWD_RUN_ID: record.request.worker?.runId,
+      WORKFLOWD_WORKER_GITHUB_SOCKET: record.request.worker?.githubSocket,
+      WORKFLOWD_CODEX_RESIDENT_SOCKET: record.request.worker?.residentSocket,
+      GH_CONFIG_DIR: record.request.worker?.githubDirectory ?? `${launch.home}/.config/gh`,
+    }).flatMap(([key, value]) => (value === undefined ? [] : [`--setenv=${key}=${value}`])),
+    "--setenv=GH_TOKEN=",
+    "--setenv=GITHUB_TOKEN=",
+    "--setenv=GH_ENTERPRISE_TOKEN=",
+    "--setenv=GITHUB_ENTERPRISE_TOKEN=",
+    "--setenv=SSH_AUTH_SOCK=",
     "--setenv=WORKFLOWD_AGENT_HOST_SOCKET=host-managed",
     `--setenv=HOME=${launch.home}`,
     `--setenv=TMPDIR=${io}`,
