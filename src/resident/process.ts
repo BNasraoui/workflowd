@@ -30,6 +30,7 @@ export function startAppServer(
     [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
     {
       env,
+      cwd: options.home,
       detached: true,
       stdin: "pipe",
       stdout: "pipe",
@@ -329,6 +330,7 @@ export const launchAppServer = async (
     "--user",
     "--quiet",
     "--service-type=exec",
+    `--working-directory=${options.home}`,
     `--unit=${unit}`,
     `--description=workflowd resident launch ${launchId}`,
     "--property=KillMode=control-group",

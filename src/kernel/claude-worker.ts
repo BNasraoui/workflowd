@@ -12,6 +12,8 @@ export const runClaudeWorker = async (options: CliWorkerOptions): Promise<number
     "--include-partial-messages",
     ...(options.sandboxBindingFile === undefined
       ? [
+          "--setting-sources",
+          "user",
           "--dangerously-skip-permissions",
           "--strict-mcp-config",
           "--mcp-config",

@@ -1,6 +1,7 @@
 import { CodexRetryTurn } from "./codex-retry"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
+import { codexProjectArguments } from "../execution/project-config"
 
 export type CliWorkerOptions = {
   readonly binary: string
@@ -56,6 +57,7 @@ export async function runCodexWorker(options: CliWorkerOptions): Promise<number>
       options.binary,
       "exec",
       "--json",
+      ...codexProjectArguments(options.directory),
       ...(options.sandboxBindingFile === undefined
         ? ["--dangerously-bypass-approvals-and-sandbox"]
         : await nativeSandboxArguments(

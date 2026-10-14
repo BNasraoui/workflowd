@@ -83,7 +83,16 @@ export const makeClaudeCli = (options: {
       "claude",
       runWorkspaceCommandBytes(
         "wake claude session",
-        [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
+        [
+          options.binary,
+          "--setting-sources",
+          "user",
+          "-p",
+          "--resume",
+          input.nativeSessionId,
+          "--output-format",
+          "json",
+        ],
         { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
       ).pipe(
         Effect.timeoutOrElse({
