@@ -511,6 +511,11 @@ New resident workers are not offered event subscriptions: the injected Codex
 credentials. Existing waits still reconcile and deliver through their original
 custody checks. No live service configuration is changed.
 
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
+
 After pushing and opening/updating a PR, use
 `timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60`.
 Retry missing checks or transient observation errors every 30 seconds for at most
@@ -519,7 +524,15 @@ three minutes per cycle; cap each retry/watch cycle at 15 minutes, below the def
 is not a stall heartbeat. Missing/pending checks, watch timeouts, and transient
 errors such as "error connecting to api.github.com" mean CI is still running for
 scheduling purposes: continue remaining work and re-check in bounded cycles,
-returning to task work and progress updates between cycles.
+returning to task work and progress updates between cycles. Never run back-to-back
+blocking waits without returning to task work in between; no single cycle may
+exceed the budget.
+
+Any other observation error means CI is unverified: continue remaining work and
+report it at handoff. Observation errors do not count as confirmed failures.
+The verified result must be for the last pushed head SHA; results for earlier SHAs
+do not verify it. At an early stop, provide the same report as at final handoff
+plus the failing check's link, if applicable.
 
 Verify the pushed head SHA before reporting CI; a changed head must be reported
 without attributing its checks to the pushed SHA. End only at final handoff, an

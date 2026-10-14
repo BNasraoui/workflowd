@@ -45,6 +45,11 @@ its workflows, not assume a past result predicts future reruns.
 
 ## Agent pattern: bounded required-check polling
 
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
+
 After pushing and opening or updating a PR, resident workers use:
 
 ```bash
@@ -65,10 +70,17 @@ Missing or pending required checks, watch timeouts (exit 124), and transient
 observation errors (such as "error connecting to api.github.com") mean CI is still
 running for scheduling purposes. Continue the remaining task, preserve unfinished
 work, and re-check in later bounded cycles. Between cycles return to task work and
-provide a progress update; never chain blocking watches beyond the stall window.
+provide a progress update; never run back-to-back blocking waits without returning
+to task work in between; no single cycle may exceed the budget.
 Address confirmed CI failures; early termination is allowed after three unsuccessful
 repair attempts for the same confirmed failure. Missing/pending checks, timeouts,
 and transient observation errors do not count toward that bound.
+
+Any other observation error means CI is unverified: continue remaining work and
+report it at handoff. Observation errors do not count as confirmed failures.
+The verified result must be for the last pushed head SHA; results for earlier SHAs
+do not verify it. At an early stop, provide the same report as at final handoff
+plus the failing check's link, if applicable.
 
 Verify the PR still points to the pushed SHA before reporting CI. If the head
 changed, continue remaining work and report the mismatch at handoff; never attribute
@@ -81,9 +93,9 @@ observed). Once remaining work is complete, make one final bounded observation
 cycle and hand off any still-unverified CI rather than waiting indefinitely.
 
 An active skill's end-turn/handoff rule takes precedence. In particular, an RPI
-implement worker required to end after pushing updates its PR, publishes its report,
-and ends without watching or subscribing. Resident coordinators use the workflowd
-MCP caller mailbox (`dispatch_agent` / `read_agent_mailbox`) or the RPI coordinator's
+implement worker completes all earlier phases before reaching Finish, updates its
+PR, publishes its report, and ends without watching or subscribing. Resident
+coordinators use the workflowd MCP caller mailbox (`dispatch_agent` / `read_agent_mailbox`) or the RPI coordinator's
 `scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for child runs, following
 that skill's handoff instructions.
 

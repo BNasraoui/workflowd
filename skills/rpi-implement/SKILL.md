@@ -56,20 +56,32 @@ under the old plan.
 
 1. Update the PR: set its title to the ticket title, mark it ready
    (`gh pr ready rpi/<id>`), and list the phases with their commits in the body.
-2. A resident worker that must end its turn after pushing opens or updates the PR,
-   publishes the report, and ends its turn without watching or subscribing to CI; the
-   coordinator handles the next wake. This handoff takes precedence over the injected
-   resident polling default.
+2. Reach this handoff step only after completing all earlier phases. A resident worker
+   required to end at this handoff skips CI observation and continues to step 3 to
+   publish the report before ending in step 5; the coordinator handles the next wake.
+   This handoff takes precedence over the injected resident polling default.
    Otherwise, only after the PR is updated, run
    `timeout 12m gh pr checks <pr> --repo <owner/repo> --required --watch --interval 60`.
-   Retry only "no checks reported" (or "no required checks reported") every 30 seconds
-   for up to 3 minutes after pushing; cap retries plus watching at 15 minutes total
-   (shorter if the configured stall window is lower). Do not rely on shell output as a
-   heartbeat. Fix failures on the same branch, only within the plan's files. Verify the
-   PR head still matches the pushed SHA. On timeout (exit 124), exhausted missing-check
-   retries, changed head, or observation errors, report the PR URL, pushed SHA, exact
-   command/error, last required-check states and links, and "CI unconfirmed; coordinator/
-   operator follow-up required", then end the turn.
+   Retry missing checks ("no checks reported" or "no required checks reported") or
+   transient observation errors every 30 seconds for up to 3 minutes per cycle; cap
+   each cycle's retries plus watching at 15 minutes (shorter if the configured stall
+   window is lower). Do not rely on shell output as a heartbeat. Never run back-to-back
+   blocking waits without returning to task work in between; no single cycle may
+   exceed the budget. Missing or pending checks, timeout (exit 124), transient errors,
+   and any other observation errors mean CI is unverified: continue to step 3 and
+   report it, never end the turn in step 2. Fix confirmed failures on the same branch,
+   only within the plan's files; after three unsuccessful repair attempts for the same
+   confirmed failure, continue to step 3 with the failure report. Missing/pending
+   checks, timeouts, and observation errors do not count as failed repairs.
+   Verify the PR head still matches the last pushed SHA before reporting CI; results
+   for earlier SHAs do not verify it. A changed head means CI is unverified: continue
+   to step 3 and report the mismatch. Once remaining work is complete, make one final
+   bounded observation cycle and continue to step 3 with any still-unverified CI.
+   For every handoff, including early stops, report the PR URL, last pushed head SHA,
+   verified required CI result or "CI unverified; coordinator/operator follow-up
+   required", exact command/error, and last observed required-check states and links
+   (explicitly say if none were observed). Include the failing check's link when
+   applicable. Carry this CI information into the step 3 report and final message.
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can
