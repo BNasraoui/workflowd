@@ -407,3 +407,146 @@ test.each([
     await rm(root, { recursive: true, force: true })
   }
 })
+
+const installPushGuard = async (root: string) => {
+  const hooks = join(root, ".git", "hooks")
+  const guard = join(hooks, "identity-guard")
+  await writeFile(guard, identityGuard, { mode: 0o700 })
+  await writeFile(join(hooks, "blocked-emails"), "blocked@example.test\n")
+  await writeFile(join(hooks, "pre-push"), guardedHook(guard, "pre-push", join(root, "unused")), {
+    mode: 0o700,
+  })
+  await ok(root, ["config", "core.hooksPath", hooks])
+}
+
+for (const destination of ["origin", "URL"]) {
+  test.each(["rebase", "merge"])(
+    `existing ref via ${destination} after %s onto published blocked main`,
+    async (operation) => {
+      const root = await mkdtemp(join(tmpdir(), "workflowd-git-update-"))
+      const remote = join(root, "remote")
+      try {
+        await ok(root, ["init", "-b", "main"])
+        await ok(root, ["commit", "--allow-empty", "-m", "seed"])
+        await ok(root, ["init", "--bare", "-b", "main", remote])
+        await ok(root, ["remote", "add", "origin", remote])
+        await ok(root, ["checkout", "-b", "agent"])
+        await ok(root, ["commit", "--allow-empty", "-m", "agent work"])
+        await ok(root, ["push", "origin", "agent"])
+        await ok(root, ["checkout", "main"])
+        await ok(root, [
+          "commit",
+          "--allow-empty",
+          "--author=Historical <blocked@example.test>",
+          "-m",
+          "published",
+        ])
+        await ok(root, ["push", "origin", "main"])
+        await ok(root, ["fetch", "origin"])
+        await ok(root, ["checkout", "agent"])
+        await ok(
+          root,
+          operation === "rebase"
+            ? ["rebase", "origin/main"]
+            : ["merge", "--no-edit", "origin/main"],
+        )
+        await installPushGuard(root)
+        const target = destination === "URL" ? pathToFileURL(remote).href : destination
+        const result = await run(root, ["push", "--force", target, "agent"])
+        expect(result).toMatchObject({ code: 0 })
+        expect(await ok(remote, ["rev-parse", "refs/heads/agent"])).toBe(
+          await ok(root, ["rev-parse", "HEAD"]),
+        )
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
+}
+
+for (const existing of [false, true]) {
+  test.each(["replace", "graft", "environment graft"])(
+    `push with existing ref=${existing} refuses blocked history hidden by %s`,
+    async (mask) => {
+      const root = await mkdtemp(join(tmpdir(), "workflowd-git-mask-"))
+      const remote = join(root, "remote")
+      try {
+        await ok(root, ["init", "-b", "main"])
+        await ok(root, ["commit", "--allow-empty", "-m", "seed"])
+        const seed = await ok(root, ["rev-parse", "HEAD"])
+        await ok(root, ["init", "--bare", "-b", "main", remote])
+        await ok(root, ["remote", "add", "origin", remote])
+        await ok(root, ["push", "origin", "main"])
+        if (existing) await ok(root, ["push", "origin", "HEAD:refs/heads/agent"])
+        await ok(root, [
+          "commit",
+          "--allow-empty",
+          "--author=Blocked <blocked@example.test>",
+          "-m",
+          "blocked",
+        ])
+        const blocked = await ok(root, ["rev-parse", "HEAD"])
+        await ok(root, ["commit", "--allow-empty", "-m", "clean tip"])
+        const tip = await ok(root, ["rev-parse", "HEAD"])
+        const env: Record<string, string> = {}
+        if (mask === "replace") {
+          await ok(root, ["replace", blocked, seed])
+        } else {
+          const graft =
+            mask === "graft" ? join(root, ".git", "info", "grafts") : join(root, "grafts")
+          await writeFile(graft, `${tip} ${seed}\n`)
+          if (mask === "environment graft") env.GIT_GRAFT_FILE = graft
+        }
+        await installPushGuard(root)
+        const result = await run(
+          root,
+          [
+            "-c",
+            "advice.graftFileDeprecated=false",
+            "push",
+            "--force",
+            "origin",
+            "HEAD:refs/heads/agent",
+          ],
+          env,
+        )
+        expect(result.code).not.toBe(0)
+        expect(result.output).toContain("workflowd: blocked git identity")
+        expect(result.output).not.toContain("grafts is deprecated")
+        if (existing) expect(await ok(remote, ["rev-parse", "refs/heads/agent"])).toBe(seed)
+        else
+          expect((await run(remote, ["rev-parse", "--verify", "refs/heads/agent"])).code).not.toBe(
+            0,
+          )
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
+}
+
+test("existing ref with an unknown remote object fails closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-git-unknown-"))
+  const remote = join(root, "remote")
+  const other = join(root, "other")
+  try {
+    await ok(root, ["init", "-b", "main"])
+    await ok(root, ["commit", "--allow-empty", "-m", "seed"])
+    await ok(root, ["init", "--bare", "-b", "main", remote])
+    await ok(root, ["remote", "add", "origin", remote])
+    await ok(root, ["push", "origin", "main"])
+    await ok(root, ["clone", remote, other])
+    await ok(other, ["commit", "--allow-empty", "-m", "remote-only"])
+    await ok(other, ["push", "origin", "main"])
+    const old = await ok(other, ["rev-parse", "HEAD"])
+    expect((await run(root, ["cat-file", "-e", old])).code).not.toBe(0)
+    await ok(root, ["commit", "--allow-empty", "-m", "local-only"])
+    await installPushGuard(root)
+    const result = await run(root, ["push", "--force", "origin", "main"])
+    expect(result.code).not.toBe(0)
+    expect(result.output).toContain("bad object")
+    expect(await ok(remote, ["rev-parse", "refs/heads/main"])).toBe(old)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

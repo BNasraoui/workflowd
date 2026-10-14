@@ -42,9 +42,13 @@ fails instead of launching an unguarded run.
 The guard checks Git's effective author and committer in `pre-commit`,
 `prepare-commit-msg`, and `commit-msg`. This catches an explicit `--author` and
 keeps the commit check active with `--no-verify`. `pre-push` separately runs
-`git log --format='%ae%n%ce'` over each advertised old-to-new range. New refs check
-reachable commits excluding all remote-tracking refs (`--not --remotes`), so
-blocked authors already in the base history do not prevent every new branch.
+`git log --format='%ae%n%ce'` over commits reachable from each pushed tip,
+excluding the advertised old tip for existing refs and any ref under
+`refs/remotes/`, including refs for unconfigured remotes (`--not --remotes`).
+Published blocked history brought in by rebasing or merging onto a newer main
+therefore does not prevent pushes to new or existing branches. Every scan disables
+replace objects and ignores graft files, including an inherited `GIT_GRAFT_FILE`,
+so they cannot hide the original commit metadata or ancestry.
 Keep these refs current with a fetch before pushing (dispatch fetches origin
 before creating worktrees). URL destinations and named remotes use the same
 exclusion, checking commits not reachable from any remote-tracking ref.
@@ -68,8 +72,9 @@ against an agent that can change Git configuration, local refs, or hook files:
 - The same Unix user can change the guard files or remove the conditional
   `includeIf` configuration.
 - Fake `refs/remotes/<remote>/*` tracking refs can exclude blocked commits from
-  the new-ref scan, even with hooks enabled. The exclusion trusts writable local
-  refs across all remotes, regardless of the push destination or remote URL.
+  push scans, even with hooks enabled. The exclusion trusts any ref under
+  `refs/remotes/`, including refs for unconfigured remotes, regardless of the push
+  destination or remote URL.
   Fetching is operational hygiene, not an enforcement boundary.
 - API-created commits, such as GitHub Git commits or Contents API writes through
   `gh api`, never pass through local hooks.
