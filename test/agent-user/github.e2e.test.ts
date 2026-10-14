@@ -1,5 +1,4 @@
 import { openCodePublisher } from "./github-opencode"
-import { publishThroughHost } from "./github-host"
 import { expect, test } from "bun:test"
 import { chmod, chown, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -382,6 +381,7 @@ test("installed Codex, Claude and OpenCode push and open PRs with run-bound App 
                 : { command: shell, timeout: 30000 },
           })
           if (kind === "codex" && uid !== process.getuid!()) {
+            const { publishThroughHost } = yield* Effect.tryPromise(() => import("./github-host"))
             try {
               yield* Effect.tryPromise(() =>
                 publishThroughHost(root, home, workspace, uid, gid, model.binary, env, identity),

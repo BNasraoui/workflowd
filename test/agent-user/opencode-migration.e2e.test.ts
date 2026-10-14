@@ -1,4 +1,3 @@
-import { fixtureEnvironment, fixturePassword } from "./opencode-fixture"
 import { expect, spyOn, test } from "bun:test"
 import * as filesystem from "node:fs/promises"
 import { spawnSync } from "node:child_process"
@@ -60,6 +59,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     await runIsolated("^installed OpenCode")
     return
   }
+  const { fixtureEnvironment, fixturePassword } = await import("./opencode-fixture")
   const ownUid = process.getuid!()
   const root = await mkdtemp(join(tmpdir(), "opencode-migration-"))
   const ben = Number(process.env.WORKFLOWD_AGENT_TEST_BEN_UID ?? ownUid)
@@ -328,6 +328,7 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     await runIsolated("^offline migration")
     return
   }
+  const { fixtureEnvironment } = await import("./opencode-fixture")
   const root = await mkdtemp(join(tmpdir(), "opencode-offline-"))
   const binary = Bun.which("opencode2")!
   const uid = process.getuid()
