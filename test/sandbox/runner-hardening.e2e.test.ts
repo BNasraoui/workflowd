@@ -56,6 +56,14 @@ test("container-use works over a private socket while nested engine access is dr
     `,
       ),
     ).rejects.toThrow(/security.insecure is not allowed/)
+    expect(
+      await runner.docker(
+        "exec",
+        `${runner.name}-engine`,
+        "cat",
+        "/proc/sys/net/ipv6/conf/dagger0/disable_ipv6",
+      ),
+    ).toBe("1")
     const rules = await runner.docker(
       "exec",
       `${runner.name}-engine`,
@@ -80,7 +88,7 @@ test("container-use works over a private socket while nested engine access is dr
         `
       import {probeDagger,connectionScript,assertProbeResults,runnerTargets,executeProbe,dropCounters,assertDropsIncreased} from './scripts/evidence/sandbox-network.mjs'
       import {sandboxSshArguments} from './src/sandbox/transport.ts'
-      const targets=runnerTargets({addresses:${JSON.stringify(addresses)},gateway:${JSON.stringify(await runner.docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", runner.name))}})
+      const targets=runnerTargets({addresses:${JSON.stringify(addresses)},defaultGateway:${JSON.stringify(addresses[0])},gateway:${JSON.stringify(await runner.docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", runner.name))}})
       targets.push({host:'10.87.0.1',port:1234})
       const script=connectionScript(targets).replace('print(json.dumps', "print('WORKFLOWD_NETWORK='+json.dumps")
       const counterArgs=['docker','exec',${JSON.stringify(`${runner.name}-engine`)},'iptables-save','-c']
@@ -95,11 +103,77 @@ test("container-use works over a private socket while nested engine access is dr
     expect(
       await runner.docker("exec", `${runner.name}-engine`, "iptables", "-S", "CNI-ADMIN"),
     ).toContain("-j WFD-SANDBOX")
+    const host = `${runner.name}-host`
+    await runner.docker(
+      "run",
+      "-d",
+      "--name",
+      host,
+      "--privileged",
+      "--memory=256m",
+      "--memory-swap=256m",
+      "--network",
+      `container:${runner.name}-engine`,
+      "--user",
+      "root",
+      "--entrypoint",
+      "sleep",
+      "-v",
+      `${process.cwd()}/test/sandbox/fixtures/engine-host-boundary.sh:/setup.sh:ro`,
+      "-v",
+      `${process.cwd()}/deploy/sandbox/network.sh:/network.sh:ro`,
+      "-v",
+      `${process.cwd()}/deploy/sandbox/probe-ipv6.sh:/probe-ipv6.sh:ro`,
+      "workflowd-sandbox-runner:fixture",
+      "infinity",
+    )
+    try {
+      await runner.docker("exec", host, "sh", "/setup.sh")
+      expect(
+        await command([
+          process.execPath,
+          "--eval",
+          `
+        import assert from 'node:assert/strict'
+        import {probeDagger,httpScript,connectionScript,assertProbeResults,executeProbe,dropCounters,assertDropsIncreased} from './scripts/evidence/sandbox-network.mjs'
+        import {sandboxSshArguments} from './src/sandbox/transport.ts'
+        const ssh=sandboxSshArguments(${JSON.stringify(runner.transport)})
+        const host=${JSON.stringify(host)}
+        const run=(...args)=>executeProbe(['docker','exec',host,...args])
+        const targets=['198.18.0.1','10.23.0.2','172.16.254.2','192.168.23.2','169.254.169.254','168.63.129.16','100.64.0.9','198.51.100.2'].map(host=>({host,port:80}))
+        // Prove listeners are reachable through the engine API before host rules.
+        const controls=await probeDagger(ssh,httpScript(targets.slice(1)),120000)
+        assertProbeResults(targets.slice(1),controls,'connected')
+        await run('ip','netns','exec','host','sh','/network.sh','host','198.18.0.0/24')
+        const counters=()=>run('ip','netns','exec','host','iptables-save','-c')
+        const before=dropCounters(await counters())
+        const engineCounters=async()=>dropCounters(await executeProbe(['docker','exec',${JSON.stringify(`${runner.name}-engine`)},'iptables-save','-c']))
+        const engineBefore=await engineCounters()
+        const results=await probeDagger(ssh,httpScript(targets),120000)
+        assertProbeResults(targets,results,'timeout')
+        assert.deepEqual(await engineCounters(),engineBefore,'http() should bypass dagger0 drops')
+        const script=connectionScript(targets).replace('print(json.dumps',"print('WORKFLOWD_NETWORK='+json.dumps")
+        assertProbeResults(targets,await probeDagger(ssh,script,120000),'timeout')
+        assertDropsIncreased(before,dropCounters(await counters()),['WFD-HOST','WFD-SANDBOX:tailscale0'])
+        const settings=()=>run('ip','netns','exec','host','sh','-c','cat /proc/sys/net/ipv6/conf/*/forwarding')
+        const original=await settings()
+        const v6=await run('ip','netns','exec','host','sh','/probe-ipv6.sh','wfd-sandbox0','2001:db8:2::2')
+        assertDropsIncreased({'WFD-HOST':0,'WFD-SANDBOX:tailscale0':0},dropCounters(v6),['WFD-HOST','WFD-SANDBOX:tailscale0'])
+        assert.equal(await settings(),original,'IPv6 forwarding settings were not restored')
+        // The public test listener and image pulls still work after host rules.
+        assertProbeResults([{host:'192.0.2.2',port:80}],await probeDagger(ssh,httpScript([{host:'192.0.2.2',port:80}]),120000),'connected')
+        console.log('combined-boundary-passed')
+      `,
+        ]),
+      ).toBe("combined-boundary-passed")
+    } finally {
+      await runner.docker("rm", "-f", host)
+    }
   } finally {
     await client.close()
     await runner.close()
   }
-}, 180000)
+}, 300000)
 
 test("host policy drops gateway and protected forwarded traffic without changing public egress", async () => {
   const { resolve } = await import("node:path")

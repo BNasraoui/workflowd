@@ -58,12 +58,13 @@ test("runner-local targets, route inventory and firewall counters fail closed", 
       `
     import assert from 'node:assert/strict'
     import { runnerTargets, assertRunnerRoutes, dropCounters, assertDropsIncreased } from './scripts/evidence/sandbox-network.mjs'
-    const local={addresses:['127.0.0.1','192.0.2.1','100.64.0.5','172.17.0.1'],gateway:'172.30.0.1'}
+    const local={addresses:['127.0.0.1','192.0.2.1','100.64.0.5','172.17.0.1'],gateway:'172.30.0.1',defaultGateway:'10.1.0.1'}
     const targets=runnerTargets(local)
-    for(const host of ['192.0.2.1','100.64.0.5','172.17.0.1','172.30.0.1','169.254.169.254','168.63.129.16'])
+    for(const host of ['10.1.0.1','192.0.2.1','100.64.0.5','172.17.0.1','172.30.0.1','169.254.169.254','168.63.129.16'])
       assert.ok(targets.some(t=>t.host===host))
     assert.ok(!targets.some(t=>t.host==='127.0.0.1'))
     assert.throws(()=>runnerTargets({...local,gateway:''}))
+    assert.throws(()=>runnerTargets({...local,defaultGateway:''}))
     assertRunnerRoutes('100.64.0.2 dev tailscale0\\n100.100.100.100 dev tailscale0')
     assert.throws(()=>assertRunnerRoutes('10.0.0.0/8 dev tailscale0'))
     assert.throws(()=>assertRunnerRoutes('default dev tailscale0'))
@@ -72,6 +73,45 @@ test("runner-local targets, route inventory and firewall counters fail closed", 
     assertDropsIncreased(before,after,['WFD-SANDBOX','WFD-ENGINE'])
     assert.throws(()=>assertDropsIncreased(before,before,['WFD-SANDBOX']))
     assert.throws(()=>assertDropsIncreased({},after,['WFD-SANDBOX']))
+    const tailBefore=dropCounters('[0:0] -A WFD-SANDBOX -o tailscale0 -j DROP')
+    const tailAfter=dropCounters('[1:60] -A WFD-SANDBOX -o tailscale0 -j DROP')
+    assertDropsIncreased(tailBefore,tailAfter,['WFD-SANDBOX:tailscale0'])
+    assert.throws(()=>assertDropsIncreased(tailBefore,after,['WFD-SANDBOX:tailscale0']))
+    console.log('passed')
+  `,
+    ]),
+  ).toBe("passed")
+})
+
+test("Dagger http probes use engine requests and reject non-timeout GraphQL errors", async () => {
+  expect(
+    await command([
+      process.execPath,
+      "--eval",
+      `
+    import assert from 'node:assert/strict'
+    import {httpScript,executeProbe,assertProbeResults} from './scripts/evidence/sandbox-network.mjs'
+    const targets=[{host:'192.0.2.1',port:80}]
+    let message='dial tcp 192.0.2.1:80: i/o timeout'
+    const server=Bun.serve({port:0,async fetch(req){
+      assert.equal(req.headers.get('authorization'),'Basic '+Buffer.from('fixture:').toString('base64'))
+      const {query}=await req.json()
+      assert.match(query,/http\\(url:/)
+      assert.match(query,/contents/)
+      return Response.json({errors:[{message}]})
+    }})
+    try {
+      const script=httpScript(targets)
+      const prefix='import os\\nos.environ["DAGGER_SESSION_PORT"]="'+server.port+'"\\nos.environ["DAGGER_SESSION_TOKEN"]="fixture"\\n'
+      const run=async()=>JSON.parse((await executeProbe(['python3','-'],prefix+script)).split('WORKFLOWD_NETWORK=')[1])
+      assertProbeResults(targets,await run(),'timeout')
+      message='connection refused'
+      await assert.rejects(async()=>assertProbeResults(targets,await run(),'timeout'))
+      message='dial tcp 192.0.2.99:443: i/o timeout'
+      await assert.rejects(async()=>assertProbeResults(targets,await run(),'timeout'))
+      message='unknown field http'
+      await assert.rejects(async()=>assertProbeResults(targets,await run(),'timeout'))
+    } finally {await server.stop(true)}
     console.log('passed')
   `,
     ]),

@@ -19,7 +19,8 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 # Only this short-lived client needs the federated identity token. No token is
-# written to disk or emitted in logs. The CLI creates a non-reusable auth key.
+# written to disk or placed in argv (sudo journals argv). The CLI reads stdin
+# through its file: token support and creates a non-reusable auth key.
 python3 - <<'PY'
 import json, os, subprocess, urllib.parse, urllib.request
 url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=' + urllib.parse.quote(os.environ['SANDBOX_AUDIENCE'], safe='')
@@ -31,7 +32,7 @@ result = subprocess.run(['sudo', '-n', 'tailscale', 'up', '--timeout=60s', '--ss
     '--accept-routes=false', '--accept-dns=false', '--advertise-tags=tag:agent-runner',
     '--hostname=lease-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT'],
     '--client-id=' + os.environ['SANDBOX_TAILSCALE_CLIENT_ID'] + '?preauthorized=true&ephemeral=true',
-    '--id-token=' + token], env=clean, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    '--id-token=file:/dev/stdin'], input=token.encode(), env=clean, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 if result.returncode:
     raise SystemExit("Tailscale enrollment failed")
 PY

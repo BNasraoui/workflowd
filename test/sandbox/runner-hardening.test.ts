@@ -120,3 +120,83 @@ print('clean-daemon')
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("enrollment passes the ID token on stdin, never in sudo argv", async () => {
+  const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
+  const script = source.split("python3 - <<'PY'\n")[1]?.split("\nPY")[0]
+  if (!script) throw new Error("Missing enrollment script")
+  const directory = await mkdtemp(join(tmpdir(), "sandbox-token-"))
+  const token = "eyJ-fake-oidc-token"
+  const server = Bun.serve({ port: 0, fetch: () => Response.json({ value: token }) })
+  try {
+    await writeFile(
+      join(directory, "sudo"),
+      `#!/usr/bin/python3
+import json,os,sys
+from pathlib import Path
+Path(os.environ['CALLS']).write_text(json.dumps(dict(argv=sys.argv,stdin=sys.stdin.read(),env=dict(os.environ))))
+sys.exit(int(os.environ['CLIENT_EXIT']))
+`,
+      { mode: 0o755 },
+    )
+    for (const status of [0, 1]) {
+      const child = Bun.spawn(["python3", "-"], {
+        stdin: new Blob([script]),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          PATH: `${directory}:/usr/bin:/bin`,
+          CALLS: join(directory, "calls"),
+          CLIENT_EXIT: String(status),
+          ACTIONS_ID_TOKEN_REQUEST_URL: `${server.url.toString()}?fixture=1`,
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-secret",
+          SANDBOX_AUDIENCE: "fixture",
+          SANDBOX_TAILSCALE_CLIENT_ID: "client",
+          GITHUB_RUN_ID: "1",
+          GITHUB_RUN_ATTEMPT: "1",
+        },
+      })
+      expect(await child.exited).toBe(status)
+      const calls = await Bun.file(join(directory, "calls")).json()
+      expect(JSON.stringify(calls.argv)).not.toContain(token)
+      expect(calls.argv).toContain("--id-token=file:/dev/stdin")
+      expect(calls.stdin).toBe(token)
+      expect(calls.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN).toBeUndefined()
+      expect(calls.env.ACTIONS_ID_TOKEN_REQUEST_URL).toBeUndefined()
+      expect(await new Response(child.stderr).text()).not.toContain(token)
+    }
+  } finally {
+    await server.stop(true)
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("release logs out even when container cleanup fails and preserves the failure", async () => {
+  const source = await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()
+  const script = source
+    .split("      - name: Release disposable containers")[1]
+    ?.split("run: |\n")[1]
+    ?.split("\n")
+    .filter((line) => line.startsWith("          "))
+    .map((line) => line.slice(10))
+    .join("\n")
+  if (!script) throw new Error("Missing release script")
+  const directory = await mkdtemp(join(tmpdir(), "sandbox-release-"))
+  try {
+    await writeFile(join(directory, "bash"), "#!/bin/sh\nexit 23\n", { mode: 0o755 })
+    await writeFile(join(directory, "sudo"), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', {
+      mode: 0o755,
+    })
+    const child = Bun.spawn(["/bin/bash", "-e", "-c", script], {
+      env: { PATH: `${directory}:/usr/bin:/bin`, CALLS: join(directory, "calls") },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await child.exited).toBe(23)
+    expect(await Bun.file(join(directory, "calls")).text()).toBe(
+      "tailscale logout\nsystemctl stop workflowd-tailscaled\n",
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
