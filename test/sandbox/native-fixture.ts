@@ -181,6 +181,7 @@ export async function nativeModelFixture(kind: "codex" | "claude", root: string)
   )
   return {
     binary: path,
+    modelUrl: model.url.toString(),
     requests,
     catalogs,
     actions,

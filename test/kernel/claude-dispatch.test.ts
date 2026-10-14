@@ -74,6 +74,8 @@ test("durable worker invokes Claude print mode directly and persists output and 
       "stream-json",
       "--verbose",
       "--include-partial-messages",
+      "--setting-sources",
+      "user",
       "--dangerously-skip-permissions",
       "--strict-mcp-config",
       "--mcp-config",

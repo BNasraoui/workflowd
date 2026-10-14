@@ -1,3 +1,4 @@
+import { codexProjectArguments } from "../execution/project-config"
 import { sandboxDiagnostic } from "./diagnostics"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
@@ -25,6 +26,7 @@ async function disabledCodexSkills(binary: string, directory: string) {
   const child = Bun.spawn(
     [
       binary,
+      ...codexProjectArguments(directory),
       "-c",
       "features.plugins=false",
       "-c",
@@ -116,7 +118,17 @@ export async function nativeSandboxArguments(
       "--no-chrome",
     ]
   const child = Bun.spawn(
-    [binary, "-c", "features.plugins=false", "-c", "features.apps=false", "mcp", "list", "--json"],
+    [
+      binary,
+      ...codexProjectArguments(directory),
+      "-c",
+      "features.plugins=false",
+      "-c",
+      "features.apps=false",
+      "mcp",
+      "list",
+      "--json",
+    ],
     {
       cwd: directory,
       stdin: "ignore",

@@ -374,7 +374,10 @@ test("dispatches concurrent threads with independent directories and completes t
         fake.calls.find((c) => c.method === "thread/start" && c.params.cwd === "/work/b")?.params,
       ).toMatchObject({
         modelProvider: "custom-provider",
-        config: { model_reasoning_effort: "xhigh" },
+        config: {
+          model_reasoning_effort: "xhigh",
+          projects: { "/work/b": { trust_level: "untrusted" } },
+        },
       })
       expect(fake.calls.some((c) => c.method === "turn/start")).toBe(false)
       const prompt = String(
@@ -512,7 +515,10 @@ test("daemon restart reloads the same thread and queues interrupted work", async
         approvalPolicy: "never",
         sandbox: "danger-full-access",
         modelProvider: "native-provider",
-        config: { model_reasoning_effort: "xhigh" },
+        config: {
+          model_reasoning_effort: "xhigh",
+          projects: { "/work/a": { trust_level: "untrusted" } },
+        },
       })
       expect(fake.calls.filter((c) => c.method === "thread/start")).toHaveLength(1)
     }).pipe(Effect.provide(layer(fake.factory))),

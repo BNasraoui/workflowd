@@ -89,7 +89,16 @@ export const makeClaudeCli = (options: {
           Effect.andThen(
             runWorkspaceCommandBytes(
               "wake claude session",
-              [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
+              [
+                options.binary,
+                "--setting-sources",
+                "user",
+                "-p",
+                "--resume",
+                input.nativeSessionId,
+                "--output-format",
+                "json",
+              ],
               {
                 env: agentGitEnvironment(options.git),
                 cwd: input.directory,
