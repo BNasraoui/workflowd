@@ -26,7 +26,7 @@ export async function command(args: ReadonlyArray<string>, cwd = repository): Pr
   return stdout.trim()
 }
 
-export async function runnerFixture() {
+export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = []) {
   const root = await mkdtemp(join(tmpdir(), "workflowd-sandbox-"))
   const databasePath = join(root, "submission.sqlite")
   await Effect.runPromise(
@@ -130,6 +130,7 @@ export async function runnerFixture() {
       "/usr/local/bin/workflowd-network",
       "engine",
       subnet,
+      ...runnerAddresses,
     )
     await docker(
       "run",

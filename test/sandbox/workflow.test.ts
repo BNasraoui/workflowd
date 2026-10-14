@@ -61,10 +61,8 @@ test("runner workflow grants only read/OIDC and pins third-party actions", async
       "persist-credentials"
     ],
   ).toBe(false)
-  expect(
-    job.steps.find((step: { uses?: string }) => step.uses?.startsWith("tailscale/github-action@"))
-      ?.uses,
-  ).toBe("tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd")
+  expect(job.steps.some((step) => step.run === "bash deploy/sandbox/tailscale.sh")).toBe(true)
+  expect(job.steps.some((step) => step.uses?.startsWith("tailscale/github-action@"))).toBe(false)
 })
 
 test("runner rejects malformed source requests before invoking Docker", async () => {
@@ -78,19 +76,19 @@ test("runner rejects malformed source requests before invoking Docker", async ()
   expect(stderr).toContain("Invalid sandbox source request")
 })
 
-test("runner disables routes after the action joins and before preparing tooling", async () => {
+test("runner joins without accepting routes or DNS before preparing tooling", async () => {
+  const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
+  expect(source).toContain("--accept-routes=false")
+  expect(source).toContain("--accept-dns=false")
+  expect(source).toContain("ip route show table 52")
   const workflow = Schema.decodeUnknownSync(Workflow)(
     Bun.YAML.parse(await Bun.file(`${root}/.github/workflows/agent-sandbox.yml`).text()),
   )
-  const steps = workflow.jobs.runner?.steps
-  if (steps === undefined) throw new Error("Missing runner steps")
-  const join = steps.findIndex((step) => step.uses?.startsWith("tailscale/github-action@"))
-  // The pinned action always supplies --accept-routes to `tailscale up`.
-  // Passing the flag again makes the CLI reject the whole join command.
-  expect(steps[join]?.with?.args).toBe("--ssh")
-  expect(steps[join + 1]?.run).toBe("sudo tailscale set --accept-routes=false")
-  expect(steps[join + 2]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
-  expect(steps.at(-1)?.run).toBe("bash deploy/sandbox/runner.sh stop")
+  const steps = workflow.jobs.runner?.steps ?? []
+  const join = steps.findIndex((step) => step.run === "bash deploy/sandbox/tailscale.sh")
+  expect(join).toBeGreaterThan(0)
+  expect(steps[join + 1]?.run).toBe("bash deploy/sandbox/runner.sh prepare")
+  expect(steps.at(-1)?.run).toContain("tailscale logout")
 })
 
 test("publication uses a fresh environment-gated runner with a step-scoped explicit publisher key", async () => {

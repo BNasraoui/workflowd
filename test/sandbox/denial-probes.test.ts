@@ -49,3 +49,31 @@ test("connection probes distinguish listening ports, refusals and command failur
     ]),
   ).toBe("passed")
 })
+
+test("runner-local targets, route inventory and firewall counters fail closed", async () => {
+  expect(
+    await command([
+      process.execPath,
+      "--eval",
+      `
+    import assert from 'node:assert/strict'
+    import { runnerTargets, assertRunnerRoutes, dropCounters, assertDropsIncreased } from './scripts/evidence/sandbox-network.mjs'
+    const local={addresses:['127.0.0.1','192.0.2.1','100.64.0.5','172.17.0.1'],gateway:'172.30.0.1'}
+    const targets=runnerTargets(local)
+    for(const host of ['192.0.2.1','100.64.0.5','172.17.0.1','172.30.0.1','169.254.169.254','168.63.129.16'])
+      assert.ok(targets.some(t=>t.host===host))
+    assert.ok(!targets.some(t=>t.host==='127.0.0.1'))
+    assert.throws(()=>runnerTargets({...local,gateway:''}))
+    assertRunnerRoutes('100.64.0.2 dev tailscale0\\n100.100.100.100 dev tailscale0')
+    assert.throws(()=>assertRunnerRoutes('10.0.0.0/8 dev tailscale0'))
+    assert.throws(()=>assertRunnerRoutes('default dev tailscale0'))
+    const before=dropCounters('[2:120] -A WFD-SANDBOX -d 169.254.0.0/16 -j DROP\\n[0:0] -A WFD-ENGINE -j DROP')
+    const after=dropCounters('[3:180] -A WFD-SANDBOX -d 169.254.0.0/16 -j DROP\\n[1:60] -A WFD-ENGINE -j DROP')
+    assertDropsIncreased(before,after,['WFD-SANDBOX','WFD-ENGINE'])
+    assert.throws(()=>assertDropsIncreased(before,before,['WFD-SANDBOX']))
+    assert.throws(()=>assertDropsIncreased({},after,['WFD-SANDBOX']))
+    console.log('passed')
+  `,
+    ]),
+  ).toBe("passed")
+})

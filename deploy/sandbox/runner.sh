@@ -4,7 +4,8 @@ set -euo pipefail
 # Only bounded control and audit data reaches Actions artifacts/logs.
 # Task output stays on the SSH/container-use stream.
 boot() {
-  local image_id directory subnet
+  local image_id directory subnet addresses
+  local -a runner_addresses
   directory=$(cd "$(dirname "$0")" && pwd)
   image_id=$(DOCKER_BUILDKIT=0 docker build --quiet --memory=512m --memory-swap=512m \
     -f "$(dirname "$0")/Containerfile" "$(dirname "$0")")
@@ -19,8 +20,10 @@ boot() {
     -v "$directory/engine.toml:/etc/dagger/engine.toml:ro" \
     registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36 \
     --addr unix:///run/workflowd-engine/engine.sock --group 65532 >/dev/null
+  addresses=$(ip -o -4 addr show | awk '$2 != "lo" {split($4, a, "/"); print a[1]}')
+  mapfile -t runner_addresses <<< "$addresses"
   # Nested CNI traffic to the engine itself never reaches host DOCKER-USER.
-  docker exec -i workflowd-sandbox-engine sh -s -- engine "$subnet" < "$directory/network.sh"
+  docker exec -i workflowd-sandbox-engine sh -s -- engine "$subnet" "${runner_addresses[@]}" < "$directory/network.sh"
   docker run -d --name workflowd-sandbox-tooling --network workflowd-sandbox \
     --memory=2g --memory-swap=2g --group-add 65532 \
     -v workflowd-sandbox-socket:/run/workflowd-engine:ro "$image_id" >/dev/null

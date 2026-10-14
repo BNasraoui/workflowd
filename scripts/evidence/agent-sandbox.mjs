@@ -33,7 +33,7 @@ import {
   assertProbeResults,
   connectionScript,
   executeProbe,
-  probeDagger,
+  probeRunnerBoundary,
 } from "./sandbox-network.mjs"
 
 let stage = "operator policy"
@@ -573,33 +573,22 @@ async function inspectDenials(row) {
   evidence.denials = JSON.parse(
     await executeProbe([...ssh.slice(0, -1), "exec python3 -"], script, timeout),
   )
-  evidence.daggerDenials = await probeDagger(
-    ssh,
-    script.replace("print(json.dumps", "print('WORKFLOWD_NETWORK='+json.dumps"),
-    timeout + 120000,
-  )
+  evidence.runnerBoundary = await probeRunnerBoundary(ssh, targets, timeout + 120000)
   evidence.controlsAfter = JSON.parse(await executeProbe(["python3", "-"], script, timeout))
   const after = await collectListeners(hosts, row.transport.address)
   assert.deepEqual(denialTargets(after), targets, "Listener inventory changed during the probe")
   for (const controls of [evidence.controlsBefore, evidence.controlsAfter])
     assertProbeResults(targets, controls, "connected|refused")
-  for (const denials of [evidence.denials, evidence.daggerDenials])
-    assertProbeResults(targets, denials, "timeout")
+  assertProbeResults(targets, evidence.denials, "timeout")
   evidence.sshReplies = "received over the controller-initiated connection"
   stage = "runner credential inventory"
-  const inventory = `import json,os,pathlib,re,subprocess
+  const inventory =
+    (await readFile(new URL("./process-environment.py", import.meta.url), "utf8")) +
+    `
+import json,os,pathlib,re,subprocess
 deny=re.compile(r'^(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|ZAI_API_KEY|WORKFLOWD_MCP_TOKEN|WORKFLOWD_MCP_DISPATCH_TOKEN|WORKFLOWD_NATS_CREDS|NATS_CREDS|GH_TOKEN|GITHUB_APP_PRIVATE_KEY|GHETTIMONSTER_PRIVATE_KEY|PUBLISH_PROBE_CANARY)$')
-env_names=set()
-hold_oidc=set()
-hold_count=0
-for p in pathlib.Path('/proc').glob('[0-9]*/environ'):
- try:
-  names={x.split(b'=',1)[0].decode(errors='replace') for x in p.read_bytes().split(b'\\0') if b'=' in x}
-  env_names.update(names)
-  if (p.parent/'cmdline').read_bytes().rstrip(b'\\0').endswith(b'\\0hold'):
-   hold_count+=1
-   hold_oidc.update(names & {'ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_ID_TOKEN_REQUEST_URL'})
- except (PermissionError,FileNotFoundError,ProcessLookupError): pass
+process_inventory=scan_process_environments()
+env_names=set(process_inventory.pop('environmentNames'))
 tool_env=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','env'],text=True)
 env_names.update(x.split('=',1)[0] for x in tool_env.splitlines())
 paths=['.local/share/opencode/auth.json','.codex/auth.json','.claude/.credentials.json','.config/workflowd/github-app.pem','.config/workflowd/mcp-token','.config/workflowd/coordinator.creds']
@@ -610,7 +599,7 @@ mounts=json.loads(subprocess.check_output(['docker','inspect','workflowd-sandbox
 git=subprocess.check_output(['docker','exec','workflowd-sandbox-tooling','git','config','--list'],text=True)
 logs=b''.join(p.read_bytes() for p in pathlib.Path('/run/workflowd-sandbox').glob('*.log'))
 key_pattern=rb'(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}|-----BEGIN (?:RSA )?PRIVATE KEY-----)'
-print(json.dumps({'holdProcesses':hold_count,'holdOidcEnvironmentNames':sorted(hold_oidc),'forbiddenEnvironmentNames':sorted(n for n in env_names if deny.fullmatch(n)),'credentialFiles':found,'toolingMounts':mounts,'gitCredentials':bool(re.search(r'credential\\.|extraheader',git,re.I)),'setupLogCredentialPattern':bool(re.search(key_pattern,logs)),'setupLogBytes':len(logs),'scannedHomes':['/home/runner','/root','tooling:/home/runner'],'scannedEnvironment':'readable /proc processes and tooling env'}))`
+print(json.dumps({**process_inventory,'forbiddenEnvironmentNames':sorted(n for n in env_names if deny.fullmatch(n)),'credentialFiles':found,'toolingMounts':mounts,'gitCredentials':bool(re.search(r'credential\\.|extraheader',git,re.I)),'setupLogCredentialPattern':bool(re.search(key_pattern,logs)),'setupLogBytes':len(logs),'scannedHomes':['/home/runner','/root','tooling:/home/runner'],'scannedEnvironment':'all live /proc processes and tooling env'}))`
   const child = Bun.spawn(
     [...sandboxSshArguments(row.transport).slice(0, -1), "exec sudo -n python3 -"],
     {
@@ -625,6 +614,8 @@ print(json.dumps({'holdProcesses':hold_count,'holdOidcEnvironmentNames':sorted(h
     const [status, text] = await Promise.all([child.exited, new Response(child.stdout).text()])
     assert.equal(status, 0, "Runner inventory failed")
     evidence.credentials = JSON.parse(text)
+    assert.deepEqual(evidence.credentials.oidcProcesses, [])
+    assert.ok(evidence.credentials.runnerWorkers <= 1)
     assert.ok(evidence.credentials.holdProcesses > 0)
     assert.deepEqual(evidence.credentials.holdOidcEnvironmentNames, [])
     assert.deepEqual(evidence.credentials.forbiddenEnvironmentNames, [])

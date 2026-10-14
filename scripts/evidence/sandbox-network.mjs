@@ -164,3 +164,92 @@ export async function probeDagger(ssh, script, timeout) {
     await client.close()
   }
 }
+
+// Loopback addresses inside Dagger name the agent itself, not the runner.
+export function runnerTargets({ addresses, gateway }) {
+  assert.ok(addresses.length > 0 && addresses.every((ip) => isIP(ip) === 4))
+  assert.equal(isIP(gateway), 4, "Docker gateway inventory missing")
+  return [...new Set([...addresses, gateway, "172.17.0.1", "169.254.169.254", "168.63.129.16"])]
+    .filter((ip) => !ip.startsWith("127."))
+    .flatMap((host) => [22, 80].map((port) => ({ host, port })))
+}
+
+export function assertRunnerRoutes(routes) {
+  for (const line of routes.trim().split("\n").filter(Boolean)) {
+    const [prefix] = line.split(/\s+/)
+    const [ip, bits = "32"] = prefix.split("/")
+    const octets = ip.split(".").map(Number)
+    assert.ok(
+      isIP(ip) === 4 &&
+        octets[0] === 100 &&
+        octets[1] >= 64 &&
+        octets[1] <= 127 &&
+        Number(bits) >= 10 &&
+        Number(bits) <= 32,
+      `Accepted subnet route in table 52: ${prefix}`,
+    )
+  }
+}
+
+export function dropCounters(save) {
+  const counters = {}
+  for (const line of save.split("\n")) {
+    const match = line.match(/^\[(\d+):\d+\] -A (WFD-[A-Z-]+) .*?-j DROP(?: |$)/)
+    if (match) counters[match[2]] = (counters[match[2]] ?? 0) + Number(match[1])
+  }
+  return counters
+}
+
+export function assertDropsIncreased(before, after, chains) {
+  for (const chain of chains)
+    assert.ok(
+      Number.isSafeInteger(before[chain]) && after[chain] > before[chain],
+      `${chain} drop counter did not increase`,
+    )
+}
+
+export async function runnerNetworkSnapshot(ssh) {
+  const script = `import json,subprocess
+def run(args): return subprocess.check_output(args,text=True).strip()
+addresses=[a['local'] for i in json.loads(run(['ip','-j','-4','addr','show'])) for a in i['addr_info'] if a['family']=='inet']
+network=json.loads(run(['docker','network','inspect','workflowd-sandbox']))[0]
+print(json.dumps(dict(addresses=addresses,gateway=network['IPAM']['Config'][0]['Gateway'],routes=run(['ip','route','show','table','52']),hostRules=run(['iptables-save','-c']),hostRules6=run(['ip6tables-save','-c']),engineRules=run(['docker','exec','workflowd-sandbox-engine','iptables-save','-c']))))`
+  const snapshot = JSON.parse(
+    await executeProbe([...ssh.slice(0, -1), "exec sudo -n python3 -"], script),
+  )
+  assertRunnerRoutes(snapshot.routes)
+  return snapshot
+}
+
+export async function probeRunnerBoundary(ssh, peerTargets, timeout) {
+  const before = await runnerNetworkSnapshot(ssh)
+  const localTargets = runnerTargets(before)
+  const targets = [...peerTargets, ...localTargets, { host: "10.87.0.1", port: 1234 }]
+  const script = "import socket; socket.getaddrinfo('github.com',443)\n" + connectionScript(targets)
+  const dagger = await probeDagger(
+    ssh,
+    script.replace("print(json.dumps", "print('WORKFLOWD_NETWORK='+json.dumps"),
+    timeout,
+  )
+  assertProbeResults(targets, dagger, "timeout")
+  // Exercise the host INPUT boundary independently of the engine's earlier drops.
+  const tooling = JSON.parse(
+    await executeProbe(
+      [...ssh.slice(0, -1), "exec docker exec -i workflowd-sandbox-tooling python3 -"],
+      "import socket; socket.getaddrinfo('github.com',443)\n" + connectionScript(localTargets),
+      timeout,
+    ),
+  )
+  assertProbeResults(localTargets, tooling, "timeout")
+  const after = await runnerNetworkSnapshot(ssh)
+  assert.deepEqual(runnerTargets(after), localTargets, "Runner address inventory changed")
+  assertDropsIncreased(dropCounters(before.engineRules), dropCounters(after.engineRules), [
+    "WFD-SANDBOX",
+    "WFD-ENGINE",
+  ])
+  assertDropsIncreased(dropCounters(before.hostRules), dropCounters(after.hostRules), [
+    "WFD-HOST",
+    "WFD-SANDBOX",
+  ])
+  return { before, after, dagger, tooling, dns: "resolved github.com from Dagger and tooling" }
+}

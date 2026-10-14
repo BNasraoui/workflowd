@@ -84,3 +84,39 @@ test("hold starts with an empty OIDC request environment", async () => {
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("tailscaled launcher strips the request credentials before executing the daemon", async () => {
+  const source = await Bun.file(`${root}/deploy/sandbox/tailscale.sh`).text()
+  const launch = source.match(
+    /\/usr\/bin\/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN[\s\S]*?--state=mem:/,
+  )?.[0]
+  expect(launch).toBeDefined()
+  if (!launch) throw new Error("Missing daemon launcher")
+  const directory = await mkdtemp(join(tmpdir(), "sandbox-daemon-env-"))
+  try {
+    const daemon = join(directory, "tailscaled")
+    await writeFile(
+      daemon,
+      `#!/usr/bin/python3
+import os,sys
+assert sys.argv[1:]==['--state=mem:']
+assert not any(k.startswith('ACTIONS_ID_TOKEN_REQUEST_') for k in os.environ)
+print('clean-daemon')
+`,
+      { mode: 0o755 },
+    )
+    const child = Bun.spawn(["bash", "-c", launch.replace("/usr/local/bin/tailscaled", daemon)], {
+      env: {
+        PATH: "/usr/bin:/bin",
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture",
+        ACTIONS_ID_TOKEN_REQUEST_URL: "fixture",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await child.exited).toBe(0)
+    expect((await new Response(child.stdout).text()).trim()).toBe("clean-daemon")
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})

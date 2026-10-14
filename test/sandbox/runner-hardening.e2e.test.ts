@@ -2,7 +2,12 @@ import { expect, test } from "bun:test"
 import { bridgeClient, command, runnerFixture } from "./harness"
 
 test("container-use works over a private socket while nested engine access is dropped", async () => {
-  const runner = await runnerFixture()
+  const addresses = (await command(["ip", "-o", "-4", "addr", "show"]))
+    .split("\n")
+    .filter((line) => !line.split(/\s+/).includes("lo"))
+    .map((line) => line.match(/inet ([0-9.]+)\//)?.[1])
+    .filter((address): address is string => address !== undefined)
+  const runner = await runnerFixture(addresses)
   const client = bridgeClient(runner.transport)
   try {
     expect(
@@ -47,7 +52,7 @@ test("container-use works over a private socket while nested engine access is dr
         "-c",
         `
       cli=$(find /home/runner/.cache/dagger -type f -name 'dagger-*' | head -1)
-      printf '%s' '{container{from(address:"ubuntu:24.04"){withExec(args:["true"],insecureRootCapabilities:true){stdout}}}}' | "$cli" query
+      printf '%s' '{container{from(address:"ubuntu:24.04"){withExec(args:["true"],insecureRootCapabilities:true){stdout}}}}' | timeout 60 "$cli" query
     `,
       ),
     ).rejects.toThrow(/security.insecure is not allowed/)
@@ -73,16 +78,23 @@ test("container-use works over a private socket while nested engine access is dr
         process.execPath,
         "--eval",
         `
-      import {probeDagger,connectionScript,assertProbeResults} from './scripts/evidence/sandbox-network.mjs'
+      import {probeDagger,connectionScript,assertProbeResults,runnerTargets,executeProbe,dropCounters,assertDropsIncreased} from './scripts/evidence/sandbox-network.mjs'
       import {sandboxSshArguments} from './src/sandbox/transport.ts'
-      const targets=[{host:'10.87.0.1',port:1234}]
+      const targets=runnerTargets({addresses:${JSON.stringify(addresses)},gateway:${JSON.stringify(await runner.docker("network", "inspect", "-f", "{{(index .IPAM.Config 0).Gateway}}", runner.name))}})
+      targets.push({host:'10.87.0.1',port:1234})
       const script=connectionScript(targets).replace('print(json.dumps', "print('WORKFLOWD_NETWORK='+json.dumps")
+      const counterArgs=['docker','exec',${JSON.stringify(`${runner.name}-engine`)},'iptables-save','-c']
+      const before=dropCounters(await executeProbe(counterArgs))
       const results=await probeDagger(sandboxSshArguments(${JSON.stringify(runner.transport)}),script,120000)
       assertProbeResults(targets,results,'timeout')
+      assertDropsIncreased(before,dropCounters(await executeProbe(counterArgs)),['WFD-SANDBOX','WFD-ENGINE'])
       console.log('nested-probe-passed')
     `,
       ]),
     ).toBe("nested-probe-passed")
+    expect(
+      await runner.docker("exec", `${runner.name}-engine`, "iptables", "-S", "CNI-ADMIN"),
+    ).toContain("-j WFD-SANDBOX")
   } finally {
     await client.close()
     await runner.close()
@@ -102,7 +114,7 @@ test("host policy drops gateway and protected forwarded traffic without changing
         "--rm",
         "--privileged",
         "--network",
-        "none",
+        runner.name,
         "--memory=128m",
         "--memory-swap=128m",
         "-v",
