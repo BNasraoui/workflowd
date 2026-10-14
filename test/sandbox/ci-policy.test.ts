@@ -21,6 +21,36 @@ test("every repository PR workflow has an unprivileged execution path", async ()
   expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
 })
 
+for (const reference of [
+  `BNasraoui/workflowd/.github/workflows/agent-sandbox.yml@${"a".repeat(40)}`,
+  "attacker/repo/.github/workflows/w.yml@main",
+  "./.github/workflows/missing.yml",
+  "./.github/workflows/nested/callee.yml",
+])
+  test(`all callers must use scanned local workflows: ${reference}`, async () => {
+    const files = await workflows()
+    files["caller.yml"] = `on: { workflow_dispatch: {} }
+jobs:
+  caller:
+    uses: ${reference}
+`
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+      "Reusable workflows must reference a scanned local .github/workflows YAML file",
+    )
+  })
+
+test("string-form dispatch triggers produce an actionable policy error", async () => {
+  const files = await workflows()
+  files["caller.yml"] = `on: workflow_dispatch
+jobs:
+  caller:
+    uses: ./.github/workflows/agent-sandbox.yml
+`
+  expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+    "caller.yml: workflow on must be a mapping (for example, on: { workflow_dispatch: {} })",
+  )
+})
+
 for (const [before, after] of [
   ["permissions: {}", "permissions: { contents: read }"],
   ["runs-on: ubuntu-24.04", "runs-on: self-hosted"],
@@ -220,3 +250,21 @@ for (const step of [
     expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
   })
 }
+
+for (const environment of [
+  "ben-merge-approval",
+  "{ name: ben-merge-approval }",
+  "BEN-MERGE-APPROVAL",
+  "${{ vars.DEPLOY_ENVIRONMENT }}",
+  "{ name: '${{ inputs.environment }}' }",
+])
+  test(`publisher cannot select the protected approval environment: ${environment}`, async () => {
+    const files = await workflows()
+    files["agent-sandbox-caller.yml"] = files["agent-sandbox-caller.yml"]!.replace(
+      "environment: agent-publish",
+      `environment: ${environment}`,
+    )
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+      "Publisher environment must be agent-publish",
+    )
+  })

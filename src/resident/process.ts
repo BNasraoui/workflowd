@@ -1,3 +1,4 @@
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import { workerEnvironment } from "./environment"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
@@ -10,6 +11,7 @@ import { RpcClient } from "./rpc"
 /** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
 export function startAppServer(
   options: {
+    readonly git?: AgentGitConfig | undefined
     readonly binary: string
     readonly home: string
     readonly env?: Readonly<Record<string, string>>
@@ -21,6 +23,7 @@ export function startAppServer(
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options.env,
+    ...agentGitEnvironment(options.git),
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),
   }
@@ -295,6 +298,7 @@ export const attachAppServer = async (
 
 export const launchAppServer = async (
   options: {
+    readonly git?: AgentGitConfig | undefined
     readonly binary: string
     readonly home: string
     readonly env?: Readonly<Record<string, string>>
@@ -316,6 +320,7 @@ export const launchAppServer = async (
   const environment: Record<string, string> = {
     ...workerEnvironment(),
     ...options.env,
+    ...agentGitEnvironment(options.git),
     CODEX_HOME: options.home,
     GH_CONFIG_DIR: join(options.home, "worker-gh"),
   }

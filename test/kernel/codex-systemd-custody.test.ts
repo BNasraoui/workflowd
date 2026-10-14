@@ -404,3 +404,30 @@ for (const mode of ["exit", "cancel"]) {
     expect(JSON.parse(stdout).polls).toBe(1200)
   })
 }
+
+test.each(["codex", "claude"] as const)(
+  "%s launch sets all four configured Git identity variables",
+  async (harness) => {
+    const { makeClaudeDispatchCli } = await import("../../src/kernel/claude-dispatch")
+    const root = await (await import("node:fs/promises")).mkdtemp(join(tmpdir(), "git-launch-"))
+    const systemd = manager()
+    try {
+      const cli = (harness === "codex" ? makeCodexCli : makeClaudeDispatchCli)({
+        binary: harness,
+        custodyRoot: root,
+        runCommand: systemd.runCommand,
+        git: { name: "Agent", email: "agent@example.test", blockedEmails: [] },
+      })
+      await Effect.runPromise(
+        cli.spawn({ runId: "agent-run-git-launch", directory: root, prompt: "go", model: null }),
+      )
+      const command = systemd.commands.find((entry) => entry[0] === "systemd-run")!
+      for (const role of ["AUTHOR", "COMMITTER"]) {
+        expect(command).toContain(`--setenv=GIT_${role}_NAME=Agent`)
+        expect(command).toContain(`--setenv=GIT_${role}_EMAIL=agent@example.test`)
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)

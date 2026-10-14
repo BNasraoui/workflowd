@@ -1,3 +1,5 @@
+import type { AgentGitConfig } from "../agent-git/config"
+import { installAgentGitGuard } from "../agent-git/guard"
 import { Context, Data, Effect } from "effect"
 import { runWorkspaceCommand } from "../workspace/command"
 import { WorkspaceError } from "../workspace/errors"
@@ -33,6 +35,7 @@ export const agentRunWorktreeFailure = (error: WorkspaceError) => {
 
 export type AgentRunWorktreesPort = {
   readonly create: (input: {
+    readonly git?: AgentGitConfig | undefined
     readonly repository: string
     readonly directory: string
     readonly branch: string
@@ -59,7 +62,7 @@ export const createAgentRunWorktree = (
 /**
  * Creates the run's git worktree inside the allow-listed repository. Hooks
  * are disabled the same way the managed PR workspace does it, and an
- * existing directory short-circuits so a crashed dispatch can be retried.
+ * existing directory skips creation but refreshes the identity guard on retry.
  */
 export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
   create: (input) =>
@@ -77,7 +80,10 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
               ),
           }),
         )
-        if (yield* pathExists(input.directory)) return
+        if (yield* pathExists(input.directory)) {
+          yield* installAgentGitGuard(input.directory, input.git)
+          return
+        }
         yield* remoteCommand("fetch agent-run repository", input.repository, ["fetch", "origin"])
         if (input.base === undefined) {
           yield* remoteCommand("detect agent-run default branch", input.repository, [
@@ -115,6 +121,7 @@ export const gitAgentRunWorktrees: AgentRunWorktreesPort = {
           input.directory,
           base,
         ])
+        yield* installAgentGitGuard(input.directory, input.git)
       }),
     ),
 }

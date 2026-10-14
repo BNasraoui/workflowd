@@ -172,6 +172,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
     CodexCli,
     makeCodexCli({
       credentialSocket: config.credentialSocket,
+      git: config.agentGit,
       binary: config.agentRuns?.codexBinary ?? "codex",
       custodyRoot: join(dirname(config.storage.databasePath), "agent-processes"),
       ...(config.agentRuns?.codexUnitPrefix === undefined
@@ -186,6 +187,7 @@ function makeExecutionOnlyLayer(config: AppConfig) {
           ClaudeDispatchCli,
           makeClaudeDispatchCli({
             credentialSocket: config.credentialSocket,
+            git: config.agentGit,
             binary: config.agentRuns?.claudeBinary ?? "claude",
             custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
           }),
@@ -212,7 +214,11 @@ function makeExecutionOnlyLayer(config: AppConfig) {
           Layer.provideMerge(claude),
           Layer.provideMerge(discovery),
           Layer.provideMerge(signals),
-          Layer.provide(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provide(
+            Layer.succeed(AgentRunWorktrees, {
+              create: (input) => gitAgentRunWorktrees.create({ ...input, git: config.agentGit }),
+            }),
+          ),
         )
   return Layer.mergeAll(
     kernel,
@@ -251,6 +257,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   )
   const openCodeAdapter = new SdkOpenCodeAdapter(
     makeOpenCodeSdkClient(openCodeClientEffect, config.credentialSocket),
+    config.agentGit,
   )
   const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
   const definitions = makeOpenCodeHarnessDefinitions({
@@ -419,6 +426,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     ClaudeCli,
     makeClaudeCli({
       credentialSocket: config.credentialSocket,
+      git: config.agentGit,
       binary: config.agentRuns?.claudeBinary ?? "claude",
     }),
   )
@@ -440,6 +448,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           {
             ...config.residentCodex,
             credentialSocket: config.credentialSocket,
+            git: config.agentGit,
             progressWindowMs: config.agentRuns?.progressWindowMs,
             unitPrefix:
               config.agentRuns?.codexUnitPrefix === undefined
@@ -474,6 +483,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     ClaudeDispatchCli,
     makeClaudeDispatchCli({
       credentialSocket: config.credentialSocket,
+      git: config.agentGit,
       binary: config.agentRuns?.claudeBinary ?? "claude",
       custodyRoot: join(dirname(config.storage.databasePath), "claude-processes"),
     }),
@@ -486,6 +496,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             const identity = yield* Effect.serviceOption(WorkerIdentity)
             return makeCodexCli({
               credentialSocket: config.credentialSocket,
+              git: config.agentGit,
               binary: config.agentRuns?.codexBinary ?? "codex",
               ...(config.agentRuns?.codexUnitPrefix === undefined
                 ? {}
@@ -564,6 +575,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
               nativeExecutors: {
                 codex: makeCodexCli({
                   credentialSocket: config.credentialSocket,
+                  git: config.agentGit,
                   binary: config.agentRuns?.codexBinary ?? "codex",
                   custodyRoot: join(
                     dirname(config.storage.databasePath),
@@ -573,6 +585,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                 }),
                 claude: makeClaudeDispatchCli({
                   credentialSocket: config.credentialSocket,
+                  git: config.agentGit,
                   binary: config.agentRuns?.claudeBinary ?? "claude",
                   custodyRoot: join(
                     dirname(config.storage.databasePath),
@@ -629,7 +642,11 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(sandboxProviderLayer),
-          Layer.provideMerge(Layer.succeed(AgentRunWorktrees, gitAgentRunWorktrees)),
+          Layer.provideMerge(
+            Layer.succeed(AgentRunWorktrees, {
+              create: (input) => gitAgentRunWorktrees.create({ ...input, git: config.agentGit }),
+            }),
+          ),
           Layer.provideMerge(claudeCliLayer),
           Layer.provideMerge(codexCliLayer),
           Layer.provideMerge(executionDiscoveryLayer),

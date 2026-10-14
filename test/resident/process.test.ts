@@ -15,15 +15,28 @@ test("owns a stdio server and closes only its subprocess", async () => {
   const binary = join(directory, "codex")
   await writeFile(
     binary,
-    '#!/usr/bin/env bun\nimport { createInterface } from "node:readline"; for await (const line of createInterface({input:process.stdin})) { const frame=JSON.parse(line); if(frame.id !== undefined) console.log(JSON.stringify({id:frame.id,result:{ok:true,args:process.argv.slice(2)}})); }\n',
+    '#!/usr/bin/env bun\nimport { createInterface } from "node:readline"; for await (const line of createInterface({input:process.stdin})) { const frame=JSON.parse(line); if(frame.id !== undefined) console.log(JSON.stringify({id:frame.id,result:{ok:true,args:process.argv.slice(2),env:Object.fromEntries(Object.entries(process.env).filter(([key])=>/^GIT_(AUTHOR|COMMITTER)_/.test(key)))}})); }\n',
     { mode: 0o700 },
   )
-  const server = startAppServer({ binary, home: directory }, () => {})
+  const server = startAppServer(
+    {
+      binary,
+      home: directory,
+      git: { name: "Agent", email: "agent@example.test", blockedEmails: [] },
+    },
+    () => {},
+  )
   try {
     await server.initialize()
     const result = await server.rpc.request("thread/list", {})
     expect(result).toMatchObject({
       ok: true,
+      env: {
+        GIT_AUTHOR_NAME: "Agent",
+        GIT_AUTHOR_EMAIL: "agent@example.test",
+        GIT_COMMITTER_NAME: "Agent",
+        GIT_COMMITTER_EMAIL: "agent@example.test",
+      },
       args: expect.arrayContaining([
         expect.stringMatching(/mcp_servers\.workflowd_subscriptions=\{command=.*enabled=false/),
       ]),
@@ -147,13 +160,22 @@ test("launches a detached unit and reattaches through its WebSocket", async () =
         runId,
         unitPrefix,
         launchId: "process-test-nonce",
+        git: { name: "Agent", email: "agent@example.test", blockedEmails: [] },
         env,
       },
       () => {},
     )
     await server.initialize()
     const result = await server.rpc.request("thread/start", {})
-    expect(result).toMatchObject({ thread: { id: "fixture-thread" } })
+    expect(result).toMatchObject({
+      thread: { id: "fixture-thread" },
+      git: {
+        GIT_AUTHOR_NAME: "Agent",
+        GIT_AUTHOR_EMAIL: "agent@example.test",
+        GIT_COMMITTER_NAME: "Agent",
+        GIT_COMMITTER_EMAIL: "agent@example.test",
+      },
+    })
     const pid = server.pid
     const invocation = server.invocation
     await server.detach()
