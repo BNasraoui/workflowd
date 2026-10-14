@@ -101,6 +101,8 @@ export const makeClaudeCli = (options: {
                     "wake claude session",
                     [
                       options.binary,
+                      "--setting-sources",
+                      "user",
                       "-p",
                       "--resume",
                       input.nativeSessionId,

@@ -556,6 +556,7 @@ describe("claude resume worker", () => {
       expect(exists).toBe(true)
       expect(missing).toBe(false)
       expect(hostile).toBe(false)
+      expect(echoed).toContain("--setting-sources user")
       expect(echoed).toContain("-p --resume abc-123 --output-format json")
       expect(echoed).not.toContain("rm -rf")
     } finally {

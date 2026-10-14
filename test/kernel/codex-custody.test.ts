@@ -206,7 +206,7 @@ test("host worker profiles preserve stdin and keep native result files bounded",
     const capture = join(root, "capture")
     await writeFile(
       binary,
-      `#!/bin/sh\ncase "$1" in --version) echo version;; login) exit 0;; auth) echo '{"loggedIn":true}';; *) cat > '${capture}'; echo '{"result":"native output"}';; esac\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${capture}-args'\ncase "$1" in --version) echo version;; login) exit 0;; auth) echo '{"loggedIn":true}';; *) cat > '${capture}'; echo '{"result":"native output"}';; esac\n`,
       { mode: 0o755 },
     )
     for (const profile of [
@@ -244,6 +244,10 @@ test("host worker profiles preserve stdin and keep native result files bounded",
         expect(await readFile(capture, "utf8")).toBe("secret stays on stdin")
         expect(await readFile(join(root, "events"), "utf8")).toContain("native output")
       }
+      if (profile === "codex-server")
+        expect((await readFile(`${capture}-args`, "utf8")).split("\n")).toContain(
+          `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+        )
       if (profile === "claude-session")
         expect(await readFile(join(root, "events"), "utf8")).toBe("false")
     }
@@ -280,7 +284,7 @@ test("host discovery worker exchanges the native model catalog and workspace wor
     const binary = join(root, "discovery")
     await writeFile(
       binary,
-      `#!${process.execPath}\nawait import(${JSON.stringify(join(import.meta.dir, "../execution/fixtures/codex-app-server.mjs"))})\n`,
+      `#!${process.execPath}\nawait Bun.write(${JSON.stringify(join(root, "args"))}, JSON.stringify(process.argv.slice(2)));\nawait import(${JSON.stringify(join(import.meta.dir, "../execution/fixtures/codex-app-server.mjs"))})\n`,
       { mode: 0o755 },
     )
     await writeFile(
@@ -295,6 +299,9 @@ test("host discovery worker exchanges the native model catalog and workspace wor
       }),
     )
     expect(await runHostWorker(input, binary, root)).toBe(0)
+    expect(JSON.parse(await readFile(join(root, "args"), "utf8"))).toContain(
+      `projects={${JSON.stringify(root)}={trust_level="untrusted"}}`,
+    )
     const models = JSON.parse(await readFile(join(root, "events"), "utf8"))
     expect(models).toMatchObject([{ model: "first" }, { model: "second" }])
     const source = join(root, "source")

@@ -6,6 +6,7 @@ import { CodexRetryTurn } from "./codex-retry"
 import { constants } from "node:fs"
 import { open, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { nativeSandboxArguments } from "../sandbox/native"
+import { codexProjectArguments } from "../execution/project-config"
 
 export type CliWorkerOptions = {
   readonly binary: string
@@ -70,6 +71,7 @@ export async function runCodexWorker(options: CliWorkerOptions): Promise<number>
       options.binary,
       "exec",
       "--json",
+      ...codexProjectArguments(options.directory),
       ...(options.sandboxBindingFile === undefined
         ? ["--dangerously-bypass-approvals-and-sandbox"]
         : await nativeSandboxArguments(
@@ -188,6 +190,8 @@ export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<
     "--include-partial-messages",
     ...(options.sandboxBindingFile === undefined
       ? [
+          "--setting-sources",
+          "user",
           "--dangerously-skip-permissions",
           "--strict-mcp-config",
           "--mcp-config",
@@ -301,6 +305,7 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     return runCliWorker(options, [
       binary,
       "app-server",
+      ...codexProjectArguments(request.directory),
       "--listen",
       `unix://${join(io, "rpc.sock")}`,
     ])
@@ -328,6 +333,8 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
   if (request.profile === "claude-resume")
     return runCliWorker(options, [
       binary,
+      "--setting-sources",
+      "user",
       "-p",
       "--resume",
       request.nativeSessionId!,
@@ -337,7 +344,13 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
   if (request.profile === "codex-discovery") {
     const { makeCodexDiscovery } = await import("../execution/codex")
     const models = await makeCodexDiscovery("codex:local", {
-      command: [binary, "app-server", "--listen", "stdio://"],
+      command: [
+        binary,
+        "app-server",
+        ...codexProjectArguments(request.directory),
+        "--listen",
+        "stdio://",
+      ],
     }).discover(AbortSignal.timeout(30000))
     await writeFile(options.eventsFile, JSON.stringify(models) + "\n", {
       mode: 0o600,

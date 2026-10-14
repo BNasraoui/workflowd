@@ -13,6 +13,7 @@ import { createInterface } from "node:readline"
 import { Readable } from "node:stream"
 import { createHash, randomUUID } from "node:crypto"
 import { chmod, mkdir, rm } from "node:fs/promises"
+import { mkdirSync } from "node:fs"
 import { RpcClient } from "./rpc"
 
 /** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
@@ -25,6 +26,8 @@ export function startAppServer(
   },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) {
+  // Preflight runs before the first durable launch creates the resident home.
+  mkdirSync(options.home, { recursive: true, mode: 0o700 })
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options.env,
@@ -41,6 +44,7 @@ export function startAppServer(
     [options.binary, "-c", subscriptionConfig, "app-server", "--listen", "stdio://"],
     {
       env,
+      cwd: options.home,
       detached: true,
       stdin: "pipe",
       stdout: "pipe",
@@ -448,6 +452,7 @@ export const launchAppServer = async (
     "--user",
     "--quiet",
     "--service-type=exec",
+    `--working-directory=${options.home}`,
     `--unit=${unit}`,
     `--description=workflowd resident launch ${launchId}`,
     "--property=KillMode=control-group",

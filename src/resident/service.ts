@@ -1,3 +1,4 @@
+import { codexProjectConfig } from "../execution/project-config"
 import type { AgentGitConfig } from "../agent-git/config"
 import {
   isNonToolItem,
@@ -530,9 +531,12 @@ export const ResidentCodexLive = (
               cwd: row.directory,
               model: selection?.model ?? row.model,
               ...(selection?.provider == null ? {} : { modelProvider: selection.provider }),
-              ...(selection?.thinking.effort === undefined
-                ? {}
-                : { config: { model_reasoning_effort: selection.thinking.effort } }),
+              config: {
+                ...codexProjectConfig(row.directory),
+                ...(selection?.thinking.effort === undefined
+                  ? {}
+                  : { model_reasoning_effort: selection.thinking.effort }),
+              },
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             }),
@@ -783,9 +787,10 @@ export const ResidentCodexLive = (
                   cwd: input.directory,
                   model: input.model,
                   ...(input.provider == null ? {} : { modelProvider: input.provider }),
-                  ...(input.effort === undefined
-                    ? {}
-                    : { config: { model_reasoning_effort: input.effort } }),
+                  config: {
+                    ...codexProjectConfig(input.directory),
+                    ...(input.effort === undefined ? {} : { model_reasoning_effort: input.effort }),
+                  },
                   approvalPolicy: "never",
                   sandbox: "danger-full-access",
                 }),
