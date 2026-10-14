@@ -1,3 +1,4 @@
+import { requireAgentHostSocket } from "../agent-host/config"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { loadRemoteNatsAuth } from "./auth"
@@ -17,6 +18,7 @@ export type RemoteProcessConfig = {
 
 export type RemoteConfigOptions = {
   readonly readFile?: (path: string) => Promise<string>
+  readonly hostPolicyPath?: string
   readonly home?: string
 }
 
@@ -31,6 +33,7 @@ export async function loadRemoteProcessConfig(
   env: Record<string, string | undefined>,
   options: RemoteConfigOptions = {},
 ): Promise<RemoteProcessConfig> {
+  await requireAgentHostSocket(env.WORKFLOWD_AGENT_HOST_SOCKET, options.hostPolicyPath)
   const auth = await loadRemoteNatsAuth(env, options.readFile)
   const rawServers = env.WORKFLOWD_NATS_SERVERS
   if (rawServers === undefined) throw new Error("WORKFLOWD_NATS_SERVERS is required")

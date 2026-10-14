@@ -121,7 +121,7 @@ jobs:
   tests:
     name: Tests and changed-line coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions: {}
     steps:
       - name: Anonymous checkout
@@ -218,18 +218,30 @@ jobs:
           /opt/workflowd-credential-fixture/bin/bun
           scripts/evidence/agent-user.mjs --probe-supervision
       - name: Require two-UID native launch and recovery
-        run: >-
-          sudo systemd-run --wait --pipe --collect
-          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
-          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
-          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
-          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
-          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
-          /opt/workflowd-credential-fixture/bin/bun test
-          test/agent-user/native.e2e.test.ts
-          test/kernel/codex-systemd-custody.test.ts
-          test/kernel/cli-launch-uncertainty.test.ts
-          test/remote/claude-resume-runner-store.test.ts
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_DEPLOYED_TEST=1 \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/native.e2e.test.ts \
+          test/kernel/codex-systemd-custody.test.ts \
+          test/kernel/cli-launch-uncertainty.test.ts \
+          test/remote/claude-resume-runner-store.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-native-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-native-tests.xml').findall('.//testcase')
+          for name in [
+              'two-UID native services retain custody across controller restart and refuse forged launches',
+              'the host native protocol uses bounded custody with a simulated manager and real UID children',
+          ]:
+              matching = [case for case in cases if case.get('name') == name]
+              assert len(matching) == 1 and len(matching[0]) == 0, f'Missing or unsuccessful required test: {name}'
+          PYTEST
       - name: Require two-UID credential admission and repair
         run: >-
           sudo systemd-run --wait --pipe --collect

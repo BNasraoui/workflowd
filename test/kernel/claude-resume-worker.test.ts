@@ -676,3 +676,55 @@ test("a local host resume checkpoints before delivery and retains its renewed le
   expect(deliveries).toHaveLength(2)
   expect(deliveries[0]?.replace(/-wake$/, "-extract")).toBe(deliveries[1])
 })
+
+test("a non-host local resume carries renewed authority through multiple heartbeats", async () => {
+  let turns = 0
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const cli: ClaudeCliPort = {
+        sessionExists: () => Effect.succeed(true),
+        resume: () =>
+          Effect.gen(function* () {
+            turns++
+            yield* Effect.sleep(40)
+            return JSON.stringify({
+              result: turns === 1 ? "ACK" : '{"acknowledged":true,"summary":"done"}',
+            })
+          }),
+      }
+      const iteration = yield* runClaudeResumeIteration({
+        ...options,
+        now: () => new Date(),
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 5,
+      }).pipe(Effect.provideService(ClaudeCli, cli))
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("completed")
+  expect(result.request?.state).toBe("completed")
+  expect(turns).toBe(2)
+})
+
+test("an unavailable host during local custody preflight releases for retry", async () => {
+  const result = await run(
+    Effect.gen(function* () {
+      yield* seed
+      const store = yield* KernelSessionStore
+      const iteration = yield* runClaudeResumeIteration(options).pipe(
+        Effect.provideService(
+          ClaudeCli,
+          makeClaudeCli({
+            binary: "must-not-run",
+            credentialSocket: `/tmp/absent-host-${crypto.randomUUID()}.sock`,
+          }),
+        ),
+      )
+      return { iteration, request: yield* store.readResumeRequest("claude-resume-1") }
+    }),
+  )
+  expect(result.iteration.status).toBe("idle")
+  expect(result.request?.state).toBe("ready")
+})

@@ -144,10 +144,17 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
       socket.destroy()
       reject(normalizeError(error))
     }
-    socket.setTimeout(15000, () => fail(new Error("agent host timed out; custody retained")))
-    socket.on("error", fail)
+    const unavailable = () =>
+      fail(
+        credentialRefusal(
+          request.operation === "start" && request.profile.startsWith("codex") ? "codex" : "claude",
+          "credential_host_unreachable_or_timed_out",
+        ),
+      )
+    socket.setTimeout(15000, unavailable)
+    socket.on("error", unavailable)
     socket.on("close", () => {
-      if (!settled) fail(new Error("agent host disconnected; custody retained"))
+      if (!settled) unavailable()
     })
     socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"))
     socket.on("data", (chunk) => {
@@ -359,7 +366,11 @@ export async function readAgentHostOutput(
       throw new Error("host custody changed")
     if (!current.active) {
       if (current.exitCode !== 0)
-        throw new Error("native host process failed or did not finish within its deadline")
+        throw new Error(
+          current.timedOut
+            ? "native host process did not finish within its deadline"
+            : `native host process exited with status ${current.exitCode}`,
+        )
       break
     }
     await new Promise((resolve) => setTimeout(resolve, 100))

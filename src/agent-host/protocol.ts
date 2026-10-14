@@ -107,6 +107,7 @@ export const OwnedProcess = Schema.Struct({
   started: Schema.String,
   active: Schema.Boolean,
   exitCode: Schema.NullOr(Schema.Int),
+  timedOut: Schema.optionalKey(Schema.Boolean),
 })
 export type OwnedProcess = typeof OwnedProcess.Type
 export const HostResponse = Schema.Union([

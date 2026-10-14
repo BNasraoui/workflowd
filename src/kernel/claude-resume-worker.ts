@@ -266,6 +266,11 @@ const observeLocalHost = (
         reason: "unsupported_output_contract",
       })
     const reference = yield* validateCustody(request.session_id, options).pipe(Effect.result)
+    if (
+      reference._tag === "Failure" &&
+      credentialReason(reference.failure) === "credential_host_unreachable_or_timed_out"
+    )
+      return REMOTE_STILL_IN_FLIGHT
     const { payload, deliveryId } = checkpoint.success
     if (
       reference._tag === "Failure" ||
@@ -281,9 +286,11 @@ const observeLocalHost = (
     const executor = makeClaudeResumeExecutor({ cli, allowedDirectories: [payload.directory] })
     if (!executor.recover) return null
     const outcome = yield* executor.recover(payload, deliveryId)
+    if (outcome.status === "pending") return REMOTE_STILL_IN_FLIGHT
     if (outcome.status === "failed")
       return yield* recordClaudeObservation(request, options, "operator_required", {
         reason: outcome.failureReason,
+        ...(outcome.failureDetail === undefined ? {} : { detail: outcome.failureDetail }),
       })
     const validated = yield* validateRemoteOutput(outcome.output, contract).pipe(Effect.result)
     if (validated._tag === "Failure")
@@ -308,6 +315,7 @@ const RemoteJobResultDocument = Schema.Struct({
   status: Schema.Literals(["succeeded", "failed"]),
   output: Schema.optional(Schema.String),
   failureReason: Schema.optional(Schema.String),
+  failureDetail: Schema.optional(Schema.String),
 })
 
 const RecoverableRow = Schema.Struct({
@@ -456,6 +464,9 @@ const observeRemoteRow = (
         reason:
           credentialReason({ reason: document.success.failureReason }) ?? "remote_delivery_failed",
         failureReason: document.success.failureReason ?? "unknown",
+        ...(document.success.failureDetail === undefined
+          ? {}
+          : { detail: document.success.failureDetail }),
       })
     }
     const contract = options.contracts.find(
@@ -529,6 +540,10 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
     }
     const custody = yield* validateCustody(claim.sessionId, options).pipe(Effect.result)
     if (custody._tag === "Failure") {
+      if (credentialReason(custody.failure) === "credential_host_unreachable_or_timed_out") {
+        yield* store.releaseResume({ ...authorityOf(claim, options.now()), runAt: options.now() })
+        return { status: "idle" as const }
+      }
       return yield* operatorRequired(claim, options, "invalid_saved_custody")
     }
     const reference = custody.success
@@ -571,8 +586,19 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
         }
       })
       const outcome = yield* Effect.raceFirst(executor.execute(payload, deliveryId), heartbeat)
+      if (outcome.status === "pending") {
+        yield* store.releaseResume({
+          ...authorityOf(currentClaim, options.now()),
+          runAt: options.now(),
+        })
+        return { status: "idle" as const }
+      }
       if (outcome.status === "failed")
-        return yield* operatorRequired(currentClaim, options, outcome.failureReason)
+        return yield* operatorRequired(
+          currentClaim,
+          options,
+          outcome.failureDetail ?? outcome.failureReason,
+        )
       const validated = yield* validateRemoteOutput(outcome.output, contract).pipe(Effect.result)
       if (validated._tag === "Failure")
         return yield* operatorRequired(currentClaim, options, "local_output_invalid")
@@ -634,6 +660,7 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
       return { status: "remote_dispatched" as const, requestId: claim.requestId }
     }
 
+    let currentClaim = claim
     const cliCall = (prompt: string) =>
       cli
         .resume({
@@ -674,10 +701,19 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
     const heartbeat = Effect.gen(function* () {
       while (true) {
         yield* Effect.sleep(options.heartbeatIntervalMs)
-        yield* store.heartbeatResume({
-          ...authorityOf(claim, options.now()),
-          leaseDurationMs: options.leaseDurationMs,
-        })
+        yield* store
+          .heartbeatResume({
+            ...authorityOf(currentClaim, options.now()),
+            leaseDurationMs: options.leaseDurationMs,
+          })
+          .pipe(
+            Effect.tap((renewed) =>
+              Effect.sync(() => {
+                currentClaim = { ...currentClaim, leaseUntil: renewed.leaseUntil }
+              }),
+            ),
+            Effect.uninterruptible,
+          )
       }
     })
     const answered = yield* Effect.raceFirst(work, heartbeat).pipe(Effect.result)
@@ -686,13 +722,13 @@ export const runClaudeResumeIteration = (options: ClaudeResumeWorkerOptions) =>
       // the session; a redelivery cannot be attributed afterwards. Escalate
       // rather than guess.
       return yield* operatorRequired(
-        claim,
+        currentClaim,
         options,
         credentialReason(answered.failure) ?? "delivery_failed",
       )
     }
     yield* store.completeResume({
-      ...authorityOf(claim, options.now()),
+      ...authorityOf(currentClaim, options.now()),
       resultId: `${claim.requestId}:result`,
       resultVersion: contract.version,
       result: answered.success,

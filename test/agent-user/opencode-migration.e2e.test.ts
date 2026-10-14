@@ -407,7 +407,8 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     const before = await readFile(policy.source)
     const victimBefore = await readFile(victim)
     const originalLstat = filesystem.lstat
-    for (const timing of ["parent", "attach", "consumer"] as const) {
+    for (const timing of ["parent", "attach", "attach-masked", "consumer"] as const) {
+      let extra: filesystem.FileHandle | undefined
       let lateConsumer: ReturnType<typeof Bun.spawn> | undefined
       let replaced = false
       let restored = false
@@ -428,7 +429,7 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         path: import("node:fs").PathLike,
         options?: import("node:fs").StatOptions,
       ) {
-        if (timing === "attach" && replaced && !restored) {
+        if (timing.startsWith("attach") && replaced && !restored) {
           await rename(destinationDirectory, victimDirectory)
           await rename(retainedDirectory, destinationDirectory)
           restored = true
@@ -437,9 +438,10 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         // The fifth absolute-path observation is the final check before ATTACH.
         if (
           path === policy.database &&
-          ++observations === (timing === "parent" ? 2 : timing === "attach" ? 5 : 6)
+          ++observations === (timing === "parent" ? 2 : timing.startsWith("attach") ? 5 : 6)
         ) {
           replaced = true
+          if (timing === "attach-masked") extra = await filesystem.open(policy.database, "r")
           if (timing === "consumer") {
             lateConsumer = Bun.spawn(["/bin/sleep", "30"], { stdout: "ignore", stderr: "ignore" })
           } else {
@@ -450,6 +452,33 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         }
         return info
       }
+      const originalReadlink = filesystem.readlink
+      function maskedReadlink(
+        path: import("node:fs").PathLike,
+        options?: BufferEncoding | import("node:fs").ObjectEncodingOptions | null,
+      ): Promise<string>
+      function maskedReadlink(
+        path: import("node:fs").PathLike,
+        options: "buffer" | { encoding: "buffer" },
+      ): Promise<Buffer<ArrayBuffer>>
+      function maskedReadlink(
+        path: import("node:fs").PathLike,
+        options?: string | import("node:fs").ObjectEncodingOptions | null,
+      ): Promise<string | Buffer<ArrayBuffer>>
+      async function maskedReadlink(
+        path: import("node:fs").PathLike,
+        options?: string | { encoding?: string | null | undefined } | null,
+      ) {
+        const value =
+          extra && path === `/proc/self/fd/${extra.fd}`
+            ? policy.database
+            : await originalReadlink(path)
+        return (typeof options === "object" && options?.encoding === "buffer") ||
+          options === "buffer"
+          ? Buffer.from(value)
+          : value
+      }
+      const linkRace = spyOn(filesystem, "readlink").mockImplementation(maskedReadlink)
       const race = spyOn(filesystem, "lstat").mockImplementation(racedLstat)
       try {
         await expect(migrateOpenCodeGrants(policy)).rejects.toMatchObject({
@@ -460,6 +489,8 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
         expect(await readFile(policy.source)).toEqual(before)
       } finally {
         race.mockRestore()
+        linkRace.mockRestore()
+        await extra?.close()
         lateConsumer?.kill()
         await lateConsumer?.exited
         if (timing !== "consumer" && replaced && !restored) {

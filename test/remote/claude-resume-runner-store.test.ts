@@ -203,3 +203,39 @@ test("a spent Claude claim consults durable host custody before recording interr
     }).pipe(Effect.provide(layer(executor))),
   )
 })
+
+test("host uncertainty keeps the spent execution claim recoverable without publishing a failure", async () => {
+  let executions = 0
+  let observations = 0
+  const executor: ClaudeResumeExecutorPort = {
+    execute: () =>
+      Effect.sync(() => {
+        executions++
+        return { status: "pending" as const }
+      }),
+    recover: () =>
+      Effect.sync(() =>
+        ++observations === 1
+          ? { status: "pending" as const }
+          : { status: "succeeded" as const, output: "{}" },
+      ),
+  }
+  const result = await Effect.runPromise(
+    Effect.gen(function* () {
+      const store = yield* RemoteRunnerStore
+      yield* deliver
+      expect((yield* store.executeClaudeResume(command, now).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      )
+      expect(yield* store.pendingResults()).toHaveLength(0)
+      expect((yield* store.executeClaudeResume(command, now).pipe(Effect.result))._tag).toBe(
+        "Failure",
+      )
+      expect(yield* store.pendingResults()).toHaveLength(0)
+      return yield* store.executeClaudeResume(command, now)
+    }).pipe(Effect.provide(layer(executor))),
+  )
+  expect(result.status).toBe("succeeded")
+  expect(executions).toBe(1)
+  expect(observations).toBe(2)
+})

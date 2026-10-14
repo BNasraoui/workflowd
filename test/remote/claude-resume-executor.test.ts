@@ -144,3 +144,47 @@ describe("claude resume executor", () => {
 
 const makeClaudeCliLike = (home: string): ClaudeCliPort =>
   makeClaudeCli({ binary: "/bin/echo", home })
+
+test("an unavailable real host preserves uncertain resume and recovery for later observation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "resume-host-unavailable-"))
+  try {
+    const executor = makeClaudeResumeExecutor({
+      cli: makeClaudeCli({ binary: "must-not-run", credentialSocket: join(root, "missing.sock") }),
+      allowedDirectories: ["/allowed"],
+    })
+    expect(await Effect.runPromise(executor.execute(payload(), "delivery"))).toEqual({
+      status: "pending",
+    })
+    expect(await Effect.runPromise(executor.recover!(payload(), "delivery"))).toEqual({
+      status: "pending",
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("host refusals retain their detail and nonzero exits are not deadline failures", async () => {
+  for (const [message, expected] of [
+    [
+      "host_request_refused: host invocation identity mismatch",
+      {
+        status: "failed",
+        failureReason: "host_request_refused",
+        failureDetail: "host_request_refused: host invocation identity mismatch",
+      },
+    ],
+    ["native host process exited with status 7", { status: "failed", failureReason: "cli_failed" }],
+  ] as const) {
+    const outcome = await run(
+      {
+        sessionExists: () => Effect.succeed(true),
+        resume: () =>
+          Effect.fail(
+            new WorkspaceError({ operation: "wake claude session", cause: new Error(message) }),
+          ),
+      },
+      payload(),
+    )
+    expect(outcome).toEqual(expected)
+  }
+})

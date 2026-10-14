@@ -357,7 +357,7 @@ const make = Effect.gen(function* () {
 
   const claudeResult = (
     command: RemoteCommand,
-    outcome: ClaudeResumeOutcome,
+    outcome: Exclude<ClaudeResumeOutcome, { status: "pending" }>,
     at: Date,
   ): RemoteResult => ({
     version: 1,
@@ -371,7 +371,10 @@ const make = Effect.gen(function* () {
     status: outcome.status,
     ...(outcome.status === "succeeded"
       ? { output: outcome.output }
-      : { failureReason: outcome.failureReason }),
+      : {
+          failureReason: outcome.failureReason,
+          ...(outcome.failureDetail === undefined ? {} : { failureDetail: outcome.failureDetail }),
+        }),
     observedAt: at.toISOString(),
   })
 
@@ -417,19 +420,23 @@ const make = Effect.gen(function* () {
             ),
           )
         }
-        return yield* storeClaudeResult(
-          command,
-          claudeResult(
-            command,
-            claudeExecutor.recover === undefined
-              ? { status: "failed", failureReason: "execution_interrupted" }
-              : yield* claudeExecutor.recover(command.payload, command.commandId),
-            at,
-          ),
-          at,
-        )
+        const outcome =
+          claudeExecutor.recover === undefined
+            ? { status: "failed" as const, failureReason: "execution_interrupted" as const }
+            : yield* claudeExecutor.recover(command.payload, command.commandId)
+        if (outcome.status === "pending")
+          return yield* new RemoteRunnerDataError({
+            key: command.commandId,
+            message: "host observation pending; custody retained",
+          })
+        return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
       }
       const outcome = yield* claudeExecutor.execute(command.payload, command.commandId)
+      if (outcome.status === "pending")
+        return yield* new RemoteRunnerDataError({
+          key: command.commandId,
+          message: "host observation pending; custody retained",
+        })
       return yield* storeClaudeResult(command, claudeResult(command, outcome, at), at)
     })
 

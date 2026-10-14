@@ -96,22 +96,24 @@ async function saveJournal(path: string, value: typeof Journal.Type) {
 
 async function pinAttachedDestination(path: string, pinned: FileHandle) {
   const expected = await pinned.stat()
-  for (const descriptor of await readdir("/proc/self/fd")) {
-    if (Number(descriptor) === pinned.fd) continue
-    const entry = `/proc/self/fd/${descriptor}`
-    if ((await readlink(entry).catch(() => undefined)) !== path) continue
-    const attached = await open(entry, fileConstants.O_RDONLY | fileConstants.O_NONBLOCK)
-    try {
-      const actual = await attached.stat()
+  const attached: FileHandle[] = []
+  try {
+    for (const descriptor of await readdir("/proc/self/fd")) {
+      if (Number(descriptor) === pinned.fd) continue
+      const entry = `/proc/self/fd/${descriptor}`
+      if ((await readlink(entry).catch(() => undefined)) !== path) continue
+      const file = await open(entry, fileConstants.O_RDONLY | fileConstants.O_NONBLOCK)
+      attached.push(file)
+      const actual = await file.stat()
       if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
         throw refused()
-      return attached
-    } catch (error) {
-      await attached.close()
-      throw error
     }
+    if (!attached.length) throw refused()
+    return attached
+  } catch (error) {
+    await Promise.all(attached.map((file) => file.close()))
+    throw error
   }
-  throw refused()
 }
 
 /** Drained, schema-pinned migration. SQLite's rollback super-journal commits both databases together. */
@@ -175,7 +177,7 @@ export async function migrateOpenCodeGrants(policy: OpenCodeMigrationPolicy) {
     // actually opened before any destination pragmas or credential writes.
     await verifyDestination()
     db.run("ATTACH DATABASE ? AS destination", [policy.database])
-    handles.push(await pinAttachedDestination(policy.database, destination))
+    handles.push(...(await pinAttachedDestination(policy.database, destination)))
     await verifyDestination()
     db.run("PRAGMA destination.wal_checkpoint(TRUNCATE)")
     db.run("PRAGMA destination.journal_mode=DELETE")

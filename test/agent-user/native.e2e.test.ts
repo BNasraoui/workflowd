@@ -7,13 +7,14 @@ import {
   readAgentHostOutput,
   connectAgentHost,
   listAgentHost,
+  acquireCredentialAdmission,
 } from "../../src/agent-host/client"
 import { RpcClient } from "../../src/resident/rpc"
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { connect } from "node:net"
+import { connect, createServer } from "node:net"
 import { serveCredentialHost } from "../../src/agent-host/server"
 
 // A controller cannot turn the credential service into a generic root launcher.
@@ -36,7 +37,17 @@ test("native host refuses unsupported profiles and unapproved agent groups", asy
     ownerUid: uid,
     groupGid: gid,
     controllerUid: uid,
-    agentUid: uid,
+    agentUid: 65534,
+    launch: {
+      custodyRoot: root,
+      ioRoot: root,
+      home: root,
+      workspaceRoot: root,
+      bun: "/unused",
+      worker: "/unused",
+      codex: "/unused",
+      claude: "/unused",
+    },
     codex: { canonical, benLink, agentLink },
     claude: { canonical, benLink, agentLink },
     consumerExecutables: [],
@@ -53,8 +64,9 @@ test("native host refuses unsupported profiles and unapproved agent groups", asy
             operation: "start",
             profile: "root-shell",
             runId: "agent-run-forged",
-            command: ["/bin/sh"],
-            user: 0,
+            directory: root,
+            prompt: "",
+            model: null,
           }) + "\n",
         ),
       )
@@ -67,6 +79,32 @@ test("native host refuses unsupported profiles and unapproved agent groups", asy
       })
     })
     expect(JSON.parse(response)).toEqual({ admitted: false, reason: "host_request_refused" })
+    const extra = await new Promise<string>((resolve, reject) => {
+      const socket = connect(socketPath)
+      socket.on("error", reject)
+      socket.on("connect", () =>
+        socket.write(
+          JSON.stringify({
+            operation: "start",
+            profile: "codex",
+            runId: "extra-field",
+            directory: root,
+            prompt: "",
+            model: null,
+            user: 0,
+          }) + "\n",
+        ),
+      )
+      let text = ""
+      socket.on("data", (chunk) => {
+        text += chunk.toString()
+        if (text.includes("\n")) {
+          socket.destroy()
+          resolve(text)
+        }
+      })
+    })
+    expect(JSON.parse(extra)).toEqual({ admitted: false, reason: "host_request_refused" })
     await host.close()
     await rm(socketPath, { force: true })
     const custodyRoot = join(root, "custody"),
@@ -110,7 +148,7 @@ import { chown, readFile, realpath, copyFile, readdir, stat } from "node:fs/prom
 import { nativeModelFixture } from "../sandbox/native-fixture"
 import { Effect, Schema } from "effect"
 import type { ClaudeResumeJobV1 } from "../../src/remote/contract"
-import { OwnedProcess, type HostRequest } from "../../src/agent-host/protocol"
+import { OwnedProcess, agentHostUnitName, type HostRequest } from "../../src/agent-host/protocol"
 
 async function nativeBoundary(simulatedManager: boolean) {
   expect(process.getuid!()).toBe(0)
@@ -118,7 +156,8 @@ async function nativeBoundary(simulatedManager: boolean) {
   const agentUid = Number(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID)
   const groupGid = Number(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID)
   expect(controllerUid).not.toBe(agentUid)
-  const root = await mkdtemp(join(tmpdir(), "native-services-"))
+  if (!simulatedManager) expect(process.env.WORKFLOWD_AGENT_DEPLOYED_TEST).toBe("1")
+  const root = await mkdtemp(join(simulatedManager ? tmpdir() : "/var/lib", "native-services-"))
   await chmod(root, 0o755)
   const controller = join(root, "controller")
   const home = join(root, "agent")
@@ -140,6 +179,49 @@ async function nativeBoundary(simulatedManager: boolean) {
   const canary = join(controller, "controller.db")
   await writeFile(canary, "controller-only", { mode: 0o600 })
   await chown(canary, controllerUid, groupGid)
+  const boundaryFiles = simulatedManager
+    ? []
+    : [
+        `/tmp/workflowd-private-${randomUUID()}`,
+        "/etc/workflowd/native-fixture-app-key",
+        "/var/lib/workflowd/controller/native-fixture.db",
+        "/var/lib/workflowd/nats/native-fixture.creds",
+        "/home/ben-fixture/.ssh/native-fixture-key",
+        "/home/ben-fixture/.config/gh/native-fixture-token",
+      ]
+  for (const path of boundaryFiles) {
+    await mkdir((await import("node:path")).dirname(path), { recursive: true })
+    await writeFile(path, "private-boundary-canary", { mode: 0o644 })
+  }
+  const boundarySockets: Array<ReturnType<typeof createServer>> = []
+  const createdSockets: string[] = []
+  if (!simulatedManager) {
+    for (const path of ["/run/docker.sock", "/run/tailscale/tailscaled.sock"]) {
+      if (!(await stat(path).catch(() => null))) {
+        await mkdir((await import("node:path")).dirname(path), { recursive: true })
+        const socket = createServer((connection) => connection.end())
+        await new Promise<void>((resolve, reject) => {
+          socket.once("error", reject)
+          socket.listen(path, resolve)
+        })
+        await chmod(path, 0o666)
+        boundarySockets.push(socket)
+        createdSockets.push(path)
+      }
+    }
+  }
+  const socketCommand = ["/run/docker.sock", "/run/tailscale/tailscaled.sock"]
+    .map(
+      (path) =>
+        `if /usr/bin/python3 -c 'import socket; socket.socket(socket.AF_UNIX).connect("${path}")' 2>/dev/null; then echo exposed:${path}; else echo denied:${path}; fi`,
+    )
+    .join("; ")
+  const boundaryCommand = boundaryFiles
+    .map(
+      (path) =>
+        `if cat '${path}' >/dev/null 2>&1; then echo exposed:${path}; else echo denied:${path}; fi`,
+    )
+    .join("; ")
   const login = async (kind: string, name: string) => {
     for (const [base, uid] of [
       [controller, controllerUid],
@@ -219,12 +301,22 @@ async function nativeBoundary(simulatedManager: boolean) {
       repositories: [{ source: "/controller/repository-selector", remote: repository }],
     },
   }
-  const path = join(root, "host.sock")
+  const path = simulatedManager ? join(root, "host.sock") : "/run/workflowd-agent-host/control.sock"
   const supervisor = simulatedManager ? fixtureSupervisor(agentUid, groupGid) : undefined
-  let host = await serveCredentialHost(path, policy, supervisor)
+  const openHost = () =>
+    simulatedManager ? serveCredentialHost(path, policy, supervisor) : deployedHost(root, policy)
+  let host = await openHost()
   const units = new Set<string>()
-  const call = async (request: HostRequest, uid = controllerUid): Promise<unknown> => {
+  const call = async (
+    request: HostRequest | { operation: "checkCredentials"; client: "codex" },
+    uid = controllerUid,
+  ): Promise<unknown> => {
     if (simulatedManager && uid === controllerUid) {
+      if (request.operation === "checkCredentials") {
+        const release = await acquireCredentialAdmission(path, request.client)
+        await release()
+        return null
+      }
       const value = await requestAgentHost(path, request)
       return Buffer.isBuffer(value) ? value.toJSON() : value
     }
@@ -238,7 +330,7 @@ async function nativeBoundary(simulatedManager: boolean) {
         "--clear-groups",
         process.execPath,
         "--eval",
-        `import {requestAgentHost} from ${JSON.stringify(join(import.meta.dir, "../../src/agent-host/client.ts"))}; console.log(JSON.stringify(await requestAgentHost(process.argv[1],JSON.parse(process.argv[2]))));`,
+        `import {requestAgentHost,acquireCredentialAdmission} from ${JSON.stringify(join(import.meta.dir, "../../src/agent-host/client.ts"))}; const request=JSON.parse(process.argv[2]); if(request.operation==="checkCredentials") {const release=await acquireCredentialAdmission(process.argv[1],request.client); await release(); console.log("null");} else console.log(JSON.stringify(await requestAgentHost(process.argv[1],request)));`,
         path,
         JSON.stringify(request),
       ],
@@ -286,6 +378,55 @@ async function nativeBoundary(simulatedManager: boolean) {
     }
   }
   try {
+    if (!simulatedManager) {
+      const originalWorker = await readFile(worker)
+      try {
+        await writeFile(
+          worker,
+          `const input=await Bun.file(process.argv[process.argv.indexOf("--host-input")+1]).json(); const child=Bun.spawn(["/bin/sleep","120"],{stdin:"ignore",stdout:"ignore",stderr:"ignore"}); await Bun.write(${JSON.stringify(workspaceRoot)}+"/"+input.runId, String(child.pid)); child.unref(); if(input.prompt!=="exit") await Bun.sleep(120000); process.exit(0);`,
+        )
+        for (const mode of ["stop", "exit", "timeout"]) {
+          const runId = `orphan-${randomUUID()}`
+          const owned = Schema.decodeUnknownSync(OwnedProcess)(
+            await call({
+              operation: "start",
+              runId,
+              profile: "codex-preflight",
+              directory: "",
+              prompt: mode,
+              model: null,
+              timeoutMs: 3000,
+            }),
+          )
+          units.add(owned.unit)
+          const until = Date.now() + 2000
+          while (!(await stat(join(workspaceRoot, runId)).catch(() => null))) {
+            if (Date.now() > until) throw new Error("descendant fixture did not start")
+            await Bun.sleep(20)
+          }
+          const descendant = Number(await readFile(join(workspaceRoot, runId), "utf8"))
+          if (mode !== "exit") expect((await stat(`/proc/${descendant}`)).uid).toBe(agentUid)
+          if (mode === "stop") await call({ operation: "stop", runId, launchId: owned.launchId })
+          const result = await terminal(runId)
+          expect(result.active).toBe(false)
+          expect(result.exitCode).toBe(mode === "exit" ? 0 : -1)
+          if (mode === "timeout") expect(result.timedOut).toBe(true)
+          const reaped = Date.now() + 5000
+          while (await stat(`/proc/${descendant}`).catch(() => null)) {
+            if (Date.now() > reaped) throw new Error("finished run retained its descendant")
+            await Bun.sleep(50)
+          }
+          const check = Bun.spawn(
+            ["systemctl", "show", owned.unit, "--property=LoadState", "--value"],
+            { stdout: "pipe", stderr: "ignore" },
+          )
+          expect((await new Response(check.stdout).text()).trim()).toBe("not-found")
+          await check.exited
+        }
+      } finally {
+        await writeFile(worker, originalWorker)
+      }
+    }
     for (const [client, fixture] of [
       ["codex", codex],
       ["claude", claude],
@@ -311,17 +452,28 @@ async function nativeBoundary(simulatedManager: boolean) {
       })
       expect((await terminal(preflightId)).exitCode).toBe(0)
       expect(fixture.requests.length).toBe(0)
+      for (const directory of ["/", `${workspaceRoot}/../controller`]) {
+        await expect(
+          call({ ...start, runId: `bad-directory-${randomUUID()}`, directory }),
+        ).rejects.toThrow("host directory outside workspace policy")
+      }
+      const linked = join(workspaceRoot, `escape-${client}`)
+      await symlink(controller, linked)
+      await expect(
+        call({ ...start, runId: `bad-link-${randomUUID()}`, directory: linked }),
+      ).rejects.toThrow("host directory outside workspace policy")
+      await rm(linked)
       const proof = join(workspaceRoot, `${client}-proof`)
       fixture.actions.push({
         name: client === "codex" ? "exec_command" : "Bash",
         arguments:
           client === "codex"
             ? {
-                cmd: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                cmd: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : `; { ${boundaryCommand}; ${socketCommand}; if cat /proc/${globalThis.process.pid}/cmdline >/dev/null 2>&1; then echo proc-exposed; else echo proc-denied; fi; } > '${proof}-boundary'; sleep 300`}`,
                 yield_time_ms: 1000,
               }
             : {
-                command: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : "; sleep 300"}`,
+                command: `id -u > '${proof}'; echo $$ > '${proof}-pid'; if cat '${canary}' >/dev/null 2>&1; then echo exposed >> '${proof}'; else echo denied >> '${proof}'; fi; if ls '${custodyRoot}' >/dev/null 2>&1; then echo custody-exposed >> '${proof}'; else echo custody-denied >> '${proof}'; fi${simulatedManager ? "" : `; { ${boundaryCommand}; ${socketCommand}; if cat /proc/${globalThis.process.pid}/cmdline >/dev/null 2>&1; then echo proc-exposed; else echo proc-denied; fi; } > '${proof}-boundary'; sleep 300`}`,
                 timeout: 1000,
               },
       })
@@ -358,6 +510,19 @@ async function nativeBoundary(simulatedManager: boolean) {
         await Bun.sleep(100)
       }
       expect(await readFile(proof, "utf8")).toBe(`${agentUid}\ndenied\ncustody-denied\n`)
+      if (!simulatedManager) {
+        const until = Date.now() + 5000
+        while (!(await readFile(`${proof}-boundary`, "utf8").catch(() => "")).includes("proc-")) {
+          if (Date.now() > until) throw new Error("boundary checks did not finish")
+          await Bun.sleep(50)
+        }
+        const evidence = await readFile(`${proof}-boundary`, "utf8")
+        for (const file of boundaryFiles) expect(evidence).toContain(`denied:${file}\n`)
+        for (const path of ["/run/docker.sock", "/run/tailscale/tailscaled.sock"])
+          expect(evidence).toContain(`denied:${path}\n`)
+        expect(evidence).toContain("proc-denied\n")
+        expect(evidence).not.toContain("exposed")
+      }
       const descendant = Number((await readFile(`${proof}-pid`, "utf8")).trim())
       if (!simulatedManager) {
         expect(await readFile(`/proc/${descendant}/status`, "utf8")).toContain(
@@ -366,7 +531,7 @@ async function nativeBoundary(simulatedManager: boolean) {
       }
       await host.close()
       await rm(path, { force: true })
-      host = await serveCredentialHost(path, policy, supervisor)
+      host = await openHost()
       const attached = Schema.decodeUnknownSync(OwnedProcess)(
         await call({ operation: "inspect", runId }),
       )
@@ -379,7 +544,27 @@ async function nativeBoundary(simulatedManager: boolean) {
       await expect(call({ operation: "stop", runId, launchId: "forged" })).rejects.toThrow(
         "host_request_refused",
       )
-      await expect(call(start, agentUid)).rejects.toThrow()
+      await chmod(path, 0o666)
+      try {
+        for (const request of [
+          start,
+          { operation: "inspect", runId },
+          { operation: "stop", runId, launchId: process.launchId },
+          { operation: "listOwned", cursor: 0 },
+          { operation: "exchange", runId, launchId: process.launchId, file: "events", offset: 0 },
+          { operation: "connect", runId, launchId: process.launchId },
+        ] satisfies HostRequest[]) {
+          for (const uid of simulatedManager ? [agentUid] : [agentUid, 0])
+            await expect(call(request, uid)).rejects.toThrow(
+              "shared_credential_permissions_invalid",
+            )
+        }
+        await expect(
+          call({ operation: "checkCredentials", client: "codex" }, agentUid),
+        ).rejects.toThrow("shared_credential_permissions_invalid")
+      } finally {
+        await chmod(path, 0o600)
+      }
       if (cli?.ownership === "transient-exec") {
         const attached = await Effect.runPromise(cli.attach({ runId }))
         if (!attached) throw new Error("native adapter lost host custody")
@@ -395,8 +580,11 @@ async function nativeBoundary(simulatedManager: boolean) {
       expect(stopped.active).toBe(false)
       expect(await readFile(`/proc/${process.pid}/status`, "utf8").catch(() => null)).toBeNull()
       if (!simulatedManager) {
-        const status = await readFile(`/proc/${descendant}/status`, "utf8").catch(() => null)
-        if (status !== null) expect(status).toContain("State:\tZ")
+        const deadline = Date.now() + 5000
+        while (await stat(`/proc/${descendant}`).catch(() => null)) {
+          if (Date.now() > deadline) throw new Error("cancelled descendant was not reaped")
+          await Bun.sleep(50)
+        }
       }
       const output = join(ioRoot, createHash("sha256").update(runId).digest("hex"), "events")
       await rm(output)
@@ -431,6 +619,50 @@ async function nativeBoundary(simulatedManager: boolean) {
       )
       expect(fixture.requests.length).toBe(priorCount)
       await repair(client)
+      if (!simulatedManager) {
+        fixture.release()
+        fixture.holdAfter(Infinity)
+        const prompt = `admission-${client}-${randomUUID()}`
+        const input = {
+          runId: `admission-${randomUUID()}`,
+          directory: workspaceRoot,
+          prompt,
+          model: start.model,
+        }
+        const controllerCli = async (operation: "preflight" | "spawn") => {
+          const program = `import {Effect} from ${JSON.stringify(join(import.meta.dir, "../../node_modules/effect/dist/index.js"))};
+import {makeHostCli} from ${JSON.stringify(join(import.meta.dir, "../../src/agent-host/client.ts"))};
+const cli=makeHostCli(${JSON.stringify(path)},${JSON.stringify(client)},()=>({type:"other"}));
+${operation === "preflight" ? "await Effect.runPromise(cli.preflight)" : `const run=await Effect.runPromise(cli.spawn(${JSON.stringify(input)})); const result=await Effect.runPromise(run.exited); if(result.exitCode!==0) throw new Error(JSON.stringify(result));`}`
+          const child = Bun.spawn(
+            [
+              "/usr/bin/setpriv",
+              "--reuid",
+              String(controllerUid),
+              "--regid",
+              String(groupGid),
+              "--clear-groups",
+              globalThis.process.execPath,
+              "--eval",
+              program,
+            ],
+            { stdout: "pipe", stderr: "pipe" },
+          )
+          const stderr = await new Response(child.stderr).text()
+          if ((await child.exited) !== 0) throw new Error(stderr)
+        }
+        await controllerCli("preflight")
+        await rm(policy[client].agentLink)
+        await expect(controllerCli("spawn")).rejects.toThrow("shared_credential_link_broken")
+        expect(
+          fixture.requests.filter((request) => JSON.stringify(request).includes(prompt)),
+        ).toHaveLength(0)
+        await repair(client)
+        await controllerCli("spawn")
+        expect(
+          fixture.requests.filter((request) => JSON.stringify(request).includes(prompt)),
+        ).toHaveLength(1)
+      }
     }
     const discoveryId = `discovery-${randomUUID()}`
     await call({
@@ -576,7 +808,7 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       await firstController.exited
       await host.close()
       await rm(path, { force: true })
-      host = await serveCredentialHost(path, policy)
+      host = await openHost()
       claude.release()
       claude.holdAfter(Infinity)
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -662,6 +894,12 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
       await expect(
         attached.rpc.request("thread/start", { cwd: workspaceRoot }),
       ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
+      await expect(
+        attached.rpc.request("review/start", { threadId: "fixture" }),
+      ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
+      await expect(attached.rpc.request("unknown/start", {})).rejects.toMatchObject({
+        message: "host relay method refused",
+      })
       expect(codex.requests.length).toBe(count)
       attached.close()
       expect((await listAgentHost(path)).map((process) => process.unit)).toContain(owned.unit)
@@ -710,7 +948,7 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
       const first = await controllerProgram(false)
       await host.close()
       await rm(path, { force: true })
-      host = await serveCredentialHost(path, policy)
+      host = await openHost()
       expect(await controllerProgram(true)).toEqual(first)
       const owned = Schema.decodeUnknownSync(OwnedProcess)(
         await call({ operation: "inspect", runId: hostId }),
@@ -737,11 +975,33 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
         .exited
     }
     await host.close()
+    if (!simulatedManager) {
+      for (const socket of boundarySockets)
+        await new Promise<void>((resolve) => socket.close(() => resolve()))
+      for (const path of createdSockets) await rm(path, { force: true })
+      for (const path of boundaryFiles) await rm(path, { force: true })
+      for (const path of [
+        "/etc/workflowd/agent-host.json",
+        "/etc/systemd/system/workflowd-agent-host.service",
+        "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
+        "/usr/local/libexec/workflowd-agent-host",
+      ])
+        await rm(path, { force: true })
+      expect(await Bun.spawn(["systemctl", "daemon-reload"]).exited).toBe(0)
+    }
     await codex.close()
     await claude.close()
     await rm(root, { recursive: true, force: true })
   }
 }
+
+test("native CI requires both real fixture identities and the deployed service gate", () => {
+  if (process.env.WORKFLOWD_AGENT_DEPLOYED_TEST !== "1") return
+  expect(process.getuid!()).toBe(0)
+  expect(process.env.WORKFLOWD_AGENT_TEST_BEN_UID).toBe("61001")
+  expect(process.env.WORKFLOWD_AGENT_TEST_AGENT_UID).toBe("61002")
+  expect(process.env.WORKFLOWD_AGENT_TEST_AUTH_GID).toBe("61000")
+})
 
 if (process.env.WORKFLOWD_AGENT_TEST_BEN_UID) {
   test(
@@ -1010,3 +1270,236 @@ test("controller discovery and workspace adapters use host custody without local
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("host persists terminal status before unloading the cgroup and inspects other runs concurrently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-lifecycle-"))
+  const uid = process.getuid!()
+  const custodyRoot = join(root, "custody")
+  const ioRoot = join(root, "io")
+  await mkdir(custodyRoot, { mode: 0o700 })
+  await mkdir(ioRoot, { mode: 0o700 })
+  const login = { canonical: "/unused", benLink: "/unused", agentLink: "/unused" }
+  const policy = {
+    root,
+    ownerUid: uid,
+    controllerUid: uid,
+    agentUid: 61002,
+    groupGid: process.getgid!(),
+    codex: login,
+    claude: login,
+    consumerExecutables: [],
+    launch: {
+      retentionMs: 1000,
+      custodyRoot,
+      ioRoot,
+      home: root,
+      workspaceRoot: root,
+      bun: "/unused",
+      worker: "/unused",
+      codex: "/unused",
+      claude: "/unused",
+    },
+  }
+  const records = new Map<string, { unit: string; launchId: string }>()
+  for (const runId of ["slow", "finished", "failed", "mismatch"]) {
+    const key = createHash("sha256").update(runId).digest("hex")
+    const unit = agentHostUnitName(runId)
+    const launchId = randomUUID()
+    records.set(runId, { unit, launchId })
+    await writeFile(
+      join(custodyRoot, `${key}.json`),
+      JSON.stringify({
+        request: {
+          operation: "start",
+          runId,
+          profile: "codex",
+          directory: root,
+          prompt: "",
+          model: null,
+        },
+        process: {
+          runId,
+          unit,
+          launchId,
+          invocationId: "fixture",
+          uid: 61002,
+          pid: 123,
+          started: new Date().toISOString(),
+          active: true,
+          exitCode: null,
+        },
+        digest: "fixture",
+        cancelled: false,
+      }),
+    )
+  }
+  let releaseSlow!: () => void
+  let enteredSlow!: () => void
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve
+  })
+  const entered = new Promise<void>((resolve) => {
+    enteredSlow = resolve
+  })
+  const stopped = new Set<string>()
+  const path = join(root, "host.sock")
+  const host = await serveCredentialHost(path, policy, async (args) => {
+    const [runId, record] = [...records].find(([, record]) => args.includes(record.unit))!
+    if (args.includes("stop")) {
+      stopped.add(runId)
+      return ""
+    }
+    if (stopped.has(runId)) return "LoadState=not-found\n"
+    if (runId === "slow") {
+      enteredSlow()
+      await slow
+    }
+    return `LoadState=loaded\nActiveState=active\nSubState=exited\nMainPID=0\nInvocationID=fixture\nDescription=workflowd native ${runId === "mismatch" ? "foreign" : record.launchId}\nUser=61002\nExecMainCode=1\nExecMainStatus=${runId === "failed" ? 7 : 0}\n`
+  })
+  try {
+    const pending = requestAgentHost(path, { operation: "inspect", runId: "slow" })
+    await entered
+    const completed = await Promise.race([
+      requestAgentHost(path, { operation: "inspect", runId: "finished" }),
+      Bun.sleep(500).then(() => "blocked by another run"),
+    ])
+    releaseSlow()
+    await pending
+    expect(completed).toMatchObject({ active: false, exitCode: 0 })
+    expect(stopped.has("finished")).toBe(true)
+    expect(await requestAgentHost(path, { operation: "inspect", runId: "finished" })).toMatchObject(
+      { exitCode: 0 },
+    )
+    expect(await requestAgentHost(path, { operation: "inspect", runId: "failed" })).toMatchObject({
+      exitCode: 7,
+    })
+    expect(await requestAgentHost(path, { operation: "inspect", runId: "failed" })).toMatchObject({
+      exitCode: 7,
+    })
+    await expect(
+      requestAgentHost(path, { operation: "inspect", runId: "mismatch" }),
+    ).rejects.toThrow("host invocation identity mismatch")
+    await expect(
+      requestAgentHost(path, { operation: "stop", runId: "missing", launchId: "none" }),
+    ).rejects.toThrow("host custody missing")
+    await expect(
+      requestAgentHost(path, { operation: "stop", runId: "failed", launchId: "forged" }),
+    ).rejects.toThrow("forged host launch nonce")
+    const forgedPath = join(
+      custodyRoot,
+      `${createHash("sha256").update("failed").digest("hex")}.json`,
+    )
+    const original = JSON.parse(await readFile(forgedPath, "utf8"))
+    await writeFile(
+      forgedPath,
+      JSON.stringify({ ...original, process: { ...original.process, uid: 0 } }),
+    )
+    await expect(requestAgentHost(path, { operation: "inspect", runId: "failed" })).rejects.toThrow(
+      "forged host custody",
+    )
+    await writeFile(forgedPath, JSON.stringify(original))
+    await expect(
+      requestAgentHost(path, {
+        operation: "start",
+        runId: "failed",
+        profile: "codex",
+        directory: root,
+        prompt: "changed",
+        model: null,
+      }),
+    ).rejects.toThrow("host launch identity conflict")
+    const key = createHash("sha256").update("finished").digest("hex")
+    await mkdir(join(ioRoot, key), { mode: 0o700 })
+    await writeFile(join(ioRoot, key, "input"), "old prompt")
+    const { utimes } = await import("node:fs/promises")
+    const old = new Date(Date.now() - 8 * 86400000)
+    await utimes(join(custodyRoot, `${key}.json`), old, old)
+    const until = Date.now() + 4000
+    while (await stat(join(custodyRoot, `${key}.json`)).catch(() => null)) {
+      if (Date.now() > until) throw new Error("host did not collect expired custody")
+      await Bun.sleep(50)
+    }
+    expect(await stat(join(ioRoot, key)).catch(() => null)).toBeNull()
+  } finally {
+    releaseSlow()
+    await host.close()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+async function deployedHost(
+  root: string,
+  policy: import("../../src/agent-host/config").CredentialPolicy,
+) {
+  // Only the explicitly marked disposable CI VM installs system files.
+  expect(process.env.WORKFLOWD_AGENT_DEPLOYED_TEST).toBe("1")
+  const command = async (args: string[]) => {
+    const child = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" })
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+    if (status !== 0) throw new Error(`${args.join(" ")}: ${stdout} ${stderr}`)
+    return stdout
+  }
+  const marker = join(root, "deployed")
+  if (!(await stat(marker).catch(() => null))) {
+    // Existing production policy is never overwritten, even if the test flag is set.
+    expect(await stat("/etc/workflowd/agent-host.json").catch(() => null)).toBeNull()
+    expect(
+      await stat("/etc/systemd/system/workflowd-agent-host.service").catch(() => null),
+    ).toBeNull()
+    for (const directory of [
+      "/etc/workflowd",
+      "/usr/local/libexec",
+      "/etc/systemd/system/workflowd-agent-host.service.d",
+      "/var/lib/workflowd/model-credentials",
+      "/var/lib/workflowd/agent-host",
+      "/var/lib/workflowd/agent-io",
+    ])
+      await mkdir(directory, { recursive: true })
+    await command([
+      process.execPath,
+      "build",
+      join(import.meta.dir, "../../src/agent-host/server.ts"),
+      "--compile",
+      "--outfile",
+      "/usr/local/libexec/workflowd-agent-host",
+    ])
+    await copyFile(
+      join(import.meta.dir, "../../deploy/systemd/workflowd-agent-host.service"),
+      "/etc/systemd/system/workflowd-agent-host.service",
+    )
+    await writeFile("/etc/workflowd/agent-host.json", JSON.stringify(policy), { mode: 0o600 })
+    // Add only the private fixture store to the unit's writable paths. All
+    // production capabilities, namespaces and restrictions remain in force.
+    await writeFile(
+      "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
+      `[Service]\nReadWritePaths=${root}\n`,
+    )
+    await command(["systemctl", "daemon-reload"])
+    await writeFile(marker, "installed")
+  }
+  await command(["systemctl", "restart", "workflowd-agent-host.service"])
+  const deadline = Date.now() + 10000
+  while (!(await stat("/run/workflowd-agent-host/control.sock").catch(() => null))) {
+    if (Date.now() > deadline)
+      throw new Error(
+        await command([
+          "journalctl",
+          "-u",
+          "workflowd-agent-host.service",
+          "--no-pager",
+          "-n",
+          "40",
+        ]),
+      )
+    await Bun.sleep(50)
+  }
+  return {
+    close: async () => {
+      await command(["systemctl", "stop", "workflowd-agent-host.service"])
+    },
+  }
+}

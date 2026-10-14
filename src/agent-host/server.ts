@@ -10,6 +10,7 @@ import {
   rename,
   realpath,
   readdir,
+  rm,
 } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
@@ -90,7 +91,7 @@ export async function serveCredentialHost(
             const request = Schema.decodeUnknownSync(HostRequest, { onExcessProperty: "error" })(
               raw,
             )
-            const response = await native(request)
+            const response = await native.request(request, () => !socket.destroyed)
             if (request.operation === "connect") {
               if (!("process" in response) || !response.process?.active)
                 throw new Error("host server inactive")
@@ -155,6 +156,7 @@ export async function serveCredentialHost(
       for (const socket of sockets) socket.destroy()
       await new Promise<void>((resolve) => server.close(() => resolve()))
       await Promise.all(pending)
+      await native.close()
       libc.close()
     },
   }
@@ -265,12 +267,36 @@ async function sendHostFrame(
       id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
     }),
   )(JSON.parse(frame))
-  if (
-    !["thread/start", "thread/resume", "turn/start", "turn/steer", "thread/queue/add"].includes(
-      message.method ?? "",
-    )
-  ) {
+  const passive = [
+    "initialize",
+    "initialized",
+    "thread/list",
+    "thread/read",
+    "thread/queue/list",
+    "turn/interrupt",
+    "model/list",
+  ]
+  const turns = [
+    "thread/start",
+    "thread/resume",
+    "turn/start",
+    "turn/steer",
+    "thread/queue/add",
+    "review/start",
+  ]
+  // Replies to app-server requests carry an id and no method.
+  if (message.method === undefined || passive.includes(message.method)) {
     ws.send(frame)
+    return
+  }
+  if (!turns.includes(message.method)) {
+    if (message.id === undefined) throw new Error("host relay method refused")
+    socket.write(
+      JSON.stringify({
+        id: message.id,
+        error: { code: -32601, message: "host relay method refused" },
+      }) + "\n",
+    )
     return
   }
   let release: (() => Promise<void>) | undefined
@@ -302,6 +328,12 @@ function hostFailureDetail(error: unknown) {
     "host socket unavailable",
     "unsafe host socket",
     "unsafe agent groups",
+    "forged host custody",
+    "host launch identity conflict",
+    "host custody missing",
+    "forged host launch nonce",
+    "host caller disconnected before launch",
+    "repository outside host policy",
   ])
   return error instanceof Error && safe.has(error.message) ? { detail: error.message } : {}
 }
@@ -383,10 +415,18 @@ async function hostCommand(args: string[]) {
   }
 }
 
+type NativeResponse =
+  | { process: OwnedProcess | null }
+  | { bytes: string }
+  | { processes: OwnedProcess[]; next: number | null }
+
 /** The system manager owns workers; connections own only bounded observations. */
 function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Promise<string>) {
-  let previous: Promise<unknown> = Promise.resolve()
-  const dispatch = async (request: HostRequest) => {
+  const running = new Map<string, Promise<unknown>>()
+  const dispatch = async (
+    request: HostRequest,
+    connected: () => boolean,
+  ): Promise<NativeResponse> => {
     const launch = policy.launch
     if (!launch || policy.agentUid === 0 || policy.agentUid === policy.controllerUid)
       throw new Error("native launch policy unavailable")
@@ -402,8 +442,10 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
         const record = Schema.decodeUnknownSync(HostRecord)(
           JSON.parse((await readHostFile(path, 300000, 0, policy.ownerUid)).toString()),
         )
-        if (record.request.profile === "codex-server")
-          processes.push(await inspectHostProcess(record, path, supervisor))
+        if (record.request.profile === "codex-server") {
+          const observed = await requestOwned({ operation: "inspect", runId: record.process.runId })
+          if ("process" in observed && observed.process) processes.push(observed.process)
+        }
       }
       return { processes, next: request.cursor + 128 < paths.length ? request.cursor + 128 : null }
     }
@@ -450,11 +492,16 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
             : undefined
         if (request.profile === "workspace" && !repository)
           throw new Error("repository outside host policy")
+        if (!connected()) throw new Error("host caller disconnected before launch")
         await prepareHostLaunch(
           policy,
           repository === undefined ? normalized : { ...normalized, repository: repository.remote },
           io,
         )
+        if (!connected()) {
+          await rm(io, { recursive: true, force: true })
+          throw new Error("host caller disconnected before launch")
+        }
         const record: HostRecord = {
           request,
           digest,
@@ -502,15 +549,83 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
     if (request.operation === "stop" && observed.active) {
       await supervisor(["/usr/bin/systemctl", "stop", saved.process.unit])
       if ((await inspect(saved)).active) throw new Error("host cancellation unconfirmed")
-      await saveHostRecord(recordPath, { ...saved, process: observed, cancelled: true })
-      return { process: await inspect(saved) }
+      const cancelled = {
+        ...saved,
+        process: { ...observed, active: false, pid: 0, exitCode: -1 },
+        cancelled: true,
+      }
+      await saveHostRecord(recordPath, cancelled)
+      return { process: cancelled.process }
     }
     return { process: observed }
   }
-  return (request: HostRequest) => {
-    const current = previous.then(() => dispatch(request))
-    previous = current.catch(() => {})
+  const requestOwned = (request: HostRequest, connected = () => true) => {
+    const key = request.operation === "listOwned" ? "listing" : `run:${request.runId}`
+    const current = (running.get(key) ?? Promise.resolve()).then(() => dispatch(request, connected))
+    const settled = current
+      .catch(() => {})
+      .finally(() => {
+        if (running.get(key) === settled) running.delete(key)
+      })
+    running.set(key, settled)
     return current
+  }
+  let collecting = Promise.resolve()
+  const collect = async () => {
+    const launch = policy.launch
+    if (!launch) return
+    for (const name of await readdir(launch.custodyRoot)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+      const path = join(launch.custodyRoot, name)
+      try {
+        const saved = Schema.decodeUnknownSync(HostRecord)(
+          JSON.parse((await readHostFile(path, 300000, 0, policy.ownerUid)).toString()),
+        )
+        const key = saved.process.runId
+        if (name !== `${hostDigest(key)}.json`) continue
+        const lockKey = `run:${key}`
+        const previous = running.get(lockKey) ?? Promise.resolve()
+        const operation = previous.then(async () => {
+          const result = await dispatch({ operation: "inspect", runId: key }, () => true)
+          if (!("process" in result) || !result.process || result.process.active) return
+          const age = Date.now() - (await lstat(path)).mtimeMs
+          if (age < (launch.retentionMs ?? 7 * 86400000)) return
+          await rm(join(launch.ioRoot, hostDigest(key)), { recursive: true, force: true })
+          await unlink(path)
+        })
+        const settled = operation
+          .catch(() => {})
+          .finally(() => {
+            if (running.get(lockKey) === settled) running.delete(lockKey)
+          })
+        running.set(lockKey, settled)
+        await settled
+      } catch {
+        // Uncertain or tampered custody must remain for operator inspection.
+      }
+    }
+  }
+  let sweeping = false
+  const timer = setInterval(
+    () => {
+      if (sweeping) return
+      sweeping = true
+      collecting = collect()
+        .catch(() => {})
+        .finally(() => {
+          sweeping = false
+        })
+    },
+    Math.min(60000, policy.launch?.retentionMs ?? 60000),
+  )
+  timer.unref()
+  return {
+    request: requestOwned,
+    close: async () => {
+      clearInterval(timer)
+      await collecting
+      await Promise.all(running.values())
+    },
   }
 }
 
@@ -524,7 +639,7 @@ async function inspectHostProcess(
     "show",
     record.process.unit,
     "--no-pager",
-    "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,Description,User,ExecMainStatus,ExecMainCode",
+    "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,Description,User,ExecMainStatus,ExecMainCode,Result",
   ])
   const fields = Object.fromEntries(
     output
@@ -536,6 +651,7 @@ async function inspectHostProcess(
       }),
   )
   const present = fields.LoadState !== "not-found"
+  if (!present && record.process.exitCode !== null) return record.process
   if (!present && record.process.invocationId === null)
     throw new Error("host launch remains unconfirmed")
   if (
@@ -553,19 +669,32 @@ async function inspectHostProcess(
   const active =
     present &&
     fields.SubState !== "exited" &&
+    !(fields.MainPID === "0" && ["1", "2", "3"].includes(fields.ExecMainCode ?? "")) &&
     ["active", "activating", "deactivating"].includes(fields.ActiveState ?? "")
-  return {
+  const observed = {
     ...record.process,
+    ...(fields.Result === "timeout" ? { timedOut: true } : {}),
     active,
     pid: Number(fields.MainPID ?? 0),
     exitCode: active
       ? null
-      : record.cancelled
+      : record.cancelled || fields.Result === "timeout"
         ? -1
         : present && fields.ExecMainCode === "1"
           ? Number(fields.ExecMainStatus)
           : -1,
   }
+  if (!active) {
+    // Save the main result before unloading the unit and killing its descendants.
+    // A crash after this write leaves enough identity to finish stopping on restart.
+    if (record.process.exitCode === null)
+      await saveHostRecord(path, { ...record, process: observed })
+    if (present) {
+      await supervisor(["/usr/bin/systemctl", "stop", record.process.unit])
+      await supervisor(["/usr/bin/systemctl", "reset-failed", record.process.unit]).catch(() => {})
+    }
+  }
+  return observed
 }
 
 async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, io: string) {
@@ -627,6 +756,7 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     `--property=User=${policy.agentUid}`,
     `--property=Group=${policy.groupGid}`,
     "--property=RemainAfterExit=yes",
+    "--property=ExitType=cgroup",
     "--property=SupplementaryGroups=",
     "--property=KillMode=control-group",
     "--property=TimeoutStopSec=5",
@@ -634,6 +764,10 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--property=NoNewPrivileges=yes",
     "--property=CapabilityBoundingSet=",
     "--property=PrivateDevices=yes",
+    "--property=PrivateTmp=yes",
+    "--property=ProtectProc=invisible",
+    "--property=InaccessiblePaths=-/run/docker.sock -/run/tailscale -/etc/workflowd -/run/credentials -/var/lib/workflowd/controller -/var/lib/workflowd/nats",
+
     "--property=ProtectSystem=strict",
     ...(record.request.profile === "codex-server"
       ? [`--property=BindPaths=${io}/daemon:/tmp/codex-daemon-${policy.agentUid}`]
