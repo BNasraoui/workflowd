@@ -156,7 +156,12 @@ import { chown, readFile, realpath, copyFile, readdir, stat } from "node:fs/prom
 import { nativeModelFixture } from "../sandbox/native-fixture"
 import { Effect, Schema } from "effect"
 import type { ClaudeResumeJobV1 } from "../../src/remote/contract"
-import { OwnedProcess, agentHostUnitName, type HostRequest } from "../../src/agent-host/protocol"
+import {
+  OwnedProcess,
+  HostStart,
+  agentHostUnitName,
+  type HostRequest,
+} from "../../src/agent-host/protocol"
 
 async function nativeBoundary(simulatedManager: boolean) {
   expect(process.getuid!()).toBe(0)
@@ -1251,7 +1256,9 @@ function fixtureSupervisor(agentUid: number, groupGid: number) {
           }),
       )
       const inputPath = args[args.indexOf("--host-input") + 1]!
-      const request = JSON.parse(await readFile(inputPath, "utf8"))
+      const request = Schema.decodeUnknownSync(HostStart)(
+        JSON.parse(await readFile(inputPath, "utf8")),
+      )
       expect(env.GH_CONFIG_DIR).toBe(request.worker?.githubDirectory ?? `${env.HOME}/.config/gh`)
       for (const key of [
         "GH_TOKEN",

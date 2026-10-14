@@ -1,5 +1,5 @@
 import { expect } from "bun:test"
-import { chmod, chown, mkdir, readFile, writeFile } from "node:fs/promises"
+import { chmod, chown, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { Schema } from "effect"
 
