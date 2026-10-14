@@ -145,3 +145,34 @@ for (const status of [0, 7]) {
     }
   })
 }
+
+test("rapid native exits persist every result after draining both output streams", async () => {
+  const root = await mkdtemp(join(tmpdir(), "claude-rapid-exit-"))
+  try {
+    const binary = join(root, "claude")
+    await writeFile(binary, "#!/bin/sh\ncat\necho diagnostic >&2\n", { mode: 0o700 })
+    const promptFile = join(root, "prompt")
+    await writeFile(promptFile, "fixture prompt")
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const options = {
+        binary,
+        directory: root,
+        promptFile,
+        eventsFile: join(root, "events"),
+        stderrFile: join(root, "stderr"),
+        resultFile: join(root, "result"),
+        maxOutputBytes: 1024,
+        model: null,
+      }
+      expect(await runClaudeWorker(options)).toBe(0)
+      expect(JSON.parse(await readFile(options.resultFile, "utf8"))).toEqual({
+        version: 1,
+        exitCode: 0,
+      })
+      expect(await readFile(options.eventsFile, "utf8")).toBe("fixture prompt")
+      expect(await readFile(options.stderrFile, "utf8")).toBe("diagnostic\n")
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15000)

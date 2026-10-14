@@ -55,7 +55,9 @@ const drainBounded = async (
       written += chunk.byteLength
     }
   } finally {
-    reader.releaseLock()
+    // This worker exclusively owns the stream and drains it to EOF. Bun 1.3.14
+    // can throw while releasing an already-closed native reader; there is no
+    // subsequent consumer that needs its lock. Always close the capture file.
     await file.close()
   }
 }
