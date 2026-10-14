@@ -1,4 +1,3 @@
-import { expect } from "bun:test"
 import { join } from "node:path"
 
 export const fixturePassword = crypto.randomUUID()
@@ -21,28 +20,4 @@ export function fixtureEnvironment(home: string) {
     ALL_PROXY: "http://127.0.0.1:9",
     NO_PROXY: "127.0.0.1,localhost",
   }
-}
-
-export async function runIsolated(file: string, pattern: string) {
-  const child = Bun.spawn(
-    [
-      "unshare",
-      ...(process.getuid?.() === 0 ? [] : ["--user", "--map-root-user"]),
-      "--pid",
-      "--fork",
-      "--mount-proc",
-      "--net",
-      "/bin/sh",
-      "-c",
-      'mount -t tmpfs -o mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
-      "fixture",
-      process.execPath,
-      "test",
-      file,
-      "--test-name-pattern",
-      pattern,
-    ],
-    { stdout: "inherit", stderr: "inherit" },
-  )
-  expect(await child.exited).toBe(0)
 }

@@ -1,4 +1,4 @@
-import { fixtureEnvironment, fixturePassword, runIsolated } from "./opencode-fixture"
+import { fixtureEnvironment, fixturePassword } from "./opencode-fixture"
 import { expect, spyOn, test } from "bun:test"
 import * as filesystem from "node:fs/promises"
 import { spawnSync } from "node:child_process"
@@ -26,6 +26,30 @@ import {
   migrateOpenCodeGrants,
 } from "../../src/agent-host/opencode-credentials"
 
+async function runIsolated(pattern: string) {
+  const child = Bun.spawn(
+    [
+      "unshare",
+      ...(process.getuid?.() === 0 ? [] : ["--user", "--map-root-user"]),
+      "--pid",
+      "--fork",
+      "--mount-proc",
+      "--net",
+      "/bin/sh",
+      "-c",
+      'mount -t tmpfs -o mode=1777 tmpfs /tmp && ip link set lo up && exec "$@"',
+      "fixture",
+      process.execPath,
+      "test",
+      import.meta.filename,
+      "--test-name-pattern",
+      pattern,
+    ],
+    { stdout: "inherit", stderr: "inherit" },
+  )
+  expect(await child.exited).toBe(0)
+}
+
 /** All client configuration, grants and responses are invented fixture data. */
 test("installed OpenCode moves grants, restarts one store, and attaches without copying refresh credentials", async () => {
   const isRoot = process.getuid?.() === 0
@@ -33,7 +57,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
     .flat()
     .every((entry) => entry?.internal)
   if (!isRoot || !egressDenied) {
-    await runIsolated(import.meta.filename, "^installed OpenCode")
+    await runIsolated("^installed OpenCode")
     return
   }
   const ownUid = process.getuid!()
@@ -301,7 +325,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
 
 test("offline migration resumes its journal and refuses schema drift or a reactivated source", async () => {
   if (process.getuid?.() !== 0 || process.pid !== 1) {
-    await runIsolated(import.meta.filename, "^offline migration")
+    await runIsolated("^offline migration")
     return
   }
   const root = await mkdtemp(join(tmpdir(), "opencode-offline-"))
