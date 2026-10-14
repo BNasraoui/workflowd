@@ -309,8 +309,8 @@ jobs:
               'agent OpenCode service checks migrated sole ownership before starting the agent UID',
               'OpenCode recovered mailbox prompts refuse before provider I/O when migration admission fails',
               'OpenCode agent-run completion crosses the run-bound subscription socket',
-              'OpenCode restart recovers persisted delivery (sending=false)',
-              'OpenCode restart recovers persisted delivery (sending=true)',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=false)',
+              'OpenCode restart as controller UID recovers persisted delivery (sending=true)',
           ]:
               assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
           PYTEST
