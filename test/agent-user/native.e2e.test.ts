@@ -452,6 +452,11 @@ async function nativeBoundary(simulatedManager: boolean) {
       })
       expect((await terminal(preflightId)).exitCode).toBe(0)
       expect(fixture.requests.length).toBe(0)
+      const extraProperty = { ...start, runId: `extra-${randomUUID()}`, user: 0 }
+      await expect(call(extraProperty)).rejects.toThrow("host_request_refused")
+      const unknownProfile = { ...start, runId: `unknown-${randomUUID()}` }
+      Object.defineProperty(unknownProfile, "profile", { value: "root-shell" })
+      await expect(call(unknownProfile)).rejects.toThrow("host_request_refused")
       for (const directory of ["/", `${workspaceRoot}/../controller`]) {
         await expect(
           call({ ...start, runId: `bad-directory-${randomUUID()}`, directory }),
@@ -898,7 +903,7 @@ console.log(JSON.stringify(await Effect.runPromise(executor.${recover ? "recover
         attached.rpc.request("review/start", { threadId: "fixture" }),
       ).rejects.toMatchObject({ reason: "shared_credential_link_broken" })
       await expect(attached.rpc.request("unknown/start", {})).rejects.toMatchObject({
-        message: "host relay method refused",
+        code: -32601,
       })
       expect(codex.requests.length).toBe(count)
       attached.close()
@@ -956,6 +961,18 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
       expect(owned.uid).toBe(agentUid)
       await call({ operation: "stop", runId: hostId, launchId })
       expect((await terminal(hostId)).active).toBe(false)
+      const recordName = (await readdir(custodyRoot)).find((name) => name.endsWith(".json"))!
+      const recordPath = join(custodyRoot, recordName)
+      const old = new Date(Date.now() - 8 * 86400000)
+      await (await import("node:fs/promises")).utimes(recordPath, old, old)
+      await host.close()
+      host = await openHost()
+      const collected = Date.now() + 5000
+      while (await stat(recordPath).catch(() => null)) {
+        if (Date.now() > collected) throw new Error("deployed host did not collect expired custody")
+        await Bun.sleep(50)
+      }
+      expect(await stat(join(ioRoot, recordName.slice(0, -5))).catch(() => null)).toBeNull()
     }
   } finally {
     for (const name of await readdir(custodyRoot)) {
@@ -1271,7 +1288,7 @@ test("controller discovery and workspace adapters use host custody without local
   }
 })
 
-test("host persists terminal status before unloading the cgroup and inspects other runs concurrently", async () => {
+test("the host persists terminal status before unloading the cgroup and inspects other runs concurrently", async () => {
   const root = await mkdtemp(join(tmpdir(), "host-lifecycle-"))
   const uid = process.getuid!()
   const custodyRoot = join(root, "custody")
