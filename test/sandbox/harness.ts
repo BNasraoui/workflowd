@@ -64,6 +64,7 @@ export async function runnerFixture() {
     await hold?.exited
     await docker("rm", "-f", `${name}-runner`, `${name}-engine`)
     await docker("network", "rm", name)
+    await docker("volume", "rm", `${name}-socket`)
     await rm(root, { recursive: true, force: true })
   }
   try {
@@ -89,6 +90,7 @@ export async function runnerFixture() {
     )
     await command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", join(root, "key")])
     await docker("network", "create", name)
+    await docker("volume", "create", `${name}-socket`)
     await docker(
       "run",
       "-d",
@@ -98,16 +100,33 @@ export async function runnerFixture() {
       "--memory-swap=2g",
       "--network",
       name,
-      "--network-alias",
-      "engine",
+      "-v",
+      `${name}-socket:/run/workflowd-engine`,
+      "-v",
+      `${repository}/deploy/sandbox/engine.toml:/etc/dagger/engine.toml:ro`,
       "--privileged",
       "registry.dagger.io/engine@sha256:56b68be5d9fc8e0a4e7c8db7599a76571f8806d5a9623d9afa6764ae3f8cae36",
       "--addr",
-      "tcp://0.0.0.0:1234",
+      "unix:///run/workflowd-engine/engine.sock",
+      "--group",
+      "65532",
     )
+    await docker("cp", "deploy/sandbox/network.sh", `${name}-engine:/tmp/network.sh`)
+    const subnet = await docker(
+      "network",
+      "inspect",
+      "-f",
+      "{{(index .IPAM.Config 0).Subnet}}",
+      name,
+    )
+    await docker("exec", `${name}-engine`, "sh", "/tmp/network.sh", "engine", subnet)
     await docker(
       "run",
       "-d",
+      "--group-add",
+      "65532",
+      "-v",
+      `${name}-socket:/run/workflowd-engine:ro`,
       "--name",
       `${name}-runner`,
       "--memory=512m",
@@ -157,7 +176,7 @@ cd /workspace/repository
 if [ "$1 $2 $3" = "config base-image set" ] && [ "$4" = "ghcr.io/bnasraoui/workflowd-agent-base@sha256:${"f".repeat(64)}" ]; then
   set -- config base-image set ubuntu:24.04
 fi
-exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"
 `,
       { mode: 0o755 },
     )

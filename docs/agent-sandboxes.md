@@ -244,3 +244,51 @@ successful `&& printf` suffix. Final model prose cannot satisfy this check. Nati
 completion additionally records the exact systemd unit's inactive state and zero
 MainPID. Live runs repeat runner network denials and credential inventory; fixture
 success never substitutes for authenticated live evidence.
+
+### Disposable runner hardening (E2/E3)
+
+The pinned engine exposes a Unix socket shared only with tooling. It has no TCP
+control listener and rejects `insecureRootCapabilities`. Agent containers never
+receive the socket volume. The disposable VM installs owned `DOCKER-USER` rules
+before booting tooling: container traffic cannot reach the bridge subnet,
+`100.64.0.0/10`, or `169.254.169.254`. An INPUT rule covers the Docker gateway,
+which does not traverse DOCKER-USER. Inside the engine, a separate INPUT rule
+covers nested CNI traffic, allowing only its DNS resolver; FORWARD repeats the
+protected destination restrictions. Stop removes only the owned VM rules and
+socket volume. These scripts must never be applied to mint.
+
+The hold step launches through `env -u` because the Actions runner injects OIDC
+request variables after step-level environment overrides. Its shell and hold
+process do not inherit either request variable. GitHub's job-level `id-token`
+permission and the runner's own credential state remain until job completion;
+this change does not claim job-wide revocation.
+
+The pinned Tailscale 1.94.2 federation implementation sets `Reusable: false`
+when creating its auth key, so successful enrollment consumes that key. The
+pinned action separately requests an ephemeral device. Do not replace this with
+a reusable key; ephemeral device lifetime alone would not consume a reusable key.
+Sources: [pinned federation implementation](https://github.com/tailscale/tailscale/blob/v1.94.2/feature/identityfederation/identityfederation.go),
+[pinned Dagger security configuration](https://github.com/dagger/dagger/blob/v0.18.14/docs/current_docs/configuration/engine.mdx#security).
+
+Operator verification after merging and updating the approved workflow/tooling
+pin requires a second disposable runner kept alive for the duration of the probe.
+Provide `EVIDENCE_SANDBOX_NETWORK_HOSTS` as the path to a private JSON array with
+one object per controller-visible IPv4 tailnet peer, plus mint itself, excluding
+the runner being tested. Each object needs `role` (`mint`, `peer`, or
+`second-runner`) and `address` (literal IP); remote objects also need `login`,
+`identityFile`, and `knownHostsFile` for existing read-only SSH access. The verifier
+requires all three roles and compares the inventory with Tailscale status.
+It obtains `ss -H -ltn` on each host before and after probing, covers every listed
+TCP listening port (including loopback-only listeners), and fails on missing
+hosts, unavailable inventory, changed listeners or incomplete results. Offline
+peers must be made available for this evidence run; they are never silently skipped.
+No credentials or process-owner details belong in the inventory.
+
+Run the existing `--probe-denials` command in a capped user unit with
+`MemoryMax=4G` and `MemorySwapMax=0`. It records controller controls before and
+after, timeout denials from the runner host and a real container-use/Dagger
+container, and an inventory of the hold process's environment variable names.
+Connection-refused responses count only as controller reachability controls,
+never as successful denials. This is TCP/IPv4 evidence, not UDP or IPv6 coverage.
+Release the second runner using its existing custody workflow afterward. No App,
+environment, secret, ruleset or mint firewall changes are required by this PR.

@@ -20,5 +20,5 @@ RUN chmod 0444 /usr/local/lib/workflowd-result.py /usr/local/lib/publication-uni
 USER runner
 WORKDIR /workspace/repository
 ENV HOME=/home/runner
-ENV _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234
+ENV _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock
 CMD ["sleep", "infinity"]

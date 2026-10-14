@@ -51,6 +51,8 @@ jobs:
           oauth-client-id: ${{ inputs.tailscale-client-id }}
           audience: ${{ inputs.tailscale-audience }}
           tags: tag:agent-runner
+          # This pinned CLI creates a non-reusable federation auth key. Joining
+          # consumes it immediately; ephemeral controls device cleanup separately.
           version: 1.94.2
           args: --ssh
           hostname: lease-${{ github.run_id }}-${{ github.run_attempt }}
@@ -74,7 +76,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Hold the lease while mint sends heartbeats
-        run: /usr/local/bin/container-use hold
+        # The runner injects OIDC variables after step env overrides. Strip them
+        # in the shell launcher, before either the shell or hold process starts.
+        shell: /usr/bin/env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: exec /usr/local/bin/container-use hold
       - name: Upload sealed result
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
