@@ -91,11 +91,29 @@ ownership separation. Audit modes, ownership and ACLs without printing secrets.
 
 For verified deployments, provision a separate repository-scoped read-only token
 in an operator-owned mode-0600 file, passed to the entrypoint with
-`--github-token-file`; the script sets GH_TOKEN without using the owner's gh
-login. Protect the deployment state file, clone/Git metadata, root node_modules,
+`--github-token-file`; the script sets GH_TOKEN only for gh calls without using
+the owner's gh login. Protect the deployment state file, release/Git metadata, node_modules,
 managed skills marker/root and binaries. Audit global `~/.bunfig.toml`,
 `$XDG_CONFIG_HOME/.bunfig.toml`, `~/.npmrc`, and `~/.bun/install/cache` or
 BUN_INSTALL_CACHE_DIR too. The entrypoint uses empty global configuration and
 `--no-cache --backend=copyfile`; services/manual installs require their own audit.
 See the [verified deployment runbook](../deploy/verified-deploy.md) for the exact
 operator steps, App ID pinning, first-parent verification and explicit bootstrap.
+
+Verified deployment units use `/opt/workflowd/deploy/current`, an atomically
+replaced symlink into the operator-owned mode-0700 `deploy/releases/` directory.
+Every deployment, including rollback, initializes a new mode-0700 release and
+`.git`, fetches from HTTPS GitHub, runs strict full fsck and checks the GitHub tree
+SHA. Nothing from an earlier release's Git directory or dependencies is reused.
+The old release stays available through `deploy/previous`; the lock, audit log
+and last successful SHA live separately under `/opt/workflowd/operator/`.
+Protect both link parents against replacement by agents. Keep service runtime
+state outside releases; a new release starts with no previous untracked files.
+
+Budget disk for current, previous and staging copies of full Git history, working
+files and dependencies; retained releases accumulate until explicitly pruned by
+the operator under the deployment lock. Keep both link targets and any release
+still in use by a process. Roll back by running the protected entrypoint for the
+previous successful SHA with explicit `--bootstrap` when required; it verifies
+and builds a fresh release again. Never directly reactivate retained `.git` or
+edit deployment state. See the runbook's layout, cleanup and recovery procedures.

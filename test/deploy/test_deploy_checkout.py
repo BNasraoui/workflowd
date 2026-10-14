@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,8 +16,9 @@ class CheckoutTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.repo = self.root / 'deploy'
-        self.repo.mkdir()
+        self.repo = self.root / 'deployment/current'
+        self.repo.mkdir(parents=True)
+        self.repo.parent.chmod(0o755)
         d.git(self.repo, 'init', '-q', '-b', 'main')
         d.git(self.repo, 'remote', 'add', 'origin', d.REMOTE)
         skill = self.repo / 'skills/rpi-example'
@@ -100,7 +102,21 @@ class CheckoutTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 d.verify_remote(self.sha, APP_ID)
 
-    def run_deploy(self, verification_error=None, install_error=False, tree=None):
+    def release_fixture(self):
+        if not self.repo.is_symlink():
+            releases = self.repo.parent / 'releases'
+            releases.mkdir(mode=0o700)
+            old = releases / 'old'
+            self.repo.rename(old)
+            self.repo.symlink_to(old)
+        return self.repo.resolve()
+
+    def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False):
+        source = Path(tempfile.mkdtemp(dir=self.root)) / 'github'
+        shutil.copytree(self.repo, source)
+        self.release_fixture()
+        if initial:
+            self.repo.unlink()
         events = self.events = []
         real_command = d.command
         real_run = subprocess.run
@@ -110,18 +126,21 @@ class CheckoutTests(unittest.TestCase):
                 events.append(args[2])
                 return ''
             if 'fetch' in args:
-                return ''  # origin/main was set by the local fixture
+                argv = list(args)
+                argv = [str(source) if arg in ('origin', d.REMOTE) else arg for arg in argv]
+                argv[1:1] = ['-c', 'protocol.file.allow=always']
+                return real_command(*argv, **kwargs)
             return real_command(*args, **kwargs)
 
         def run(args, **kwargs):
             if args[0] == str(self.bun):
                 events.append('install')
                 self.assertEqual(args, [str(self.bun), 'install', '--frozen-lockfile', '--no-cache', '--backend=copyfile'])
-                self.assertEqual(d.git(self.repo, 'rev-parse', 'HEAD'), self.sha)
-                self.assertEqual((self.repo / 'tracked').read_text(), 'reviewed file\n')
-                self.assertFalse((self.repo / 'untracked').exists())
-                self.assertFalse((self.repo / 'node_modules').exists())
-                self.assertFalse((self.repo / 'pkg/node_modules/evil.js').exists())
+                self.assertEqual(d.git(Path(kwargs['cwd']), 'rev-parse', 'HEAD'), self.sha)
+                self.assertEqual((Path(kwargs['cwd']) / 'tracked').read_text(), 'reviewed file\n')
+                self.assertFalse((Path(kwargs['cwd']) / 'untracked').exists())
+                self.assertFalse((Path(kwargs['cwd']) / 'node_modules').exists())
+                self.assertFalse((Path(kwargs['cwd']) / 'pkg/node_modules/evil.js').exists())
                 if install_error:
                     raise subprocess.CalledProcessError(1, 'bun')
                 return subprocess.CompletedProcess(args, 0)
@@ -151,13 +170,13 @@ class CheckoutTests(unittest.TestCase):
         self.dirty()
         self.assertEqual(self.run_deploy(ValueError('CI unavailable')), [])
         self.assertEqual((self.repo / 'tracked').read_text(), 'dirty\n')
-        self.assertFalse((self.repo / '.git/verified-deploy.jsonl').exists())
+        self.assertFalse((self.state.parent / 'verified-deploy.jsonl').exists())
 
     def test_deployment_cleans_installs_copies_restarts_and_records(self):
         self.dirty()
-        self.assertEqual(self.run_deploy(), ['stop', 'install', 'restart', 'is-active'])
+        self.assertEqual(self.run_deploy(), ['install', 'stop', 'restart', 'is-active'])
         rows = [json.loads(line) for line in
-                (self.repo / '.git/verified-deploy.jsonl').read_text().splitlines()]
+                (self.state.parent / 'verified-deploy.jsonl').read_text().splitlines()]
         self.assertEqual([row['status'] for row in rows], ['verified', 'deployed'])
         self.assertEqual(rows[-1]['sha'], self.sha)
         self.assertEqual(self.state.read_text().strip(), self.sha)
@@ -165,9 +184,9 @@ class CheckoutTests(unittest.TestCase):
 
     def test_install_failure_is_logged_without_restart_or_success(self):
         self.dirty()
-        self.assertEqual(self.run_deploy(install_error=True), ['stop', 'install'])
+        self.assertEqual(self.run_deploy(install_error=True), ['install'])
         rows = [json.loads(line) for line in
-                (self.repo / '.git/verified-deploy.jsonl').read_text().splitlines()]
+                (self.state.parent / 'verified-deploy.jsonl').read_text().splitlines()]
         self.assertEqual([row['status'] for row in rows], ['verified', 'failed'])
 
     def test_install_failure_preserves_last_deployed_state(self):
@@ -250,7 +269,7 @@ class CheckoutTests(unittest.TestCase):
         self.commit()
         self.sha = d.git(self.repo, 'rev-parse', 'HEAD')
         d.git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.sha)
-        self.assertEqual(self.run_deploy(), ['stop', 'install', 'restart', 'is-active'])
+        self.assertEqual(self.run_deploy(), ['install', 'stop', 'restart', 'is-active'])
 
     def test_environment_disables_packed_replace_refs_and_grafted_history(self):
         original = self.sha
@@ -276,10 +295,10 @@ class CheckoutTests(unittest.TestCase):
         self.dirty()
         with self.assertRaisesRegex(ValueError, 'tree'):
             self.run_deploy(tree='f' * 40)
-        self.assertEqual(self.events, ['stop'])
+        self.assertEqual(self.events, [])
         self.assertFalse(self.state.exists())
         rows = [json.loads(line) for line in
-                (self.repo / '.git/verified-deploy.jsonl').read_text().splitlines()]
+                (self.state.parent / 'verified-deploy.jsonl').read_text().splitlines()]
         self.assertEqual([row['status'] for row in rows], ['verified', 'failed'])
 
     def test_lock_and_log_symlinks_are_refused_before_stop(self):
@@ -289,7 +308,7 @@ class CheckoutTests(unittest.TestCase):
         for name in ['verified-deploy.lock', 'verified-deploy.jsonl']:
             for target in [victim, self.root / 'absent']:
                 with self.subTest(name=name, target=target):
-                    link = self.repo / '.git' / name
+                    link = self.state.parent / name
                     link.unlink(missing_ok=True)
                     link.symlink_to(target)
                     try:
@@ -355,3 +374,18 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(self.run_deploy(ValueError('should not get to GitHub')), [])
         with self.assertRaisesRegex(ValueError, 'state directory'):
             d.deployment_commits(self.repo, self.sha, self.state, True)
+
+    def test_initial_deploy_creates_current_without_previous(self):
+        self.run_deploy(initial=True)
+        self.assertTrue(self.repo.is_symlink())
+        self.assertFalse((self.repo.parent / 'previous').exists())
+        self.assertEqual(self.state.read_text().strip(), self.sha)
+
+    def test_same_sha_redeploy_also_gets_new_git_and_keeps_previous(self):
+        self.run_deploy()
+        first = self.repo.resolve()
+        first_index = (first / '.git/index').read_bytes()
+        self.run_deploy()
+        self.assertNotEqual(self.repo.resolve(), first)
+        self.assertEqual((self.repo.parent / 'previous').resolve(), first)
+        self.assertEqual((first / '.git/index').read_bytes(), first_index)

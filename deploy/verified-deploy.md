@@ -42,18 +42,24 @@ first-parent commits are checked even if `--bootstrap` was supplied. Redeploying
 the same SHA rechecks its evidence. A refused earlier commit blocks the whole
 range even when the target itself is approved.
 
-The script requires a standalone clone, independent Git metadata, no worktrees or
-object alternates, and canonical HTTPS origin. It ignores global/system Git
-configuration; every wrapper command disables hooks and fsmonitor and permits
-only HTTPS transport. Before using the clone it reads local config without
-following includes and allows only `core.repositoryformatversion`, `core.filemode`,
-`core.bare`, `core.logallrefupdates`, `core.hooksPath`, `remote.origin.url` and
-`remote.origin.fetch`. All other local keys are refused. It disables object
-replacement and grafts with `GIT_NO_REPLACE_OBJECTS=1` and
-`GIT_GRAFT_FILE=/dev/null`, and refuses `.git/refs/replace`, `.git/info/grafts`,
-`.git/info/sparse-checkout` and `.git/info/attributes`, including dangling symlinks.
-It serializes operators with a lock in `.git`; both lock and log files are opened
-with `O_NOFOLLOW` so symlinks are refused.
+Each deployment creates a new mode-0700 directory under
+`/opt/workflowd/deploy/releases/` and a new operator-owned mode-0700 `.git` inside
+it. It initializes with an empty template and fetches main plus the exact target
+from `https://github.com/BNasraoui/workflowd.git` over HTTPS. Nothing from any
+retained release's `.git` is read, copied, hardlinked or reused: no objects, index,
+config, refs, hooks or info files. Each attempt, including redeploying the same
+SHA or rollback, gets a different directory and an independent full fetch.
+
+The fresh repository must still have independent Git metadata, no worktrees or
+object alternates, and canonical HTTPS origin. The local config allow-list and
+replacement/graft/sparse/attribute checks remain as defense in depth. Global and
+system Git configuration are ignored; hooks and fsmonitor are disabled and only
+HTTPS transport is permitted. `GIT_NO_REPLACE_OBJECTS=1` and
+`GIT_GRAFT_FILE=/dev/null` disable replacement/grafts, with
+`-c advice.graftFileDeprecated=false` suppressing the deprecated-grafts hint.
+Fetch object validation is enabled. The stable operator lock and audit log now
+live under `/opt/workflowd/operator/`, outside every release. Both are opened with
+`O_NOFOLLOW`; symlinks are refused.
 
 The entrypoint replaces its child environment, uses `/usr/bin:/bin`, and loads
 only a dedicated read-only token file into `GH_TOKEN` for `gh` calls. Git, Bun and
@@ -64,15 +70,23 @@ and token overrides are cleared. It requires an absolute pinned Bun executable,
 prints tool versions, and refuses Git older than 2.34, gh older than 2.45, or Bun
 other than 1.3.14. Run it with Python 3.9+ and `-I` from a trusted shell.
 
-After admission it stops all three units, resets and cleans, checks out the exact
-SHA detached, and resets/cleans again with `git clean -ffdx` (no dependency
-exclusion). It compares `HEAD^{tree}` with `commit.tree.sha` fetched from GitHub's
-commit API; a mismatch stops deployment before install or restart. It removes
-root `node_modules` before every install, including tracked files, and unlinks
-symlinks without following them. Installation uses the absolute Bun path
-with `install --frozen-lockfile --no-cache --backend=copyfile`; no shared Bun cache
-is trusted or hardlinked. Repository-local bunfig/npmrc and lifecycle policy are
-part of the reviewed commit.
+After admission it checks out the exact SHA detached into the new working tree,
+runs `git fsck --full --strict --no-dangling`, then compares `HEAD^{tree}` with
+GitHub's `commit.tree.sha`. Any failure leaves the active release and services
+untouched and removes the unsuccessful staging directory. No retained index stat
+cache, skip-worktree bit or object can influence the new checkout.
+
+It removes root `node_modules` before every install, including tracked files,
+unlinking symlinks without following them. Installation in the new directory uses
+the absolute Bun path with `install --frozen-lockfile --no-cache --backend=copyfile`;
+no shared Bun cache or earlier release dependencies are trusted or hardlinked.
+Repository-local bunfig/npmrc and lifecycle policy are part of the reviewed
+commit. Only after installation succeeds does it stop the three units, copy
+skills, record the previous release link, and atomically replace `current` with a
+symlink to the new release using a single rename on the same filesystem. Units
+use `/opt/workflowd/deploy/current` as their stable WorkingDirectory; the old
+release remains on disk unchanged. Activation is atomic for the service path;
+skill copies, service restarts and the state write are separate operations.
 
 Tracked `skills/rpi-*` blobs are copied using NUL-delimited Git filenames, preserving
 executable modes. Symlinks/submodules are refused. The destination must already
@@ -81,14 +95,56 @@ create it only in a dedicated managed root. Existing links are replaced without
 following them and obsolete RPI directories are removed. Never mark a general
 skill home as managed. The three units are then restarted and checked as active.
 
-JSON records in `<checkout>/.git/verified-deploy.jsonl` and stdout contain target
-and previous SHA, bootstrap status, state path, each admitted commit's PR/head,
-approval App/check IDs, GitHub tree SHA, CI check/run IDs, UTC time, paths, units and outcome.
-An admission refusal leaves units running and working files untouched. A tree
-mismatch after checkout leaves units stopped and records failure.
-Install/copy/restart failure records failure and requires operator recovery;
-units can remain stopped. There is no automatic unverified rollback. Unit state
-is not application health: the operator must validate that separately.
+JSON records in `/opt/workflowd/operator/verified-deploy.jsonl` and stdout contain
+target and previous SHA, release and previous-release paths, bootstrap status,
+state path, every admitted commit's PR/head, approval App/check IDs, GitHub tree
+SHA, CI check/run IDs, UTC time, paths, units and outcome. `verified` records API
+admission; only `deployed` plus the state file indicate successful activation.
+Install/integrity failures leave services running and the old link unchanged.
+Copy/activation/restart failures can leave units stopped; after activation the
+new release and previous release are both retained, and unsuccessful deployment
+does not advance state. There is no automatic unverified rollback. Unit state is
+not application health: the operator must validate that separately.
+
+## Layout, disk use and rollback
+
+```text
+/opt/workflowd/deploy/                 operator-owned, 0755; protected ancestors
+  current -> releases/<sha>-<random>  atomically replaced service path
+  previous -> releases/<sha>-<random> preceding activation, retained for recovery
+  releases/                          operator-owned, 0700
+    <sha>-<random>/                   fresh working tree, 0700
+      .git/                          independent Git directory, 0700
+      node_modules/                  separately installed dependencies
+/opt/workflowd/operator/              operator-owned, 0700
+  last-deployed                      last successful SHA, 0600
+  verified-deploy.lock                stable deployment lock, 0600
+  verified-deploy.jsonl               append-only audit records, 0600
+  github-token                       dedicated read-only token, 0600
+/opt/workflowd/skills/                 separately managed skill copies
+```
+
+Reserve disk for **current + previous + one staging release**, each containing a
+full independent Git history, working tree and installed dependencies. Every
+attempt downloads its own history; no alternates, shared objects or install
+cache reduce this cost. Successfully activated releases are never automatically
+deleted, so disk use grows until the operator prunes older releases. Inspect
+`du -sh /opt/workflowd/deploy/releases/*` and available space before deployment.
+Under the operator lock, remove only explicitly identified directories that are
+neither `current` nor `previous`, after checking audit records and confirming no
+process still uses them. Do not use broad cleanup globs. Interrupted preparation
+can leave an unreferenced staging directory; inspect it using the same procedure.
+
+For rollback, take the previous successful SHA from `last-deployed` (after a
+failed deploy) or the audit log's `previous_sha`, and record the recovery reason.
+Run the protected entrypoint with that SHA and explicit `--bootstrap` if it is
+not a forward deployment. The script rechecks current approval/main-CI evidence,
+fetches into another fresh directory, reinstalls dependencies and recopies skills
+before atomic activation. **Do not repoint `current` directly to `previous` or
+reuse its `.git`**: retained releases preserve the old files for recovery and
+inspection, but cannot be trusted as inputs to a new verified deployment. Do not
+edit state to bypass verification. If fresh verification is unavailable, leave
+services stopped and escalate to the operator; there is no offline bypass.
 
 ## Operator migration on mint
 
@@ -122,17 +178,15 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
    sudo install -d -o ben -g ben -m 0755 /opt/workflowd/deploy /opt/workflowd/skills
    sudo install -d -o ben -g ben -m 0700 /opt/workflowd/operator
    install -m 0644 /dev/null /opt/workflowd/skills/.workflowd-verified-skills
-   env -i PATH=/usr/bin:/bin HOME=/opt/workflowd/operator \
-     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-     git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-       -c protocol.allow=never -c protocol.https.allow=always \
-       clone --no-checkout --config core.hooksPath=/dev/null \
-       https://github.com/BNasraoui/workflowd.git /opt/workflowd/deploy
-   git -C /opt/workflowd/deploy config --local --remove-section branch.main
+   sudo install -d -o ben -g ben -m 0700 /opt/workflowd/deploy/releases
    ```
 
-   Remove the clone-created `branch.main` tracking settings as shown: deployment
-   uses detached SHAs, and those settings are outside its local config allow-list.
+   Leave `/opt/workflowd/deploy/current` absent for the first deployment. Do not
+   pre-clone or copy any old `.git` there; the entrypoint creates every repository.
+   For an installation using the earlier standalone-clone layout at
+   `/opt/workflowd/deploy`, stop units and move that entire directory to a named
+   backup before creating this layout. Retain its audit log separately. Never
+   migrate its Git metadata into `releases` as deployment input.
 
    Provision a **dedicated fine-grained read-only GitHub token**, restricted to this
    repository with Contents, Checks, Actions and Pull requests read permissions
@@ -169,8 +223,8 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
    directory with protected ancestors. Do not use an agent-writable `~/.bun/bin`.
 5. Repoint `workflowd.service`, `workflowd-runner.service` and
    `workflowd-mcp.service` WorkingDirectory and absolute ExecStart paths to the
-   protected clone and binaries. Preserve operator-owned credential/env files
-   outside the clone. Run `systemctl --user daemon-reload`. All three units must
+   stable `/opt/workflowd/deploy/current` path and pinned binaries. Preserve operator-owned credential/env files
+   outside the release directories. Run `systemctl --user daemon-reload`. All three units must
    exist. Audit any service Bun configuration/cache separately; deploy isolation
    does not rewrite service environments.
 6. Choose an approved merged SHA after its **post-merge main CI finishes**. The
@@ -188,7 +242,7 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
      -p MemoryMax=4G -p MemorySwapMax=0 \
      --working-directory=/opt/workflowd --setenv=PATH=/usr/bin:/bin \
      /usr/bin/python3 -I /usr/local/libexec/workflowd/verified-deploy.py \
-       "$deploy_sha" --checkout /opt/workflowd/deploy --skills /opt/workflowd/skills \
+       "$deploy_sha" --checkout /opt/workflowd/deploy/current --skills /opt/workflowd/skills \
        --github-token-file /opt/workflowd/operator/github-token \
        --approval-app-id "$approval_app_id" --bun /opt/workflowd/bin/bun --bootstrap
    ```
@@ -218,7 +272,7 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
 
 Unix accounts, ACLs, token scope, the operator shell and user-bus isolation are
 operator prerequisites; a same-UID script cannot establish them. Never use the
-protected clone as an agent worktree source.
+release directories as an agent worktree source.
 
 ## Tests
 
@@ -233,4 +287,6 @@ offline GitHub fixtures and the **real installed gh argument list**, with a loca
 Unix HTTP socket for paginated responses. No host units restart, no credentials
 are read, and no external GitHub API is called. Tests cover App/head binding,
 unchanged CI/suite checks, range refusal, bootstrap, state persistence, environment
-isolation, Git configuration, cleanup and skill copying.
+isolation, Git configuration, skill copying, fresh-directory attack regressions
+(skip-worktree, forged index stat data and poisoned loose objects), fsck failure,
+atomic activation and retained-release recovery.

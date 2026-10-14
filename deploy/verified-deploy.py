@@ -75,6 +75,7 @@ def command(*args, cwd=None, token=None):
 def git(checkout, *args):
     return command('git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
                    '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
+                   '-c', 'advice.graftFileDeprecated=false', '-c', 'fetch.fsckObjects=true',
                    '-C', str(checkout), *args)
 
 
@@ -228,7 +229,8 @@ def copy_skills(checkout, sha, target):
             for relative, mode, blob in files:
                 dest = staged / relative
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                data = subprocess.check_output(['git', '-C', str(checkout), 'cat-file', 'blob', blob])
+                data = subprocess.check_output(['git', '-c', 'advice.graftFileDeprecated=false',
+                                                '-C', str(checkout), 'cat-file', 'blob', blob])
                 dest.write_bytes(data)
                 dest.chmod(0o755 if mode == '100755' else 0o644)
             destination = target / name
@@ -251,58 +253,102 @@ def append_file(path):
                              0o600), 'a')
 
 
+def release_layout(checkout):
+    """Inspect only directory/link metadata, never a retained release's Git data."""
+    require_state_directory(checkout)
+    releases = checkout.parent / 'releases'
+    releases.mkdir(mode=0o700, exist_ok=True)
+    info = releases.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+            and info.st_mode & 0o077 == 0, 'Releases must be a private operator-owned directory')
+    previous = None
+    if checkout.exists() or checkout.is_symlink():
+        require(checkout.is_symlink(), 'Checkout must be absent or a release symlink; migrate the old clone')
+        previous = checkout.resolve(strict=True)
+        require(previous.parent == releases and previous.is_dir(),
+                'Checkout must point directly to a retained release directory')
+    return releases, previous
+
+
+def replace_link(link, target):
+    with tempfile.TemporaryDirectory(prefix='.activate-', dir=link.parent) as directory:
+        temporary = Path(directory) / 'link'
+        temporary.symlink_to(target, target_is_directory=True)
+        temporary.replace(link)
+    descriptor = os.open(link.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, token=None):
-    standalone(checkout)
+    require(re.fullmatch(r'[0-9a-f]{40}', sha), 'Use a full lowercase commit SHA')
     require_skill_target(skill_target)
-    # The lock lives outside the worktree cleaned below and serializes operators.
-    with append_file(checkout / '.git/verified-deploy.lock') as lock:
+    require_state_directory(state)
+    # Stable operator state, independent of all current and retained releases.
+    with append_file(state.parent / 'verified-deploy.lock') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        git(checkout, 'fetch', '--no-tags', '--prune', 'origin',
-            '+refs/heads/main:refs/remotes/origin/main')
-        verify_main(checkout, sha)
-        commits = deployment_commits(checkout, sha, state, bootstrap)
-        evidence = [verify_remote(commit, app_id, token=token) for commit in commits]
-        record = {'sha': sha, 'evidence': evidence, 'bootstrap': bootstrap,
-                  'previous_sha': private_file(state) if state.exists() else None,
-                  'state': str(state), 'checkout': str(checkout),
-                  'skills': str(skill_target), 'units': UNITS}
-        log_path = checkout / '.git/verified-deploy.jsonl'
+        releases, previous = release_layout(checkout)
+        release = Path(tempfile.mkdtemp(prefix=sha[:12] + '-', dir=releases))
+        activated = False
+        record = None
 
         def log(status):
             row = record | {'status': status, 'at': datetime.datetime.now(
                 datetime.timezone.utc).isoformat()}
-            with append_file(log_path) as output:
+            with append_file(state.parent / 'verified-deploy.jsonl') as output:
                 output.write(json.dumps(row) + '\n')
                 output.flush()
                 os.fsync(output.fileno())
             print(json.dumps(row), flush=True)
 
-        log('verified')
         try:
-            # Stop readers before mutating their working directory.
-            command('systemctl', '--user', 'stop', *UNITS)
-            git(checkout, 'reset', '--hard', 'HEAD')
-            git(checkout, 'clean', '-ffdx')
-            git(checkout, 'checkout', '--force', '--detach', sha)
-            git(checkout, 'reset', '--hard', sha)
-            git(checkout, 'clean', '-ffdx')
-            require(git(checkout, 'rev-parse', 'HEAD^{tree}') == evidence[-1]['tree'],
+            (release / '.git').mkdir(mode=0o700)
+            git(release, 'init', '--quiet', '--template=', '--initial-branch=main')
+            git(release, 'remote', 'add', 'origin', REMOTE)
+            standalone(release)
+            git(release, 'fetch', '--no-tags', REMOTE,
+                '+refs/heads/main:refs/remotes/origin/main', sha)
+            verify_main(release, sha)
+            commits = deployment_commits(release, sha, state, bootstrap)
+            evidence = [verify_remote(commit, app_id, token=token) for commit in commits]
+            record = {'sha': sha, 'evidence': evidence, 'bootstrap': bootstrap,
+                      'previous_sha': private_file(state) if state.exists() else None,
+                      'state': str(state), 'checkout': str(checkout), 'release': str(release),
+                      'previous_release': str(previous) if previous else None,
+                      'skills': str(skill_target), 'units': UNITS}
+            log('verified')
+            git(release, 'checkout', '--force', '--detach', sha)
+            git(release, 'fsck', '--full', '--strict', '--no-dangling')
+            require(git(release, 'rev-parse', 'HEAD^{tree}') == evidence[-1]['tree'],
                     'Checked-out tree differs from the GitHub commit tree')
-            dependencies = checkout / 'node_modules'
+            dependencies = release / 'node_modules'
             if dependencies.is_symlink() or dependencies.is_file():
                 dependencies.unlink()
             elif dependencies.exists():
                 shutil.rmtree(dependencies)
             subprocess.run([str(bun), 'install', '--frozen-lockfile', '--no-cache',
-                            '--backend=copyfile'], cwd=checkout, check=True)
-            copy_skills(checkout, sha, skill_target)
+                            '--backend=copyfile'], cwd=release, check=True)
+            # All Git reads, including skill blobs, use this fresh object store.
+            command('systemctl', '--user', 'stop', *UNITS)
+            copy_skills(release, sha, skill_target)
+            if previous:
+                replace_link(checkout.parent / 'previous', previous)
+            replace_link(checkout, release)
+            activated = True
             command('systemctl', '--user', 'restart', *UNITS)
             command('systemctl', '--user', 'is-active', '--quiet', *UNITS)
             log('deployed')
             write_state(state, sha)
         except Exception:
-            log('failed')
+            if record is not None:
+                log('failed')
             raise
+        finally:
+            # A post-activation failure retains both releases for operator recovery.
+            if not activated and checkout.resolve() != release:
+                shutil.rmtree(release)
 
 
 def check_toolchain(bun):
@@ -351,14 +397,16 @@ def main():
     require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
     require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
     require(args.bun.is_absolute(), 'Bun path must be absolute')
-    checkout = args.checkout.resolve()
+    require(args.checkout.is_absolute(), 'Checkout path must be absolute')
+    checkout = args.checkout.parent.resolve() / args.checkout.name
+    require(checkout.name not in ('releases', 'previous'), 'Reserved checkout name')
     require_skill_target(args.skills)
     target = args.skills.resolve()
-    require(not target.is_relative_to(checkout) and not checkout.is_relative_to(target),
+    require(not target.is_relative_to(checkout.parent) and not checkout.parent.is_relative_to(target),
             'Skill directory must be separate from the deployment checkout')
     for path in (DEPLOY_STATE, args.github_token_file, args.bun):
         require(path.is_absolute() and not path.is_symlink(), 'Use absolute non-symlink operator paths')
-        require(not path.resolve().is_relative_to(checkout)
+        require(not path.resolve().is_relative_to(checkout.parent)
                 and not path.resolve().is_relative_to(target),
                 'State, credentials and Bun must be outside checkout and skills')
     require(DEPLOY_STATE != args.github_token_file.resolve() and DEPLOY_STATE != args.bun.resolve(),

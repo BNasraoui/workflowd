@@ -101,12 +101,16 @@ class RuntimeTests(unittest.TestCase):
             skills = root / 'skills'
             skills.mkdir()
             (skills / '.workflowd-verified-skills').touch()
-            argv = ['verified-deploy.py', 'a' * 40, '--checkout', str(root / 'checkout'),
+            argv = ['verified-deploy.py', 'a' * 40, '--checkout', str(root / 'deployment/current'),
                     '--skills', str(skills), '--github-token-file', str(token),
                     '--approval-app-id', '98765', '--bun', str(root / 'bun')]
+            old = root / 'deployment/releases/old'
+            old.mkdir(parents=True)
+            (root / 'deployment/current').symlink_to(old)
             observed = []
 
             def deploy(checkout, sha, target, actual_state, app_id, bun, bootstrap, token=None):
+                self.assertEqual(checkout, root / 'deployment/current')
                 self.assertEqual(token, 'fixture')
                 self.assertNotIn('GH_TOKEN', os.environ)
                 observed.append(actual_state)
