@@ -1551,3 +1551,25 @@ async function deployedHost(
     },
   }
 }
+
+test("the host configuration refuses missing or relative sockets when a policy exists", async () => {
+  const { requireAgentHostSocket } = await import("../../src/agent-host/config")
+  const root = await mkdtemp(join(tmpdir(), "host-policy-admission-"))
+  const policy = join(root, "policy.json")
+  try {
+    await requireAgentHostSocket(undefined, policy)
+    await writeFile(policy, "{}")
+    await expect(requireAgentHostSocket(undefined, policy)).rejects.toThrow(
+      "required by the installed host policy",
+    )
+    await requireAgentHostSocket("/run/host.sock", policy)
+    await expect(requireAgentHostSocket("relative.sock", policy)).rejects.toThrow(
+      "must be absolute",
+    )
+    await expect(requireAgentHostSocket(undefined, join(policy, "child"))).rejects.toMatchObject({
+      code: "ENOTDIR",
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
