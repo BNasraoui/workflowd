@@ -192,19 +192,48 @@ async function nativeBoundary(simulatedManager: boolean) {
     : [
         `/tmp/workflowd-private-${randomUUID()}`,
         "/etc/workflowd/native-fixture-app-key",
-        "/var/lib/workflowd/controller/native-fixture.db",
-        "/var/lib/workflowd/nats/native-fixture.creds",
+        // Match controller stateRoot() and the deployed NATS/noscope layout.
+        "/home/ben-fixture/.local/state/workflowd/workflowd.db",
+        "/home/ben-fixture/.config/workflowd/env",
+        "/home/ben-fixture/.config/nats/nats.conf",
+        "/home/ben-fixture/.local/share/nats/nsc/keys/native-fixture.seed",
+        "/home/ben-fixture/.config/noscope/providers/nats.toml",
+        "/run/credentials/workflowd.service/nats-creds",
         "/home/ben-fixture/.ssh/native-fixture-key",
         "/home/ben-fixture/.config/gh/native-fixture-token",
       ]
   for (const path of boundaryFiles) {
     await mkdir((await import("node:path")).dirname(path), { recursive: true })
-    await writeFile(path, "private-boundary-canary", { mode: 0o644 })
+    await writeFile(path, "private-boundary-canary", { mode: 0o644, flag: "wx" })
   }
   const boundarySockets: Array<ReturnType<typeof createServer>> = []
   const createdSockets: string[] = []
+  let dockerMode: number | undefined
   if (!simulatedManager) {
-    for (const path of ["/run/docker.sock", "/run/tailscale/tailscaled.sock"]) {
+    const docker = await stat("/run/docker.sock")
+    expect(docker.isSocket()).toBe(true)
+    dockerMode = docker.mode & 0o777
+    await chmod("/run/docker.sock", 0o666)
+    // Prove the real Docker daemon and the file canaries are accessible to this
+    // UID outside the unit, so DAC cannot make the isolation assertions vacuous.
+    const probe = Bun.spawn(
+      [
+        "/usr/bin/setpriv",
+        "--reuid",
+        String(agentUid),
+        "--regid",
+        String(groupGid),
+        "--clear-groups",
+        "/usr/bin/python3",
+        "-c",
+        'import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect("/run/docker.sock"); s.sendall(b"GET /_ping HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n"); assert b"200 OK" in s.recv(4096); [open(p).read() for p in __import__("sys").argv[1:]]',
+        ...boundaryFiles,
+      ],
+      { stdout: "ignore", stderr: "pipe" },
+    )
+    const diagnostic = await new Response(probe.stderr).text()
+    expect({ status: await probe.exited, diagnostic }).toEqual({ status: 0, diagnostic: "" })
+    for (const path of ["/run/tailscale/tailscaled.sock"]) {
       if (!(await stat(path).catch(() => null))) {
         await mkdir((await import("node:path")).dirname(path), { recursive: true })
         const socket = createServer((connection) => connection.end())
@@ -1131,6 +1160,7 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
     }
     await host.close()
     if (!simulatedManager) {
+      if (dockerMode !== undefined) await chmod("/run/docker.sock", dockerMode)
       for (const socket of boundarySockets)
         await new Promise<void>((resolve) => socket.close(() => resolve()))
       for (const path of createdSockets) await rm(path, { force: true })
@@ -1378,7 +1408,7 @@ test("controller discovery and workspace adapters use host custody without local
     await Effect.runPromise(agentRunWorktrees(socket).create(input))
     await Effect.runPromise(agentRunWorktrees(socket).create(input))
     expect(starts.at(-1)).toMatchObject({ ...input, profile: "workspace" })
-    expect(starts.at(-1)?.runId).toBe(starts.at(-2)?.runId)
+    expect(starts.at(-1)?.runId).not.toBe(starts.at(-2)?.runId)
     exitCode = 1
     const failed = await Effect.runPromise(
       agentRunWorktrees(socket).create(input).pipe(Effect.result),

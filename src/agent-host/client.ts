@@ -139,6 +139,7 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
     const socket = connect(path)
     let data = ""
     let settled = false
+    let written = false
     const fail = (error: unknown) => {
       settled = true
       socket.destroy()
@@ -146,17 +147,25 @@ function requestAgentHostResponse(path: string, request: import("./protocol").Ho
     }
     const unavailable = () =>
       fail(
-        credentialRefusal(
-          request.operation === "start" && request.profile.startsWith("codex") ? "codex" : "claude",
-          "credential_host_unreachable_or_timed_out",
-        ),
+        written && request.operation === "start"
+          ? new Error("host start result uncertain; request written but acknowledgement lost")
+          : credentialRefusal(
+              request.operation === "start" && request.profile.startsWith("codex")
+                ? "codex"
+                : "claude",
+              "credential_host_unreachable_or_timed_out",
+            ),
       )
     socket.setTimeout(15000, unavailable)
     socket.on("error", unavailable)
     socket.on("close", () => {
       if (!settled) unavailable()
     })
-    socket.on("connect", () => socket.write(JSON.stringify(request) + "\n"))
+    socket.on("connect", () => {
+      // Once handed to the socket, even a partial write may have reached the host.
+      written = true
+      socket.write(JSON.stringify(request) + "\n")
+    })
     socket.on("data", (chunk) => {
       data += chunk.toString()
       if (Buffer.byteLength(data) > 100000) {

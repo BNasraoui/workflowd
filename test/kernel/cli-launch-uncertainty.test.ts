@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { makeCodexCli } from "../../src/kernel/codex-session"
 import { makeClaudeDispatchCli } from "../../src/kernel/claude-dispatch"
 import {
@@ -243,3 +243,86 @@ for (const kind of ["codex", "claude"] as const)
         await rm(root, { recursive: true, force: true })
       }
     })
+
+for (const boundary of ["before write", "after start"] as const) {
+  test(`host disconnect ${boundary} preserves the correct launch custody`, async () => {
+    const { createServer } = await import("node:net")
+    const { makeHostCli } = await import("../../src/agent-host/client")
+    const { credentialReason, agentHostUnitName, HostRequest } =
+      await import("../../src/agent-host/protocol")
+    const root = await mkdtemp(join(tmpdir(), "host-start-uncertain-"))
+    const socket = join(root, "host.sock")
+    let starts = 0
+    const host = createServer((connection) => {
+      let data = ""
+      connection.on("data", (chunk) => {
+        data += chunk.toString()
+        if (!data.includes("\n")) return
+        const request = Schema.decodeUnknownSync(HostRequest)(JSON.parse(data))
+        if (request.operation === "inspect") {
+          connection.end(
+            JSON.stringify({
+              admitted: true,
+              process: {
+                runId: request.runId,
+                launchId: "retained-launch",
+                unit: agentHostUnitName(request.runId),
+                invocationId: "retained-invocation",
+                uid: 12345,
+                pid: 1,
+                started: new Date().toISOString(),
+                active: true,
+                exitCode: null,
+              },
+            }) + "\n",
+          )
+        } else {
+          expect(request.operation).toBe("start")
+          starts++
+          connection.destroy()
+        }
+      })
+    })
+    if (boundary === "after start")
+      await new Promise<void>((resolve) => host.listen(socket, resolve))
+    const cli = {
+      ...makeHostCli(socket, "codex", () => ({ type: "other" })),
+      preflight: Effect.void,
+    }
+    const input = {
+      route: "scan",
+      repository: "workflowd",
+      prompt: "inert",
+      idempotencyKey: "drop",
+    }
+    const id = agentRunIdentifiers({ ...input, parentSessionId: null, resumePrompt: null }).runId
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          const first = yield* register(input).pipe(Effect.result)
+          expect(first._tag).toBe("Failure")
+          if (first._tag === "Failure")
+            expect(credentialReason(first.failure)).toBe(
+              boundary === "after start" ? undefined : "credential_host_unreachable_or_timed_out",
+            )
+          expect((yield* store.read(id))?.state).toBe(
+            boundary === "after start" ? "spawning" : undefined,
+          )
+          if (boundary === "after start") {
+            yield* register(input).pipe(Effect.result)
+            expect(starts).toBe(1)
+            const retained = yield* store.read(id)
+            expect(retained?.state).toBe("spawning")
+            const attached = yield* cli.attach({ runId: id })
+            expect(attached?.executionId).toBe(agentHostUnitName(id))
+            expect(starts).toBe(1)
+          }
+        }).pipe(Effect.provide(makeLayer(makeProvider(defaultState()), worktrees([]), cli))),
+      )
+    } finally {
+      if (host.listening) await new Promise<void>((resolve) => host.close(() => resolve()))
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}

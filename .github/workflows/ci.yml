@@ -247,17 +247,32 @@ jobs:
               assert len(matching) == 1 and len(matching[0]) == 0, f'Missing or unsuccessful required test: {name}'
           PYTEST
       - name: Require two-UID credential admission and repair
-        run: >-
-          sudo systemd-run --wait --pipe --collect
-          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD"
-          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin
-          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001
-          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002
-          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000
-          /opt/workflowd-credential-fixture/bin/bun test
-          test/agent-user/credentials.e2e.test.ts
-          test/agent-user/credential-dispatch.e2e.test.ts
-          test/agent-user/opencode-migration.e2e.test.ts
+        run: |
+          set -euo pipefail
+          sudo systemd-run --wait --pipe --collect \
+          -p MemoryMax=6G -p MemorySwapMax=0 --working-directory="$PWD" \
+          --setenv=PATH=/opt/workflowd-credential-fixture/bin:/usr/bin:/bin \
+          --setenv=WORKFLOWD_AGENT_TEST_BEN_UID=61001 \
+          --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
+          --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
+          /opt/workflowd-credential-fixture/bin/bun test \
+          test/agent-user/credentials.e2e.test.ts \
+          test/agent-user/credential-dispatch.e2e.test.ts \
+          test/agent-user/opencode-migration.e2e.test.ts --reporter=junit --reporter-outfile=/tmp/workflowd-credential-tests.xml
+          python3 - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          cases = ET.parse('/tmp/workflowd-credential-tests.xml').findall('.//testcase')
+          assert len(cases) >= 58, f'Expected at least 58 credential tests, got {len(cases)}'
+          assert all(len(case) == 0 for case in cases), 'Credential tests failed or skipped'
+          for name in [
+              'a replaced login refuses even with identical bytes; explicit relink restores both links',
+              'relink auto preserves an opposite-side login replaced during import',
+              'relink ben preserves an opposite-side login replaced during import',
+              'relink caps a source that grows after its size check',
+              'relink refuses an active or uncertain unit recorded in host custody',
+          ]:
+              assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
+          PYTEST
       - name: Require administrative credential coverage
         run: |
           mkdir -p coverage/administrative

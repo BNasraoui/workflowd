@@ -165,3 +165,53 @@ still in use by a process. Roll back by running the protected entrypoint for the
 previous successful SHA with explicit `--bootstrap` when required; it verifies
 and builds a fresh release again. Never directly reactivate retained `.git` or
 edit deployment state. See the runbook's layout, cleanup and recovery procedures.
+
+## Phase 2 reviewed deviations and protocol
+
+The Phase 2 continuation explicitly records two deviations from the original
+plan: the root host needs `CAP_SYS_PTRACE` to inspect `/proc` across UIDs and
+refuse repair while consumers run; and its protocol includes `connect` in
+addition to `start`, `inspect`, `listOwned`, `stop`, and bounded `exchange`.
+The agent units receive no capabilities. `connect` authenticates the controller
+peer UID and requires the run's launch nonce and an active owned process. It
+relays line-delimited JSON RPC to the agent-owned Codex app-server socket,
+allowlists methods, and holds credential admission across each forwarded turn.
+The agent controls that socket's directory, so the relay remains inside the
+shared agent-UID trust domain; it does not authenticate individual agent sessions
+against one another.
+
+Rollout must allow an idle repair window: automatic relink refuses while **any
+agent unit** or the operator's **Claude or Codex** runs, including unrelated
+runs. Active or unconfirmed host custody is an additional fence even if a process
+scan misses a consumer. Finished custody is reconciled by host inspection and
+collection; unresolved launches require operator investigation. Expect
+`credential_relink_in_progress` until consumers are idle and custody is resolved.
+No automatic relink stops consumers for the operator.
+
+Both manual and automatic repair recheck both paths immediately before each link
+replacement. Linux `renameat2(RENAME_EXCHANGE)` retains the displaced entry for
+validation and swaps it back on a race; a mismatch keeps the repair journal and
+refuses admission. Explicit recovery of a missing link uses `RENAME_NOREPLACE`.
+Import reads at most 1 MiB + 1 bytes and refuses an oversized source, including
+one that grows after inspection. A login arriving during import is preserved;
+the journal fences the already imported canonical value for explicit recovery.
+
+A host connection lost after writing `start` is an uncertain launch, so the
+controller retains its spawning row for reattachment. Only transport failures
+before the request is written can report an unreachable-host refusal. Workspace
+setup runs with a fresh custody identity on each request, skips clone/checkout
+for an existing directory, and reinstalls the Git guard as the agent UID.
+
+Disposable privileged CI checks denial of the real Docker socket after proving
+that the agent UID can ping it outside the unit, then restores its permissions.
+It also probes `/run/credentials/workflowd.service/nats-creds`, the controller's
+`.local/state/workflowd/workflowd.db`, and deployed NATS/noscope paths in the
+fixture operator home. These contain only synthetic canaries. JUnit checks require
+successful credential tests and the named repair regressions, preventing a skipped
+privileged suite from passing silently.
+
+PR #112's repository-config isolation also applies to host launches: native
+Claude launch and both host/local resume use `--setting-sources user`, while
+sandboxed Claude keeps empty setting sources. Host Codex app-server and model
+discovery pass the same untrusted-project configuration arguments as the resident
+launcher. See [Agent project config](agent-project-config.md).

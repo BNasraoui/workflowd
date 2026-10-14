@@ -261,33 +261,40 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
       request.base?.startsWith("-")
     )
       throw new Error("invalid workspace selection")
-    await Effect.runPromise(
-      runWorkspaceCommand("clone agent repository", [
-        "/usr/bin/git",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "clone",
-        "--no-local",
-        "--no-hardlinks",
-        "--no-checkout",
-        "--",
-        request.repository,
-        request.directory,
-      ]),
-    )
-    await Effect.runPromise(
-      runWorkspaceCommand("checkout agent branch", [
-        "/usr/bin/git",
-        "-C",
-        request.directory,
-        "-c",
-        "core.hooksPath=/dev/null",
-        "checkout",
-        "-B",
-        request.branch,
-        request.base ?? "origin/HEAD",
-      ]),
-    )
+    const existing = await stat(request.directory).catch((error: unknown) => {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return null
+      throw error
+    })
+    if (existing && !existing.isDirectory()) throw new Error("workspace is not a directory")
+    if (!existing) {
+      await Effect.runPromise(
+        runWorkspaceCommand("clone agent repository", [
+          "/usr/bin/git",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "clone",
+          "--no-local",
+          "--no-hardlinks",
+          "--no-checkout",
+          "--",
+          request.repository,
+          request.directory,
+        ]),
+      )
+      await Effect.runPromise(
+        runWorkspaceCommand("checkout agent branch", [
+          "/usr/bin/git",
+          "-C",
+          request.directory,
+          "-c",
+          "core.hooksPath=/dev/null",
+          "checkout",
+          "-B",
+          request.branch,
+          request.base ?? "origin/HEAD",
+        ]),
+      )
+    }
     await Effect.runPromise(installAgentGitGuard(request.directory, request.git))
     await writeFile(options.eventsFile, "", {
       mode: 0o600,

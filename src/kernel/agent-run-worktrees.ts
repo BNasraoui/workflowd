@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { randomUUID } from "node:crypto"
 import { startAgentHost, readAgentHostOutput } from "../agent-host/client"
 import { normalizeError } from "../errors"
 import type { AgentGitConfig } from "../agent-git/config"
@@ -139,7 +139,7 @@ export const agentRunWorktrees = (socket: string | undefined): AgentRunWorktrees
             try: async (signal) => {
               const process = await startAgentHost(socket, {
                 profile: "workspace",
-                runId: `workspace-${createHash("sha256").update(input.directory).digest("hex")}`,
+                runId: `workspace-${randomUUID()}`,
                 directory: input.directory,
                 repository: input.repository,
                 branch: input.branch,
