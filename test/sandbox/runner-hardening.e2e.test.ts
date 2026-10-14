@@ -129,6 +129,17 @@ test("container-use works over a private socket while nested engine access is dr
     )
     try {
       await runner.docker("exec", host, "sh", "/setup.sh")
+      // Exercise the synthetic topology with strict reverse-path validation,
+      // independently of the Docker host's defaults.
+      await runner.docker(
+        "exec",
+        host,
+        "sh",
+        "-c",
+        `for ns in host target tailtarget; do
+          ip netns exec "$ns" sh -c 'for conf in /proc/sys/net/ipv4/conf/*/rp_filter; do echo 1 > "$conf"; done'
+        done`,
+      )
       expect(
         await command([
           process.execPath,
