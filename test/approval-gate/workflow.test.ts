@@ -14,8 +14,28 @@ test("the approval workflow exists and passes the repository privilege policy", 
   const workflow = Bun.YAML.parse(files["ben-approval.yml"]!)
   expect(workflow).toHaveProperty(
     "run-name",
-    "Ben approval for PR #${{ inputs.pr_number }} at ${{ inputs.head_sha }}",
+    "Ben approval: ${{ inputs.action }} ${{ inputs.head_sha }} (PR #${{ inputs.pr_number }})",
   )
+  expect(workflow).toHaveProperty(
+    "on.workflow_dispatch.inputs.action",
+    expect.objectContaining({
+      type: "choice",
+      required: true,
+      default: "approve",
+      options: ["approve", "revoke"],
+    }),
+  )
+  expect(workflow).toHaveProperty("on.workflow_dispatch.inputs.pr_number.required", false)
+  expect(workflow).toHaveProperty("concurrency", {
+    group: "ben-approval-${{ inputs.head_sha }}",
+    "cancel-in-progress": false,
+  })
+  expect(workflow).toHaveProperty("jobs.approve.env", {
+    PR_NUMBER: "${{ inputs.pr_number }}",
+    HEAD_SHA: "${{ inputs.head_sha }}",
+    APPROVAL_ACTION: "${{ inputs.action }}",
+    BEN_APPROVAL_APP_ID: "${{ vars.BEN_APPROVAL_APP_ID }}",
+  })
   expect(() => assertUnprivilegedPrWorkflows(files)).not.toThrow()
   for (const [before, after] of [
     ["workflow_dispatch:", "pull_request_target:"],

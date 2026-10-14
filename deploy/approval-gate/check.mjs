@@ -36,21 +36,24 @@ async function list(request, path, key) {
 
 export async function runGate(mode, env, request) {
   const sha = env.HEAD_SHA
+  const revoke = env.APPROVAL_ACTION === "revoke"
+  if (revoke && (env.PR_NUMBER ?? "") !== "")
+    throw new Error("PR number must be empty for revoke")
   if (
     !["validate", "publish"].includes(mode) ||
+    !["approve", "revoke"].includes(env.APPROVAL_ACTION) ||
+    !/^[1-9][0-9]*$/.test(env.BEN_APPROVAL_APP_ID ?? "") ||
     env.GITHUB_REPOSITORY !== repository ||
     env.GITHUB_EVENT_NAME !== "workflow_dispatch" ||
     env.GITHUB_REF !== "refs/heads/main" ||
     env.GITHUB_RUN_ATTEMPT !== "1" ||
-    !/^[1-9][0-9]*$/.test(env.PR_NUMBER ?? "") ||
+    (!revoke && !/^[1-9][0-9]*$/.test(env.PR_NUMBER ?? "")) ||
     !/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID ?? "") ||
     !/^[a-f0-9]{40}$/.test(sha ?? "")
   )
     throw new Error(
-      "Use a fresh workflow_dispatch from main with a PR number and full lowercase head SHA",
+      "Use a fresh workflow_dispatch from main with approve/revoke, a numeric App ID, a full lowercase SHA, and a PR number for approve",
     )
-  const prPath = `${root}/pulls/${env.PR_NUMBER}`
-  requireEligiblePr(await request(prPath), sha)
   const approvals = await request(`${root}/actions/runs/${env.GITHUB_RUN_ID}/approvals`)
   const reviewsOfEnvironment = approvals.filter((approval) =>
     approval.environments.some((environment) => environment.name === "ben-merge-approval"),
@@ -63,6 +66,27 @@ export async function runGate(mode, env, request) {
   )
     throw new Error("This run requires Ben's recorded environment approval")
 
+  if (!revoke) await requireReadyPr(env, request)
+  if (mode === "publish")
+    await request(`${root}/check-runs`, {
+      name: "Ben approval",
+      head_sha: sha,
+      status: "completed",
+      conclusion: revoke ? "failure" : "success",
+      details_url: `https://github.com/${repository}/actions/runs/${env.GITHUB_RUN_ID}`,
+      output: {
+        title: revoke ? "Ben revoked approval for this commit" : "Ben approved this PR head",
+        summary: revoke
+          ? `Approval revoked for ${sha} across all PRs. Ben authorized revocation through the protected environment.`
+          : `PR #${env.PR_NUMBER}, head ${sha}. Protected environment approval and visible review/check state verified.`,
+      },
+    })
+}
+
+async function requireReadyPr(env, request) {
+  const sha = env.HEAD_SHA
+  const prPath = `${root}/pulls/${env.PR_NUMBER}`
+  requireEligiblePr(await request(prPath), sha)
   const reviews = await list(request, `${prPath}/reviews`)
   const latest = new Map()
   for (const review of reviews.sort((a, b) => a.id - b.id)) {
@@ -90,28 +114,17 @@ export async function runGate(mode, env, request) {
   if (
     checks.some(
       (check) =>
-        check.status !== "completed" ||
-        !["success", "neutral", "skipped"].includes(check.conclusion),
+        !(check.name === "Ben approval" && String(check.app?.id) === env.BEN_APPROVAL_APP_ID) &&
+        (check.status !== "completed" ||
+          !["success", "neutral", "skipped"].includes(check.conclusion)),
     )
   )
     throw new Error("A check (including any independent review) is pending or unsuccessful")
   const statuses = await list(request, `${root}/commits/${sha}/status`, "statuses")
   if (statuses.some((status) => status.state !== "success"))
     throw new Error("A commit status is pending or unsuccessful")
-  // Narrow the read/write race. A subsequent push cannot reuse this SHA-bound check.
+  // Narrow the read/write race. Other PRs may still reuse this exact SHA.
   requireEligiblePr(await request(prPath), sha)
-  if (mode === "publish")
-    await request(`${root}/check-runs`, {
-      name: "Ben approval",
-      head_sha: sha,
-      status: "completed",
-      conclusion: "success",
-      details_url: `https://github.com/${repository}/actions/runs/${env.GITHUB_RUN_ID}`,
-      output: {
-        title: "Ben approved this PR head",
-        summary: `PR #${env.PR_NUMBER}, head ${sha}. Protected environment approval and visible review/check state verified.`,
-      },
-    })
 }
 
 export async function githubRequest(path, body) {
