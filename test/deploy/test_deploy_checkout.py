@@ -114,6 +114,7 @@ class CheckoutTests(unittest.TestCase):
     def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False):
         source = Path(tempfile.mkdtemp(dir=self.root)) / 'github'
         shutil.copytree(self.repo, source)
+        d.git(source, 'update-ref', 'refs/heads/main', self.sha)
         self.release_fixture()
         if initial:
             self.repo.unlink()
@@ -150,7 +151,7 @@ class CheckoutTests(unittest.TestCase):
              patch.object(d.subprocess, 'run', side_effect=run), \
              patch.object(d, 'verify_remote', side_effect=verification_error,
                           return_value={'pr': 42, 'check_id': 10, 'run_id': 30,
-                                        'tree': tree or d.git(self.repo, 'rev-parse', f'{self.sha}^{{tree}}')}):
+                                        'tree': tree or d.git(source, 'rev-parse', f'{self.sha}^{{tree}}')}):
             if verification_error or install_error:
                 with self.assertRaises((ValueError, subprocess.CalledProcessError)):
                     d.deploy(self.repo, self.sha, self.skills, self.state, APP_ID, self.bun, bootstrap=True)
