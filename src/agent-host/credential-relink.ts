@@ -295,6 +295,30 @@ export async function admitHostCredentials(policy: CredentialPolicy, client: "co
   }
 }
 
+async function loadRepair(
+  path: string,
+  ownerUid: number,
+  client: "codex" | "claude",
+  source: "ben" | "agent",
+  automatic: boolean,
+) {
+  const existing = await absentOrStat(path)
+  if (!existing) return undefined
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  if (
+    automatic ||
+    !existing.isFile() ||
+    existing.uid !== ownerUid ||
+    (existing.mode & 0o777) !== 0o600
+  )
+    fail()
+  const repair = Schema.decodeUnknownSync(Repair)(JSON.parse(await readFile(path, "utf8")))
+  if (repair.client !== client || repair.source !== source) fail()
+  return repair
+}
+
 /** Administrative offline repair. Failure deliberately leaves a durable admission fence. */
 export async function relinkCredentials(
   policy: CredentialPolicy,
@@ -334,17 +358,14 @@ export async function relinkCredentials(
       fail()
     const storePath = `/proc/self/fd/${canonical.handle.fd}`
     const journalPath = join(storePath, `${client}.repair.json`)
-    const existing = await lstat(journalPath).catch(() => null)
-    if (
-      existing &&
-      (!existing.isFile() || existing.uid !== policy.ownerUid || (existing.mode & 0o777) !== 0o600)
+    const repair = await loadRepair(
+      journalPath,
+      policy.ownerUid,
+      client,
+      source,
+      automatic !== undefined,
     )
-      fail()
-    const repair = existing
-      ? Schema.decodeUnknownSync(Repair)(JSON.parse(await readFile(journalPath, "utf8")))
-      : undefined
-    if (automatic && (existing || !otherInfo)) fail()
-    if (repair && (repair.client !== client || repair.source !== source)) fail()
+    if (automatic && !otherInfo) fail()
     if (!repair && sourceInfo?.isSymbolicLink()) {
       await inspectCredentialLayout(policy, client)
       return
