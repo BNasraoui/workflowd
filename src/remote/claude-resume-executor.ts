@@ -1,3 +1,4 @@
+import type { WorkspaceError } from "../workspace/errors"
 import { credentialReason } from "../agent-host/protocol"
 import { Context, Effect, Schema } from "effect"
 import type { ClaudeCliPort } from "../kernel/claude-session"
@@ -65,6 +66,15 @@ const failed = (
   ...(failureDetail === undefined ? {} : { failureDetail }),
 })
 
+const failureOutcome = (error: WorkspaceError): ClaudeResumeOutcome => {
+  const reason = credentialReason(error)
+  if (reason === "credential_host_unreachable_or_timed_out") return { status: "pending" }
+  if (reason !== undefined) return failed(reason)
+  const message = error.cause.message
+  if (message.startsWith("host_request_refused")) return failed("host_request_refused", message)
+  return failed(message.includes("did not finish within") ? "cli_timeout" : "cli_failed")
+}
+
 const underAllowedDirectory = (directory: string, prefixes: ReadonlyArray<string>) =>
   prefixes.some((prefix) => directory === prefix || directory.startsWith(`${prefix}/`))
 
@@ -119,21 +129,7 @@ export const makeClaudeResumeExecutor = (options: {
       .pipe(
         Effect.map((stdout) => ({ ok: true as const, stdout })),
         Effect.catch((error) =>
-          credentialReason(error) === "credential_host_unreachable_or_timed_out"
-            ? Effect.fail(error)
-            : Effect.succeed({
-                ok: false as const,
-                failureReason:
-                  credentialReason(error) ??
-                  (error.cause.message.startsWith("host_request_refused")
-                    ? ("host_request_refused" as const)
-                    : String(error.cause.message).includes("did not finish within")
-                      ? ("cli_timeout" as const)
-                      : ("cli_failed" as const)),
-                ...(error.cause.message.startsWith("host_request_refused")
-                  ? { failureDetail: error.cause.message }
-                  : {}),
-              }),
+          Effect.succeed({ ok: false as const, outcome: failureOutcome(error) }),
         ),
       )
 
@@ -153,14 +149,9 @@ export const makeClaudeResumeExecutor = (options: {
           nativeSessionId: payload.nativeSessionId,
           directory: payload.directory,
         })
-        .pipe(
-          Effect.catch((error) =>
-            credentialReason(error) === "credential_host_unreachable_or_timed_out"
-              ? Effect.fail(error)
-              : Effect.succeed(false),
-          ),
-        )
-      if (!exists) return failed("transcript_missing")
+        .pipe(Effect.result)
+      if (exists._tag === "Failure") return failureOutcome(exists.failure)
+      if (!exists.success) return failed("transcript_missing")
 
       const schemaObject = parseSchemaObject(payload.extractionSchemaJson)
       if (schemaObject === null) return failed("cli_failed")
@@ -170,7 +161,7 @@ export const makeClaudeResumeExecutor = (options: {
         payload.prompt,
         deliveryId === undefined ? undefined : `${deliveryId}-wake`,
       )
-      if (!wake.ok) return failed(wake.failureReason, wake.failureDetail)
+      if (!wake.ok) return wake.outcome
       if ((yield* parseEnvelope(wake.stdout))._tag === "None") return failed("cli_failed")
 
       const extracted = yield* extractOutput(payload, schemaObject, deliveryId)
@@ -195,7 +186,7 @@ export const makeClaudeResumeExecutor = (options: {
               : `${deliveryId}-${feedback === undefined ? "extract" : "retry"}`,
           )
           if (!extraction.ok) {
-            return { outcome: failed(extraction.failureReason, extraction.failureDetail) }
+            return { outcome: extraction.outcome }
           }
           const answer = yield* parseEnvelope(extraction.stdout)
           if (answer._tag === "None") return { outcome: failed("cli_failed") }
@@ -214,25 +205,17 @@ export const makeClaudeResumeExecutor = (options: {
 
   const hasDelivery = options.cli.hasDelivery
   return {
-    execute: (payload, deliveryId) =>
-      execute(payload, deliveryId).pipe(
-        Effect.catch(() => Effect.succeed({ status: "pending" as const })),
-      ),
+    execute,
     ...(hasDelivery === undefined
       ? {}
       : {
           recover: (payload: ClaudeResumeJobV1, deliveryId: string) =>
             Effect.gen(function* () {
-              const exists = yield* hasDelivery(`${deliveryId}-wake`).pipe(
-                Effect.catch((error) =>
-                  credentialReason(error) === "credential_host_unreachable_or_timed_out"
-                    ? Effect.fail(error)
-                    : Effect.succeed(false),
-                ),
-              )
-              if (!exists) return failed("execution_interrupted")
+              const exists = yield* hasDelivery(`${deliveryId}-wake`).pipe(Effect.result)
+              if (exists._tag === "Failure") return failureOutcome(exists.failure)
+              if (!exists.success) return failed("execution_interrupted")
               return yield* execute(payload, deliveryId)
-            }).pipe(Effect.catch(() => Effect.succeed({ status: "pending" as const }))),
+            }),
         }),
   }
 }

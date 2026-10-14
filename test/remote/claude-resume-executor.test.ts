@@ -188,3 +188,25 @@ test("host refusals retain their detail and nonzero exits are not deadline failu
     expect(outcome).toEqual(expected)
   }
 })
+
+test("host refusal during transcript or custody observation retains its reason", async () => {
+  const refusal = new WorkspaceError({
+    operation: "host",
+    cause: new Error("host_request_refused: forged host custody"),
+  })
+  const executor = makeClaudeResumeExecutor({
+    allowedDirectories: ["/allowed"],
+    cli: {
+      sessionExists: () => Effect.fail(refusal),
+      hasDelivery: () => Effect.fail(refusal),
+      resume: () => Effect.die("must not deliver"),
+    },
+  })
+  const expected = {
+    status: "failed",
+    failureReason: "host_request_refused",
+    failureDetail: "host_request_refused: forged host custody",
+  }
+  expect(await Effect.runPromise(executor.execute(payload(), "delivery"))).toEqual(expected)
+  expect(await Effect.runPromise(executor.recover!(payload(), "delivery"))).toEqual(expected)
+})
