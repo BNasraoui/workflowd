@@ -1,4 +1,4 @@
-import { fixtureEnvironment, runIsolated } from "./opencode-fixture"
+import { fixtureEnvironment, fixturePassword, runIsolated } from "./opencode-fixture"
 import { expect, spyOn, test } from "bun:test"
 import * as filesystem from "node:fs/promises"
 import { spawnSync } from "node:child_process"
@@ -109,7 +109,7 @@ test("installed OpenCode moves grants, restarts one store, and attaches without 
         {
           method: body === undefined ? "GET" : "POST",
           headers: {
-            authorization: `Basic ${Buffer.from("opencode:synthetic-server").toString("base64")}`,
+            authorization: `Basic ${Buffer.from(`opencode:${fixturePassword}`).toString("base64")}`,
             "content-type": "application/json",
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),

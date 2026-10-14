@@ -10,6 +10,7 @@ export async function openCodePublisher(
   asAgent: (argv: string[]) => string[],
   shell: string,
 ) {
+  const serverPassword = crypto.randomUUID()
   let sent = false
   const model = Bun.serve({
     hostname: "127.0.0.1",
@@ -94,7 +95,7 @@ export async function openCodePublisher(
   }
   await writeFile(
     join(home, ".config/opencode/service.json"),
-    JSON.stringify({ password: "synthetic-server" }),
+    JSON.stringify({ password: serverPassword }),
     { mode: 0o600 },
   )
   await chown(
@@ -129,7 +130,7 @@ export async function openCodePublisher(
       {
         method: body === undefined ? "GET" : path.endsWith("/environment") ? "PUT" : "POST",
         headers: {
-          authorization: `Basic ${Buffer.from("opencode:synthetic-server").toString("base64")}`,
+          authorization: `Basic ${Buffer.from(`opencode:${serverPassword}`).toString("base64")}`,
           "content-type": "application/json",
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),

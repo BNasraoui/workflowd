@@ -585,10 +585,25 @@ async function nativeBoundary(simulatedManager: boolean) {
       })
       fixture.holdAfter(1)
       const cli = simulatedManager
-        ? makeHostCli(path, client, (line) => {
-            Schema.decodeUnknownSync(Schema.Struct({ type: Schema.String }))(JSON.parse(line))
-            return { type: "other" }
-          })
+        ? makeHostCli(
+            path,
+            client,
+            (line) => {
+              Schema.decodeUnknownSync(Schema.Struct({ type: Schema.String }))(JSON.parse(line))
+              return { type: "other" }
+            },
+            {
+              environment: () => ({
+                WORKFLOWD_RUN_ID: runId,
+                WORKFLOWD_WORKER_GITHUB_SOCKET: start.worker.githubSocket,
+                GH_CONFIG_DIR: start.worker.githubDirectory,
+              }),
+              register: (id, pid) => {
+                expect(id).toBe(runId)
+                expect(pid).toBeGreaterThan(0)
+              },
+            },
+          )
         : undefined
       if (cli) {
         await Effect.runPromise(cli.preflight)
