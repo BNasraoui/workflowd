@@ -26,11 +26,12 @@ or change GitHub settings. API errors and malformed responses fail closed.
 Pagination uses `gh api --paginate` and parses concatenated JSON pages, compatible
 with mint's gh 2.45.0; it does not use `--slurp`.
 
-`--state` is an operator-owned mode-0600 file outside the checkout and skill root.
+`/opt/workflowd/operator/last-deployed` is the fixed operator-owned mode-0600
+state file outside the checkout and skill root. The CLI cannot select another
+state destination; changing this path requires reviewing the protected entrypoint.
 Its parent must be operator-owned and not writable by others. The script writes
 the successful target atomically, with fsync, after install, copy, restart and
-unit-state checks. Keep this same state path for every deployment; do not seed or
-edit it to skip history. A missing state or a last-deployed SHA that is not an
+unit-state checks. Do not seed or edit the state file to skip history. A missing state or a last-deployed SHA that is not an
 ancestor of the target refuses admission unless the operator explicitly supplies
 `--bootstrap`. Bootstrap trusts history **before** the target; the target still
 needs its own App approval and main CI. Use bootstrap only for a personally
@@ -49,8 +50,8 @@ following includes and refuses `include*`, `filter.*`, `core.fsmonitor`,
 It serializes operators with a lock in `.git`.
 
 The entrypoint replaces its child environment, uses `/usr/bin:/bin`, and loads
-only a dedicated read-only token file into `GH_TOKEN`. A temporary empty HOME,
-XDG_CONFIG_HOME and GH_CONFIG_DIR exclude the owner's gh login/config (including
+only a dedicated read-only token file into `GH_TOKEN`. A mode-0700 temporary home under `/opt/workflowd/operator`,
+used for HOME, XDG_CONFIG_HOME and GH_CONFIG_DIR exclude the owner's gh login/config (including
 `http_unix_socket`), global bunfig and npmrc files. Inherited proxy, Git, Bun/npm
 and token overrides are cleared. It requires an absolute pinned Bun executable,
 prints tool versions, and refuses Git older than 2.34, gh older than 2.45, or Bun
@@ -166,13 +167,12 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
      --working-directory=/opt/workflowd --setenv=PATH=/usr/bin:/bin \
      /usr/bin/python3 -I /usr/local/libexec/workflowd/verified-deploy.py \
        "$deploy_sha" --checkout /opt/workflowd/deploy --skills /opt/workflowd/skills \
-       --state /opt/workflowd/operator/last-deployed \
        --github-token-file /opt/workflowd/operator/github-token \
        --approval-app-id "$approval_app_id" --bun /opt/workflowd/bin/bun --bootstrap
    ```
 
    **Remove `--bootstrap` on every normal subsequent deployment.** Keep the App ID
-   and state path in operator-owned launch configuration. For rollback, explicitly
+   in operator-owned launch configuration. For rollback, explicitly
    bootstrap a previously approved merge SHA after checking its current evidence;
    do not edit state manually or run the legacy deploy path.
 7. Configure harness discovery or protected links to `/opt/workflowd/skills/rpi-*`.

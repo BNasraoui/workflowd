@@ -87,3 +87,30 @@ class RuntimeTests(unittest.TestCase):
                 with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'version'):
                     d.check_toolchain(Path('/operator/bun'))
                 versions[name] = old
+
+    def test_cli_uses_fixed_operator_state_and_private_temporary_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'last-deployed'
+            token = root / 'token'
+            token.write_text('fixture')
+            token.chmod(0o600)
+            skills = root / 'skills'
+            skills.mkdir()
+            (skills / '.workflowd-verified-skills').touch()
+            argv = ['verified-deploy.py', 'a' * 40, '--checkout', str(root / 'checkout'),
+                    '--skills', str(skills), '--github-token-file', str(token),
+                    '--approval-app-id', '98765', '--bun', str(root / 'bun')]
+            observed = []
+
+            def deploy(checkout, sha, target, actual_state, app_id, bun, bootstrap):
+                observed.append(actual_state)
+                self.assertEqual(actual_state, state)
+                self.assertEqual(Path(os.environ['HOME']).parent, root)
+                self.assertEqual(Path(os.environ['HOME']).stat().st_mode & 0o777, 0o700)
+
+            with patch.object(d, 'DEPLOY_STATE', state, create=True), \
+                 patch.object(d.sys, 'argv', argv), patch.dict(os.environ), \
+                 patch.object(d, 'check_toolchain'), patch.object(d, 'deploy', side_effect=deploy):
+                d.main()
+            self.assertEqual(observed, [state])

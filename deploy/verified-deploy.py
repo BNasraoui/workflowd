@@ -15,6 +15,7 @@ import tempfile
 
 REPO = 'BNasraoui/workflowd'
 REMOTE = f'https://github.com/{REPO}.git'
+DEPLOY_STATE = Path('/opt/workflowd/operator/last-deployed')
 UNITS = ['workflowd.service', 'workflowd-runner.service', 'workflowd-mcp.service']
 
 
@@ -147,11 +148,15 @@ def private_file(path):
     return path.read_text().strip()
 
 
-def deployment_commits(checkout, sha, state, bootstrap):
+def require_state_directory(state):
     parent = state.parent.lstat()
     require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == os.geteuid()
             and parent.st_mode & 0o022 == 0,
             'Deployment state directory must be operator-owned and not writable by others')
+
+
+def deployment_commits(checkout, sha, state, bootstrap):
+    require_state_directory(state)
     if not state.exists() and not state.is_symlink():
         require(bootstrap, 'Missing deployment state; operator must explicitly --bootstrap')
         return [sha]
@@ -314,8 +319,6 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--skills', type=Path, required=True,
                         help='dedicated operator-owned directory with managed marker')
-    parser.add_argument('--state', type=Path, required=True,
-                        help='operator-owned last-deployed SHA file outside checkout and skills')
     parser.add_argument('--github-token-file', type=Path, required=True)
     parser.add_argument('--approval-app-id', type=int, required=True,
                         help='merge gate App integration ID, not installation ID')
@@ -330,19 +333,20 @@ def main():
     target = args.skills.resolve()
     require(not target.is_relative_to(checkout) and not checkout.is_relative_to(target),
             'Skill directory must be separate from the deployment checkout')
-    for path in (args.state, args.github_token_file, args.bun):
+    for path in (DEPLOY_STATE, args.github_token_file, args.bun):
         require(path.is_absolute() and not path.is_symlink(), 'Use absolute non-symlink operator paths')
         require(not path.resolve().is_relative_to(checkout)
                 and not path.resolve().is_relative_to(target),
                 'State, credentials and Bun must be outside checkout and skills')
-    require(args.state != args.github_token_file and args.state != args.bun,
+    require(DEPLOY_STATE != args.github_token_file.resolve() and DEPLOY_STATE != args.bun.resolve(),
             'State must have its own path')
     # The whole child environment is replaced, including inherited proxies,
     # tokens, Bun/npm overrides and global gh/Bun configuration paths.
-    with tempfile.TemporaryDirectory(prefix='workflowd-deploy-', dir='/tmp') as isolated:
+    require_state_directory(DEPLOY_STATE)
+    with tempfile.TemporaryDirectory(prefix='.deploy-home-', dir=DEPLOY_STATE.parent) as isolated:
         configure_environment(args.github_token_file, Path(isolated))
         check_toolchain(args.bun)
-        deploy(checkout, args.sha, target, args.state, args.approval_app_id,
+        deploy(checkout, args.sha, target, DEPLOY_STATE, args.approval_app_id,
                args.bun, args.bootstrap)
 
 
