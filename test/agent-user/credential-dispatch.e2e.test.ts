@@ -94,6 +94,7 @@ adminTest(
         reason: "shared_credential_diverged",
       })
       await writeFile(policy.codex.benLink, "synthetic-generation-2")
+      await chown(policy.codex.benLink, policy.controllerUid, policy.groupGid)
       await relinkCredentials(policy, "codex", "ben")
       await checkCredentialAdmission(policy, "codex")
       expect((await lstat(policy.codex.benLink)).isSymbolicLink()).toBe(true)
