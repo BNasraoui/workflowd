@@ -4,6 +4,7 @@ import { createInterface } from "node:readline"
 import { Readable } from "node:stream"
 import { createHash, randomUUID } from "node:crypto"
 import { chmod, mkdir, rm } from "node:fs/promises"
+import { mkdirSync } from "node:fs"
 import { RpcClient } from "./rpc"
 
 /** Owns exactly one stdio app-server process. Never connects to a managed daemon. */
@@ -15,6 +16,8 @@ export function startAppServer(
   },
   notify: (frame: { readonly method: string; readonly params: unknown }) => void,
 ) {
+  // Preflight runs before the first durable launch creates the resident home.
+  mkdirSync(options.home, { recursive: true, mode: 0o700 })
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options.env,
