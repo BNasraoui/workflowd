@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Developer convenience only. Mint deployment uses verified-deploy.py copies;
+# see verified-deploy.md for the protected skill directory.
 # link-agent-skills — expose a deploy checkout's RPI skills to local agents.
 #
 # Symlinks each skills/rpi-* directory of the checkout into ~/.agents/skills
