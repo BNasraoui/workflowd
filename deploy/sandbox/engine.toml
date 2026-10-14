@@ -1,0 +1,2 @@
+# Supported by the pinned Dagger engine; deny privileged nested executions.
+insecure-entitlements = []

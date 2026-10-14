@@ -1318,7 +1318,7 @@ test("revoking a binding terminates an in-flight SSH tool call before its respon
     const wrapper = join(runner.root, "observed-container-use")
     await Bun.write(
       wrapper,
-      '#!/bin/sh\ncd /workspace/repository\ntee /tmp/bridge-requests | env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=tcp://engine:1234 /usr/local/bin/container-use-real "$@"\n',
+      '#!/bin/sh\ncd /workspace/repository\ntee /tmp/bridge-requests | env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/home/runner _EXPERIMENTAL_DAGGER_RUNNER_HOST=unix:///run/workflowd-engine/engine.sock /usr/local/bin/container-use-real "$@"\n',
     )
     await runner.docker("cp", wrapper, `${runner.name}-runner:/usr/local/bin/container-use`)
     await runner.docker(
