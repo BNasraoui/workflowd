@@ -45,6 +45,11 @@ its workflows, not assume a past result predicts future reruns.
 
 ## Agent pattern: bounded required-check polling
 
+An active skill's end-turn/handoff instructions take precedence: if it requires
+ending at its handoff step (such as rpi-implement's Finish), finish all earlier
+phases first; at that step update the PR, publish the report, and end without
+watching CI.
+
 After pushing and opening or updating a PR, resident workers use:
 
 ```bash
@@ -52,24 +57,45 @@ timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interv
 ```
 
 `--required` excludes optional checks such as OpenCode Review, whose
-`action_required` state otherwise makes a green PR exit nonzero. Retry only
-"no checks reported" (including "no required checks reported") every 30 seconds
-for at most three minutes immediately after pushing. The combined retry/watch
-budget is 15 minutes. Use a shorter budget if the configured stall window is lower.
-The resident Codex stall detector observes app-server notifications, not shell
-stdout directly (`src/resident/service.ts`, `notifyFor`/`lastEventAt`); the default
-no-event window is 20 minutes. Do not assume polling output keeps the worker alive.
+`action_required` state otherwise makes a green PR exit nonzero. Retry missing
+checks ("no checks reported", including "no required checks reported") or transient
+observation errors every 30 seconds for at most three minutes per cycle. Limit
+retries and watching in each observation cycle to 15 minutes, below the default
+20-minute no-event stall window; use a shorter budget if the configured stall
+window is lower. The resident Codex stall detector observes app-server notifications,
+not shell stdout directly (`src/resident/service.ts`, `notifyFor`/`lastEventAt`).
+Do not assume polling output keeps the worker alive.
 
-Verify that the PR still points to the pushed SHA. On timeout (exit 124), missing
-checks after the retry budget, a changed head, or other observation error, report
-the PR URL, pushed SHA, exact command/error, last required-check states and links,
-and "CI unconfirmed; coordinator/operator follow-up required", then **end the turn**.
-On completion, report the PR URL, SHA and required CI result and end the turn.
+Missing or pending required checks, watch timeouts (exit 124), and transient
+observation errors (such as "error connecting to api.github.com") mean CI is still
+running for scheduling purposes. Continue the remaining task, preserve unfinished
+work, and re-check in later bounded cycles. Between cycles return to task work and
+provide a progress update; never run back-to-back blocking waits without returning
+to task work in between; no single cycle may exceed the budget.
+Address confirmed CI failures; early termination is allowed after three unsuccessful
+repair attempts for the same confirmed failure. Missing/pending checks, timeouts,
+and transient observation errors do not count toward that bound.
+
+Any other observation error means CI is unverified: continue remaining work and
+report it at handoff. Observation errors do not count as confirmed failures.
+The verified result must be for the last pushed head SHA; results for earlier SHAs
+do not verify it. At an early stop, provide the same report as at final handoff
+plus the failing check's link, if applicable.
+
+Verify the PR still points to the pushed SHA before reporting CI. If the head
+changed, continue remaining work and report the mismatch at handoff; never attribute
+the new head's checks to the pushed SHA. End only at the final handoff, an active
+skill's explicit end-turn instruction, or the repeated-failure bound. At final
+handoff report the PR URL, pushed SHA, and verified required CI result, or "CI is
+unverified; coordinator/operator follow-up required" with the exact command/error
+and last observed required-check states and links (explicitly say if none were
+observed). Once remaining work is complete, make one final bounded observation
+cycle and hand off any still-unverified CI rather than waiting indefinitely.
 
 An active skill's end-turn/handoff rule takes precedence. In particular, an RPI
-implement worker required to end after pushing updates its PR, publishes its report,
-and ends without watching or subscribing. Resident coordinators use the workflowd
-MCP caller mailbox (`dispatch_agent` / `read_agent_mailbox`) or the RPI coordinator's
+implement worker completes all earlier phases before reaching Finish, updates its
+PR, publishes its report, and ends without watching or subscribing. Resident
+coordinators use the workflowd MCP caller mailbox (`dispatch_agent` / `read_agent_mailbox`) or the RPI coordinator's
 `scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for child runs, following
 that skill's handoff instructions.
 
