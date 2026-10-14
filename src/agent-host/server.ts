@@ -1,3 +1,5 @@
+import { admitHostCredentials } from "./credential-relink"
+import { loadAgentGitConfig, agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import { checkOpenCodeMigration } from "./opencode-credentials"
 import {
   chmod,
@@ -20,7 +22,7 @@ import type { Socket } from "node:net"
 import { dlopen, FFIType, ptr } from "bun:ffi"
 import { Schema } from "effect"
 import { CredentialPolicy } from "./config"
-import { credentialLock, inspectCredentialLayout } from "./credentials"
+import { credentialLock } from "./credentials"
 import {
   CredentialRequest,
   HostRequest,
@@ -36,14 +38,16 @@ export async function serveCredentialHost(
   path: string,
   policy: CredentialPolicy,
   supervisor: (args: string[]) => Promise<string> = hostCommand,
+  environment: Record<string, string | undefined> = process.env,
 ) {
+  const git = loadAgentGitConfig(environment, policy.launch !== undefined)
   const libc = dlopen("libc.so.6", {
     getsockopt: {
       args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.ptr],
       returns: FFIType.i32,
     },
   })
-  const native = nativeHost(policy, supervisor)
+  const native = nativeHost(policy, supervisor, git)
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const server = createServer((socket) => {
@@ -103,12 +107,12 @@ export async function serveCredentialHost(
           const request = Schema.decodeUnknownSync(CredentialRequest, {
             onExcessProperty: "error",
           })(raw)
-          release = await credentialLock(policy, false)
           if (request.client === "opencode") {
+            release = await credentialLock(policy, false)
             if (!policy.opencode)
               throw credentialRefusal(request.client, "opencode_grant_migration_incomplete")
             await checkOpenCodeMigration(policy.opencode)
-          } else await inspectCredentialLayout(policy, request.client)
+          } else release = await admitHostCredentials(policy, request.client)
           if (socket.destroyed) {
             await release()
             release = undefined
@@ -301,8 +305,7 @@ async function sendHostFrame(
   }
   let release: (() => Promise<void>) | undefined
   try {
-    release = await credentialLock(policy, false)
-    await inspectCredentialLayout(policy, "codex")
+    release = await admitHostCredentials(policy, "codex")
     if (!socket.destroyed) ws.send(frame)
   } catch (error) {
     const reason = credentialReason(error)
@@ -421,7 +424,11 @@ type NativeResponse =
   | { processes: OwnedProcess[]; next: number | null }
 
 /** The system manager owns workers; connections own only bounded observations. */
-function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Promise<string>) {
+function nativeHost(
+  policy: CredentialPolicy,
+  supervisor: (args: string[]) => Promise<string>,
+  git: AgentGitConfig | undefined,
+) {
   const running = new Map<string, Promise<unknown>>()
   const dispatch = async (
     request: HostRequest,
@@ -473,13 +480,10 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
         if (saved.digest !== digest) throw new Error("host launch identity conflict")
         return { process: await inspect(saved) }
       }
-      const release = await credentialLock(policy, false)
+      const release = await (["claude-session", "workspace"].includes(request.profile)
+        ? credentialLock(policy, false)
+        : admitHostCredentials(policy, request.profile.startsWith("codex") ? "codex" : "claude"))
       try {
-        if (!["claude-session", "workspace"].includes(request.profile))
-          await inspectCredentialLayout(
-            policy,
-            request.profile.startsWith("codex") ? "codex" : "claude",
-          )
         const normalized =
           request.directory === "" &&
           (request.profile.endsWith("-preflight") ||
@@ -497,6 +501,7 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
           policy,
           repository === undefined ? normalized : { ...normalized, repository: repository.remote },
           io,
+          git,
         )
         if (!connected()) {
           await rm(io, { recursive: true, force: true })
@@ -520,7 +525,7 @@ function nativeHost(policy: CredentialPolicy, supervisor: (args: string[]) => Pr
         }
         // Persist the fence before the manager call. Never repeat an uncertain launch.
         await saveHostRecord(recordPath, record)
-        await supervisor(hostLaunchCommand(policy, record, io))
+        await supervisor(hostLaunchCommand(policy, record, io, git))
         return { process: await inspect(record) }
       } finally {
         await release()
@@ -696,7 +701,12 @@ async function inspectHostProcess(
   return observed
 }
 
-async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, io: string) {
+async function prepareHostLaunch(
+  policy: CredentialPolicy,
+  request: HostStart,
+  io: string,
+  git: AgentGitConfig | undefined,
+) {
   // SupplementaryGroups= does not erase groups from the system account database.
   // Fail before launching if this UID could acquire any unapproved group.
   const groups = (await hostCommand(["/usr/bin/id", "--groups", String(policy.agentUid)]))
@@ -730,7 +740,7 @@ async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, i
   await mkdir(io, { mode: 0o700 })
   const input = await open(join(io, "input"), "wx", 0o600)
   try {
-    await input.writeFile(JSON.stringify(request))
+    await input.writeFile(JSON.stringify({ ...request, git }))
     await input.sync()
   } finally {
     await input.close()
@@ -743,7 +753,12 @@ async function prepareHostLaunch(policy: CredentialPolicy, request: HostStart, i
   await chown(io, policy.agentUid, policy.groupGid)
 }
 
-function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: string) {
+function hostLaunchCommand(
+  policy: CredentialPolicy,
+  record: HostRecord,
+  io: string,
+  git: AgentGitConfig | undefined,
+) {
   const launch = policy.launch!
   return [
     "/usr/bin/systemd-run",
@@ -777,6 +792,7 @@ function hostLaunchCommand(policy: CredentialPolicy, record: HostRecord, io: str
     "--property=MemorySwapMax=0",
     `--property=RuntimeMaxSec=${Math.ceil((record.request.timeoutMs ?? 86400000) / 1000)}`,
     `--property=ReadWritePaths=${launch.home} ${launch.workspaceRoot} ${io} ${policy.codex.canonical} ${policy.claude.canonical}`,
+    ...Object.entries(agentGitEnvironment(git)).map(([key, value]) => `--setenv=${key}=${value}`),
     "--setenv=WORKFLOWD_AGENT_HOST_SOCKET=host-managed",
     `--setenv=HOME=${launch.home}`,
     `--setenv=TMPDIR=${io}`,

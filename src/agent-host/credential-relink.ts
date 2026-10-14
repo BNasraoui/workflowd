@@ -1,4 +1,4 @@
-import { constants } from "node:fs"
+import { constants, type Stats } from "node:fs"
 import {
   lstat,
   open,
@@ -16,7 +16,7 @@ import { basename, dirname, join } from "node:path"
 import { Schema } from "effect"
 import type { CredentialPolicy } from "./config"
 import { credentialLock, credentialParent, inspectCredentialLayout } from "./credentials"
-import { credentialRefusal } from "./protocol"
+import { credentialRefusal, credentialReason } from "./protocol"
 
 async function resolvedConsumers(paths: readonly string[]) {
   const installed = new Set<string>()
@@ -193,11 +193,113 @@ async function validateRepairedSource(path: string, canonical: string, repair: t
   throw credentialRefusal(repair.client, "shared_credential_diverged")
 }
 
+function validAutomaticStore(
+  policy: CredentialPolicy,
+  client: "codex" | "claude",
+  directory: Stats,
+  canonical: Stats,
+) {
+  return (
+    [policy.root, join(policy.root, client)].includes(dirname(policy[client].canonical)) &&
+    directory.uid === policy.ownerUid &&
+    directory.gid === policy.groupGid &&
+    (directory.mode & 0o777) === 0o710 &&
+    canonical.isFile() &&
+    canonical.nlink === 1 &&
+    canonical.uid === policy.ownerUid &&
+    canonical.gid === policy.groupGid &&
+    (canonical.mode & 0o777) === 0o660
+  )
+}
+
+function newerPrivateLogin(info: Stats, canonical: Stats, uid: number) {
+  return (
+    info.isFile() &&
+    info.nlink === 1 &&
+    info.uid === uid &&
+    (info.mode & 0o777) === 0o600 &&
+    info.size > 0 &&
+    info.size <= 1024 * 1024 &&
+    info.mtimeMs > canonical.mtimeMs
+  )
+}
+
+const absentOrStat = (path: string) =>
+  lstat(path).catch((error: unknown) => {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null
+    throw error
+  })
+
+/** Select only a private newer replacement beside an unchanged canonical link.
+ * Runs under the same exclusive lock as the journaled repair; never resumes a journal automatically.
+ */
+async function automaticSource(policy: CredentialPolicy, client: "codex" | "claude") {
+  const login = policy[client]
+  const handles: FileHandle[] = []
+  const fail = (): never => {
+    throw credentialRefusal(client, "shared_credential_diverged")
+  }
+  try {
+    const store = await credentialParent(login.canonical, policy.ownerUid)
+    handles.push(store.handle)
+    const directory = await store.handle.stat()
+    const canonical = await lstat(store.path)
+    if (!validAutomaticStore(policy, client, directory, canonical)) fail()
+    for (const name of [
+      `${client}.repair.json`,
+      `${client}.repair.json.next`,
+      `${client}.staging`,
+    ]) {
+      if (await absentOrStat(join(`/proc/self/fd/${store.handle.fd}`, name))) fail()
+    }
+    let selected: typeof Repair.Type | undefined
+    for (const [source, path, uid] of [
+      ["ben", login.benLink, policy.controllerUid],
+      ["agent", login.agentLink, policy.agentUid],
+    ] as const) {
+      const parent = await credentialParent(path, uid)
+      handles.push(parent.handle)
+      if (await absentOrStat(`${parent.path}.workflowd-relink`)) fail()
+      const info = await lstat(parent.path)
+      if (info.isSymbolicLink()) {
+        if ((await readlink(parent.path)) !== login.canonical) fail()
+      } else {
+        if (selected || !newerPrivateLogin(info, canonical, uid)) fail()
+        selected = { client, source, sourceDevice: info.dev, sourceInode: info.ino }
+      }
+    }
+    return selected ?? fail()
+  } finally {
+    await Promise.all(handles.map((handle) => handle.close()))
+  }
+}
+
+/** Admission stays locked through handoff, including after an automatic repair. */
+export async function admitHostCredentials(policy: CredentialPolicy, client: "codex" | "claude") {
+  let release = await credentialLock(policy, false)
+  try {
+    try {
+      await inspectCredentialLayout(policy, client)
+    } catch (error) {
+      if (credentialReason(error) !== "shared_credential_diverged") throw error
+      await release()
+      release = async () => {}
+      await relinkCredentials(policy, client, "auto")
+      release = await credentialLock(policy, false)
+      await inspectCredentialLayout(policy, client)
+    }
+    return release
+  } catch (error) {
+    await release()
+    throw error
+  }
+}
+
 /** Administrative offline repair. Failure deliberately leaves a durable admission fence. */
 export async function relinkCredentials(
   policy: CredentialPolicy,
   client: "codex" | "claude",
-  source: "ben" | "agent",
+  requestedSource: "ben" | "agent" | "auto",
 ) {
   const release = await credentialLock(policy, true)
   const handles: FileHandle[] = []
@@ -205,6 +307,8 @@ export async function relinkCredentials(
     throw credentialRefusal(client, "shared_credential_diverged")
   }
   try {
+    const automatic = requestedSource === "auto" ? await automaticSource(policy, client) : undefined
+    const source = automatic?.source ?? (requestedSource === "agent" ? "agent" : "ben")
     await requireStopped(policy, client)
     const login = policy[client]
     const sourcePath = source === "ben" ? login.benLink : login.agentLink
@@ -239,6 +343,7 @@ export async function relinkCredentials(
     const repair = existing
       ? Schema.decodeUnknownSync(Repair)(JSON.parse(await readFile(journalPath, "utf8")))
       : undefined
+    if (automatic && (existing || !otherInfo)) fail()
     if (repair && (repair.client !== client || repair.source !== source)) fail()
     if (!repair && sourceInfo?.isSymbolicLink()) {
       await inspectCredentialLayout(policy, client)
@@ -250,7 +355,8 @@ export async function relinkCredentials(
       target?.ino === repair.stagedInode &&
       target?.dev === repair.stagedDevice
     if (!installed) {
-      await importReplacement(policy, client, source, selected, canonical, repair)
+      await requireStopped(policy, client)
+      await importReplacement(policy, client, source, selected, canonical, repair ?? automatic)
     } else {
       await validateRepairedSource(selected.path, login.canonical, repair)
     }

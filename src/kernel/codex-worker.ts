@@ -1,3 +1,4 @@
+import { installAgentGitGuard, refreshAgentGitGuard } from "../agent-git/guard"
 import { Schema, Effect } from "effect"
 import { join } from "node:path"
 import { HostStart } from "../agent-host/protocol"
@@ -205,11 +206,21 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
   const input = join(io, "input")
   if (inputPath !== input) throw new Error("invalid host input path")
   const file = await open(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  let request: typeof HostStart.Type
+  const HostInput = Schema.Struct({
+    ...HostStart.fields,
+    git: Schema.optionalKey(
+      Schema.Struct({
+        name: Schema.String,
+        email: Schema.String,
+        blockedEmails: Schema.Array(Schema.String),
+      }),
+    ),
+  })
+  let request: typeof HostInput.Type
   try {
     const info = await file.stat()
     if (!info.isFile() || info.nlink !== 1) throw new Error("invalid host input file")
-    request = Schema.decodeUnknownSync(HostStart)(JSON.parse(await file.readFile("utf8")))
+    request = Schema.decodeUnknownSync(HostInput)(JSON.parse(await file.readFile("utf8")))
   } finally {
     await file.close()
   }
@@ -271,6 +282,7 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
         request.base ?? "origin/HEAD",
       ]),
     )
+    await Effect.runPromise(installAgentGitGuard(request.directory, request.git))
     await writeFile(options.eventsFile, "", {
       mode: 0o600,
       flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
@@ -282,6 +294,7 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
     await writeResult(options.resultFile, 0)
     return 0
   }
+  await Effect.runPromise(refreshAgentGitGuard(request.directory, request.git))
   if (request.profile === "codex-server")
     return runCliWorker(options, [
       binary,

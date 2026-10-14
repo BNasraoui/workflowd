@@ -15,7 +15,15 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { connect, createServer } from "node:net"
-import { serveCredentialHost } from "../../src/agent-host/server"
+import { serveCredentialHost as serveHost } from "../../src/agent-host/server"
+
+const identity = {
+  WORKFLOWD_AGENT_GIT_NAME: "Fixture Agent",
+  WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
+  WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS: "blocked@example.test",
+}
+const serveCredentialHost = (...args: Parameters<typeof serveHost>) =>
+  serveHost(args[0], args[1], args[2], identity)
 
 // A controller cannot turn the credential service into a generic root launcher.
 test("native host refuses unsupported profiles and unapproved agent groups", async () => {
@@ -242,6 +250,24 @@ async function nativeBoundary(simulatedManager: boolean) {
   }
   const codex = await nativeModelFixture("codex", root)
   const claude = await nativeModelFixture("claude", root)
+  // Every native invocation (including discovery, preflight, resume and resident)
+  // must inherit the root host's configured identity under the agent UID.
+  for (const fixture of [codex, claude]) {
+    const script = await readFile(fixture.binary, "utf8")
+    const newline = script.indexOf("\n") + 1
+    const expected = {
+      GIT_AUTHOR_NAME: "Fixture Agent",
+      GIT_AUTHOR_EMAIL: "agent@example.test",
+      GIT_COMMITTER_NAME: "Fixture Agent",
+      GIT_COMMITTER_EMAIL: "agent@example.test",
+    }
+    await writeFile(
+      fixture.binary,
+      script.slice(0, newline) +
+        `if (process.getuid() !== ${agentUid} || Object.entries(${JSON.stringify(expected)}).some(([key,value]) => process.env[key] !== value)) throw new Error("host identity propagation failed");\n` +
+        script.slice(newline),
+    )
+  }
   const worker = join(root, "worker.js")
   const runtime = join(root, "bun")
   await copyFile(await realpath(process.execPath), runtime)
@@ -308,7 +334,7 @@ async function nativeBoundary(simulatedManager: boolean) {
   let host = await openHost()
   const units = new Set<string>()
   const call = async (
-    request: HostRequest | { operation: "checkCredentials"; client: "codex" },
+    request: HostRequest | { operation: "checkCredentials"; client: "codex" | "claude" },
     uid = controllerUid,
   ): Promise<unknown> => {
     if (simulatedManager && uid === controllerUid) {
@@ -378,6 +404,25 @@ async function nativeBoundary(simulatedManager: boolean) {
     }
   }
   try {
+    // Exercise automatic relink through the installed unit's real capability and
+    // filesystem restrictions, with an authenticated controller-UID caller.
+    for (const client of ["codex", "claude"] as const) {
+      for (const side of ["ben", "agent"] as const) {
+        const login = policy[client]
+        const selected = side === "ben" ? login.benLink : login.agentLink
+        const content = await readFile(login.canonical, "utf8")
+        const { utimes } = await import("node:fs/promises")
+        await utimes(login.canonical, 1, 1)
+        await rm(selected)
+        await writeFile(selected, content + "\n", { mode: 0o600 })
+        await chown(selected, side === "ben" ? controllerUid : agentUid, groupGid)
+        await call({ operation: "checkCredentials", client })
+        const { lstat } = await import("node:fs/promises")
+        expect((await lstat(login.benLink)).isSymbolicLink()).toBe(true)
+        expect((await lstat(login.agentLink)).isSymbolicLink()).toBe(true)
+        expect(await readFile(login.canonical, "utf8")).toBe(content + "\n")
+      }
+    }
     if (!simulatedManager) {
       const originalWorker = await readFile(worker)
       try {
@@ -716,7 +761,10 @@ ${operation === "preflight" ? "await Effect.runPromise(cli.preflight)" : `const 
         await call({ operation: "inspect", runId: discoveryId }),
       )
       expect(Array.isArray(JSON.parse(await readAgentHostOutput(path, discovered)))).toBe(true)
+    }
+    {
       const input = {
+        operation: "start" as const,
         profile: "workspace" as const,
         runId: `workspace-${randomUUID()}`,
         repository: "/controller/repository-selector",
@@ -725,10 +773,69 @@ ${operation === "preflight" ? "await Effect.runPromise(cli.preflight)" : `const 
         prompt: "",
         model: null,
       }
-      const workspace = await startAgentHost(path, input)
-      await readAgentHostOutput(path, workspace)
-      expect((await startAgentHost(path, input)).invocationId).toBe(workspace.invocationId)
+      const workspace = Schema.decodeUnknownSync(OwnedProcess)(await call(input))
+      expect((await terminal(input.runId)).exitCode).toBe(0)
+      expect(Schema.decodeUnknownSync(OwnedProcess)(await call(input)).invocationId).toBe(
+        workspace.invocationId,
+      )
       expect((await stat(join(input.directory, ".git"))).uid).toBe(agentUid)
+      const hooks = join(input.directory, ".git", "workflowd-hooks")
+      for (const [name, mode] of [
+        ["agent-worktree", 0o600],
+        ["blocked-emails", 0o600],
+        ["identity-guard", 0o700],
+      ] as const) {
+        const info = await stat(join(hooks, name))
+        expect(info.uid).toBe(agentUid)
+        expect(info.mode & 0o777).toBe(mode)
+      }
+      const probe = Bun.spawn(
+        [
+          "/usr/bin/setpriv",
+          "--reuid",
+          String(agentUid),
+          "--regid",
+          String(groupGid),
+          "--clear-groups",
+          runtime,
+          "--eval",
+          `
+        const cwd = process.argv[1];
+        const run = async (args, env = {}) => {
+          const child = Bun.spawn(["git", "-C", cwd, ...args], {env: {...process.env, ...env}, stdout:"pipe", stderr:"pipe"});
+          const output = await new Response(child.stderr).text();
+          return {code: await child.exited, blocked: output.includes("workflowd: blocked git identity")};
+        };
+        const blocked = await run(["commit", "--allow-empty", "--author=Blocked <blocked@example.test>", "-m", "blocked"]);
+        const committer = await run(["commit", "--allow-empty", "-m", "blocked"], {GIT_COMMITTER_EMAIL:"blocked@example.test"});
+        const allowed = await run(["commit", "--allow-empty", "-m", "allowed"]);
+        console.log(JSON.stringify({blocked, committer, allowed}));
+      `,
+          input.directory,
+        ],
+        {
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: home,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_AUTHOR_NAME: "Fixture Agent",
+            GIT_AUTHOR_EMAIL: "agent@example.test",
+            GIT_COMMITTER_NAME: "Fixture Agent",
+            GIT_COMMITTER_EMAIL: "agent@example.test",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      const proof = await new Response(probe.stdout).text()
+      expect(await new Response(probe.stderr).text()).toBe("")
+      expect(await probe.exited).toBe(0)
+      expect(JSON.parse(proof)).toEqual({
+        blocked: { code: 1, blocked: true },
+        committer: { code: 1, blocked: true },
+        allowed: { code: 0, blocked: false },
+      })
+
       expect(await readFile(join(input.directory, ".git", "HEAD"), "utf8")).toBe(
         "ref: refs/heads/agent-work\n",
       )
@@ -1030,6 +1137,7 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
       for (const path of boundaryFiles) await rm(path, { force: true })
       for (const path of [
         "/etc/workflowd/agent-host.json",
+        "/etc/workflowd/agent-git.env",
         "/etc/systemd/system/workflowd-agent-host.service",
         "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
         "/usr/local/libexec/workflowd-agent-host",
@@ -1495,6 +1603,7 @@ async function deployedHost(
   if (!(await stat(marker).catch(() => null))) {
     // Existing production policy is never overwritten, even if the test flag is set.
     expect(await stat("/etc/workflowd/agent-host.json").catch(() => null)).toBeNull()
+    expect(await stat("/etc/workflowd/agent-git.env").catch(() => null)).toBeNull()
     expect(
       await stat("/etc/systemd/system/workflowd-agent-host.service").catch(() => null),
     ).toBeNull()
@@ -1520,6 +1629,13 @@ async function deployedHost(
       "/etc/systemd/system/workflowd-agent-host.service",
     )
     await writeFile("/etc/workflowd/agent-host.json", JSON.stringify(policy), { mode: 0o600 })
+    await writeFile(
+      "/etc/workflowd/agent-git.env",
+      Object.entries(identity)
+        .map(([key, value]) => `${key}="${value}"`)
+        .join("\n"),
+      { mode: 0o600 },
+    )
     // Add only the private fixture store to the unit's writable paths. All
     // production capabilities, namespaces and restrictions remain in force.
     await writeFile(
@@ -1569,6 +1685,39 @@ test("the host configuration refuses missing or relative sockets when a policy e
     await expect(requireAgentHostSocket(undefined, join(policy, "child"))).rejects.toMatchObject({
       code: "ENOTDIR",
     })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("a launch-capable root host requires its own complete Git identity configuration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-git-config-"))
+  const login = { canonical: "/unused", benLink: "/unused", agentLink: "/unused" }
+  const policy = {
+    root,
+    ownerUid: 0,
+    controllerUid: 1,
+    agentUid: 2,
+    groupGid: 2,
+    codex: login,
+    claude: login,
+    consumerExecutables: [],
+    launch: {
+      custodyRoot: root,
+      ioRoot: root,
+      home: root,
+      workspaceRoot: root,
+      bun: "/unused",
+      worker: "/unused",
+      codex: "/unused",
+      claude: "/unused",
+    },
+  }
+  try {
+    for (const env of [{}, { WORKFLOWD_AGENT_GIT_NAME: "Fixture" }])
+      await expect(serveHost(join(root, "host.sock"), policy, undefined, env)).rejects.toThrow(
+        "WORKFLOWD_AGENT_GIT",
+      )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

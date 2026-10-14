@@ -325,6 +325,7 @@ test("host discovery worker exchanges the native model catalog and workspace wor
       operation: "start",
       profile: "workspace",
       runId: "workspace-worker",
+      git: { name: "Agent", email: "agent@example.test", blockedEmails: ["blocked@example.test"] },
       directory,
       repository: source,
       branch: "agent-run",
@@ -336,6 +337,10 @@ test("host discovery worker exchanges the native model catalog and workspace wor
       await rm(join(root, name), { force: true })
     expect(await runHostWorker(input, binary, root)).toBe(0)
     expect((await stat(join(directory, ".git"))).isDirectory()).toBe(true)
+    const hooks = join(directory, ".git", "workflowd-hooks")
+    expect(await readFile(join(hooks, "agent-worktree"), "utf8")).toBe("")
+    expect(await readFile(join(hooks, "blocked-emails"), "utf8")).toBe("blocked@example.test\n")
+    expect((await stat(join(hooks, "blocked-emails"))).mode & 0o777).toBe(0o600)
     expect(await readFile(join(directory, ".git", "HEAD"), "utf8")).toBe(
       "ref: refs/heads/agent-run\n",
     )
