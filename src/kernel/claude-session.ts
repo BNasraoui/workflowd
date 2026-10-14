@@ -1,3 +1,5 @@
+import { installAgentGitGuard } from "../agent-git/guard"
+import { agentGitEnvironment, type AgentGitConfig } from "../agent-git/config"
 import { withCredentialAdmission } from "../agent-host/client"
 import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -55,6 +57,7 @@ const MAX_CLAUDE_STDOUT_BYTES = 262_144
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*$/
 
 export const makeClaudeCli = (options: {
+  readonly git?: AgentGitConfig | undefined
   readonly binary: string
   readonly home?: string
   readonly credentialSocket?: string | undefined
@@ -81,23 +84,34 @@ export const makeClaudeCli = (options: {
     withCredentialAdmission(
       options.credentialSocket,
       "claude",
-      runWorkspaceCommandBytes(
-        "wake claude session",
-        [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
-        { cwd: input.directory, stdin: input.prompt, maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES },
-      ).pipe(
-        Effect.timeoutOrElse({
-          duration: input.timeoutMs,
-          orElse: () =>
-            Effect.fail(
-              new WorkspaceError({
-                operation: "wake claude session",
-                cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
-              }),
+      installAgentGitGuard(input.directory, options.git)
+        .pipe(
+          Effect.andThen(
+            runWorkspaceCommandBytes(
+              "wake claude session",
+              [options.binary, "-p", "--resume", input.nativeSessionId, "--output-format", "json"],
+              {
+                env: agentGitEnvironment(options.git),
+                cwd: input.directory,
+                stdin: input.prompt,
+                maxStdoutBytes: MAX_CLAUDE_STDOUT_BYTES,
+              },
             ),
-        }),
-        Effect.map((output) => new TextDecoder().decode(output.stdout)),
-      ),
+          ),
+        )
+        .pipe(
+          Effect.timeoutOrElse({
+            duration: input.timeoutMs,
+            orElse: () =>
+              Effect.fail(
+                new WorkspaceError({
+                  operation: "wake claude session",
+                  cause: new Error(`claude resume did not finish within ${input.timeoutMs}ms`),
+                }),
+              ),
+          }),
+          Effect.map((output) => new TextDecoder().decode(output.stdout)),
+        ),
     ).pipe(
       Effect.mapError((error) =>
         error instanceof WorkspaceError

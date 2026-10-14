@@ -76,3 +76,22 @@ for (const server of [
     ).rejects.toThrow("NATS server URL")
   })
 }
+
+test("remote Claude workers load the operator git identity and require it when enabled", async () => {
+  const env = {
+    WORKFLOWD_NATS_SERVERS: "nats://localhost:4222",
+    WORKFLOWD_NATS_TOKEN: "test-token",
+    WORKFLOWD_REMOTE_HOST_ID: "host",
+    WORKFLOWD_RUNNER_CLAUDE_DIRS: "/tmp/agents",
+  }
+  await expect(loadRemoteProcessConfig(env)).rejects.toThrow("WORKFLOWD_AGENT_GIT")
+  expect(
+    (
+      await loadRemoteProcessConfig({
+        ...env,
+        WORKFLOWD_AGENT_GIT_NAME: "Agent",
+        WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
+      })
+    ).agentGit,
+  ).toMatchObject({ name: "Agent", email: "agent@example.test" })
+})

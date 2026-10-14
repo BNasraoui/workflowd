@@ -1,3 +1,4 @@
+import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
 import { parseSandboxRepositories, type SandboxPolicy } from "./sandbox/config"
 import { parseInstallationAccountIds } from "./installation-policy"
@@ -127,6 +128,7 @@ export interface AgentRunConfig {
 }
 
 interface SharedAppConfig {
+  readonly agentGit?: AgentGitConfig
   readonly credentialSocket?: string
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
   readonly residentOpenCodeSocket?: string
@@ -761,6 +763,13 @@ export async function loadConfig(
   const residentOpenCodeSocket = loadOpenCodeResidentSocket(env)
   const ci = await loadCiConfig(env, read)
   const agentRuns = loadAgentRunConfig(env, secrets.agentRunToken)
+  const agentGit = loadAgentGitConfig(
+    env,
+    mode !== "execution" &&
+      (agentRuns !== undefined ||
+        residentCodex !== undefined ||
+        residentOpenCodeSocket !== undefined),
+  )
   const executionCapabilities = await loadExecutionCapabilitiesConfig(env, read, {
     ...(secrets.agentRunToken === undefined ? {} : { token: secrets.agentRunToken }),
     codexEnabled: agentRuns !== undefined || residentCodex !== undefined,
@@ -768,6 +777,7 @@ export async function loadConfig(
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
 
   return {
+    ...(agentGit === undefined ? {} : { agentGit }),
     ...(credentialSocket === undefined ? {} : { credentialSocket }),
     ...(workerIdentity === undefined ? {} : { workerIdentity }),
     ...(executionCapabilities === undefined ? {} : { executionCapabilities }),

@@ -634,3 +634,40 @@ test("v2 first-token telemetry observes generated steps before session totals se
     await server.stop(true)
   }
 })
+
+test("OpenCode session creation and resident environment replacement retain configured Git identity", async () => {
+  const environments: Readonly<Record<string, string>>[] = []
+  const adapter = new SdkOpenCodeAdapter(
+    makeClient({
+      setSessionEnvironment: (input) => {
+        environments.push(input.variables)
+        return Effect.void
+      },
+    }),
+    { name: "Agent", email: "agent@example.test", blockedEmails: [] },
+  )
+  await Effect.runPromise(
+    adapter.createSession({
+      directory: "/repo",
+      title: "test",
+      agent: "worker",
+      model: { providerID: "test", modelID: "test" },
+    }),
+  )
+  await Effect.runPromise(
+    adapter.setSessionEnvironment({
+      sessionID: "ses_1",
+      variables: { WORKFLOWD_RUN_ID: "run", GIT_AUTHOR_EMAIL: "blocked@example.test" },
+    }),
+  )
+  expect(environments).toHaveLength(2)
+  for (const environment of environments) {
+    expect(environment).toMatchObject({
+      GIT_AUTHOR_NAME: "Agent",
+      GIT_AUTHOR_EMAIL: "agent@example.test",
+      GIT_COMMITTER_NAME: "Agent",
+      GIT_COMMITTER_EMAIL: "agent@example.test",
+    })
+  }
+  expect(environments[1]?.WORKFLOWD_RUN_ID).toBe("run")
+})

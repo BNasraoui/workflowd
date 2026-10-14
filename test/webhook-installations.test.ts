@@ -305,6 +305,8 @@ test("installation-free or invalid installation envelopes never persist", () =>
 test("rejects a sandbox-only installation without storing its delivery", async () => {
   const config = await loadConfig({
     GITHUB_APP_ID: "123",
+    WORKFLOWD_AGENT_GIT_NAME: "Agent",
+    WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
     GITHUB_PRIVATE_KEY_PATH: "/unused/key",
     GITHUB_WEBHOOK_SECRET: "secret",
     OPENCODE_SERVER_PASSWORD: "secret",
