@@ -125,7 +125,7 @@ jobs:
   tests:
     name: Tests and changed-line coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions: {}
     steps:
       - name: Anonymous checkout
