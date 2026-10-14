@@ -71,3 +71,31 @@ The evidence script supports `--probe-credentials` and emits metadata only.
 It is not an installation or cutover command. The relink and migration programs
 are administrative entrypoints for further validation; agents receive no sudo
 or repair authority.
+
+## Operator credential and deployment isolation
+
+Before live cutover, verify from the separate agent UID that it cannot **read**
+Ben's `~/.config/gh/hosts.yml`, owner `GH_TOKEN`/`GITHUB_TOKEN` values or files that
+supply them, `~/.config/workflowd/env`, rollout override/env files, or any approval
+or administration credential. Read access alone permits impersonation. Do not
+pass these variables into agent processes. Model credential admission does not
+authorize access to the owner's GitHub credentials.
+
+Deny writes to gh `config.yml` (including its `http_unix_socket` setting), Git
+configuration, unit/drop-in files, `~/.config/environment.d`, executable paths,
+and every ancestor that could permit replacement. Deny access to the operator
+user systemd bus, including `systemctl --user set-environment`; manager variables
+can reach transient units before a script can sanitize its environment. Remove
+same-UID agent processes and sudo/polkit escalation routes before relying on
+ownership separation. Audit modes, ownership and ACLs without printing secrets.
+
+For verified deployments, provision a separate repository-scoped read-only token
+in an operator-owned mode-0600 file, passed to the entrypoint with
+`--github-token-file`; the script sets GH_TOKEN without using the owner's gh
+login. Protect the deployment state file, clone/Git metadata, root node_modules,
+managed skills marker/root and binaries. Audit global `~/.bunfig.toml`,
+`$XDG_CONFIG_HOME/.bunfig.toml`, `~/.npmrc`, and `~/.bun/install/cache` or
+BUN_INSTALL_CACHE_DIR too. The entrypoint uses empty global configuration and
+`--no-cache --backend=copyfile`; services/manual installs require their own audit.
+See the [verified deployment runbook](../deploy/verified-deploy.md) for the exact
+operator steps, App ID pinning, first-parent verification and explicit bootstrap.

@@ -1,5 +1,7 @@
 # Remote Probe Runner
 
+For mint deployment and updates, use the [verified deployment runbook](../deploy/verified-deploy.md). It covers the independent clone, review/CI admission, protected skill copies and agent Unix-user boundary.
+
 This plane transports two command kinds: the built-in harmless probe, and `claude_resume` — a request to wake a Claude Code session that lives on the runner's host. SQLite on the coordinator is the workflow authority. JetStream provides bounded, durable, at-least-once transport; runner inbox/outbox tables fence duplicate execution and coordinator result acceptance.
 
 ### `claude_resume` threat model
