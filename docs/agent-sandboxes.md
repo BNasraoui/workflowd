@@ -244,3 +244,75 @@ successful `&& printf` suffix. Final model prose cannot satisfy this check. Nati
 completion additionally records the exact systemd unit's inactive state and zero
 MainPID. Live runs repeat runner network denials and credential inventory; fixture
 success never substitutes for authenticated live evidence.
+
+### Disposable runner hardening (E2/E3)
+
+The pinned engine exposes a Unix socket shared only with tooling. It has no TCP
+control listener and rejects `insecureRootCapabilities`. Agent containers never
+receive the socket volume. The disposable VM installs owned `DOCKER-USER` rules
+before booting tooling: forwarded container traffic cannot reach the bridge subnet,
+`100.64.0.0/10`, `169.254.0.0/16`, or Azure's `168.63.129.16`. Both IPv4 and IPv6
+forwarding from the sandbox bridge to `tailscale0` are dropped, including accepted
+subnet routes outside the tailnet address range. Both families' INPUT chains accept
+only `ESTABLISHED,RELATED` traffic from that bridge and drop everything else,
+covering every runner address rather than a destination list. Docker's resolver
+runs inside each container namespace and does not require a host INPUT exception.
+
+Inside the engine, INPUT allows only Dagger's DNS resolver. Protected forwarded
+destinations (including all non-loopback runner IPv4 addresses captured at boot and
+`172.17.0.1`) are dropped through `CNI-ADMIN`, which CNI evaluates before its own
+ACCEPT rules. The tests and live verifier require increasing DROP counters;
+rule presence alone is insufficient. Stop removes the owned VM rules and socket
+volume. These scripts must never be applied to mint or another controller host.
+
+The hold step launches through `env -u` because the Actions runner injects OIDC
+request variables after step-level environment overrides. The in-repo Tailscale
+bootstrap installs checksum-pinned 1.94.2 binaries and starts `tailscaled` as a
+systemd service with both request variables removed. Only the short-lived join
+client receives the federated token, and the join uses `--accept-routes=false`
+and `--accept-dns=false`. The verifier scans all live process environments and
+rejects OIDC request variables in any executable other than `Runner.Worker`;
+it records names only and fails on unreadable live processes. GitHub's job-level
+`id-token` permission remains until completion; this is not job-wide revocation.
+
+The pinned Tailscale federation implementation sets `Reusable: false` when
+creating its auth key, so successful enrollment consumes that key. The bootstrap
+also requests an ephemeral device. Ephemeral lifetime alone does not consume a
+reusable key. Sources: [pinned federation implementation](https://github.com/tailscale/tailscale/blob/v1.94.2/feature/identityfederation/identityfederation.go),
+[pinned Dagger security configuration](https://github.com/dagger/dagger/blob/v0.18.14/docs/current_docs/configuration/engine.mdx#security).
+
+Operator verification after merging and updating the approved workflow/tooling
+pin requires a second disposable runner kept alive for the duration of the probe.
+Provide `EVIDENCE_SANDBOX_NETWORK_HOSTS` as the path to a private JSON array with
+one object per controller-visible IPv4 tailnet peer, plus mint itself, excluding
+the runner being tested. Each object needs `role` (`mint`, `peer`, or
+`second-runner`) and `address` (literal IP); remote objects also need `login`,
+`identityFile`, and `knownHostsFile` for existing read-only SSH access. The verifier
+requires all three roles and compares the inventory with Tailscale status.
+It obtains `ss -H -ltn` on each host before and after probing, covers every listed
+TCP listening port (including loopback-only listeners), and fails on missing
+hosts, unavailable inventory, changed listeners or incomplete results. Offline
+peers must be made available for this evidence run; they are never silently skipped.
+Peers without SSH (such as phones) cannot supply this listener inventory. The
+verifier deliberately fails rather than silently skipping them; a complete pass
+requires an inventory-capable tailnet. A future explicitly reviewed exclusion
+policy would need to disclose reduced coverage and cannot claim every-peer proof.
+No credentials or process-owner details belong in the inventory.
+
+Run the existing `--probe-denials` command in a capped user unit with
+`MemoryMax=4G` and `MemorySwapMax=0`. It records controller controls before and
+after, timeout denials from the runner host and a real container-use/Dagger
+container, and process environment variable names. From Dagger it also probes
+every non-loopback runner IPv4 address, the sandbox Docker gateway, `172.17.0.1`,
+`169.254.169.254`, `168.63.129.16`, and the engine control address. Loopback inside
+Dagger denotes the agent container itself, so it is not a runner-local target.
+Tooling separately probes the runner addresses to exercise host INPUT. Both
+container contexts must resolve public DNS, all protected TCP probes must time
+out, and host/engine DROP counters must increase. The verifier captures
+`ip route show table 52` before and after and rejects accepted routes outside
+`100.64.0.0/10`. It retains both families' firewall counters; isolated namespace
+tests exercise IPv6 INPUT and Tailscale forwarding as well.
+Connection-refused responses count only as controller reachability controls,
+never as successful denials. This is TCP/IPv4 evidence, not UDP or IPv6 coverage.
+Release the second runner using its existing custody workflow afterward. No App,
+environment, secret, ruleset or mint firewall changes are required by this PR.
