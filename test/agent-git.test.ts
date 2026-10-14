@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
+import { identityGuard, guardedHook } from "../src/agent-git/hooks"
 import { Effect } from "effect"
 import { loadConfig } from "../src/config"
 import { gitAgentRunWorktrees } from "../src/kernel/agent-run-worktrees"
@@ -346,3 +348,62 @@ test.each([
     }
   },
 )
+
+test.each([
+  ["URL", false],
+  ["URL", true],
+  ["named remote", false],
+  ["named remote", true],
+] as const)("new branch push via %s with new blocked author=%j", async (destination, blocked) => {
+  const root = await mkdtemp(join(tmpdir(), "workflowd-git-new-ref-"))
+  const remote = join(root, "remote")
+  const hooks = join(root, ".git", "hooks")
+  try {
+    await ok(root, ["init", "-b", "main"])
+    await ok(root, [
+      "commit",
+      "--allow-empty",
+      "--author=Historical <blocked@example.test>",
+      "-m",
+      "published",
+    ])
+    await ok(root, ["init", "--bare", "-b", "main", remote])
+    await ok(root, ["remote", "add", "origin", remote])
+    await ok(root, ["push", "origin", "main"])
+    await ok(root, ["fetch", "origin"])
+    expect(await ok(root, ["rev-parse", "origin/main"])).toBe(await ok(root, ["rev-parse", "HEAD"]))
+    await ok(root, [
+      "commit",
+      "--allow-empty",
+      `--author=Agent <${blocked ? "blocked" : "agent"}@example.test>`,
+      "-m",
+      "unpublished",
+    ])
+    const guard = join(hooks, "identity-guard")
+    await writeFile(guard, identityGuard, { mode: 0o700 })
+    await writeFile(join(hooks, "blocked-emails"), "blocked@example.test\n")
+    await writeFile(join(hooks, "pre-push"), guardedHook(guard, "pre-push", join(root, "unused")), {
+      mode: 0o700,
+    })
+    await ok(root, ["config", "core.hooksPath", hooks])
+    const result = await run(root, [
+      "push",
+      destination === "URL" ? pathToFileURL(remote).href : "origin",
+      "HEAD:refs/heads/new-branch",
+    ])
+    if (blocked) {
+      expect(result.code).not.toBe(0)
+      expect(result.output).toContain("workflowd: blocked git identity")
+      expect((await run(remote, ["rev-parse", "--verify", "refs/heads/new-branch"])).code).not.toBe(
+        0,
+      )
+    } else {
+      expect(result.code).toBe(0)
+      expect(await ok(remote, ["rev-parse", "refs/heads/new-branch"])).toBe(
+        await ok(root, ["rev-parse", "HEAD"]),
+      )
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

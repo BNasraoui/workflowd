@@ -24,7 +24,7 @@ case "$1" in
       case "$local_oid" in *[!0]*) ;; *) continue ;; esac
       case "$remote_oid" in
         *[!0]*) emails=$(git log --format='%ae%n%ce' "$remote_oid..$local_oid" --) || exit 1 ;;
-        *) emails=$(git log --format='%ae%n%ce' "$local_oid" --not --remotes="$2" --) || exit 1 ;;
+        *) emails=$(git log --format='%ae%n%ce' "$local_oid" --not --remotes --) || exit 1 ;;
       esac
       printf '%s\\n' "$emails" | check_emails || exit 1
     done

@@ -43,12 +43,13 @@ The guard checks Git's effective author and committer in `pre-commit`,
 `prepare-commit-msg`, and `commit-msg`. This catches an explicit `--author` and
 keeps the commit check active with `--no-verify`. `pre-push` separately runs
 `git log --format='%ae%n%ce'` over each advertised old-to-new range. New refs check
-reachable commits excluding the destination remote’s fetched tracking refs, so
+reachable commits excluding all remote-tracking refs (`--not --remotes`), so
 blocked authors already in the base history do not prevent every new branch.
 Keep these refs current with a fetch before pushing (dispatch fetches origin
-before creating worktrees). A URL destination with no matching tracking refs
-conservatively checks all reachable history. Deletions need no scan. An unknown
-old object or failed history inspection refuses the push; fetch before retrying.
+before creating worktrees). URL destinations and named remotes use the same
+exclusion, checking commits not reachable from any remote-tracking ref.
+Deletions need no scan. An unknown old object or failed history inspection refuses
+the push; fetch before retrying.
 
 Workflowd runs the identity check before chaining the original repository hook.
 Other Git hooks are forwarded, and pre-push forwards the original stdin unchanged.
@@ -68,8 +69,8 @@ against an agent that can change Git configuration, local refs, or hook files:
   `includeIf` configuration.
 - Fake `refs/remotes/<remote>/*` tracking refs can exclude blocked commits from
   the new-ref scan, even with hooks enabled. The exclusion trusts writable local
-  refs; another remote with the same URL and fabricated tracking history has the
-  same limitation. Fetching is operational hygiene, not an enforcement boundary.
+  refs across all remotes, regardless of the push destination or remote URL.
+  Fetching is operational hygiene, not an enforcement boundary.
 - API-created commits, such as GitHub Git commits or Contents API writes through
   `gh api`, never pass through local hooks.
 - `git commit-tree` and cherry-pick can create or preserve metadata that the
