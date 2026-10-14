@@ -120,6 +120,10 @@ function assertPublishIsolation(workflow: ReturnType<typeof object>) {
       if (job.environment !== undefined || referencesSecrets(job) || job.secrets !== undefined)
         throw new Error("Only agent-publish may attach an environment or reference secrets")
     } else {
+      // Only the separately reviewed ben-approval.yml may select the approval
+      // environment. A constant allowlist also excludes dynamic/case aliases.
+      if (job.environment !== undefined && job.environment !== "agent-publish")
+        throw new Error("Publisher environment must be agent-publish")
       if ("workflow_call" in object(workflow.on))
         throw new Error("agent-publish must be a top-level caller job")
       const { steps, ...ambientJob } = job
@@ -166,7 +170,7 @@ export function assertUnprivilegedPrWorkflows(workflows: Record<string, string>)
       // read-only workflow token, and single scoped App-key consumer.
       if (
         createHash("sha256").update(source).digest("hex") !==
-        "55346a10f19ab2edcbe312af115f368756c667f967ed67fa013b2c60c542d948"
+        "67d9e619b9c9260a7fb4f753e0721a17278bfb09d20e59bfd85d21ea1701b5d8"
       )
         throw new Error("Approval workflow differs from the reviewed secret-isolation snapshot")
       continue

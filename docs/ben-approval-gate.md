@@ -11,13 +11,16 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
 ## Trust boundary and prerequisites
 
 - Ben performs setup and approvals from a trusted workstation/browser. Generate
-  and retain the App private key there; never copy it to mint, repository files,
+  and retain the App private key there; never copy it to any agent host, repository files,
   repository-wide secrets, agent sessions, logs, PRs, or beads.
-- **A credential on mint that can act as Ben to approve deployments or administer
-  repository/App settings defeats this boundary.** Before calling F1 resolved,
-  Ben must ensure all agent-accessible credentials lack those rights and ruleset
-  bypass rights. Separating the App key alone does not distinguish Ben from a
-  token acting as Ben. This is an operator prerequisite, not a change made here.
+- **The gate only protects `main` once the account owner's GitHub credentials
+  are absent from every host where agents run**, including mint and ben-arch.
+  An owner credential can approve deployments or administer/bypass the controls;
+  separating the App key alone does not distinguish Ben from a token acting as
+  Ben. Audit all agent hosts, credential stores, environment variables, and
+  forwarded credentials. Complete the agent Unix user work (`workflowd-3m17`)
+  and operator credential/activation verification (`workflowd-bawj`) before
+  calling F1 resolved. This PR does not establish that prerequisite.
 - Required environment reviewers must be supported by the repository's GitHub
   plan/visibility. If the reviewer control is unavailable, stop activation.
 - The App has only repository **Checks: Read and write**, plus GitHub's mandatory
@@ -29,6 +32,10 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
   No administrator bypass is allowed on the environment or main ruleset.
 
 ## Console setup (Ben only)
+
+First verify the credential prerequisite on **every** agent host above. Creating
+an agent Unix user alone does not prove owner credentials are absent from hosts.
+Keep setup and approvals on a trusted workstation that does not run agents.
 
 1. On GitHub, avatar → **Settings → Developer settings → GitHub Apps → New GitHub
    App**. Choose a unique name, for example `workflowd-ben-approval`, and set the
@@ -54,7 +61,7 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
    branch/tag patterns. In **Environment variables**, add `BEN_APPROVAL_APP_ID`
    with the numeric App ID. In **Environment secrets**, add
    `BEN_APPROVAL_PRIVATE_KEY` with the PEM contents using the console. Neither is
-   a repository-wide secret. Do not place the key anywhere on mint.
+   a repository-wide secret. Do not place the key on any agent host.
 6. Review and merge the implementation PR using the existing process. The workflow
    must exist on `main` before dispatch. This initial bootstrap merge is not
    evidence that the new gate is enforced. Ben should personally review changes
@@ -62,7 +69,8 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
 7. Use a small open, non-draft verification PR targeting `main`, with green CI
    and completed independent review. Record its full current head SHA. Go to
    **Actions → Ben approval gate → Run workflow**, choose branch **main**, enter
-   `pr_number` and the exact lowercase 40-character `head_sha`, then run. Inspect
+   `action: approve`, `pr_number`, and the exact lowercase 40-character
+   `head_sha`, then run. Inspect
    the run title and PR diff at that SHA. The job must wait at the environment.
    **Review deployments → ben-merge-approval → Approve and deploy** releases it.
    Verify the PR has `Ben approval: success`, authored by the new App, linking to
@@ -106,6 +114,17 @@ PR does not change any ruleset, environment, App, secret, or mint configuration.
    resolve that configuration; a name-only required check does not establish
    the intended boundary. Do not add the App to any bypass list.
 
+10. On the still-open verification PR, dispatch `action: revoke` from `main`
+    for the same `head_sha` and approve the protected environment again. Verify
+    a **newer** `Ben approval: failure` from the **same App** exists and that the
+    ruleset blocks merging despite the older success. Check the PR merge box
+    and ruleset evaluation, not just the newest check displayed in the UI.
+    Then dispatch a fresh `action: approve` with the PR number and the same SHA;
+    verify the newer success restores eligibility after normal validation.
+    Record check IDs, App ID, SHA, run URLs, and merge-blocking evidence in
+    `workflowd-bawj`. **Stop activation if the ruleset does not evaluate the
+    newest check run for this name and App.**
+
 ## Normal operation and acceptance checks
 
 Finish CI and independent review, update the branch with `main` if required,
@@ -141,9 +160,38 @@ GitHub may hide another reviewer's unsubmitted draft. Off-platform reviews are
 also invisible. Ben must confirm those reviews have finished before releasing
 the job. API reads and check creation are not atomic: review state can change
 after validation, and an approval on the same SHA is not automatically revoked.
-If review restarts after approval, Ben must hold the merge; if approval must be
-invalidated, advance the PR head and request a fresh approval. Strict checks
-handle base updates, and SHA binding prevents approval of a different head.
+A check belongs to a commit, not a PR: another PR can reuse an approved SHA
+while it remains up to date with `main`. Closing the original PR, rejecting a
+later environment deployment, or moving only the original PR's head does not
+withdraw the existing successful check.
+
+### Revoke an approved SHA
+
+From **Actions → Ben approval gate → Run workflow**, choose **main**, select
+`action: revoke`, and enter the exact `head_sha`. `pr_number` is unnecessary for
+revocation. Inspect the action and SHA in the run title, then approve the same
+`ben-merge-approval` environment. The same scoped App posts a new completed
+`Ben approval` check with conclusion `failure`; historical success remains in
+GitHub's record. This affects every PR using that SHA. Verify the failing check
+and blocked merge as in activation step 10.
+
+Revocation intentionally does not require an open/current PR, completed reviews,
+or passing CI: those conditions must not prevent invalidating an approval.
+It still requires a fresh dispatch from `main` and Ben's recorded environment
+approval, checked before token minting and again before posting. A fresh
+`action: approve` can supersede revocation only after the normal PR, review,
+and CI validation, ignoring the prior check from this App alone.
+
+Runs for the same SHA share a concurrency group across PRs and both actions.
+GitHub does not guarantee FIFO ordering: before revoking, cancel other pending
+or running decisions for that SHA and confirm their termination. Do not approve
+a queued approval after revocation unless intentionally restoring approval.
+
+**Immediate workaround:** advance `main` through the normal reviewed process so
+strict required checks make the previously approved commit stale. Verify all
+PRs reusing it are blocked as out of date. Use this when revocation is unavailable
+or newest-check enforcement is unverified. Advancing only one PR does not fix
+reuse of its old approved SHA by another PR.
 
 ## Rollback and recovery (Ben only)
 
@@ -151,7 +199,9 @@ For a broken job or suspected key exposure, disable **Actions → Ben approval
 gate → … → Disable workflow**, cancel queued/in-progress runs, and revoke the
 App's key/installation as appropriate. Leave the required App check in place
 to keep new merges blocked. Previously approved heads need separate operator
-attention; disabling the workflow does not invalidate existing checks.
+attention; disabling the workflow does not invalidate existing checks. Revoke
+their SHAs first if the gate is trustworthy, or advance `main` and verify strict
+checks block those old commits. Do not run a suspected compromised gate to revoke.
 
 Preferred recovery: fix through a reviewed PR, restore a trusted key in the
 protected environment if needed, re-enable the workflow, and dispatch a fresh
@@ -173,10 +223,19 @@ The CI Repository integrity job runs pinned actionlint on this workflow:
 `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/ben-approval.yml`.
 Policy tests reject changes to the reviewed workflow's trust boundaries; a
 deliberate workflow edit requires reviewing and updating its SHA-256 snapshot
-in `src/sandbox/ci-policy.ts`. Full suites run in CI. Live activation tests require
+in `src/sandbox/ci-policy.ts`. Policy also reserves the protected approval
+environment for `ben-approval.yml`: other jobs cannot attach environments,
+except the publisher which may select only the literal `agent-publish` environment.
+Dynamic environment names are refused. Full suites run in CI. Live activation tests require
 Ben's console setup and cannot be replaced by the local API fixtures.
 
-GitHub references: [environment setup and availability](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
+PR #109's former “CI unconfirmed” handoff is superseded: its head
+`8b5ce4ce2964abe09cbc5597b9fb76e8ca561b29` passed
+[Required checks](https://github.com/BNasraoui/workflowd/actions/runs/38528936161/job/115742204859)
+on 2026-10-14. This verifies the original implementation's CI, not live gate
+activation or the owner-credential prerequisite.
+
+GitHub references: [check-run creation](https://docs.github.com/en/rest/checks/runs#create-a-check-run), [environment setup and availability](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
 [environment reviewers and self-review](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments),
 [ruleset checks and expected sources](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets),
 [workflow approval history and deployment review API](https://docs.github.com/en/rest/actions/workflow-runs),

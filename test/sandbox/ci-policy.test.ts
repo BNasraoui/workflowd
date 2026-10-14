@@ -220,3 +220,21 @@ for (const step of [
     expect(() => assertUnprivilegedPrWorkflows(files)).toThrow()
   })
 }
+
+for (const environment of [
+  "ben-merge-approval",
+  "{ name: ben-merge-approval }",
+  "BEN-MERGE-APPROVAL",
+  "${{ vars.DEPLOY_ENVIRONMENT }}",
+  "{ name: '${{ inputs.environment }}' }",
+])
+  test(`publisher cannot select the protected approval environment: ${environment}`, async () => {
+    const files = await workflows()
+    files["agent-sandbox-caller.yml"] = files["agent-sandbox-caller.yml"]!.replace(
+      "environment: agent-publish",
+      `environment: ${environment}`,
+    )
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+      "Publisher environment must be agent-publish",
+    )
+  })

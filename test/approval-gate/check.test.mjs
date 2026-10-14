@@ -40,6 +40,8 @@ function fixture() {
     GITHUB_REF: "refs/heads/main",
     GITHUB_RUN_ID: "123",
     GITHUB_RUN_ATTEMPT: "1",
+    APPROVAL_ACTION: "approve",
+    BEN_APPROVAL_APP_ID: "98765",
     PR_NUMBER: "42",
     HEAD_SHA: sha,
   }
@@ -114,6 +116,8 @@ test("only publish posts an App check on the supplied, verified PR head", async 
 })
 
 for (const [key, value] of Object.entries({
+  APPROVAL_ACTION: "unexpected",
+  BEN_APPROVAL_APP_ID: "invalid",
   GITHUB_REPOSITORY: "other/repo",
   GITHUB_EVENT_NAME: "pull_request",
   GITHUB_REF: "refs/heads/topic",
@@ -221,3 +225,72 @@ test("API failure and a head change during validation never post success", async
     expect(f.writes).toEqual([])
   }
 })
+
+test("revocation posts a newer failing check for the SHA without depending on PR or CI state", async () => {
+  const f = fixture()
+  await runGate("publish", f.env, f.request)
+  f.env.APPROVAL_ACTION = "revoke"
+  delete f.env.PR_NUMBER
+  // Closed, moved, or reused PRs and failing reviews/checks cannot prevent revocation.
+  for (const path of f.responses.keys()) if (!path.endsWith("/approvals")) f.responses.delete(path)
+  f.reads.length = 0
+  await runGate("validate", f.env, f.request)
+  expect(f.writes).toHaveLength(1)
+  await runGate("publish", f.env, f.request)
+  expect(f.writes).toHaveLength(2)
+  expect(f.writes[1]).toMatchObject({
+    path: `${root}/check-runs`,
+    body: {
+      name: f.writes[0].body.name,
+      head_sha: sha,
+      status: "completed",
+      conclusion: "failure",
+      details_url: "https://github.com/BNasraoui/workflowd/actions/runs/123",
+      output: { title: "Ben revoked approval for this commit" },
+    },
+  })
+  expect(f.reads).toEqual(Array(2).fill(`${root}/actions/runs/123/approvals`))
+})
+
+for (const [key, value] of [
+  ["GITHUB_REF", "refs/heads/topic"],
+  ["GITHUB_RUN_ATTEMPT", "2"],
+  ["HEAD_SHA", "main"],
+])
+  test(`revocation refuses invalid ${key} before API access`, async () => {
+    const f = fixture()
+    Object.assign(f.env, { APPROVAL_ACTION: "revoke", [key]: value })
+    await expect(runGate("publish", f.env, f.request)).rejects.toThrow()
+    expect(f.reads).toEqual([])
+    expect(f.writes).toEqual([])
+  })
+
+test("revocation still requires Ben's protected environment approval", async () => {
+  const f = fixture()
+  f.env.APPROVAL_ACTION = "revoke"
+  f.responses.set(`${root}/actions/runs/123/approvals`, [])
+  await expect(runGate("publish", f.env, f.request)).rejects.toThrow(
+    "recorded environment approval",
+  )
+  expect(f.writes).toEqual([])
+})
+
+for (const appId of [98765, 12345])
+  test(`fresh approval may supersede only this App's revocation: ${appId}`, async () => {
+    const f = fixture()
+    f.responses
+      .get(`${root}/commits/${sha}/check-runs?filter=latest&per_page=100&page=1`)
+      .check_runs.push({
+        name: "Ben approval",
+        app: { id: appId },
+        status: "completed",
+        conclusion: "failure",
+      })
+    if (appId === 98765) {
+      await runGate("publish", f.env, f.request)
+      expect(f.writes[0].body.conclusion).toBe("success")
+    } else {
+      await expect(runGate("publish", f.env, f.request)).rejects.toThrow("pending or unsuccessful")
+      expect(f.writes).toEqual([])
+    }
+  })
