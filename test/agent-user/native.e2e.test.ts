@@ -543,6 +543,37 @@ async function nativeBoundary(simulatedManager: boolean) {
       expect(attached.invocationId).toBe(process.invocationId)
       expect(attached.pid).toBe(process.pid)
       expect(attached.active).toBe(true)
+      const custodyFile = join(
+        custodyRoot,
+        `${createHash("sha256").update(runId).digest("hex")}.json`,
+      )
+      const savedCustody = await readFile(custodyFile, "utf8")
+      const savedRecord = JSON.parse(savedCustody)
+      try {
+        await writeFile(
+          custodyFile,
+          JSON.stringify({ ...savedRecord, process: { ...savedRecord.process, uid: 0 } }),
+        )
+        await expect(call({ operation: "inspect", runId })).rejects.toThrow("forged host custody")
+        await writeFile(
+          custodyFile,
+          JSON.stringify({
+            ...savedRecord,
+            process: { ...savedRecord.process, invocationId: "foreign" },
+          }),
+        )
+        await expect(call({ operation: "inspect", runId })).rejects.toThrow(
+          "host invocation identity mismatch",
+        )
+      } finally {
+        await writeFile(custodyFile, savedCustody)
+      }
+      await expect(call({ ...start, prompt: "conflicting launch" })).rejects.toThrow(
+        "host launch identity conflict",
+      )
+      await expect(
+        call({ operation: "stop", runId: `missing-${randomUUID()}`, launchId: "missing" }),
+      ).rejects.toThrow("host custody missing")
       expect(Schema.decodeUnknownSync(OwnedProcess)(await call(start)).invocationId).toBe(
         process.invocationId,
       )
