@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect, Queue } from "effect"
 import { TestClock } from "effect/testing"
+import { IdentityBudgetExhausted } from "../src/github/identity-request"
 import { makeIdentityCheckDispatcher } from "../src/github/identity-dispatch"
 import { blocked, checkName, commit, fixture, head, payload } from "./helpers/identity"
 
@@ -186,6 +187,40 @@ test("a deferred retry re-reads trust after a collaborator is demoted", async ()
       yield* TestClock.adjust("31 minutes")
       expect(f.writes.at(-1)?.conclusion).toBe("success")
       expect(f.writes).toHaveLength(before + 2)
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  )
+})
+
+test("retry trust lookup charges the author after the PR budget history expires", async () => {
+  const f = fixture({
+    author: () => "author-7",
+    suiteChecks: [],
+    intercept: async (path) => {
+      if (path.endsWith("/pulls"))
+        return Response.json(
+          Array.from({ length: 125 }, (_, i) => ({
+            number: i + 100,
+            user: { login: "author-7" },
+            head: { sha: head },
+          })),
+        )
+      if (path.includes("/compare/")) return Response.json({ total_commits: 0, commits: [] })
+    },
+  })
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      for (let i = 0; i < 25; i++) yield* f.app.checkAgentGitIdentity("pull_request", payload())
+      const [job] = yield* f.app.identityCheckJobs("pull_request", payload())
+      if (job === undefined) throw new Error("missing job")
+      expect(yield* job.run.pipe(Effect.flip)).toBeInstanceOf(IdentityBudgetExhausted)
+      yield* TestClock.adjust("61 minutes")
+      yield* f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        () => Effect.void,
+      )
+      const reads = f.requests.filter((r) => r.path.endsWith("/pulls/7")).length
+      expect(yield* job.run.pipe(Effect.flip)).toBeInstanceOf(IdentityBudgetExhausted)
+      expect(f.requests.filter((r) => r.path.endsWith("/pulls/7"))).toHaveLength(reads)
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   )
 })

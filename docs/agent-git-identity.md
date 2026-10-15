@@ -242,10 +242,13 @@ installation and 50 per PR and per untrusted author. These separate completion
 allowances leave capacity after the start limit is reached.
 
 Local budget exhaustion retains the job in the dispatcher's bounded waiting set.
-Twenty waiting slots are reserved for trusted jobs. At capacity, a new job evicts
-the oldest deferred entry that has no check ID; active work and entries owning a
-check ID are never evicted. Evicted heads can be recovered by webhook redelivery
-or startup recovery.
+Twenty waiting slots are reserved for trusted jobs. New jobs from an untrusted
+author are refused once that author holds 25 queued or deferred entries in an
+installation; already active scans can also defer. At capacity, only a trusted
+arrival can evict the oldest untrusted deferred entry without a check ID; active
+work, trusted jobs and entries owning a check ID are retained.
+Untrusted arrivals are refused when full; startup recovery waits for admission.
+Evicted heads can be recovered by webhook redelivery or startup recovery.
 A minute scheduler requeues retained jobs once their rolling shares have capacity;
 waiting retries do not occupy scan workers. Each retry re-reads the PR's author
 and trust from GitHub before starting or resetting a check. Existing check IDs are

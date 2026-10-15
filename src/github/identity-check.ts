@@ -275,10 +275,11 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
               request: { signal },
             }),
           installationId,
-          { prKey },
+          { prKey, authorKey: target.author?.toLowerCase() },
         )
       : undefined
-  const authorKey = (target.author ?? lookup?.pullRequest.author ?? "").toLowerCase()
+  target.author = lookup?.pullRequest.author ?? target.author
+  const authorKey = (target.author ?? "").toLowerCase()
   const trusted =
     target.trusted ??
     identityTrusted(
@@ -424,7 +425,6 @@ const runTarget = (
               Effect.sync(() => {
                 // A deferred job must re-read association and repository trust:
                 // permissions may change while it waits for budget capacity.
-                target.author = undefined
                 target.trusted = undefined
               }),
             ),
@@ -477,6 +477,10 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
     return {
       key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
       prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+      authorKey:
+        target.author === undefined
+          ? undefined
+          : `${target.installation.id}/${target.author.toLowerCase()}`,
       trusted: target.trusted ?? false,
       preserve: () => target.checkId !== undefined,
       supersede: () => {
