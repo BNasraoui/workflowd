@@ -9,6 +9,7 @@ import {
   OpenCodeAutomationAdapter,
 } from "../../src/opencode"
 import { loadConfig } from "../../src/config"
+import { WorkflowStart } from "../../src/qrspi/workflow-start"
 import { startHookService } from "../../src/runtime"
 import { normalizeWorkflowDefinition, workflowDefinitionSha256 } from "../../src/qrspi/domain"
 import { questionsStageContract } from "../../src/qrspi/contracts"
@@ -132,9 +133,7 @@ test.each([0, 200])(
     expect(reads).toBe(latency === 0 ? 15 : 14)
     expect(result._tag).toBe("Failure")
     if (result._tag === "Failure") {
-      expect(result.failure.message).toContain(
-        "OpenCode catalogs are not ready (0 agents, 0 models)",
-      )
+      expect(result.failure.message).toContain("OpenCode catalogs are empty (0 agents, 0 models)")
       expect(result.failure.message).toContain("plugins may still be activating")
       expect(result.failure.message).toContain(
         "no agents/providers may be configured for this location",
@@ -259,7 +258,7 @@ for (const scenario of [
             if (!(cause instanceof Error)) throw new Error("Expected an Error cause")
             if (scenario.agents?.length === 0 || scenario.models?.length === 0) {
               expect(cause.name).toBe("OpenCodeCatalogNotReadyError")
-              expect(cause.message).toContain("OpenCode catalogs are not ready")
+              expect(cause.message).toContain("OpenCode catalogs are empty")
               expect(cause.message).not.toContain("Unavailable OpenCode integration")
             } else if (scenario.agents !== undefined) {
               expect(cause.message).toContain("Unavailable OpenCode integration: agent pr-reviewer")
@@ -339,3 +338,89 @@ test("startup waits for cold catalogs using the existing bounded retry", async (
     { operation: "validate OpenCode availability" },
   ])
 })
+
+// Use wall time here: TestClock cannot exercise Bun's socket idle timeout.
+test.each([false, true])(
+  "HTTP cold-catalog start returns its validation outcome (second check: %s)",
+  async (secondCheck) => {
+    let validations = 0
+    let reads = 0
+    const definition = normalizeWorkflowDefinition(qrspiDefinition)
+    const stageCatalog = new TrustedStageCatalog([questionsStageContract]).port()
+    const agentHarness = harnessFor({
+      ...catalogClient([], [{ providerID: "openai", id: "gpt-5.6-sol" }]),
+      listAgents: () =>
+        Effect.suspend(() => {
+          reads += 1
+          // The first validation uses 3.8s; the second exhausts the shared
+          // eight-second deadline with the catalog empty again.
+          return Effect.succeed(
+            secondCheck && validations === 1 && reads > 1 ? ["qrspi-questions"] : [],
+          ).pipe(Effect.delay(secondCheck && validations === 1 ? 900 : 0))
+        }),
+    })
+    const validate = Effect.suspend(() => {
+      validations += 1
+      return validateWorkflowDefinition({ definition, stageCatalog, agentHarness })
+    })
+    const loaded = await loadConfig(
+      {
+        ...agentGitTestEnvironment,
+        GITHUB_APP_ID: "123",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
+        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
+        GITHUB_WEBHOOK_SECRET: "secret",
+        OPENCODE_SERVER_PASSWORD: "password",
+        WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:4096",
+        WORKFLOWD_QRSPI_TOKEN: "kickoff-secret",
+        WORKFLOWD_QRSPI_INSTALLATION_ID: "91",
+        WORKFLOWD_QRSPI_REPOSITORY_ID: "42",
+        WORKFLOWD_QRSPI_REPOSITORY: "example-owner/example",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE_ID: "workspace-42",
+        WORKFLOWD_QRSPI_BEADS_WORKSPACE: "/tmp",
+        WORKFLOWD_QRSPI_DEFINITION_JSON: JSON.stringify(qrspiDefinition),
+      },
+      { home: "/tmp" },
+    )
+    const response = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* startHookService({
+            ...loaded,
+            http: { ...loaded.http, host: "127.0.0.1", port: 0 },
+          })
+          return yield* Effect.tryPromise(() =>
+            fetch(`http://${server.hostname}:${server.port}/workflows/qrspi`, {
+              method: "POST",
+              headers: { authorization: "Bearer kickoff-secret" },
+              body: "{}",
+              signal: AbortSignal.timeout(9_500),
+            }).then(async (response) => ({ status: response.status, body: await response.json() })),
+          )
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            kernelLayer(":memory:"),
+            stubAdapters(),
+            Layer.succeed(WorkflowStart, {
+              preflight: Effect.void,
+              start: () =>
+                validate.pipe(
+                  Effect.andThen(validate),
+                  Effect.andThen(Effect.die("empty catalog must fail validation")),
+                ),
+            }),
+          ),
+        ),
+        Effect.provide(Logger.layer([])),
+      ),
+    )
+    expect(response).toEqual({ status: 503, body: { error: "WorkflowStartValidationError" } })
+    expect(validations).toBe(secondCheck ? 2 : 1)
+    expect(reads).toBeGreaterThan(validations)
+  },
+  12_000,
+)

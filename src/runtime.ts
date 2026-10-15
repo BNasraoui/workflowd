@@ -8,6 +8,7 @@ import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
+import { withAvailabilityDeadline } from "./availability-validation"
 import { validateOpenCodeStartup } from "./startup-validation"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
@@ -33,7 +34,7 @@ import {
   runPublicationIteration,
   runReconciliationIteration,
 } from "./worker"
-import { WorkflowStart } from "./qrspi/workflow-start"
+import { WorkflowStart, toWorkflowStartValidationError } from "./qrspi/workflow-start"
 import { WorkSignal, type WorkLane } from "./work-signal"
 import { ExecutionDiscovery } from "./execution-capabilities"
 
@@ -102,6 +103,9 @@ function serveHookHttpWithHandler<R>(config: HookHttpConfig, handler: ScopedHook
             hostname: config.host,
             port: config.port,
             maxRequestBodySize: config.maxWebhookBytes,
+            // HTTP QRSPI availability checks share an 8s deadline, leaving
+            // 2s to deliver the outcome before the socket idle timeout.
+            idleTimeout: 10,
             fetch: (request) =>
               runRequest(
                 handler(request, {
@@ -528,7 +532,15 @@ export function startHookService(
               : {
                   qrspi: {
                     token: config.qrspi.token,
-                    start: Option.getOrThrow(workflowStart).start,
+                    start: (input: unknown) =>
+                      withAvailabilityDeadline(
+                        Option.getOrThrow(workflowStart).start(input),
+                        8_000,
+                      ).pipe(
+                        Effect.catchTag("WorkflowDefinitionValidationError", (error) =>
+                          Effect.fail(toWorkflowStartValidationError(error)),
+                        ),
+                      ),
                   },
                 }),
             ...(config.testJobCanary === undefined

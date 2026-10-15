@@ -1,4 +1,18 @@
-import { Effect, Schedule } from "effect"
+import { Clock, Context, Effect, Schedule } from "effect"
+
+const AvailabilityDeadline = Context.Reference("workflowd/AvailabilityDeadline", {
+  defaultValue: (): number | undefined => undefined,
+})
+
+/** All availability checks within this effect share one deadline, including preflight. */
+export const withAvailabilityDeadline = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  budgetMs: number,
+) =>
+  Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis
+    return yield* effect.pipe(Effect.provideService(AvailabilityDeadline, now + budgetMs))
+  })
 
 /** Catalog reads can race location activation, including after idle eviction. */
 export const retryAvailability = <
@@ -8,11 +22,15 @@ export const retryAvailability = <
   E2,
 >(
   check: Effect.Effect<A, E, R>,
-  onTimeout: (lastFailure: E | undefined) => E2,
+  onTimeout: (lastFailure: E | undefined, timeoutMs: number) => E2,
 ) =>
-  Effect.suspend(() => {
+  Effect.gen(function* () {
+    const deadline = yield* AvailabilityDeadline
+    const now = yield* Clock.currentTimeMillis
+    const timeoutMs =
+      deadline === undefined ? 30_000 : Math.max(0, Math.min(30_000, deadline - now))
     let lastFailure: E | undefined
-    return check.pipe(
+    return yield* check.pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
           lastFailure = error
@@ -31,8 +49,8 @@ export const retryAvailability = <
         ),
       }),
       Effect.timeoutOrElse({
-        duration: "30 seconds",
-        orElse: () => Effect.fail(onTimeout(lastFailure)),
+        duration: timeoutMs,
+        orElse: () => Effect.fail(onTimeout(lastFailure, timeoutMs)),
       }),
     )
   })

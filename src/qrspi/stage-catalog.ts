@@ -839,12 +839,14 @@ export const validatePersistedSnapshots = (input: {
     )
   })
 
-function availabilityTimeout(lastFailure: AgentHarnessError | undefined) {
+function availabilityTimeout(lastFailure: AgentHarnessError | undefined, timeoutMs: number) {
   return (
     lastFailure ??
     new AgentHarnessError({
       operation: "validate OpenCode availability",
-      cause: new Error("OpenCode availability validation timed out after 30 seconds"),
+      cause: new Error(
+        `OpenCode availability validation timed out after ${timeoutMs / 1_000} seconds`,
+      ),
       retryable: true,
     })
   )
