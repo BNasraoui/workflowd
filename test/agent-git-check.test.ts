@@ -32,9 +32,9 @@ test("near-cap fork scans share the installation budget across PRs and fail clos
     })
   }
   const completed = f.writes.filter((write) => write.status === "completed")
-  expect(completed.filter((write) => write.conclusion === "success")).toHaveLength(9)
-  const exhausted = completed.slice(9)
-  expect(exhausted).toHaveLength(2)
+  expect(completed.filter((write) => write.conclusion === "success")).toHaveLength(7)
+  const exhausted = completed.slice(7)
+  expect(exhausted).toHaveLength(4)
   for (const check of exhausted)
     expect(check).toMatchObject({
       conclusion: "failure",

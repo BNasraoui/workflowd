@@ -87,27 +87,27 @@ test("recovery waits for capacity and eventually runs a recovered check", async 
           }),
         recoverIdentityChecks: (_repos, submit) =>
           Deferred.await(recover).pipe(
-            Effect.andThen(submit("check_run", 104)),
+            Effect.andThen(submit("check_run", 84)),
             Effect.andThen(Deferred.succeed(recovered, undefined)),
             Effect.orDie,
           ),
       })
       if (dispatch === undefined) throw new Error("dispatcher unavailable")
-      for (let id = 0; id < 104; id++) yield* dispatch("pull_request", id)
+      for (let id = 0; id < 84; id++) yield* dispatch("pull_request", id)
       yield* Deferred.succeed(recover, undefined)
       yield* TestClock.adjust("1 millis")
       expect(completed).toEqual([])
       yield* Deferred.succeed(release, undefined)
-      for (let i = 0; i < 104; i++) yield* Queue.take(finished)
+      for (let i = 0; i < 84; i++) yield* Queue.take(finished)
       yield* TestClock.adjust("1 second")
       yield* Deferred.await(recovered)
       // A subsequent job is a barrier: recovery must have admitted its check first.
-      yield* dispatch("pull_request", 105)
-      while ((yield* Queue.take(finished)) !== 105) {
+      yield* dispatch("pull_request", 85)
+      while ((yield* Queue.take(finished)) !== 85) {
         /* drain */
       }
-      expect(completed).toHaveLength(106)
-      expect(completed).toContain(104)
+      expect(completed).toHaveLength(86)
+      expect(completed).toContain(84)
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   )
 })

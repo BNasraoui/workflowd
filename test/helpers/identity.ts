@@ -23,6 +23,8 @@ export const payload = (action = "opened") => ({
 export function fixture(
   options: {
     author?: () => string
+    association?: string
+    headRepository?: string
     afterSnapshot?: () => Promise<void>
     baseSha?: () => string
     intercept?: (
@@ -124,6 +126,7 @@ export function fixture(
           const response = Response.json({
             number: options.wrongNumber ? 8 : Number(url.pathname.split("/").at(-1)),
             user: { login: options.author?.() ?? `author-${url.pathname.split("/").at(-1)}` },
+            author_association: options.association ?? "NONE",
             draft: true,
             state:
               (options.closedBefore && pulls === 1) || (options.closedAfter && pulls > 1)
@@ -142,7 +145,7 @@ export function fixture(
                 options.changedHead || (options.changeHeadDuringScan && pulls > 1)
                   ? "c".repeat(40)
                   : head,
-              repo: { full_name: "fork/repo" },
+              repo: { full_name: options.headRepository ?? "fork/repo" },
             },
           })
           await options.afterSnapshot?.()

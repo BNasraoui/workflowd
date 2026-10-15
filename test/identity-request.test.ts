@@ -10,20 +10,22 @@ test("scan requests share a rolling hourly installation budget, leaving publicat
       let calls = 0
       const run = async () => ++calls
       yield* Effect.all(
-        Array.from({ length: 1000 }, () => request(run, 91)),
+        Array.from({ length: 1000 }, () => request(run, 91, { trusted: true })),
         {
           concurrency: "unbounded",
         },
       )
-      const exhausted = yield* request(run, 91).pipe(Effect.flip)
+      const exhausted = yield* request(run, 91, { trusted: true }).pipe(Effect.flip)
       expect(exhausted.message).toBe("scan budget exhausted, retry later")
       expect(calls).toBe(1000)
       yield* request(run)
       yield* request(run, 92)
       yield* TestClock.adjust("59 minutes")
-      expect((yield* request(run, 91).pipe(Effect.flip)).message).toBe(exhausted.message)
+      expect((yield* request(run, 91, { trusted: true }).pipe(Effect.flip)).message).toBe(
+        exhausted.message,
+      )
       yield* TestClock.adjust("1 minute")
-      yield* request(run, 91)
+      yield* request(run, 91, { trusted: true })
       expect(calls).toBe(1003)
     }).pipe(Effect.provide(TestClock.layer())),
   )
@@ -126,7 +128,8 @@ test.each([
           calls++
           throw new Error("failed write")
         }
-        const send = (prKey: string) => request(run, 91, { kind, prKey }).pipe(Effect.ignore)
+        const send = (prKey: string) =>
+          request(run, 91, { kind, prKey, trusted: true }).pipe(Effect.ignore)
         for (let i = 0; i <= prLimit; i++) yield* send("owner/repo/7")
         expect(calls).toBe(prLimit)
         // Distinct repositories do not collide, but share the installation cap.
@@ -169,4 +172,21 @@ test("author shares span PRs and repositories but expire and remain installation
       expect(calls).toBe(27)
     }).pipe(Effect.provide(TestClock.layer())),
   )
+})
+
+test("fork reads leave a reserved share for trusted PRs", async () => {
+  const request = makeIdentityRequest()
+  let calls = 0
+  const run = async () => ++calls
+  for (let i = 0; i < 800; i++)
+    await Effect.runPromise(request(run, 91, { authorKey: `fork-${i % 4}` }))
+  const error = await Effect.runPromise(request(run, 91).pipe(Effect.flip))
+  expect(error.message).toBe("scan budget exhausted, retry later")
+  expect(calls).toBe(800)
+  for (let i = 0; i < 200; i++)
+    await Effect.runPromise(request(run, 91, { trusted: true, authorKey: "maintainer" }))
+  expect(calls).toBe(1000)
+  expect(
+    (await Effect.runPromise(request(run, 91, { trusted: true }).pipe(Effect.flip))).message,
+  ).toBe("scan budget exhausted, retry later")
 })
