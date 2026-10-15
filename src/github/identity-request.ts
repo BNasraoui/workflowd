@@ -13,12 +13,25 @@ const RateResponse = Schema.Struct({
 // requests wait until GitHub's reset/retry-after deadline.
 export const makeIdentityRequest = () => {
   let resumeAt = 0
-  return <A>(run: (signal: AbortSignal) => Promise<A>) =>
+  const scans = new Map<number, number[]>()
+  return <A>(run: (signal: AbortSignal) => Promise<A>, scanInstallationId?: number) =>
     Effect.gen(function* () {
       let now = yield* Clock.currentTimeMillis
       while (now < resumeAt) {
         yield* Effect.sleep(resumeAt - now)
         now = yield* Clock.currentTimeMillis
+      }
+      if (scanInstallationId !== undefined) {
+        // A rolling window avoids a double burst at an hourly reset. Charge
+        // before issuing I/O, including failed requests; concurrent scans share
+        // this synchronous reservation. Publication must remain available.
+        const recent = (scans.get(scanInstallationId) ?? []).filter(
+          (time) => time > now - 3_600_000,
+        )
+        scans.set(scanInstallationId, recent)
+        if (recent.length >= 1000)
+          return yield* Effect.fail(new Error("scan budget exhausted, retry later"))
+        recent.push(now)
       }
       return yield* Effect.tryPromise({
         try: run,

@@ -2,6 +2,46 @@ import { expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Queue } from "effect"
 import { TestClock } from "effect/testing"
 import { makeIdentityWork } from "../src/github/identity-work"
+import { fixture, payload } from "./helpers/identity"
+
+test("a PR retains only its two newest waiting heads without evicting active work or another PR", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const started = yield* Queue.unbounded<string>()
+      const release = yield* Deferred.make<void>()
+      const submit = yield* makeIdentityWork(1, 3)
+      const f = fixture()
+      const job = (version: number, number = 7) =>
+        Effect.gen(function* () {
+          const jobs = yield* f.app.identityCheckJobs("pull_request", {
+            ...payload(),
+            pull_request: { number, head: { sha: version.toString(16).padStart(40, "0") } },
+          })
+          const target = jobs[0]
+          if (target === undefined) throw new Error("missing identity job")
+          return {
+            ...target,
+            run: Queue.offer(started, String(version)).pipe(
+              Effect.andThen(Deferred.await(release)),
+            ),
+          }
+        })
+      yield* submit(yield* job(5000))
+      expect(yield* Queue.take(started)).toBe("5000")
+      for (let i = 0; i < 5000; i++) expect(yield* submit(yield* job(i))).toBe(true)
+      expect(yield* submit(yield* job(5001, 8))).toBe(true)
+      // Recovery waits rather than replacing any admitted head.
+      expect(yield* submit(yield* job(5002), false)).toBe(false)
+      yield* Deferred.succeed(release, undefined)
+      const ran = [
+        yield* Queue.take(started),
+        yield* Queue.take(started),
+        yield* Queue.take(started),
+      ]
+      expect(ran.sort()).toEqual(["4998", "4999", "5001"])
+    }).pipe(Effect.scoped),
+  )
+})
 
 test("bounds active scans and waiting PRs, retaining only the newest target", async () => {
   await Effect.runPromise(

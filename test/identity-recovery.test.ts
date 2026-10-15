@@ -10,6 +10,50 @@ const own = {
   external_id: "agent-git:7",
 }
 
+test.each([false, true])(
+  "recovery resumes the newest pending check across pages and supersedes older checks (newest first: %s)",
+  async (newestFirst) => {
+    const checks = [
+      { ...own, id: 12 },
+      ...Array.from({ length: 99 }, () => ({ ...own, status: "completed", id: 99 })),
+      { ...own, id: 14 },
+      { ...own, id: 13 },
+    ]
+    const f = fixture({
+      suiteChecks: newestFirst ? checks.reverse() : checks,
+      intercept: async (path) => {
+        if (path.endsWith("/pulls")) return Response.json([{ number: 7, head: { sha: head } }])
+      },
+    })
+    const recovered: unknown[] = []
+    await Effect.runPromise(
+      f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (_event, payload) =>
+          Effect.sync(() => {
+            recovered.push(payload)
+          }),
+      ),
+    )
+    expect(recovered).toEqual([
+      expect.objectContaining({ check_run: expect.objectContaining({ id: 14 }) }),
+    ])
+    expect(f.writes).toHaveLength(2)
+    expect(
+      f.writes.every((write) => write.status === "completed" && write.conclusion === "failure"),
+    ).toBe(true)
+    expect(f.writes.every((write) => JSON.stringify(write.output).includes("Superseded"))).toBe(
+      true,
+    )
+    expect(
+      f.requests
+        .filter((r) => r.method === "PATCH")
+        .map((r) => r.path)
+        .sort(),
+    ).toEqual(["/repos/owner/repo/check-runs/12", "/repos/owner/repo/check-runs/13"])
+  },
+)
+
 test("startup paginates open PRs and checks, recovering only this App's pending identity checks", async () => {
   let pages = 0
   const f = fixture({

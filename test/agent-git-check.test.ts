@@ -12,6 +12,35 @@ import {
   fixture,
 } from "./helpers/identity"
 
+test("near-cap fork scans share the installation budget across PRs and fail closed with a retry message", async () => {
+  const f = fixture({
+    intercept: async (path, _body, _signal, url) => {
+      if (!path.includes("/compare/")) return
+      const page = Number(url.searchParams.get("page"))
+      return Response.json({
+        total_commits: 10_000,
+        commits: Array.from({ length: 100 }, (_, index) =>
+          commit((page * 100 + index).toString(16).padStart(40, "0")),
+        ),
+      })
+    },
+  })
+  for (let number = 1; number <= 11; number++) {
+    await f.run("pull_request", { ...payload(), pull_request: { number, head: { sha: head } } })
+  }
+  const completed = f.writes.filter((write) => write.status === "completed")
+  expect(completed.filter((write) => write.conclusion === "success")).toHaveLength(9)
+  const exhausted = completed.slice(9)
+  expect(exhausted).toHaveLength(2)
+  for (const check of exhausted)
+    expect(check).toMatchObject({
+      conclusion: "failure",
+      output: { title: checkName, summary: "scan budget exhausted, retry later" },
+    })
+  await f.run("pull_request", { ...payload(), installation: { id: 92 } })
+  expect(f.writes.at(-1)?.conclusion).toBe("success")
+})
+
 test.each(["opened", "synchronize", "reopened", "edited"])(
   "checks a draft fork on %s using immutable base..head",
   async (action) => {

@@ -262,7 +262,8 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
     yield* write((signal) =>
       client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
     )
-  const result = yield* inspectPull(client, repository, target, blockedEmails, attempt).pipe(
+  const scan: IdentityRequest = (run) => attempt(run, target.installation.id)
+  const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
     Effect.timeout("2 minutes"),
     Effect.catch((error) =>
       Effect.succeed({
@@ -270,8 +271,10 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
         output: {
           title: checkName,
           summary:
-            error instanceof Error && error.message === "range too large"
-              ? "range too large"
+            error instanceof Error &&
+            (error.message === "range too large" ||
+              error.message === "scan budget exhausted, retry later")
+              ? error.message
               : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
         },
       }),
@@ -323,6 +326,7 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
   )
   return targets.map((target): IdentityWork => ({
     key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
+    prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
     run: checkTarget(getClient, blockedEmails, target, publication, attempt),
   }))
 })

@@ -1,7 +1,8 @@
 import { Effect, Schema } from "effect"
 import type { PrRepositories } from "../pr-automation-config"
-import type { GitHubInstallationAdapter } from "./adapter"
+import type { GitHubCheckRun, GitHubInstallationAdapter } from "./adapter"
 import type { IdentityRequest } from "./identity-request"
+import type { IdentityPublication } from "./identity-publication"
 
 const Pulls = Schema.Array(
   Schema.Struct({
@@ -20,6 +21,7 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
   request: IdentityRequest,
   repositories: PrRepositories,
   dispatch: Dispatch,
+  publication: IdentityPublication,
 ) {
   for (const repository of repositories) {
     yield* Effect.gen(function* () {
@@ -52,6 +54,7 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
             request: { signal: controller.signal },
           })
           const checks = checkPages[Symbol.asyncIterator]()
+          let newest: GitHubCheckRun | undefined
           for (;;) {
             const page = yield* request(() => checks.next())
             if (page.done) break
@@ -63,19 +66,47 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
                 check.externalId !== `agent-git:${pull.number}`
               )
                 continue
-              yield* dispatch("check_run", {
-                action: "rerequested",
-                installation: { id: repository.installationId },
-                repository: { full_name: repository.repository },
-                check_run: {
-                  id: check.id,
-                  name: check.name,
-                  app: { id: appId },
-                  external_id: check.externalId,
-                  head_sha: pull.head.sha,
-                },
-              })
+              if (newest === undefined) {
+                newest = check
+                continue
+              }
+              const older = check.id > newest.id ? newest : check
+              if (check.id > newest.id) newest = check
+              yield* Effect.gen(function* () {
+                const write = yield* publication(
+                  `${repository.repository.toLowerCase()}/${older.id}`,
+                  request,
+                )
+                yield* write((signal) =>
+                  client.updateCheckRun({
+                    owner,
+                    repo,
+                    check_run_id: older.id,
+                    status: "completed",
+                    conclusion: "failure",
+                    output: {
+                      title: "Workflowd Git Identity",
+                      summary: "Superseded by a newer identity check on this head.",
+                    },
+                    request: { signal },
+                  }),
+                )
+              }).pipe(Effect.scoped)
             }
+          }
+          if (newest !== undefined) {
+            yield* dispatch("check_run", {
+              action: "rerequested",
+              installation: { id: repository.installationId },
+              repository: { full_name: repository.repository },
+              check_run: {
+                id: newest.id,
+                name: newest.name,
+                app: { id: appId },
+                external_id: newest.externalId,
+                head_sha: pull.head.sha,
+              },
+            })
           }
         }
       }

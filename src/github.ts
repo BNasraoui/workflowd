@@ -91,6 +91,7 @@ export class GitHubAppAdapter implements GitHubPort {
       this.identityRequest,
       repositories,
       dispatch,
+      this.identityPublication,
     )
 
   readonly identityCheckJobs = (event: string, payload: unknown) =>
