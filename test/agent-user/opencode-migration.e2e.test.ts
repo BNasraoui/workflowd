@@ -47,9 +47,7 @@ async function runIsolated(pattern: string) {
     {
       env: {
         ...process.env,
-        ...(pattern === "^offline migration"
-          ? { PATH: `${join(import.meta.dir, "../resources/forbidden")}:${process.env.PATH}` }
-          : {}),
+        PATH: `${join(import.meta.dir, "../resources/forbidden")}:${process.env.PATH}`,
       },
       stdout: "inherit",
       stderr: "inherit",

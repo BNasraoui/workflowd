@@ -72,7 +72,14 @@ if (process.getuid!() !== 0 && !process.env.WORKFLOWD_AGENT_TEST_BEN_UID) {
         "--test-name-pattern",
         "^(a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|refused installed|relink |a FIFO)",
       ],
-      { stdout: "inherit", stderr: "inherit" },
+      {
+        env: {
+          ...process.env,
+          PATH: `${join(import.meta.dir, "../resources/forbidden")}:${process.env.PATH}`,
+        },
+        stdout: "inherit",
+        stderr: "inherit",
+      },
     )
     expect(await child.exited).toBe(0)
   }, 120000)
