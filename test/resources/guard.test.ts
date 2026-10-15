@@ -54,3 +54,31 @@ test("failed backend inventory still attempts every backend and retains recovery
     rmSync(directory, { recursive: true, force: true })
   }
 })
+
+test("a guardian preserves recovery state when owner liveness is unknown", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "workflowd-guard-test-"))
+  const fields = owner().split(".")
+  fields[1] = "0".repeat(32)
+  const config: Config = {
+    directory,
+    owner: fields.join("."),
+    launcher: fields.join("."),
+    docker: null,
+    systemctl: null,
+    systemdRun: null,
+    env: {},
+  }
+  const path = join(directory, "config.json")
+  writeFileSync(path, JSON.stringify(config))
+  try {
+    const child = Bun.spawn([process.execPath, join(import.meta.dir, "guardian.ts"), path], {
+      stdout: "ignore",
+      stderr: "pipe",
+    })
+    const output = await new Response(child.stderr).text()
+    expect(await child.exited, output).toBe(1)
+    expect(existsSync(path)).toBe(true)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
