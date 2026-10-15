@@ -1,44 +1,23 @@
-import { Effect, Schedule } from "effect"
-import type { OpenCodeAutomationError } from "./opencode"
+import { Effect } from "effect"
+import { OpenCodeAutomationError } from "./opencode"
+import { retryAvailability } from "./availability-validation"
 
 /** Location plugin activation can outlive the first catalog reads, even on a running server. */
 export const validateOpenCodeStartup = (check: Effect.Effect<void, OpenCodeAutomationError>) =>
-  Effect.suspend(() => {
-    let lastFailure: OpenCodeAutomationError | undefined
-    return check.pipe(
-      Effect.tapError((error) =>
-        Effect.sync(() => {
-          lastFailure = error
-        }),
+  retryAvailability(
+    check,
+    (lastFailure) =>
+      new Error(
+        `OpenCode startup validation timed out after 30 seconds${lastFailure === undefined ? "" : ` (${lastFailure.operation}): ${String(lastFailure.cause)}`}`,
+        { cause: lastFailure },
       ),
-      Effect.retry({
-        while: (error) => error.retryable,
-        schedule: Schedule.spaced("2 seconds").pipe(
-          Schedule.upTo({ times: 14 }),
-          Schedule.setInputType<OpenCodeAutomationError>(),
-          Schedule.tap(({ input }) =>
-            Effect.logWarning("OpenCode startup availability check failed; retrying", {
-              operation: input.operation,
-            }),
-          ),
-        ),
-      }),
-      Effect.mapError(
-        (error) =>
-          new Error(
+  ).pipe(
+    Effect.mapError((error) =>
+      error instanceof OpenCodeAutomationError
+        ? new Error(
             `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
             { cause: error },
-          ),
-      ),
-      Effect.timeoutOrElse({
-        duration: "30 seconds",
-        orElse: () =>
-          Effect.fail(
-            new Error(
-              `OpenCode startup validation timed out after 30 seconds${lastFailure === undefined ? "" : ` (${lastFailure.operation}): ${String(lastFailure.cause)}`}`,
-              { cause: lastFailure },
-            ),
-          ),
-      }),
-    )
-  })
+          )
+        : error,
+    ),
+  )
