@@ -154,7 +154,7 @@ test("startup recovery gives every untrusted PR in a 300-PR backlog a check", as
         const next = new URL(url)
         next.searchParams.set("page", String(page + 1))
         const response = Response.json(pulls.slice((page - 1) * 100, page * 100), {
-          headers: page < 3 ? { link: `<${next}>; rel="next"` } : {},
+          headers: page < 3 ? { link: `<${next.toString()}>; rel="next"` } : {},
         })
         Object.defineProperty(response, "url", { value: url.toString() })
         return response
@@ -229,7 +229,7 @@ test("one untrusted author cannot fill other authors' deferred slots", async () 
                 ...target,
                 run: Effect.gen(function* () {
                   if (attempts++ === 0)
-                    yield* Effect.fail(new IdentityBudgetExhausted({ retryAt: 60_000 }))
+                    return yield* Effect.fail(new IdentityBudgetExhausted({ retryAt: 60_000 }))
                 }),
               }
             }),
