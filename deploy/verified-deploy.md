@@ -82,9 +82,11 @@ the absolute Bun path with `install --frozen-lockfile --no-cache --backend=copyf
 no shared Bun cache or earlier release dependencies are trusted or hardlinked.
 Repository-local bunfig/npmrc and lifecycle policy are part of the reviewed
 commit. The layout preflight requires `previous` to be absent or a symlink.
-Only after installation and skill validation/copy succeed does it stop the three
-units, record the previous release link, and atomically replace `current` with a
-symlink to the new release using a single rename on the same filesystem. Units
+After installation and skill validation/copy succeed, it prepares both activation
+symlinks in one temporary directory inside the deployment parent. Only then does
+it stop the three units and rename the prepared links into `previous` and `current`.
+A parent that refuses temporary-directory or link creation leaves units running.
+The `current` replacement uses a single rename on the same filesystem. Units
 use `/opt/workflowd/deploy/current` as their stable WorkingDirectory; the old
 release remains on disk unchanged. Activation is atomic for the service path;
 skill copies, service restarts and the state write are separate operations.
@@ -143,11 +145,19 @@ prune explicitly named releases with the protected entrypoint:
 Pass directory basenames from `releases/`, never paths or globs. The command takes
 the same nonblocking `/opt/workflowd/operator/verified-deploy.lock` as deployment,
 resolves `current` and `previous` under that lock, and refuses either target.
-It checks the entire request before deletion and rejects symlinks, traversal,
-missing candidates and invalid link layouts. Lock contention refuses the command;
+It requires `releases/` to already exist, checks the entire request before deletion,
+and rejects symlinks, traversal, missing candidates and invalid link layouts.
+Under the lock it checks each workflowd unit's `MainPID`, `ExecStart` and
+`WorkingDirectory`, plus the operator's processes' `/proc` `cwd`, `exe` and `root`
+links. A path resolving inside any candidate refuses the whole request. Unit
+inspection failures and unreadable process paths also refuse pruning; processes
+that exit during inspection are skipped. Lock contention refuses the command;
 retry after the other operation finishes. Pruning needs no GitHub token or Bun.
-It does not detect running consumers: drain them before pruning any release they
-still reference, even when neither activation link points there. Do not manually
+Drain consumers before pruning and prevent new consumers from starting during
+the operation: the deploy lock cannot prevent an unrelated process from opening
+a release after inspection. Processes under other UIDs are inspected only when
+named by a unit's MainPID; retained open files or imports alone are not detected.
+Do not manually
 change links outside the lock. Interrupted preparation can leave an unreferenced
 staging directory; inspect it using the same procedure. Deletion I/O failures may
 leave a partially pruned request; inspect the printed removed paths before retrying.

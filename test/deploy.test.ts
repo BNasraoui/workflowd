@@ -1,6 +1,18 @@
 import { expect, test } from "bun:test"
 import { readFile } from "node:fs/promises"
 
+test("MCP unit uses the pinned Bun and stable release entrypoint", async () => {
+  const [unit, packageJson] = await Promise.all([
+    readFile("deploy/systemd/workflowd-mcp.service", "utf8"),
+    readFile("package.json", "utf8"),
+  ])
+  expect(JSON.parse(packageJson).scripts.mcp).toBe("bun src/mcp-server.ts")
+  expect(unit.split("\n").filter((line) => line.startsWith("ExecStart="))).toEqual([
+    "ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/mcp-server.ts",
+  ])
+  expect(unit).toContain("WorkingDirectory=/opt/workflowd/deploy/current")
+})
+
 test("shipped deployment defaults Fix Work off but permits explicit enablement", async () => {
   const [environment, unit, readme] = await Promise.all([
     readFile("deploy/workflowd.env.example", "utf8"),

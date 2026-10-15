@@ -401,6 +401,34 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual((previous / 'keep').read_text(), 'untouched')
         self.assertFalse(self.state.exists())
 
+    def test_read_only_activation_parent_is_refused_before_stop(self):
+        old = self.release_fixture()
+        self.repo.parent.chmod(0o555)
+        try:
+            with self.assertRaises(PermissionError):
+                self.run_deploy()
+            self.assertEqual(self.events, ['install'])
+            self.assertEqual(self.repo.resolve(), old)
+            self.assertFalse(self.state.exists())
+        finally:
+            self.repo.parent.chmod(0o755)
+
+    def test_both_activation_links_are_prepared_before_stop(self):
+        real_symlink = Path.symlink_to
+        prepared = []
+
+        def symlink(link, target, **kwargs):
+            if link.parent.name.startswith('.activate-'):
+                self.assertNotIn('stop', self.events)
+                prepared.append(link)
+            return real_symlink(link, target, **kwargs)
+
+        with patch.object(Path, 'symlink_to', symlink):
+            self.run_deploy()
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(prepared[0].parent, prepared[1].parent)
+        self.assertFalse(prepared[0].parent.exists())
+
     def test_bad_skill_tree_is_refused_before_stop(self):
         for invalid in ['symlink', 'missing SKILL.md']:
             with self.subTest(invalid=invalid):
