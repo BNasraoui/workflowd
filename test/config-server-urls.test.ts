@@ -37,9 +37,12 @@ for (const name of [
     )
     expect(result._tag).toBe("Failure")
     if (result._tag !== "Failure") throw new Error("Expected configuration rejection")
-    expect(inspect(result.failure, { depth: null })).toContain(name)
+    const cause = result.failure.cause
+    if (!(cause instanceof Error)) throw new Error("Expected a configuration error")
+    expect(cause.message).toContain(name)
     expect(logs).toHaveLength(1)
     for (const rendered of [
+      cause.message,
       inspect(result.failure, { depth: null }),
       inspect(logs, { depth: null }),
       JSON.stringify(logs),
