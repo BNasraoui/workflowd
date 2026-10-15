@@ -26,7 +26,10 @@ test("near-cap fork scans share the installation budget across PRs and fail clos
     },
   })
   for (let number = 1; number <= 11; number++) {
-    await f.run("pull_request", { ...payload(), pull_request: { number, head: { sha: head } } })
+    await f.run("pull_request", {
+      ...payload(),
+      pull_request: { number, user: { login: `author-${number}` }, head: { sha: head } },
+    })
   }
   const completed = f.writes.filter((write) => write.status === "completed")
   expect(completed.filter((write) => write.conclusion === "success")).toHaveLength(9)
@@ -122,7 +125,7 @@ test.each([
   expect(JSON.stringify(f.writes)).not.toContain("@")
 })
 
-test("reruns only this App's identity check, resetting the old result before reading", async () => {
+test("reruns only this App's identity check, resolving its author then resetting before scanning", async () => {
   const f = fixture()
   const rerun = {
     ...payload(),
@@ -136,11 +139,13 @@ test("reruns only this App's identity check, resetting the old result before rea
     },
   }
   await f.run("check_run", rerun)
-  expect(f.requests[0]).toMatchObject({
+  expect(f.requests[0]).toMatchObject({ method: "GET", path: "/repos/owner/repo/pulls/7" })
+  expect(f.requests[1]).toMatchObject({
     method: "PATCH",
     path: "/repos/owner/repo/check-runs/12",
     body: { status: "in_progress" },
   })
+  expect(f.requests[2]).toMatchObject({ method: "GET", path: "/repos/owner/repo/pulls/7" })
   expect(f.writes.at(-1)).toMatchObject({ conclusion: "success" })
   for (const value of [
     { ...rerun, action: "completed" },
