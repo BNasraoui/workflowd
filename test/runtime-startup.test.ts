@@ -140,10 +140,11 @@ describe("runHookService startup", () => {
       worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 60_000 },
     }
 
-    const result = await Effect.runPromise(
+    await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           const brokerAvailable = yield* Deferred.make<void>()
+          const allowGuard = yield* Deferred.make<void>()
           const guardReconciled = yield* Deferred.make<void>()
           const recovered = yield* Deferred.make<void>()
           const coordinator = {
@@ -159,10 +160,13 @@ describe("runHookService startup", () => {
             Layer.succeed(RemoteCoordinator, coordinator),
             Layer.succeed(InstallationGuard, {
               reconcile: () =>
-                Effect.sync(() => {
-                  guardPasses++
-                  return true
-                }).pipe(Effect.tap(() => Deferred.succeed(guardReconciled, undefined))),
+                Deferred.await(allowGuard).pipe(
+                  Effect.map(() => {
+                    guardPasses++
+                    return true
+                  }),
+                  Effect.tap(() => Deferred.succeed(guardReconciled, undefined)),
+                ),
               runWebhooks: Effect.never,
               health: () =>
                 Effect.succeed({
@@ -177,16 +181,16 @@ describe("runHookService startup", () => {
                 }),
             }),
           )
-          const started = yield* Effect.race(
-            startHookService(config).pipe(
-              Effect.map((server) => server as Bun.Server<undefined> | null),
-            ),
-            Effect.sleep(250).pipe(Effect.as(null)),
-          ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)))
-          if (started === null) return { started: false, health: 0, recovered: false }
+          const started = yield* startHookService(config).pipe(
+            Effect.provide(Layer.merge(kernelLayer(":memory:"), adapters)),
+          )
           const health = yield* Effect.tryPromise(() =>
             fetch(`http://${started.hostname}:${started.port}/health`),
           )
+          // HTTP readiness does not imply that the background guard has reconciled.
+          expect(health.status).toBe(200)
+          expect(guardPasses).toBe(0)
+          yield* Deferred.succeed(allowGuard, undefined)
           yield* Deferred.await(guardReconciled)
           expect(guardPasses).toBe(1)
           const body = JSON.stringify({ action: "created" })
@@ -204,16 +208,10 @@ describe("runHookService startup", () => {
           expect(guarded.status).toBe(202)
           expect(guardEvents).toBe(1)
           yield* Deferred.succeed(brokerAvailable, undefined)
-          const didRecover = yield* Effect.race(
-            Deferred.await(recovered).pipe(Effect.as(true)),
-            Effect.sleep(250).pipe(Effect.as(false)),
-          )
-          return { started: true, health: health.status, recovered: didRecover }
+          yield* Deferred.await(recovered)
         }),
       ),
     )
-
-    expect(result).toEqual({ started: true, health: 200, recovered: true })
   })
 
   test("starts one kernel job supervisor and immediately processes ready work", async () => {
