@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test"
+import { inspect } from "node:util"
+import { Effect, Logger } from "effect"
 import {
   authorizedForWrites,
   loadAgentRunDaemon,
@@ -142,6 +144,44 @@ test("the daemon URL must be an absolute credential-free HTTP(S) URL", async () 
       }),
     ).rejects.toThrow(/WORKFLOWD_DAEMON_URL/)
   }
+})
+
+test.each([
+  "https://url-secret@example.test",
+  "https://user:url-secret@example.test",
+  "https://example.test?token=url-secret",
+  "https://example.test#url-secret",
+  "https://invalid host?token=url-secret",
+])("unsafe daemon URLs are rejected without leaking secrets: %s", async (value) => {
+  const logs: unknown[] = []
+  const result = await Effect.runPromise(
+    Effect.tryPromise(() =>
+      loadAgentWaitDaemon({
+        WORKFLOWD_DAEMON_URL: value,
+        WORKFLOWD_AGENT_WAIT_TOKEN: "daemon-token",
+      }),
+    ).pipe(
+      Effect.tapError((error) => Effect.logError("Configuration failed", error)),
+      Effect.result,
+      Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+    ),
+  )
+  expect(result._tag).toBe("Failure")
+  if (result._tag !== "Failure") throw new Error("Expected configuration rejection")
+  const error = result.failure.cause
+  if (!(error instanceof Error)) throw new Error("Expected a configuration error")
+  expect(error.message).toContain("WORKFLOWD_DAEMON_URL")
+  expect(logs).toHaveLength(1)
+  for (const rendered of [
+    error.message,
+    inspect(result.failure, { depth: null }),
+    inspect(logs, { depth: null }),
+    JSON.stringify(logs),
+  ]) {
+    expect(rendered).not.toContain(value)
+    expect(rendered).not.toContain("url-secret")
+  }
+  expect(error.cause).toBeUndefined()
 })
 
 test("an unreadable or empty agent-wait token file is a startup error", async () => {
