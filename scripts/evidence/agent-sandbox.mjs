@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "../../test/resources/preload.ts"
 import * as Bun from "bun"
 // Opt-in real lease probe. Operator trust settings are read, never provisioned.
 import assert from "node:assert/strict"
