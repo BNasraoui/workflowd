@@ -92,6 +92,24 @@ const retainedEntries = (current: unknown): Array<typeof Entry.Type> | undefined
   return entries
 }
 
+// Follow the first failing path only; never format the issue or read its input.
+const schemaFailureMessage = (error: unknown) => {
+  if (!Schema.isSchemaError(error)) return "Schema validation failed"
+  let issue = error.issue
+  const path: PropertyKey[] = []
+  for (let depth = 0; depth < 32; depth++) {
+    if (issue._tag === "Pointer") {
+      path.push(...issue.path)
+      issue = issue.issue
+    } else if (issue._tag === "Encoding" || issue._tag === "Filter") {
+      issue = issue.issue
+    } else if ((issue._tag === "Composite" || issue._tag === "AnyOf") && issue.issues.length > 0) {
+      issue = issue.issues[0]!
+    } else break
+  }
+  return diagnosticMessage(`Schema validation failed at ${path.map(String).join(".") || "$"}`)
+}
+
 const causeEntry = (stage: string, current: unknown, started: number): typeof Entry.Type => {
   const errorClass = classification(current)
   const code = property(current, "code")
@@ -102,7 +120,7 @@ const causeEntry = (stage: string, current: unknown, started: number): typeof En
     errorClass,
     message:
       errorClass === "SchemaError" || errorClass === "DecodeError"
-        ? "Schema validation failed"
+        ? schemaFailureMessage(current)
         : diagnosticMessage(property(current, "message") ?? current),
     code: typeof code === "string" && /^E[A-Z0-9_]{1,30}$/.test(code) ? code : null,
     httpStatus: integer(

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
 import { Duration, Effect, Schedule, Schema } from "effect"
-import type { SandboxPolicy } from "./config"
+import type { SavedSandboxPolicy } from "./saved-policy"
 import { SandboxError, SandboxRefAbsent, SandboxRefRejected } from "./store"
 
 const Repository = Schema.Struct({ id: Schema.Int, fork: Schema.Boolean })
@@ -119,7 +119,7 @@ export const makeSandboxGithub = (
     })
     const app = new App({ appId: github.appId, privateKey: key, Octokit: OctokitClass })
     const scoped = Effect.fn("SandboxGithub.scoped")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       approval = false,
     ) {
       const response = yield* http((signal) =>
@@ -178,7 +178,7 @@ export const makeSandboxGithub = (
       })
     })
     const ensureRef = Effect.fn("SandboxGithub.ensureRef")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
       create = true,
     ) {
@@ -212,7 +212,7 @@ export const makeSandboxGithub = (
         )
     })
     const runs = Effect.fn("SandboxGithub.runs")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
     ) {
       const client = yield* scoped(policy)
@@ -240,7 +240,7 @@ export const makeSandboxGithub = (
       return yield* Effect.forEach(owned, (run) => validateRun(policy, leaseId, run))
     })
     const validateRun = Effect.fn("SandboxGithub.validateRun")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
       value: unknown,
     ) {
@@ -271,7 +271,7 @@ export const makeSandboxGithub = (
       return run
     })
     const savedRun = Effect.fn("SandboxGithub.savedRun")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
       runId: number,
       attempt: number,
@@ -290,7 +290,7 @@ export const makeSandboxGithub = (
         )
       return run
     })
-    const inventory = Effect.fn("SandboxGithub.inventory")(function* (policy: SandboxPolicy) {
+    const inventory = Effect.fn("SandboxGithub.inventory")(function* (policy: SavedSandboxPolicy) {
       return yield* Effect.gen(function* () {
         const client = yield* scoped(policy)
         const owned: OwnedLeaseRun[] = []
@@ -337,7 +337,7 @@ export const makeSandboxGithub = (
       )
     })
     const cancel = Effect.fn("SandboxGithub.cancel")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       runId: number,
     ) {
       const client = yield* scoped(policy)
@@ -349,7 +349,7 @@ export const makeSandboxGithub = (
       if (![202, 409].includes(response.status)) return yield* Effect.fail(githubFailure(response))
     })
     const deleteRef = Effect.fn("SandboxGithub.deleteRef")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
     ) {
       const client = yield* scoped(policy)
@@ -367,7 +367,7 @@ export const makeSandboxGithub = (
     })
     const readyArtifact = Effect.fn("SandboxGithub.readyArtifact")(function* (
       client: Octokit,
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       runId: number,
       attempt: number,
     ) {
@@ -411,7 +411,7 @@ export const makeSandboxGithub = (
       return artifact
     })
     const readiness = Effect.fn("SandboxGithub.readiness")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       leaseId: string,
       runId: number,
       attempt: number,
@@ -505,7 +505,7 @@ export const makeSandboxGithub = (
       return ready
     })
     const resolveSource = Effect.fn("SandboxGithub.resolveSource")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       ref: string,
     ) {
       const client = yield* scoped(policy)
@@ -521,7 +521,7 @@ export const makeSandboxGithub = (
       return commit.sha
     })
     const verifyWorkflow = Effect.fn("SandboxGithub.verifyWorkflow")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
     ) {
       const client = yield* scoped(policy)
       for (const file of ["agent-sandbox.yml", "agent-sandbox-caller.yml"]) {
@@ -541,7 +541,7 @@ export const makeSandboxGithub = (
       }
     })
     const publishRequest = Effect.fn("SandboxGithub.publishRequest")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       method: "GET" | "POST",
       path: string,
       body: Record<string, unknown> = {},
@@ -553,7 +553,7 @@ export const makeSandboxGithub = (
       return response.data
     })
     const publicationRead = Effect.fn("SandboxGithub.publicationRead")(function* (
-      policy: SandboxPolicy,
+      policy: SavedSandboxPolicy,
       path: string,
     ) {
       // Public repository metadata needs no token; the approval token keeps its narrow grants.
@@ -566,7 +566,7 @@ export const makeSandboxGithub = (
       return response.data
     })
     return {
-      repositoryUrl: (policy: SandboxPolicy) =>
+      repositoryUrl: (policy: SavedSandboxPolicy) =>
         new OctokitClass().request.endpoint(`GET /repos/${policy.repository}`).url,
       publicationRead,
       gateAppId: github.appId,

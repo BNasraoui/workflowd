@@ -1,6 +1,6 @@
 import { sandboxDiagnostic } from "./diagnostics"
 import { saveSandboxFile } from "./binding"
-import { SandboxCompletion } from "./config"
+import { SandboxCompletion, SandboxPolicy } from "./config"
 import { makePublishStore, ResultMetadata } from "./publish-store"
 import { AuditReceipt, drainToolAudit } from "./audit"
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises"
@@ -17,7 +17,7 @@ import {
 } from "./store"
 import { sandboxSshArguments, type SandboxTransport } from "./transport"
 import type { makeSandboxGithub } from "./github"
-import type { SandboxPolicy } from "./config"
+import type { SavedSandboxPolicy } from "./saved-policy"
 
 type Github = Effect.Success<ReturnType<typeof makeSandboxGithub>>
 
@@ -227,7 +227,7 @@ export const makeSandboxLeaseService = (
         )
       return lease
     })
-    const cleanup = Effect.fn("SandboxLease.cleanup")(function* (policy?: SandboxPolicy) {
+    const cleanup = Effect.fn("SandboxLease.cleanup")(function* (policy?: SavedSandboxPolicy) {
       const retained = (yield* store.cleanupRuns()).filter(
         (row) => policy === undefined || JSON.stringify(row.policy) === JSON.stringify(policy),
       )
@@ -295,7 +295,7 @@ export const makeSandboxLeaseService = (
           ),
         ),
       )
-    const inventory = Effect.fn("SandboxLease.inventory")(function* (policy: SandboxPolicy) {
+    const inventory = Effect.fn("SandboxLease.inventory")(function* (policy: SavedSandboxPolicy) {
       const owned = yield* github
         .inventory(policy)
         .pipe(Effect.tapError((cause) => store.inventoryError(policy, cause)))
@@ -321,6 +321,7 @@ export const makeSandboxLeaseService = (
       )
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
       let lease = yield* required(runId)
+      yield* Schema.decodeUnknownEffect(SandboxPolicy)(lease.policy)
       if (lease.state === "ready") return lease
       if (lease.state === "requested") {
         if (!(yield* store.beginStart(runId))) return yield* required(runId)
@@ -401,7 +402,7 @@ export const makeSandboxLeaseService = (
       },
     )
     const reconcile = Effect.fn("SandboxLease.reconcile")(function* (
-      policies: ReadonlyArray<SandboxPolicy> = [],
+      policies: ReadonlyArray<SavedSandboxPolicy> = [],
     ) {
       const leases = yield* store.active()
       const saved = yield* store.cleanupRuns()

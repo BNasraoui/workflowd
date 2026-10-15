@@ -7,13 +7,14 @@ import { saveSandboxFile } from "./binding"
 import type { makeSandboxLeaseService } from "./lease"
 import { Effect, Schema } from "effect"
 import type { makeSandboxGithub } from "./github"
-import { publicationBody, type SandboxPolicy } from "./config"
+import { publicationBody, SandboxPolicy } from "./config"
 import { makeSandboxStore, SandboxError } from "./store"
 import {
   makePublishStore,
   PublicationReceipt,
   publishedCommitSchema,
   type PublishIntent,
+  ResultMetadata,
 } from "./publish-store"
 import { readSandboxSubmission } from "./submission"
 
@@ -219,7 +220,7 @@ export const makeSandboxPublisher = (
     })
     const reconcile = Effect.fn("SandboxPublisher.reconcile")(function* (
       policy: SandboxPolicy,
-      intent: PublishIntent,
+      intent: PublishIntent & { metadata: typeof ResultMetadata.Type },
       jobId: number,
     ) {
       const marker = `<!-- workflowd-publication:${Buffer.from(approvalComment(intent)).toString("base64")} -->`
@@ -271,7 +272,7 @@ export const makeSandboxPublisher = (
         )
           return yield* Effect.fail(fail())
         const { stage, pr, revoked, commitSha, cause } = proof
-        receipt = {
+        const currentReceipt = {
           stage,
           pr,
           revoked,
@@ -279,7 +280,8 @@ export const makeSandboxPublisher = (
           closingIssuesVerified: proof.closingIssuesVerified === true,
           ...(cause === undefined ? {} : { cause }),
         }
-        yield* store.saveReceipt(intent.run_id, receipt)
+        receipt = currentReceipt
+        yield* store.saveReceipt(intent.run_id, currentReceipt)
       }
       if (receipt.cause !== undefined)
         return yield* Effect.fail(
@@ -287,7 +289,7 @@ export const makeSandboxPublisher = (
         )
       if (
         !receipt.revoked ||
-        receipt.commitSha === null ||
+        receipt.commitSha == null ||
         !["creating_pr", "published"].includes(receipt.stage)
       )
         return "operator_required" as const
@@ -381,17 +383,24 @@ export const makeSandboxPublisher = (
         lease.policy.publish.publisherActorId !== 339414993
       )
         return yield* Effect.fail(fail())
-      let intent = saved
-      if (["probed", "published", "operator_required", "cancelled"].includes(intent.phase))
-        return intent.phase
-      if (
-        intent.base_ref === null ||
-        (intent.deadline <= Date.now() && intent.phase === "sealed")
-      ) {
-        yield* store.advance(runId, intent.phase, "operator_required")
+      if (["probed", "published", "operator_required", "cancelled"].includes(saved.phase))
+        return saved.phase
+      if (saved.base_ref === null || (saved.deadline <= Date.now() && saved.phase === "sealed")) {
+        yield* store.advance(runId, saved.phase, "operator_required")
         return "operator_required"
       }
-      const policy = lease.policy
+      const validation = yield* Effect.result(
+        Effect.all({
+          policy: Schema.decodeUnknownEffect(SandboxPolicy)(lease.policy),
+          metadata: Schema.decodeUnknownEffect(ResultMetadata)(saved.metadata),
+        }),
+      )
+      if (validation._tag === "Failure") {
+        yield* store.advance(runId, saved.phase, "operator_required")
+        return "operator_required"
+      }
+      const policy = validation.success.policy
+      let intent = { ...saved, metadata: validation.success.metadata }
       yield* github.savedRun(policy, lease.lease_id, intent.actions_run_id, intent.attempt)
       const prefix = `actions/runs/${intent.actions_run_id}`
       const { runners, publishers } = yield* jobsFor(policy, intent)
@@ -434,7 +443,7 @@ export const makeSandboxPublisher = (
           catch: (cause) => new SandboxError(sandboxDiagnostic("publish.approval", cause)),
         }).pipe(Effect.tapError(() => store.advance(runId, "sealed", "operator_required")))
         if (!(yield* store.claimApproval(runId, artifact.id, artifact.digest))) return "approving"
-        intent = (yield* store.read(runId))!
+        intent = { ...(yield* store.read(runId))!, metadata: intent.metadata }
         // Persist uncertainty BEFORE the side effect. A lost response is never blindly retried.
         yield* github
           .publishRequest(policy, "POST", `${prefix}/deployment_protection_rule`, {
