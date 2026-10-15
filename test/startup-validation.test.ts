@@ -50,3 +50,42 @@ test("a hung availability request is interrupted at the startup deadline", async
   expect(result._tag).toBe("Failure")
   if (result._tag === "Failure") expect(result.failure.message).toContain("30 seconds")
 })
+
+test.each([
+  { latency: "200 millis", expectedAttempts: 14 },
+  { latency: "25 seconds", expectedAttempts: 2 },
+])(
+  "the deadline preserves the last failure with $latency per attempt",
+  async ({ latency, expectedAttempts }) => {
+    let attempts = 0
+    let lastFailure = unavailable
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const startup = yield* validateOpenCodeStartup(
+          Effect.gen(function* () {
+            attempts += 1
+            yield* Effect.sleep(latency)
+            lastFailure = new OpenCodeAutomationError({
+              operation: "validate OpenCode availability",
+              cause: new Error(
+                `attempt ${attempts}: Unavailable OpenCode integration: agent pr-reviewer, model zai-coding-plan/glm-5.3-flash`,
+              ),
+              retryable: true,
+            })
+            return yield* Effect.fail(lastFailure)
+          }),
+        ).pipe(Effect.result, Effect.forkChild)
+        yield* TestClock.adjust("30 seconds")
+        return yield* Fiber.join(startup)
+      }).pipe(Effect.provide(TestClock.layer())),
+    )
+    expect(attempts).toBe(expectedAttempts)
+    expect(result._tag).toBe("Failure")
+    if (result._tag === "Failure") {
+      expect(result.failure.cause).toBe(lastFailure)
+      expect(result.failure.message).toContain("30 seconds")
+      expect(result.failure.message).toContain(lastFailure.operation)
+      expect(result.failure.message).toContain(lastFailure.cause.message)
+    }
+  },
+)
