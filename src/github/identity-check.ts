@@ -419,7 +419,16 @@ const runTarget = (
   checkTarget(getClient, blockedEmails, target, publication, attempt, superseded).pipe(
     Effect.tapError((error) =>
       error instanceof IdentityBudgetExhausted
-        ? budgetFeedback(getClient, target, publication, attempt, error)
+        ? budgetFeedback(getClient, target, publication, attempt, error).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                // A deferred job must re-read association and repository trust:
+                // permissions may change while it waits for budget capacity.
+                target.author = undefined
+                target.trusted = undefined
+              }),
+            ),
+          )
         : Effect.void,
     ),
   )
@@ -468,6 +477,7 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
     return {
       key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
       prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+      trusted: target.trusted ?? false,
       preserve: () => target.checkId !== undefined,
       supersede: () => {
         superseded = true

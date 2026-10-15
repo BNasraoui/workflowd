@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { Effect, Queue } from "effect"
 import { TestClock } from "effect/testing"
 import { makeIdentityCheckDispatcher } from "../src/github/identity-dispatch"
-import { checkName, fixture, head, payload } from "./helpers/identity"
+import { blocked, checkName, commit, fixture, head, payload } from "./helpers/identity"
 
 const rerun = {
   ...payload("rerequested"),
@@ -99,3 +99,93 @@ test.each(["start", "finish"])(
     )
   },
 )
+
+test("a read share exhausted mid-range rescans and finds the later blocked commit", async () => {
+  const pages: number[] = []
+  const f = fixture({
+    suiteChecks: [],
+    intercept: async (path, _body, _signal, url) => {
+      // Two check-page reads for each PR leave this author only two reads.
+      if (path.endsWith("/pulls"))
+        return Response.json(
+          Array.from({ length: 124 }, (_, i) => ({
+            number: i + 100,
+            user: { login: "author-7" },
+            head: { sha: head },
+          })),
+        )
+      if (path.includes("/compare/")) {
+        const page = Number(url.searchParams.get("page"))
+        pages.push(page)
+        return Response.json({
+          total_commits: 101,
+          commits:
+            page === 1
+              ? Array.from({ length: 100 }, (_, i) => commit(i.toString(16).padStart(40, "0")))
+              : [commit(head, blocked)],
+        })
+      }
+    },
+  })
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        () => Effect.void,
+      )
+      const dispatch = yield* makeIdentityCheckDispatcher(f.app)
+      if (dispatch === undefined) throw new Error("missing dispatcher")
+      yield* dispatch("pull_request", payload())
+      yield* TestClock.adjust("1 millis")
+      expect(pages).toEqual([1])
+      expect(f.writes.at(-1)).toMatchObject({
+        conclusion: "failure",
+        output: { summary: "scan budget exhausted, retry later" },
+      })
+      yield* TestClock.adjust("61 minutes")
+      expect(pages).toEqual([1, 1, 2])
+      expect(f.writes.at(-1)).toMatchObject({
+        conclusion: "failure",
+        output: { summary: `${head}: author` },
+      })
+      expect(f.writes.some((w) => w.conclusion === "success")).toBe(false)
+      expect(f.requests.filter((r) => r.method === "POST")).toHaveLength(1)
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  )
+})
+
+test("a deferred retry re-reads trust after a collaborator is demoted", async () => {
+  const options = {
+    author: () => "author-7",
+    association: "COLLABORATOR",
+    intercept: async (path: string) =>
+      path.includes("/compare/") ? Response.json({ total_commits: 0, commits: [] }) : undefined,
+  }
+  const f = fixture(options)
+  const trustedPull = (number: number) => ({
+    ...payload(),
+    pull_request: { ...payload().pull_request, number, author_association: "COLLABORATOR" },
+  })
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      for (let i = 0; i < 25; i++)
+        yield* f.app.checkAgentGitIdentity("pull_request", trustedPull(7))
+      yield* TestClock.adjust("30 minutes")
+      const dispatch = yield* makeIdentityCheckDispatcher(f.app)
+      if (dispatch === undefined) throw new Error("missing dispatcher")
+      yield* dispatch("pull_request", trustedPull(7))
+      yield* TestClock.adjust("1 millis")
+      for (let number = 100; number < 125; number++)
+        yield* f.app.checkAgentGitIdentity("pull_request", trustedPull(number))
+      const before = f.writes.length
+      const reads = f.requests.filter((r) => r.path.endsWith("/pulls/7")).length
+      options.association = "NONE"
+      yield* TestClock.adjust("31 minutes")
+      expect(f.requests.filter((r) => r.path.endsWith("/pulls/7"))).toHaveLength(reads + 1)
+      expect(f.writes).toHaveLength(before)
+      yield* TestClock.adjust("31 minutes")
+      expect(f.writes.at(-1)?.conclusion).toBe("success")
+      expect(f.writes).toHaveLength(before + 2)
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  )
+})

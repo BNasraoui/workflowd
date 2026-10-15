@@ -229,8 +229,9 @@ at most 250 of those reads. Untrusted authors share 250 reads across their PRs
 and repositories in the installation. Authors are trusted when GitHub reports
 `OWNER`, `MEMBER`, or `COLLABORATOR`, or the head repository matches the base
 repository. Only verified webhook or PR API fields establish trust; caller-supplied
-trust flags are ignored. Trusted authors are exempt from author shares, while
-installation and per-PR limits still apply. Of the installation allowance, 200
+trust flags are ignored. `MEMBER` includes any member of the owning organisation,
+even members without access to this repository. Trusted authors are exempt from
+author shares, while installation and per-PR limits still apply. Of the installation allowance, 200
 reads and 20 check starts are reserved for trusted PRs.
 
 Every pagination step is charged, including iterator completion; failed requests
@@ -241,10 +242,15 @@ installation and 50 per PR and per untrusted author. These separate completion
 allowances leave capacity after the start limit is reached.
 
 Local budget exhaustion retains the job in the dispatcher's bounded waiting set.
-A minute scheduler requeues it after the exhausted rolling shares have capacity;
-waiting retries do not occupy scan workers. Existing check IDs are retained, so a
-completion rejected by the budget is retried by scanning and completing the same
-check. A capped rerun or scan publishes **scan budget exhausted, retry later** as a
+Twenty waiting slots are reserved for trusted jobs. At capacity, a new job evicts
+the oldest deferred entry that has no check ID; active work and entries owning a
+check ID are never evicted. Evicted heads can be recovered by webhook redelivery
+or startup recovery.
+A minute scheduler requeues retained jobs once their rolling shares have capacity;
+waiting retries do not occupy scan workers. Each retry re-reads the PR's author
+and trust from GitHub before starting or resetting a check. Existing check IDs are
+retained, so a completion rejected by the budget is retried by scanning and
+completing the same check. A capped rerun or scan publishes **scan budget exhausted, retry later** as a
 failed check when completion capacity remains. GitHub I/O errors are not retried
 as local budget rejections. Queue overflow, GitHub errors, and failed supersede
 writes can still need webhook redelivery or startup recovery.

@@ -32,12 +32,14 @@ test("client-supplied trusted flags cannot exempt fork authors", async () => {
   expect(f.writes.filter((w) => w.status === "in_progress")).toHaveLength(25)
 })
 
-test("recovery lists all trusted PR checks beyond the author read share", async () => {
+test.each([
+  { author_association: "OWNER", head: { sha: head } },
+  { author_association: "NONE", head: { sha: head, repo: { full_name: "owner/repo" } } },
+])("recovery lists all trusted PR checks beyond the author read share (%j)", async (trust) => {
   const pulls = Array.from({ length: 150 }, (_, i) => ({
     number: i + 1,
     user: { login: "maintainer" },
-    author_association: "OWNER",
-    head: { sha: head },
+    ...trust,
   }))
   const f = fixture({
     suiteChecks: [],

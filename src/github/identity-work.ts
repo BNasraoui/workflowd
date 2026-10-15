@@ -5,6 +5,7 @@ import { IdentityBudgetExhausted } from "./identity-request"
 export type IdentityWork = {
   readonly key: string
   readonly prKey?: string
+  readonly trusted?: boolean
   readonly preserve?: () => boolean
   readonly supersede?: () => void
   readonly run: Effect.Effect<void, Error>
@@ -23,6 +24,7 @@ type Entry = {
 export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
   concurrency = 4,
   waiting = 100,
+  trustedReserve = 0,
 ) {
   const ready = yield* Queue.unbounded<Entry>()
   const entries = new Map<string, Entry>()
@@ -97,7 +99,17 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
         return true
       }
     }
-    if (entries.size >= concurrency + waiting) return false
+    const limit = concurrency + waiting - (job.trusted ? 0 : trustedReserve)
+    if (entries.size >= limit) {
+      // Deferred starts own no visible check and are recoverable on restart.
+      // Map order retains admission age; never evict running work or a check ID.
+      const oldest = [...entries].find(
+        ([, entry]) =>
+          entry.retryAt !== undefined && entry.fiber === undefined && !entry.next?.preserve?.(),
+      )
+      if (oldest === undefined) return false
+      entries.delete(oldest[0])
+    }
     const added: Entry = {
       retryAt: undefined,
       next: job,

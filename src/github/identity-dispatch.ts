@@ -18,7 +18,7 @@ export const makeIdentityCheckDispatcher = Effect.fn("GitIdentity.dispatcher")(f
   const check = github?.checkAgentGitIdentity
   const jobsForEvent = github?.identityCheckJobs
   if (github === undefined || check === undefined) return undefined
-  const submit = yield* makeIdentityWork()
+  const submit = yield* makeIdentityWork(4, 100, 20)
   const suites = yield* makeIdentityWork(1, 100)
   const resolve = Effect.fn(function* (event: string, payload: unknown) {
     const jobs =

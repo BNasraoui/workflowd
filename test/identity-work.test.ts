@@ -291,7 +291,7 @@ test("two queued check reruns are retained when another head arrives", async () 
   )
 })
 
-test("deferred retries retain bounded slots while releasing the scan worker", async () => {
+test("deferred checks retain bounded slots while releasing the scan worker", async () => {
   await Effect.runPromise(
     Effect.gen(function* () {
       const submit = yield* makeIdentityWork(1, 2)
@@ -300,6 +300,7 @@ test("deferred retries retain bounded slots while releasing the scan worker", as
         let runs = 0
         return {
           key,
+          preserve: () => true,
           run: Effect.gen(function* () {
             yield* Queue.offer(attempted, key)
             if (runs++ === 0)
