@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
@@ -11,7 +12,7 @@ async function waitFor(check: () => Promise<boolean>) {
   }
 }
 
-for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
+for (const scenario of ["exit", "signal", "kill", "next-start", "cgroup-kill"] as const) {
   test(`resources are labelled and removed after ${scenario}`, async () => {
     const root = await mkdtemp(join(tmpdir(), "workflowd-reaper-proof-"))
     const name = `workflowd-test-${crypto.randomUUID()}`
@@ -37,7 +38,32 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
       }, 60000);
     `
     await writeFile(path, source)
-    const child = Bun.spawn([process.execPath, "test", path], { stdout: "ignore", stderr: "pipe" })
+    const unit = `${name}-suite.service`
+    const child = Bun.spawn(
+      scenario === "cgroup-kill"
+        ? [
+            "systemd-run",
+            "--user",
+            "--wait",
+            "--pipe",
+            "--collect",
+            "-p",
+            "MemoryMax=4G",
+            "-p",
+            "MemorySwapMax=0",
+            "-p",
+            "KillSignal=SIGKILL",
+            `--unit=${unit}`,
+            `--working-directory=${process.cwd()}`,
+            `--setenv=PATH=${process.env.WORKFLOWD_TEST_ORIGINAL_PATH}`,
+            `--setenv=TMPDIR=${tmpdir()}`,
+            process.execPath,
+            "test",
+            path,
+          ]
+        : [process.execPath, "test", path],
+      { stdout: "ignore", stderr: "pipe" },
+    )
     const logs = new Response(child.stderr).text()
     try {
       await waitFor(async () => {
@@ -65,7 +91,14 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
         process.kill(state.launcher, "SIGKILL")
         child.kill("SIGKILL")
       }
-      if (scenario !== "exit")
+      if (scenario === "cgroup-kill") {
+        expect(readFileSync(`/proc/${state.guardian}/cgroup`, "utf8")).not.toBe(
+          readFileSync(`/proc/${state.pid}/cgroup`, "utf8"),
+        )
+        const killed = Bun.spawnSync(["systemctl", "--user", "stop", unit])
+        expect(killed.exitCode, killed.stderr.toString()).toBe(0)
+      }
+      if (scenario !== "exit" && scenario !== "cgroup-kill")
         process.kill(state.pid, scenario === "signal" ? "SIGTERM" : "SIGKILL")
       if (scenario === "next-start") {
         await child.exited
@@ -98,6 +131,7 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
       })
       if (scenario === "exit") expect(await child.exited, await logs).toBe(0)
     } finally {
+      if (scenario === "cgroup-kill") Bun.spawnSync(["systemctl", "--user", "stop", unit])
       if (child.exitCode === null) child.kill("SIGTERM")
       await child.exited
       await rm(root, { recursive: true, force: true })

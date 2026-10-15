@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { removeNativeTestLabels } from "./native-units"
 import { ownerState } from "./owner"
 import { type Config, dockerBackend, systemdBackend } from "./backend"
 import { reap } from "./reaper"
@@ -34,6 +33,5 @@ export function finish(config: Config) {
     )
   )
     throw new Error("Test resource commands still running at teardown")
-  removeNativeTestLabels(config)
   rmSync(config.directory, { recursive: true, force: true })
 }

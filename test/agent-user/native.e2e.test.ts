@@ -1212,7 +1212,6 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
         "/etc/workflowd/agent-git.env",
         "/etc/systemd/system/workflowd-agent-host.service",
         "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
-        "/run/systemd/system/workflowd-native-.service.d/90-workflowd-test.conf",
         "/usr/local/libexec/workflowd-agent-host",
       ])
         await rm(path, { force: true })

@@ -33,13 +33,25 @@ export function dockerBackend(config: Config, selector?: string): Backend {
     command(config, [config.docker!, "--context", "default", ...args])
   const inspect = (kind: string, id: string) => {
     try {
-      return docker(
+      const value = docker(
         kind,
         "inspect",
         "--format",
         `{{index .${kind === "container" ? "Config.Labels" : "Labels"} "${label}"}}`,
         id,
       )
+      if (kind === "container" && value) {
+        const image = docker("container", "inspect", "--format", "{{.Image}}", id)
+        const inherited = docker(
+          "image",
+          "inspect",
+          "--format",
+          `{{index .Config.Labels "${label}"}}`,
+          image,
+        )
+        if (value === inherited) return undefined
+      }
+      return value
     } catch (error) {
       if (
         error instanceof Error &&
@@ -80,12 +92,29 @@ export function dockerBackend(config: Config, selector?: string): Backend {
   }
 }
 
+// systemctl show serializes Environment as whitespace-separated C-escaped words.
+// Quotes group an entire assignment; text inside another variable is not a label.
+function environmentOwner(value: string): string | undefined {
+  const entries = value.match(/(?:[^\s"\\]|\\.|"(?:[^"\\]|\\.)*")+/g) ?? []
+  for (const entry of entries) {
+    const decoded = entry
+      .replace(/^"(.*)"$/, "$1")
+      .replace(/\\(x[0-9a-fA-F]{2}|[0-7]{3}|.)/g, (_, escape: string) => {
+        if (escape.startsWith("x")) return String.fromCharCode(parseInt(escape.slice(1), 16))
+        if (/^[0-7]{3}$/.test(escape)) return String.fromCharCode(parseInt(escape, 8))
+        return ({ n: "\n", r: "\r", t: "\t", s: " " } as Record<string, string>)[escape] ?? escape
+      })
+    if (decoded.startsWith(`${unitLabel}=`)) return decoded.slice(unitLabel.length + 1)
+  }
+  return undefined
+}
+
 export function systemdBackend(config: Config, user: boolean): Backend {
   const ctl = (...args: string[]) =>
     command(config, [config.systemctl!, ...(user ? ["--user"] : []), ...args])
   const inspect = (id: string) => {
     const environment = ctl("show", id, "--property=Environment", "--value")
-    return new RegExp(`(?:^|[ "])${unitLabel}=([^ "\\n]+)`).exec(environment)?.[1]
+    return environmentOwner(environment)
   }
   return {
     list: () =>
@@ -93,10 +122,8 @@ export function systemdBackend(config: Config, user: boolean): Backend {
         .split("\n\n")
         .flatMap((block) => {
           if (/^ActiveState=inactive$/m.test(block)) return []
-          const id = /^Id=(.+)$/m.exec(block.replace(/^Environment=/m, ""))?.[1]
-          const owner = new RegExp(`(?:^|[ "])${unitLabel}=([^ "\\n]+)`).exec(
-            block.replace(/^Environment=/m, ""),
-          )?.[1]
+          const id = /^Id=(.+)$/m.exec(block)?.[1]
+          const owner = environmentOwner(/^Environment=(.*)$/m.exec(block)?.[1] ?? "")
           return id && owner ? [{ kind: "unit", id, owner }] : []
         }),
     remove: (resource: Resource) => {

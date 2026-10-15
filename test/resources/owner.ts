@@ -10,11 +10,17 @@ const identity = (pid: number) => {
   return { state: fields[0], start: fields[19] }
 }
 
-export const owner = (pid = process.pid) =>
-  ["v1", host(), process.getuid!(), boot(), namespace(), pid, identity(pid).start].join(".")
+const procMatches = () =>
+  Number(readFileSync("/proc/self/stat", "utf8").split(" ")[0]) === process.pid
+
+export const owner = (pid = process.pid) => {
+  if (!procMatches()) throw new Error("PID namespace does not match /proc")
+  return ["v1", host(), process.getuid!(), boot(), namespace(), pid, identity(pid).start].join(".")
+}
 
 /** Unknown ownership is never authority to delete. Include boot, namespace and start ticks to fence PID reuse. */
 export function ownerState(id: string | undefined): "alive" | "dead" | "unknown" {
+  if (!procMatches()) return "unknown"
   if (!id || !/^v1\.[a-f0-9]{32}\.\d+\.[a-f0-9]{32}\.\d+\.[1-9]\d*\.\d+$/.test(id)) return "unknown"
   const [, machine, uid, bootId, ns, pid, start] = id.split(".")
   if (machine !== host() || uid !== String(process.getuid!())) return "unknown"

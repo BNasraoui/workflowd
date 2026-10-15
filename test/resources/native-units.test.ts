@@ -1,36 +1,36 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { labelNativeTestUnits, removeNativeTestLabels } from "./native-units"
+import { labelNativeTestUnits } from "./native-units"
 import { owner } from "./owner"
-import type { Config } from "./backend"
 
-test("native fixture labels refuse live replacement and remove only their own exact drop-in", () => {
+test("native fixture labels every generated unit through its private launcher", () => {
   const directory = mkdtempSync(join(tmpdir(), "workflowd-test-run-labels-"))
-  const path = join(directory, "native.service.d/test.conf")
-  const config: Config = {
-    directory,
-    owner: owner(),
-    launcher: owner(),
-    docker: null,
-    systemctl: "/bin/true",
-    systemdRun: null,
-    env: {},
-  }
+  const binary = join(directory, "real-systemd-run")
+  writeFileSync(binary, '#!/bin/sh\nprintf "%s\\n" "$@"\n', { mode: 0o700 })
   try {
-    expect(labelNativeTestUnits(directory, path)).toContain(owner())
-    expect(() => labelNativeTestUnits(directory, path)).toThrow()
-    const stale = owner().split(".")
-    stale[6] = "0"
-    writeFileSync(path, `[Service]\nEnvironment=WORKFLOWD_TEST_RESOURCE_RUN=${stale.join(".")}\n`)
-    expect(labelNativeTestUnits(directory, path)).toContain(owner())
-    removeNativeTestLabels({ ...config, owner: "other" }, path)
-    expect(readFileSync(path, "utf8")).toContain(owner())
-    removeNativeTestLabels(config, path)
-    removeNativeTestLabels(config, path)
-    expect(() => readFileSync(path)).toThrow()
-    expect(() => labelNativeTestUnits("/not-a-test", path)).toThrow("guard required")
+    const properties = labelNativeTestUnits(directory, binary)
+    expect(properties).toContain(`Environment=WORKFLOWD_TEST_RESOURCE_RUN=${owner()}`)
+    expect(properties).toContain(`BindReadOnlyPaths=/usr/bin/systemd-run:${binary}`)
+    expect(properties).toContain(
+      `BindReadOnlyPaths=${directory}/native-systemd-run:/usr/bin/systemd-run`,
+    )
+    const unit = `workflowd-native-${crypto.randomUUID()}.service`
+    const result = Bun.spawnSync([
+      join(directory, "native-systemd-run"),
+      `--unit=${unit}`,
+      "/bin/true",
+    ])
+    expect(result.exitCode, result.stderr.toString()).toBe(0)
+    expect(result.stdout.toString().trim().split("\n")).toEqual([
+      `--setenv=WORKFLOWD_TEST_RESOURCE_RUN=${owner()}`,
+      `--unit=${unit}`,
+      "/bin/true",
+    ])
+    expect(readFileSync(join(directory, "used-system"), "utf8")).toBe("")
+    expect(existsSync(join(directory, "workflowd-native-.service.d"))).toBe(false)
+    expect(() => labelNativeTestUnits("/not-a-test", binary)).toThrow("guard required")
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

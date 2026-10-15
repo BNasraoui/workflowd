@@ -4,13 +4,16 @@ import { join } from "node:path"
 import { owner } from "./owner"
 import { type Config, dockerBackend, systemdBackend } from "./backend"
 import { finish } from "./guard"
+import { sweepDirectories } from "./recovery"
+import { startGuardian } from "./start-guardian"
 import { reap } from "./reaper"
 
 const originalPath = process.env.WORKFLOWD_TEST_ORIGINAL_PATH ?? process.env.PATH ?? ""
+const launcherOwner = owner()
 const directory = mkdtempSync(join(tmpdir(), "workflowd-test-run-"))
 const config: Config = {
-  owner: owner(),
-  launcher: owner(),
+  owner: launcherOwner,
+  launcher: launcherOwner,
   directory,
   docker: Bun.which("docker", { PATH: originalPath }),
   systemdRun: Bun.which("systemd-run", { PATH: originalPath }),
@@ -48,8 +51,13 @@ for (const backend of [
   } catch {
     continue
   }
-  reap(backend)
+  try {
+    reap(backend)
+  } catch (error) {
+    console.warn(`Startup cleanup warning: ${String(error)}`)
+  }
 }
+sweepDirectories()
 writeFileSync(`${configPath}.next`, JSON.stringify(config), { mode: 0o600 })
 renameSync(`${configPath}.next`, configPath)
 const child = Bun.spawn([process.execPath, ...process.argv.slice(2)], {
@@ -66,15 +74,7 @@ const child = Bun.spawn([process.execPath, ...process.argv.slice(2)], {
 config.owner = owner(child.pid)
 writeFileSync(`${configPath}.next`, JSON.stringify(config), { mode: 0o600 })
 renameSync(`${configPath}.next`, configPath)
-const guardian = Bun.spawn([process.execPath, join(import.meta.dir, "guardian.ts"), configPath], {
-  env: config.env,
-  detached: true,
-  stdin: "ignore",
-  stdout: "ignore",
-  stderr: "inherit",
-})
-writeFileSync(join(directory, "guardian"), String(guardian.pid))
-guardian.unref()
+await startGuardian(config, configPath)
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => child.kill(signal))
 let status = await child.exited
 try {

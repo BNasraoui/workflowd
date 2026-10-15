@@ -1,9 +1,11 @@
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import type { Config } from "./backend"
 import { ownerState } from "./owner"
 import { finish } from "./guard"
 
 const config: Config = await Bun.file(process.argv[2]!).json()
+writeFileSync(join(config.directory, "guardian"), String(process.pid))
 while (existsSync(config.directory)) {
   const states = [ownerState(config.owner), ownerState(config.launcher)]
   if (states.includes("unknown"))

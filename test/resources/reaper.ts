@@ -6,7 +6,7 @@ export type Backend = { list: () => Resource[]; remove: (resource: Resource) => 
 export function reap(backend: Backend, own?: string): void {
   const eligible = (resource: Resource) =>
     resource.owner !== undefined &&
-    ((own !== undefined && resource.owner === own) || ownerState(resource.owner) === "dead")
+    (own !== undefined ? resource.owner === own : ownerState(resource.owner) === "dead")
   const order = ["unit", "container", "network", "volume"]
   const errors: unknown[] = []
   for (const resource of backend
