@@ -517,11 +517,18 @@ phases first; at that step update the PR, publish the report, and end without
 watching CI.
 
 After pushing and opening/updating a PR, use
-`timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60`.
-Retry missing checks or transient observation errors every 30 seconds for at most
-three minutes per cycle; cap each retry/watch cycle at 15 minutes, below the default
-20-minute stall window (shorten it for a lower configured window). Shell output
-is not a stall heartbeat. Missing/pending checks, watch timeouts, and transient
+`gh pr checks PR_NUMBER --repo OWNER/NAME` every 60 seconds on draft and ready PRs,
+without the required-only filter or watch mode. Inspect the named `Required checks`
+aggregate row. Ignore optional checks such as OpenCode Review; do not infer CI from
+the command's exit code alone. A missing aggregate is pending, never success, even
+if all visible checks pass or `gh` reports "no checks reported".
+Only an explicit pass/success of the aggregate verifies CI; a pending aggregate
+keeps polling, a fail/failure is a confirmed CI failure, and a skipped or cancelled
+aggregate is unverified (as is any other non-success terminal state). Retry
+missing/pending aggregates or
+transient observation errors every 60 seconds within the cycle budget. Cap each
+observation cycle at 15 minutes, below the default 20-minute stall window (shorten
+it for a lower configured window). Shell output is not a stall heartbeat. Missing/pending checks, observation timeouts, and transient
 errors such as "error connecting to api.github.com" mean CI is still running for
 scheduling purposes: continue remaining work and re-check in bounded cycles,
 returning to task work and progress updates between cycles. Never run back-to-back

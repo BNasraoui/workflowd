@@ -61,13 +61,20 @@ under the old plan.
    publish the report before ending in step 5; the coordinator handles the next wake.
    This handoff takes precedence over the injected resident polling default.
    Otherwise, only after the PR is updated, run
-   `timeout 12m gh pr checks <pr> --repo <owner/repo> --required --watch --interval 60`.
-   Retry missing checks ("no checks reported" or "no required checks reported") or
-   transient observation errors every 30 seconds for up to 3 minutes per cycle; cap
-   each cycle's retries plus watching at 15 minutes (shorter if the configured stall
-   window is lower). Do not rely on shell output as a heartbeat. Never run back-to-back
+   `gh pr checks <pr> --repo <owner/repo>` every 60 seconds on draft and ready PRs,
+   without the required-only filter or watch mode. Inspect the named `Required checks`
+   aggregate row. Ignore optional checks such as OpenCode Review; do not infer CI from
+   the command's exit code alone. A missing aggregate is pending, never success, even
+   if all visible checks pass or `gh` reports "no checks reported".
+   Only an explicit pass/success of the aggregate verifies CI; a pending aggregate
+   keeps polling, a fail/failure is a confirmed CI failure, and a skipped or cancelled
+   aggregate is unverified (as is any other non-success terminal state). Retry
+   missing/pending aggregates or
+   transient observation errors every 60 seconds within the cycle budget; cap each
+   observation cycle at 15 minutes (shorter if the configured stall window is lower).
+   Do not rely on shell output as a heartbeat. Never run back-to-back
    blocking waits without returning to task work in between; no single cycle may
-   exceed the budget. Missing or pending checks, timeout (exit 124), transient errors,
+   exceed the budget. Missing or pending checks, observation timeouts, transient errors,
    and any other observation errors mean CI is unverified: continue to step 3 and
    report it, never end the turn in step 2. Fix confirmed failures on the same branch,
    only within the plan's files; after three unsuccessful repair attempts for the same

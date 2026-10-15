@@ -53,20 +53,24 @@ watching CI.
 After pushing and opening or updating a PR, resident workers use:
 
 ```bash
-timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60
+gh pr checks PR_NUMBER --repo OWNER/NAME
 ```
 
-`--required` excludes optional checks such as OpenCode Review, whose
-`action_required` state otherwise makes a green PR exit nonzero. Retry missing
-checks ("no checks reported", including "no required checks reported") or transient
-observation errors every 30 seconds for at most three minutes per cycle. Limit
-retries and watching in each observation cycle to 15 minutes, below the default
+Poll every 60 seconds on draft and ready PRs, without the required-only filter or
+watch mode. Inspect the named `Required checks` aggregate row. Ignore optional
+checks such as OpenCode Review; do not infer CI from the command's exit code alone.
+A missing aggregate is pending, never success, even if all visible checks pass or
+`gh` reports "no checks reported". Only an explicit pass/success of the aggregate verifies CI;
+a pending aggregate keeps polling, a fail/failure is a confirmed CI failure, and a
+skipped or cancelled aggregate is unverified (as is any other non-success terminal state).
+Retry missing/pending aggregates or transient observation errors every 60 seconds
+within the cycle budget. Limit each observation cycle to 15 minutes, below the default
 20-minute no-event stall window; use a shorter budget if the configured stall
 window is lower. The resident Codex stall detector observes app-server notifications,
 not shell stdout directly (`src/resident/service.ts`, `notifyFor`/`lastEventAt`).
 Do not assume polling output keeps the worker alive.
 
-Missing or pending required checks, watch timeouts (exit 124), and transient
+Missing or pending required checks, observation timeouts, and transient
 observation errors (such as "error connecting to api.github.com") mean CI is still
 running for scheduling purposes. Continue the remaining task, preserve unfinished
 work, and re-check in later bounded cycles. Between cycles return to task work and

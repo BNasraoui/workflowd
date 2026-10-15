@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
 import { residentWorkerInstructions as instructions } from "../../src/resident/instructions"
 
 test("incomplete CI observation preserves remaining work until final handoff", () => {
   expect(instructions).toContain("Missing or still-pending required checks")
-  expect(instructions).toContain("watch timeout (exit 124)")
+  expect(instructions).toContain("observation timeout")
   expect(instructions).toContain("error connecting to api.github.com")
   expect(instructions).toContain("CI is still running")
   expect(instructions).toContain("Continue the remaining task")
@@ -15,7 +16,6 @@ test("incomplete CI observation preserves remaining work until final handoff", (
 })
 
 test("observation cycles retain stall, head verification and mailbox safeguards", () => {
-  expect(instructions).toContain("timeout 12m gh pr checks")
   expect(instructions).toContain("each observation cycle to 15 minutes")
   expect(instructions).toContain("shorter budget if the configured stall window is lower")
   expect(instructions).toContain("Do not rely on shell output as a stall heartbeat")
@@ -49,3 +49,30 @@ test("handoff verifies the last pushed head and reports early stops and observat
     "never run back-to-back blocking waits without returning to task work in between; no single cycle may exceed the budget",
   )
 })
+
+for (const { source, content } of [
+  { source: "resident prompt", content: instructions },
+  ...["skills/rpi-implement/SKILL.md", "docs/agent-inboxes-ci.md", "docs/mcp-server.md"].map(
+    (path) => ({
+      source: path,
+      content: readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"),
+    }),
+  ),
+]) {
+  test(`${source} confirms the aggregate on drafts and tolerates check creation`, () => {
+    const text = content.replace(/\s+/g, " ")
+    expect(text).toMatch(/gh pr checks (PR_NUMBER|<pr>) --repo (OWNER\/NAME|<owner\/repo>)/)
+    expect(text).not.toMatch(/gh pr checks[^.\n`]*--(?:required|watch)/)
+    expect(text).toContain("every 60 seconds")
+    expect(text).toContain("draft and ready PRs")
+    expect(text).toContain("Required checks")
+    expect(text).toContain("missing aggregate is pending, never success")
+    expect(text).toContain("Only an explicit pass/success of the aggregate verifies CI")
+    expect(text).toContain("fail/failure is a confirmed CI failure")
+    expect(text).toContain("skipped or cancelled aggregate is unverified")
+    expect(text).toContain("OpenCode Review")
+    expect(text).toContain("exit code alone")
+    expect(text).toContain("15 minutes")
+    expect(text).toContain("CI is unverified")
+  })
+}
