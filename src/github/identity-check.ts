@@ -98,17 +98,16 @@ const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
     const checks = []
     const controller = new AbortController()
     yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
-    const pages = client
-      .listCheckRunPages({
-        owner,
-        repo,
-        ref: suite.head_sha,
-        check_name: checkName,
-        filter: "all",
-        per_page: 100,
-        request: { signal: controller.signal },
-      })
-      [Symbol.asyncIterator]()
+    const checkPages = client.listCheckRunPages({
+      owner,
+      repo,
+      ref: suite.head_sha,
+      check_name: checkName,
+      filter: "all",
+      per_page: 100,
+      request: { signal: controller.signal },
+    })
+    const pages = checkPages[Symbol.asyncIterator]()
     for (;;) {
       const page = yield* attempt(() => pages.next(), envelope.installation.id)
       if (page.done) break

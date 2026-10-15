@@ -179,7 +179,8 @@ test("a failed supersede write does not stop the newest check or later PRs recov
   expect(JSON.stringify(logs)).toContain('"checkId":12')
   expect(JSON.stringify(logs)).toContain('"checkId":13')
   expect(attempted).toEqual(["/repos/owner/repo/check-runs/12", "/repos/owner/repo/check-runs/13"])
-  expect(recovered).toEqual(
-    [14, 20].map((id) => expect.objectContaining({ check_run: expect.objectContaining({ id }) })),
-  )
+  expect(recovered).toEqual([
+    expect.objectContaining({ check_run: expect.objectContaining({ id: 14 }) }),
+    expect.objectContaining({ check_run: expect.objectContaining({ id: 20 }) }),
+  ])
 })
