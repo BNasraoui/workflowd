@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
-import { Effect } from "effect"
-import { checkName, fixture, head } from "./helpers/identity"
+import { Effect, Logger } from "effect"
+import { checkName, fixture, head, payload } from "./helpers/identity"
+
+import { makeIdentityCheckDispatcher } from "../src/github/identity-dispatch"
 
 const own = {
   id: 12,
@@ -9,6 +11,50 @@ const own = {
   status: "in_progress",
   external_id: "agent-git:7",
 }
+
+test.each([false, true])(
+  "recovery resumes the newest pending check across pages and supersedes older checks (newest first: %s)",
+  async (newestFirst) => {
+    const checks = [
+      { ...own, id: 12 },
+      ...Array.from({ length: 99 }, () => ({ ...own, status: "completed", id: 99 })),
+      { ...own, id: 14 },
+      { ...own, id: 13 },
+    ]
+    const f = fixture({
+      suiteChecks: newestFirst ? checks.reverse() : checks,
+      intercept: async (path) => {
+        if (path.endsWith("/pulls")) return Response.json([{ number: 7, head: { sha: head } }])
+      },
+    })
+    const recovered: unknown[] = []
+    await Effect.runPromise(
+      f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (_event, payload) =>
+          Effect.sync(() => {
+            recovered.push(payload)
+          }),
+      ),
+    )
+    expect(recovered).toEqual([
+      expect.objectContaining({ check_run: expect.objectContaining({ id: 14 }) }),
+    ])
+    expect(f.writes).toHaveLength(2)
+    expect(
+      f.writes.every((write) => write.status === "completed" && write.conclusion === "failure"),
+    ).toBe(true)
+    expect(f.writes.every((write) => JSON.stringify(write.output).includes("Superseded"))).toBe(
+      true,
+    )
+    expect(
+      f.requests
+        .filter((r) => r.method === "PATCH")
+        .map((r) => r.path)
+        .sort(),
+    ).toEqual(["/repos/owner/repo/check-runs/12", "/repos/owner/repo/check-runs/13"])
+  },
+)
 
 test("startup paginates open PRs and checks, recovering only this App's pending identity checks", async () => {
   let pages = 0
@@ -99,4 +145,131 @@ test("a failed repository does not prevent startup recovery in the next configur
     ),
   )
   expect(recovered).toHaveLength(1)
+})
+
+test("a failed supersede write does not stop the newest check or later PRs recovering", async () => {
+  const attempted: string[] = []
+  const f = fixture({
+    suiteChecks: [
+      { ...own, id: 12 },
+      { ...own, id: 14 },
+      { ...own, id: 13 },
+      { ...own, id: 20, external_id: "agent-git:8" },
+    ],
+    intercept: async (path, body) => {
+      if (path.endsWith("/pulls"))
+        return Response.json([7, 8].map((number) => ({ number, head: { sha: head } })))
+      if (body.status === "completed") {
+        attempted.push(path)
+        return Response.json({ message: "unavailable" }, { status: 503 })
+      }
+    },
+  })
+  const recovered: unknown[] = []
+  const logs: unknown[] = []
+  await Effect.runPromise(
+    f.app
+      .recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (_event, payload) =>
+          Effect.sync(() => {
+            recovered.push(payload)
+          }),
+      )
+      .pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))]))),
+  )
+  expect(JSON.stringify(logs)).toContain('"checkId":12')
+  expect(JSON.stringify(logs)).toContain('"checkId":13')
+  expect(attempted).toEqual(["/repos/owner/repo/check-runs/12", "/repos/owner/repo/check-runs/13"])
+  expect(recovered).toEqual([
+    expect.objectContaining({ check_run: expect.objectContaining({ id: 14 }) }),
+    expect.objectContaining({ check_run: expect.objectContaining({ id: 20 }) }),
+  ])
+})
+
+test("scope closure leaves a real scanning check in progress and restart recovery reruns it", async () => {
+  const scanning = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let scans = 0
+  let status = "in_progress"
+  const f = fixture({
+    intercept: async (path, body, _signal, url) => {
+      if (path.endsWith("/pulls")) return Response.json([{ number: 7, head: { sha: head } }])
+      if (path.includes(`/commits/${head}/check-runs`)) {
+        const response = Response.json({ total_count: 1, check_runs: [{ ...own, status }] })
+        Object.defineProperty(response, "url", { value: url.toString() })
+        return response
+      }
+      if (typeof body.status === "string") status = body.status
+      if (path.includes("/compare/") && ++scans === 1) {
+        scanning.resolve()
+        await release.promise
+      }
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const dispatch = yield* makeIdentityCheckDispatcher(f.app)
+        if (dispatch === undefined) throw new Error("dispatcher unavailable")
+        yield* dispatch("pull_request", payload())
+        yield* Effect.promise(() => scanning.promise)
+      }).pipe(Effect.scoped),
+    )
+    expect(status).toBe("in_progress")
+    expect(f.writes).toHaveLength(1)
+    await Effect.runPromise(
+      f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (event, value) => f.app.checkAgentGitIdentity(event, value),
+      ),
+    )
+    expect(scans).toBe(2)
+    expect(f.writes.at(-1)?.conclusion).toBe("success")
+  } finally {
+    release.resolve()
+  }
+})
+
+test("restart creates checks for heads dropped at the start cap, within the fresh budget", async () => {
+  const missing = Array.from({ length: 30 }, (_, i) => ({
+    number: 100 + ((i + 25) % 30),
+    user: { login: "fork-author" },
+    head: { sha: head },
+  }))
+  const options = {
+    suiteChecks: [
+      { ...own, status: "completed" },
+      { ...own, app: { id: 999 }, external_id: "agent-git:100" },
+    ],
+    intercept: async (path: string) => {
+      if (path.endsWith("/pulls"))
+        return Response.json([
+          { number: 7, user: { login: "existing" }, head: { sha: head } },
+          ...missing,
+          { number: 200, user: { login: "maintainer" }, head: { sha: head } },
+        ])
+    },
+  }
+  const before = fixture(options)
+  for (let i = 0; i < 26; i++)
+    await before.run("pull_request", {
+      ...payload(),
+      pull_request: { number: 100 + i, user: { login: "fork-author" }, head: { sha: head } },
+    })
+  expect(before.writes.filter((w) => w.status === "in_progress")).toHaveLength(25)
+  const restarted = fixture(options)
+  await Effect.runPromise(
+    restarted.app.recoverIdentityChecks(
+      [{ repository: "owner/repo", installationId: 91 }],
+      (event, value) => restarted.app.checkAgentGitIdentity(event, value),
+    ),
+  )
+  const starts = restarted.writes.filter((w) => w.status === "in_progress")
+  expect(starts).toHaveLength(26)
+  expect(starts.some((w) => w.external_id === "agent-git:7")).toBe(false)
+  expect(starts.some((w) => w.external_id === "agent-git:125")).toBe(true)
+  expect(starts.some((w) => w.external_id === "agent-git:124")).toBe(false)
+  expect(starts.at(-1)?.external_id).toBe("agent-git:200")
+  expect(restarted.writes.at(-1)?.conclusion).toBe("success")
 })

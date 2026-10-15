@@ -209,6 +209,12 @@ dispatcher. At most four scans run globally, with at most 100 additional targets
 waiting. A repeated target replaces the pending target for the same repository/PR/head
 and interrupts its active scan; the replacement waits for that scan to exit.
 Events for obsolete heads cannot interrupt the current head’s scan.
+Each PR retains at most two heads that have not started. A further head evicts
+the oldest waiting head without an existing check or interrupted predecessor.
+Queued reruns and interrupted keys are retained; if both waiting heads are
+protected, the new delivery is logged and dropped. An evicted head needs a
+new event to be checked. Interrupted scans complete as superseded failures
+through the publication fence before their replacements run.
 Already-issued check writes are drained before a replacement resets the same
 check ID, including when a client ignores cancellation.
 Suite discovery has one worker and at most 100 waiting suites. Overflow is logged
@@ -216,15 +222,46 @@ and dropped; redeliver its webhook to retry.
 Ranges above 10,000 commits fail with **range too large**. GitHub rate-limit
 exhaustion pauses subsequent identity API requests until the reset/retry-after
 deadline (at least one minute), including check publication and discovery.
+Inspection, startup recovery and suite discovery share a rolling allowance of
+1,000 reads per installation per hour across repositories. Each PR can consume
+at most 250 of those reads. The same 250-read share also applies to each PR
+author across PRs and repositories in the installation. Every pagination step is charged, including iterator
+completion; failed requests also consume allowance. Exhaustion stops the scan
+before another read and completes its check as failure with
+**scan budget exhausted, retry later**.
+Check creation and rerun resets have a separate allowance of 100 writes per
+installation per hour, with at most 25 per PR and per author. Exhausted deliveries are logged
+and dropped before starting another check. Completions, including recovery and
+superseded failures, have 200 writes per installation and 50 per PR and per author, leaving
+capacity after the start limit is reached. Completion failures are logged;
+GitHub availability and exhausted completion capacity can still require a rerun.
+Together these limits bound identity API traffic to 1,300 requests per
+installation per rolling hour. Client acquisition uses the App's cached client
+and is outside the installation API allowance. All allowances are in memory
+and reset on daemon restart. Re-run the check or redeliver its webhook after
+capacity expires. These local budgets do not account for other App users of
+the installation's GitHub rate limit. Author names are normalized to lowercase;
+reruns resolve missing author metadata through a budgeted PR read and reuse
+recent reservations to charge subsequent lookups to that author too.
 
 Checks API errors and slow scans do not prevent PR automation ingestion. On
 daemon startup, workflowd lists open PRs in the configured repositories and
 requeues this App's named identity checks left **in_progress** on their current
-heads. Recovery uses the same bounded dispatcher and waits for capacity; it does
+heads. Scope closure and daemon shutdown leave running checks in progress;
+only a replacement-triggered interruption publishes a superseded failure.
+Recovery also creates a check for an open current head with no identity check
+from this App, so heads dropped at the start cap can recover after restart.
+Existing completed checks are retained. All recovery reads and writes use the
+same budgets, including author shares. Recovery uses the same bounded dispatcher and waits for capacity; it does
 not replace work already admitted from a webhook. Discovery errors are logged
-per repository. This is not a durable queue: missing checks, discovery failures,
+per PR or repository. This is not a durable queue: exhausted recovery budgets, discovery failures,
 and interrupted checks on obsolete heads may still need webhook redelivery.
 Requiring the check prevents merging without a success.
+When a current head has multiple pending identity checks, recovery selects the
+newest check ID across all pages and completes older pending checks as failed
+with a superseded message. Its writes use the same publication fence as scans.
+A failed supersede write is logged with its repository and check ID; recovery
+continues with the newest check and later PRs.
 
 Matching is exact after trimming and lowercasing. Operators must list the GitHub
 noreply form of every blocked identity as well as its other Git email forms; the

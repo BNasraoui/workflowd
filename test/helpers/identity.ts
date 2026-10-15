@@ -17,11 +17,12 @@ export const payload = (action = "opened") => ({
   action,
   installation: { id: 91 },
   repository: { full_name: "owner/repo" },
-  pull_request: { number: 7, head: { sha: head } },
+  pull_request: { number: 7, user: { login: "author-7" }, head: { sha: head } },
 })
 
 export function fixture(
   options: {
+    author?: () => string
     afterSnapshot?: () => Promise<void>
     baseSha?: () => string
     intercept?: (
@@ -122,7 +123,7 @@ export function fixture(
           pulls++
           const response = Response.json({
             number: options.wrongNumber ? 8 : Number(url.pathname.split("/").at(-1)),
-            user: { login: "author" },
+            user: { login: options.author?.() ?? `author-${url.pathname.split("/").at(-1)}` },
             draft: true,
             state:
               (options.closedBefore && pulls === 1) || (options.closedAfter && pulls > 1)

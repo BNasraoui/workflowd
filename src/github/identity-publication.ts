@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import type { IdentityRequest } from "./identity-request"
+import type { IdentityBudget, IdentityRequest } from "./identity-request"
 
 type Lease = { readonly controller: AbortController; pendingWrite: Effect.Effect<void> }
 
@@ -23,20 +23,29 @@ export const makeIdentityPublication = () => {
       }),
     )
     yield* lease.pendingWrite
-    return <A>(run: (signal: AbortSignal) => Promise<A>) =>
+    return <A>(
+      run: (signal: AbortSignal) => Promise<A>,
+      installationId?: number,
+      budget?: IdentityBudget,
+    ) =>
       Effect.gen(function* () {
+        yield* lease.pendingWrite
         if (lease.controller.signal.aborted) return yield* Effect.interrupt
-        return yield* request((signal) => {
-          lease.controller.signal.throwIfAborted()
-          const pending = run(AbortSignal.any([signal, lease.controller.signal]))
-          lease.pendingWrite = Effect.promise(() =>
-            pending.then(
-              () => {},
-              () => {},
-            ),
-          )
-          return pending
-        })
+        return yield* request(
+          (signal) => {
+            lease.controller.signal.throwIfAborted()
+            const pending = run(AbortSignal.any([signal, lease.controller.signal]))
+            lease.pendingWrite = Effect.promise(() =>
+              pending.then(
+                () => {},
+                () => {},
+              ),
+            )
+            return pending
+          },
+          installationId,
+          budget,
+        )
       })
   })
 }

@@ -12,6 +12,38 @@ import {
   fixture,
 } from "./helpers/identity"
 
+test("near-cap fork scans share the installation budget across PRs and fail closed with a retry message", async () => {
+  const f = fixture({
+    intercept: async (path, _body, _signal, url) => {
+      if (!path.includes("/compare/")) return
+      const page = Number(url.searchParams.get("page"))
+      return Response.json({
+        total_commits: 10_000,
+        commits: Array.from({ length: 100 }, (_, index) =>
+          commit((page * 100 + index).toString(16).padStart(40, "0")),
+        ),
+      })
+    },
+  })
+  for (let number = 1; number <= 11; number++) {
+    await f.run("pull_request", {
+      ...payload(),
+      pull_request: { number, user: { login: `author-${number}` }, head: { sha: head } },
+    })
+  }
+  const completed = f.writes.filter((write) => write.status === "completed")
+  expect(completed.filter((write) => write.conclusion === "success")).toHaveLength(9)
+  const exhausted = completed.slice(9)
+  expect(exhausted).toHaveLength(2)
+  for (const check of exhausted)
+    expect(check).toMatchObject({
+      conclusion: "failure",
+      output: { title: checkName, summary: "scan budget exhausted, retry later" },
+    })
+  await f.run("pull_request", { ...payload(), installation: { id: 92 } })
+  expect(f.writes.at(-1)?.conclusion).toBe("success")
+})
+
 test.each(["opened", "synchronize", "reopened", "edited"])(
   "checks a draft fork on %s using immutable base..head",
   async (action) => {
@@ -93,7 +125,7 @@ test.each([
   expect(JSON.stringify(f.writes)).not.toContain("@")
 })
 
-test("reruns only this App's identity check, resetting the old result before reading", async () => {
+test("reruns only this App's identity check, resolving its author then resetting before scanning", async () => {
   const f = fixture()
   const rerun = {
     ...payload(),
@@ -107,11 +139,13 @@ test("reruns only this App's identity check, resetting the old result before rea
     },
   }
   await f.run("check_run", rerun)
-  expect(f.requests[0]).toMatchObject({
+  expect(f.requests[0]).toMatchObject({ method: "GET", path: "/repos/owner/repo/pulls/7" })
+  expect(f.requests[1]).toMatchObject({
     method: "PATCH",
     path: "/repos/owner/repo/check-runs/12",
     body: { status: "in_progress" },
   })
+  expect(f.requests[2]).toMatchObject({ method: "GET", path: "/repos/owner/repo/pulls/7" })
   expect(f.writes.at(-1)).toMatchObject({ conclusion: "success" })
   for (const value of [
     { ...rerun, action: "completed" },
