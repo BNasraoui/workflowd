@@ -252,138 +252,126 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   return result
 })
 
-const checkTarget = Effect.fn("GitIdentity.checkTarget")(
-  function* (
-    getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
-    blockedEmails: ReadonlyArray<string> | undefined,
-    target: Target,
-    publication: IdentityPublication,
-    attempt: IdentityRequest,
-    superseded: () => boolean = () => false,
-  ) {
-    const [owner = "", repo = ""] = target.repository.full_name.split("/")
-    const repository = { owner, repo }
-    const prKey = `${target.repository.full_name.toLowerCase()}/${target.number}`
-    const installationId = target.installation.id
-    const client = yield* attempt(() => getClient(target.installation.id))
-    const lookup =
-      target.author === undefined || target.trusted === undefined
-        ? yield* attempt(
+const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
+  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
+  blockedEmails: ReadonlyArray<string> | undefined,
+  target: Target,
+  publication: IdentityPublication,
+  attempt: IdentityRequest,
+  superseded: () => boolean = () => false,
+) {
+  const [owner = "", repo = ""] = target.repository.full_name.split("/")
+  const repository = { owner, repo }
+  const prKey = `${target.repository.full_name.toLowerCase()}/${target.number}`
+  const installationId = target.installation.id
+  const client = yield* attempt(() => getClient(target.installation.id))
+  const lookup =
+    target.author === undefined || target.trusted === undefined
+      ? yield* attempt(
+          (signal) =>
+            client.getPullRequest({
+              ...repository,
+              pull_number: target.number,
+              request: { signal },
+            }),
+          installationId,
+          { prKey },
+        )
+      : undefined
+  const authorKey = (target.author ?? lookup?.pullRequest.author ?? "").toLowerCase()
+  const trusted =
+    target.trusted ??
+    identityTrusted(
+      target.repository.full_name,
+      lookup?.pullRequest.headRepositoryFullName,
+      lookup?.pullRequest.authorAssociation,
+    )
+  const pending = {
+    ...repository,
+    name: checkName,
+    status: "in_progress" as const,
+    external_id: `agent-git:${target.number}`,
+    output: { title: checkName, summary: "Inspecting commit identities." },
+  }
+  const rerun = target.checkId !== undefined
+  const checkId =
+    target.checkId ??
+    (yield* attempt(
+      (signal) => client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
+      installationId,
+      { kind: "start", prKey, authorKey, trusted },
+    ))
+  target.checkId = checkId
+  const write = yield* publication(
+    `${target.repository.full_name.toLowerCase()}/${checkId}`,
+    attempt,
+  )
+  yield* Effect.gen(function* () {
+    if (rerun)
+      yield* write(
+        (signal) =>
+          client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
+        installationId,
+        { kind: "start", prKey, authorKey, trusted },
+      )
+    const scan: IdentityRequest = (run) =>
+      attempt(run, installationId, { prKey, authorKey, trusted })
+    const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
+      Effect.timeout("2 minutes"),
+      Effect.catch((error) => {
+        if (error instanceof IdentityBudgetExhausted) return Effect.fail(error)
+        return Effect.succeed({
+          conclusion: "failure" as const,
+          output: {
+            title: checkName,
+            summary:
+              error instanceof Error &&
+              (error.message === "range too large" ||
+                error.message === "scan budget exhausted, retry later")
+                ? error.message
+                : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
+          },
+        })
+      }),
+    )
+    yield* write(
+      (signal) =>
+        client.updateCheckRun({
+          ...repository,
+          check_run_id: checkId,
+          status: "completed",
+          ...result,
+          request: { signal },
+        }),
+      installationId,
+      { kind: "finish", prKey, authorKey, trusted },
+    )
+  }).pipe(
+    Effect.onInterrupt(() =>
+      superseded()
+        ? write(
             (signal) =>
-              client.getPullRequest({
+              client.updateCheckRun({
                 ...repository,
-                pull_number: target.number,
+                check_run_id: checkId,
+                status: "completed",
+                conclusion: "failure",
+                output: { title: checkName, summary: "Superseded by a newer identity check." },
                 request: { signal },
               }),
             installationId,
-            { prKey },
+            { kind: "finish", prKey, authorKey, trusted },
+          ).pipe(
+            Effect.catch(() =>
+              Effect.logError("Git identity interrupted check completion unavailable", {
+                checkId,
+              }),
+            ),
           )
-        : undefined
-    const authorKey = (target.author ?? lookup?.pullRequest.author ?? "").toLowerCase()
-    const trusted =
-      target.trusted ??
-      identityTrusted(
-        target.repository.full_name,
-        lookup?.pullRequest.headRepositoryFullName,
-        lookup?.pullRequest.authorAssociation,
-      )
-    const pending = {
-      ...repository,
-      name: checkName,
-      status: "in_progress" as const,
-      external_id: `agent-git:${target.number}`,
-      output: { title: checkName, summary: "Inspecting commit identities." },
-    }
-    const rerun = target.checkId !== undefined
-    const checkId =
-      target.checkId ??
-      (yield* attempt(
-        (signal) =>
-          client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
-        installationId,
-        { kind: "start", prKey, authorKey, trusted },
-      ))
-    target.checkId = checkId
-    const write = yield* publication(
-      `${target.repository.full_name.toLowerCase()}/${checkId}`,
-      attempt,
-    )
-    yield* Effect.gen(function* () {
-      if (rerun)
-        yield* write(
-          (signal) =>
-            client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
-          installationId,
-          { kind: "start", prKey, authorKey, trusted },
-        )
-      const scan: IdentityRequest = (run) =>
-        attempt(run, installationId, { prKey, authorKey, trusted })
-      const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
-        Effect.timeout("2 minutes"),
-        Effect.catch((error) => {
-          if (error instanceof IdentityBudgetExhausted) return Effect.fail(error)
-          return Effect.succeed({
-            conclusion: "failure" as const,
-            output: {
-              title: checkName,
-              summary:
-                error instanceof Error &&
-                (error.message === "range too large" ||
-                  error.message === "scan budget exhausted, retry later")
-                  ? error.message
-                  : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
-            },
-          })
-        }),
-      )
-      yield* write(
-        (signal) =>
-          client.updateCheckRun({
-            ...repository,
-            check_run_id: checkId,
-            status: "completed",
-            ...result,
-            request: { signal },
-          }),
-        installationId,
-        { kind: "finish", prKey, authorKey, trusted },
-      )
-    }).pipe(
-      Effect.onInterrupt(() =>
-        superseded()
-          ? write(
-              (signal) =>
-                client.updateCheckRun({
-                  ...repository,
-                  check_run_id: checkId,
-                  status: "completed",
-                  conclusion: "failure",
-                  output: { title: checkName, summary: "Superseded by a newer identity check." },
-                  request: { signal },
-                }),
-              installationId,
-              { kind: "finish", prKey, authorKey, trusted },
-            ).pipe(
-              Effect.catch(() =>
-                Effect.logError("Git identity interrupted check completion unavailable", {
-                  checkId,
-                }),
-              ),
-            )
-          : Effect.void,
-      ),
-    )
-  },
-  Effect.scoped,
-  (effect, getClient, _blockedEmails, target, publication, attempt, _superseded?: () => boolean) =>
-    effect.pipe(
-      Effect.tapError((error) =>
-        error instanceof IdentityBudgetExhausted
-          ? budgetFeedback(getClient, target, publication, attempt, error)
-          : Effect.void,
-      ),
+        : Effect.void,
     ),
-)
+  )
+}, Effect.scoped)
 
 const budgetFeedback = Effect.fn("GitIdentity.budgetFeedback")(
   function* (
@@ -420,6 +408,22 @@ const budgetFeedback = Effect.fn("GitIdentity.budgetFeedback")(
   (effect) => Effect.ignore(effect),
 )
 
+const runTarget = (
+  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
+  blockedEmails: ReadonlyArray<string> | undefined,
+  target: Target,
+  publication: IdentityPublication,
+  attempt: IdentityRequest,
+  superseded?: () => boolean,
+) =>
+  checkTarget(getClient, blockedEmails, target, publication, attempt, superseded).pipe(
+    Effect.tapError((error) =>
+      error instanceof IdentityBudgetExhausted
+        ? budgetFeedback(getClient, target, publication, attempt, error)
+        : Effect.void,
+    ),
+  )
+
 export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
   appId: number,
   getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
@@ -435,7 +439,7 @@ export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
   yield* Effect.forEach(
     targets,
     (target) =>
-      checkTarget(getClient, blockedEmails, target, publication, attempt).pipe(
+      runTarget(getClient, blockedEmails, target, publication, attempt).pipe(
         Effect.catchIf(
           (error) => error instanceof IdentityBudgetExhausted,
           () => Effect.logWarning("Git identity budget exhausted"),
@@ -468,7 +472,7 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
       supersede: () => {
         superseded = true
       },
-      run: checkTarget(getClient, blockedEmails, target, publication, attempt, () => superseded),
+      run: runTarget(getClient, blockedEmails, target, publication, attempt, () => superseded),
     }
   })
 })
