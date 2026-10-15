@@ -100,17 +100,17 @@ test("live CI provider persists NATS publications and uses conditional installat
 
 // Never delete and recreate WORKFLOWD_CI_V1 in one store: NATS file-store
 // teardown can overlap its replacement. Each case starts with an empty store.
-const mismatches: Partial<StreamConfig>[] = [
-  { storage: StorageType.Memory },
-  { discard: DiscardPolicy.New },
-  { max_age: 100000000, duplicate_window: 100000000 },
-  { max_bytes: 1 },
-  { retention: RetentionPolicy.Interest },
-  { subjects: ["workflowd.other.>"] },
+const mismatches: [keyof StreamConfig, Partial<StreamConfig>][] = [
+  ["storage", { storage: StorageType.Memory }],
+  ["discard", { discard: DiscardPolicy.New }],
+  ["max_age", { max_age: 100000000, duplicate_window: 100000000 }],
+  ["max_bytes", { max_bytes: 1 }],
+  ["retention", { retention: RetentionPolicy.Interest }],
+  ["subjects", { subjects: ["workflowd.other.>"] }],
 ]
 test.each(mismatches)(
-  "live CI provider refuses an incompatible stream: %j",
-  async (mismatch) => {
+  "live CI provider refuses an incompatible stream: %s",
+  async (field, mismatch) => {
     await withProvider(async (live, servers) => {
       const admin = await connect({ servers, token: "test-token" })
       try {
@@ -131,7 +131,9 @@ test.each(mismatches)(
           }).pipe(Effect.provide(live), Effect.result),
         )
         expect(result._tag).toBe("Failure")
-        expect(String(result)).toContain("Incompatible CI stream")
+        expect(String(result)).toContain(
+          `Incompatible CI stream WORKFLOWD_CI_V1: ${field}; refusing to reconfigure existing stream`,
+        )
         const current = (await manager.streams.info("WORKFLOWD_CI_V1")).config
         expect(current).toMatchObject(mismatch)
       } finally {

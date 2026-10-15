@@ -187,7 +187,7 @@ describe("runHookService startup", () => {
           const health = yield* Effect.tryPromise(() =>
             fetch(`http://${started.hostname}:${started.port}/health`),
           )
-          // HTTP readiness does not imply that the background guard has reconciled.
+          // HTTP responds while the guard is held; waiting for reconciliation would time out.
           expect(health.status).toBe(200)
           expect(guardPasses).toBe(0)
           yield* Deferred.succeed(allowGuard, undefined)
