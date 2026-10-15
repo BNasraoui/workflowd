@@ -798,6 +798,7 @@ test("the operator trust record accepts no custom claims and validates before ac
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           HOME: root,
+          TMPDIR: root,
           WORKFLOWD_AGENT_RUN_SANDBOX_REPOSITORIES: JSON.stringify([policy]),
           EVIDENCE_TAILSCALE_TRUST_FILE: path,
         },

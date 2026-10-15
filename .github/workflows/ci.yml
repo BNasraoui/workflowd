@@ -314,6 +314,8 @@ jobs:
           ]:
               assert sum(case.get('name') == name for case in cases) == 1, f'Missing required test: {name}'
           PYTEST
+      # These simulated-manager/process fixtures must remain namespace PID 1
+      # to reap orphaned UID children. Host resource commands are denied here.
       - name: Require administrative credential coverage
         run: |
           mkdir -p coverage/administrative
@@ -324,7 +326,7 @@ jobs:
             --setenv=WORKFLOWD_AGENT_TEST_AGENT_UID=61002 \
             --setenv=WORKFLOWD_AGENT_TEST_AUTH_GID=61000 \
             /usr/bin/unshare --pid --fork --mount-proc --net \
-            /bin/sh -c 'ip link set lo up && exec "$@"' fixture \
+            /bin/sh -c 'ip link set lo up && export PATH="$PWD/test/resources/forbidden:$PATH" && exec "$@"' fixture \
             /opt/workflowd-credential-fixture/bin/bun test --coverage \
             --coverage-dir=coverage/administrative \
             --test-name-pattern='^(installed|offline migration|a replaced login|missing links|an admission lease|interrupted repair|repair after|the host|relink |a FIFO|host transport|admitted)' \

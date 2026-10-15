@@ -1,3 +1,4 @@
+import "../../test/resources/preload.ts"
 /* global Bun */
 // Scratch-only dependencies for exercising the unmodified src/main.ts entrypoint.
 import { mkdir, writeFile, chmod } from "node:fs/promises"
@@ -95,7 +96,7 @@ await Bun.write(process.env.EVIDENCE_ROOT + "/owned-" + unit, "")
 const index = args.indexOf(process.execPath)
 if (index < 0) throw Error("missing worker executable")
 const clean = ["HOME", "PATH", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"].map(k => k + "=" + process.env[k])
-const child = Bun.spawn(["/usr/bin/systemd-run", ...args.slice(0,index), "/usr/bin/env", "-i", ...clean, ...args.slice(index)], { stdout: "inherit", stderr: "inherit" })
+const child = Bun.spawn([${JSON.stringify(Bun.which("systemd-run"))}, ...args.slice(0,index), "/usr/bin/env", "-i", ...clean, ...args.slice(index)], { stdout: "inherit", stderr: "inherit" })
 const code = await child.exited
 if (code === 0 && process.env.EVIDENCE_LAUNCH_BARRIER === "1") {
   await Bun.write(process.env.EVIDENCE_ROOT + "/launch-barrier", "")

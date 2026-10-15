@@ -1780,11 +1780,12 @@ async function deployedHost(
         .join("\n"),
       { mode: 0o600 },
     )
+    const { labelNativeTestUnits } = await import("../resources/native-units")
     // Add only the private fixture store to the unit's writable paths. All
     // production capabilities, namespaces and restrictions remain in force.
     await writeFile(
       "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
-      `[Service]\nReadWritePaths=${root}\n`,
+      `[Service]\nReadWritePaths=${root}\n${labelNativeTestUnits()}`,
     )
     await command(["systemctl", "daemon-reload"])
     await writeFile(marker, "installed")

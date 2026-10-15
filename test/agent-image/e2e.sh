@@ -1,10 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
+repository_root=$(cd "$(dirname "$0")/../.." && pwd)
+if [[ ${WORKFLOWD_TEST_RESOURCE_SHELL:-} != 1 ]]; then
+  exec bun "$repository_root/test/resources/run.ts" bash "$0" "$@"
+fi
+
 # A disposable local registry makes the build visible to Dagger's image resolver.
 # Nothing is pulled from GHCR or published beyond this machine.
 image=${1:-workflowd-agent-base:local}
-repository_root=$(cd "$(dirname "$0")/../.." && pwd)
 docker run --rm --entrypoint python3 \
   -v "$repository_root/deploy/sandbox/skills/catalog.json:/tmp/catalog.json:ro" \
   -v "$repository_root/test/agent-image/skills.py:/tmp/check-skills.py:ro" \
@@ -59,7 +63,7 @@ export _EXPERIMENTAL_DAGGER_RUNNER_HOST="docker-container://$name-engine"
 export HOME="$root/home"
 mkdir -p "$HOME" "$root/repository"
 git config --global user.name fixture
-git config --global user.email fixture@example.invalid
+git config --global user.email fixture@example.test
 git -C "$root/repository" init -q -b main
 printf 'fixture\n' > "$root/repository/README"
 (
