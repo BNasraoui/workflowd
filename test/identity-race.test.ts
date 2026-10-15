@@ -139,3 +139,59 @@ test.each([false, true])(
     )
   },
 )
+
+test("a late synchronize for an old head cannot interrupt the current head's check", async () => {
+  const currentHead = "c".repeat(40)
+  const scanning = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const oldDone = Promise.withResolvers<void>()
+  const currentDone = Promise.withResolvers<void>()
+  const writes: Array<{ id: number; conclusion: unknown }> = []
+  const f = fixture({
+    changedHead: true,
+    intercept: async (path, body) => {
+      if (path.includes("/compare/")) {
+        scanning.resolve()
+        await release.promise
+        return Response.json({ total_commits: 1, commits: [commit(currentHead)] })
+      }
+      if (!path.includes("/check-runs")) return
+      const id = path.endsWith("/check-runs")
+        ? body.head_sha === currentHead
+          ? 101
+          : 102
+        : Number(path.split("/").at(-1))
+      writes.push({ id, conclusion: body.conclusion ?? body.status })
+      if (body.status === "completed") {
+        if (id === 101) currentDone.resolve()
+        else oldDone.resolve()
+      }
+      return Response.json({ id })
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const dispatch = yield* makeIdentityCheckDispatcher(f.app)
+        if (dispatch === undefined) throw new Error("dispatcher unavailable")
+        yield* dispatch("pull_request", {
+          ...payload("synchronize"),
+          pull_request: { number: 7, head: { sha: currentHead } },
+        })
+        yield* Effect.promise(() => scanning.promise)
+        yield* dispatch("pull_request", payload("synchronize"))
+        yield* Effect.promise(() => oldDone.promise)
+        release.resolve()
+        yield* Effect.promise(() => currentDone.promise).pipe(Effect.timeout("1 second"))
+        expect(writes).toEqual([
+          { id: 101, conclusion: "in_progress" },
+          { id: 102, conclusion: "in_progress" },
+          { id: 102, conclusion: "failure" },
+          { id: 101, conclusion: "success" },
+        ])
+      }).pipe(Effect.scoped),
+    )
+  } finally {
+    release.resolve()
+  }
+})

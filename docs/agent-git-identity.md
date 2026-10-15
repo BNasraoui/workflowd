@@ -205,9 +205,10 @@ empty PR list ([GitHub check-suite behavior](https://docs.github.com/en/rest/che
 Title and body edits do not trigger scans.
 
 Webhook ingestion stores the delivery before scheduling the check in a daemon-scoped
-dispatcher. At most four scans run globally, with at most 100 additional PRs
-waiting. A newer target replaces the pending target for the same repository/PR
+dispatcher. At most four scans run globally, with at most 100 additional targets
+waiting. A repeated target replaces the pending target for the same repository/PR/head
 and interrupts its active scan; the replacement waits for that scan to exit.
+Events for obsolete heads cannot interrupt the current head’s scan.
 Already-issued check writes are drained before a replacement resets the same
 check ID, including when a client ignores cancellation.
 Suite discovery has one worker and at most 100 waiting suites. Overflow is logged

@@ -322,7 +322,7 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
     Effect.mapError(unavailable),
   )
   return targets.map((target): IdentityWork => ({
-    key: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+    key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
     run: checkTarget(getClient, blockedEmails, target, publication, attempt),
   }))
 })

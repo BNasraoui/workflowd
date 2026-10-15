@@ -28,6 +28,7 @@ export function fixture(
       path: string,
       body: Record<string, unknown>,
       signal: AbortSignal | null | undefined,
+      url: URL,
     ) => Promise<Response | undefined>
     pages?: ReadonlyArray<unknown>
     errorPath?: string
@@ -57,7 +58,7 @@ export function fixture(
         const body = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
           JSON.parse(typeof init?.body === "string" ? init.body : "{}"),
         )
-        const intercepted = await options.intercept?.(url.pathname, body, init?.signal)
+        const intercepted = await options.intercept?.(url.pathname, body, init?.signal, url)
         if (intercepted !== undefined) return intercepted
         requests.push({ method, path: url.pathname + url.search, body })
         if (url.pathname.includes(options.errorPath ?? "NEVER"))

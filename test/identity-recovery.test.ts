@@ -22,10 +22,15 @@ test("startup paginates open PRs and checks, recovering only this App's pending 
       ...Array.from({ length: 95 }, () => ({ ...own, status: "queued" })),
       own,
     ],
-    intercept: async (path) => {
+    intercept: async (path, _body, _signal, url) => {
       if (!path.endsWith("/pulls")) return
       pages++
-      const response = Response.json(pages === 1 ? [] : [{ number: 7, head: { sha: head } }], {
+      // A closed PR has an otherwise recoverable check too. Honour the API query
+      // so broadening discovery to all PRs produces an extra recovery.
+      const pulls = pages === 1 ? [] : [{ number: 7, head: { sha: head } }]
+      if (url.searchParams.get("state") !== "open")
+        pulls.push({ number: 8, head: { sha: "c".repeat(40) } })
+      const response = Response.json(pulls, {
         headers:
           pages === 1
             ? {
