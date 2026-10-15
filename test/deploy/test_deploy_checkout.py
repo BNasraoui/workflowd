@@ -390,3 +390,38 @@ class CheckoutTests(unittest.TestCase):
         self.assertNotEqual(self.repo.resolve(), first)
         self.assertEqual((self.repo.parent / 'previous').resolve(), first)
         self.assertEqual((first / '.git/index').read_bytes(), first_index)
+
+    def test_previous_directory_is_refused_before_stop(self):
+        previous = self.repo.parent / 'previous'
+        previous.mkdir()
+        (previous / 'keep').write_text('untouched')
+        with self.assertRaisesRegex(ValueError, 'Previous'):
+            self.run_deploy()
+        self.assertEqual(self.events, [])
+        self.assertEqual((previous / 'keep').read_text(), 'untouched')
+        self.assertFalse(self.state.exists())
+
+    def test_bad_skill_tree_is_refused_before_stop(self):
+        for invalid in ['symlink', 'missing SKILL.md']:
+            with self.subTest(invalid=invalid):
+                skill = self.repo / 'skills/rpi-example/SKILL.md'
+                skill.unlink()
+                if invalid == 'symlink':
+                    skill.symlink_to('../../tracked')
+                else:
+                    (skill.parent / 'other').touch()
+                self.commit()
+                self.sha = d.git(self.repo, 'rev-parse', 'HEAD')
+                with self.assertRaises(ValueError):
+                    self.run_deploy()
+                self.assertEqual(self.events, ['install'])
+                self.assertFalse(self.state.exists())
+                skill.unlink(missing_ok=True)
+                skill.write_text('reviewed skill')
+
+    def test_skill_copy_io_failure_does_not_stop_services(self):
+        with patch.object(d, 'copy_skills', side_effect=OSError('copy failed')):
+            with self.assertRaisesRegex(OSError, 'copy failed'):
+                self.run_deploy()
+        self.assertEqual(self.events, ['install'])
+        self.assertFalse(self.state.exists())

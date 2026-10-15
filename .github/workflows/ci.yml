@@ -117,10 +117,12 @@ jobs:
           no-cache: true
       - name: Verify deployment admission and checkout isolation
         run: python3 -B -m unittest discover -s test/deploy -v
-      - name: Verify systemd unit
-        run: >-
-          systemd-analyze --user --recursive-errors=no --man=no --generators=no
-          verify deploy/systemd/workflowd.service
+      - name: Verify systemd units with pinned executable fixture
+        run: |
+          sudo install -D -m 0755 "$(command -v bun)" /opt/workflowd/bin/bun
+          systemd-analyze --user --recursive-errors=no --man=no --generators=no \
+            verify deploy/systemd/workflowd.service \
+              deploy/systemd/workflowd-runner.service deploy/systemd/workflowd-mcp.service
 
   tests:
     name: Tests and changed-line coverage

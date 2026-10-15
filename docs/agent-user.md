@@ -166,6 +166,43 @@ previous successful SHA with explicit `--bootstrap` when required; it verifies
 and builds a fresh release again. Never directly reactivate retained `.git` or
 edit deployment state. See the runbook's layout, cleanup and recovery procedures.
 
+## Agent code access before cutover: operator decision
+
+Decide how agent processes will read their executable code before enabling the
+separate agent UID. The current controller resolves worker GitHub command paths
+in `src/worker-identity/service.ts` and resident MCP paths in
+`src/resident/process.ts` relative to its own release. Those paths point inside
+mode-0700 `deploy/releases/` and pin that release even after `current` moves.
+A separate agent UID cannot traverse them. Same-UID agents can read them, but
+also share the operator's authority; same-UID access is not isolation.
+
+Options for operator review:
+
+- Publish a minimal, versioned, read-only agent runtime outside private releases,
+  containing the worker command and resident MCP entrypoints with their required
+  dependencies (or reviewed compiled artifacts). Use operator/root ownership,
+  agent read/execute access and no agent write access to any ancestor. Pass these
+  published paths to launches and keep each version until its consumers drain.
+  Exclude Git metadata, deploy credentials, state and unrelated controller files.
+- Grant narrowly scoped traversal/read ACLs to the required release paths and
+  dependencies. This couples access policy and retention to every new release;
+  auditing the transitive imports and preventing unintended reads is harder.
+  It also needs a reviewed change to the current private-release policy and
+  validation, rather than simply making `releases/` world-readable.
+- Delay the separate-UID cutover until published artifacts are available. This
+  avoids an unreadable-code launch failure but leaves the existing same-UID trust
+  limitation in place, so it is not the long-term isolation solution.
+
+Recommendation: publish the minimal versioned runtime, reusing the trusted
+installed worker artifact where suitable, and explicitly configure both worker
+and MCP launch paths. A stable discovery link can select the version for new
+runs, but running agents must retain their selected version through completion.
+Before cutover, prove both entrypoints execute as the agent UID, verify that
+operator secrets remain unreadable and published code/ancestors unwritable, and
+exercise deployment plus a continuing old run before allowing pruning. The
+operator must approve the publication layout and retention policy; this document
+makes no permission, ACL, launch-path or live deployment changes.
+
 ## Phase 2 reviewed deviations and protocol
 
 The Phase 2 continuation explicitly records two deviations from the original

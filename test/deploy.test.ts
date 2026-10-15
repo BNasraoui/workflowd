@@ -12,7 +12,9 @@ test("shipped deployment defaults Fix Work off but permits explicit enablement",
   expect(environment).toContain("WORKFLOWD_TRUSTED_AGENT_USERS=trusted-agent[bot]")
   const execStart = unit.split("\n").find((line) => line.startsWith("ExecStart="))
   if (execStart === undefined) throw new Error("missing ExecStart")
-  expect(execStart).toBe("ExecStart=%h/.bun/bin/bun run start")
+  expect(execStart).toBe(
+    "ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/main.ts",
+  )
   expect(unit).not.toContain("WORKFLOWD_FIX_WORK_ENABLED=false")
   expect(readme).toContain("trusted agent-owned pull requests")
   expect(readme).toContain("WORKFLOWD_FIX_WORK_ENABLED=true")
@@ -29,7 +31,9 @@ test("remote runner ships as a hardened long-running systemd command", async () 
     readFile("src/remote-process.ts", "utf8"),
   ])
   expect(JSON.parse(packageJson).scripts.runner).toBe("bun src/remote-runner.ts")
-  expect(unit).toContain("ExecStart=%h/.bun/bin/bun run runner")
+  expect(unit).toContain(
+    "ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/remote-runner.ts",
+  )
   expect(unit).toContain("LoadCredential=nats-token:")
   expect(unit).toContain("NoNewPrivileges=true")
   expect(unit).toContain("ProtectSystem=strict")

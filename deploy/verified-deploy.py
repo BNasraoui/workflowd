@@ -261,6 +261,9 @@ def release_layout(checkout):
     info = releases.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
             and info.st_mode & 0o077 == 0, 'Releases must be a private operator-owned directory')
+    previous_link = checkout.parent / 'previous'
+    require(previous_link.is_symlink() or not previous_link.exists(),
+            'Previous must be absent or a symlink')
     previous = None
     if checkout.exists() or checkout.is_symlink():
         require(checkout.is_symlink(), 'Checkout must be absent or a release symlink; migrate the old clone')
@@ -268,6 +271,34 @@ def release_layout(checkout):
         require(previous.parent == releases and previous.is_dir(),
                 'Checkout must point directly to a retained release directory')
     return releases, previous
+
+
+def prune_releases(checkout, state, names):
+    """Delete explicit unused releases; the operator must first drain their users."""
+    require_state_directory(state)
+    with append_file(state.parent / 'verified-deploy.lock') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        releases, current = release_layout(checkout)
+        protected = {current}
+        previous = checkout.parent / 'previous'
+        if previous.is_symlink():
+            target = previous.resolve(strict=True)
+            require(target.parent == releases and target.is_dir(),
+                    'Previous must point directly to a retained release directory')
+            protected.add(target)
+        candidates = []
+        for name in dict.fromkeys(names):
+            require(name not in ('', '.', '..') and Path(name).name == name,
+                    'Prune requires release directory names, not paths')
+            candidate = releases / name
+            require(not candidate.is_symlink() and candidate.is_dir(),
+                    'Prune requires a real release directory')
+            require(candidate not in protected, 'Cannot prune current or previous release')
+            candidates.append(candidate)
+        # Validate the entire request before removing anything.
+        for candidate in candidates:
+            shutil.rmtree(candidate)
+            print(json.dumps({'pruned_release': str(candidate)}), flush=True)
 
 
 def replace_link(link, target):
@@ -331,8 +362,8 @@ def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, tok
             subprocess.run([str(bun), 'install', '--frozen-lockfile', '--no-cache',
                             '--backend=copyfile'], cwd=release, check=True)
             # All Git reads, including skill blobs, use this fresh object store.
-            command('systemctl', '--user', 'stop', *UNITS)
             copy_skills(release, sha, skill_target)
+            command('systemctl', '--user', 'stop', *UNITS)
             if previous:
                 replace_link(checkout.parent / 'previous', previous)
             replace_link(checkout, release)
@@ -383,23 +414,33 @@ def configure_environment(token_file, isolated_home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('sha', help='full merge-result SHA on origin/main')
+    parser.add_argument('sha', nargs='?', help='full merge-result SHA on origin/main')
     parser.add_argument('--checkout', type=Path, required=True)
-    parser.add_argument('--skills', type=Path, required=True,
+    parser.add_argument('--prune', nargs='+', metavar='RELEASE',
+                        help='remove named unused releases under the deployment lock')
+    parser.add_argument('--skills', type=Path,
                         help='dedicated operator-owned directory with managed marker')
-    parser.add_argument('--github-token-file', type=Path, required=True)
-    parser.add_argument('--approval-app-id', type=int, required=True,
+    parser.add_argument('--github-token-file', type=Path)
+    parser.add_argument('--approval-app-id', type=int,
                         help='merge gate App integration ID, not installation ID')
-    parser.add_argument('--bun', type=Path, required=True, help='absolute pinned Bun executable')
+    parser.add_argument('--bun', type=Path, help='absolute pinned Bun executable')
     parser.add_argument('--bootstrap', action='store_true',
                         help='explicitly trust history before target; target still needs approval and CI')
     args = parser.parse_args()
-    require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
-    require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
-    require(args.bun.is_absolute(), 'Bun path must be absolute')
     require(args.checkout.is_absolute(), 'Checkout path must be absolute')
     checkout = args.checkout.parent.resolve() / args.checkout.name
     require(checkout.name not in ('releases', 'previous'), 'Reserved checkout name')
+    if args.prune:
+        require(not any((args.sha, args.skills, args.github_token_file, args.approval_app_id,
+                         args.bun, args.bootstrap)), 'Prune cannot be combined with deployment arguments')
+        prune_releases(checkout, DEPLOY_STATE, args.prune)
+        return
+    if any(value is None for value in (args.sha, args.skills, args.github_token_file,
+                                       args.approval_app_id, args.bun)):
+        parser.error('deployment requires sha, --skills, --github-token-file, --approval-app-id and --bun')
+    require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
+    require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
+    require(args.bun.is_absolute(), 'Bun path must be absolute')
     require_skill_target(args.skills)
     target = args.skills.resolve()
     require(not target.is_relative_to(checkout.parent) and not checkout.parent.is_relative_to(target),
