@@ -36,15 +36,16 @@ class ReleaseLayoutTests(unittest.TestCase):
         self.enterContext(patch.object(d, 'command', side_effect=self.systemctl))
 
     def systemctl(self, *args):
-        self.assertEqual(args[:-1], ('systemctl', '--user', 'show', '-p', 'MainPID',
-                                    '-p', 'ExecStart', '-p', 'WorkingDirectory'))
+        self.assertEqual(args[:3], ('systemctl', '--user', 'show'))
         self.assertIn(args[-1], d.UNITS)
         with d.append_file(self.state.parent / 'verified-deploy.lock') as lock:
             with self.assertRaises(BlockingIOError):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        properties = dict(MainPID='0', ExecStart='', WorkingDirectory='/')
+        properties = dict(MainPID='0', ExecStart='', WorkingDirectory='/', ControlGroup='',
+                          ExecStartPre='', ExecStartPost='', ExecStop='', ExecStopPost='',
+                          ExecReload='', Environment='')
         properties.update(self.unit_properties.get(args[-1], {}))
-        return '\n'.join(f'{key}={value}' for key, value in properties.items())
+        return '\n'.join(f'{key}={properties[key]}' for key in args[4:-1:2])
 
     def test_private_releases_and_direct_current_are_accepted(self):
         self.assertEqual(d.release_layout(self.checkout), (self.releases, self.current))
@@ -134,6 +135,7 @@ class ReleaseLayoutTests(unittest.TestCase):
     def test_prune_does_not_create_missing_releases(self):
         checkout = self.root / 'typo/current'
         checkout.parent.mkdir()
+        checkout.parent.chmod(0o755)
         with self.assertRaises((ValueError, OSError)):
             d.prune_releases(checkout, self.state, ['unused'])
         self.assertFalse((checkout.parent / 'releases').exists())
@@ -197,6 +199,8 @@ class ReleaseLayoutTests(unittest.TestCase):
 
     def test_prune_refuses_when_operator_process_paths_are_unreadable(self):
         (self.proc / '123').mkdir()
+        (self.proc / '123/comm').write_text('fixture')
+        (self.proc / '123/cgroup').write_text('0::/other')
         real_readlink = os.readlink
 
         def readlink(path):
@@ -205,7 +209,7 @@ class ReleaseLayoutTests(unittest.TestCase):
             return real_readlink(path)
 
         with patch.object(d.os, 'readlink', side_effect=readlink):
-            with self.assertRaises(PermissionError):
+            with self.assertRaisesRegex(ValueError, 'allow-unreadable'):
                 d.prune_releases(self.checkout, self.state, ['unused'])
         self.assertTrue(self.unused.exists())
 

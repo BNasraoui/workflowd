@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -18,6 +19,7 @@ REMOTE = f'https://github.com/{REPO}.git'
 DEPLOY_STATE = Path('/opt/workflowd/operator/last-deployed')
 UNITS = ['workflowd.service', 'workflowd-runner.service', 'workflowd-mcp.service']
 PROC_ROOT = Path('/proc')
+CGROUP_ROOT = Path('/sys/fs/cgroup')
 
 
 def require(condition, message):
@@ -275,7 +277,7 @@ def release_layout(checkout, *, create=True):
     return releases, previous
 
 
-def require_unused_releases(candidates):
+def require_unused_releases(candidates, allow_unreadable=()):
     """Inspect unit configuration and live process paths while holding the deploy lock."""
     def check_path(value, source):
         path = Path(value).resolve()
@@ -283,46 +285,94 @@ def require_unused_releases(candidates):
             require(not path.is_relative_to(candidate),
                     f'Release in use by {source}: {candidate}')
 
-    def check_process(process):
+    unreadable = set()
+
+    def check_process(process, unit_process=False):
+        denied = None
         for name in ('cwd', 'exe', 'root'):
             try:
                 target = os.readlink(process / name)
             except (FileNotFoundError, ProcessLookupError):
                 continue  # Process exited, or has no executable (for example a zombie).
+            except PermissionError as error:
+                if unit_process:
+                    raise
+                denied = error
+                continue
             check_path(target.removesuffix(' (deleted)'), f'{process}/{name}')
 
+        if denied:
+            comm = (process / 'comm').read_text().strip()
+            cgroup = (process / 'cgroup').read_text().strip()
+            pid = int(process.name)
+            print(f'Unreadable process PID={pid} comm={comm!r} cgroup={cgroup!r}', file=sys.stderr)
+            if pid not in allow_unreadable:
+                unreadable.add(pid)
+
+    def check_cgroup(directory):
+        for pid in (directory / 'cgroup.procs').read_text().split():
+            require(pid.isdigit(), f'Invalid cgroup PID: {directory}')
+            check_process(PROC_ROOT / pid, unit_process=True)
+        for child in directory.iterdir():
+            if child.is_dir():
+                check_cgroup(child)
+
+    commands = ('ExecStart', 'ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecReload')
+    keys = ('MainPID', 'ControlGroup', 'WorkingDirectory', 'Environment', *commands)
     for unit in UNITS:
-        output = command('systemctl', '--user', 'show', '-p', 'MainPID',
-                         '-p', 'ExecStart', '-p', 'WorkingDirectory', unit)
+        output = command('systemctl', '--user', 'show',
+                         *(arg for key in keys for arg in ('-p', key)), unit)
         properties = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
-        require(all(key in properties for key in ('MainPID', 'ExecStart', 'WorkingDirectory')),
+        require(all(key in properties for key in keys),
                 f'Cannot inspect unit properties: {unit}')
         require(properties['MainPID'].isdigit(), f'Invalid MainPID: {unit}')
         if int(properties['MainPID']):
-            check_process(PROC_ROOT / properties['MainPID'])
+            check_process(PROC_ROOT / properties['MainPID'], unit_process=True)
+        if properties['ControlGroup']:
+            group = Path(properties['ControlGroup'])
+            require(group.is_absolute() and '..' not in group.parts, f'Invalid ControlGroup: {unit}')
+            check_cgroup(CGROUP_ROOT / str(group).lstrip('/'))
         if properties['WorkingDirectory']:
-            check_path(properties['WorkingDirectory'], f'{unit} WorkingDirectory')
-        # systemctl renders ExecStart as structured text containing path= and argv[]=.
-        # Check absolute paths in both fields, including escaped whitespace. Also
-        # check prefixes at spaces because the display may leave argv unquoted.
-        value = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m[1], 16)),
-                       properties['ExecStart'])
-        for start in re.finditer(r'(?:^|[\s=])(?=/)', value):
-            tail = re.split(r'[;{}\n]', value[start.end():], maxsplit=1)[0].rstrip()
-            for end in [m.start() for m in re.finditer(r'\s', tail)] + [len(tail)]:
-                check_path(tail[:end], f'{unit} ExecStart')
+            value = properties['WorkingDirectory'].removeprefix('!')
+            path = Path.home() if value == '~' else Path(value)
+            require(path.is_absolute(), f'Invalid WorkingDirectory: {unit}')
+            check_path(path, f'{unit} WorkingDirectory')
+        for entry in shlex.split(properties['Environment']):
+            if entry.startswith('PATH='):
+                for path in entry.removeprefix('PATH=').split(':'):
+                    check_path(path, f'{unit} Environment PATH')
+        # Inspect executable and argv paths, including quotes inside shell commands.
+        # Preserve whitespace prefixes for systemctl's unquoted/escaped display.
+        for key in commands:
+            value = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m[1], 16)), properties[key])
+            for start in re.finditer(r'''(?:^|[\s="'])(?=/)''', value):
+                tail = re.split(r'''[;{}\n"']''', value[start.end():], maxsplit=1)[0].rstrip()
+                for end in [m.start() for m in re.finditer(r'\s', tail)] + [len(tail)]:
+                    check_path(tail[:end], f'{unit} {key}')
 
     for process in PROC_ROOT.iterdir():
         if not process.name.isdigit():
             continue
         try:
-            if process.stat().st_uid == os.geteuid():
+            owned = process.stat().st_uid == os.geteuid()
+            if not owned:
+                # Non-dumpable processes can expose root-owned /proc directories.
+                status = (process / 'status').read_text()
+                uid = re.search(r'^Uid:\s+\d+\s+(\d+)', status, re.MULTILINE)
+                require(uid, f'Cannot inspect process UID: {process}')
+                owned = int(uid[1]) == os.geteuid()
+            if owned:
                 check_process(process)
         except (FileNotFoundError, ProcessLookupError):
+            if process.exists():
+                raise
             continue  # The process exited between listing /proc and inspection.
 
+    require(not unreadable, 'Acknowledge each unreadable process with ' +
+            ' '.join(f'--allow-unreadable {pid}' for pid in sorted(unreadable)))
 
-def prune_releases(checkout, state, names):
+
+def prune_releases(checkout, state, names, allow_unreadable=()):
     """Delete explicit unused releases; the operator must first drain their users."""
     require_state_directory(state)
     with append_file(state.parent / 'verified-deploy.lock') as lock:
@@ -345,7 +395,7 @@ def prune_releases(checkout, state, names):
             require(candidate not in protected, 'Cannot prune current or previous release')
             candidates.append(candidate)
         # Validate the entire request before removing anything.
-        require_unused_releases(candidates)
+        require_unused_releases(candidates, allow_unreadable)
         for candidate in candidates:
             shutil.rmtree(candidate)
             print(json.dumps({'pruned_release': str(candidate)}), flush=True)
@@ -412,13 +462,13 @@ def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, tok
                     staged_previous.replace(checkout.parent / 'previous')
                 staged_current.replace(checkout)
                 activated = True
+                descriptor = os.open(checkout.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
                 command('systemctl', '--user', 'restart', *UNITS)
                 command('systemctl', '--user', 'is-active', '--quiet', *UNITS)
-            descriptor = os.open(checkout.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
             log('deployed')
             write_state(state, sha)
         except Exception:
@@ -467,6 +517,8 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--prune', nargs='+', metavar='RELEASE',
                         help='remove named unused releases under the deployment lock')
+    parser.add_argument('--allow-unreadable', type=int, action='append', default=[], metavar='PID',
+                        help='acknowledge an unreadable non-workflowd process during prune; repeat per PID')
     parser.add_argument('--skills', type=Path,
                         help='dedicated operator-owned directory with managed marker')
     parser.add_argument('--github-token-file', type=Path)
@@ -483,8 +535,10 @@ def main():
         require(not args.bootstrap and all(value is None for value in
                 (args.sha, args.skills, args.github_token_file, args.approval_app_id, args.bun)),
                 'Prune cannot be combined with deployment arguments')
-        prune_releases(checkout, DEPLOY_STATE, args.prune)
+        require(all(pid > 0 for pid in args.allow_unreadable), 'Use positive unreadable PIDs')
+        prune_releases(checkout, DEPLOY_STATE, args.prune, set(args.allow_unreadable))
         return
+    require(not args.allow_unreadable, '--allow-unreadable requires --prune')
     if any(value is None for value in (args.sha, args.skills, args.github_token_file,
                                        args.approval_app_id, args.bun)):
         parser.error('deployment requires sha, --skills, --github-token-file, --approval-app-id and --bun')

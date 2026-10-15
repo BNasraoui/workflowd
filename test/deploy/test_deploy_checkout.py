@@ -111,7 +111,7 @@ class CheckoutTests(unittest.TestCase):
             self.repo.symlink_to(old)
         return self.repo.resolve()
 
-    def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False):
+    def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False, restart_error=False):
         source = Path(tempfile.mkdtemp(dir=self.root)) / 'github'
         shutil.copytree(self.repo, source)
         d.git(source, 'update-ref', 'refs/heads/main', self.sha)
@@ -125,6 +125,8 @@ class CheckoutTests(unittest.TestCase):
         def command(*args, **kwargs):
             if args[0] == 'systemctl':
                 events.append(args[2])
+                if args[2] == 'restart' and restart_error:
+                    raise subprocess.CalledProcessError(1, args)
                 return ''
             if 'fetch' in args:
                 argv = list(args)
@@ -453,3 +455,20 @@ class CheckoutTests(unittest.TestCase):
                 self.run_deploy()
         self.assertEqual(self.events, ['install'])
         self.assertFalse(self.state.exists())
+
+    def test_activation_directory_is_synced_before_restart_even_when_restart_fails(self):
+        real_fsync = os.fsync
+        synced = []
+        old = self.release_fixture()
+
+        def fsync(descriptor):
+            if os.fstat(descriptor).st_ino == self.repo.parent.stat().st_ino:
+                self.assertNotEqual(self.repo.resolve(), old)
+                self.assertEqual((self.repo.parent / 'previous').resolve(), old)
+                synced.append(self.events.copy())
+            return real_fsync(descriptor)
+
+        with patch.object(d.os, 'fsync', side_effect=fsync):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_deploy(restart_error=True)
+        self.assertEqual(synced, [['install', 'stop']])

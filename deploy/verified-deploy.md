@@ -147,16 +147,27 @@ the same nonblocking `/opt/workflowd/operator/verified-deploy.lock` as deploymen
 resolves `current` and `previous` under that lock, and refuses either target.
 It requires `releases/` to already exist, checks the entire request before deletion,
 and rejects symlinks, traversal, missing candidates and invalid link layouts.
-Under the lock it checks each workflowd unit's `MainPID`, `ExecStart` and
-`WorkingDirectory`, plus the operator's processes' `/proc` `cwd`, `exe` and `root`
-links. A path resolving inside any candidate refuses the whole request. Unit
-inspection failures and unreadable process paths also refuse pruning; processes
-that exit during inspection are skipped. Lock contention refuses the command;
-retry after the other operation finishes. Pruning needs no GitHub token or Bun.
+Under the lock it checks each workflowd unit's `MainPID`, `ControlGroup`
+(including descendant cgroups), `WorkingDirectory`, `ExecStart`, `ExecStartPre/Post`,
+`ExecStop/Post`, `ExecReload` and `Environment=PATH`, plus the operator's processes'
+`/proc` `cwd`, `exe` and `root` links. A path resolving inside any candidate refuses
+the whole request. Systemd's leading `!` WorkingDirectory marker is stripped;
+`~` means the operator's home; other non-absolute directories are refused.
+Unit inspection failures and unreadable MainPIDs or cgroup members always refuse
+pruning. For other unreadable operator processes (such as `(sd-pam)`), the command
+prints each PID, comm and cgroup and refuses until the operator has checked them
+and repeats the command with `--allow-unreadable PID` for each acknowledged PID.
+Acknowledgements apply only to unreadable links; readable links still block
+deletion when they point into a candidate. Never reuse an acknowledgement without
+checking the process again, since PIDs can be recycled. Processes that exit during
+inspection are skipped. Lock contention refuses the command; retry after the
+other operation finishes. Pruning needs no GitHub token or Bun.
 Drain consumers before pruning and prevent new consumers from starting during
 the operation: the deploy lock cannot prevent an unrelated process from opening
 a release after inspection. Processes under other UIDs are inspected only when
-named by a unit's MainPID; retained open files or imports alone are not detected.
+named by a unit's MainPID or cgroup; retained open files or imports alone are not
+detected. EnvironmentFile contents and dynamically constructed shell paths are
+not inspected.
 Do not manually
 change links outside the lock. Interrupted preparation can leave an unreferenced
 staging directory; inspect it using the same procedure. Deletion I/O failures may
