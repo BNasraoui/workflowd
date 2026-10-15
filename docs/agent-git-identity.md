@@ -92,10 +92,8 @@ against an agent that can change Git configuration, local refs, or hook files:
   commit hooks do not inspect; the push scan catches it only if that scan runs
   and includes the commit.
 
-Enforcement relies on a required server-side check over every PR commit range,
-tracked in **workflowd-bg6q**. That check must read the blocklist from host
-configuration, cover every repository agents work in, and avoid exposing identity
-values in repositories or check output. It is not implemented by this PR.
+Enforcement relies on requiring the workflowd App check described below. Local
+hook bypasses do not affect its GitHub API scan.
 
 Fix Work workspaces receive the configured identity through OpenCode but do not
 install this guard.
@@ -144,7 +142,85 @@ billing paths, or set an unsupported flag. The Git guard remains necessary.
 3. Check a disposable run for each enabled harness with a harmless commit and
    verify the metadata locally. Test rejection using a temporary fake blocked
    identity; do not publish the probe commits.
-4. Once workflowd-bg6q is implemented, enable the server-side identity check and
-   require it through branch protection for every repository agents work in.
+4. Enable and require the server-side identity check in every repository agents
+   work in, following the ruleset procedure below.
 
 This change does not modify mint's live environment or rewrite existing commits.
+
+
+## Required server-side check
+
+The workflowd GitHub App publishes **Workflowd Git Identity** for every repository
+in `WORKFLOWD_PR_REPOSITORIES` (the existing JSON array of `repository` and
+`installationId` entries). Add every repository agents work in to this host
+configuration and install the App there. The webhook signature, installation
+account guard, and repository/installation allowlist apply before the check runs.
+It covers all PR authors, drafts, and forks, independently of automatic review
+eligibility. No repository code, Git configuration, hooks, or local refs are read.
+
+The daemon reads the blocklist from `WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS` through
+its existing agent Git configuration. Configure the identity fields alongside it.
+An explicitly empty blocklist accepts all identities; absent agent Git
+configuration produces a failed check. Keep policy values on the daemon host;
+changing the root agent host's private file alone does not update the daemon.
+
+On PR `opened`, `synchronize`, `reopened`, and `edited` deliveries, the check reads
+the current PR base and head from GitHub, then inspects both raw Git author and
+committer addresses on every commit in `base..head`. It uses the
+[paginated compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits),
+checks the total and unique commit count, and rechecks the PR before publishing.
+History reachable from the base is excluded. Commits created by the Git or
+Contents API receive the same inspection as pushed commits. This covers local
+hook overrides, writable guards, and fake remote-tracking refs without trusting
+any of those local controls.
+
+Blocked identities fail the check. Output lists only failed commit SHAs and roles
+(`author`, `committer`); names, addresses, commit messages, and raw API errors are
+never included. Large failure lists are bounded to GitHub's output limit with an
+omitted-commit count. API errors, malformed/incomplete results, PR changes during
+the scan, and missing policy fail closed. If GitHub cannot accept a check write,
+the webhook returns HTTP 500 and the check remains missing or pending: neither
+satisfies a required check. Inspect App webhook deliveries and redeliver failed
+deliveries after recovery; GitHub does not automatically retry failed deliveries.
+
+Enable **Pull requests: read**, **Contents: read**, and **Checks: read and write**
+on the App, and subscribe to **Pull request** and **Check run** webhooks. Keep the
+existing installation subscriptions and permissions. Approve updated installation
+permissions where GitHub requests it. The check runs in the automation daemon
+that owns the existing GitHub App integration, not in an execution-only runner.
+
+To re-run, open the PR's Checks tab and use **Re-run** on **Workflowd Git Identity**.
+The `check_run.rerequested` handler accepts only this App's named check and its
+workflowd PR identifier. It resets that check to pending before re-reading the
+PR and its entire range. A request for an obsolete head cannot publish success.
+After a host policy change, restart the daemon and re-run checks on open PRs;
+already completed checks retain the previous policy until re-run.
+
+### Enable the requirement in each repository
+
+These are operator steps; workflowd does not edit rulesets.
+
+1. Deploy the check, configure the repository/installation and private policy, and
+   open or synchronize a PR. Verify **Workflowd Git Identity** is published by the
+   workflowd App. For existing PRs without the check, reopen or synchronize them,
+   or redeliver a qualifying PR webhook.
+2. In the repository's **Settings → Rules → Rulesets**, create or edit an active
+   branch ruleset targeting the default branch and every other protected merge
+   destination. Require a pull request before merging and require status checks.
+3. Add the exact check name **Workflowd Git Identity**. Select the installed
+   **workflowd App as the expected source** rather than “any source”; otherwise
+   another writer could spoof the check name. Require branches to be up to date
+   before merging so the result covers the current base. See GitHub's
+   [required-check rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging).
+4. Keep agent users, teams, and Apps out of the ruleset bypass list. Restrict
+   direct pushes, force pushes, and deletion of protected branches. Save with
+   enforcement **Active**, not Evaluate, and confirm a PR with a failing or missing
+   identity check cannot merge. Repeat for every repository agents work in; an
+   App installation alone does not make its check required. See
+   [creating rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
+
+The check validates the PR's commits, not a later GitHub-generated squash or merge
+commit, and does not publish `merge_group` checks for merge queues. Configure merge
+identities separately and do not rely on this PR check to validate generated merge
+commits. Protect the host policy, App credentials, and ruleset administration from
+agent modification; those are the enforcement boundary.

@@ -10,6 +10,7 @@ import { normalizeError } from "./errors"
 import type { GitHubInstallationAdapter } from "./github/adapter"
 import { collectHeadEvidence, type SonarRequest, type SonarResponse } from "./github/head-evidence"
 import { presentReviewCheck, renderReviewComment, reviewMarker } from "./github/review-presentation"
+import { checkAgentGitIdentity } from "./github/identity-check"
 import type { SessionAccess } from "./session-access"
 
 type InstallationClientProvider = (installationId: number) => Promise<GitHubInstallationAdapter>
@@ -40,6 +41,7 @@ export type PullRequestSnapshot = typeof AuthoritativePullRequestSnapshot.Encode
 export type PublicationCurrentness<E, R> = (now: Date) => Effect.Effect<boolean, E, R>
 
 export type GitHubPort = {
+  readonly checkAgentGitIdentity?: (event: string, payload: unknown) => Effect.Effect<void, Error>
   readonly publishReview: <E, R>(
     publication: Publication,
     isCurrent: PublicationCurrentness<E, R>,
@@ -60,7 +62,17 @@ export class GitHubAppAdapter implements GitHubPort {
     private readonly getInstallationClient: InstallationClientProvider,
     private readonly sessionAccess?: SessionAccessProvider,
     private readonly sonarRequest: SonarRequest = publicSonarRequest,
+    private readonly blockedEmails?: ReadonlyArray<string>,
   ) {}
+
+  readonly checkAgentGitIdentity = (event: string, payload: unknown) =>
+    checkAgentGitIdentity(
+      this.appId,
+      this.getInstallationClient,
+      this.blockedEmails,
+      event,
+      payload,
+    )
 
   readonly collectHeadEvidence = (
     input: FetchPullRequestSnapshotInput & { readonly target: Publication["target"] },

@@ -518,6 +518,9 @@ export function startHookService(
             ...options,
             prAutomationEnabled: config.mode !== "execution",
             prRepositories: config.github?.prRepositories ?? [],
+            ...(Option.isSome(github) && github.value.checkAgentGitIdentity !== undefined
+              ? { checkAgentGitIdentity: github.value.checkAgentGitIdentity }
+              : {}),
             installationIds,
             ciRepositories: config.ci?.repositories ?? [],
             ...(Option.isSome(installationGuard)

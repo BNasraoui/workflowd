@@ -815,6 +815,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
                   ),
               },
               publicSonarRequest,
+              config.agentGit?.blockedEmails,
             )
             return Context.make(GitHub, github).pipe(
               Context.add(

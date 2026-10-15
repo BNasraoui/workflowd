@@ -60,6 +60,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 
 export type WebhookHandlerOptions = {
   readonly installationGuard?: typeof InstallationGuard.Service
+  readonly checkAgentGitIdentity?: (event: string, payload: unknown) => Effect.Effect<void, Error>
   readonly prAutomationEnabled?: boolean
   readonly installationIds: ReadonlySet<number>
   readonly prRepositories?: PrRepositories
@@ -541,7 +542,7 @@ function installationGateResponse(
     const installationId = webhookInstallationId(payload)
     const configured = installationId !== undefined && options.installationIds.has(installationId)
     const repositories =
-      eventName === "pull_request" || eventName === "issue_comment"
+      eventName === "pull_request" || eventName === "issue_comment" || eventName === "check_run"
         ? (options.prRepositories ?? [])
         : eventName === "workflow_run" || eventName === "check_suite"
           ? (options.ciRepositories ?? [])
@@ -613,6 +614,10 @@ export function handleGitHubWebhook(
 
     const ignored = yield* installationGateResponse(payload, options, deliveryId, eventName)
     if (ignored !== undefined) return ignored
+
+    if (options.checkAgentGitIdentity !== undefined) {
+      yield* options.checkAgentGitIdentity(eventName, payload)
+    }
 
     const decode =
       options.ci === undefined && (eventName === "workflow_run" || eventName === "check_suite")

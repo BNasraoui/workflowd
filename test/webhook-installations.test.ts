@@ -455,3 +455,59 @@ test("an undecodable guard event stores nothing", () => {
     }).pipe(Effect.provide(f.logger)),
   )
 })
+
+for (const event of ["pull_request", "check_run"]) {
+  test.each([
+    [91, "pr/repo", true],
+    [999, "pr/repo", false],
+    [91, "foreign/repo", false],
+    [92, "pr/repo", false],
+  ] as const)(
+    "identity %s webhook admits only configured installation/repository: " + event,
+    (id, repo, admitted) =>
+      withStore(
+        Effect.gen(function* () {
+          let calls = 0
+          const response = yield* handleGitHubWebhook(
+            signedRequest(event, eventPayload(event, id, repo), "identity-gate", "secret"),
+            {
+              webhookSecret: "secret",
+              now: new Date(),
+              installationIds: new Set([91, 92]),
+              prRepositories: [{ repository: "pr/repo", installationId: 91 }],
+              checkAgentGitIdentity: () =>
+                Effect.sync(() => {
+                  calls++
+                }),
+            },
+          )
+          expect(response.status).toBe(202)
+          expect(calls).toBe(admitted ? 1 : 0)
+        }),
+      ),
+  )
+}
+
+test("identity check publication failure returns a retryable webhook response", () =>
+  withStore(
+    Effect.gen(function* () {
+      const response = yield* handleGitHubWebhook(
+        signedRequest(
+          "pull_request",
+          eventPayload("pull_request", 91, "pr/repo"),
+          "identity-error",
+          "secret",
+        ),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationIds: new Set([91]),
+          prRepositories: [{ repository: "pr/repo", installationId: 91 }],
+          checkAgentGitIdentity: () => Effect.fail(new Error("Git identity check unavailable")),
+        },
+      )
+      expect(response.status).toBe(500)
+      const sql = yield* SqlClient.SqlClient
+      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
+    }),
+  ))
