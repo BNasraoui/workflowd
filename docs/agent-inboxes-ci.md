@@ -56,45 +56,54 @@ After pushing and opening or updating a PR, resident workers use:
 gh pr checks PR_NUMBER --repo OWNER/NAME
 ```
 
-Poll every 60 seconds on draft and ready PRs, without the required-only filter or
-watch mode. Inspect the named `Required checks` aggregate row. Ignore optional
-checks such as OpenCode Review; do not infer CI from the command's exit code alone.
-A missing aggregate is pending, never success, even if all visible checks pass or
-`gh` reports "no checks reported". Only an explicit pass/success of the aggregate verifies CI;
-a pending aggregate keeps polling, a fail/failure is a confirmed CI failure, and a
-skipped or cancelled aggregate is unverified (as is any other non-success terminal state).
-Retry missing/pending aggregates or transient observation errors every 60 seconds
-within the cycle budget. Limit each observation cycle to 15 minutes, below the default
-20-minute no-event stall window; use a shorter budget if the configured stall
-window is lower. The resident Codex stall detector observes app-server notifications,
-not shell stdout directly (`src/resident/service.ts`, `notifyFor`/`lastEventAt`).
-Do not assume polling output keeps the worker alive.
+Poll every 60 seconds on draft and ready PRs, without the required-only filter or watch
+mode. Inspect the named `Required checks` aggregate row. The only advisory checks are
+OpenCode Review and AI slop (advisory); ignore those rows and do not infer CI from the
+command's exit code alone. A missing aggregate is pending, never success, even if all
+visible checks pass or `gh` reports "no checks reported". CI is verified only when the
+aggregate is pass/success and every other non-advisory row is pass/success or
+skipping/skipped. SonarCloud Code Analysis and CodeQL PR policy must also be present and
+pass/success, consistent with the required contexts in `src/domain/head-evidence.ts`; a
+missing required context means pending. Any non-advisory pending row means pending; any
+non-advisory fail/failure row means confirmed CI failure, even when the aggregate
+passes. For the aggregate, fail/failure is a confirmed CI failure; a skipped or
+cancelled aggregate is unverified (as is any other non-success terminal state). Any
+other non-advisory terminal state is unverified. Retry missing/pending checks or
+transient observation errors every 60 seconds within the cycle budget. Limit each
+observation cycle to 15 minutes, below the default 20-minute no-event stall window; use
+a shorter budget if the configured stall window is lower. The resident Codex stall
+detector observes app-server notifications, not shell stdout directly
+(`src/resident/service.ts`, `notifyFor`/`lastEventAt`). Full CI takes about 25 minutes.
+Allow a 30-minute total observation budget per pushed head, split into bounded cycles; a
+single 15-minute cycle is not the total wait. Do not assume polling output keeps the
+worker alive.
 
-Missing or pending required checks, observation timeouts, and transient
-observation errors (such as "error connecting to api.github.com") mean CI is still
-running for scheduling purposes. Continue the remaining task, preserve unfinished
-work, and re-check in later bounded cycles. Between cycles return to task work and
-provide a progress update; never run back-to-back blocking waits without returning
-to task work in between; no single cycle may exceed the budget.
-Address confirmed CI failures; early termination is allowed after three unsuccessful
-repair attempts for the same confirmed failure. Missing/pending checks, timeouts,
-and transient observation errors do not count toward that bound.
+Missing or pending required checks, observation timeouts, and transient observation
+errors (such as "error connecting to api.github.com") mean CI is still running for
+scheduling purposes. Continue the remaining task, preserve unfinished work, and re-check
+in later bounded cycles. Between cycles return to task work and provide a progress
+update; never run back-to-back blocking waits without returning to task work in between;
+no single cycle may exceed the budget. Address confirmed CI failures; early termination
+is allowed after three unsuccessful repair attempts for the same confirmed failure.
+Missing/pending checks, timeouts, and transient observation errors do not count toward
+that bound.
 
-Any other observation error means CI is unverified: continue remaining work and
-report it at handoff. Observation errors do not count as confirmed failures.
-The verified result must be for the last pushed head SHA; results for earlier SHAs
-do not verify it. At an early stop, provide the same report as at final handoff
-plus the failing check's link, if applicable.
+Any other observation error means CI is unverified: continue remaining work and report
+it at handoff. Observation errors do not count as confirmed failures. The verified
+result must be for the last pushed head SHA; results for earlier SHAs do not verify it.
+At an early stop, provide the same report as at final handoff plus the failing check's
+link, if applicable.
 
-Verify the PR still points to the pushed SHA before reporting CI. If the head
-changed, continue remaining work and report the mismatch at handoff; never attribute
-the new head's checks to the pushed SHA. End only at the final handoff, an active
-skill's explicit end-turn instruction, or the repeated-failure bound. At final
-handoff report the PR URL, pushed SHA, and verified required CI result, or "CI is
-unverified; coordinator/operator follow-up required" with the exact command/error
-and last observed required-check states and links (explicitly say if none were
-observed). Once remaining work is complete, make one final bounded observation
-cycle and hand off any still-unverified CI rather than waiting indefinitely.
+Verify the PR still points to the pushed SHA before reporting CI. If the head changed,
+continue remaining work and report the mismatch at handoff; never attribute the new
+head's checks to the pushed SHA. End only at the final handoff, an active skill's
+explicit end-turn instruction, or the repeated-failure bound. At final handoff report
+the PR URL, pushed SHA, and verified required CI result, or "CI is unverified;
+coordinator/operator follow-up required" with the exact command/error and last observed
+required-check states and links (explicitly say if none were observed). Once remaining
+work is complete, use the remaining total budget in bounded cycles before handing off
+any still-unverified CI. Between cycles, review the final diff and prepare the handoff
+report, and provide a progress update.
 
 An active skill's end-turn/handoff rule takes precedence. In particular, an RPI
 implement worker completes all earlier phases before reaching Finish, updates its

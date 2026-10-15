@@ -1,6 +1,14 @@
 import { expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
+import { repositoryRequiredCheckContexts } from "../../src/domain/head-evidence"
 import { residentWorkerInstructions as instructions } from "../../src/resident/instructions"
+
+test("the workflow aggregate name matches the required context taught to workers", () => {
+  const workflow = Bun.YAML.parse(
+    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+  )
+  expect(workflow).toHaveProperty("jobs.required-checks.name", repositoryRequiredCheckContexts[0])
+})
 
 test("incomplete CI observation preserves remaining work until final handoff", () => {
   expect(instructions).toContain("Missing or still-pending required checks")
@@ -65,14 +73,25 @@ for (const { source, content } of [
     expect(text).not.toMatch(/gh pr checks[^.\n`]*--(?:required|watch)/)
     expect(text).toContain("every 60 seconds")
     expect(text).toContain("draft and ready PRs")
-    expect(text).toContain("Required checks")
+    for (const context of repositoryRequiredCheckContexts) {
+      expect(text).toContain(context)
+    }
     expect(text).toContain("missing aggregate is pending, never success")
-    expect(text).toContain("Only an explicit pass/success of the aggregate verifies CI")
+    expect(text).toContain(
+      "CI is verified only when the aggregate is pass/success and every other non-advisory row is pass/success or skipping/skipped",
+    )
+    expect(text).toContain("The only advisory checks are OpenCode Review and AI slop (advisory)")
+    expect(text).toContain("Any non-advisory pending row means pending")
+    expect(text).toContain("any non-advisory fail/failure row means confirmed CI failure")
+    expect(text).toContain("must also be present and pass/success")
     expect(text).toContain("fail/failure is a confirmed CI failure")
     expect(text).toContain("skipped or cancelled aggregate is unverified")
     expect(text).toContain("OpenCode Review")
     expect(text).toContain("exit code alone")
     expect(text).toContain("15 minutes")
+    expect(text).toContain("Full CI takes about 25 minutes")
+    expect(text).toContain("30-minute total observation budget per pushed head")
+    expect(text).toContain("remaining total budget in bounded cycles")
     expect(text).toContain("CI is unverified")
   })
 }
