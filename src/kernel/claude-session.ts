@@ -112,6 +112,8 @@ export const makeClaudeCli = (options: {
                       options.binary,
                       "--setting-sources",
                       "user",
+                      "--settings",
+                      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
                       "-p",
                       "--resume",
                       input.nativeSessionId,
