@@ -7,6 +7,7 @@ import type { IdentityPublication } from "./identity-publication"
 const Pulls = Schema.Array(
   Schema.Struct({
     number: Schema.Int.check(Schema.isGreaterThan(0)),
+    user: Schema.optional(Schema.Struct({ login: Schema.NonEmptyString })),
     head: Schema.Struct({ sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)) }),
   }),
 )
@@ -44,86 +45,107 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
         const page = yield* request(() => pulls.next(), repository.installationId)
         if (page.done) break
         for (const pull of yield* Schema.decodeUnknownEffect(Pulls)(page.value)) {
-          const checkPages = client.listCheckRunPages({
-            owner,
-            repo,
-            ref: pull.head.sha,
-            check_name: "Workflowd Git Identity",
-            filter: "all",
-            per_page: 100,
-            request: { signal: controller.signal },
-          })
-          const checks = checkPages[Symbol.asyncIterator]()
-          let newest: GitHubCheckRun | undefined
-          for (;;) {
-            const page = yield* request(() => checks.next(), repository.installationId, {
-              prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
+          yield* Effect.gen(function* () {
+            const authorKey = pull.user?.login.toLowerCase()
+            const checkPages = client.listCheckRunPages({
+              owner,
+              repo,
+              ref: pull.head.sha,
+              check_name: "Workflowd Git Identity",
+              filter: "all",
+              per_page: 100,
+              request: { signal: controller.signal },
             })
-            if (page.done) break
-            for (const check of page.value) {
-              if (
-                check.appId !== appId ||
-                check.name !== "Workflowd Git Identity" ||
-                check.status !== "in_progress" ||
-                check.externalId !== `agent-git:${pull.number}`
-              )
-                continue
-              if (newest === undefined) {
-                newest = check
-                continue
-              }
-              const older = check.id > newest.id ? newest : check
-              if (check.id > newest.id) newest = check
-              yield* Effect.gen(function* () {
-                const write = yield* publication(
-                  `${repository.repository.toLowerCase()}/${older.id}`,
-                  request,
+            const checks = checkPages[Symbol.asyncIterator]()
+            let exists = false
+            let newest: GitHubCheckRun | undefined
+            for (;;) {
+              const page = yield* request(() => checks.next(), repository.installationId, {
+                prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
+                authorKey,
+              })
+              if (page.done) break
+              for (const check of page.value) {
+                if (
+                  check.appId !== appId ||
+                  check.name !== "Workflowd Git Identity" ||
+                  check.externalId !== `agent-git:${pull.number}`
                 )
-                yield* write(
-                  (signal) =>
-                    client.updateCheckRun({
-                      owner,
-                      repo,
-                      check_run_id: older.id,
-                      status: "completed",
-                      conclusion: "failure",
-                      output: {
-                        title: "Workflowd Git Identity",
-                        summary: "Superseded by a newer identity check on this head.",
-                      },
-                      request: { signal },
+                  continue
+                exists = true
+                if (check.status !== "in_progress") continue
+                if (newest === undefined) {
+                  newest = check
+                  continue
+                }
+                const older = check.id > newest.id ? newest : check
+                if (check.id > newest.id) newest = check
+                yield* Effect.gen(function* () {
+                  const write = yield* publication(
+                    `${repository.repository.toLowerCase()}/${older.id}`,
+                    request,
+                  )
+                  yield* write(
+                    (signal) =>
+                      client.updateCheckRun({
+                        owner,
+                        repo,
+                        check_run_id: older.id,
+                        status: "completed",
+                        conclusion: "failure",
+                        output: {
+                          title: "Workflowd Git Identity",
+                          summary: "Superseded by a newer identity check on this head.",
+                        },
+                        request: { signal },
+                      }),
+                    repository.installationId,
+                    {
+                      kind: "finish",
+                      prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
+                      authorKey,
+                    },
+                  )
+                }).pipe(
+                  Effect.scoped,
+                  Effect.catch(() =>
+                    Effect.logError("Git identity supersede unavailable", {
+                      repository: repository.repository,
+                      checkId: older.id,
                     }),
-                  repository.installationId,
-                  {
-                    kind: "finish",
-                    prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
-                  },
+                  ),
                 )
-              }).pipe(
-                Effect.scoped,
-                Effect.catch(() =>
-                  Effect.logError("Git identity supersede unavailable", {
-                    repository: repository.repository,
-                    checkId: older.id,
-                  }),
-                ),
-              )
+              }
             }
-          }
-          if (newest !== undefined) {
-            yield* dispatch("check_run", {
-              action: "rerequested",
-              installation: { id: repository.installationId },
-              repository: { full_name: repository.repository },
-              check_run: {
-                id: newest.id,
-                name: newest.name,
-                app: { id: appId },
-                external_id: newest.externalId,
-                head_sha: pull.head.sha,
-              },
-            })
-          }
+            if (newest !== undefined) {
+              yield* dispatch("check_run", {
+                action: "rerequested",
+                installation: { id: repository.installationId },
+                repository: { full_name: repository.repository },
+                check_run: {
+                  id: newest.id,
+                  name: newest.name,
+                  app: { id: appId },
+                  external_id: newest.externalId,
+                  head_sha: pull.head.sha,
+                },
+              })
+            } else if (!exists) {
+              yield* dispatch("pull_request", {
+                action: "opened",
+                installation: { id: repository.installationId },
+                repository: { full_name: repository.repository },
+                pull_request: pull,
+              })
+            }
+          }).pipe(
+            Effect.catch(() =>
+              Effect.logError("Git identity PR recovery unavailable", {
+                repository: repository.repository,
+                number: pull.number,
+              }),
+            ),
+          )
         }
       }
     }).pipe(

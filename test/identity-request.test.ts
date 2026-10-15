@@ -142,3 +142,31 @@ test.each([
     )
   },
 )
+
+test("author shares span PRs and repositories but expire and remain installation-local", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const request = makeIdentityRequest()
+      let calls = 0
+      const run = async () => ++calls
+      for (let i = 0; i < 25; i++)
+        yield* request(run, 91, {
+          kind: "start",
+          prKey: `owner/repo-${i}/7`,
+          authorKey: "fork-author",
+        })
+      expect(
+        (yield* request(run, 91, {
+          kind: "start",
+          prKey: "owner/other/8",
+          authorKey: "fork-author",
+        }).pipe(Effect.flip)).message,
+      ).toBe("scan budget exhausted, retry later")
+      yield* request(run, 92, { kind: "start", authorKey: "fork-author" })
+      expect(calls).toBe(26)
+      yield* TestClock.adjust("1 hour")
+      yield* request(run, 91, { kind: "start", authorKey: "fork-author" })
+      expect(calls).toBe(27)
+    }).pipe(Effect.provide(TestClock.layer())),
+  )
+})

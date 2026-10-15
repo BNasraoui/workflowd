@@ -18,7 +18,11 @@ const Envelope = Schema.Struct({
   }),
 })
 const Pull = Schema.Struct({
-  pull_request: Schema.Struct({ number: Id, head: Schema.Struct({ sha: Sha }) }),
+  pull_request: Schema.Struct({
+    number: Id,
+    head: Schema.Struct({ sha: Sha }),
+    user: Schema.optional(Schema.Struct({ login: Schema.NonEmptyString })),
+  }),
 })
 const Rerun = Schema.Struct({
   check_run: Schema.Struct({
@@ -69,7 +73,7 @@ const targetFromCheck = Effect.fn("GitIdentity.rerunTarget")(function* (
   const match = /^agent-git:([1-9][0-9]*)$/.exec(check.external_id)
   if (match === null) return []
   const number = yield* Schema.decodeUnknownEffect(Id)(Number(match[1]))
-  return [{ ...envelope, number, head: check.head_sha, checkId: check.id }]
+  return [{ ...envelope, number, head: check.head_sha, checkId: check.id, author: undefined }]
 })
 
 const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
@@ -85,7 +89,15 @@ const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
     if (!["opened", "synchronize", "reopened", "edited"].includes(envelope.action)) return []
     if (envelope.action === "edited" && !Schema.is(BaseChange)(payload)) return []
     const { pull_request: pull } = yield* Schema.decodeUnknownEffect(Pull)(payload)
-    return [{ ...envelope, number: pull.number, head: pull.head.sha, checkId: undefined }]
+    return [
+      {
+        ...envelope,
+        number: pull.number,
+        head: pull.head.sha,
+        checkId: undefined,
+        author: pull.user?.login,
+      },
+    ]
   }
   if (envelope.action !== "rerequested") return []
   if (event === "check_suite") {
@@ -238,12 +250,22 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(
     target: Target,
     publication: IdentityPublication,
     attempt: IdentityRequest,
+    superseded: () => boolean = () => false,
   ) {
     const [owner = "", repo = ""] = target.repository.full_name.split("/")
     const repository = { owner, repo }
     const prKey = `${target.repository.full_name.toLowerCase()}/${target.number}`
     const installationId = target.installation.id
     const client = yield* attempt(() => getClient(target.installation.id))
+    const author =
+      target.author ??
+      (yield* attempt(
+        (signal) =>
+          client.getPullRequest({ ...repository, pull_number: target.number, request: { signal } }),
+        installationId,
+        { prKey },
+      )).pullRequest.author
+    const authorKey = author.toLowerCase()
     const pending = {
       ...repository,
       name: checkName,
@@ -257,7 +279,7 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(
         (signal) =>
           client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
         installationId,
-        { kind: "start", prKey },
+        { kind: "start", prKey, authorKey },
       ))
     const write = yield* publication(
       `${target.repository.full_name.toLowerCase()}/${checkId}`,
@@ -269,9 +291,9 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(
           (signal) =>
             client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
           installationId,
-          { kind: "start", prKey },
+          { kind: "start", prKey, authorKey },
         )
-      const scan: IdentityRequest = (run) => attempt(run, installationId, { prKey })
+      const scan: IdentityRequest = (run) => attempt(run, installationId, { prKey, authorKey })
       const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
         Effect.timeout("2 minutes"),
         Effect.catch((error) =>
@@ -299,27 +321,31 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(
             request: { signal },
           }),
         installationId,
-        { kind: "finish", prKey },
+        { kind: "finish", prKey, authorKey },
       )
     }).pipe(
       Effect.onInterrupt(() =>
-        write(
-          (signal) =>
-            client.updateCheckRun({
-              ...repository,
-              check_run_id: checkId,
-              status: "completed",
-              conclusion: "failure",
-              output: { title: checkName, summary: "Superseded by a newer identity check." },
-              request: { signal },
-            }),
-          installationId,
-          { kind: "finish", prKey },
-        ).pipe(
-          Effect.catch(() =>
-            Effect.logError("Git identity interrupted check completion unavailable", { checkId }),
-          ),
-        ),
+        superseded()
+          ? write(
+              (signal) =>
+                client.updateCheckRun({
+                  ...repository,
+                  check_run_id: checkId,
+                  status: "completed",
+                  conclusion: "failure",
+                  output: { title: checkName, summary: "Superseded by a newer identity check." },
+                  request: { signal },
+                }),
+              installationId,
+              { kind: "finish", prKey, authorKey },
+            ).pipe(
+              Effect.catch(() =>
+                Effect.logError("Git identity interrupted check completion unavailable", {
+                  checkId,
+                }),
+              ),
+            )
+          : Effect.void,
       ),
     )
   },
@@ -363,10 +389,16 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
   const targets = yield* targetFromEvent(appId, getClient, event, payload, attempt).pipe(
     Effect.mapError(unavailable),
   )
-  return targets.map((target): IdentityWork => ({
-    key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
-    prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
-    preserve: target.checkId !== undefined,
-    run: checkTarget(getClient, blockedEmails, target, publication, attempt),
-  }))
+  return targets.map((target): IdentityWork => {
+    let superseded = false
+    return {
+      key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
+      prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+      preserve: target.checkId !== undefined,
+      supersede: () => {
+        superseded = true
+      },
+      run: checkTarget(getClient, blockedEmails, target, publication, attempt, () => superseded),
+    }
+  })
 })

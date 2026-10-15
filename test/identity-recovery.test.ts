@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
 import { Effect, Logger } from "effect"
-import { checkName, fixture, head } from "./helpers/identity"
+import { checkName, fixture, head, payload } from "./helpers/identity"
+
+import { makeIdentityCheckDispatcher } from "../src/github/identity-dispatch"
 
 const own = {
   id: 12,
@@ -183,4 +185,91 @@ test("a failed supersede write does not stop the newest check or later PRs recov
     expect.objectContaining({ check_run: expect.objectContaining({ id: 14 }) }),
     expect.objectContaining({ check_run: expect.objectContaining({ id: 20 }) }),
   ])
+})
+
+test("scope closure leaves a real scanning check in progress and restart recovery reruns it", async () => {
+  const scanning = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  let scans = 0
+  let status = "in_progress"
+  const f = fixture({
+    intercept: async (path, body, _signal, url) => {
+      if (path.endsWith("/pulls")) return Response.json([{ number: 7, head: { sha: head } }])
+      if (path.includes(`/commits/${head}/check-runs`)) {
+        const response = Response.json({ total_count: 1, check_runs: [{ ...own, status }] })
+        Object.defineProperty(response, "url", { value: url.toString() })
+        return response
+      }
+      if (typeof body.status === "string") status = body.status
+      if (path.includes("/compare/") && ++scans === 1) {
+        scanning.resolve()
+        await release.promise
+      }
+    },
+  })
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const dispatch = yield* makeIdentityCheckDispatcher(f.app)
+        if (dispatch === undefined) throw new Error("dispatcher unavailable")
+        yield* dispatch("pull_request", payload())
+        yield* Effect.promise(() => scanning.promise)
+      }).pipe(Effect.scoped),
+    )
+    expect(status).toBe("in_progress")
+    expect(f.writes).toHaveLength(1)
+    await Effect.runPromise(
+      f.app.recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (event, value) => f.app.checkAgentGitIdentity(event, value),
+      ),
+    )
+    expect(scans).toBe(2)
+    expect(f.writes.at(-1)?.conclusion).toBe("success")
+  } finally {
+    release.resolve()
+  }
+})
+
+test("restart creates checks for heads dropped at the start cap, within the fresh budget", async () => {
+  const missing = Array.from({ length: 30 }, (_, i) => ({
+    number: 100 + ((i + 25) % 30),
+    user: { login: "fork-author" },
+    head: { sha: head },
+  }))
+  const options = {
+    suiteChecks: [
+      { ...own, status: "completed" },
+      { ...own, app: { id: 999 }, external_id: "agent-git:100" },
+    ],
+    intercept: async (path: string) => {
+      if (path.endsWith("/pulls"))
+        return Response.json([
+          { number: 7, user: { login: "existing" }, head: { sha: head } },
+          ...missing,
+          { number: 200, user: { login: "maintainer" }, head: { sha: head } },
+        ])
+    },
+  }
+  const before = fixture(options)
+  for (let i = 0; i < 26; i++)
+    await before.run("pull_request", {
+      ...payload(),
+      pull_request: { number: 100 + i, user: { login: "fork-author" }, head: { sha: head } },
+    })
+  expect(before.writes.filter((w) => w.status === "in_progress")).toHaveLength(25)
+  const restarted = fixture(options)
+  await Effect.runPromise(
+    restarted.app.recoverIdentityChecks(
+      [{ repository: "owner/repo", installationId: 91 }],
+      (event, value) => restarted.app.checkAgentGitIdentity(event, value),
+    ),
+  )
+  const starts = restarted.writes.filter((w) => w.status === "in_progress")
+  expect(starts).toHaveLength(26)
+  expect(starts.some((w) => w.external_id === "agent-git:7")).toBe(false)
+  expect(starts.some((w) => w.external_id === "agent-git:125")).toBe(true)
+  expect(starts.some((w) => w.external_id === "agent-git:124")).toBe(false)
+  expect(starts.at(-1)?.external_id).toBe("agent-git:200")
+  expect(restarted.writes.at(-1)?.conclusion).toBe("success")
 })

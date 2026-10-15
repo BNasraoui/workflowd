@@ -4,10 +4,12 @@ export type IdentityWork = {
   readonly key: string
   readonly prKey?: string
   readonly preserve?: boolean
+  readonly supersede?: () => void
   readonly run: Effect.Effect<void, Error>
 }
 
 type Entry = {
+  supersede: (() => void) | undefined
   interrupted: boolean
   next: IdentityWork | undefined
   fiber: Fiber.Fiber<void, Error> | undefined
@@ -26,9 +28,11 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
     if (entry.next === undefined) return
     const job = entry.next
     entry.next = undefined
+    entry.supersede = job.supersede
     entry.fiber = yield* Effect.forkChild(job.run, { startImmediately: false })
     yield* Fiber.await(entry.fiber)
     entry.fiber = undefined
+    entry.supersede = undefined
     if (entry.next !== undefined) yield* Queue.offer(ready, entry)
     else entries.delete(job.key)
   })
@@ -40,6 +44,7 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
       entry.next = job
       if (entry.fiber !== undefined) {
         entry.interrupted = true
+        entry.supersede?.()
         entry.fiber.interruptUnsafe()
       }
       return true
@@ -63,7 +68,7 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
       }
     }
     if (entries.size >= concurrency + waiting) return false
-    const added = { next: job, fiber: undefined, interrupted: false }
+    const added = { next: job, fiber: undefined, interrupted: false, supersede: undefined }
     entries.set(job.key, added)
     yield* Queue.offer(ready, added)
     return true

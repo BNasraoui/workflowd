@@ -11,6 +11,7 @@ const RateResponse = Schema.Struct({
 export type IdentityBudget = {
   readonly kind?: "read" | "start" | "finish"
   readonly prKey?: string
+  readonly authorKey?: string | undefined
 }
 
 // Shared by scans, suite discovery and restart recovery in one App adapter.
@@ -18,7 +19,10 @@ export type IdentityBudget = {
 // requests wait until GitHub's reset/retry-after deadline.
 export const makeIdentityRequest = () => {
   let resumeAt = 0
-  const windows = new Map<string, Array<{ time: number; prKey: string | undefined }>>()
+  const windows = new Map<
+    string,
+    Array<{ time: number; prKey: string | undefined; authorKey: string | undefined }>
+  >()
   return <A>(
     run: (signal: AbortSignal) => Promise<A>,
     installationId?: number,
@@ -40,13 +44,28 @@ export const makeIdentityRequest = () => {
         const key = `${installationId}/${kind}`
         const recent = (windows.get(key) ?? []).filter(({ time }) => time > now - 3_600_000)
         windows.set(key, recent)
+        // Rerun payloads omit the PR author. Reuse the author from recent
+        // reservations, and charge the initial lookup once its response is known.
+        const related =
+          budget.prKey === undefined
+            ? []
+            : ["read", "start", "finish"].flatMap((kind) =>
+                (windows.get(`${installationId}/${kind}`) ?? []).filter(
+                  (entry) => entry.time > now - 3_600_000 && entry.prKey === budget.prKey,
+                ),
+              )
+        const authorKey =
+          budget.authorKey ?? related.findLast((entry) => entry.authorKey !== undefined)?.authorKey
+        if (authorKey !== undefined) for (const entry of related) entry.authorKey ??= authorKey
         const prRequests = recent.filter(({ prKey }) => prKey === budget.prKey).length
         if (
           recent.length >= installationLimit ||
-          (budget.prKey !== undefined && prRequests >= prLimit)
+          (budget.prKey !== undefined && prRequests >= prLimit) ||
+          (authorKey !== undefined &&
+            recent.filter((entry) => entry.authorKey === authorKey).length >= prLimit)
         )
           return yield* Effect.fail(new Error("scan budget exhausted, retry later"))
-        recent.push({ time: now, prKey: budget.prKey })
+        recent.push({ time: now, prKey: budget.prKey, authorKey })
       }
       return yield* Effect.tryPromise({
         try: run,
