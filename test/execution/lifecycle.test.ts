@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -57,6 +58,7 @@ for (const [action, name] of [
       await writeFile(privateKeyPath, key.export({ type: "pkcs8", format: "pem" }))
       const config = await loadConfig(
         {
+          ...agentGitTestEnvironment,
           GITHUB_APP_ID: "123",
           WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
           WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",

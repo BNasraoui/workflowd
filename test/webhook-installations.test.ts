@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect, Layer } from "effect"
@@ -304,6 +305,7 @@ test("installation-free or invalid installation envelopes never persist", () =>
 
 test("rejects a sandbox-only installation without storing its delivery", async () => {
   const config = await loadConfig({
+    ...agentGitTestEnvironment,
     GITHUB_APP_ID: "123",
     WORKFLOWD_AGENT_GIT_NAME: "Agent",
     WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",
@@ -370,7 +372,7 @@ for (const [event, action] of guardEvents) {
       )
       await withStore(
         Effect.gen(function* () {
-          yield* f.guard.runWebhooks.pipe(Effect.forkScoped)
+          yield* f.guard.runWebhooks.pipe(Effect.provide(f.logger), Effect.forkScoped)
           const payload = JSON.stringify({ action, installation: installation(10, accountId) })
           const send = () =>
             handleGitHubWebhook(signedRequest(event, payload, "guard", "secret"), {
@@ -456,7 +458,7 @@ test("an undecodable guard event stores nothing", () => {
   )
 })
 
-for (const event of ["pull_request", "check_run"]) {
+for (const event of ["pull_request", "check_run", "check_suite"]) {
   test.each([
     [91, "pr/repo", true],
     [999, "pr/repo", false],
@@ -469,7 +471,15 @@ for (const event of ["pull_request", "check_run"]) {
         Effect.gen(function* () {
           let calls = 0
           const response = yield* handleGitHubWebhook(
-            signedRequest(event, eventPayload(event, id, repo), "identity-gate", "secret"),
+            signedRequest(
+              event,
+              JSON.stringify({
+                ...JSON.parse(eventPayload(event, id, repo)),
+                action: event === "check_suite" ? "rerequested" : "opened",
+              }),
+              "identity-gate",
+              "secret",
+            ),
             {
               webhookSecret: "secret",
               now: new Date(),
@@ -488,9 +498,11 @@ for (const event of ["pull_request", "check_run"]) {
   )
 }
 
-test("identity check publication failure returns a retryable webhook response", () =>
+test("identity check publication failure still stores PR automation delivery", () =>
   withStore(
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      let storedBeforeCheck = false
       const response = yield* handleGitHubWebhook(
         signedRequest(
           "pull_request",
@@ -503,11 +515,58 @@ test("identity check publication failure returns a retryable webhook response", 
           now: new Date(),
           installationIds: new Set([91]),
           prRepositories: [{ repository: "pr/repo", installationId: 91 }],
-          checkAgentGitIdentity: () => Effect.fail(new Error("Git identity check unavailable")),
+          checkAgentGitIdentity: () =>
+            Effect.gen(function* () {
+              storedBeforeCheck = (yield* sql`SELECT * FROM webhook_deliveries`).length === 1
+              return yield* Effect.fail(new Error("Git identity check unavailable"))
+            }),
         },
       )
-      expect(response.status).toBe(500)
-      const sql = yield* SqlClient.SqlClient
-      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(0)
+      expect(response.status).toBe(202)
+      expect(storedBeforeCheck).toBe(true)
+      expect(yield* sql`SELECT * FROM webhook_deliveries`).toHaveLength(1)
+      expect(yield* sql`SELECT * FROM jobs`).toHaveLength(1)
     }),
   ))
+
+test.each(["signature", "installation"])("%s guard precedes the identity callback", (guard) =>
+  withStore(
+    Effect.gen(function* () {
+      let calls = 0
+      const f = fixture((method) =>
+        method === "GET"
+          ? Response.json(installation(91, 999))
+          : new Response(null, { status: 204 }),
+      )
+      if (guard === "installation")
+        yield* f.guard.runWebhooks.pipe(Effect.provide(f.logger), Effect.forkScoped)
+      const response = yield* handleGitHubWebhook(
+        signedRequest(
+          guard === "installation" ? "installation" : "pull_request",
+          guard === "installation"
+            ? JSON.stringify({ action: "created", installation: installation(91, 999) })
+            : eventPayload("pull_request", 91, "pr/repo"),
+          "admission-order",
+          guard === "signature" ? "wrong-secret" : "secret",
+        ),
+        {
+          webhookSecret: "secret",
+          now: new Date(),
+          installationIds: new Set([91]),
+          prRepositories: [{ repository: "pr/repo", installationId: 91 }],
+          installationGuard: f.guard,
+          checkAgentGitIdentity: () =>
+            Effect.sync(() => {
+              calls++
+            }),
+        },
+      )
+      expect(response.status).toBe(guard === "signature" ? 401 : 202)
+      expect(calls).toBe(0)
+      if (guard === "installation") {
+        yield* f.nextLog
+        expect(f.requests).toContain("DELETE /app/installations/91")
+      }
+    }).pipe(Effect.scoped),
+  ),
+)

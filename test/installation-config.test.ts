@@ -1,7 +1,9 @@
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { loadConfig } from "../src/config"
 
 const env = {
+  ...agentGitTestEnvironment,
   GITHUB_APP_ID: "123",
   WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
   GITHUB_PRIVATE_KEY_PATH: "/unused/key",

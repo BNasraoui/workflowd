@@ -26,6 +26,14 @@ const Rerun = Schema.Struct({
     head_sha: Sha,
   }),
 })
+const Suite = Schema.Struct({
+  check_suite: Schema.Struct({
+    id: Id,
+    app: Schema.Struct({ id: Id }),
+    head_sha: Sha,
+  }),
+})
+const BaseChange = Schema.Struct({ changes: Schema.Struct({ base: Schema.Unknown }) })
 const Comparison = Schema.Struct({
   total_commits: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   commits: Schema.Array(
@@ -54,28 +62,79 @@ const attempt = <A>(run: (signal: AbortSignal) => Promise<A>) =>
     Effect.mapError(unavailable),
   )
 
+const targetFromCheck = Effect.fn("GitIdentity.rerunTarget")(function* (
+  appId: number,
+  envelope: typeof Envelope.Type,
+  check: typeof Rerun.Type.check_run,
+) {
+  if (check.app.id !== appId || check.name !== checkName || check.external_id === null) return []
+  const match = /^agent-git:([1-9][0-9]*)$/.exec(check.external_id)
+  if (match === null) return []
+  const number = yield* Schema.decodeUnknownEffect(Id)(Number(match[1]))
+  return [{ ...envelope, number, head: check.head_sha, checkId: check.id }]
+})
+
 const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
   appId: number,
+  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
   event: string,
   payload: unknown,
 ) {
-  if (event !== "pull_request" && event !== "check_run") return
+  if (event !== "pull_request" && event !== "check_run" && event !== "check_suite") return []
   const envelope = yield* Schema.decodeUnknownEffect(Envelope)(payload)
   if (event === "pull_request") {
-    if (!["opened", "synchronize", "reopened", "edited"].includes(envelope.action)) return
+    if (!["opened", "synchronize", "reopened", "edited"].includes(envelope.action)) return []
+    if (envelope.action === "edited" && !Schema.is(BaseChange)(payload)) return []
     const { pull_request: pull } = yield* Schema.decodeUnknownEffect(Pull)(payload)
-    return { ...envelope, number: pull.number, head: pull.head.sha, checkId: undefined }
+    return [{ ...envelope, number: pull.number, head: pull.head.sha, checkId: undefined }]
   }
-  if (envelope.action !== "rerequested") return
+  if (envelope.action !== "rerequested") return []
+  if (event === "check_suite") {
+    const { check_suite: suite } = yield* Schema.decodeUnknownEffect(Suite)(payload)
+    if (suite.app.id !== appId) return []
+    const client = yield* attempt(() => getClient(envelope.installation.id))
+    const [owner = "", repo = ""] = envelope.repository.full_name.split("/")
+    // Fork suites may omit pull_requests. Recover our PR identifiers from the
+    // existing checks, selecting only this suite and App on its immutable head.
+    const checks = yield* attempt(async (signal) => {
+      const checks = []
+      for await (const page of client.listCheckRunPages({
+        owner,
+        repo,
+        ref: suite.head_sha,
+        check_name: checkName,
+        filter: "all",
+        per_page: 100,
+        request: { signal },
+      })) {
+        for (const check of page) {
+          if (
+            check.checkSuiteId === suite.id &&
+            check.appId === appId &&
+            check.name === checkName
+          ) {
+            checks.push({
+              id: check.id,
+              name: check.name,
+              app: { id: check.appId },
+              external_id: check.externalId ?? null,
+              head_sha: suite.head_sha,
+            })
+          }
+        }
+      }
+      return checks
+    }).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Rerun.fields.check_run))))
+    const targets = yield* Effect.forEach(checks, (check) =>
+      targetFromCheck(appId, envelope, check),
+    )
+    return targets.flat()
+  }
   const { check_run: check } = yield* Schema.decodeUnknownEffect(Rerun)(payload)
-  if (check.app.id !== appId || check.name !== checkName || check.external_id === null) return
-  const match = /^agent-git:([1-9][0-9]*)$/.exec(check.external_id)
-  if (match === null) return
-  const number = yield* Schema.decodeUnknownEffect(Id)(Number(match[1]))
-  return { ...envelope, number, head: check.head_sha, checkId: check.id }
+  return yield* targetFromCheck(appId, envelope, check)
 })
 
-type Target = NonNullable<Effect.Success<ReturnType<typeof targetFromEvent>>>
+type Target = Effect.Success<ReturnType<typeof targetFromEvent>>[number]
 type Repository = { readonly owner: string; readonly repo: string }
 
 const inspectRange = Effect.fn("GitIdentity.inspectRange")(function* (
@@ -136,7 +195,8 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   target: Target,
   blockedEmails: ReadonlyArray<string> | undefined,
 ) {
-  if (blockedEmails === undefined) return yield* Effect.fail(unavailable())
+  if (!blockedEmails?.some((email) => email.trim().length > 0))
+    return yield* Effect.fail(unavailable())
   const snapshot = () =>
     attempt((signal) =>
       client.getPullRequest({
@@ -162,15 +222,11 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   return result
 })
 
-export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
-  appId: number,
+const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
   getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
   blockedEmails: ReadonlyArray<string> | undefined,
-  event: string,
-  payload: unknown,
+  target: Target,
 ) {
-  const target = yield* targetFromEvent(appId, event, payload).pipe(Effect.mapError(unavailable))
-  if (target === undefined) return
   const [owner = "", repo = ""] = target.repository.full_name.split("/")
   const repository = { owner, repo }
   const client = yield* attempt(() => getClient(target.installation.id))
@@ -208,4 +264,19 @@ export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
       request: { signal },
     }),
   )
+})
+
+export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
+  appId: number,
+  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
+  blockedEmails: ReadonlyArray<string> | undefined,
+  event: string,
+  payload: unknown,
+) {
+  const targets = yield* targetFromEvent(appId, getClient, event, payload).pipe(
+    Effect.mapError(unavailable),
+  )
+  yield* Effect.forEach(targets, (target) => checkTarget(getClient, blockedEmails, target), {
+    discard: true,
+  })
 })

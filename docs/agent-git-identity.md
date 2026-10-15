@@ -8,13 +8,13 @@ identity values in repository files, issue comments, PR bodies, or shell example
 | --- | --- |
 | `WORKFLOWD_AGENT_GIT_NAME` | Agent author and committer name |
 | `WORKFLOWD_AGENT_GIT_EMAIL` | Agent author and committer address |
-| `WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS` | Comma-separated addresses forbidden for both roles; case-insensitive; empty means no blocked addresses |
+| `WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS` | Comma-separated addresses forbidden for both roles; case-insensitive; must be nonempty when PR repositories are configured |
 
 Startup fails if agent dispatch or a resident executor is enabled and
 either identity field is missing. Partial or invalid configuration, including an
 allowed identity on the blocklist, is rejected without echoing address values.
 This includes execution-mode daemons with agent runs configured. A daemon without
-agent dispatch or resident executors can omit this configuration. Remote runners
+PR repositories, agent dispatch, or resident executors can omit this configuration. Remote runners
 that enable Claude resume directories also require the identity.
 
 Codex and Claude transient units receive all four `GIT_AUTHOR_*` and
@@ -153,19 +153,22 @@ This change does not modify mint's live environment or rewrite existing commits.
 The workflowd GitHub App publishes **Workflowd Git Identity** for every repository
 in `WORKFLOWD_PR_REPOSITORIES` (the existing JSON array of `repository` and
 `installationId` entries). Add every repository agents work in to this host
-configuration and install the App there. The webhook signature, installation
+configuration and install the App there. This is also the PR automation allowlist;
+adding a repository enables its existing review workflows, subject to their
+eligibility rules. The webhook signature, installation
 account guard, and repository/installation allowlist apply before the check runs.
 It covers all PR authors, drafts, and forks, independently of automatic review
 eligibility. No repository code, Git configuration, hooks, or local refs are read.
 
 The daemon reads the blocklist from `WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS` through
 its existing agent Git configuration. Configure the identity fields alongside it.
-An explicitly empty blocklist accepts all identities; absent agent Git
-configuration produces a failed check. Keep policy values on the daemon host;
+An absent, empty, or whitespace-only blocklist produces a failed check. Startup
+refuses PR repositories without a nonempty blocklist. Keep policy values on the
+daemon host;
 changing the root agent host's private file alone does not update the daemon.
 
-On PR `opened`, `synchronize`, `reopened`, and `edited` deliveries, the check reads
-the current PR base and head from GitHub, then inspects both raw Git author and
+On PR `opened`, `synchronize`, `reopened`, and base-changing `edited` deliveries,
+the check reads the current PR base and head from GitHub, then inspects both raw Git author and
 committer addresses on every commit in `base..head`. It uses the
 [paginated compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits),
 checks the total and unique commit count, and rechecks the PR before publishing.
@@ -179,13 +182,13 @@ Blocked identities fail the check. Output lists only failed commit SHAs and role
 never included. Large failure lists are bounded to GitHub's output limit with an
 omitted-commit count. API errors, malformed/incomplete results, PR changes during
 the scan, and missing policy fail closed. If GitHub cannot accept a check write,
-the webhook returns HTTP 500 and the check remains missing or pending: neither
-satisfies a required check. Inspect App webhook deliveries and redeliver failed
-deliveries after recovery; GitHub does not automatically retry failed deliveries.
+the check remains missing or pending: neither satisfies a required check. The
+delivery is still stored and acknowledged. Inspect daemon logs and re-run the
+check or redeliver the webhook after recovery.
 
 Enable **Pull requests: read**, **Contents: read**, and **Checks: read and write**
-on the App, and subscribe to **Pull request** and **Check run** webhooks. Keep the
-existing installation subscriptions and permissions. Approve updated installation
+on the App, and subscribe to **Pull request**, **Check run**, and **Check suite**
+webhooks. Keep the existing installation subscriptions and permissions. Approve updated installation
 permissions where GitHub requests it. The check runs in the automation daemon
 that owns the existing GitHub App integration, not in an execution-only runner.
 
@@ -193,6 +196,24 @@ To re-run, open the PR's Checks tab and use **Re-run** on **Workflowd Git Identi
 The `check_run.rerequested` handler accepts only this App's named check and its
 workflowd PR identifier. It resets that check to pending before re-reading the
 PR and its entire range. A request for an obsolete head cannot publish success.
+**Re-run all** is also supported through `check_suite.rerequested`, restricted to
+this App and PR repositories. It paginates existing identity checks on the suite's
+head SHA and recovers their PR identifiers, including when fork suites have an
+empty PR list ([GitHub check-suite behavior](https://docs.github.com/en/rest/checks/suites)).
+Title and body edits do not trigger scans.
+
+Webhook ingestion stores the delivery before scheduling the check in a daemon-scoped
+background fiber. Checks API errors and slow scans do not delay acknowledgment or
+prevent PR automation ingestion. This follow-up is not a durable queue: a daemon
+restart can interrupt a scan. Re-run a pending check or redeliver the webhook for
+a missing check after a restart or service error. Requiring the check prevents
+merging without a success.
+
+Matching is exact after trimming and lowercasing. Operators must list the GitHub
+noreply form of every blocked identity as well as its other Git email forms; the
+check does not infer aliases from a GitHub username or account. Add each variant
+that policy intends to block in host configuration.
+
 After a host policy change, restart the daemon and re-run checks on open PRs;
 already completed checks retain the previous policy until re-run.
 
