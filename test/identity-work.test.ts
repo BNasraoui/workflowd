@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Queue } from "effect"
 import { TestClock } from "effect/testing"
+import { IdentityBudgetExhausted } from "../src/github/identity-request"
 import { makeIdentityWork } from "../src/github/identity-work"
 import { fixture, payload } from "./helpers/identity"
 
@@ -287,5 +288,39 @@ test("two queued check reruns are retained when another head arrives", async () 
         "failure",
       ])
     }).pipe(Effect.scoped, Effect.timeout("2 seconds")),
+  )
+})
+
+test("deferred retries retain bounded slots while releasing the scan worker", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const submit = yield* makeIdentityWork(1, 2)
+      const attempted = yield* Queue.unbounded<string>()
+      const job = (key: string) => {
+        let runs = 0
+        return {
+          key,
+          run: Effect.gen(function* () {
+            yield* Queue.offer(attempted, key)
+            if (runs++ === 0)
+              return yield* Effect.fail(new IdentityBudgetExhausted({ retryAt: 60_000 }))
+          }),
+        }
+      }
+      for (const key of ["a", "b", "c"]) {
+        expect(yield* submit(job(key))).toBe(true)
+        expect(yield* Queue.take(attempted)).toBe(key)
+        yield* TestClock.adjust("1 millis")
+      }
+      expect(yield* submit(job("overflow"))).toBe(false)
+      yield* TestClock.adjust("1 minute")
+      expect([
+        yield* Queue.take(attempted),
+        yield* Queue.take(attempted),
+        yield* Queue.take(attempted),
+      ]).toEqual(["a", "b", "c"])
+      yield* TestClock.adjust("1 millis")
+      expect(yield* submit(job("next"))).toBe(true)
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   )
 })

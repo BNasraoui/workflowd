@@ -32,7 +32,7 @@ test("suite discovery charges every page and shares the recovery read allowance"
     },
   })
   await Effect.runPromise(f.app.identityCheckJobs("check_suite", suite).pipe(Effect.ignore))
-  expect(suitePages).toBe(1000)
+  expect(suitePages).toBe(800)
   await Effect.runPromise(
     f.app.recoverIdentityChecks(
       [{ repository: "owner/repo", installationId: 91 }],
@@ -67,8 +67,8 @@ test("recovery charges both pull and check pagination to the installation allowa
         )
         .pipe(Effect.provide(Logger.layer([]))),
     )
-  expect(pulls).toBe(250)
-  expect(reads).toBe(500)
+  expect(pulls).toBe(200)
+  expect(reads).toBe(400)
   const before = reads
   await Effect.runPromise(f.app.identityCheckJobs("check_suite", suite).pipe(Effect.ignore))
   expect(reads).toBe(before)
@@ -82,10 +82,10 @@ test("a push and rerun flood stops starting checks while leaving completion capa
       ...payload(),
       pull_request: { number, head: { sha: head } },
     })
-  expect(f.writes.filter((w) => w.status === "in_progress")).toHaveLength(100)
+  expect(f.writes.filter((w) => w.status === "in_progress")).toHaveLength(80)
   expect(
     f.writes.filter((w) => w.status === "completed" && w.conclusion === "failure"),
-  ).toHaveLength(100)
+  ).toHaveLength(80)
   await f.run("check_run", {
     ...payload("rerequested"),
     check_run: {
@@ -96,9 +96,9 @@ test("a push and rerun flood stops starting checks while leaving completion capa
       head_sha: head,
     },
   })
-  expect(f.writes).toHaveLength(200)
+  expect(f.writes).toHaveLength(161)
   await f.run("pull_request", { ...payload(), installation: { id: 92 } })
-  expect(f.writes).toHaveLength(202)
+  expect(f.writes).toHaveLength(163)
 })
 
 test("one fork's repeated scans leave inspection capacity for another PR", async () => {
@@ -246,5 +246,40 @@ test("rerun author lookups cannot bypass the shared author read allowance", asyn
     })
   expect(f.requests.filter((r) => r.method === "GET").length).toBeLessThanOrEqual(250)
   await f.run("pull_request", pullFor(20, "maintainer"))
+  expect(f.writes.at(-1)?.conclusion).toBe("success")
+})
+
+test.each(["OWNER", "MEMBER", "COLLABORATOR", "same-repository"])(
+  "one trusted author can scan 30 PRs (%s)",
+  async (trust) => {
+    const f = fixture()
+    for (let number = 1; number <= 30; number++) {
+      const event = pullFor(number, "maintainer")
+      await f.run("pull_request", {
+        ...event,
+        pull_request: {
+          ...event.pull_request,
+          author_association: trust === "same-repository" ? "NONE" : trust,
+          head: {
+            sha: head,
+            repo: { full_name: trust === "same-repository" ? "OWNER/REPO" : "fork/repo" },
+          },
+        },
+      })
+    }
+    expect(f.writes.filter((w) => w.conclusion === "success")).toHaveLength(30)
+  },
+)
+
+test("several fork authors cannot consume the trusted start reserve", async () => {
+  const f = fixture()
+  for (let number = 1; number <= 100; number++)
+    await f.run("pull_request", pullFor(number, `fork-${number % 4}`))
+  expect(f.writes.filter((w) => w.status === "in_progress")).toHaveLength(80)
+  const event = pullFor(101, "maintainer")
+  await f.run("pull_request", {
+    ...event,
+    pull_request: { ...event.pull_request, author_association: "MEMBER" },
+  })
   expect(f.writes.at(-1)?.conclusion).toBe("success")
 })

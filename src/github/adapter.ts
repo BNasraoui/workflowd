@@ -69,7 +69,8 @@ type OpenPullPages = (input: {
 }) => AsyncIterable<
   ReadonlyArray<{
     readonly number: number
-    readonly head: { readonly sha: string }
+    readonly head: { readonly sha: string; readonly repo?: { readonly full_name: string } }
+    readonly author_association?: string
     readonly user?: { readonly login: string }
   }>
 >
@@ -394,7 +395,13 @@ export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort 
       for await (const response of client.paginate.iterator(client.rest.pulls.list, input)) {
         yield response.data.map((pull) => ({
           number: pull.number,
-          head: { sha: pull.head.sha },
+          head: {
+            sha: pull.head.sha,
+            ...(pull.head.repo == null ? {} : { repo: { full_name: pull.head.repo.full_name } }),
+          },
+          ...(pull.author_association === undefined
+            ? {}
+            : { author_association: pull.author_association }),
           ...(pull.user == null ? {} : { user: { login: pull.user.login } }),
         }))
       }

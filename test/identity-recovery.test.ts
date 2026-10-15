@@ -273,3 +273,31 @@ test("restart creates checks for heads dropped at the start cap, within the fres
   expect(starts.at(-1)?.external_id).toBe("agent-git:200")
   expect(restarted.writes.at(-1)?.conclusion).toBe("success")
 })
+
+test("an early PR check-list failure does not stop recovery of later PRs", async () => {
+  const badHead = "c".repeat(40)
+  const f = fixture({
+    suiteChecks: [own],
+    intercept: async (path) => {
+      if (path.endsWith("/pulls"))
+        return Response.json([
+          { number: 6, head: { sha: badHead } },
+          { number: 7, head: { sha: head } },
+        ])
+      if (path.includes(badHead)) return Response.json({}, { status: 503 })
+    },
+  })
+  const recovered: unknown[] = []
+  await Effect.runPromise(
+    f.app.recoverIdentityChecks(
+      [{ repository: "owner/repo", installationId: 91 }],
+      (_event, value) =>
+        Effect.sync(() => {
+          recovered.push(value)
+        }),
+    ),
+  )
+  expect(recovered).toEqual([
+    expect.objectContaining({ check_run: expect.objectContaining({ id: 12 }) }),
+  ])
+})

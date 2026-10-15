@@ -1,16 +1,11 @@
 import { Effect, Schema } from "effect"
+import { IdentityPull, identityTrusted } from "./identity-trust"
 import type { PrRepositories } from "../pr-automation-config"
 import type { GitHubCheckRun, GitHubInstallationAdapter } from "./adapter"
 import type { IdentityRequest } from "./identity-request"
 import type { IdentityPublication } from "./identity-publication"
 
-const Pulls = Schema.Array(
-  Schema.Struct({
-    number: Schema.Int.check(Schema.isGreaterThan(0)),
-    user: Schema.optional(Schema.Struct({ login: Schema.NonEmptyString })),
-    head: Schema.Struct({ sha: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/)) }),
-  }),
-)
+const Pulls = Schema.Array(IdentityPull)
 
 type Dispatch = (event: string, payload: unknown) => Effect.Effect<void, Error>
 
@@ -47,6 +42,11 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
         for (const pull of yield* Schema.decodeUnknownEffect(Pulls)(page.value)) {
           yield* Effect.gen(function* () {
             const authorKey = pull.user?.login.toLowerCase()
+            const trusted = identityTrusted(
+              repository.repository,
+              pull.head.repo?.full_name,
+              pull.author_association,
+            )
             const checkPages = client.listCheckRunPages({
               owner,
               repo,
@@ -63,6 +63,7 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
               const page = yield* request(() => checks.next(), repository.installationId, {
                 prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
                 authorKey,
+                trusted,
               })
               if (page.done) break
               for (const check of page.value) {
@@ -104,6 +105,7 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
                       kind: "finish",
                       prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
                       authorKey,
+                      trusted,
                     },
                   )
                 }).pipe(

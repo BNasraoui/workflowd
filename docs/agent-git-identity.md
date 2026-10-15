@@ -208,6 +208,7 @@ Webhook ingestion stores the delivery before scheduling the check in a daemon-sc
 dispatcher. At most four scans run globally, with at most 100 additional targets
 waiting. A repeated target replaces the pending target for the same repository/PR/head
 and interrupts its active scan; the replacement waits for that scan to exit.
+A same-head redelivery retains a deferred completion and its existing check ID.
 Events for obsolete heads cannot interrupt the current head’s scan.
 Each PR retains at most two heads that have not started. A further head evicts
 the oldest waiting head without an existing check or interrupted predecessor.
@@ -224,25 +225,37 @@ exhaustion pauses subsequent identity API requests until the reset/retry-after
 deadline (at least one minute), including check publication and discovery.
 Inspection, startup recovery and suite discovery share a rolling allowance of
 1,000 reads per installation per hour across repositories. Each PR can consume
-at most 250 of those reads. The same 250-read share also applies to each PR
-author across PRs and repositories in the installation. Every pagination step is charged, including iterator
-completion; failed requests also consume allowance. Exhaustion stops the scan
-before another read and completes its check as failure with
-**scan budget exhausted, retry later**.
-Check creation and rerun resets have a separate allowance of 100 writes per
-installation per hour, with at most 25 per PR and per author. Exhausted deliveries are logged
-and dropped before starting another check. Completions, including recovery and
-superseded failures, have 200 writes per installation and 50 per PR and per author, leaving
-capacity after the start limit is reached. Completion failures are logged;
-GitHub availability and exhausted completion capacity can still require a rerun.
+at most 250 of those reads. Untrusted authors share 250 reads across their PRs
+and repositories in the installation. Authors are trusted when GitHub reports
+`OWNER`, `MEMBER`, or `COLLABORATOR`, or the head repository matches the base
+repository. Only verified webhook or PR API fields establish trust; caller-supplied
+trust flags are ignored. Trusted authors are exempt from author shares, while
+installation and per-PR limits still apply. Of the installation allowance, 200
+reads and 20 check starts are reserved for trusted PRs.
+
+Every pagination step is charged, including iterator completion; failed requests
+also consume allowance. Check creation and rerun resets have 100 writes per
+installation per hour, with at most 25 per PR and per untrusted author.
+Completions, including recovery and superseded failures, have 200 writes per
+installation and 50 per PR and per untrusted author. These separate completion
+allowances leave capacity after the start limit is reached.
+
+Local budget exhaustion retains the job in the dispatcher's bounded waiting set.
+A minute scheduler requeues it after the exhausted rolling shares have capacity;
+waiting retries do not occupy scan workers. Existing check IDs are retained, so a
+completion rejected by the budget is retried by scanning and completing the same
+check. A capped rerun or scan publishes **scan budget exhausted, retry later** as a
+failed check when completion capacity remains. GitHub I/O errors are not retried
+as local budget rejections. Queue overflow, GitHub errors, and failed supersede
+writes can still need webhook redelivery or startup recovery.
+
 Together these limits bound identity API traffic to 1,300 requests per
 installation per rolling hour. Client acquisition uses the App's cached client
-and is outside the installation API allowance. All allowances are in memory
-and reset on daemon restart. Re-run the check or redeliver its webhook after
-capacity expires. These local budgets do not account for other App users of
-the installation's GitHub rate limit. Author names are normalized to lowercase;
-reruns resolve missing author metadata through a budgeted PR read and reuse
-recent reservations to charge subsequent lookups to that author too.
+and is outside the installation API allowance. Allowances and waiting retries
+are in memory and reset on daemon restart. These budgets do not account for
+other App users of the installation's GitHub rate limit. Author names are
+normalized to lowercase; reruns resolve missing author and trust metadata through
+a budgeted PR read and reuse recent reservations for subsequent lookups.
 
 Checks API errors and slow scans do not prevent PR automation ingestion. On
 daemon startup, workflowd lists open PRs in the configured repositories and

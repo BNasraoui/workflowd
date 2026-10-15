@@ -1,6 +1,7 @@
 import { Effect, Schedule, Schema } from "effect"
 import type { PrRepositories } from "../pr-automation-config"
 import type { GitHubPort } from "../github"
+import { IdentityBudgetExhausted } from "./identity-request"
 import { makeIdentityWork } from "./identity-work"
 
 const SuiteKey = Schema.Struct({
@@ -27,7 +28,12 @@ export const makeIdentityCheckDispatcher = Effect.fn("GitIdentity.dispatcher")(f
     for (const job of jobs) {
       const accepted = yield* submit({
         ...job,
-        run: job.run.pipe(Effect.catch(() => Effect.logError("Git identity check unavailable"))),
+        run: job.run.pipe(
+          Effect.catchIf(
+            (error) => !(error instanceof IdentityBudgetExhausted),
+            () => Effect.logError("Git identity check unavailable"),
+          ),
+        ),
       })
       if (!accepted) yield* Effect.logWarning("Git identity waiting set full; redeliver webhook")
     }

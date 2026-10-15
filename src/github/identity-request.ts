@@ -8,20 +8,35 @@ const RateResponse = Schema.Struct({
   ),
 })
 
+export class IdentityBudgetExhausted extends Schema.TaggedError<IdentityBudgetExhausted>()(
+  "IdentityBudgetExhausted",
+  { retryAt: Schema.Number },
+) {
+  override get message() {
+    return "scan budget exhausted, retry later"
+  }
+}
+
 export type IdentityBudget = {
   readonly kind?: "read" | "start" | "finish"
   readonly prKey?: string
   readonly authorKey?: string | undefined
+  readonly trusted?: boolean
 }
 
 // Shared by scans, suite discovery and restart recovery in one App adapter.
-// Do not retry writes: an exhausted request fails closed, while subsequent
-// requests wait until GitHub's reset/retry-after deadline.
+// Only local budget rejections are safe to retry: no I/O was sent. GitHub
+// failures remain failures; subsequent requests honour its reset deadline.
 export const makeIdentityRequest = () => {
   let resumeAt = 0
   const windows = new Map<
     string,
-    Array<{ time: number; prKey: string | undefined; authorKey: string | undefined }>
+    Array<{
+      time: number
+      prKey: string | undefined
+      authorKey: string | undefined
+      trusted: boolean
+    }>
   >()
   return <A>(
     run: (signal: AbortSignal) => Promise<A>,
@@ -57,15 +72,33 @@ export const makeIdentityRequest = () => {
         const authorKey =
           budget.authorKey ?? related.findLast((entry) => entry.authorKey !== undefined)?.authorKey
         if (authorKey !== undefined) for (const entry of related) entry.authorKey ??= authorKey
-        const prRequests = recent.filter(({ prKey }) => prKey === budget.prKey).length
-        if (
-          recent.length >= installationLimit ||
-          (budget.prKey !== undefined && prRequests >= prLimit) ||
-          (authorKey !== undefined &&
-            recent.filter((entry) => entry.authorKey === authorKey).length >= prLimit)
-        )
-          return yield* Effect.fail(new Error("scan budget exhausted, retry later"))
-        recent.push({ time: now, prKey: budget.prKey, authorKey })
+        const trusted = budget.trusted ?? related.at(-1)?.trusted ?? false
+        const reserve = kind === "finish" ? 0 : installationLimit / 5
+        const shares = [
+          { entries: recent, limit: installationLimit },
+          ...(!trusted
+            ? [
+                {
+                  entries: recent.filter((entry) => !entry.trusted),
+                  limit: installationLimit - reserve,
+                },
+              ]
+            : []),
+          ...(budget.prKey === undefined
+            ? []
+            : [
+                { entries: recent.filter((entry) => entry.prKey === budget.prKey), limit: prLimit },
+              ]),
+          ...(!trusted && authorKey !== undefined
+            ? [{ entries: recent.filter((entry) => entry.authorKey === authorKey), limit: prLimit }]
+            : []),
+        ]
+        const resets = shares
+          .filter(({ entries, limit }) => entries.length >= limit)
+          .map(({ entries, limit }) => (entries[entries.length - limit]?.time ?? now) + 3_600_000)
+        if (resets.length > 0)
+          return yield* Effect.fail(new IdentityBudgetExhausted({ retryAt: Math.max(...resets) }))
+        recent.push({ time: now, prKey: budget.prKey, authorKey, trusted })
       }
       return yield* Effect.tryPromise({
         try: run,
