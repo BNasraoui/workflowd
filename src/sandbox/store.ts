@@ -3,6 +3,7 @@ import { Cause, Effect, Schema } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { SandboxPolicy } from "./config"
+import { SavedSandboxPolicy } from "./saved-policy"
 import { SandboxTransport } from "./transport"
 import type { OwnedLeaseRun } from "./github"
 import { SandboxFailureEvidence, sandboxDiagnostic } from "./diagnostics"
@@ -42,7 +43,7 @@ export const isUnobservedRun = (lease: { release_error: string | null }) =>
 const Lease = Schema.Struct({
   run_id: Schema.String,
   lease_id: Schema.String,
-  policy: Schema.fromJsonString(SandboxPolicy),
+  policy: Schema.fromJsonString(SavedSandboxPolicy),
   source_sha: Schema.String,
   state: Schema.Literals([
     "requested",
@@ -70,7 +71,7 @@ const CleanupRun = Schema.Struct({
   actions_run_id: Schema.Int.check(Schema.isGreaterThan(0)),
   actions_attempt: Schema.Literal(1),
   lease_id: Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9-]{1,80}$/)),
-  policy: Schema.fromJsonString(SandboxPolicy),
+  policy: Schema.fromJsonString(SavedSandboxPolicy),
   state: Schema.Literals(["pending", "terminated", "released"]),
   observed_at: Schema.Number,
   updated_at: Schema.Number,
@@ -452,11 +453,11 @@ export const makeSandboxStore = Effect.gen(function* () {
       )
   })
   const adopt = Effect.fn("SandboxStore.adopt")(function* (
-    policy: SandboxPolicy,
+    policy: SavedSandboxPolicy,
     owned: { leaseId: string; run: Pick<OwnedLeaseRun["run"], "id" | "run_attempt"> },
     now: number,
   ) {
-    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxPolicy))(policy)
+    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SavedSandboxPolicy))(policy)
     yield* Schema.decodeUnknownEffect(CleanupRun.fields.actions_run_id)(owned.run.id)
     yield* Schema.decodeUnknownEffect(CleanupRun.fields.actions_attempt)(owned.run.run_attempt)
     yield* Schema.decodeUnknownEffect(CleanupRun.fields.lease_id)(owned.leaseId)
@@ -469,6 +470,9 @@ export const makeSandboxStore = Effect.gen(function* () {
         const rows =
           yield* sql`SELECT * FROM sandbox_cleanup_runs WHERE repository_id=${policy.repositoryId}
         AND actions_run_id=${owned.run.id} AND actions_attempt=${owned.run.run_attempt}`
+        // Inventory includes completed historical runs. Their released custody needs
+        // no policy decode or comparison with today's configuration.
+        if (rows[0]?.state === "released" && rows[0]?.lease_id === owned.leaseId) return
         const saved = yield* Schema.decodeUnknownEffect(CleanupRun)(rows[0])
         const leases = yield* sql`SELECT policy FROM sandbox_leases WHERE lease_id=${owned.leaseId}
         AND json_extract(policy,'$.repositoryId')=${policy.repositoryId}`
@@ -487,7 +491,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       }),
     )
   })
-  const adoptAll = (policy: SandboxPolicy, owned: ReadonlyArray<OwnedLeaseRun>) =>
+  const adoptAll = (policy: SavedSandboxPolicy, owned: ReadonlyArray<OwnedLeaseRun>) =>
     sql.withTransaction(
       Effect.forEach(owned, (run) => adopt(policy, run, Date.now()), { discard: true }),
     )
@@ -498,9 +502,9 @@ export const makeSandboxStore = Effect.gen(function* () {
     return yield* Effect.forEach(rows, (row) => Schema.decodeUnknownEffect(CleanupRun)(row))
   })
   const reopenReleased = Effect.fn("SandboxStore.reopenReleased")(function* (
-    policy: SandboxPolicy,
+    policy: SavedSandboxPolicy,
   ) {
-    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxPolicy))(policy)
+    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SavedSandboxPolicy))(policy)
     yield* sql.withTransaction(
       Effect.gen(function* () {
         yield* sql`UPDATE sandbox_cleanup_runs SET state='pending',updated_at=${Date.now()},last_error='Sandbox custody revalidation pending'
@@ -527,7 +531,7 @@ export const makeSandboxStore = Effect.gen(function* () {
       AND actions_attempt=${row.actions_attempt} AND state != 'released'`
   })
   const inventoryError = Effect.fn("SandboxStore.inventoryError")(function* (
-    policy: SandboxPolicy,
+    policy: SavedSandboxPolicy,
     cause?: unknown,
   ) {
     const diagnostic =
@@ -541,9 +545,9 @@ export const makeSandboxStore = Effect.gen(function* () {
       AND coalesce(release_error,'') != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`
   })
   const clearPolicyErrors = Effect.fn("SandboxStore.clearPolicyErrors")(function* (
-    policy: SandboxPolicy,
+    policy: SavedSandboxPolicy,
   ) {
-    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SandboxPolicy))(policy)
+    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(SavedSandboxPolicy))(policy)
     yield* sql`UPDATE sandbox_cleanup_runs SET last_error=NULL WHERE policy=${encoded}`
     yield* sql`UPDATE sandbox_leases SET release_error=NULL WHERE policy=${encoded}
       AND release_error != ${sessionCleanupUnconfirmed} AND state != 'operator_required'`

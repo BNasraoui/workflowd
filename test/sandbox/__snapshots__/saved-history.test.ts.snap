@@ -1,0 +1,96 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`current saved policy round-trips every field; schema changes require a new frozen fixture 1`] = `
+{
+  "definitions": {},
+  "dialect": "draft-2020-12",
+  "schema": {
+    "additionalProperties": false,
+    "properties": {
+      "agentImage": {
+        "pattern": "^ghcr\\.io\\/bnasraoui\\/workflowd-agent-base@sha256:[a-f0-9]{64}$",
+        "type": "string",
+      },
+      "alias": {
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$",
+        "type": "string",
+      },
+      "appActorId": {
+        "exclusiveMinimum": 0,
+        "type": "integer",
+      },
+      "installationId": {
+        "exclusiveMinimum": 0,
+        "type": "integer",
+      },
+      "publish": {
+        "additionalProperties": false,
+        "properties": {
+          "baseRef": {
+            "type": "string",
+          },
+          "coAuthor": {
+            "type": "string",
+          },
+          "environmentId": {
+            "exclusiveMinimum": 0,
+            "type": "integer",
+          },
+          "publisherActorId": {
+            "exclusiveMinimum": 0,
+            "type": "integer",
+          },
+          "publisherAppId": {
+            "exclusiveMinimum": 0,
+            "type": "integer",
+          },
+        },
+        "required": [
+          "baseRef",
+          "environmentId",
+          "publisherAppId",
+          "publisherActorId",
+          "coAuthor",
+        ],
+        "type": "object",
+      },
+      "repository": {
+        "pattern": "^[a-zA-Z0-9_.-]+\\/[a-zA-Z0-9_.-]+$",
+        "type": "string",
+      },
+      "repositoryId": {
+        "exclusiveMinimum": 0,
+        "type": "integer",
+      },
+      "tailscaleAudience": {
+        "minLength": 1,
+        "type": "string",
+      },
+      "tailscaleClientId": {
+        "minLength": 1,
+        "type": "string",
+      },
+      "toolingSha": {
+        "pattern": "^[a-f0-9]{40}$",
+        "type": "string",
+      },
+      "workflowSha": {
+        "pattern": "^[a-f0-9]{40}$",
+        "type": "string",
+      },
+    },
+    "required": [
+      "alias",
+      "repository",
+      "repositoryId",
+      "installationId",
+      "workflowSha",
+      "appActorId",
+      "agentImage",
+      "tailscaleClientId",
+      "tailscaleAudience",
+    ],
+    "type": "object",
+  },
+}
+`;

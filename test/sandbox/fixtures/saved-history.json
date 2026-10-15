@@ -1,0 +1,167 @@
+{
+  "policies": [
+    {
+      "commit": "79f4612",
+      "policy": {
+        "alias": "workflowd",
+        "repository": "BNasraoui/workflowd",
+        "repositoryId": 1306107007,
+        "installationId": 147573449,
+        "workflowSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "appActorId": 306741873,
+        "tailscaleClientId": "fixture",
+        "tailscaleAudience": "fixture"
+      }
+    },
+    {
+      "commit": "fa1eee0",
+      "policy": {
+        "alias": "workflowd",
+        "repository": "BNasraoui/workflowd",
+        "repositoryId": 1306107007,
+        "installationId": 147573449,
+        "workflowSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "appActorId": 306741873,
+        "toolingSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "publish": {
+          "baseRef": "main",
+          "environmentId": 7,
+          "publisherAppId": 5232172,
+          "publisherActorId": 339414993
+        },
+        "tailscaleClientId": "fixture",
+        "tailscaleAudience": "fixture"
+      }
+    },
+    {
+      "commit": "4b63209",
+      "policy": {
+        "alias": "workflowd",
+        "repository": "BNasraoui/workflowd",
+        "repositoryId": 1306107007,
+        "installationId": 147573449,
+        "workflowSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "appActorId": 306741873,
+        "publish": {
+          "baseRef": "main",
+          "environmentId": 7,
+          "publisherAppId": 5232172,
+          "publisherActorId": 339414993,
+          "coAuthor": "Ben <ben@example.com>"
+        },
+        "tailscaleClientId": "fixture",
+        "tailscaleAudience": "fixture"
+      }
+    },
+    {
+      "commit": "7875968",
+      "policy": {
+        "alias": "workflowd",
+        "repository": "BNasraoui/workflowd",
+        "repositoryId": 1306107007,
+        "installationId": 147573449,
+        "workflowSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "appActorId": 306741873,
+        "agentImage": "ghcr.io/bnasraoui/workflowd-agent-base@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "publish": {
+          "baseRef": "main",
+          "environmentId": 7,
+          "publisherAppId": 5232172,
+          "publisherActorId": 339414993,
+          "coAuthor": "Ben <ben@example.com>"
+        },
+        "tailscaleClientId": "fixture",
+        "tailscaleAudience": "fixture"
+      }
+    }
+  ],
+  "publications": [
+    {
+      "commit": "fa1eee0",
+      "metadata": {
+        "sourceSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "branch": "agent/result",
+        "bundleSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "receipt": null
+    },
+    {
+      "commit": "57ec07b",
+      "metadata": {
+        "sourceSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "branch": "agent/result",
+        "bundleSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "receipt": {
+        "stage": "published",
+        "pr": 12,
+        "revoked": true
+      }
+    },
+    {
+      "commit": "6e823cb",
+      "metadata": {
+        "sourceSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "branch": "agent/result",
+        "bundleSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "treeSha": "ffffffffffffffffffffffffffffffffffffffff",
+        "title": "Fix #12",
+        "commitMessage": "See @owner and <example>"
+      },
+      "receipt": {
+        "stage": "published",
+        "commitSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "pr": 12,
+        "revoked": true
+      }
+    },
+    {
+      "commit": "adc00f5",
+      "metadata": {
+        "sourceSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "branch": "agent/result",
+        "bundleSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "treeSha": "ffffffffffffffffffffffffffffffffffffffff",
+        "title": "Agent title",
+        "commitMessage": "Agent message",
+        "body": "Details &amp; examples"
+      },
+      "receipt": {
+        "stage": "published",
+        "commitSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "pr": 12,
+        "revoked": true,
+        "cause": "historical cause"
+      }
+    },
+    {
+      "commit": "7875968",
+      "metadata": {
+        "sourceSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resultSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "branch": "agent/result",
+        "bundleSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "manifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "treeSha": "ffffffffffffffffffffffffffffffffffffffff",
+        "title": "Agent title",
+        "commitMessage": "```text\n@example\n```",
+        "body": "Details"
+      },
+      "receipt": {
+        "stage": "published",
+        "commitSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "pr": 12,
+        "revoked": true,
+        "closingIssuesVerified": true
+      }
+    }
+  ]
+}
