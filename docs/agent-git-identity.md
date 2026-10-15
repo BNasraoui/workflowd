@@ -183,8 +183,8 @@ never included. Large failure lists are bounded to GitHub's output limit with an
 omitted-commit count. API errors, malformed/incomplete results, PR changes during
 the scan, and missing policy fail closed. If GitHub cannot accept a check write,
 the check remains missing or pending: neither satisfies a required check. The
-delivery is still stored and acknowledged. Inspect daemon logs and re-run the
-check or redeliver the webhook after recovery.
+delivery is still stored and acknowledged. Inspect daemon logs and redeliver the
+webhook after recovery. Webhook redelivery is the primary manual recovery path.
 
 Enable **Pull requests: read**, **Contents: read**, and **Checks: read and write**
 on the App, and subscribe to **Pull request**, **Check run**, and **Check suite**
@@ -192,7 +192,9 @@ webhooks. Keep the existing installation subscriptions and permissions. Approve 
 permissions where GitHub requests it. The check runs in the automation daemon
 that owns the existing GitHub App integration, not in an execution-only runner.
 
-To re-run, open the PR's Checks tab and use **Re-run** on **Workflowd Git Identity**.
+When GitHub offers **Re-run**, use it on **Workflowd Git Identity** in the PR's
+Checks tab. GitHub may not offer this action for an in-progress check; redeliver
+the original webhook from the App delivery log in that case.
 The `check_run.rerequested` handler accepts only this App's named check and its
 workflowd PR identifier. It resets that check to pending before re-reading the
 PR and its entire range. A request for an obsolete head cannot publish success.
@@ -203,11 +205,25 @@ empty PR list ([GitHub check-suite behavior](https://docs.github.com/en/rest/che
 Title and body edits do not trigger scans.
 
 Webhook ingestion stores the delivery before scheduling the check in a daemon-scoped
-background fiber. Checks API errors and slow scans do not delay acknowledgment or
-prevent PR automation ingestion. This follow-up is not a durable queue: a daemon
-restart can interrupt a scan. Re-run a pending check or redeliver the webhook for
-a missing check after a restart or service error. Requiring the check prevents
-merging without a success.
+dispatcher. At most four scans run globally, with at most 100 additional PRs
+waiting. A newer target replaces the pending target for the same repository/PR
+and interrupts its active scan; the replacement waits for that scan to exit.
+Already-issued check writes are drained before a replacement resets the same
+check ID, including when a client ignores cancellation.
+Suite discovery has one worker and at most 100 waiting suites. Overflow is logged
+and dropped; redeliver its webhook to retry.
+Ranges above 10,000 commits fail with **range too large**. GitHub rate-limit
+exhaustion pauses subsequent identity API requests until the reset/retry-after
+deadline (at least one minute), including check publication and discovery.
+
+Checks API errors and slow scans do not prevent PR automation ingestion. On
+daemon startup, workflowd lists open PRs in the configured repositories and
+requeues this App's named identity checks left **in_progress** on their current
+heads. Recovery uses the same bounded dispatcher and waits for capacity; it does
+not replace work already admitted from a webhook. Discovery errors are logged
+per repository. This is not a durable queue: missing checks, discovery failures,
+and interrupted checks on obsolete heads may still need webhook redelivery.
+Requiring the check prevents merging without a success.
 
 Matching is exact after trimming and lowercasing. Operators must list the GitHub
 noreply form of every blocked identity as well as its other Git email forms; the

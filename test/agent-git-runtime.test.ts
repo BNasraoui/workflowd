@@ -14,7 +14,7 @@ import { privateKey } from "./helpers/installation-guard"
 import { automationStub } from "./helpers/runtime"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 
-for (const scenario of ["allowed", "blocked", "slow", "api-failure"] as const) {
+for (const scenario of ["allowed", "blocked", "slow", "api-failure", "recovery"] as const) {
   test(`live layer/runtime identity check: ${scenario}`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "workflowd-identity-runtime-"))
     const originalFetch = globalThis.fetch
@@ -30,6 +30,29 @@ for (const scenario of ["allowed", "blocked", "slow", "api-failure"] as const) {
           if (url.pathname === "/app/installations") return Response.json([])
           if (url.pathname.endsWith("/access_tokens"))
             return Response.json({ token: "fixture-token", expires_at: "2099-01-01T00:00:00Z" })
+          if (url.pathname.endsWith("/pulls"))
+            return Response.json(
+              scenario === "recovery" ? [{ number: 7, head: { sha: "a".repeat(40) } }] : [],
+            )
+          if (
+            url.pathname.includes("/check-runs") &&
+            (init?.method ?? "GET").toUpperCase() === "GET"
+          ) {
+            const response = Response.json({
+              total_count: 1,
+              check_runs: [
+                {
+                  id: 12,
+                  name: "Workflowd Git Identity",
+                  app: { id: 123 },
+                  status: "in_progress",
+                  external_id: "agent-git:7",
+                },
+              ],
+            })
+            Object.defineProperty(response, "url", { value: url.toString() })
+            return response
+          }
           if (url.pathname.includes("/check-runs")) {
             const body = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(
               JSON.parse(typeof init?.body === "string" ? init.body : "{}"),
@@ -106,20 +129,22 @@ for (const scenario of ["allowed", "blocked", "slow", "api-failure"] as const) {
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient
           const server = yield* startHookService(config)
-          const request = signedRequest(
-            "pull_request",
-            pullRequestPayload(),
-            "runtime-identity",
-            "secret",
-            `http://127.0.0.1:${server.port}/hooks/github`,
-          )
-          const response = yield* Effect.tryPromise((signal) =>
-            originalFetch(request, { signal }),
-          ).pipe(Effect.timeout("2 seconds"))
-          expect(response.status).toBe(202)
-          expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([
-            { delivery_id: "runtime-identity" },
-          ])
+          if (scenario !== "recovery") {
+            const request = signedRequest(
+              "pull_request",
+              pullRequestPayload(),
+              "runtime-identity",
+              "secret",
+              `http://127.0.0.1:${server.port}/hooks/github`,
+            )
+            const response = yield* Effect.tryPromise((signal) =>
+              originalFetch(request, { signal }),
+            ).pipe(Effect.timeout("2 seconds"))
+            expect(response.status).toBe(202)
+            expect(yield* sql`SELECT delivery_id FROM webhook_deliveries`).toEqual([
+              { delivery_id: "runtime-identity" },
+            ])
+          }
           yield* Effect.promise(() => started.promise).pipe(Effect.timeout("2 seconds"))
           if (scenario === "slow") {
             expect(checkWrites).toHaveLength(1)

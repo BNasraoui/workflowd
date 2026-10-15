@@ -1,4 +1,7 @@
 import { Effect, Schema } from "effect"
+import type { IdentityPublication } from "./identity-publication"
+import type { IdentityRequest } from "./identity-request"
+import type { IdentityWork } from "./identity-work"
 import type { GitHubInstallationAdapter } from "./adapter"
 
 const checkName = "Workflowd Git Identity"
@@ -56,11 +59,6 @@ const Snapshot = Schema.Struct({
 })
 
 const unavailable = () => new Error("Git identity check unavailable")
-const attempt = <A>(run: (signal: AbortSignal) => Promise<A>) =>
-  Effect.tryPromise({ try: run, catch: unavailable }).pipe(
-    Effect.timeout("30 seconds"),
-    Effect.mapError(unavailable),
-  )
 
 const targetFromCheck = Effect.fn("GitIdentity.rerunTarget")(function* (
   appId: number,
@@ -79,6 +77,7 @@ const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
   getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
   event: string,
   payload: unknown,
+  attempt: IdentityRequest,
 ) {
   if (event !== "pull_request" && event !== "check_run" && event !== "check_suite") return []
   const envelope = yield* Schema.decodeUnknownEffect(Envelope)(payload)
@@ -143,6 +142,7 @@ const inspectRange = Effect.fn("GitIdentity.inspectRange")(function* (
   base: string,
   head: string,
   blockedEmails: ReadonlyArray<string>,
+  attempt: IdentityRequest,
 ) {
   const compareCommits = client.compareCommits?.bind(client)
   if (compareCommits === undefined) return yield* Effect.fail(unavailable())
@@ -160,6 +160,8 @@ const inspectRange = Effect.fn("GitIdentity.inspectRange")(function* (
         request: { signal },
       }),
     ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Comparison)))
+    if (data.total_commits > 10_000 || seen.size + data.commits.length > 10_000)
+      return yield* Effect.fail(new Error("range too large"))
     if (
       (total !== undefined && total !== data.total_commits) ||
       (data.commits.length === 0 && seen.size < data.total_commits)
@@ -194,6 +196,7 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   repository: Repository,
   target: Target,
   blockedEmails: ReadonlyArray<string> | undefined,
+  attempt: IdentityRequest,
 ) {
   if (!blockedEmails?.some((email) => email.trim().length > 0))
     return yield* Effect.fail(unavailable())
@@ -211,7 +214,14 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   const pull = yield* snapshot()
   if (pull.number !== target.number || pull.headSha !== target.head || pull.state !== "open")
     return yield* Effect.fail(unavailable())
-  const result = yield* inspectRange(client, repository, pull.baseSha, pull.headSha, blockedEmails)
+  const result = yield* inspectRange(
+    client,
+    repository,
+    pull.baseSha,
+    pull.headSha,
+    blockedEmails,
+    attempt,
+  )
   const current = yield* snapshot()
   if (
     current.headSha !== pull.headSha ||
@@ -226,6 +236,8 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
   getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
   blockedEmails: ReadonlyArray<string> | undefined,
   target: Target,
+  publication: IdentityPublication,
+  attempt: IdentityRequest,
 ) {
   const [owner = "", repo = ""] = target.repository.full_name.split("/")
   const repository = { owner, repo }
@@ -237,25 +249,35 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
     external_id: `agent-git:${target.number}`,
     output: { title: checkName, summary: "Inspecting commit identities." },
   }
-  const checkId = yield* attempt((signal) =>
-    target.checkId === undefined
-      ? client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } })
-      : client.updateCheckRun({ ...pending, check_run_id: target.checkId, request: { signal } }),
+  const checkId =
+    target.checkId ??
+    (yield* attempt((signal) =>
+      client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
+    ))
+  const write = yield* publication(
+    `${target.repository.full_name.toLowerCase()}/${checkId}`,
+    attempt,
   )
-  const result = yield* inspectPull(client, repository, target, blockedEmails).pipe(
+  if (target.checkId !== undefined)
+    yield* write((signal) =>
+      client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
+    )
+  const result = yield* inspectPull(client, repository, target, blockedEmails, attempt).pipe(
     Effect.timeout("2 minutes"),
-    Effect.catch(() =>
+    Effect.catch((error) =>
       Effect.succeed({
         conclusion: "failure" as const,
         output: {
           title: checkName,
           summary:
-            "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
+            error instanceof Error && error.message === "range too large"
+              ? "range too large"
+              : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
         },
       }),
     ),
   )
-  yield* attempt((signal) =>
+  yield* write((signal) =>
     client.updateCheckRun({
       ...repository,
       check_run_id: checkId,
@@ -264,7 +286,7 @@ const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
       request: { signal },
     }),
   )
-})
+}, Effect.scoped)
 
 export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
   appId: number,
@@ -272,11 +294,35 @@ export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
   blockedEmails: ReadonlyArray<string> | undefined,
   event: string,
   payload: unknown,
+  publication: IdentityPublication,
+  attempt: IdentityRequest,
 ) {
-  const targets = yield* targetFromEvent(appId, getClient, event, payload).pipe(
+  const targets = yield* targetFromEvent(appId, getClient, event, payload, attempt).pipe(
     Effect.mapError(unavailable),
   )
-  yield* Effect.forEach(targets, (target) => checkTarget(getClient, blockedEmails, target), {
-    discard: true,
-  })
+  yield* Effect.forEach(
+    targets,
+    (target) => checkTarget(getClient, blockedEmails, target, publication, attempt),
+    {
+      discard: true,
+    },
+  )
+})
+
+export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
+  appId: number,
+  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
+  blockedEmails: ReadonlyArray<string> | undefined,
+  event: string,
+  payload: unknown,
+  publication: IdentityPublication,
+  attempt: IdentityRequest,
+) {
+  const targets = yield* targetFromEvent(appId, getClient, event, payload, attempt).pipe(
+    Effect.mapError(unavailable),
+  )
+  return targets.map((target): IdentityWork => ({
+    key: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+    run: checkTarget(getClient, blockedEmails, target, publication, attempt),
+  }))
 })

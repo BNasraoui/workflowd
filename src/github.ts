@@ -10,7 +10,12 @@ import { normalizeError } from "./errors"
 import type { GitHubInstallationAdapter } from "./github/adapter"
 import { collectHeadEvidence, type SonarRequest, type SonarResponse } from "./github/head-evidence"
 import { presentReviewCheck, renderReviewComment, reviewMarker } from "./github/review-presentation"
-import { checkAgentGitIdentity } from "./github/identity-check"
+import type { PrRepositories } from "./pr-automation-config"
+import { recoverIdentityChecks } from "./github/identity-recovery"
+import { makeIdentityPublication } from "./github/identity-publication"
+import { makeIdentityRequest } from "./github/identity-request"
+import type { IdentityWork } from "./github/identity-work"
+import { identityCheckJobs, checkAgentGitIdentity } from "./github/identity-check"
 import type { SessionAccess } from "./session-access"
 
 type InstallationClientProvider = (installationId: number) => Promise<GitHubInstallationAdapter>
@@ -41,6 +46,14 @@ export type PullRequestSnapshot = typeof AuthoritativePullRequestSnapshot.Encode
 export type PublicationCurrentness<E, R> = (now: Date) => Effect.Effect<boolean, E, R>
 
 export type GitHubPort = {
+  readonly recoverIdentityChecks?: (
+    repositories: PrRepositories,
+    dispatch: (event: string, payload: unknown) => Effect.Effect<void, Error>,
+  ) => Effect.Effect<void>
+  readonly identityCheckJobs?: (
+    event: string,
+    payload: unknown,
+  ) => Effect.Effect<ReadonlyArray<IdentityWork>, Error>
   readonly checkAgentGitIdentity?: (event: string, payload: unknown) => Effect.Effect<void, Error>
   readonly publishReview: <E, R>(
     publication: Publication,
@@ -65,6 +78,32 @@ export class GitHubAppAdapter implements GitHubPort {
     private readonly blockedEmails?: ReadonlyArray<string>,
   ) {}
 
+  private readonly identityRequest = makeIdentityRequest()
+  private readonly identityPublication = makeIdentityPublication()
+
+  readonly recoverIdentityChecks = (
+    repositories: PrRepositories,
+    dispatch: (event: string, payload: unknown) => Effect.Effect<void, Error>,
+  ) =>
+    recoverIdentityChecks(
+      this.appId,
+      this.getInstallationClient,
+      this.identityRequest,
+      repositories,
+      dispatch,
+    )
+
+  readonly identityCheckJobs = (event: string, payload: unknown) =>
+    identityCheckJobs(
+      this.appId,
+      this.getInstallationClient,
+      this.blockedEmails,
+      event,
+      payload,
+      this.identityPublication,
+      this.identityRequest,
+    )
+
   readonly checkAgentGitIdentity = (event: string, payload: unknown) =>
     checkAgentGitIdentity(
       this.appId,
@@ -72,6 +111,8 @@ export class GitHubAppAdapter implements GitHubPort {
       this.blockedEmails,
       event,
       payload,
+      this.identityPublication,
+      this.identityRequest,
     )
 
   readonly collectHeadEvidence = (

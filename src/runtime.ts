@@ -256,7 +256,10 @@ export function startHookService(
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Effect.serviceOption(Automation)
     const github = yield* Effect.serviceOption(GitHub)
-    const checkAgentGitIdentity = yield* makeIdentityCheckDispatcher(Option.getOrUndefined(github))
+    const checkAgentGitIdentity = yield* makeIdentityCheckDispatcher(
+      Option.getOrUndefined(github),
+      config.github?.prRepositories ?? [],
+    )
     const harness = yield* Effect.serviceOption(AgentHarness)
     const workspace = yield* Effect.serviceOption(Workspace)
     const signals = yield* WorkSignal
