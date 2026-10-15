@@ -3,7 +3,7 @@ import { AgentHarness } from "../../src/agent-harness"
 import { GitHub } from "../../src/github"
 import { InstallationGuard } from "../../src/installation-guard"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
-import { Automation } from "../../src/opencode"
+import { Automation, type OpenCodeAutomationError } from "../../src/opencode"
 import { WorkSignalLive } from "../../src/work-signal"
 import { Workspace } from "../../src/workspace"
 import { kernelLayer as jobKernelLayer } from "../kernel/job-store-harness"
@@ -48,7 +48,7 @@ const unexpectedAdapterCall = () => Effect.die("unexpected runtime adapter call"
  * observe availability validation instead of ignoring it.
  */
 export const automationStub = (
-  validateAvailability: () => Effect.Effect<void> = () => Effect.void,
+  validateAvailability: () => Effect.Effect<void, OpenCodeAutomationError> = () => Effect.void,
 ) => ({
   validateAvailability,
   prepareReview: unexpectedAdapterCall,

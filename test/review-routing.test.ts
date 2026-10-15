@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Layer, Schema } from "effect"
+import { Effect, Layer, Logger, Schema } from "effect"
 import { loadConfig } from "../src/config"
 import { makeLiveLayer } from "../src/layers"
 import { AgentHarness } from "../src/agent-harness"
@@ -15,6 +15,7 @@ import { Automation, RunPullRequestAutomationInput } from "../src/opencode"
 test("review availability and sessions use the reviewer URL; agent runs retain their server", async () => {
   const requests: string[] = []
   const credentials: string[] = []
+  const logs: unknown[] = []
   const server = (name: string) =>
     Bun.serve({
       port: 0,
@@ -67,6 +68,14 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
         const automation = yield* Automation
         const harness = yield* AgentHarness
         yield* automation.validateAvailability({ fixWorkEnabled: false }).pipe(Effect.ignore)
+        expect(logs).toContainEqual([
+          "OpenCode availability check failed",
+          expect.objectContaining({
+            serverUrl: reviewer.url.toString(),
+            agentCount: null,
+            modelCount: null,
+          }),
+        ])
         expect(requests.length).toBeGreaterThan(0)
         expect(requests.every((path) => path.startsWith("reviewer:"))).toBe(true)
         requests.length = 0
@@ -142,6 +151,10 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
             ],
           })
           .pipe(Effect.ignore)
+        expect(logs).toContainEqual([
+          "OpenCode availability check failed",
+          expect.objectContaining({ serverUrl: agents.url.toString() }),
+        ])
         const provider = yield* AgentRunProvider
         yield* provider.listProviders({ directory: root }).pipe(Effect.ignore)
         expect(requests.length).toBeGreaterThan(0)
@@ -153,7 +166,10 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
             `${name}:Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
           )
         }
-      }).pipe(Effect.provide(live)),
+      }).pipe(
+        Effect.provide(live),
+        Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+      ),
     )
   } finally {
     await agents.stop(true)

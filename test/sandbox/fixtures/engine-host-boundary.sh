@@ -7,7 +7,8 @@ ip netns add target
 ip netns add tailtarget
 ip link add engine-probe type veth peer name ingress
 ip link set ingress netns host
-ip -n host link add wfd-sandbox0 type bridge
+# Pin the MAC: temporary IPv6 probe ports must not invalidate cached ARP entries.
+ip -n host link add wfd-sandbox0 address 02:00:00:00:00:01 type bridge
 ip -n host addr add 198.18.0.1/24 dev wfd-sandbox0
 ip -n host link set wfd-sandbox0 up
 ip -n host link set ingress master wfd-sandbox0

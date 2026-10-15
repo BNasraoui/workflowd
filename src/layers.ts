@@ -69,13 +69,13 @@ import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
 
 import { makeGitHubLayer } from "./github/layer"
-import { makeExecutionOnlyLayer, makeHarnessAdapters } from "./layers-harness"
+import { makeDiscoveryLayer, makeExecutionOnlyLayer } from "./layers-execution"
+import { makeOpenCodeComposition } from "./layers-opencode"
 
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
   const {
     openCodeAdapter,
     openCodeClientEffect,
-    executionDiscoveryLayer,
     definitions,
     resumeProvider,
     completionSourceOptions,
@@ -83,7 +83,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     agentHarness,
     reviewAccess,
     sessionAccess,
-  } = makeHarnessAdapters(config)
+  } = makeOpenCodeComposition(config)
+  const executionDiscoveryLayer = makeDiscoveryLayer(config, openCodeClientEffect)
   const stageCatalogLayer = Layer.effect(
     StageCatalog,
     Effect.try({

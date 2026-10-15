@@ -8,6 +8,7 @@ import { CiService } from "./ci/service"
 import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
+import { validateOpenCodeStartup } from "./startup-validation"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
@@ -293,15 +294,7 @@ export function startHookService(
         .validateAvailability({
           fixWorkEnabled: config.fixWork.enabled,
         })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new Error(
-                `OpenCode startup validation failed (${error.operation}): ${String(error.cause)}`,
-                { cause: error },
-              ),
-          ),
-        )
+        .pipe(validateOpenCodeStartup)
     }
 
     if (config.mode !== "execution") {
