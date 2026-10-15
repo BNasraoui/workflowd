@@ -59,13 +59,19 @@ function parseDaemonBaseUrl(env: Record<string, string | undefined>): URL | unde
   let parsed: URL
   try {
     parsed = new URL(baseUrl)
-  } catch (cause) {
-    throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL", { cause })
+  } catch {
+    // URL parse errors can include the raw value and any secrets it contains.
+    throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL")
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("WORKFLOWD_DAEMON_URL must be an absolute HTTP(S) URL")
   }
-  if (parsed.username !== "" || parsed.password !== "") {
+  if (
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
     throw new Error("WORKFLOWD_DAEMON_URL must not include credentials")
   }
   return parsed
