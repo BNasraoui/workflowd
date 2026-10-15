@@ -1528,7 +1528,8 @@ function redactFailure(value) {
     .slice(0, 12000)
 }
 if (import.meta.main) {
-  await import("../../test/resources/preload.ts")
+  // Policy validation is read-only and must not start resource supervision.
+  if (process.argv[2] !== "--check-policy") await import("../../test/resources/preload.ts")
   try {
     await probe()
   } catch (error) {

@@ -4,7 +4,8 @@
 Docker and systemd executables already in PATH (Bun caches executable lookup).
 Keep this preload when generating a temporary Bun configuration. Standalone shell
 tests use `bun test/resources/run.ts COMMAND`; evidence probes import the preload.
-The agent-image shell test enters the guard automatically.
+The agent-image shell test enters the guard automatically. The read-only
+`--check-policy` evidence mode does not start resource supervision.
 
 Host containers, networks and volumes carry `io.workflowd.test-run`. User and
 system service units carry `WORKFLOWD_TEST_RESOURCE_RUN` in their Environment
