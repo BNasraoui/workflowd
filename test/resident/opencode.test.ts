@@ -417,7 +417,9 @@ test("OpenCode session shells retain the worker PATH and HOME without daemon cre
         expect(variables.GITHUB_TOKEN).toBeUndefined()
         expect(variables.WORKFLOWD_SUBSCRIPTION_CAPABILITY).toBeUndefined()
         expect(variables.WORKFLOWD_OPENCODE_RESIDENT_SOCKET).toBeUndefined()
-        expect(prompt).toContain("--required --watch")
+        expect(prompt).toContain("gh pr checks PR_NUMBER --repo OWNER/NAME every 60 seconds")
+        expect(prompt).toContain("Required checks")
+        expect(prompt).not.toContain("--required --watch")
         const inbox = yield* makeResidentStore
         expect((yield* inbox.read("ses_env"))?.capability_hash).toBeNull()
         yield* (yield* AgentRunStore).markVerified({
