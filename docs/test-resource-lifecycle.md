@@ -27,9 +27,10 @@ handles process death; the next suite also sweeps dead labelled owners if the
 whole process group was killed. In-flight commands are fenced when teardown
 starts. A live or uninspectable owner is never swept by another suite.
 
-The offline migration fixture is the sole process in a private PID namespace.
-It uses resource-denying Docker/systemd executables instead of a guardian, so
-its process-count security checks retain their original meaning.
+The offline migration and administrative credential fixtures run as PID 1 in a
+private PID namespace. They use resource-denying Docker/systemd executables
+instead of a guardian, preserving process-count checks and orphan reaping. Their
+simulated managers do not create host resources.
 
 The disposable two-UID CI fixture labels its installed host service and native
 transient units using a fixture-only drop-in. This path remains gated by
