@@ -70,6 +70,8 @@ test("durable worker invokes Claude print mode directly and persists output and 
     const invoked = JSON.parse(await readFile(join(root, "invocation.json"), "utf8"))
     expect(invoked.args).toEqual([
       "--print",
+      "--settings",
+      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
       "--output-format",
       "stream-json",
       "--verbose",
