@@ -516,33 +516,48 @@ ending at its handoff step (such as rpi-implement's Finish), finish all earlier
 phases first; at that step update the PR, publish the report, and end without
 watching CI.
 
-After pushing and opening/updating a PR, use
-`timeout 12m gh pr checks PR_NUMBER --repo OWNER/NAME --required --watch --interval 60`.
-Retry missing checks or transient observation errors every 30 seconds for at most
-three minutes per cycle; cap each retry/watch cycle at 15 minutes, below the default
-20-minute stall window (shorten it for a lower configured window). Shell output
-is not a stall heartbeat. Missing/pending checks, watch timeouts, and transient
-errors such as "error connecting to api.github.com" mean CI is still running for
-scheduling purposes: continue remaining work and re-check in bounded cycles,
-returning to task work and progress updates between cycles. Never run back-to-back
-blocking waits without returning to task work in between; no single cycle may
-exceed the budget.
+After pushing and opening/updating a PR, use `gh pr checks PR_NUMBER --repo OWNER/NAME`
+every 60 seconds on draft and ready PRs, without the required-only filter or watch mode.
+Inspect the named `Required checks` aggregate row. The only advisory checks are OpenCode
+Review and AI slop (advisory); ignore those rows and do not infer CI from the command's
+exit code alone. A missing aggregate is pending, never success, even if all visible
+checks pass or `gh` reports "no checks reported". CI is verified only when the aggregate
+is pass/success and every other non-advisory row is pass/success or skipping/skipped.
+SonarCloud Code Analysis and CodeQL PR policy must also be present and pass/success,
+consistent with the required contexts in `src/domain/head-evidence.ts`; a missing
+required context means pending. Any non-advisory pending row means pending; any
+non-advisory fail/failure row means confirmed CI failure, even when the aggregate
+passes. For the aggregate, fail/failure is a confirmed CI failure; a skipped or
+cancelled aggregate is unverified (as is any other non-success terminal state). Any
+other non-advisory terminal state is unverified. Retry missing/pending checks or
+transient observation errors every 60 seconds within the cycle budget. Cap each
+observation cycle at 15 minutes, below the default 20-minute stall window (shorten it
+for a lower configured window). Full CI takes about 25 minutes. Allow a 30-minute total
+observation budget per pushed head, split into bounded cycles; a single 15-minute cycle
+is not the total wait. Shell output is not a stall heartbeat. Missing/pending checks,
+observation timeouts, and transient errors such as "error connecting to api.github.com"
+mean CI is still running for scheduling purposes: continue remaining work and re-check
+in bounded cycles, returning to task work and progress updates between cycles. Never run
+back-to-back blocking waits without returning to task work in between; no single cycle
+may exceed the budget.
 
-Any other observation error means CI is unverified: continue remaining work and
-report it at handoff. Observation errors do not count as confirmed failures.
-The verified result must be for the last pushed head SHA; results for earlier SHAs
-do not verify it. At an early stop, provide the same report as at final handoff
-plus the failing check's link, if applicable.
+Any other observation error means CI is unverified: continue remaining work and report
+it at handoff. Observation errors do not count as confirmed failures. The verified
+result must be for the last pushed head SHA; results for earlier SHAs do not verify it.
+At an early stop, provide the same report as at final handoff plus the failing check's
+link, if applicable.
 
-Verify the pushed head SHA before reporting CI; a changed head must be reported
-without attributing its checks to the pushed SHA. End only at final handoff, an
-active skill's explicit end-turn instruction, or after three unsuccessful repair
-attempts for the same confirmed failure. Missing/pending checks, timeouts, and
-transient observation errors do not count as failures. Once remaining work is
-complete, make one final bounded cycle and hand off. Report the PR URL, pushed SHA,
-and verified required CI result, or CI as unverified and needing follow-up with
-the exact command/error and last required-check states/links (or explicitly none).
-An active skill's end-turn/handoff instructions take precedence over this default.
+Verify the pushed head SHA before reporting CI; a changed head must be reported without
+attributing its checks to the pushed SHA. End only at final handoff, an active skill's
+explicit end-turn instruction, or after three unsuccessful repair attempts for the same
+confirmed failure. Missing/pending checks, timeouts, and transient observation errors do
+not count as failures. Once remaining work is complete, use the remaining total budget
+in bounded cycles before handing off any still-unverified CI. Between cycles, review the
+final diff and prepare the handoff report, and provide a progress update. Report the PR
+URL, pushed SHA, and verified required CI result, or CI as unverified and needing
+follow-up with the exact command/error and last required-check states/links (or
+explicitly none). An active skill's end-turn/handoff instructions take precedence over
+this default.
 
 Resident coordinators use `dispatch_agent` / `read_agent_mailbox` or
 `skills/rpi-coordinate/scripts/wait-mailbox.sh` with the receipt's `mailbox_id` for

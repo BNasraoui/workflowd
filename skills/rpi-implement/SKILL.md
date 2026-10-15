@@ -60,28 +60,45 @@ under the old plan.
    required to end at this handoff skips CI observation and continues to step 3 to
    publish the report before ending in step 5; the coordinator handles the next wake.
    This handoff takes precedence over the injected resident polling default.
-   Otherwise, only after the PR is updated, run
-   `timeout 12m gh pr checks <pr> --repo <owner/repo> --required --watch --interval 60`.
-   Retry missing checks ("no checks reported" or "no required checks reported") or
-   transient observation errors every 30 seconds for up to 3 minutes per cycle; cap
-   each cycle's retries plus watching at 15 minutes (shorter if the configured stall
-   window is lower). Do not rely on shell output as a heartbeat. Never run back-to-back
-   blocking waits without returning to task work in between; no single cycle may
-   exceed the budget. Missing or pending checks, timeout (exit 124), transient errors,
-   and any other observation errors mean CI is unverified: continue to step 3 and
-   report it, never end the turn in step 2. Fix confirmed failures on the same branch,
-   only within the plan's files; after three unsuccessful repair attempts for the same
-   confirmed failure, continue to step 3 with the failure report. Missing/pending
-   checks, timeouts, and observation errors do not count as failed repairs.
-   Verify the PR head still matches the last pushed SHA before reporting CI; results
-   for earlier SHAs do not verify it. A changed head means CI is unverified: continue
-   to step 3 and report the mismatch. Once remaining work is complete, make one final
-   bounded observation cycle and continue to step 3 with any still-unverified CI.
-   For every handoff, including early stops, report the PR URL, last pushed head SHA,
-   verified required CI result or "CI unverified; coordinator/operator follow-up
-   required", exact command/error, and last observed required-check states and links
-   (explicitly say if none were observed). Include the failing check's link when
-   applicable. Carry this CI information into the step 3 report and final message.
+   Otherwise, only after the PR is updated, run `gh pr checks <pr> --repo <owner/repo>`
+   every 60 seconds on draft and ready PRs, without the required-only filter or watch
+   mode. Inspect the named `Required checks` aggregate row. The only advisory checks are
+   OpenCode Review and AI slop (advisory); ignore those rows and do not infer CI from
+   the command's exit code alone. A missing aggregate is pending, never success, even if
+   all visible checks pass or `gh` reports "no checks reported". CI is verified only
+   when the aggregate is pass/success and every other non-advisory row is pass/success
+   or skipping/skipped. SonarCloud Code Analysis and CodeQL PR policy must also be
+   present and pass/success, consistent with the required contexts in
+   `src/domain/head-evidence.ts`; a missing required context means pending. Any
+   non-advisory pending row means pending; any non-advisory fail/failure row means
+   confirmed CI failure, even when the aggregate passes. For the aggregate, fail/failure
+   is a confirmed CI failure; a skipped or cancelled aggregate is unverified (as is any
+   other non-success terminal state). Any other non-advisory terminal state is
+   unverified. Retry missing/pending checks or transient observation errors every 60
+   seconds within the cycle budget; cap each observation cycle at 15 minutes (shorter if
+   the configured stall window is lower). Full CI takes about 25 minutes. Allow a
+   30-minute total observation budget per pushed head, split into bounded cycles; a
+   single 15-minute cycle is not the total wait. Do not rely on shell output as a
+   heartbeat. Never run back-to-back blocking waits without returning to task work in
+   between; no single cycle may exceed the budget. Missing or pending checks,
+   observation timeouts, transient errors, and any other observation errors mean CI is
+   unverified. Use the remaining total budget in bounded cycles before continuing to
+   step 3 to report it; never end the turn in step 2. Between cycles, review the final
+   diff and prepare the handoff report, and provide a progress update. Fix confirmed
+   failures on the same branch, only within the plan's files; after three unsuccessful
+   repair attempts for the same confirmed failure, continue to step 3 with the failure
+   report. Missing/pending checks, timeouts, and observation errors do not count as
+   failed repairs. Verify the PR head still matches the last pushed SHA before reporting
+   CI; results for earlier SHAs do not verify it. A changed head means CI is unverified:
+   continue to step 3 and report the mismatch. Once remaining work is complete, use the
+   remaining total budget in bounded cycles before continuing to step 3 with any
+   still-unverified CI. For every handoff, including early stops, report the PR URL,
+   last pushed head SHA, verified required CI result or "CI unverified;
+   coordinator/operator follow-up required", exact command/error, and last observed
+   required-check states and links (explicitly say if none were observed). Include the
+   failing check's link when applicable. Carry this CI information into the step 3
+   report and final message.
+
 3. Write a short report to `/tmp/rpi/<id>/implement.md`: phases done, commits, checks run with
    results, end-to-end tests run, anything stopped and why. Re-read it, then publish it with
    `gh gist create --desc "RPI implement <id>" /tmp/rpi/<id>/implement.md` (secret). It can
