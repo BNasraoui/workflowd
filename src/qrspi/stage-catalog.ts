@@ -1,5 +1,7 @@
 import { Context, Data, Effect, Schema } from "effect"
+import { retryAvailability } from "../availability-validation"
 import {
+  AgentHarnessError,
   MAX_AGENT_OUTPUT_BYTES,
   MAX_STAGE_REQUEST_BYTES,
   type AgentHarnessPort,
@@ -683,6 +685,7 @@ export const validateWorkflowDefinition = (input: {
       })),
     )
     yield* input.agentHarness.validateAvailability({ selections }).pipe(
+      (check) => retryAvailability(check, availabilityTimeout),
       Effect.mapError((cause) => {
         const failedSnapshot = snapshotForSelection(stageSnapshots, cause.selection)
         return new WorkflowDefinitionValidationError({
@@ -815,6 +818,7 @@ export const validatePersistedSnapshots = (input: {
       })),
     )
     yield* input.agentHarness.validateAvailability({ selections }).pipe(
+      (check) => retryAvailability(check, availabilityTimeout),
       Effect.mapError((cause) => {
         const failedSnapshot = snapshotForSelection(validatedSnapshots, cause.selection)
         return new WorkflowDefinitionValidationError({
@@ -834,6 +838,17 @@ export const validatePersistedSnapshots = (input: {
       }),
     )
   })
+
+function availabilityTimeout(lastFailure: AgentHarnessError | undefined) {
+  return (
+    lastFailure ??
+    new AgentHarnessError({
+      operation: "validate OpenCode availability",
+      cause: new Error("OpenCode availability validation timed out after 30 seconds"),
+      retryable: true,
+    })
+  )
+}
 
 function snapshotForSelection(
   snapshots: ReadonlyArray<typeof ExecutableStageSnapshot.Type>,

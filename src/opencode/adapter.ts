@@ -216,7 +216,7 @@ class OpenCodeAvailabilityError extends Error {
 class OpenCodeCatalogNotReadyError extends Error {
   constructor(agentCount: number, modelCount: number) {
     super(
-      `OpenCode catalogs are not ready (${agentCount} agents, ${modelCount} models); location plugins may still be activating`,
+      `OpenCode catalogs are not ready (${agentCount} agents, ${modelCount} models); plugins may still be activating or no agents/providers may be configured for this location`,
     )
     this.name = "OpenCodeCatalogNotReadyError"
   }

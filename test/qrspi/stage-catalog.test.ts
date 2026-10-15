@@ -608,7 +608,7 @@ describe("TrustedStageCatalog", () => {
             new AgentHarnessError({
               operation: "validate OpenCode availability",
               cause: new Error("unavailable"),
-              retryable: true,
+              retryable: false,
             }),
             { selection: failedSelection },
           ),
@@ -945,7 +945,7 @@ describe("persisted stage snapshots", () => {
               new AgentHarnessError({
                 operation: "validate OpenCode availability",
                 cause: new Error("unavailable"),
-                retryable: true,
+                retryable: false,
                 selection,
               }),
             )
