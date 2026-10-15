@@ -82,7 +82,8 @@ function fixture(
           const response = Response.json(
             { total_count: checks.length, check_runs: checks.slice((page - 1) * 100, page * 100) },
             {
-              headers: page * 100 < checks.length ? { link: `<${next}>; rel="next"` } : {},
+              headers:
+                page * 100 < checks.length ? { link: `<${next.toString()}>; rel="next"` } : {},
             },
           )
           Object.defineProperty(response, "url", { value: url.toString() })
