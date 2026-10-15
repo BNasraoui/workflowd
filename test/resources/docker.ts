@@ -1,10 +1,20 @@
+import { existsSync } from "node:fs"
+import { join } from "node:path"
+import { ownerState } from "./owner"
 import { fixtureLabel } from "./fixture"
 import { command, type Config, label } from "./backend"
 
 /** Explicitly create image-declared and CLI volumes: Docker cannot label anonymous volumes after creation. */
 export function containerArgs(config: Config, args: string[]): string[] {
-  const docker = (...args: string[]) =>
-    command(config, [config.docker!, "--context", "default", ...args])
+  const docker = (...args: string[]) => {
+    if (existsSync(join(config.directory, "closing")) || ownerState(config.owner) !== "alive")
+      throw new Error("Test run ended during container preparation")
+    return command(
+      config,
+      [config.docker!, "--context", "default", ...args],
+      args[0] === "pull" ? 300000 : 20000,
+    )
+  }
   const fixture = args.find((arg) => arg.startsWith(`${fixtureLabel}=`))
   const mounts = new Set<string>()
   const prefix: string[] = []

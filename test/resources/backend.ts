@@ -13,11 +13,11 @@ export type Config = {
   env: NodeJS.ProcessEnv
 }
 
-export function command(config: Config, args: string[]): string {
+export function command(config: Config, args: string[], timeout = 20000): string {
   const result = spawnSync(args[0]!, args.slice(1), {
     env: config.env,
     encoding: "utf8",
-    timeout: 20000,
+    timeout,
     maxBuffer: 8 * 1024 * 1024,
   })
   if (result.error || result.status !== 0)
