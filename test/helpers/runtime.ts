@@ -40,6 +40,8 @@ export const qrspiDefinition = {
   ],
 }
 
+const unexpectedAdapterCall = () => Effect.die("unexpected runtime adapter call")
+
 /**
  * Every runtime adapter stubbed to die on use. Wiring tests merge extra
  * layers (logger, coordinator, stores) on top; pass an Automation stub to
@@ -49,8 +51,8 @@ export const automationStub = (
   validateAvailability: () => Effect.Effect<void> = () => Effect.void,
 ) => ({
   validateAvailability,
-  prepareReview: () => Effect.die("unexpected review"),
-  prepareFix: () => Effect.die("unexpected fix"),
+  prepareReview: unexpectedAdapterCall,
+  prepareFix: unexpectedAdapterCall,
 })
 
 export const stubAdapters = (automation = automationStub()) =>
@@ -68,22 +70,22 @@ export const stubAdapters = (automation = automationStub()) =>
         }),
     }),
     Layer.succeed(GitHub, {
-      fetchPullRequestSnapshot: () => Effect.die("unexpected fetch"),
-      publishReview: () => Effect.die("unexpected publish"),
-      collectHeadEvidence: () => Effect.die("unexpected evidence collection"),
+      fetchPullRequestSnapshot: unexpectedAdapterCall,
+      publishReview: unexpectedAdapterCall,
+      collectHeadEvidence: unexpectedAdapterCall,
     }),
     Layer.succeed(Automation, automation),
     Layer.succeed(AgentHarness, {
-      describe: () => Effect.die("unexpected harness description"),
-      validateAvailability: () => Effect.die("unexpected harness validation"),
-      prepare: () => Effect.die("unexpected harness preparation"),
-      createSession: () => Effect.die("unexpected session creation"),
-      resumeSession: () => Effect.die("unexpected session resume"),
-      abortSession: () => Effect.die("unexpected session abort"),
+      describe: unexpectedAdapterCall,
+      validateAvailability: unexpectedAdapterCall,
+      prepare: unexpectedAdapterCall,
+      createSession: unexpectedAdapterCall,
+      resumeSession: unexpectedAdapterCall,
+      abortSession: unexpectedAdapterCall,
     }),
     Layer.succeed(Workspace, {
-      prepareReview: () => Effect.die("unexpected review workspace"),
-      prepareFix: () => Effect.die("unexpected fix workspace"),
-      publishFix: () => Effect.die("unexpected fix publication"),
+      prepareReview: unexpectedAdapterCall,
+      prepareFix: unexpectedAdapterCall,
+      publishFix: unexpectedAdapterCall,
     }),
   )
