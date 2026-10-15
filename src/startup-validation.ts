@@ -17,7 +17,9 @@ export const validateOpenCodeStartup = (check: Effect.Effect<void, OpenCodeAutom
           Schedule.upTo({ times: 14 }),
           Schedule.setInputType<OpenCodeAutomationError>(),
           Schedule.tap(({ input }) =>
-            Effect.logWarning("OpenCode startup availability check failed; retrying", input),
+            Effect.logWarning("OpenCode startup availability check failed; retrying", {
+              operation: input.operation,
+            }),
           ),
         ),
       }),

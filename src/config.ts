@@ -551,7 +551,10 @@ function fixWorkSigningKey(
 }
 
 function openCodeBaseUrl(env: Record<string, string | undefined>): string {
-  return httpUrl(env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096", "OPENCODE_SERVER_URL")
+  return credentialFreeHttpUrl(
+    env.OPENCODE_SERVER_URL ?? "http://127.0.0.1:4096",
+    "OPENCODE_SERVER_URL",
+  )
 }
 
 function workerHostId(env: Record<string, string | undefined>): string {
