@@ -10,16 +10,8 @@ const identity = (pid: number) => {
   return { state: fields[0], start: fields[19] }
 }
 
-export const owner = () =>
-  [
-    "v1",
-    host(),
-    process.getuid!(),
-    boot(),
-    namespace(),
-    process.pid,
-    identity(process.pid).start,
-  ].join(".")
+export const owner = (pid = process.pid) =>
+  ["v1", host(), process.getuid!(), boot(), namespace(), pid, identity(pid).start].join(".")
 
 /** Unknown ownership is never authority to delete. Include boot, namespace and start ticks to fence PID reuse. */
 export function ownerState(id: string | undefined): "alive" | "dead" | "unknown" {

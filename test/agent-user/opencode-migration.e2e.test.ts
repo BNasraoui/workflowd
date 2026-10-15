@@ -44,7 +44,16 @@ async function runIsolated(pattern: string) {
       "--test-name-pattern",
       pattern,
     ],
-    { stdout: "inherit", stderr: "inherit" },
+    {
+      env: {
+        ...process.env,
+        ...(pattern === "^offline migration"
+          ? { PATH: `${join(import.meta.dir, "../resources/forbidden")}:${process.env.PATH}` }
+          : {}),
+      },
+      stdout: "inherit",
+      stderr: "inherit",
+    },
   )
   expect(await child.exited).toBe(0)
 }
@@ -328,6 +337,8 @@ test("offline migration resumes its journal and refuses schema drift or a reacti
     await runIsolated("^offline migration")
     return
   }
+  for (const executable of ["docker", "systemd-run"])
+    expect(Bun.spawnSync([executable, "--version"]).exitCode).toBe(1)
   const { fixtureEnvironment } = await import("./opencode-fixture")
   const root = await mkdtemp(join(tmpdir(), "opencode-offline-"))
   const binary = Bun.which("opencode2")!

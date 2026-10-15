@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "../../test/resources/preload.ts"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { chmod, chown, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"

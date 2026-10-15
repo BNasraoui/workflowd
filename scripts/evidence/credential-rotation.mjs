@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "../../test/resources/preload.ts"
 /* global Bun */
 // Explicit manual invocation only; never imported by CI or the test suite.
 import assert from "node:assert/strict"

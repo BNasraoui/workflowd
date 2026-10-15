@@ -1,4 +1,3 @@
-import { labelNativeTestUnits } from "../resources/native-units"
 import { randomUUID, createHash } from "node:crypto"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
 import {
@@ -1782,6 +1781,7 @@ async function deployedHost(
         .join("\n"),
       { mode: 0o600 },
     )
+    const { labelNativeTestUnits } = await import("../resources/native-units")
     // Add only the private fixture store to the unit's writable paths. All
     // production capabilities, namespaces and restrictions remain in force.
     await writeFile(

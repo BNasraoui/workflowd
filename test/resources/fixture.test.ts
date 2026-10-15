@@ -24,3 +24,14 @@ test("fixture teardown removes its network and volumes without touching another 
     cleanupFixture(second)
   }
 }, 30000)
+
+test("standalone shell tests use the same labelled lifecycle", async () => {
+  const name = `workflowd-test-${crypto.randomUUID()}`
+  const child = Bun.spawn(
+    [process.execPath, `${import.meta.dir}/run.ts`, "bash", "-c", `docker volume create ${name}`],
+    { stdout: "pipe", stderr: "pipe" },
+  )
+  const stderr = await new Response(child.stderr).text()
+  expect(await child.exited, stderr).toBe(0)
+  expect(docker("volume", "ls", "--quiet", "--filter", `name=${name}`)).toBe("")
+}, 30000)

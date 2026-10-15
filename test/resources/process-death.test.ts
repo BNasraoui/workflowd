@@ -32,7 +32,7 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
         const mounts = JSON.parse(run(['docker','inspect','--format','{{json .Mounts}}',${JSON.stringify(name)}]));
         expect(run(['docker','volume','inspect','--format','{{index .Labels "io.workflowd.test-run"}}',mounts[0].Name])).toBe(owner());
         expect(run(['systemctl','--user','show',${JSON.stringify(name)},'--property=Environment','--value'])).toContain('WORKFLOWD_TEST_RESOURCE_RUN='+owner());
-        await Bun.write(${JSON.stringify(ready)}, JSON.stringify({pid:process.pid, guardian:Number(await Bun.file(process.env.PATH.split(':')[0]+'/guardian').text()), volume:mounts[0].Name}));
+        await Bun.write(${JSON.stringify(ready)}, JSON.stringify({pid:process.pid, launcher:process.ppid, guardian:Number(await Bun.file(process.env.PATH.split(':')[0]+'/guardian').text()), volume:mounts[0].Name}));
         ${scenario === "exit" ? "process.exit(0)" : "await new Promise(()=>{})"};
       }, 60000);
     `
@@ -44,7 +44,7 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
         if (child.exitCode !== null && child.exitCode !== 0) throw new Error(await logs)
         return Bun.file(ready).exists()
       })
-      const state: { pid: number; guardian: number; volume: string } = JSON.parse(
+      const state: { pid: number; guardian: number; launcher: number; volume: string } = JSON.parse(
         await readFile(ready, "utf8"),
       )
       if (scenario === "kill") {
@@ -62,6 +62,7 @@ for (const scenario of ["exit", "signal", "kill", "next-start"] as const) {
       }
       if (scenario === "next-start") {
         process.kill(state.guardian, "SIGKILL")
+        process.kill(state.launcher, "SIGKILL")
         child.kill("SIGKILL")
       }
       if (scenario !== "exit")
