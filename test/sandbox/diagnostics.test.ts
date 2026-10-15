@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Cause } from "effect"
+import { Cause, Schema } from "effect"
 import { sandboxDiagnostic } from "../../src/sandbox/diagnostics"
 import { SandboxError } from "../../src/sandbox/store"
 
@@ -92,4 +92,50 @@ test("JSON escaping cannot expand the diagnostic beyond its byte budget", () => 
   const cause = new AggregateError(Array.from({ length: 7 }, () => new Error("\ud800".repeat(512))))
   const diagnostic = sandboxDiagnostic("terminal", cause)
   expect(Buffer.byteLength(diagnostic.message)).toBeLessThan(8192)
+})
+
+test("schema diagnostics retain nested failing paths without values or schema messages", () => {
+  const schema = Schema.Struct({
+    policy: Schema.fromJsonString(
+      Schema.Struct({
+        publish: Schema.Struct({ coAuthor: Schema.String.check(Schema.isPattern(/^valid$/)) }),
+      }),
+    ),
+  })
+  const result = Schema.decodeUnknownResult(schema)({
+    policy: JSON.stringify({ publish: { coAuthor: "private-value-canary" } }),
+  })
+  expect(result._tag).toBe("Failure")
+  if (result._tag !== "Failure") throw new Error("Expected decode failure")
+  const diagnostic = sandboxDiagnostic("lease.reconcile", result.failure)
+  expect(diagnostic.evidence.causes[0]?.message).toBe(
+    "Schema validation failed at policy.publish.coAuthor",
+  )
+  expect(diagnostic.message).not.toContain("private-value-canary")
+  expect(diagnostic.message).not.toContain("/^valid$/") // schema expectations stay private
+})
+
+test("schema paths include array indices, missing keys and root failures", () => {
+  for (const [schema, input, path] of [
+    [
+      Schema.Struct({ items: Schema.Array(Schema.Struct({ name: Schema.String })) }),
+      { items: [{}] },
+      "items.0.name",
+    ],
+    [
+      Schema.Union([
+        Schema.Struct({ nested: Schema.String }),
+        Schema.Struct({ other: Schema.Number }),
+      ]),
+      { nested: 7 },
+      "nested",
+    ],
+    [Schema.String, 7, "$"],
+  ] as const) {
+    const result = Schema.decodeUnknownResult(schema)(input)
+    if (result._tag !== "Failure") throw new Error("Expected decode failure")
+    expect(sandboxDiagnostic("decode", result.failure).evidence.causes[0]?.message).toBe(
+      `Schema validation failed at ${path}`,
+    )
+  }
 })

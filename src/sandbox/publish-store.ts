@@ -42,11 +42,32 @@ export const PublicationReceipt = Schema.Struct({
   closingIssuesVerified: Schema.optionalKey(Schema.Boolean),
   cause: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
 })
+// Saved metadata is evidence, not a new publication request. Retain old text and
+// absent fields exactly; the publisher validates current requirements before I/O.
+const SavedResultMetadata = Schema.Struct({
+  sourceSha: sha,
+  resultSha: sha,
+  treeSha: Schema.optionalKey(sha),
+  title: Schema.optionalKey(Schema.String),
+  commitMessage: Schema.optionalKey(Schema.String),
+  body: Schema.optionalKey(Schema.String),
+  branch: Schema.String,
+  bundleSha256: digest,
+  manifestSha256: digest,
+})
+const SavedPublicationReceipt = Schema.Struct({
+  stage: Schema.Literals(["validated", "pushing", "pushed", "creating_pr", "published"]),
+  commitSha: Schema.optionalKey(Schema.NullOr(sha)),
+  pr: Schema.NullOr(Schema.Int.check(Schema.isGreaterThan(0))),
+  revoked: Schema.Boolean,
+  closingIssuesVerified: Schema.optionalKey(Schema.Boolean),
+  cause: Schema.optionalKey(Schema.String),
+})
 export const PublishIntent = Schema.Struct({
   run_id: Schema.String,
   actions_run_id: Schema.Int,
   attempt: Schema.Literal(1),
-  metadata: Schema.fromJsonString(ResultMetadata),
+  metadata: Schema.fromJsonString(SavedResultMetadata),
   phase: Schema.Literals([
     "sealed",
     "approving",
@@ -60,7 +81,7 @@ export const PublishIntent = Schema.Struct({
   artifact_digest: Schema.NullOr(Schema.String),
   deadline: Schema.Number,
   base_ref: Schema.NullOr(Schema.String),
-  receipt: Schema.NullOr(Schema.fromJsonString(PublicationReceipt)),
+  receipt: Schema.NullOr(Schema.fromJsonString(SavedPublicationReceipt)),
 })
 export type PublishIntent = typeof PublishIntent.Type
 

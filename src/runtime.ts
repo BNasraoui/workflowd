@@ -401,8 +401,8 @@ export function startHookService(
       const superviseSandbox = (operation: Effect.Effect<void, SandboxError>) =>
         operation.pipe(
           Effect.as("worked" as const),
-          Effect.catch(() =>
-            Effect.logError("Sandbox reconciliation failed; saved custody retained").pipe(
+          Effect.catch((cause) =>
+            Effect.logError("Sandbox reconciliation failed; saved custody retained", cause).pipe(
               Effect.as("idle" as const),
             ),
           ),
