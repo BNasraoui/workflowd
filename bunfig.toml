@@ -1,8 +1,12 @@
 [test]
+preload = ["./test/resources/preload.ts"]
 # Bun applies thresholds per covered file rather than to the aggregate result.
 coverageThreshold = { lines = 0.6, functions = 0.6, statements = 0.6 }
 coverageReporter = ["text", "lcov"]
 coveragePathIgnorePatterns = [
+  # The launcher re-execs before tests and verifies cleanup after coverage is emitted.
+  # Its exit-status and process-death contracts are exercised by child-suite tests.
+  "test/resources/preload.ts",
   "src/store/errors.ts",
   "src/workspace/errors.ts",
   "src/qrspi/ports.ts",

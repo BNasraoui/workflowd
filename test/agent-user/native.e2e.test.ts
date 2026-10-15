@@ -1,3 +1,4 @@
+import { labelNativeTestUnits } from "../resources/native-units"
 import { randomUUID, createHash } from "node:crypto"
 import { relinkCredentials } from "../../src/agent-host/credential-relink"
 import {
@@ -1212,6 +1213,7 @@ await server.initialize(); await server.rpc.request("thread/list",{limit:1}); co
         "/etc/workflowd/agent-git.env",
         "/etc/systemd/system/workflowd-agent-host.service",
         "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
+        "/run/systemd/system/workflowd-native-.service.d/90-workflowd-test.conf",
         "/usr/local/libexec/workflowd-agent-host",
       ])
         await rm(path, { force: true })
@@ -1784,7 +1786,7 @@ async function deployedHost(
     // production capabilities, namespaces and restrictions remain in force.
     await writeFile(
       "/etc/systemd/system/workflowd-agent-host.service.d/fixture.conf",
-      `[Service]\nReadWritePaths=${root}\n`,
+      `[Service]\nReadWritePaths=${root}\n${labelNativeTestUnits()}`,
     )
     await command(["systemctl", "daemon-reload"])
     await writeFile(marker, "installed")

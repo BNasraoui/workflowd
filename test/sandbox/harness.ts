@@ -1,3 +1,4 @@
+import { cleanupFixture, fixtureArgs } from "../resources/fixture"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
@@ -55,18 +56,30 @@ export async function runnerFixture(runnerAddresses: ReadonlyArray<string> = [])
     repositoryUrl: new URL("repos/fixture/repo", submissionServer.url).toString(),
   }
   const name = `workflowd-sandbox-${process.pid}-${root.split("-").at(-1) ?? "fixture"}`
-  const docker = (...args: string[]) => command(["env", "DOCKER_BUILDKIT=0", "docker", ...args])
+  const docker = (...args: string[]) => command(["docker", ...fixtureArgs(name, args)])
   let hold: ReturnType<typeof Bun.spawn> | undefined
   let holdLog = Promise.resolve("")
   const close = async () => {
-    await submissionServer.stop(true)
-    hold?.kill("SIGKILL")
-    await hold?.exited
-    await docker("rm", "-f", `${name}-runner`, `${name}-engine`)
-    await docker("network", "rm", name)
-    await docker("volume", "rm", `${name}-socket`)
-    await rm(root, { recursive: true, force: true })
+    const errors: unknown[] = []
+    // Keep dependency order, but one failure must not skip the remaining teardown.
+    for (const release of [
+      () => submissionServer.stop(true),
+      async () => {
+        hold?.kill("SIGKILL")
+        await hold?.exited
+      },
+      () => cleanupFixture(name),
+      () => rm(root, { recursive: true, force: true }),
+    ]) {
+      try {
+        await release()
+      } catch (error) {
+        errors.push(error)
+      }
+    }
+    if (errors.length) throw new AggregateError(errors, `Sandbox teardown failed: ${name}`)
   }
+
   try {
     await docker(
       "build",
