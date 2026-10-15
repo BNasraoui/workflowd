@@ -47,7 +47,7 @@
           "environmentId": 7,
           "publisherAppId": 5232172,
           "publisherActorId": 339414993,
-          "coAuthor": "Ben <ben@example.com>"
+          "coAuthor": "Ben <ben@example.test>"
         },
         "tailscaleClientId": "fixture",
         "tailscaleAudience": "fixture"
@@ -68,7 +68,7 @@
           "environmentId": 7,
           "publisherAppId": 5232172,
           "publisherActorId": 339414993,
-          "coAuthor": "Ben <ben@example.com>"
+          "coAuthor": "Ben <ben@example.test>"
         },
         "tailscaleClientId": "fixture",
         "tailscaleAudience": "fixture"

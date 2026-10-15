@@ -1,11 +1,15 @@
 import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Effect, Schema } from "effect"
+import { Effect, Logger, Schema, type SchemaAST } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { SandboxPolicy } from "../../src/sandbox/config"
 import { makeSandboxStore } from "../../src/sandbox/store"
 import { makeSandboxPublisher } from "../../src/sandbox/publish"
-import { makePublishStore } from "../../src/sandbox/publish-store"
+import {
+  makePublishStore,
+  ResultMetadata,
+  PublicationReceipt,
+} from "../../src/sandbox/publish-store"
 import { makeSandboxGithub } from "../../src/sandbox/github"
 import { makeSandboxLeaseService } from "../../src/sandbox/lease"
 import {
@@ -16,12 +20,28 @@ import {
   sandboxPublishMigration,
   sandboxPublicationReceiptMigration,
 } from "../../src/sandbox/migration"
-import { sandboxGithubFixture } from "./harness"
+import { sandboxGithubFixture, sandboxPublicationFixture } from "./harness"
 import history from "./fixtures/saved-history.json"
 
 // Frozen values from the named git revisions, including pre-merge development shapes.
 // Never build these policies by spreading today's config or relaxing its schema.
 const current = Schema.decodeUnknownSync(SandboxPolicy)(history.policies[3]!.policy)
+const validMetadata = Schema.decodeUnknownSync(ResultMetadata)({
+  ...history.publications[4]!.metadata,
+  commitMessage: "Agent message",
+})
+
+// Inspect every nested struct independently of snapshots, which can be updated blindly.
+const expectEveryField = (ast: SchemaAST.AST, value: unknown, path: string) => {
+  if (ast._tag !== "Objects") return
+  expect(value, path).toBeObject()
+  const object = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown))(value)
+  expect(Object.keys(object).sort(), path).toEqual(
+    ast.propertySignatures.map((field) => String(field.name)).sort(),
+  )
+  for (const field of ast.propertySignatures)
+    expectEveryField(field.type, object[String(field.name)], `${path}.${String(field.name)}`)
+}
 const migrations = Effect.gen(function* () {
   yield* sandboxMigration
   yield* sandboxCleanupMigration
@@ -122,14 +142,18 @@ for (const { commit, metadata, receipt } of history.publications) {
 test("current saved policy round-trips every field; schema changes require a new frozen fixture", async () => {
   // Adding, removing or changing a policy field requires an explicit persistence decision.
   expect(Schema.toJsonSchemaDocument(SandboxPolicy)).toMatchSnapshot()
-  expect(Object.keys(SandboxPolicy.fields).sort()).toEqual(
-    Object.keys(current).sort().concat("toolingSha").sort(),
+  const policy = { ...current, toolingSha: "c".repeat(40) }
+  expectEveryField(SandboxPolicy.ast, policy, "policy")
+  expectEveryField(ResultMetadata.ast, validMetadata, "metadata")
+  expectEveryField(
+    PublicationReceipt.ast,
+    { ...history.publications[4]!.receipt, cause: "historical cause" },
+    "receipt",
   )
   await run(
     Effect.gen(function* () {
       yield* migrations
       const store = yield* makeSandboxStore
-      const policy = { ...current, toolingSha: "c".repeat(40) }
       const saved = yield* store.request({
         runId: "new",
         leaseId: "lease-new",
@@ -182,6 +206,44 @@ test("legacy policies cannot authorize a new runner acquisition", async () => {
   }
 })
 
+for (const [name, policy] of [
+  ["missing agentImage", history.policies[2]!.policy],
+  ["untrusted agentImage", { ...current, agentImage: "docker.io/attacker/image:latest" }],
+  ["invalid coAuthor", { ...current, publish: { ...current.publish, coAuthor: "invalid" } }],
+] as const) {
+  test(`ready leases fail closed with ${name}`, async () => {
+    const fixture = await sandboxGithubFixture(current)
+    try {
+      await run(
+        Effect.gen(function* () {
+          yield* migrations
+          yield* saveLease(policy, "starting")
+          const sql = yield* SqlClient.SqlClient
+          const transport = {
+            leaseId: "lease-1",
+            peerId: "peer-1",
+            repositoryPath: "/workspace/repository",
+            address: "runner",
+            port: 22,
+            knownHostsFile: "/tmp/known-hosts",
+            identityFile: "/tmp/identity",
+          }
+          yield* sql`UPDATE sandbox_leases SET state='ready',peer_id='peer-1',transport=${JSON.stringify(transport)} WHERE run_id='old'`
+          const store = yield* makeSandboxStore
+          const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+          const leases = yield* makeSandboxLeaseService(github)
+          expect((yield* Effect.result(leases.acquire("old")))._tag).toBe("Failure")
+          expect((yield* store.read("old"))?.state).toBe("ready")
+          expect(fixture.tokenRequests).toEqual([])
+          expect(fixture.refCreates).toBe(0)
+        }),
+      )
+    } finally {
+      await fixture.close()
+    }
+  })
+}
+
 test("historical publication evidence never authorizes a new approval", async () => {
   const fixture = await sandboxGithubFixture(current)
   try {
@@ -201,6 +263,20 @@ test("historical publication evidence never authorizes a new approval", async ()
           VALUES('old',41,1,${JSON.stringify(metadata)},'sealed',${Date.now() + 60000},'main')`
           expect(yield* publisher.poll("old")).toBe("operator_required")
           expect((yield* (yield* makePublishStore).read("old"))?.phase).toBe("operator_required")
+        }
+        // Valid current metadata isolates the policy gate from the metadata gate.
+        for (const { policy } of history.policies.slice(1, 3)) {
+          yield* sql`DELETE FROM sandbox_publications`
+          yield* sql`DELETE FROM sandbox_leases`
+          yield* sql`DELETE FROM sandbox_cleanup_runs`
+          yield* saveLease(policy)
+          yield* sql`INSERT INTO sandbox_publications(run_id,actions_run_id,attempt,metadata,phase,deadline,base_ref)
+          VALUES('old',41,1,${JSON.stringify(validMetadata)},'sealed',${Date.now() + 60000},'main')`
+          const result = yield* publisher.poll("old").pipe(Effect.result)
+          expect(fixture.tokenRequests).toEqual([])
+          expect(result).toMatchObject({ _tag: "Success", success: "operator_required" })
+          expect((yield* (yield* makePublishStore).read("old"))?.phase).toBe("operator_required")
+          expect(yield* publisher.poll("old")).toBe("operator_required")
         }
         expect(fixture.tokenRequests).toEqual([])
       }),
@@ -225,6 +301,51 @@ test("reconciliation preserves an in-flight pre-body publication until its deadl
         expect((yield* (yield* makeSandboxStore).read("old"))?.state).toBe("starting")
         expect(fixture.cancellations).toEqual([])
       }),
+    )
+  } finally {
+    await fixture.close()
+  }
+})
+
+test("reconciliation retains a saved receipt without commitSha without attempting PR recovery", async () => {
+  const policy = { ...current, publish: { ...current.publish!, environmentId: 9 } }
+  const fixture = await sandboxGithubFixture(policy)
+  const publication = sandboxPublicationFixture(
+    fixture,
+    policy,
+    "lease-1",
+    "saved receipt",
+    validMetadata.branch,
+  )
+  const messages: unknown[] = []
+  try {
+    await run(
+      Effect.gen(function* () {
+        yield* migrations
+        yield* saveLease(policy, "starting")
+        const store = yield* makePublishStore
+        yield* store.seal({
+          runId: "old",
+          actionsRunId: 41,
+          attempt: 1,
+          metadata: validMetadata,
+          baseRef: "main",
+          deadline: Date.now() + 60000,
+        })
+        const github = yield* makeSandboxGithub(fixture.github, fixture.OctokitClass)
+        const publisher = yield* makeSandboxPublisher(
+          github,
+          yield* makeSandboxLeaseService(github),
+        )
+        expect(yield* publisher.poll("old")).toBe("approved")
+        const sql = yield* SqlClient.SqlClient
+        const receipt = history.publications[1]!.receipt
+        yield* sql`UPDATE sandbox_publications SET receipt=${JSON.stringify(receipt)} WHERE run_id='old'`
+        expect(yield* publisher.poll("old")).toBe("operator_required")
+        expect<unknown>((yield* store.read("old"))?.receipt).toEqual(receipt)
+        expect(publication.posts).toBe(1)
+        expect(messages).toEqual([])
+      }).pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => messages.push(message))]))),
     )
   } finally {
     await fixture.close()

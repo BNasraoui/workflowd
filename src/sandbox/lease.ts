@@ -321,8 +321,8 @@ export const makeSandboxLeaseService = (
       )
     const acquire = Effect.fn("SandboxLease.acquire")(function* (runId: string) {
       let lease = yield* required(runId)
-      if (lease.state === "ready") return lease
       yield* Schema.decodeUnknownEffect(SandboxPolicy)(lease.policy)
+      if (lease.state === "ready") return lease
       if (lease.state === "requested") {
         if (!(yield* store.beginStart(runId))) return yield* required(runId)
         lease = yield* required(runId)

@@ -1,18 +1,25 @@
 import { expect, test } from "bun:test"
-import { Deferred, Effect, Layer, Logger } from "effect"
+import { Deferred, Effect, Layer, Logger, Schema } from "effect"
 import { loadConfig } from "../../src/config"
 import { startHookService } from "../../src/runtime"
 import { SandboxDispatch } from "../../src/sandbox/dispatch"
-import { SandboxError } from "../../src/sandbox/store"
+import { sandboxStage } from "../../src/sandbox/store"
 import { KernelSessionStoreLive } from "../../src/kernel/session-store"
 import { kernelLayer } from "../kernel/job-store-harness"
 import { WorkSignalLive } from "../../src/work-signal"
 
 test("runtime logs the reconciliation failure cause while retaining the worker", async () => {
   const loaded = await loadConfig({ WORKFLOWD_MODE: "execution" }, { home: "/tmp" })
-  const failure = new SandboxError({
-    message: "Saved lease policy decode failed: agentImage missing",
-  })
+  const failure = await Effect.runPromise(
+    sandboxStage(
+      "dispatch.iteration",
+      Schema.decodeUnknownEffect(
+        Schema.Struct({
+          policy: Schema.fromJsonString(Schema.Struct({ agentImage: Schema.String })),
+        }),
+      )({ policy: JSON.stringify({ agentImage: 123456789 }) }),
+    ).pipe(Effect.flip),
+  )
   const messages: unknown[] = []
   await Effect.runPromise(
     Effect.scoped(
@@ -52,6 +59,8 @@ test("runtime logs the reconciliation failure cause while retaining the worker",
       }),
     ),
   )
+  expect(JSON.stringify(messages)).toContain("policy.agentImage")
+  expect(JSON.stringify(messages)).not.toContain("123456789")
   expect(messages).toContainEqual([
     "Sandbox reconciliation failed; saved custody retained",
     failure,
