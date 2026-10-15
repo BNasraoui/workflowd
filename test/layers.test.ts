@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { InstallationGuard } from "../src/installation-guard"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
@@ -99,6 +100,7 @@ function qrspiEnvironment(directory: string) {
 function loadLayerConfig(directory: string, overrides: Record<string, string> = {}) {
   return loadConfig(
     {
+      ...agentGitTestEnvironment,
       GITHUB_APP_ID: "123",
       WORKFLOWD_AGENT_GIT_NAME: "Agent",
       WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",

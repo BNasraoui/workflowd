@@ -60,7 +60,23 @@ export type GitHubCommitStatus = {
   readonly targetUrl?: string | null
 }
 
+type OpenPullPages = (input: {
+  readonly owner: string
+  readonly repo: string
+  readonly state: "open"
+  readonly per_page: number
+  readonly request?: { readonly signal?: AbortSignal }
+}) => AsyncIterable<
+  ReadonlyArray<{ readonly number: number; readonly head: { readonly sha: string } }>
+>
+
+type CompareCommits = (
+  input: RestEndpointMethodTypes["repos"]["compareCommitsWithBasehead"]["parameters"],
+) => Promise<unknown>
+
 export type OctokitClientPort = {
+  readonly listOpenPullPages?: OpenPullPages
+  readonly compareCommits?: CompareCommits
   readonly getPullRequest: (
     input: RestEndpointMethodTypes["pulls"]["get"]["parameters"],
   ) => Promise<{
@@ -149,6 +165,8 @@ export type OctokitClientPort = {
 }
 
 export type GitHubInstallationAdapter = {
+  readonly listOpenPullPages?: OpenPullPages
+  readonly compareCommits?: CompareCommits
   readonly getPullRequest: (
     input: RestEndpointMethodTypes["pulls"]["get"]["parameters"],
   ) => Promise<GitHubPullRequestData>
@@ -186,6 +204,18 @@ export type GitHubInstallationAdapter = {
 
 export class OctokitInstallationAdapter implements GitHubInstallationAdapter {
   constructor(private readonly client: OctokitClientPort) {}
+
+  listOpenPullPages(input: Parameters<OpenPullPages>[0]) {
+    const pages = this.client.listOpenPullPages?.(input)
+    if (pages === undefined) throw new Error("Pull request listing unavailable")
+    return pages
+  }
+
+  compareCommits(input: Parameters<CompareCommits>[0]) {
+    return (
+      this.client.compareCommits?.(input) ?? Promise.reject(new Error("Compare API unavailable"))
+    )
+  }
 
   async getPullRequest(input: Parameters<GitHubInstallationAdapter["getPullRequest"]>[0]) {
     return normalizePullRequest(await this.client.getPullRequest(input))
@@ -356,6 +386,13 @@ function normalizeCommitState(state: string): GitHubCommitStatus["state"] {
 
 export function makeOctokitClientPort(client: OctokitClient): OctokitClientPort {
   return {
+    listOpenPullPages: async function* (input) {
+      for await (const response of client.paginate.iterator(client.rest.pulls.list, input)) {
+        yield response.data.map((pull) => ({ number: pull.number, head: { sha: pull.head.sha } }))
+      }
+    },
+    compareCommits: async (input) =>
+      (await client.rest.repos.compareCommitsWithBasehead(input)).data,
     getPullRequest: async (input) => (await client.rest.pulls.get(input)).data,
     listIssueCommentPages: async function* (input) {
       for await (const response of client.paginate.iterator(

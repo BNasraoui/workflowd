@@ -317,17 +317,15 @@ test("an empty blocklist permits pushes whose ranges contain no new commits", as
   }
 })
 
-test("identity configuration is optional only when automation dispatch is disabled", async () => {
+test("identity configuration is optional only without PR repositories or dispatch", async () => {
   expect((await loadConfig({ WORKFLOWD_MODE: "execution" })).agentGit).toBeUndefined()
-  expect(
-    (
-      await loadConfig({
-        ...automation,
-        WORKFLOWD_AGENT_RUN_TOKEN: undefined,
-        WORKFLOWD_AGENT_RUN_REPOSITORIES: undefined,
-      })
-    ).agentGit,
-  ).toBeUndefined()
+  await expect(
+    loadConfig({
+      ...automation,
+      WORKFLOWD_AGENT_RUN_TOKEN: undefined,
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: undefined,
+    }),
+  ).rejects.toThrow("WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS")
 })
 
 test.each([

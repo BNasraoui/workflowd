@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { loadConfig } from "../../src/config"
 import { Effect } from "effect"
@@ -5,6 +6,7 @@ import { localDiscoverySources } from "../../src/execution/local"
 import { loadExecutionCapabilitiesDaemon } from "../../src/mcp/auth"
 
 const env = {
+  ...agentGitTestEnvironment,
   GITHUB_APP_ID: "123",
   WORKFLOWD_AGENT_GIT_NAME: "Agent",
   WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",

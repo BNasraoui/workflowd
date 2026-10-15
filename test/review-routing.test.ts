@@ -1,3 +1,4 @@
+import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { expect, test } from "bun:test"
 import { generateKeyPairSync } from "node:crypto"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -39,6 +40,7 @@ test("review availability and sessions use the reviewer URL; agent runs retain t
     )
     const config = await loadConfig(
       {
+        ...agentGitTestEnvironment,
         GITHUB_APP_ID: "123",
         WORKFLOWD_AGENT_GIT_NAME: "Agent",
         WORKFLOWD_AGENT_GIT_EMAIL: "agent@example.test",

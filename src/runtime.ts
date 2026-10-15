@@ -1,3 +1,4 @@
+import { makeIdentityCheckDispatcher } from "./github/identity-dispatch"
 import { configuredWebhookInstallations } from "./webhook-installations"
 import { InstallationGuard, startInstallationGuard } from "./installation-guard"
 import { AgentHarness } from "./agent-harness"
@@ -255,6 +256,10 @@ export function startHookService(
     const ci = yield* Effect.serviceOption(CiService)
     const automation = yield* Effect.serviceOption(Automation)
     const github = yield* Effect.serviceOption(GitHub)
+    const checkAgentGitIdentity = yield* makeIdentityCheckDispatcher(
+      Option.getOrUndefined(github),
+      config.github?.prRepositories ?? [],
+    )
     const harness = yield* Effect.serviceOption(AgentHarness)
     const workspace = yield* Effect.serviceOption(Workspace)
     const signals = yield* WorkSignal
@@ -511,6 +516,7 @@ export function startHookService(
             ...options,
             prAutomationEnabled: config.mode !== "execution",
             prRepositories: config.github?.prRepositories ?? [],
+            ...(checkAgentGitIdentity !== undefined ? { checkAgentGitIdentity } : {}),
             installationIds,
             ciRepositories: config.ci?.repositories ?? [],
             ...(Option.isSome(installationGuard)

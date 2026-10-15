@@ -1,15 +1,12 @@
 import { App } from "@octokit/app"
 import { Octokit } from "@octokit/rest"
-import { Cause, Context, Effect, Layer, Option } from "effect"
+import { Cause, Effect, Layer, Option } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { AgentHarness } from "./agent-harness"
 import { CiServiceLive } from "./ci/service"
 import type { AppConfig } from "./config"
-import { GitHub, GitHubAppAdapter, publicSonarRequest } from "./github"
-import { OctokitInstallationAdapter, makeOctokitClientPort } from "./github/adapter"
-import { InstallationGuard, makeInstallationGuard } from "./installation-guard"
 import { AgentHandoffStore, AgentHandoffStoreLive } from "./kernel/agent-handoff-store"
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
@@ -70,13 +67,15 @@ import { WorkSignal, WorkSignalLive } from "./work-signal"
 import { loadRunSocketPolicy } from "./worker-identity/peer"
 import { WorkerIdentity, WorkerIdentityLive } from "./worker-identity/service"
 import { GitWorkspaceAdapter, Workspace } from "./workspace"
+
+import { makeGitHubLayer } from "./github/layer"
 import { makeDiscoveryLayer, makeExecutionOnlyLayer } from "./layers-execution"
 import { makeOpenCodeComposition } from "./layers-opencode"
 
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
   const {
-    openCodeClientEffect,
     openCodeAdapter,
+    openCodeClientEffect,
     definitions,
     resumeProvider,
     completionSourceOptions,
@@ -525,45 +524,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
     providerLayer,
     resumeWorkerLayer,
     completionSourceLayer,
-    Layer.effectContext(
-      Effect.tryPromise({
-        try: () => readFile(config.github.privateKeyPath, "utf8"),
-        catch: (cause) => new Error(`Could not read GitHub App private key: ${String(cause)}`),
-      }).pipe(
-        Effect.flatMap(
-          Effect.fn(function* (privateKey: string) {
-            const app = new App({
-              appId: config.github.appId,
-              privateKey,
-              Octokit,
-            })
-            const github = new GitHubAppAdapter(
-              config.github.appId,
-              async (installationId) =>
-                new OctokitInstallationAdapter(
-                  makeOctokitClientPort(await app.getInstallationOctokit(installationId)),
-                ),
-              {
-                resolve: (reference) =>
-                  (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(
-                    reference,
-                  ),
-              },
-              publicSonarRequest,
-            )
-            return Context.make(GitHub, github).pipe(
-              Context.add(
-                InstallationGuard,
-                yield* makeInstallationGuard(
-                  config.github.allowedInstallationAccountIds,
-                  app.octokit,
-                ),
-              ),
-            )
-          }),
-        ),
-      ),
-    ),
+    makeGitHubLayer(config, {
+      resolve: (reference) =>
+        (reference.serverId === reviewServerId ? reviewAccess : sessionAccess).resolve(reference),
+    }),
     Layer.succeed(AgentHarness, agentHarness),
     Layer.succeed(Automation, new OpenCodeAutomationAdapter(agentHarness, definitions)),
     Layer.succeed(Workspace, new GitWorkspaceAdapter(config.workspace)),

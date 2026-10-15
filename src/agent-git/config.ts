@@ -11,6 +11,10 @@ export function loadAgentGitConfig(
   const name = env.WORKFLOWD_AGENT_GIT_NAME?.trim()
   const email = env.WORKFLOWD_AGENT_GIT_EMAIL?.trim()
   const blocked = env.WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS?.trim()
+  if (env.WORKFLOWD_PR_REPOSITORIES?.trim() && !blocked)
+    throw new Error(
+      "WORKFLOWD_AGENT_GIT_BLOCKED_EMAILS must be nonempty when PR repositories are configured",
+    )
   if (!required && !name && !email && !blocked) return undefined
   if (!name || /[\r\n\0<>]/.test(name))
     throw new Error("WORKFLOWD_AGENT_GIT_NAME must be a nonempty git identity name")
