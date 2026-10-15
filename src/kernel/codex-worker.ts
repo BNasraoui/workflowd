@@ -184,6 +184,9 @@ export const runClaudeNativeWorker = async (options: CliWorkerOptions): Promise<
   runCliWorker(options, [
     options.binary,
     "--print",
+    // Print-mode turns must finish their commands before workflowd records completion.
+    "--settings",
+    '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
     "--output-format",
     "stream-json",
     "--verbose",
@@ -342,6 +345,8 @@ export async function runHostWorker(inputPath: string, binary: string, io = proc
       binary,
       "--setting-sources",
       "user",
+      "--settings",
+      '{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"1"}}',
       "-p",
       "--resume",
       request.nativeSessionId!,
