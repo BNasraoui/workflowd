@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Logger } from "effect"
 import { checkName, fixture, head } from "./helpers/identity"
 
 const own = {
@@ -143,4 +143,43 @@ test("a failed repository does not prevent startup recovery in the next configur
     ),
   )
   expect(recovered).toHaveLength(1)
+})
+
+test("a failed supersede write does not stop the newest check or later PRs recovering", async () => {
+  const attempted: string[] = []
+  const f = fixture({
+    suiteChecks: [
+      { ...own, id: 12 },
+      { ...own, id: 14 },
+      { ...own, id: 13 },
+      { ...own, id: 20, external_id: "agent-git:8" },
+    ],
+    intercept: async (path, body) => {
+      if (path.endsWith("/pulls"))
+        return Response.json([7, 8].map((number) => ({ number, head: { sha: head } })))
+      if (body.status === "completed") {
+        attempted.push(path)
+        return Response.json({ message: "unavailable" }, { status: 503 })
+      }
+    },
+  })
+  const recovered: unknown[] = []
+  const logs: unknown[] = []
+  await Effect.runPromise(
+    f.app
+      .recoverIdentityChecks(
+        [{ repository: "owner/repo", installationId: 91 }],
+        (_event, payload) =>
+          Effect.sync(() => {
+            recovered.push(payload)
+          }),
+      )
+      .pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))]))),
+  )
+  expect(JSON.stringify(logs)).toContain('"checkId":12')
+  expect(JSON.stringify(logs)).toContain('"checkId":13')
+  expect(attempted).toEqual(["/repos/owner/repo/check-runs/12", "/repos/owner/repo/check-runs/13"])
+  expect(recovered).toEqual(
+    [14, 20].map((id) => expect.objectContaining({ check_run: expect.objectContaining({ id }) })),
+  )
 })

@@ -95,43 +95,43 @@ const targetFromEvent = Effect.fn("GitIdentity.target")(function* (
     const [owner = "", repo = ""] = envelope.repository.full_name.split("/")
     // Fork suites may omit pull_requests. Recover our PR identifiers from the
     // existing checks, selecting only this suite and App on its immutable head.
-    const checks = yield* attempt(async (signal) => {
-      const checks = []
-      for await (const page of client.listCheckRunPages({
+    const checks = []
+    const controller = new AbortController()
+    yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
+    const pages = client
+      .listCheckRunPages({
         owner,
         repo,
         ref: suite.head_sha,
         check_name: checkName,
         filter: "all",
         per_page: 100,
-        request: { signal },
-      })) {
-        for (const check of page) {
-          if (
-            check.checkSuiteId === suite.id &&
-            check.appId === appId &&
-            check.name === checkName
-          ) {
-            checks.push({
-              id: check.id,
-              name: check.name,
-              app: { id: check.appId },
-              external_id: check.externalId ?? null,
-              head_sha: suite.head_sha,
-            })
-          }
-        }
+        request: { signal: controller.signal },
+      })
+      [Symbol.asyncIterator]()
+    for (;;) {
+      const page = yield* attempt(() => pages.next(), envelope.installation.id)
+      if (page.done) break
+      for (const check of page.value) {
+        if (check.checkSuiteId === suite.id && check.appId === appId && check.name === checkName)
+          checks.push({
+            id: check.id,
+            name: check.name,
+            app: { id: check.appId },
+            external_id: check.externalId ?? null,
+            head_sha: suite.head_sha,
+          })
       }
-      return checks
-    }).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Rerun.fields.check_run))))
-    const targets = yield* Effect.forEach(checks, (check) =>
+    }
+    const decoded = yield* Schema.decodeUnknownEffect(Schema.Array(Rerun.fields.check_run))(checks)
+    const targets = yield* Effect.forEach(decoded, (check) =>
       targetFromCheck(appId, envelope, check),
     )
     return targets.flat()
   }
   const { check_run: check } = yield* Schema.decodeUnknownEffect(Rerun)(payload)
   return yield* targetFromCheck(appId, envelope, check)
-})
+}, Effect.scoped)
 
 type Target = Effect.Success<ReturnType<typeof targetFromEvent>>[number]
 type Repository = { readonly owner: string; readonly repo: string }
@@ -232,64 +232,104 @@ const inspectPull = Effect.fn("GitIdentity.inspectPull")(function* (
   return result
 })
 
-const checkTarget = Effect.fn("GitIdentity.checkTarget")(function* (
-  getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
-  blockedEmails: ReadonlyArray<string> | undefined,
-  target: Target,
-  publication: IdentityPublication,
-  attempt: IdentityRequest,
-) {
-  const [owner = "", repo = ""] = target.repository.full_name.split("/")
-  const repository = { owner, repo }
-  const client = yield* attempt(() => getClient(target.installation.id))
-  const pending = {
-    ...repository,
-    name: checkName,
-    status: "in_progress" as const,
-    external_id: `agent-git:${target.number}`,
-    output: { title: checkName, summary: "Inspecting commit identities." },
-  }
-  const checkId =
-    target.checkId ??
-    (yield* attempt((signal) =>
-      client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
-    ))
-  const write = yield* publication(
-    `${target.repository.full_name.toLowerCase()}/${checkId}`,
-    attempt,
-  )
-  if (target.checkId !== undefined)
-    yield* write((signal) =>
-      client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
-    )
-  const scan: IdentityRequest = (run) => attempt(run, target.installation.id)
-  const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
-    Effect.timeout("2 minutes"),
-    Effect.catch((error) =>
-      Effect.succeed({
-        conclusion: "failure" as const,
-        output: {
-          title: checkName,
-          summary:
-            error instanceof Error &&
-            (error.message === "range too large" ||
-              error.message === "scan budget exhausted, retry later")
-              ? error.message
-              : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
-        },
-      }),
-    ),
-  )
-  yield* write((signal) =>
-    client.updateCheckRun({
+const checkTarget = Effect.fn("GitIdentity.checkTarget")(
+  function* (
+    getClient: (installationId: number) => Promise<GitHubInstallationAdapter>,
+    blockedEmails: ReadonlyArray<string> | undefined,
+    target: Target,
+    publication: IdentityPublication,
+    attempt: IdentityRequest,
+  ) {
+    const [owner = "", repo = ""] = target.repository.full_name.split("/")
+    const repository = { owner, repo }
+    const prKey = `${target.repository.full_name.toLowerCase()}/${target.number}`
+    const installationId = target.installation.id
+    const client = yield* attempt(() => getClient(target.installation.id))
+    const pending = {
       ...repository,
-      check_run_id: checkId,
-      status: "completed",
-      ...result,
-      request: { signal },
-    }),
-  )
-}, Effect.scoped)
+      name: checkName,
+      status: "in_progress" as const,
+      external_id: `agent-git:${target.number}`,
+      output: { title: checkName, summary: "Inspecting commit identities." },
+    }
+    const checkId =
+      target.checkId ??
+      (yield* attempt(
+        (signal) =>
+          client.createCheckRun({ ...pending, head_sha: target.head, request: { signal } }),
+        installationId,
+        { kind: "start", prKey },
+      ))
+    const write = yield* publication(
+      `${target.repository.full_name.toLowerCase()}/${checkId}`,
+      attempt,
+    )
+    yield* Effect.gen(function* () {
+      if (target.checkId !== undefined)
+        yield* write(
+          (signal) =>
+            client.updateCheckRun({ ...pending, check_run_id: checkId, request: { signal } }),
+          installationId,
+          { kind: "start", prKey },
+        )
+      const scan: IdentityRequest = (run) => attempt(run, installationId, { prKey })
+      const result = yield* inspectPull(client, repository, target, blockedEmails, scan).pipe(
+        Effect.timeout("2 minutes"),
+        Effect.catch((error) =>
+          Effect.succeed({
+            conclusion: "failure" as const,
+            output: {
+              title: checkName,
+              summary:
+                error instanceof Error &&
+                (error.message === "range too large" ||
+                  error.message === "scan budget exhausted, retry later")
+                  ? error.message
+                  : "Commit identities could not be verified. Re-run this check after resolving the service or policy configuration error.",
+            },
+          }),
+        ),
+      )
+      yield* write(
+        (signal) =>
+          client.updateCheckRun({
+            ...repository,
+            check_run_id: checkId,
+            status: "completed",
+            ...result,
+            request: { signal },
+          }),
+        installationId,
+        { kind: "finish", prKey },
+      )
+    }).pipe(
+      Effect.onInterrupt(() =>
+        write(
+          (signal) =>
+            client.updateCheckRun({
+              ...repository,
+              check_run_id: checkId,
+              status: "completed",
+              conclusion: "failure",
+              output: { title: checkName, summary: "Superseded by a newer identity check." },
+              request: { signal },
+            }),
+          installationId,
+          { kind: "finish", prKey },
+        ).pipe(
+          Effect.catch(() =>
+            Effect.logError("Git identity interrupted check completion unavailable", { checkId }),
+          ),
+        ),
+      ),
+    )
+  },
+  Effect.scoped,
+  Effect.catchIf(
+    (error) => error instanceof Error && error.message === "scan budget exhausted, retry later",
+    () => Effect.logWarning("Git identity check write budget exhausted; delivery dropped"),
+  ),
+)
 
 export const checkAgentGitIdentity = Effect.fn("GitIdentity.check")(function* (
   appId: number,
@@ -327,6 +367,7 @@ export const identityCheckJobs = Effect.fn("GitIdentity.jobs")(function* (
   return targets.map((target): IdentityWork => ({
     key: `${target.repository.full_name.toLowerCase()}/${target.number}/${target.head}`,
     prKey: `${target.repository.full_name.toLowerCase()}/${target.number}`,
+    preserve: target.checkId !== undefined,
     run: checkTarget(getClient, blockedEmails, target, publication, attempt),
   }))
 })

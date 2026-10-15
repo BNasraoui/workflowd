@@ -41,7 +41,7 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
         request: { signal: controller.signal },
       })[Symbol.asyncIterator]()
       for (;;) {
-        const page = yield* request(() => pulls.next())
+        const page = yield* request(() => pulls.next(), repository.installationId)
         if (page.done) break
         for (const pull of yield* Schema.decodeUnknownEffect(Pulls)(page.value)) {
           const checkPages = client.listCheckRunPages({
@@ -56,7 +56,9 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
           const checks = checkPages[Symbol.asyncIterator]()
           let newest: GitHubCheckRun | undefined
           for (;;) {
-            const page = yield* request(() => checks.next())
+            const page = yield* request(() => checks.next(), repository.installationId, {
+              prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
+            })
             if (page.done) break
             for (const check of page.value) {
               if (
@@ -77,21 +79,35 @@ export const recoverIdentityChecks = Effect.fn("GitIdentity.recover")(function* 
                   `${repository.repository.toLowerCase()}/${older.id}`,
                   request,
                 )
-                yield* write((signal) =>
-                  client.updateCheckRun({
-                    owner,
-                    repo,
-                    check_run_id: older.id,
-                    status: "completed",
-                    conclusion: "failure",
-                    output: {
-                      title: "Workflowd Git Identity",
-                      summary: "Superseded by a newer identity check on this head.",
-                    },
-                    request: { signal },
-                  }),
+                yield* write(
+                  (signal) =>
+                    client.updateCheckRun({
+                      owner,
+                      repo,
+                      check_run_id: older.id,
+                      status: "completed",
+                      conclusion: "failure",
+                      output: {
+                        title: "Workflowd Git Identity",
+                        summary: "Superseded by a newer identity check on this head.",
+                      },
+                      request: { signal },
+                    }),
+                  repository.installationId,
+                  {
+                    kind: "finish",
+                    prKey: `${repository.repository.toLowerCase()}/${pull.number}`,
+                  },
                 )
-              }).pipe(Effect.scoped)
+              }).pipe(
+                Effect.scoped,
+                Effect.catch(() =>
+                  Effect.logError("Git identity supersede unavailable", {
+                    repository: repository.repository,
+                    checkId: older.id,
+                  }),
+                ),
+              )
             }
           }
           if (newest !== undefined) {

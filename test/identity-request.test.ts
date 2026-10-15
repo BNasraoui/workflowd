@@ -111,3 +111,34 @@ test.each([{ "retry-after": "120" }, { "x-ratelimit-remaining": "0", "x-ratelimi
     )
   },
 )
+
+test.each([
+  { kind: "start" as const, installationLimit: 100, prLimit: 25 },
+  { kind: "finish" as const, installationLimit: 200, prLimit: 50 },
+])(
+  "bounds $kind writes per installation and PR, including failed writes and rolling expiry",
+  async ({ kind, installationLimit, prLimit }) => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const request = makeIdentityRequest()
+        let calls = 0
+        const run = async () => {
+          calls++
+          throw new Error("failed write")
+        }
+        const send = (prKey: string) => request(run, 91, { kind, prKey }).pipe(Effect.ignore)
+        for (let i = 0; i <= prLimit; i++) yield* send("owner/repo/7")
+        expect(calls).toBe(prLimit)
+        // Distinct repositories do not collide, but share the installation cap.
+        for (let i = 0; i < installationLimit; i++) yield* send(`owner/repo-${i}/7`)
+        expect(calls).toBe(installationLimit)
+        yield* TestClock.adjust("59 minutes")
+        yield* send("owner/repo/7")
+        expect(calls).toBe(installationLimit)
+        yield* TestClock.adjust("1 minute")
+        yield* send("owner/repo/7")
+        expect(calls).toBe(installationLimit + 1)
+      }).pipe(Effect.provide(TestClock.layer())),
+    )
+  },
+)

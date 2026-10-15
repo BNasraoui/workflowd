@@ -3,10 +3,12 @@ import { Effect, Fiber, Queue } from "effect"
 export type IdentityWork = {
   readonly key: string
   readonly prKey?: string
+  readonly preserve?: boolean
   readonly run: Effect.Effect<void, Error>
 }
 
 type Entry = {
+  interrupted: boolean
   next: IdentityWork | undefined
   fiber: Fiber.Fiber<void, Error> | undefined
 }
@@ -36,7 +38,10 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
     if (entry !== undefined) {
       if (!replace) return true
       entry.next = job
-      if (entry.fiber !== undefined) entry.fiber.interruptUnsafe()
+      if (entry.fiber !== undefined) {
+        entry.interrupted = true
+        entry.fiber.interruptUnsafe()
+      }
       return true
     }
     if (job.prKey !== undefined) {
@@ -45,19 +50,20 @@ export const makeIdentityWork = Effect.fn("GitIdentity.work")(function* (
       )
       if (pending.length >= 2) {
         if (!replace) return false
-        const oldest = pending[0]
-        if (oldest !== undefined) {
-          // Reuse the queued slot: leaving tombstone keys in ready would make
-          // memory grow without bound during a stalled worker's push flood.
-          entries.delete(oldest[0])
-          oldest[1].next = job
-          entries.set(job.key, oldest[1])
-          return true
-        }
+        // Never discard a check that is already open, including one owned by
+        // the interrupted predecessor of a same-head pull_request delivery.
+        const oldest = pending.find(([, entry]) => !entry.interrupted && !entry.next?.preserve)
+        if (oldest === undefined) return false
+        // Reuse the queued slot: leaving tombstone keys in ready would make
+        // memory grow without bound during a stalled worker's push flood.
+        entries.delete(oldest[0])
+        oldest[1].next = job
+        entries.set(job.key, oldest[1])
+        return true
       }
     }
     if (entries.size >= concurrency + waiting) return false
-    const added = { next: job, fiber: undefined }
+    const added = { next: job, fiber: undefined, interrupted: false }
     entries.set(job.key, added)
     yield* Queue.offer(ready, added)
     return true

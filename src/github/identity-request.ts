@@ -8,30 +8,45 @@ const RateResponse = Schema.Struct({
   ),
 })
 
+export type IdentityBudget = {
+  readonly kind?: "read" | "start" | "finish"
+  readonly prKey?: string
+}
+
 // Shared by scans, suite discovery and restart recovery in one App adapter.
 // Do not retry writes: an exhausted request fails closed, while subsequent
 // requests wait until GitHub's reset/retry-after deadline.
 export const makeIdentityRequest = () => {
   let resumeAt = 0
-  const scans = new Map<number, number[]>()
-  return <A>(run: (signal: AbortSignal) => Promise<A>, scanInstallationId?: number) =>
+  const windows = new Map<string, Array<{ time: number; prKey: string | undefined }>>()
+  return <A>(
+    run: (signal: AbortSignal) => Promise<A>,
+    installationId?: number,
+    budget: IdentityBudget = {},
+  ) =>
     Effect.gen(function* () {
       let now = yield* Clock.currentTimeMillis
       while (now < resumeAt) {
         yield* Effect.sleep(resumeAt - now)
         now = yield* Clock.currentTimeMillis
       }
-      if (scanInstallationId !== undefined) {
-        // A rolling window avoids a double burst at an hourly reset. Charge
-        // before issuing I/O, including failed requests; concurrent scans share
-        // this synchronous reservation. Publication must remain available.
-        const recent = (scans.get(scanInstallationId) ?? []).filter(
-          (time) => time > now - 3_600_000,
+      if (installationId !== undefined) {
+        // Separate write allowances reserve completion capacity even after a
+        // read or start flood. Failed I/O is charged before concurrent callers
+        // can reserve the same slot. A rerun reset is also a check start.
+        const kind = budget.kind ?? "read"
+        const limits = { read: [1000, 250], start: [100, 25], finish: [200, 50] } as const
+        const [installationLimit, prLimit] = limits[kind]
+        const key = `${installationId}/${kind}`
+        const recent = (windows.get(key) ?? []).filter(({ time }) => time > now - 3_600_000)
+        windows.set(key, recent)
+        const prRequests = recent.filter(({ prKey }) => prKey === budget.prKey).length
+        if (
+          recent.length >= installationLimit ||
+          (budget.prKey !== undefined && prRequests >= prLimit)
         )
-        scans.set(scanInstallationId, recent)
-        if (recent.length >= 1000)
           return yield* Effect.fail(new Error("scan budget exhausted, retry later"))
-        recent.push(now)
+        recent.push({ time: now, prKey: budget.prKey })
       }
       return yield* Effect.tryPromise({
         try: run,
