@@ -60,6 +60,8 @@ for (const [before, after] of [
   ["    steps:", "    environment: production\n    steps:"],
   ["    steps:", "    env: { TOKEN: '${{ secrets.WRITE_TOKEN }}' }\n    steps:"],
   ["    steps:", "    steps:\n      - uses: actions/cache@v4"],
+  ["bun-version: 1.3.14", "bun-version: latest"],
+  ["no-cache: true", "no-cache: false"],
   ["--no-update-lock-file", "--recreate-lock-file"],
   ["timeout 900 bash test/agent-image/e2e.sh", "true"],
   ['test "$first" = "$second"', "true"],

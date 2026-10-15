@@ -5,8 +5,10 @@ import { join } from "node:path"
 // making exit failures observable, this avoids imposing guard coverage on every
 // independently filtered coverage shard.
 const candidate = process.env.WORKFLOWD_TEST_RESOURCE_CONFIG
-const read = (path: string): { launcher: string; owner: string } =>
-  JSON.parse(readFileSync(path, "utf8"))
+const read = (path: string) => {
+  const value: { launcher: string; owner: string } = JSON.parse(readFileSync(path, "utf8"))
+  return value
+}
 const bootstrap =
   candidate &&
   existsSync(candidate) &&
