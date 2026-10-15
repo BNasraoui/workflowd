@@ -213,6 +213,15 @@ class OpenCodeAvailabilityError extends Error {
   }
 }
 
+class OpenCodeCatalogNotReadyError extends Error {
+  constructor(agentCount: number, modelCount: number) {
+    super(
+      `OpenCode catalogs are not ready (${agentCount} agents, ${modelCount} models); location plugins may still be activating`,
+    )
+    this.name = "OpenCodeCatalogNotReadyError"
+  }
+}
+
 class OpenCodeStructuredOutputError extends Error {
   constructor(message: string, options?: { readonly cause: unknown }) {
     super(message, options)
@@ -225,6 +234,11 @@ function validateOpenCodeAvailability(
   availableAgents: ReadonlyArray<string>,
   availableModels: ReadonlyArray<OpenCodeModelAvailability>,
 ): void {
+  // OpenCode lists are snapshots: a newly loaded (or idle-evicted) location
+  // can answer before its plugins register agents and providers.
+  if (availableAgents.length === 0 || availableModels.length === 0) {
+    throw new OpenCodeCatalogNotReadyError(availableAgents.length, availableModels.length)
+  }
   const agents = new Set(availableAgents)
   const unavailable = requested.agents
     .filter((agent) => !agents.has(agent))
@@ -393,6 +407,7 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
           Effect.tapError(() =>
             Effect.logWarning("OpenCode availability check failed", {
               serverUrl: publicServerUrl(this.serverUrl),
+              directory: input.directory ?? null,
               agentCount: agents?.length ?? null,
               modelCount: models?.length ?? null,
               agents: input.agents.map((name) => ({

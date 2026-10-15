@@ -1,7 +1,7 @@
 import { Effect, Schedule } from "effect"
 import type { OpenCodeAutomationError } from "./opencode"
 
-/** Catalog reads can temporarily omit configured integrations even on a running server. */
+/** Location plugin activation can outlive the first catalog reads, even on a running server. */
 export const validateOpenCodeStartup = (check: Effect.Effect<void, OpenCodeAutomationError>) =>
   Effect.suspend(() => {
     let lastFailure: OpenCodeAutomationError | undefined
