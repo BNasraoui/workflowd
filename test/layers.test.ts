@@ -6,7 +6,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Cause, Effect, Layer, Option } from "effect"
+import { Cause, Duration, Effect, Fiber, Layer, Option, Queue } from "effect"
+import { TestClock } from "effect/testing"
+import { timed } from "./helpers/installation-guard"
 import { loadConfig } from "../src/config"
 import { AgentHarness } from "../src/agent-harness"
 import { GitHub } from "../src/github"
@@ -117,6 +119,20 @@ function loadLayerConfig(directory: string, overrides: Record<string, string> = 
   )
 }
 
+function runWithAvailabilityDeadline<A, E>(effect: Effect.Effect<A, E>) {
+  return Effect.runPromise(
+    timed((sleeps) =>
+      Effect.gen(function* () {
+        const fiber = yield* effect.pipe(Effect.forkChild)
+        let sleep = yield* Queue.take(sleeps)
+        while (Duration.toMillis(sleep) !== 30_000) sleep = yield* Queue.take(sleeps)
+        yield* TestClock.adjust("30 seconds")
+        return yield* Fiber.join(fiber)
+      }),
+    ),
+  )
+}
+
 test.each([false, true])(
   "starts and restarts the full live layer with both kernel stores (sandbox %s)",
   async (sandbox) => {
@@ -156,7 +172,7 @@ test.each([false, true])(
       })
 
       const start = () =>
-        Effect.runPromise(
+        runWithAvailabilityDeadline(
           Effect.gen(function* () {
             const events = yield* KernelEventStore
             const jobs = yield* KernelJobStore
@@ -233,7 +249,7 @@ test("composes the reusable agent harness with the live ports", async () => {
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
 
-    const methods = await Effect.runPromise(
+    const methods = await runWithAvailabilityDeadline(
       Effect.gen(function* () {
         const store = yield* WorkflowStore
         const github = yield* GitHub
@@ -271,7 +287,7 @@ test("composes the explicit six-contract catalog by default", async () => {
     const Live = makeLiveLayer(config).pipe(
       Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
     )
-    const preflight = await Effect.runPromise(
+    const preflight = await runWithAvailabilityDeadline(
       Effect.gen(function* () {
         const workflowStart = yield* WorkflowStart
         return yield* workflowStart.preflight.pipe(Effect.result)
