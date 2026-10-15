@@ -3,6 +3,7 @@ import { InstallationGuard } from "../src/installation-guard"
 import { describe, expect, test } from "bun:test"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Logger, Scope, PubSub } from "effect"
+import { TestClock } from "effect/testing"
 import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
 import {
@@ -76,7 +77,9 @@ const qrspiDefinition = {
  * layers (logger, coordinator, stores) on top; pass an Automation stub to
  * observe availability validation instead of ignoring it.
  */
-const automationStub = (validateAvailability: () => Effect.Effect<void> = () => Effect.void) => ({
+const automationStub = (
+  validateAvailability: () => Effect.Effect<void, OpenCodeAutomationError> = () => Effect.void,
+) => ({
   validateAvailability,
   prepareReview: () => Effect.die("unexpected review"),
   prepareFix: () => Effect.die("unexpected fix"),
@@ -612,6 +615,7 @@ describe("runHookService startup", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const brokerAvailable = yield* Deferred.make<void>()
+          const guardReconciled = yield* Deferred.make<void>()
           const recovered = yield* Deferred.make<void>()
           const coordinator = {
             ensure: Deferred.await(brokerAvailable),
@@ -629,7 +633,7 @@ describe("runHookService startup", () => {
                 Effect.sync(() => {
                   guardPasses++
                   return true
-                }),
+                }).pipe(Effect.tap(() => Deferred.succeed(guardReconciled, undefined))),
               runWebhooks: Effect.never,
               health: () =>
                 Effect.succeed({
@@ -654,6 +658,7 @@ describe("runHookService startup", () => {
           const health = yield* Effect.tryPromise(() =>
             fetch(`http://${started.hostname}:${started.port}/health`),
           )
+          yield* Deferred.await(guardReconciled)
           expect(guardPasses).toBe(1)
           const body = JSON.stringify({ action: "created" })
           const guarded = yield* Effect.tryPromise(() =>
@@ -870,7 +875,7 @@ describe("runHookService startup", () => {
     expect(githubCalls).toBe(0)
   })
 
-  test("composes workers and starts a healthy listener after validation", async () => {
+  test.each([0, 1])("starts after %i unavailable checks", async (failures) => {
     let validations = 0
     const observedWorkers = new Set<string>()
     const loaded = await loadConfig(
@@ -902,8 +907,19 @@ describe("runHookService startup", () => {
     const TestAdapters = Layer.mergeAll(
       stubAdapters(
         automationStub(() =>
-          Effect.sync(() => {
+          Effect.suspend(() => {
             validations += 1
+            return validations <= failures
+              ? Effect.fail(
+                  new OpenCodeAutomationError({
+                    operation: "validate OpenCode availability",
+                    cause: new Error(
+                      "Unavailable OpenCode integration: agent pr-reviewer, model zai-coding-plan/glm-5.3-flash",
+                    ),
+                    retryable: true,
+                  }),
+                )
+              : Effect.void
           }),
         ),
       ),
@@ -927,14 +943,16 @@ describe("runHookService startup", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const allWorkersObserved = yield* Deferred.make<void>()
-          const server = yield* startHookService(config, (worker) =>
+          const startup = yield* startHookService(config, (worker) =>
             Effect.gen(function* () {
               observedWorkers.add(worker)
               if (observedWorkers.size === 5) {
                 yield* Deferred.succeed(allWorkersObserved, undefined)
               }
             }),
-          )
+          ).pipe(Effect.forkChild)
+          yield* TestClock.adjust("2 seconds")
+          const server = yield* Fiber.join(startup)
           yield* Deferred.await(allWorkersObserved)
           const response = yield* Effect.tryPromise(() =>
             fetch(`http://${server.hostname}:${server.port}/health`),
@@ -968,10 +986,13 @@ describe("runHookService startup", () => {
             },
           }
         }),
-      ).pipe(Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters))),
+      ).pipe(
+        Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters)),
+        Effect.provide(TestClock.layer()),
+      ),
     )
 
-    expect(validations).toBe(1)
+    expect(validations).toBe(failures + 1)
     expect(observedWorkers).toEqual(
       new Set(["job", "kernel-job", "publication", "reconciliation", "command"]),
     )
