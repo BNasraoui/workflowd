@@ -281,7 +281,8 @@ entry during redeployment.
 which carries its own token:
 
 - `WORKFLOWD_DAEMON_URL` — base URL of the workflowd daemon, e.g.
-  `http://127.0.0.1:8787`. Must be absolute HTTP(S) and carry no credentials.
+  `http://127.0.0.1:8787`. Must be absolute HTTP(S) with no userinfo, query or
+  fragment. Never put secrets in URL paths: validators cannot detect them.
 - `WORKFLOWD_AGENT_WAIT_TOKEN` / `WORKFLOWD_AGENT_WAIT_TOKEN_FILE` — the
   daemon's `WORKFLOWD_AGENT_WAIT_TOKEN`, supplied the same way as the MCP
   token. Set exactly one source.
