@@ -81,9 +81,12 @@ unlinking symlinks without following them. Installation in the new directory use
 the absolute Bun path with `install --frozen-lockfile --no-cache --backend=copyfile`;
 no shared Bun cache or earlier release dependencies are trusted or hardlinked.
 Repository-local bunfig/npmrc and lifecycle policy are part of the reviewed
-commit. Only after installation succeeds does it stop the three units, copy
-skills, record the previous release link, and atomically replace `current` with a
-symlink to the new release using a single rename on the same filesystem. Units
+commit. The layout preflight requires `previous` to be absent or a symlink.
+After installation and skill validation/copy succeed, it prepares both activation
+symlinks in one temporary directory inside the deployment parent. Only then does
+it stop the three units and rename the prepared links into `previous` and `current`.
+A parent that refuses temporary-directory or link creation leaves units running.
+The `current` replacement uses a single rename on the same filesystem. Units
 use `/opt/workflowd/deploy/current` as their stable WorkingDirectory; the old
 release remains on disk unchanged. Activation is atomic for the service path;
 skill copies, service restarts and the state write are separate operations.
@@ -101,7 +104,8 @@ state path, every admitted commit's PR/head, approval App/check IDs, GitHub tree
 SHA, CI check/run IDs, UTC time, paths, units and outcome. `verified` records API
 admission; only `deployed` plus the state file indicate successful activation.
 Install/integrity failures leave services running and the old link unchanged.
-Copy/activation/restart failures can leave units stopped; after activation the
+Skill validation/copy failures also leave services running; skill copies may be
+partially updated. Activation/restart failures can leave units stopped; after activation the
 new release and previous release are both retained, and unsuccessful deployment
 does not advance state. There is no automatic unverified rollback. Unit state is
 not application health: the operator must validate that separately.
@@ -130,10 +134,44 @@ attempt downloads its own history; no alternates, shared objects or install
 cache reduce this cost. Successfully activated releases are never automatically
 deleted, so disk use grows until the operator prunes older releases. Inspect
 `du -sh /opt/workflowd/deploy/releases/*` and available space before deployment.
-Under the operator lock, remove only explicitly identified directories that are
-neither `current` nor `previous`, after checking audit records and confirming no
-process still uses them. Do not use broad cleanup globs. Interrupted preparation
-can leave an unreferenced staging directory; inspect it using the same procedure.
+After checking audit records and confirming no process still uses a candidate,
+prune explicitly named releases with the protected entrypoint:
+
+```bash
+/usr/bin/python3 -I /usr/local/libexec/workflowd/verified-deploy.py \
+  --checkout /opt/workflowd/deploy/current --prune OLD_SHA_RANDOM_DIRECTORY_NAME
+```
+
+Pass directory basenames from `releases/`, never paths or globs. The command takes
+the same nonblocking `/opt/workflowd/operator/verified-deploy.lock` as deployment,
+resolves `current` and `previous` under that lock, and refuses either target.
+It requires `releases/` to already exist, checks the entire request before deletion,
+and rejects symlinks, traversal, missing candidates and invalid link layouts.
+Under the lock it checks each workflowd unit's `MainPID`, `ControlGroup`
+(including descendant cgroups), `WorkingDirectory`, `ExecStart`, `ExecStartPre/Post`,
+`ExecStop/Post`, `ExecReload` and `Environment=PATH`, plus the operator's processes'
+`/proc` `cwd`, `exe` and `root` links. A path resolving inside any candidate refuses
+the whole request. Systemd's leading `!` WorkingDirectory marker is stripped;
+`~` means the operator's home; other non-absolute directories are refused.
+Unit inspection failures and unreadable MainPIDs or cgroup members always refuse
+pruning. For other unreadable operator processes (such as `(sd-pam)`), the command
+prints each PID, comm and cgroup and refuses until the operator has checked them
+and repeats the command with `--allow-unreadable PID` for each acknowledged PID.
+Acknowledgements apply only to unreadable links; readable links still block
+deletion when they point into a candidate. Never reuse an acknowledgement without
+checking the process again, since PIDs can be recycled. Processes that exit during
+inspection are skipped. Lock contention refuses the command; retry after the
+other operation finishes. Pruning needs no GitHub token or Bun.
+Drain consumers before pruning and prevent new consumers from starting during
+the operation: the deploy lock cannot prevent an unrelated process from opening
+a release after inspection. Processes under other UIDs are inspected only when
+named by a unit's MainPID or cgroup; retained open files or imports alone are not
+detected. EnvironmentFile contents and dynamically constructed shell paths are
+not inspected.
+Do not manually
+change links outside the lock. Interrupted preparation can leave an unreferenced
+staging directory; inspect it using the same procedure. Deletion I/O failures may
+leave a partially pruned request; inspect the printed removed paths before retrying.
 
 For rollback, take the previous successful SHA from `last-deployed` (after a
 failed deploy) or the audit log's `previous_sha`, and record the recovery reason.
@@ -223,7 +261,11 @@ and retire its old checkout/linking path. `update-dev-infra.example` and
    directory with protected ancestors. Do not use an agent-writable `~/.bun/bin`.
 5. Repoint `workflowd.service`, `workflowd-runner.service` and
    `workflowd-mcp.service` WorkingDirectory and absolute ExecStart paths to the
-   stable `/opt/workflowd/deploy/current` path and pinned binaries. Preserve operator-owned credential/env files
+   stable `/opt/workflowd/deploy/current` path and pinned binaries. The checked-in
+   [controller](systemd/workflowd.service), [runner](systemd/workflowd-runner.service)
+   and [MCP](systemd/workflowd-mcp.service) examples use that WorkingDirectory and
+   `/opt/workflowd/bin/bun` with absolute entrypoint paths. Review existing drop-ins:
+   they can override both settings. Preserve operator-owned credential/env files
    outside the release directories. Run `systemctl --user daemon-reload`. All three units must
    exist. Audit any service Bun configuration/cache separately; deploy isolation
    does not rewrite service environments.

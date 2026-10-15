@@ -207,16 +207,18 @@ Do not configure a bypass that permits `OpenCode Review` to be skipped for ordin
 
 ## Installed Layout
 
-The shipped user unit assumes:
+The shipped controller, runner and MCP user units assume:
 
-- Repository: `%h/Documents/repos/workflowd`
-- Bun: `%h/.bun/bin/bun`
+- Active release: `/opt/workflowd/deploy/current`, a stable symlink into `/opt/workflowd/deploy/releases/`
+- Pinned Bun executable: `/opt/workflowd/bin/bun`
 - OpenCode unit: `opencode-server.service`, bound to `127.0.0.1:4096` with Basic authentication
 - Workflowd listener: `127.0.0.1:8787`
 - Non-secret environment file: `%h/.config/workflowd/env`
 - Credential source files: `%h/.config/workflowd/github-webhook-secret` and `%h/.config/workflowd/opencode-server-password`
 
-Edit the unit if the repository or Bun is installed elsewhere.
+See the [verified deployment runbook](deploy/verified-deploy.md) for the installed
+layout, operator state, retained releases and migration steps. Review all three
+units and their drop-ins if the release path or pinned Bun is installed elsewhere.
 
 ## OpenCode 2 Server
 

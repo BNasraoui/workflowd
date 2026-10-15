@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -17,6 +18,8 @@ REPO = 'BNasraoui/workflowd'
 REMOTE = f'https://github.com/{REPO}.git'
 DEPLOY_STATE = Path('/opt/workflowd/operator/last-deployed')
 UNITS = ['workflowd.service', 'workflowd-runner.service', 'workflowd-mcp.service']
+PROC_ROOT = Path('/proc')
+CGROUP_ROOT = Path('/sys/fs/cgroup')
 
 
 def require(condition, message):
@@ -253,14 +256,18 @@ def append_file(path):
                              0o600), 'a')
 
 
-def release_layout(checkout):
+def release_layout(checkout, *, create=True):
     """Inspect only directory/link metadata, never a retained release's Git data."""
     require_state_directory(checkout)
     releases = checkout.parent / 'releases'
-    releases.mkdir(mode=0o700, exist_ok=True)
+    if create:
+        releases.mkdir(mode=0o700, exist_ok=True)
     info = releases.lstat()
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
             and info.st_mode & 0o077 == 0, 'Releases must be a private operator-owned directory')
+    previous_link = checkout.parent / 'previous'
+    require(previous_link.is_symlink() or not previous_link.exists(),
+            'Previous must be absent or a symlink')
     previous = None
     if checkout.exists() or checkout.is_symlink():
         require(checkout.is_symlink(), 'Checkout must be absent or a release symlink; migrate the old clone')
@@ -270,16 +277,128 @@ def release_layout(checkout):
     return releases, previous
 
 
-def replace_link(link, target):
-    with tempfile.TemporaryDirectory(prefix='.activate-', dir=link.parent) as directory:
-        temporary = Path(directory) / 'link'
-        temporary.symlink_to(target, target_is_directory=True)
-        temporary.replace(link)
-    descriptor = os.open(link.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+def require_unused_releases(candidates, allow_unreadable=()):
+    """Inspect unit configuration and live process paths while holding the deploy lock."""
+    def check_path(value, source):
+        path = Path(value).resolve()
+        for candidate in candidates:
+            require(not path.is_relative_to(candidate),
+                    f'Release in use by {source}: {candidate}')
+
+    unreadable = set()
+
+    def check_process(process, unit_process=False):
+        denied = None
+        for name in ('cwd', 'exe', 'root'):
+            try:
+                target = os.readlink(process / name)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # Process exited, or has no executable (for example a zombie).
+            except PermissionError as error:
+                if unit_process:
+                    raise
+                denied = error
+                continue
+            check_path(target.removesuffix(' (deleted)'), f'{process}/{name}')
+
+        if denied:
+            comm = (process / 'comm').read_text().strip()
+            cgroup = (process / 'cgroup').read_text().strip()
+            pid = int(process.name)
+            print(f'Unreadable process PID={pid} comm={comm!r} cgroup={cgroup!r}', file=sys.stderr)
+            if pid not in allow_unreadable:
+                unreadable.add(pid)
+
+    def check_cgroup(directory):
+        for pid in (directory / 'cgroup.procs').read_text().split():
+            require(pid.isdigit(), f'Invalid cgroup PID: {directory}')
+            check_process(PROC_ROOT / pid, unit_process=True)
+        for child in directory.iterdir():
+            if child.is_dir():
+                check_cgroup(child)
+
+    commands = ('ExecStart', 'ExecStartPre', 'ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecReload')
+    keys = ('MainPID', 'ControlGroup', 'WorkingDirectory', 'Environment', *commands)
+    for unit in UNITS:
+        output = command('systemctl', '--user', 'show',
+                         *(arg for key in keys for arg in ('-p', key)), unit)
+        properties = dict(line.split('=', 1) for line in output.splitlines() if '=' in line)
+        require(all(key in properties for key in keys),
+                f'Cannot inspect unit properties: {unit}')
+        require(properties['MainPID'].isdigit(), f'Invalid MainPID: {unit}')
+        if int(properties['MainPID']):
+            check_process(PROC_ROOT / properties['MainPID'], unit_process=True)
+        if properties['ControlGroup']:
+            group = Path(properties['ControlGroup'])
+            require(group.is_absolute() and '..' not in group.parts, f'Invalid ControlGroup: {unit}')
+            check_cgroup(CGROUP_ROOT / str(group).lstrip('/'))
+        if properties['WorkingDirectory']:
+            value = properties['WorkingDirectory'].removeprefix('!')
+            path = Path.home() if value == '~' else Path(value)
+            require(path.is_absolute(), f'Invalid WorkingDirectory: {unit}')
+            check_path(path, f'{unit} WorkingDirectory')
+        for entry in shlex.split(properties['Environment']):
+            if entry.startswith('PATH='):
+                for path in entry.removeprefix('PATH=').split(':'):
+                    check_path(path, f'{unit} Environment PATH')
+        # Inspect executable and argv paths, including quotes inside shell commands.
+        # Preserve whitespace prefixes for systemctl's unquoted/escaped display.
+        for key in commands:
+            value = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m[1], 16)), properties[key])
+            for start in re.finditer(r'''(?:^|[\s="'])(?=/)''', value):
+                tail = re.split(r'''[;{}\n"']''', value[start.end():], maxsplit=1)[0].rstrip()
+                for end in [m.start() for m in re.finditer(r'\s', tail)] + [len(tail)]:
+                    check_path(tail[:end], f'{unit} {key}')
+
+    for process in PROC_ROOT.iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            owned = process.stat().st_uid == os.geteuid()
+            if not owned:
+                # Non-dumpable processes can expose root-owned /proc directories.
+                status = (process / 'status').read_text()
+                uid = re.search(r'^Uid:\s+\d+\s+(\d+)', status, re.MULTILINE)
+                require(uid, f'Cannot inspect process UID: {process}')
+                owned = int(uid[1]) == os.geteuid()
+            if owned:
+                check_process(process)
+        except (FileNotFoundError, ProcessLookupError):
+            if process.exists():
+                raise
+            continue  # The process exited between listing /proc and inspection.
+
+    require(not unreadable, 'Acknowledge each unreadable process with ' +
+            ' '.join(f'--allow-unreadable {pid}' for pid in sorted(unreadable)))
+
+
+def prune_releases(checkout, state, names, allow_unreadable=()):
+    """Delete explicit unused releases; the operator must first drain their users."""
+    require_state_directory(state)
+    with append_file(state.parent / 'verified-deploy.lock') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        releases, current = release_layout(checkout, create=False)
+        protected = {current}
+        previous = checkout.parent / 'previous'
+        if previous.is_symlink():
+            target = previous.resolve(strict=True)
+            require(target.parent == releases and target.is_dir(),
+                    'Previous must point directly to a retained release directory')
+            protected.add(target)
+        candidates = []
+        for name in dict.fromkeys(names):
+            require(name not in ('', '.', '..') and Path(name).name == name,
+                    'Prune requires release directory names, not paths')
+            candidate = releases / name
+            require(not candidate.is_symlink() and candidate.is_dir(),
+                    'Prune requires a real release directory')
+            require(candidate not in protected, 'Cannot prune current or previous release')
+            candidates.append(candidate)
+        # Validate the entire request before removing anything.
+        require_unused_releases(candidates, allow_unreadable)
+        for candidate in candidates:
+            shutil.rmtree(candidate)
+            print(json.dumps({'pruned_release': str(candidate)}), flush=True)
 
 
 def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, token=None):
@@ -331,14 +450,25 @@ def deploy(checkout, sha, skill_target, state, app_id, bun, bootstrap=False, tok
             subprocess.run([str(bun), 'install', '--frozen-lockfile', '--no-cache',
                             '--backend=copyfile'], cwd=release, check=True)
             # All Git reads, including skill blobs, use this fresh object store.
-            command('systemctl', '--user', 'stop', *UNITS)
             copy_skills(release, sha, skill_target)
-            if previous:
-                replace_link(checkout.parent / 'previous', previous)
-            replace_link(checkout, release)
-            activated = True
-            command('systemctl', '--user', 'restart', *UNITS)
-            command('systemctl', '--user', 'is-active', '--quiet', *UNITS)
+            with tempfile.TemporaryDirectory(prefix='.activate-', dir=checkout.parent) as directory:
+                staged_current = Path(directory) / 'current'
+                staged_previous = Path(directory) / 'previous'
+                staged_current.symlink_to(release, target_is_directory=True)
+                if previous:
+                    staged_previous.symlink_to(previous, target_is_directory=True)
+                command('systemctl', '--user', 'stop', *UNITS)
+                if previous:
+                    staged_previous.replace(checkout.parent / 'previous')
+                staged_current.replace(checkout)
+                activated = True
+                descriptor = os.open(checkout.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                command('systemctl', '--user', 'restart', *UNITS)
+                command('systemctl', '--user', 'is-active', '--quiet', *UNITS)
             log('deployed')
             write_state(state, sha)
         except Exception:
@@ -383,23 +513,38 @@ def configure_environment(token_file, isolated_home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('sha', help='full merge-result SHA on origin/main')
+    parser.add_argument('sha', nargs='?', help='full merge-result SHA on origin/main')
     parser.add_argument('--checkout', type=Path, required=True)
-    parser.add_argument('--skills', type=Path, required=True,
+    parser.add_argument('--prune', nargs='+', metavar='RELEASE',
+                        help='remove named unused releases under the deployment lock')
+    parser.add_argument('--allow-unreadable', type=int, action='append', default=[], metavar='PID',
+                        help='acknowledge an unreadable non-workflowd process during prune; repeat per PID')
+    parser.add_argument('--skills', type=Path,
                         help='dedicated operator-owned directory with managed marker')
-    parser.add_argument('--github-token-file', type=Path, required=True)
-    parser.add_argument('--approval-app-id', type=int, required=True,
+    parser.add_argument('--github-token-file', type=Path)
+    parser.add_argument('--approval-app-id', type=int,
                         help='merge gate App integration ID, not installation ID')
-    parser.add_argument('--bun', type=Path, required=True, help='absolute pinned Bun executable')
+    parser.add_argument('--bun', type=Path, help='absolute pinned Bun executable')
     parser.add_argument('--bootstrap', action='store_true',
                         help='explicitly trust history before target; target still needs approval and CI')
     args = parser.parse_args()
-    require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
-    require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
-    require(args.bun.is_absolute(), 'Bun path must be absolute')
     require(args.checkout.is_absolute(), 'Checkout path must be absolute')
     checkout = args.checkout.parent.resolve() / args.checkout.name
     require(checkout.name not in ('releases', 'previous'), 'Reserved checkout name')
+    if args.prune:
+        require(not args.bootstrap and all(value is None for value in
+                (args.sha, args.skills, args.github_token_file, args.approval_app_id, args.bun)),
+                'Prune cannot be combined with deployment arguments')
+        require(all(pid > 0 for pid in args.allow_unreadable), 'Use positive unreadable PIDs')
+        prune_releases(checkout, DEPLOY_STATE, args.prune, set(args.allow_unreadable))
+        return
+    require(not args.allow_unreadable, '--allow-unreadable requires --prune')
+    if any(value is None for value in (args.sha, args.skills, args.github_token_file,
+                                       args.approval_app_id, args.bun)):
+        parser.error('deployment requires sha, --skills, --github-token-file, --approval-app-id and --bun')
+    require(args.approval_app_id != 15368, 'GitHub Actions cannot be the approval App')
+    require(args.approval_app_id > 0, 'A positive merge gate App ID is required')
+    require(args.bun.is_absolute(), 'Bun path must be absolute')
     require_skill_target(args.skills)
     target = args.skills.resolve()
     require(not target.is_relative_to(checkout.parent) and not checkout.parent.is_relative_to(target),

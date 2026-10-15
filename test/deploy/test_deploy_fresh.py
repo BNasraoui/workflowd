@@ -142,18 +142,18 @@ class FreshReleaseTests(unittest.TestCase):
         self.assertEqual(list((self.repo.parent / 'releases').iterdir()), [self.old_release])
 
     def test_restart_failure_retains_both_releases_without_advancing_state(self):
-        real_replace = d.replace_link
+        real_replace = os.replace
         previous_sha = self.sha
         self.state.write_text(previous_sha + '\n')
         self.state.chmod(0o600)
 
-        def activate(link, target):
-            real_replace(link, target)
-            if link == self.repo:
+        def activate(source, destination):
+            real_replace(source, destination)
+            if Path(destination) == self.repo:
                 # Simulate failure immediately after the atomic switch.
                 raise OSError('restart unavailable')
 
-        with patch.object(d, 'replace_link', side_effect=activate):
+        with patch.object(d.os, 'replace', side_effect=activate):
             with self.assertRaisesRegex(OSError, 'restart unavailable'):
                 self.attack_deploy(lambda: None)
         self.assertNotEqual(self.repo.resolve(), self.old_release)

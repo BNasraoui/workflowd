@@ -111,7 +111,7 @@ class CheckoutTests(unittest.TestCase):
             self.repo.symlink_to(old)
         return self.repo.resolve()
 
-    def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False):
+    def run_deploy(self, verification_error=None, install_error=False, tree=None, initial=False, restart_error=False):
         source = Path(tempfile.mkdtemp(dir=self.root)) / 'github'
         shutil.copytree(self.repo, source)
         d.git(source, 'update-ref', 'refs/heads/main', self.sha)
@@ -125,6 +125,8 @@ class CheckoutTests(unittest.TestCase):
         def command(*args, **kwargs):
             if args[0] == 'systemctl':
                 events.append(args[2])
+                if args[2] == 'restart' and restart_error:
+                    raise subprocess.CalledProcessError(1, args)
                 return ''
             if 'fetch' in args:
                 argv = list(args)
@@ -390,3 +392,83 @@ class CheckoutTests(unittest.TestCase):
         self.assertNotEqual(self.repo.resolve(), first)
         self.assertEqual((self.repo.parent / 'previous').resolve(), first)
         self.assertEqual((first / '.git/index').read_bytes(), first_index)
+
+    def test_previous_directory_is_refused_before_stop(self):
+        previous = self.repo.parent / 'previous'
+        previous.mkdir()
+        (previous / 'keep').write_text('untouched')
+        with self.assertRaisesRegex(ValueError, 'Previous'):
+            self.run_deploy()
+        self.assertEqual(self.events, [])
+        self.assertEqual((previous / 'keep').read_text(), 'untouched')
+        self.assertFalse(self.state.exists())
+
+    def test_read_only_activation_parent_is_refused_before_stop(self):
+        old = self.release_fixture()
+        self.repo.parent.chmod(0o555)
+        try:
+            with self.assertRaises(PermissionError):
+                self.run_deploy()
+            self.assertEqual(self.events, ['install'])
+            self.assertEqual(self.repo.resolve(), old)
+            self.assertFalse(self.state.exists())
+        finally:
+            self.repo.parent.chmod(0o755)
+
+    def test_both_activation_links_are_prepared_before_stop(self):
+        real_symlink = Path.symlink_to
+        prepared = []
+
+        def symlink(link, target, **kwargs):
+            if link.parent.name.startswith('.activate-'):
+                self.assertNotIn('stop', self.events)
+                prepared.append(link)
+            return real_symlink(link, target, **kwargs)
+
+        with patch.object(Path, 'symlink_to', symlink):
+            self.run_deploy()
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(prepared[0].parent, prepared[1].parent)
+        self.assertFalse(prepared[0].parent.exists())
+
+    def test_bad_skill_tree_is_refused_before_stop(self):
+        for invalid in ['symlink', 'missing SKILL.md']:
+            with self.subTest(invalid=invalid):
+                skill = self.repo / 'skills/rpi-example/SKILL.md'
+                skill.unlink()
+                if invalid == 'symlink':
+                    skill.symlink_to('../../tracked')
+                else:
+                    (skill.parent / 'other').touch()
+                self.commit()
+                self.sha = d.git(self.repo, 'rev-parse', 'HEAD')
+                with self.assertRaises(ValueError):
+                    self.run_deploy()
+                self.assertEqual(self.events, ['install'])
+                self.assertFalse(self.state.exists())
+                skill.unlink(missing_ok=True)
+                skill.write_text('reviewed skill')
+
+    def test_skill_copy_io_failure_does_not_stop_services(self):
+        with patch.object(d, 'copy_skills', side_effect=OSError('copy failed')):
+            with self.assertRaisesRegex(OSError, 'copy failed'):
+                self.run_deploy()
+        self.assertEqual(self.events, ['install'])
+        self.assertFalse(self.state.exists())
+
+    def test_activation_directory_is_synced_before_restart_even_when_restart_fails(self):
+        real_fsync = os.fsync
+        synced = []
+        old = self.release_fixture()
+
+        def fsync(descriptor):
+            if os.fstat(descriptor).st_ino == self.repo.parent.stat().st_ino:
+                self.assertNotEqual(self.repo.resolve(), old)
+                self.assertEqual((self.repo.parent / 'previous').resolve(), old)
+                synced.append(self.events.copy())
+            return real_fsync(descriptor)
+
+        with patch.object(d.os, 'fsync', side_effect=fsync):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_deploy(restart_error=True)
+        self.assertEqual(synced, [['install', 'stop']])
