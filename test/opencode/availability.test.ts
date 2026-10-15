@@ -150,5 +150,8 @@ test("startup waits for cold catalogs using the existing bounded retry", async (
     "OpenCode availability check failed",
     { directory: null, agentCount: 0, modelCount: 0 },
   ])
-  expect(JSON.stringify(logs)).toContain("OpenCodeCatalogNotReadyError")
+  expect(logs[1]).toEqual([
+    "OpenCode startup availability check failed; retrying",
+    { operation: "validate OpenCode availability" },
+  ])
 })
