@@ -4,6 +4,19 @@ import { basename, join, resolve } from "node:path"
 const gone = (cause: unknown) =>
   cause instanceof Error && "code" in cause && cause.code === "ENOENT"
 
+async function matchesEntrypoint(pid: number, executable: string, entry: string) {
+  if ((await readlink(`/proc/${pid}/exe`)) !== executable) return false
+  const args = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").filter(Boolean)
+  const cwd = await readlink(`/proc/${pid}/cwd`)
+  const paths = await Promise.all(
+    args
+      .slice(1)
+      .filter((arg) => basename(arg) === basename(entry))
+      .map((arg) => realpath(resolve(cwd, arg))),
+  )
+  return paths.includes(entry)
+}
+
 /** Signal only the matching Bun daemon, never noscope or a process group. */
 export async function signalWorkflowdReload(
   mainPid: number,
@@ -19,15 +32,7 @@ export async function signalWorkflowdReload(
     try {
       const children = await readFile(`/proc/${pid}/task/${pid}/children`, "utf8")
       pending.push(...children.trim().split(/\s+/).filter(Boolean).map(Number))
-      if ((await readlink(`/proc/${pid}/exe`)) !== executable) continue
-      const args = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").filter(Boolean)
-      const cwd = await readlink(`/proc/${pid}/cwd`)
-      for (const arg of args.slice(1)) {
-        if (basename(arg) === basename(entry) && (await realpath(resolve(cwd, arg))) === entry) {
-          candidates.push(pid)
-          break
-        }
-      }
+      if (await matchesEntrypoint(pid, executable, entry)) candidates.push(pid)
     } catch (cause) {
       if (!gone(cause)) throw cause
     }

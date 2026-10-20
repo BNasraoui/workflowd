@@ -47,12 +47,10 @@ export async function startConfigReload(
     let stage = "read_failed"
     try {
       const candidateEnvironment = { ...startEnvironment }
-      for (const file of files) {
-        const content = await readFile(file, "utf8")
-        stage = "invalid_environment_file"
+      const contents = await Promise.all(files.map((file) => readFile(file, "utf8")))
+      stage = "invalid_environment_file"
+      for (const content of contents)
         Object.assign(candidateEnvironment, parseReloadEnvironment(content))
-        stage = "read_failed"
-      }
       stage = "invalid_configuration"
       const candidate = await loadConfig(candidateEnvironment)
       // Validate against pinned infrastructure as well as the requested full config.
@@ -79,8 +77,9 @@ export async function startConfigReload(
         } else if (!same(value, requested)) restart.push(group)
       }
       current = settings(effective.agentRuns)
+      const restartNames = restart.toSorted((left, right) => left.localeCompare(right))
       log(
-        `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restart.sort().join(",") || "none"}`,
+        `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restartNames.join(",") || "none"}`,
       )
     } catch {
       // Parser and filesystem errors may contain secret values or paths.

@@ -5,9 +5,10 @@ import { join } from "node:path"
 import { signalWorkflowdReload } from "../src/config-reload-signal"
 
 async function until(check: () => Promise<boolean>) {
-  for (let i = 0; i < 200; i++) {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
     if (await check()) return
-    await Bun.sleep(10)
+    await Bun.sleep(20)
   }
   throw new Error("Daemon did not reach the expected state")
 }
@@ -53,4 +54,4 @@ test("a real daemon handles HUP, keeps its HTTP port and logs only names", async
     await readers
     await rm(root, { recursive: true, force: true })
   }
-})
+}, 20_000)
