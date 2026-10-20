@@ -10,6 +10,7 @@ WorkingDirectory=/opt/workflowd/deploy/current
 Environment=HOME=%h
 Environment=PATH=/opt/workflowd/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.config/workflowd/env
+Environment='WORKFLOWD_CONFIG_RELOAD_FILES=["%h/.config/workflowd/env"]'
 LoadCredential=github-webhook-secret:%h/.config/workflowd/github-webhook-secret
 LoadCredential=reviewer-password:%h/.config/workflowd/reviewer-password
 LoadCredential=opencode-server-password:%h/.config/workflowd/opencode-server-password
@@ -17,6 +18,7 @@ Environment=GITHUB_WEBHOOK_SECRET_FILE=%d/github-webhook-secret
 Environment=WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE=%d/reviewer-password
 Environment=OPENCODE_SERVER_PASSWORD_FILE=%d/opencode-server-password
 ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/main.ts
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
