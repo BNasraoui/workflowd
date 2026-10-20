@@ -75,7 +75,7 @@ held by live connections nor reloads arbitrary files behind path settings.
 
 ## Reaching Bun through noscope
 
-The checked-in direct-Bun unit uses:
+A unit that starts Bun directly can use:
 
 ```ini
 ExecReload=/bin/kill -HUP $MAINPID
@@ -87,8 +87,10 @@ Do not use that command when `MAINPID` is noscope. The inspected noscope source
 forwards it to the whole child process group, and revokes credentials as part of
 shutdown. It does forward HUP, but forwarding is too broad for a config reload.
 
-For `noscope run ... -- bun run start`, the operator should override only the
-reload command, preserving the existing `ExecStart` and noscope arguments:
+The checked-in unit uses the helper below for both direct Bun and
+`noscope run ... -- bun run start`. This also protects existing noscope
+`ExecStart` drop-ins when the base unit is updated. For a custom unit, set
+this reload command and preserve the existing `ExecStart` and noscope arguments:
 
 ```ini
 [Service]

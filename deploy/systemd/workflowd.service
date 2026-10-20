@@ -18,7 +18,7 @@ Environment=GITHUB_WEBHOOK_SECRET_FILE=%d/github-webhook-secret
 Environment=WORKFLOWD_REVIEW_OPENCODE_PASSWORD_FILE=%d/reviewer-password
 Environment=OPENCODE_SERVER_PASSWORD_FILE=%d/opencode-server-password
 ExecStart=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/main.ts
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/config-reload-signal.ts $MAINPID
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT
