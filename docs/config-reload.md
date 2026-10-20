@@ -59,7 +59,8 @@ readable at startup and reload; an empty list uses only the startup environment.
 
 Files use systemd-style `NAME=value` assignments: blank lines and full-line `#`
 or `;` comments, whole single-quoted or double-quoted values, multiline quoted
-values, and backslash continuations. Unquoted outer whitespace is trimmed; escaped whitespace is kept.
+values, and backslash continuations. Unquoted outer whitespace is trimmed;
+escaped whitespace is kept.
 Double quotes preserve backslashes except before `"`, `\`, `$`, and backtick.
 There is no shell execution, variable expansion, `export`, or inline comment
 syntax. This parser is stricter than systemd: names must match `[A-Za-z_][A-Za-z0-9_]*`
@@ -70,7 +71,8 @@ whole reload. Write files atomically so a reload cannot read half an edit.
 The full candidate goes through the startup config parser. It is also validated
 with the existing infrastructure settings pinned. Nothing changes if either
 validation fails. Any invalid setting blocks the whole reload, including a
-restart-only setting staged for later. Reloads run in order. Each new dispatch takes one snapshot;
+restart-only setting staged for later. Reloads run in order. Each new dispatch
+takes one snapshot;
 agent runs and dispatches already in flight keep their original settings.
 
 ## What reloads
@@ -105,8 +107,8 @@ Each reload emits one `Configuration reload:` line with `changed=` and
 groups, or an error code with `changed=none`. A validation error includes
 `setting=WORKFLOWD_…` when the error identifies a setting. It prints names only,
 never values, file contents, paths or raw parser errors. Groups such as `openCode`
-are reported when parsed values changed, including
-file-backed secrets whose path stayed the same. Restart requests remain visible
+are reported when parsed values changed, including file-backed secrets whose path
+stayed the same. Restart requests remain visible
 on later reloads until the operator restarts. Reload neither rotates credentials
 held by live connections nor reloads arbitrary files behind path settings.
 
@@ -130,7 +132,8 @@ Use the same Bun executable and release path as the running daemon. The Linux
 helper searches only `MAINPID` and its descendants for that release's Bun
 `src/main.ts` process. It refuses zero or multiple matches, and sends HUP to
 one PID only after `/proc/<pid>/status` confirms a caught SIGHUP. It searches
-children of every thread. It does not signal noscope, sibling agents or a process group. It works
+children of every thread. It does not signal noscope, sibling agents or a process
+group. It works
 with both direct Bun and the `bun run start` wrapper. A successful systemctl
 reload confirms signal delivery; inspect the daemon's reload log to confirm
 validation and application succeeded.

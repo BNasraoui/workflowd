@@ -144,6 +144,7 @@ test("deleting file-owned route and restart-only lines removes their startup val
   await withReload(
     async ({ override, signal, logs, layer }) => {
       await signal()
+      expect(logs.at(-1)).toBe(unchanged)
       await writeFile(override, "")
       await signal()
       await Effect.runPromise(

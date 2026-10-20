@@ -3,7 +3,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { signalWorkflowdReload } from "../src/config-reload-signal"
-
 import { until } from "./helpers/reload"
 
 test("a real daemon handles HUP, keeps its HTTP port and logs only names", async () => {
@@ -16,7 +15,6 @@ test("a real daemon handles HUP, keeps its HTTP port and logs only names", async
       PATH: process.env.PATH,
       WORKFLOWD_MODE: "execution",
       WORKFLOWD_HOST: "127.0.0.1",
-
       WORKFLOWD_DATABASE_PATH: join(root, "state.db"),
       WORKFLOWD_CONFIG_RELOAD_FILES: JSON.stringify([file]),
     },
