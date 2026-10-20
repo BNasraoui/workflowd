@@ -5,7 +5,8 @@ class EnvironmentFile {
   constructor(private readonly text: string) {}
 
   parse(): Record<string, string> {
-    const result: Record<string, string> = Object.create(null)
+    const result: Record<string, string> = {}
+    Object.setPrototypeOf(result, null)
     while (this.offset < this.text.length) {
       const end = this.lineEnd()
       const line = this.text.slice(this.offset, end).trim()

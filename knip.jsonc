@@ -7,6 +7,7 @@
     "src/resident/subscribe.ts",
     "src/resident/mcp.ts",
     "test/kernel/register-wait-process.ts",
+    "test/fixtures/config-reload-daemon.ts",
     "scripts/**/*.{mjs,ts}",
     "skills/**/scripts/**/*.{mjs,ts}",
   ],

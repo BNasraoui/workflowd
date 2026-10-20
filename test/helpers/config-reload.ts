@@ -84,13 +84,11 @@ async function setup(
 export const completed = (runId: string) =>
   Effect.gen(function* () {
     const store = yield* AgentRunStore
-    yield* store
-      .read(runId)
-      .pipe(
-        Effect.repeat({
-          until: (row) => row?.state === "completed",
-          schedule: Schedule.spaced("5 millis"),
-        }),
-        Effect.timeout("2 seconds"),
-      )
+    yield* store.read(runId).pipe(
+      Effect.repeat({
+        until: (row) => row?.state === "completed",
+        schedule: Schedule.spaced("5 millis"),
+      }),
+      Effect.timeout("2 seconds"),
+    )
   })

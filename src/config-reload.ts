@@ -34,12 +34,13 @@ export async function startConfigReload(
   for (const content of startupContents)
     for (const name of Object.keys(parseReloadEnvironment(content))) delete baseEnvironment[name]
   const keys = new Set<string>(Object.values(reloadable))
-  const settings = (runs: AgentRunConfig | undefined): DispatchSettings | undefined =>
-    runs === undefined
-      ? undefined
-      : (Object.fromEntries(
-          Object.values(reloadable).map((key) => [key, runs[key]]),
-        ) as DispatchSettings)
+  const settings = (runs: AgentRunConfig | undefined): DispatchSettings | undefined => {
+    if (runs === undefined) return undefined
+    const snapshot = { ...runs }
+    for (const key of Object.keys(snapshot))
+      if (!keys.has(key)) Reflect.deleteProperty(snapshot, key)
+    return snapshot
+  }
   const pinned = (runs: AgentRunConfig | undefined) =>
     runs === undefined
       ? undefined
@@ -73,7 +74,7 @@ export async function startConfigReload(
             !Object.hasOwn(reloadable, name) &&
             candidateEnvironment[name] !== startEnvironment[name],
         )
-        .sort()
+        .toSorted((left, right) => left.localeCompare(right))
       // Include groups for changed file-backed values, even when the path is unchanged.
       const groups: string[] = []
       for (const [group, value] of Object.entries(config)) {
@@ -83,15 +84,17 @@ export async function startConfigReload(
         } else if (!same(value, requested)) groups.push(group)
       }
       const next = settings(effective.agentRuns)
-      const line = `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restart.join(",") || "none"} restart_required_groups=${groups.sort().join(",") || "none"}`
+      const restartGroups = groups.toSorted((left, right) => left.localeCompare(right))
+      const line = `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restart.join(",") || "none"} restart_required_groups=${restartGroups.join(",") || "none"}`
       log(line)
       current = next
     } catch (cause) {
       // Only a setting name is safe to extract from errors that may contain secrets.
       const setting =
         cause instanceof Error ? /\bWORKFLOWD_[A-Z0-9_]+\b/.exec(cause.message)?.[0] : undefined
+      const settingField = setting === undefined ? "" : " setting=" + setting
       log(
-        `Configuration reload: error=${stage}${setting === undefined ? "" : ` setting=${setting}`} changed=none restart_required=none restart_required_groups=none`,
+        `Configuration reload: error=${stage}${settingField} changed=none restart_required=none restart_required_groups=none`,
       )
     }
   }

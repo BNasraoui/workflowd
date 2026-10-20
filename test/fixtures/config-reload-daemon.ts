@@ -13,7 +13,7 @@ BunRuntime.runMain(
       (owner) => Effect.promise(() => owner.close()),
     )
     const config = { ...reload.config, http: { ...reload.config.http, port: 0 } }
-    yield* runHookService(config).pipe(
+    return yield* runHookService(config).pipe(
       Effect.provide(
         makeLiveLayer(config).pipe(
           Layer.provide(SqliteClient.layer({ filename: config.storage.databasePath })),

@@ -17,6 +17,37 @@ async function matchesEntrypoint(pid: number, executable: string, entry: string)
   return paths.includes(entry)
 }
 
+async function children(pid: number): Promise<number[]> {
+  const threads = await readdir(`/proc/${pid}/task`)
+  const lists = await Promise.all(
+    threads.map(async (thread) => {
+      try {
+        const value = await readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
+        return value.trim().split(/\s+/).filter(Boolean).map(Number)
+      } catch (cause) {
+        if (!gone(cause)) throw cause
+        return []
+      }
+    }),
+  )
+  return lists.flat()
+}
+
+async function candidatesBelow(pid: number, executable: string, entry: string): Promise<number[]> {
+  try {
+    const [matches, descendants] = await Promise.all([
+      matchesEntrypoint(pid, executable, entry),
+      children(pid).then((pids) =>
+        Promise.all(pids.map((child) => candidatesBelow(child, executable, entry))),
+      ),
+    ])
+    return [...(matches ? [pid] : []), ...descendants.flat()]
+  } catch (cause) {
+    if (!gone(cause)) throw cause
+    return []
+  }
+}
+
 /** Signal only the matching Bun daemon, never noscope or a process group. */
 export async function signalWorkflowdReload(
   mainPid: number,
@@ -25,25 +56,7 @@ export async function signalWorkflowdReload(
   if (!Number.isSafeInteger(mainPid) || mainPid <= 1) throw new Error("Invalid main PID")
   const entry = await realpath(entrypoint)
   const executable = await realpath(process.execPath)
-  const candidates: number[] = []
-  const pending = [mainPid]
-  while (pending.length > 0) {
-    const pid = pending.pop()!
-    try {
-      const threads = await readdir(`/proc/${pid}/task`)
-      for (const thread of threads) {
-        try {
-          const children = await readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
-          pending.push(...children.trim().split(/\s+/).filter(Boolean).map(Number))
-        } catch (cause) {
-          if (!gone(cause)) throw cause
-        }
-      }
-      if (await matchesEntrypoint(pid, executable, entry)) candidates.push(pid)
-    } catch (cause) {
-      if (!gone(cause)) throw cause
-    }
-  }
+  const candidates = await candidatesBelow(mainPid, executable, entry)
   if (candidates.length !== 1) throw new Error("Expected one workflowd process below the main PID")
   const pid = candidates[0]!
   const status = await readFile(`/proc/${pid}/status`, "utf8")
