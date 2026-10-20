@@ -129,11 +129,23 @@ ExecReload=/opt/workflowd/bin/bun /opt/workflowd/deploy/current/src/config-reloa
 ```
 
 Use the same Bun executable and release path as the running daemon. The Linux
-helper searches only `MAINPID` and its descendants for that release's Bun
-`src/main.ts` process. It refuses zero or multiple matches, and sends HUP to
-one PID only after `/proc/<pid>/status` confirms a caught SIGHUP. It searches
-children of every thread. It does not signal noscope, sibling agents or a process
-group. It works
-with both direct Bun and the `bun run start` wrapper. A successful systemctl
-reload confirms signal delivery; inspect the daemon's reload log to confirm
-validation and application succeeded.
+helper searches only `MAINPID` and its descendants. It reads `cmdline` and
+children of every thread; it does not read `/proc/<pid>/exe` or `cwd`, which
+noscope's user namespace can make inaccessible to ExecReload.
+
+A match must name Bun and put the entrypoint directly in the script argument.
+An absolute script path must equal the helper's entrypoint path; a relative path
+must match its trailing path components (for example, `src/main.ts`). Arguments
+to noscope, `bun run start`, or another script do not count. Command lines cannot
+prove the working directory of a relative script, so keep one daemon entrypoint
+in the service tree. The helper refuses zero or several matches, even if only
+one has a handler. It sends HUP to one PID only after `/proc/<pid>/status`
+confirms a caught SIGHUP. It does not signal noscope, sibling agents or a process
+group. It works with both direct Bun and the `bun run start` wrapper.
+
+If reload is refused, the helper now says why: no matching process, several
+matches, no SIGHUP handler, unreadable handler status, or an inspection/delivery
+failure. It omits paths and raw OS errors. Missing or inaccessible non-candidates
+are skipped while the remaining tree is searched. A successful systemctl reload
+confirms signal delivery; inspect the daemon's reload log to confirm validation
+and application succeeded.

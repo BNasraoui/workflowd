@@ -1,74 +1,91 @@
-import { readFile, readdir, readlink, realpath } from "node:fs/promises"
-import { basename, join, resolve } from "node:path"
+import { readFile, readdir, realpath } from "node:fs/promises"
+import { basename, isAbsolute, join, normalize } from "node:path"
 
-const gone = (cause: unknown) =>
-  cause instanceof Error && "code" in cause && cause.code === "ENOENT"
+class ReloadRefused extends Error {}
 
-async function matchesEntrypoint(pid: number, executable: string, entry: string) {
-  if ((await readlink(`/proc/${pid}/exe`)) !== executable) return false
-  const args = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").filter(Boolean)
-  const cwd = await readlink(`/proc/${pid}/cwd`)
-  const paths = await Promise.all(
-    args
-      .slice(1)
-      .filter((arg) => basename(arg) === basename(entry))
-      .map((arg) => realpath(resolve(cwd, arg))),
-  )
-  return paths.includes(entry)
+const unavailable = (cause: unknown) =>
+  cause instanceof Error && "code" in cause && (cause.code === "ENOENT" || cause.code === "EACCES")
+
+async function matchesEntrypoint(pid: number, entry: string) {
+  try {
+    const args = (await readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0")
+    // Inspect the script position, never arguments to noscope, `bun run`, or another script.
+    if (basename(args[0] ?? "") !== basename(process.execPath) || !args[1]) return false
+    const script = normalize(args[1])
+    return isAbsolute(script) ? script === entry : entry.endsWith(`/${script}`)
+  } catch (cause) {
+    if (!unavailable(cause)) throw cause
+    return false
+  }
 }
 
 async function children(pid: number): Promise<number[]> {
-  const threads = await readdir(`/proc/${pid}/task`)
-  const lists = await Promise.all(
-    threads.map(async (thread) => {
-      try {
-        const value = await readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
-        return value.trim().split(/\s+/).filter(Boolean).map(Number)
-      } catch (cause) {
-        if (!gone(cause)) throw cause
-        return []
-      }
-    }),
-  )
-  return lists.flat()
-}
-
-async function candidatesBelow(pid: number, executable: string, entry: string): Promise<number[]> {
   try {
-    const [matches, descendants] = await Promise.all([
-      matchesEntrypoint(pid, executable, entry),
-      children(pid).then((pids) =>
-        Promise.all(pids.map((child) => candidatesBelow(child, executable, entry))),
-      ),
-    ])
-    return [...(matches ? [pid] : []), ...descendants.flat()]
+    const threads = await readdir(`/proc/${pid}/task`)
+    const lists = await Promise.all(
+      threads.map(async (thread) => {
+        try {
+          const value = await readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
+          return value.trim().split(/\s+/).filter(Boolean).map(Number)
+        } catch (cause) {
+          if (!unavailable(cause)) throw cause
+          return []
+        }
+      }),
+    )
+    return lists.flat()
   } catch (cause) {
-    if (!gone(cause)) throw cause
+    if (!unavailable(cause)) throw cause
     return []
   }
 }
 
-/** Signal only the matching Bun daemon, never noscope or a process group. */
+async function candidatesBelow(
+  pid: number,
+  entry: string,
+  seen = new Set<number>(),
+): Promise<number[]> {
+  if (seen.has(pid)) return []
+  seen.add(pid)
+  // A denied cmdline on a wrapper must not prevent traversal of its children.
+  const [matches, descendants] = await Promise.all([
+    matchesEntrypoint(pid, entry),
+    children(pid).then((pids) =>
+      Promise.all(pids.map((child) => candidatesBelow(child, entry, seen))),
+    ),
+  ])
+  return [...(matches ? [pid] : []), ...descendants.flat()]
+}
+
+/** Signal exactly one Bun entrypoint with a caught HUP, using no ptrace-gated proc links. */
 export async function signalWorkflowdReload(
   mainPid: number,
   entrypoint = join(import.meta.dir, "main.ts"),
 ) {
-  if (!Number.isSafeInteger(mainPid) || mainPid <= 1) throw new Error("Invalid main PID")
-  const entry = await realpath(entrypoint)
-  const executable = await realpath(process.execPath)
-  const candidates = await candidatesBelow(mainPid, executable, entry)
-  if (candidates.length !== 1) throw new Error("Expected one workflowd process below the main PID")
+  if (!Number.isSafeInteger(mainPid) || mainPid <= 1) throw new ReloadRefused("Invalid main PID")
+  const candidates = await candidatesBelow(mainPid, await realpath(entrypoint))
+  if (candidates.length === 0)
+    throw new ReloadRefused("No workflowd process matched below the main PID")
+  if (candidates.length > 1)
+    throw new ReloadRefused("Several workflowd processes matched below the main PID")
   const pid = candidates[0]!
-  const status = await readFile(`/proc/${pid}/status`, "utf8")
+  const status = await readFile(`/proc/${pid}/status`, "utf8").catch(() => {
+    throw new ReloadRefused("Could not read workflowd SIGHUP handler status")
+  })
   const caught = /^SigCgt:\s*([0-9a-f]+)$/im.exec(status)?.[1]
   if (caught === undefined || (BigInt(`0x${caught}`) & 1n) === 0n)
-    throw new Error("Workflowd has no SIGHUP handler")
+    throw new ReloadRefused("Workflowd has no SIGHUP handler")
   process.kill(pid, "SIGHUP")
 }
 
 if (import.meta.main) {
-  await signalWorkflowdReload(Number(process.argv[2])).catch(() => {
-    console.error("Could not identify and signal one workflowd process")
+  await signalWorkflowdReload(Number(process.argv[2])).catch((cause: unknown) => {
+    // Raw OS errors may include paths or command arguments containing secrets.
+    const reason =
+      cause instanceof ReloadRefused
+        ? cause.message
+        : "Process inspection or signal delivery failed"
+    console.error(`Could not reload workflowd: ${reason}`)
     process.exitCode = 1
   })
 }
