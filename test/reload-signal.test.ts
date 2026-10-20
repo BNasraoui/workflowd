@@ -1,25 +1,31 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { signalWorkflowdReload } from "../src/config-reload-signal"
 import { until } from "./helpers/reload"
 
 async function fixture(
-  phase: "ready" | "startup" | "shutdown" | "ambiguous" | "thread",
+  phase: "ready" | "startup" | "shutdown" | "ambiguous" | "thread" | "private",
   run: (input: { pid: number; entry: string; received: string }) => Promise<void>,
 ) {
   const root = await mkdtemp(join(tmpdir(), "workflowd-hup-"))
   const entry = join(root, "main.ts")
   const received = join(root, "received")
   const ready = join(root, "ready")
+  // PR_SET_DUMPABLE=0 reproduces noscope's ptrace-gated proc links without privileges.
+  const privateProcess =
+    phase === "private"
+      ? `const { dlopen, FFIType } = await import('bun:ffi'); const libc = dlopen('libc.so.6', { prctl: { args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64], returns: FFIType.i32 } }); if (libc.symbols.prctl(4, 0, 0, 0, 0) !== 0) throw new Error('prctl failed');`
+      : ""
   const closed =
     phase === "shutdown"
       ? `const { startConfigReload } = await import(${JSON.stringify(join(import.meta.dir, "../src/config-reload.ts"))}); const reload = await startConfigReload({ WORKFLOWD_MODE: 'execution' }, () => {}); await reload.close();`
       : ""
   await writeFile(
     entry,
-    `${closed}
+    `${privateProcess}
+    ${closed}
     ${phase === "startup" || phase === "shutdown" ? "" : `process.on('SIGHUP', () => { void Bun.write(${JSON.stringify(received)}, 'received') });`}
     await Bun.write(process.argv[2], String(process.pid)); setInterval(() => {}, 1000)`,
   )
@@ -34,7 +40,7 @@ async function fixture(
   )
   await writeFile(
     launcher,
-    `${spawn} process.on('SIGTERM', () => { a.kill(); b.kill(); process.exit(0) }); setInterval(() => {}, 1000)`,
+    `${privateProcess} ${spawn} process.on('SIGTERM', () => { a.kill(); b.kill(); process.exit(0) }); setInterval(() => {}, 1000)`,
   )
   if (phase === "thread") {
     await writeFile(
@@ -93,3 +99,21 @@ for (const phase of ["startup", "shutdown", "ambiguous"] as const) {
     })
   }, 20_000)
 }
+
+test("the helper CLI reloads with unreadable proc exe and cwd", async () => {
+  await fixture("private", async ({ pid, entry, received }) => {
+    const daemonPid = Number(await Bun.file(join(entry, "..", "ready")).text())
+    for (const target of [pid, daemonPid]) {
+      for (const link of ["exe", "cwd"])
+        await expect(readlink(`/proc/${target}/${link}`)).rejects.toHaveProperty("code", "EACCES")
+      for (const file of ["cmdline", "stat", "status", `task/${target}/children`])
+        expect((await readFile(`/proc/${target}/${file}`, "utf8")).length).toBeGreaterThanOrEqual(0)
+    }
+    const helper = join(entry, "..", "config-reload-signal.ts")
+    await writeFile(helper, await readFile(join(import.meta.dir, "../src/config-reload-signal.ts")))
+    const command = Bun.spawn([process.execPath, helper, String(pid)], { stderr: "pipe" })
+    const error = await new Response(command.stderr).text()
+    expect({ exit: await command.exited, error }).toEqual({ exit: 0, error: "" })
+    await until(() => Bun.file(received).exists())
+  })
+}, 20_000)
