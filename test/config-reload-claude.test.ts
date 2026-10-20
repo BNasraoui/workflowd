@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { writeFile } from "node:fs/promises"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Option } from "effect"
 import { ExecutionDiscovery } from "../src/execution-capabilities"
 import { makeDiscoveryLayer } from "../src/layers-execution"
 import { completed, withReload } from "./helpers/config-reload"
@@ -40,8 +40,9 @@ test("Claude discovery exists before routes and reload dispatch checks readiness
             writeFile(override, "WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES=review=claude-opus-5\n"),
           )
           yield* Effect.promise(signal)
-          const discovery = yield* ExecutionDiscovery
-          expect((yield* discovery.list()).sources).toMatchObject([
+          const discovery = yield* Effect.serviceOption(ExecutionDiscovery)
+          if (Option.isNone(discovery)) return yield* Effect.die(new Error("Discovery is disabled"))
+          expect((yield* discovery.value.list()).sources).toMatchObject([
             { executor: "claude:local", kind: "claude", status: "unsupported" },
           ])
           expect(checks).toBe(0)

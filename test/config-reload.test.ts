@@ -117,7 +117,7 @@ test("malformed or missing files keep dispatch unchanged and later signals recov
         for (const [route, model] of [
           ["scan", "gpt-5.6-sol"],
           ["review", "claude-opus-5"],
-        ]) {
+        ] as const) {
           const receipt = yield* register({ ...submission, repository: "added", route })
           expect(receipt.modelId).toBe(model)
           yield* completed(receipt.runId)
