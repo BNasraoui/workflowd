@@ -23,10 +23,7 @@ export function localDiscoverySources(
         ...(config.residentCodex === undefined ? {} : { home: config.residentCodex.home }),
       }),
     )
-  if (
-    config.agentRuns?.claudeHosts.includes(config.worker.hostId) ||
-    (config.agentRuns?.claudeRoutes.length ?? 0) > 0
-  )
+  if (config.agentRuns !== undefined)
     sources.push({
       executor: "claude:local",
       kind: "claude",

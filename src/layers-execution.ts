@@ -77,7 +77,7 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
     }),
   )
   const claude =
-    (config.agentRuns?.claudeRoutes.length ?? 0) === 0
+    config.agentRuns === undefined
       ? Layer.empty
       : Layer.succeed(
           ClaudeDispatchCli,

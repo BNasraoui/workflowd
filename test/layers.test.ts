@@ -189,15 +189,10 @@ test.each([false, true])(
             if (Option.isNone(discovery))
               return yield* Effect.die(new Error("expected configured discovery module"))
             const catalog = yield* discovery.value.list()
-            if (
-              catalog.sources.length !== 1 ||
-              catalog.sources[0]?.kind !== "opencode" ||
-              catalog.sources[0]?.status !== "unavailable"
-            ) {
-              return yield* Effect.die(
-                new Error("expected only the enabled, unavailable OpenCode discovery source"),
-              )
-            }
+            expect(catalog.sources.map(({ kind, status }) => ({ kind, status }))).toEqual([
+              { kind: "opencode", status: "unavailable" },
+              { kind: "claude", status: "unsupported" },
+            ])
             // Both supervised iterations run once against the empty store so
             // the composed worker pipelines execute, not just resolve.
             const watchdogStatus = yield* watchdog.iteration

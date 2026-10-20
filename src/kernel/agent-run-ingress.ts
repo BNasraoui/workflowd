@@ -1,3 +1,4 @@
+import { AgentRunDispatchSettings } from "../config-reload"
 import { CredentialAdmissionReason, credentialReason } from "../agent-host/protocol"
 import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
@@ -269,6 +270,7 @@ const choiceForSelection = (
 
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
+    const dispatchSettings = yield* Effect.serviceOption(AgentRunDispatchSettings)
     const store = yield* AgentRunStore
     const sandbox = Option.getOrUndefined(yield* Effect.serviceOption(SandboxDispatch))
     const requiresSandbox = (repository: string) =>
@@ -313,9 +315,11 @@ const make = (options: AgentRunIngressOptions) =>
     if (codexReadiness._tag === "Failure") {
       yield* Effect.logWarning("Codex route unavailable at startup", codexReadiness.failure)
     }
-    const claudeReadiness = yield* currentReadiness(claudeDispatch, "Claude")
-    if (claudeReadiness._tag === "Failure" && (options.claudeRoutes?.length ?? 0) > 0)
-      yield* Effect.logWarning("Claude CLI route unavailable at startup", claudeReadiness.failure)
+    if ((options.claudeRoutes?.length ?? 0) > 0) {
+      const claudeReadiness = yield* currentReadiness(claudeDispatch, "Claude")
+      if (claudeReadiness._tag === "Failure")
+        yield* Effect.logWarning("Claude CLI route unavailable at startup", claudeReadiness.failure)
+    }
 
     const { ensureResource, ensureSession, registerWait, resolveParentDirectory } =
       makeAgentRunCustody({ sessions, provider, waits, claude, options, refuse })
@@ -624,6 +628,10 @@ const make = (options: AgentRunIngressOptions) =>
 
     const prepareRegistration = (input: Parameters<AgentRunIngressPort["register"]>[0]) =>
       Effect.gen(function* () {
+        const dispatch = {
+          ...options,
+          ...(Option.isSome(dispatchSettings) ? dispatchSettings.value.current() : undefined),
+        }
         const submission = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(input, {
           onExcessProperty: "error",
         })
@@ -668,10 +676,10 @@ const make = (options: AgentRunIngressOptions) =>
           submission.route === undefined
             ? undefined
             : resolveAgentRunRouteChoice(
-                options.routes,
-                options.codexRoutes,
+                dispatch.routes,
+                dispatch.codexRoutes,
                 submission.route,
-                options.claudeRoutes,
+                dispatch.claudeRoutes,
               )
         const identityRoute =
           submission.model === undefined
@@ -687,7 +695,7 @@ const make = (options: AgentRunIngressOptions) =>
             parentSessionId:
               submission.parentSessionId === undefined
                 ? null
-                : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? options.identity.owningHostId}:${submission.parentSessionId}`,
+                : `${submission.parentKind ?? "opencode"}@${submission.parentHost ?? dispatch.identity.owningHostId}:${submission.parentSessionId}`,
             resumePrompt: submission.resumePrompt ?? null,
             idempotencyKey: submission.idempotencyKey,
             baseRef: submission.baseRef,
@@ -733,19 +741,19 @@ const make = (options: AgentRunIngressOptions) =>
           resolution = choiceForSelection(selection, identityRoute)
         } else {
           const alias = resolveAgentRunRouteChoice(
-            options.routes,
-            options.codexRoutes,
+            dispatch.routes,
+            dispatch.codexRoutes,
             submission.route!,
-            options.claudeRoutes,
+            dispatch.claudeRoutes,
           )
           if (alias.outcome === "refused")
             return yield* refuse(alias.reason, routeRefusalDetail(submission.route!, alias.reason))
           resolution = alias
           selection = {
-            host: options.identity.owningHostId,
+            host: dispatch.identity.owningHostId,
             executor:
               alias.provider === "opencode"
-                ? `opencode:${options.identity.serverId}`
+                ? `opencode:${dispatch.identity.serverId}`
                 : `${alias.provider}:local`,
             executorKind: alias.provider,
             provider: alias.provider === "opencode" ? alias.route.providerID : null,
@@ -797,7 +805,7 @@ const make = (options: AgentRunIngressOptions) =>
             }
           }
         }
-        const repository = options.repositories.find(
+        const repository = dispatch.repositories.find(
           (candidate) => candidate.name === submission.repository,
         )
         if (repository === undefined) {
@@ -806,7 +814,7 @@ const make = (options: AgentRunIngressOptions) =>
             `repository "${submission.repository}" is not in the dispatch allow-list`,
           )
         }
-        if (options.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
+        if (dispatch.sandboxRepositories?.some((policy) => policy.alias === repository.name)) {
           if (sandbox === undefined)
             return yield* refuse(
               "executor_unavailable",

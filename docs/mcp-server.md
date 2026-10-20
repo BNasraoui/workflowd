@@ -1,5 +1,7 @@
 # Workflowd MCP server
 
+See [dispatch configuration reload](execution-dispatch.md) for changing agent-run lists.
+
 A thin remote MCP server over the authoritative workflowd SQLite store. It
 runs on mint beside the coordinator, listens on loopback
 (`127.0.0.1:$WORKFLOWD_MCP_PORT`, default 8791), and is fronted by
