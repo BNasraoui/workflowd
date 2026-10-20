@@ -132,3 +132,10 @@ test("the helper CLI explains refusals without exposing paths", async () => {
     expect(error).not.toContain(import.meta.dir)
   }
 })
+
+test("reload refuses invalid and nonexistent main PIDs", async () => {
+  for (const pid of [NaN, -1, 0, 1, 1.5])
+    await expect(signalWorkflowdReload(pid)).rejects.toThrow("Invalid main PID")
+  // Linux PIDs cannot reach this value; no signal should be attempted.
+  await expect(signalWorkflowdReload(2_147_483_647)).rejects.toThrow("No workflowd process matched")
+})
