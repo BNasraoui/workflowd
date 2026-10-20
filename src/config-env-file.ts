@@ -5,7 +5,7 @@ class EnvironmentFile {
   constructor(private readonly text: string) {}
 
   parse(): Record<string, string> {
-    const result: Record<string, string> = {}
+    const result: Record<string, string> = Object.create(null)
     while (this.offset < this.text.length) {
       const end = this.lineEnd()
       const line = this.text.slice(this.offset, end).trim()
@@ -45,17 +45,21 @@ class EnvironmentFile {
 
   private value(quote: string | undefined): string {
     let value = ""
+    let keep = 0
     while (this.offset < this.text.length) {
       const char = this.text[this.offset++]!
       if (quote !== undefined && char === quote) {
         this.finishQuote()
         return value
       }
-      if (quote === undefined && char === "\n") return value.trim()
-      value += char === "\\" && quote !== "'" ? this.escape(quote) : char
+      if (quote === undefined && char === "\n") return value.slice(0, keep)
+      const escaped = char === "\\" && quote !== "'"
+      const part = escaped ? this.escape(quote) : char
+      value += part
+      if (part !== "" && (escaped || !/\s/.test(char))) keep = value.length
     }
     if (quote !== undefined) throw invalid()
-    return value.trim()
+    return value.slice(0, keep)
   }
 }
 

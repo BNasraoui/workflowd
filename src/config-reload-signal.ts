@@ -1,4 +1,4 @@
-import { readFile, readlink, realpath } from "node:fs/promises"
+import { readFile, readdir, readlink, realpath } from "node:fs/promises"
 import { basename, join, resolve } from "node:path"
 
 const gone = (cause: unknown) =>
@@ -30,15 +30,27 @@ export async function signalWorkflowdReload(
   while (pending.length > 0) {
     const pid = pending.pop()!
     try {
-      const children = await readFile(`/proc/${pid}/task/${pid}/children`, "utf8")
-      pending.push(...children.trim().split(/\s+/).filter(Boolean).map(Number))
+      const threads = await readdir(`/proc/${pid}/task`)
+      for (const thread of threads) {
+        try {
+          const children = await readFile(`/proc/${pid}/task/${thread}/children`, "utf8")
+          pending.push(...children.trim().split(/\s+/).filter(Boolean).map(Number))
+        } catch (cause) {
+          if (!gone(cause)) throw cause
+        }
+      }
       if (await matchesEntrypoint(pid, executable, entry)) candidates.push(pid)
     } catch (cause) {
       if (!gone(cause)) throw cause
     }
   }
   if (candidates.length !== 1) throw new Error("Expected one workflowd process below the main PID")
-  process.kill(candidates[0]!, "SIGHUP")
+  const pid = candidates[0]!
+  const status = await readFile(`/proc/${pid}/status`, "utf8")
+  const caught = /^SigCgt:\s*([0-9a-f]+)$/im.exec(status)?.[1]
+  if (caught === undefined || (BigInt(`0x${caught}`) & 1n) === 0n)
+    throw new Error("Workflowd has no SIGHUP handler")
+  process.kill(pid, "SIGHUP")
 }
 
 if (import.meta.main) {

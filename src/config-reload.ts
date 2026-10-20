@@ -4,10 +4,7 @@ import { Context, Schema } from "effect"
 import { loadConfig, type AgentRunConfig } from "./config"
 import { parseReloadEnvironment } from "./config-env-file"
 
-export type DispatchSettings = Pick<
-  AgentRunConfig,
-  "repositories" | "routes" | "codexRoutes" | "claudeRoutes"
->
+export type DispatchSettings = Pick<AgentRunConfig, (typeof reloadable)[keyof typeof reloadable]>
 export const AgentRunDispatchSettings = Context.Service<{
   readonly current: () => DispatchSettings | undefined
 }>("workflowd/AgentRunDispatchSettings")
@@ -31,26 +28,33 @@ export async function startConfigReload(
   )
   if (files.some((path) => !isAbsolute(path)))
     throw new Error("WORKFLOWD_CONFIG_RELOAD_FILES must contain absolute paths")
+  // Names supplied by reload files have no inherited startup fallback.
+  const baseEnvironment = { ...startEnvironment }
+  const startupContents = await Promise.all(files.map((file) => readFile(file, "utf8")))
+  for (const content of startupContents)
+    for (const name of Object.keys(parseReloadEnvironment(content))) delete baseEnvironment[name]
+  const keys = new Set<string>(Object.values(reloadable))
   const settings = (runs: AgentRunConfig | undefined): DispatchSettings | undefined =>
     runs === undefined
       ? undefined
-      : {
-          repositories: runs.repositories,
-          routes: runs.routes,
-          codexRoutes: runs.codexRoutes,
-          claudeRoutes: runs.claudeRoutes,
-        }
+      : (Object.fromEntries(
+          Object.values(reloadable).map((key) => [key, runs[key]]),
+        ) as DispatchSettings)
+  const pinned = (runs: AgentRunConfig | undefined) =>
+    runs === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(runs).filter(([key]) => !keys.has(key)))
   let current = settings(config.agentRuns)
   let pending = Promise.resolve()
   let closed = false
   const reload = async () => {
     let stage = "read_failed"
     try {
-      const candidateEnvironment = { ...startEnvironment }
+      let candidateEnvironment = { ...baseEnvironment }
       const contents = await Promise.all(files.map((file) => readFile(file, "utf8")))
       stage = "invalid_environment_file"
       for (const content of contents)
-        Object.assign(candidateEnvironment, parseReloadEnvironment(content))
+        candidateEnvironment = { ...candidateEnvironment, ...parseReloadEnvironment(content) }
       stage = "invalid_configuration"
       const candidate = await loadConfig(candidateEnvironment)
       // Validate against pinned infrastructure as well as the requested full config.
@@ -61,29 +65,34 @@ export async function startConfigReload(
       const changed = Object.entries(reloadable)
         .filter(([, key]) => !same(current?.[key], effective.agentRuns?.[key]))
         .map(([name]) => name)
-      const restart = Object.keys(candidateEnvironment).filter(
-        (name) => !(name in reloadable) && candidateEnvironment[name] !== startEnvironment[name],
-      )
+      const restart = [
+        ...new Set([...Object.keys(startEnvironment), ...Object.keys(candidateEnvironment)]),
+      ]
+        .filter(
+          (name) =>
+            !Object.hasOwn(reloadable, name) &&
+            candidateEnvironment[name] !== startEnvironment[name],
+        )
+        .sort()
       // Include groups for changed file-backed values, even when the path is unchanged.
-      const pinned = (runs: AgentRunConfig | undefined) => {
-        if (runs === undefined) return undefined
-        const { repositories, routes, codexRoutes, claudeRoutes, ...rest } = runs
-        return rest
-      }
+      const groups: string[] = []
       for (const [group, value] of Object.entries(config)) {
         const requested: unknown = Reflect.get(candidate, group)
         if (group === "agentRuns") {
-          if (!same(pinned(config.agentRuns), pinned(candidate.agentRuns))) restart.push(group)
-        } else if (!same(value, requested)) restart.push(group)
+          if (!same(pinned(config.agentRuns), pinned(candidate.agentRuns))) groups.push(group)
+        } else if (!same(value, requested)) groups.push(group)
       }
-      current = settings(effective.agentRuns)
-      const restartNames = restart.toSorted((left, right) => left.localeCompare(right))
+      const next = settings(effective.agentRuns)
+      const line = `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restart.join(",") || "none"} restart_required_groups=${groups.sort().join(",") || "none"}`
+      log(line)
+      current = next
+    } catch (cause) {
+      // Only a setting name is safe to extract from errors that may contain secrets.
+      const setting =
+        cause instanceof Error ? /\bWORKFLOWD_[A-Z0-9_]+\b/.exec(cause.message)?.[0] : undefined
       log(
-        `Configuration reload: changed=${changed.join(",") || "none"} restart_required=${restartNames.join(",") || "none"}`,
+        `Configuration reload: error=${stage}${setting === undefined ? "" : ` setting=${setting}`} changed=none restart_required=none restart_required_groups=none`,
       )
-    } catch {
-      // Parser and filesystem errors may contain secret values or paths.
-      log(`Configuration reload: error=${stage} changed=none restart_required=none`)
     }
   }
   const signal = () => {

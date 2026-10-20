@@ -1,10 +1,6 @@
 # Workflowd MCP server
 
-Agent-run repository and route lists can be changed without restarting the
-controller. See [configuration reload](config-reload.md) for
-`WORKFLOWD_CONFIG_RELOAD_FILES`, SIGHUP, systemd/noscope setup, and restart-only
-settings. Existing runs keep their original configuration.
-
+See [dispatch configuration reload](execution-dispatch.md) for changing agent-run lists.
 
 A thin remote MCP server over the authoritative workflowd SQLite store. It
 runs on mint beside the coordinator, listens on loopback

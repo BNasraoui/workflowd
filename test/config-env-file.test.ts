@@ -33,3 +33,12 @@ test("rejects malformed env files without reporting their contents", () => {
     }
   }
 })
+
+test("preserves escaped outer whitespace and owns prototype-like names", () => {
+  const parsed = parseReloadEnvironment("A=x\\ \nB=\\ x\\ \nC=x\\ \n__proto__=safe\n")
+  expect(parsed.A).toBe("x ")
+  expect(parsed.B).toBe(" x ")
+  expect(parsed.C).toBe("x ")
+  expect(Object.hasOwn(parsed, "__proto__")).toBe(true)
+  expect(parsed.__proto__).toBe("safe")
+})

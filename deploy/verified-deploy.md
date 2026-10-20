@@ -7,7 +7,6 @@ still use this deployment procedure. With noscope, use the daemon-only reload
 helper from that guide; HUP to noscope forwards to its whole child group and
 revokes credentials. Workers must leave live rollout and reload to the coordinator.
 
-
 `verified-deploy.py` is an operator entrypoint for a full merge-result SHA on
 freshly fetched `origin/main` in `BNasraoui/workflowd`. Before stopping units or
 changing working files, it verifies **every first-parent commit** between the

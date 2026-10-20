@@ -28,15 +28,6 @@ export const mainProgram = (env: Record<string, string | undefined>) =>
     const DatabaseLive = SqliteClient.layer({
       filename: config.storage.databasePath,
     })
-    if (config.mode === "execution")
-      return yield* runHookService(config).pipe(
-        Effect.provide(
-          makeLiveLayer(config).pipe(
-            Layer.provide(DatabaseLive),
-            Layer.provide(Layer.succeed(AgentRunDispatchSettings, reload.dispatchSettings)),
-          ),
-        ),
-      )
     return yield* runHookService(config).pipe(
       Effect.provide(
         makeLiveLayer(config).pipe(

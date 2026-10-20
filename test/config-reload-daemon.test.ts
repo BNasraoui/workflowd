@@ -4,28 +4,19 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { signalWorkflowdReload } from "../src/config-reload-signal"
 
-async function until(check: () => Promise<boolean>) {
-  const deadline = Date.now() + 10_000
-  while (Date.now() < deadline) {
-    if (await check()) return
-    await Bun.sleep(20)
-  }
-  throw new Error("Daemon did not reach the expected state")
-}
+import { until } from "./helpers/reload"
 
 test("a real daemon handles HUP, keeps its HTTP port and logs only names", async () => {
   const root = await mkdtemp(join(tmpdir(), "workflowd-hup-daemon-"))
   const file = join(root, "env")
-  const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
-  const port = reservation.port!
-  await reservation.stop(true)
-  await writeFile(file, "WORKFLOWD_PORT=9999\nIGNORED_SECRET=never-log-this-value\n")
-  const child = Bun.spawn([process.execPath, "src/main.ts"], {
+  await writeFile(file, "")
+  const entry = join(import.meta.dir, "fixtures/config-reload-daemon.ts")
+  const child = Bun.spawn([process.execPath, entry], {
     env: {
       PATH: process.env.PATH,
       WORKFLOWD_MODE: "execution",
       WORKFLOWD_HOST: "127.0.0.1",
-      WORKFLOWD_PORT: String(port),
+
       WORKFLOWD_DATABASE_PATH: join(root, "state.db"),
       WORKFLOWD_CONFIG_RELOAD_FILES: JSON.stringify([file]),
     },
@@ -39,10 +30,13 @@ test("a real daemon handles HUP, keeps its HTTP port and logs only names", async
   const readers = Promise.all([read(child.stdout), read(child.stderr)])
   try {
     await until(async () => output.includes("workflowd listening"))
-    await signalWorkflowdReload(child.pid)
+    const port = /workflowd listening on http:\/\/127\.0\.0\.1:(\d+)/.exec(output)![1]
+    await writeFile(file, "WORKFLOWD_PORT=9999\nIGNORED_SECRET=never-log-this-value\n")
+    await signalWorkflowdReload(child.pid, entry)
     await until(async () => output.includes("Configuration reload:"))
-    expect(output).toContain("restart_required=")
-    expect(output).toContain("WORKFLOWD_PORT")
+    expect(output.split("\n").find((line) => line.startsWith("Configuration reload:"))).toBe(
+      "Configuration reload: changed=none restart_required=IGNORED_SECRET,WORKFLOWD_PORT restart_required_groups=http",
+    )
     expect(output).not.toContain("never-log-this-value")
     expect((await fetch(`http://127.0.0.1:${port}/hooks/github`, { method: "POST" })).status).toBe(
       404,
