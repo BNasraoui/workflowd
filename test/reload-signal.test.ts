@@ -16,10 +16,11 @@ test("reload targets the daemon under a wrapper and leaves siblings and the wrap
     `process.on('SIGHUP', () => { void Bun.write(${JSON.stringify(signal)}, 'received') }); await Bun.write(${JSON.stringify(ready)}, String(process.pid)); setInterval(() => {}, 1000)`,
   )
   await writeFile(sibling, `setInterval(() => {}, 1000)`)
+  await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "bun main.ts" } }))
   const wrapper = join(root, "wrapper.ts")
   await writeFile(
     wrapper,
-    `const children = [Bun.spawn([process.execPath, ${JSON.stringify(entry)}]), Bun.spawn([process.execPath, ${JSON.stringify(sibling)}])]; process.on('SIGTERM', () => { for (const child of children) child.kill(); process.exit(0) }); setInterval(() => {}, 1000)`,
+    `const children = [Bun.spawn([process.execPath, "run", "start"], { cwd: ${JSON.stringify(root)} }), Bun.spawn([process.execPath, ${JSON.stringify(sibling)}])]; process.on('SIGTERM', () => { for (const child of children) child.kill(); process.exit(0) }); setInterval(() => {}, 1000)`,
   )
   const child = Bun.spawn([process.execPath, wrapper], { stdout: "ignore", stderr: "pipe" })
   try {
@@ -35,6 +36,13 @@ test("reload targets the daemon under a wrapper and leaves siblings and the wrap
       "Expected one workflowd process",
     )
   } finally {
+    if (await Bun.file(ready).exists()) {
+      try {
+        process.kill(Number(await readFile(ready, "utf8")), "SIGTERM")
+      } catch {
+        /* The fixture may already have exited. */
+      }
+    }
     child.kill()
     await child.exited
     await rm(root, { recursive: true, force: true })

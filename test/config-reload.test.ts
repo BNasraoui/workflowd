@@ -142,3 +142,49 @@ test("an in-flight dispatch keeps its repository and model snapshot", async () =
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test("malformed or missing files reject the whole reload and a later signal recovers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflowd-reload-errors-"))
+  const file = join(directory, "env")
+  const logs: string[] = []
+  const reload = await startConfigReload(
+    {
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "dispatch-secret",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/tmp/original",
+      WORKFLOWD_CONFIG_RELOAD_FILES: JSON.stringify([file]),
+    },
+    (line) => logs.push(line),
+  )
+  try {
+    process.emit("SIGHUP")
+    await reload.settled()
+    expect(logs.at(-1)).toContain("error=read_failed")
+    await writeFile(
+      file,
+      "WORKFLOWD_AGENT_RUN_REPOSITORIES=added=/tmp/added\nSECRET='unfinished-secret",
+    )
+    process.emit("SIGHUP")
+    await reload.settled()
+    expect(logs.at(-1)).toContain("error=invalid_environment_file")
+    expect(reload.dispatchSettings.current()?.repositories[0]?.name).toBe("workflowd")
+    await writeFile(
+      file,
+      "WORKFLOWD_AGENT_RUN_REPOSITORIES=added=/tmp/added\nWORKFLOWD_AGENT_RUN_CODEX_ROUTES=scan=gpt-5.6-sol\nWORKFLOWD_AGENT_RUN_CLAUDE_ROUTES=review=claude-opus-5\n",
+    )
+    process.emit("SIGHUP")
+    process.emit("SIGHUP")
+    await reload.settled()
+    expect(reload.dispatchSettings.current()).toMatchObject({
+      repositories: [{ name: "added" }],
+      codexRoutes: [{ name: "scan", modelID: "gpt-5.6-sol" }],
+      claudeRoutes: [{ name: "review", modelID: "claude-opus-5" }],
+    })
+    expect(logs.at(-1)).toContain("changed=none")
+    expect(logs).toHaveLength(4)
+    expect(logs.join("\n")).not.toContain("unfinished-secret")
+  } finally {
+    await reload.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
