@@ -1,3 +1,4 @@
+import { AgentRunDispatchSettings } from "../config-reload"
 import { CredentialAdmissionReason, credentialReason } from "../agent-host/protocol"
 import { sandboxDiagnostic } from "../sandbox/diagnostics"
 import { canonicalJson } from "./session-store-support"
@@ -269,6 +270,7 @@ const choiceForSelection = (
 
 const make = (options: AgentRunIngressOptions) =>
   Effect.gen(function* () {
+    const dispatchSettings = yield* Effect.serviceOption(AgentRunDispatchSettings)
     const store = yield* AgentRunStore
     const sandbox = Option.getOrUndefined(yield* Effect.serviceOption(SandboxDispatch))
     const requiresSandbox = (repository: string) =>
@@ -622,8 +624,13 @@ const make = (options: AgentRunIngressOptions) =>
         } satisfies ResolvedSelection
       })
 
+    const initialOptions = options
     const prepareRegistration = (input: Parameters<AgentRunIngressPort["register"]>[0]) =>
       Effect.gen(function* () {
+        const options = {
+          ...initialOptions,
+          ...(Option.isSome(dispatchSettings) ? dispatchSettings.value.current() : undefined),
+        }
         const submission = yield* Schema.decodeUnknownEffect(AgentRunSubmission)(input, {
           onExcessProperty: "error",
         })
