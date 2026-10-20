@@ -33,7 +33,7 @@ async function fixture(
   const launcher = phase === "thread" ? join(root, "thread.ts") : join(root, "wrapper.ts")
   const secondReady = join(root, "second-ready")
   const spawn = `const a = Bun.spawn([process.execPath, "run", "start", ${JSON.stringify(ready)}], { cwd: ${JSON.stringify(root)} });
-    const b = Bun.spawn([process.execPath, ${JSON.stringify(phase === "ambiguous" ? entry : join(root, "sibling.ts"))}, ${JSON.stringify(secondReady)}]);`
+    const b = Bun.spawn([process.execPath, ${JSON.stringify(phase === "ambiguous" ? entry : join(root, "sibling.ts"))}, ${JSON.stringify(secondReady)}, ${JSON.stringify(entry)}]);`
   await writeFile(
     join(root, "sibling.ts"),
     `await Bun.write(process.argv[2], String(process.pid)); setInterval(() => {}, 1000)`,
@@ -48,7 +48,7 @@ async function fixture(
       `new Worker(${JSON.stringify(launcher)}); setInterval(() => {}, 1000)`,
     )
   }
-  const child = Bun.spawn([process.execPath, join(root, "wrapper.ts")], {
+  const child = Bun.spawn([process.execPath, join(root, "wrapper.ts"), entry], {
     stdout: "ignore",
     stderr: "pipe",
   })
@@ -84,7 +84,7 @@ for (const phase of ["ready", "thread"] as const) {
       const missing = join(entry, "..", "missing.ts")
       await writeFile(missing, "")
       await expect(signalWorkflowdReload(pid, missing)).rejects.toThrow(
-        "Expected one workflowd process",
+        "No workflowd process matched",
       )
     })
   }, 20_000)
@@ -94,7 +94,7 @@ for (const phase of ["startup", "shutdown", "ambiguous"] as const) {
   test(`reload refuses a daemon during ${phase}`, async () => {
     await fixture(phase, async ({ pid, entry }) => {
       await expect(signalWorkflowdReload(pid, entry)).rejects.toThrow(
-        phase === "ambiguous" ? "Expected one workflowd process" : "SIGHUP handler",
+        phase === "ambiguous" ? "Several workflowd processes matched" : "SIGHUP handler",
       )
     })
   }, 20_000)
@@ -117,3 +117,18 @@ test("the helper CLI reloads with unreadable proc exe and cwd", async () => {
     await until(() => Bun.file(received).exists())
   })
 }, 20_000)
+
+test("the helper CLI explains refusals without exposing paths", async () => {
+  const helper = join(import.meta.dir, "../src/config-reload-signal.ts")
+  for (const [pid, reason] of [
+    ["1", "Invalid main PID"],
+    [String(process.pid), "No workflowd process matched"],
+  ] as const) {
+    const command = Bun.spawn([process.execPath, helper, pid, "/secret/path"], { stderr: "pipe" })
+    const error = await new Response(command.stderr).text()
+    expect(await command.exited).toBe(1)
+    expect(error).toContain(reason)
+    expect(error).not.toContain("/secret/path")
+    expect(error).not.toContain(import.meta.dir)
+  }
+})
