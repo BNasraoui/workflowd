@@ -203,7 +203,7 @@ const MESSAGE_LOOKUP_LIMIT = 20
 const toError = (cause: unknown): Error =>
   cause instanceof Error ? cause : new Error(String(cause))
 
-class OpenCodeAvailabilityError extends Error {
+export class OpenCodeAvailabilityError extends Error {
   readonly unavailable: ReadonlyArray<string>
 
   constructor(unavailable: ReadonlyArray<string>) {
@@ -404,8 +404,8 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
               catch: toError,
             }),
           ),
-          Effect.tapError(() =>
-            Effect.logWarning("OpenCode availability check failed", {
+          Effect.tapError(() => {
+            const details = {
               serverUrl: publicServerUrl(this.serverUrl),
               directory: input.directory ?? null,
               agentCount: agents?.length ?? null,
@@ -423,8 +423,9 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
                       model.id === input.model.modelID,
                   ) ?? null,
               },
-            }),
-          ),
+            }
+            return Effect.logWarning("OpenCode availability check failed", details)
+          }),
         )
       }),
     )

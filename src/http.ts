@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import type { ReviewAvailability } from "./review-availability"
 import { createHash, timingSafeEqual } from "node:crypto"
 import { AgentRunSubmission } from "./agent-run-contract"
 import type { CiStore } from "./ci/store"
@@ -57,6 +58,8 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 }
 
 export type WebhookHandlerOptions = {
+  readonly reviewAutomation?: Effect.Effect<ReviewAvailability>
+  readonly fixAutomation?: Effect.Effect<ReviewAvailability>
   readonly installationGuard?: typeof InstallationGuard.Service
   readonly checkAgentGitIdentity?: (event: string, payload: unknown) => Effect.Effect<void, Error>
   readonly prAutomationEnabled?: boolean
@@ -78,16 +81,23 @@ export type WebhookHandlerOptions = {
   }
 }
 
-function healthResponse(guard: WebhookHandlerOptions["installationGuard"]) {
-  return guard === undefined
-    ? Effect.succeed(Response.json({ status: "ok" }))
-    : guard
-        .health()
-        .pipe(
-          Effect.map((installationGuard) =>
-            Response.json({ status: installationGuard.status, installationGuard }),
-          ),
-        )
+function healthResponse(options: WebhookHandlerOptions) {
+  return Effect.gen(function* () {
+    const installationGuard = yield* options.installationGuard?.health() ??
+      Effect.succeed(undefined)
+    const reviewAutomation = yield* options.reviewAutomation ?? Effect.succeed(undefined)
+    const fixAutomation = yield* options.fixAutomation ?? Effect.succeed(undefined)
+    const reviewDegraded = [reviewAutomation, fixAutomation].some(
+      (automation) =>
+        automation !== undefined && !["available", "disabled"].includes(automation.status),
+    )
+    return Response.json({
+      status: reviewDegraded ? "degraded" : (installationGuard?.status ?? "ok"),
+      ...(installationGuard === undefined ? {} : { installationGuard }),
+      ...(reviewAutomation === undefined ? {} : { reviewAutomation }),
+      ...(fixAutomation === undefined ? {} : { fixAutomation }),
+    })
+  })
 }
 
 export function routeRequest(
@@ -112,7 +122,7 @@ export function routeRequest(
     )
   }
   if (pathname === "/health" && request.method === "GET") {
-    return healthResponse(options.installationGuard)
+    return healthResponse(options)
   }
   if (pathname === "/hooks/github" && request.method === "POST") {
     return options.prAutomationEnabled === false

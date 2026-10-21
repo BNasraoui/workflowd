@@ -239,6 +239,11 @@ export function makeSharedStoreOperations(sql: SqlClient) {
         updated_at = excluded.updated_at
       WHERE ${input.requeueFailed}
       AND jobs.state = 'failed'
+      AND NOT EXISTS (
+        SELECT 1 FROM agent_executions AS execution
+        WHERE execution.job_id = jobs.id
+        AND execution.state = 'session_ready'
+      )
        RETURNING id
      `
   }

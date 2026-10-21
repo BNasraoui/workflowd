@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { randomUUID } from "node:crypto"
+import { SqlClient } from "effect/unstable/sql"
+import { Clock, Deferred, Effect, Fiber, Layer, Logger, Schema, Stream } from "effect"
 import {
   AgentHarness,
   AgentHarnessError,
@@ -8,11 +10,17 @@ import {
   type AgentLaunchIntent,
   SessionReference,
 } from "../src/agent-harness"
+import { TestClock } from "effect/testing"
 import { FixResult } from "../src/domain/fix-result"
 import { Publication } from "../src/domain/publication"
 import { ReviewResult } from "../src/domain/review-result"
 import { GitHub, GitHubClientError, type GitHubPort } from "../src/github"
-import { Automation, type AutomationPort, RunPullRequestAutomationInput } from "../src/opencode"
+import {
+  Automation,
+  type AutomationPort,
+  OpenCodeAutomationError,
+  RunPullRequestAutomationInput,
+} from "../src/opencode"
 import type { OpenCodeAdapter } from "../src/opencode/adapter"
 import { SessionAccessResolver } from "../src/session-access"
 import {
@@ -1994,3 +2002,168 @@ describe("job cancellation", () => {
     expect(reschedules).toBe(0)
   })
 })
+
+for (const [scenario, name] of Object.entries({
+  hang: "a reviewer that hangs on every run fails after two durable refunds",
+  decode: "a non-retryable decode error with socket in its message keeps its attempt",
+  "retryable-decode": "a retryable decode error with socket in its message uses the attempt limit",
+  "automation-decode": "an automation decode error with socket in its message keeps its attempt",
+  operator: "a refunded job fails when session cleanup needs an operator",
+  shutdown: "shutdown during an immediate check keeps the attempt counted",
+})) {
+  test(name, async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* WorkflowStore
+          const sql = yield* SqlClient.SqlClient
+          const clock = yield* Clock.Clock
+          const now = () => new Date(clock.currentTimeMillisUnsafe())
+          yield* store.ingestPullRequest(
+            {
+              deliveryId: "refund-bound",
+              event: "pull_request",
+              action: "opened",
+              payload: "{}",
+              receivedAt: now(),
+            },
+            samplePullRequestEvent,
+          )
+          let checks = 0
+          const checking = yield* Deferred.make<void>()
+          const decode = scenario.includes("decode")
+          const failure = decode
+            ? new AgentHarnessError({
+                operation: "decode structured session output",
+                cause: new Error("Invalid socket field"),
+                retryable: scenario === "retryable-decode",
+              })
+            : new AgentHarnessError({
+                operation: "run structured agent session",
+                cause: new Error("Agent execution timed out"),
+                retryable: true,
+              })
+          const iteration = runJobIteration({
+            ...jobOptions,
+            now,
+            recheckAvailability: () =>
+              Effect.gen(function* () {
+                checks++
+                yield* Deferred.succeed(checking, undefined)
+                if (scenario === "shutdown") return yield* Effect.never
+                return false
+              }),
+          }).pipe(
+            Effect.provide(
+              makeWorkerLayer({
+                store,
+                workspace: {
+                  prepareReview: () => Effect.succeed({ directory: "/tmp/review-refund" }),
+                },
+                automation: {
+                  prepareReview: (_input, context) => {
+                    if (scenario === "automation-decode")
+                      return Effect.fail(
+                        new OpenCodeAutomationError({
+                          operation: "decode structured session output",
+                          cause: new Error("Invalid socket field"),
+                          retryable: false,
+                        }),
+                      )
+                    const prepared = preparedReview(context)
+                    return Effect.succeed({
+                      ...prepared,
+                      launchIntent: {
+                        ...prepared.launchIntent,
+                        sessionReferenceId: randomUUID(),
+                      },
+                    })
+                  },
+                },
+                agentHarness: {
+                  resumeSession: () =>
+                    decode
+                      ? Effect.fail(failure)
+                      : Effect.never.pipe(
+                          Effect.timeoutOrElse({
+                            duration: 1000,
+                            orElse: () => Effect.fail(failure),
+                          }),
+                        ),
+                  abortSession: () =>
+                    scenario === "operator"
+                      ? Effect.fail(
+                          new AgentHarnessError({
+                            operation: "abort session",
+                            cause: new Error("No response"),
+                            retryable: true,
+                          }),
+                        )
+                      : Effect.void,
+                },
+              }),
+            ),
+          )
+          if (scenario === "shutdown") {
+            const worker = yield* iteration.pipe(Effect.forkScoped)
+            yield* TestClock.adjust("1 second")
+            yield* Deferred.await(checking)
+            yield* Fiber.interrupt(worker)
+            expect(yield* sql`SELECT state, attempts FROM jobs`).toEqual([
+              { state: "leased", attempts: 1 },
+            ])
+            return
+          }
+          const outcomes: string[] = []
+          const count = scenario === "hang" ? 5 : scenario === "retryable-decode" ? 3 : 1
+          for (let index = 0; index < count; index++) {
+            const worker = yield* iteration.pipe(Effect.forkScoped)
+            yield* TestClock.adjust("1 second")
+            outcomes.push(yield* Fiber.join(worker))
+            yield* TestClock.adjust("3 minutes")
+          }
+          if (scenario === "operator") {
+            expect(outcomes).toEqual(["retry"])
+            for (let index = 0; index < 3; index++) {
+              expect(yield* iteration).toBe("idle")
+              yield* TestClock.adjust("1 minute")
+            }
+            expect(yield* sql`SELECT state FROM jobs`).toEqual([{ state: "failed" }])
+            expect(yield* sql`SELECT cleanup_disposition FROM agent_executions`).toEqual([
+              { cleanup_disposition: "operator_required" },
+            ])
+          } else {
+            expect(outcomes).toEqual(
+              scenario === "hang"
+                ? ["retry", "retry", "retry", "retry", "failed"]
+                : scenario === "retryable-decode"
+                  ? ["retry", "retry", "failed"]
+                  : ["failed"],
+            )
+            expect(checks).toBe(scenario === "hang" ? 5 : 0)
+            expect(yield* sql`SELECT state, attempts FROM jobs`).toEqual([
+              {
+                state: "failed",
+                attempts: scenario === "hang" || scenario === "retryable-decode" ? 3 : 1,
+              },
+            ])
+            if (scenario === "hang") {
+              expect(yield* sql`SELECT availability_refunds FROM jobs`).toEqual([
+                { availability_refunds: 2 },
+              ])
+              expect(yield* sql`SELECT state FROM agent_executions ORDER BY rowid`).toEqual([
+                ...Array.from({ length: 4 }, () => ({ state: "superseded" })),
+                { state: "failed" },
+              ])
+            }
+            expect(yield* iteration).toBe("idle")
+          }
+        }),
+      ).pipe(
+        Effect.provide(makeStoreLayer()),
+        Effect.provide(TestClock.layer()),
+        Effect.provide(Logger.layer([])),
+      ),
+    )
+  })
+}

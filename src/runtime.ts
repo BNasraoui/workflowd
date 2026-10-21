@@ -9,7 +9,7 @@ import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
 import { withAvailabilityDeadline } from "./availability-validation"
-import { validateOpenCodeStartup } from "./startup-validation"
+import { startPullRequestAvailability } from "./pr-availability"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
@@ -294,15 +294,11 @@ export function startHookService(
     })
     if (missingService !== null) return yield* Effect.die(new Error(missingService))
 
-    if (config.mode !== "execution") {
-      if (Option.isNone(automation))
-        return yield* Effect.die(new Error("Automation service is required"))
-      yield* automation.value
-        .validateAvailability({
-          fixWorkEnabled: config.fixWork.enabled,
-        })
-        .pipe(validateOpenCodeStartup)
-    }
+    const availability = yield* startPullRequestAvailability(
+      Option.getOrUndefined(automation),
+      config.mode !== "execution",
+      config.fixWork.enabled,
+    )
 
     if (config.mode !== "execution") {
       if (Option.isNone(installationGuard))
@@ -334,6 +330,8 @@ export function startHookService(
             observed(
               "job",
               runJobIteration({
+                availableJobKinds: availability.availableJobKinds,
+                recheckAvailability: availability.recheckAvailability,
                 workerId,
                 leaseDurationMs: config.worker.jobLeaseDurationMs,
                 maxAttempts: 3,
@@ -519,6 +517,8 @@ export function startHookService(
           return yield* routeRequest(request, {
             ...options,
             prAutomationEnabled: config.mode !== "execution",
+            reviewAutomation: availability.review.health,
+            fixAutomation: availability.fix.health,
             prRepositories: config.github?.prRepositories ?? [],
             ...(checkAgentGitIdentity !== undefined ? { checkAgentGitIdentity } : {}),
             installationIds,

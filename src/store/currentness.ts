@@ -50,7 +50,10 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
     currentJob,
     currentPublication,
     latestReviewRequest,
-    jobClaimCandidate: (now: string) => sql`
+    jobClaimCandidate: (
+      now: string,
+      kinds: ReadonlyArray<"review" | "fix"> = ["review", "fix"],
+    ) => sql`
       SELECT candidate.id
       FROM jobs AS candidate
       WHERE (
@@ -59,6 +62,7 @@ export function makeCurrentnessPolicy(sql: SqlClient) {
       )
       AND candidate.run_at <= ${now}
       AND candidate.attempts < candidate.max_attempts
+      AND ${sql.in("candidate.kind", kinds)}
       AND candidate.cancel_requested = FALSE
       AND NOT EXISTS (
         SELECT 1 FROM agent_executions AS active_execution

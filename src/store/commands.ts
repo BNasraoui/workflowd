@@ -2,7 +2,11 @@ import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import type { SqlError } from "effect/unstable/sql/SqlError"
 import { Effect } from "effect"
 import { decideFixCandidate } from "../domain/transaction-policy"
-import { decodeCommandRow, decodePublicationReviewRow } from "./codecs"
+import {
+  decodeAgentSessionReferenceRow,
+  decodeCommandRow,
+  decodePublicationReviewRow,
+} from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import type { StoreDataError } from "./errors"
@@ -23,7 +27,8 @@ type CurrentPullRequest = {
   readonly repository_full_name: string
   readonly head_repository_full_name: string
 }
-type CommandDisposition = "review" | "fix" | "noop" | "disabled" | "denied"
+type CommandDisposition =
+  "review" | "fix" | "noop" | "disabled" | "denied" | `operator_required: ${string}`
 
 export class SqlCommandStore implements CommandOperations {
   readonly #sql: SqlClient
@@ -251,7 +256,10 @@ export class SqlCommandStore implements CommandOperations {
     command: ClaimedCommand,
     pullRequest: CurrentPullRequest,
     timestamp: string,
-  ): Effect.Effect<"fix" | "noop" | "denied", SqlError | StoreDataError> {
+  ): Effect.Effect<
+    "fix" | "noop" | "denied" | `operator_required: ${string}`,
+    SqlError | StoreDataError
+  > {
     return Effect.gen({ self: this }, function* () {
       const currentness = makeCurrentnessPolicy(this.#sql)
       const reviews = yield* this.#sql<object>`
@@ -287,6 +295,23 @@ export class SqlCommandStore implements CommandOperations {
         return eligibility.reason === "different-repository"
           ? ("denied" as const)
           : ("noop" as const)
+
+      const sessions = yield* this.#sql<object>`
+        SELECT execution.session_reference_json
+        FROM agent_executions AS execution
+        JOIN jobs AS fix ON fix.id = execution.job_id
+        WHERE fix.kind = 'fix'
+        AND fix.publication_id = ${review.id}
+        AND fix.state = 'failed'
+        AND execution.state = 'session_ready'
+        ORDER BY execution.session_reference_id
+        LIMIT 1
+      `
+      const session = sessions[0]
+      if (session !== undefined) {
+        const { sessionReference } = yield* decodeAgentSessionReferenceRow(session)
+        return `operator_required: ${sessionReference.nativeSessionId}` as const
+      }
 
       const fixes = yield* this.#support.enqueueFixFromReview({
         headRepositoryFullName: pullRequest.head_repository_full_name,

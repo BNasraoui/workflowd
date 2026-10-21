@@ -148,7 +148,7 @@ The daemon serves, on one listener:
 
 | Route | Method | Enabled when | Purpose |
 | --- | --- | --- | --- |
-| `/health` | GET | always | Liveness; responds `{"status":"ok"}` |
+| `/health` | GET | always | HTTP 200 liveness; inspect `status`, `reviewAutomation`, and `fixAutomation` for readiness |
 | `/hooks/github` | POST | always | GitHub App webhook receiver |
 | `/workflows/qrspi` | POST | token configured | Start a QRSPI workflow |
 | `/workflows/agent-waits` | POST | token configured | Register a durable agent wait (proxied by `wait_for_agent`) |
@@ -378,7 +378,42 @@ journalctl --user -u workflowd.service --since "10 minutes ago"
 tailscale funnel status
 ```
 
-The health response is `{"status":"ok"}`. Confirm a GitHub test delivery receives HTTP `202`, then check that a review job produces the sticky PR comment and per-head Check Run. Port 443 remains private to the tailnet for OpenCode; only Funnel port 8443 should expose the Workflowd listener.
+`/health` returns HTTP 200 for liveness even when its body has `status: "degraded"`.
+`curl --fail` alone does not check review readiness. After each deploy, inspect
+`reviewAutomation.status` and, when Fix Work is enabled, `fixAutomation.status`:
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8787/health |
+  jq -e '.status == "ok" and
+    (.reviewAutomation.status == "available" or .reviewAutomation.status == "disabled") and
+    (.fixAutomation.status == "available" or .fixAutomation.status == "disabled")'
+```
+
+Each automation status is `available`, `disabled`, `unavailable`, `misconfigured`,
+or `unreachable`. Empty catalogs and failed checks are unavailable. A missing
+selection must repeat on two consecutive checks before it is misconfigured;
+`missing` names the agent or model. An unanswered 10-second check is unreachable
+with `reason: "timeout"`; timeouts are logged at most once per minute while
+unchanged. Checks continue after success (every 30 seconds), and failures back
+off 2, 4, 8, 16, then 30 seconds. Recovery resets the failure delay. The monitor
+logs `available` only when the status changes. A retryable session timeout or
+transport operation starts a check at once. Concurrent callers share one check;
+a caller uses the stored result if the gate is already closed. A status change
+wakes the schedule. After a worker closes the gate, the next check starts in two
+seconds. If the check closes the gate, the job is queued again and its attempt
+count is restored. Each job can receive at most two refunds. The refund count
+is stored in the database. After two refunds, failures use the normal attempt
+limit. Decode errors do not receive refunds.
+Shutdown during an immediate check keeps the attempt counted, as for other work in progress.
+Workflowd sets the job to `failed` if session cleanup needs an operator.
+The session still needs operator cleanup.
+Review and fix claims pause separately, without
+consuming queued attempts or pausing expired-session cleanup and disabled-fix
+retirement. A hung reviewer needs an operator restart; workflowd does not restart
+it. Inspect `opencode2-reviewer.service` journals before an authorized restart.
+
+Confirm a GitHub test delivery receives HTTP `202`, then check that a review job
+produces the sticky PR comment and per-head Check Run. Port 443 remains private to the tailnet for OpenCode; only Funnel port 8443 should expose the Workflowd listener.
 
 ## Development
 
