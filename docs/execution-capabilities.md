@@ -60,6 +60,39 @@ An enabled local Claude resume executor is reported as an `unsupported` source;
 this slice has no supported Claude discovery protocol. `workflowd-5si` owns its
 direct launch implementation.
 
+## Cross-repository model identity
+
+[`schemas/model-identity.schema.json`](../schemas/model-identity.schema.json) is
+workflowd's cross-repo contract for model identity (JSON Schema draft 2020-12).
+It is generated from `ModelIdentity`, which derives its five fields from
+`ResolvedSelection` in `src/execution-selection.ts`; regenerate it with
+`bun run schema:model-identity`. The committed file is checked against the generated
+output by `test/model-identity-schema.test.ts`.
+
+`kernel_agent_runs.resolved_selection` stores the identity alongside host, thinking,
+availability and evidence. Consumers should parse that column and project
+`executor`, `executorKind`, `provider`, `model` and `selectionModel` before validating
+against the schema. Compare the full five-field identity, preserving nulls; comparing
+only `model`, or only `executor/model`, can merge distinct providers of
+`glm-5.3-flash`. `model` is the native model ID; `selectionModel` is the catalog
+selection ID and can differ. `provider` is null when an executor uses its own
+credentials without exposing a provider, such as the Claude CLI; it can also be
+unknown for other executors. Null does not imply a particular provider.
+
+Consumers such as the Python trust-graph repo should fetch the committed schema
+from a pinned workflowd commit (the same path as its stable `$id`, replacing `main`
+with the commit SHA), then validate the projected JSON with a draft 2020-12 validator.
+The schema requires all five fields and rejects extra properties. It preserves
+existing nullable model/provider/selection IDs; validation does not establish actual
+provider access, resolve unknown IDs or retroactively fill missing selections in old
+runs. This change does not alter how workflowd resolves or persists selections.
+
+[`schemas/examples/`](../schemas/examples/) contains one identity per executor kind
+(`codex`, `opencode`, `claude`), copied on 2026-10-21 from the newest matching
+`kernel_agent_runs.resolved_selection` in the live database opened read-only.
+Only the five identity fields were copied. Tests validate these committed snapshots
+against the published schema without requiring database access.
+
 ## Freshness and failure
 
 `sources` identifies each executor, its kind and discovery protocol, source status,

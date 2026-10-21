@@ -1,0 +1,7 @@
+{
+  "executor": "codex:local",
+  "executorKind": "codex",
+  "provider": "openai",
+  "model": "gpt-6.1-sol",
+  "selectionModel": "gpt-6.1-sol"
+}

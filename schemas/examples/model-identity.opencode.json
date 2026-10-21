@@ -1,0 +1,7 @@
+{
+  "executor": "opencode:opencode-primary",
+  "executorKind": "opencode",
+  "provider": "openai",
+  "model": "gpt-5.6-sol",
+  "selectionModel": "gpt-5.6-sol"
+}

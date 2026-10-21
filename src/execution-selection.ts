@@ -43,6 +43,28 @@ export const ResolvedSelection = Schema.Struct({
   evidence: Schema.Literals(["advertised", "configured", "runtime"]),
 })
 export type ResolvedSelection = typeof ResolvedSelection.Type
+
+export const ModelIdentity = ResolvedSelection.mapFields((fields) => ({
+  executor: fields.executor.annotate({
+    description: "Executor instance identifier, such as codex:local or opencode:<serverId>.",
+  }),
+  executorKind: fields.executorKind.annotate({
+    description: "Executor implementation used for the run: codex, opencode or claude.",
+  }),
+  provider: fields.provider.annotate({
+    description:
+      "Observed provider ID; null when the executor uses its own credentials without exposing a provider, such as the Claude CLI.",
+  }),
+  model: fields.model.annotate({
+    description: "Native model ID used by the executor; null when unknown.",
+  }),
+  selectionModel: fields.selectionModel.annotate({
+    description:
+      "Catalog selection ID used to select the model; may differ from the native model ID; null when unknown.",
+  }),
+})).annotate({ description: "Cross-repository model identity for a workflowd agent run." })
+export type ModelIdentity = typeof ModelIdentity.Type
+
 export type SelectionRefusal =
   | "unknown_model"
   | "ambiguous_model"

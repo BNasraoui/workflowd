@@ -1,0 +1,7 @@
+{
+  "executor": "claude:local",
+  "executorKind": "claude",
+  "provider": null,
+  "model": "claude-opus-5-5",
+  "selectionModel": "claude-opus-5-5"
+}
