@@ -1495,5 +1495,9 @@ export const runStoreMigrations = Migrator.make({})({
       const sql = yield* SqlClient.SqlClient
       yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
     }),
+    "0038_job_availability_refunds": Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`ALTER TABLE jobs ADD COLUMN availability_refunds INTEGER NOT NULL DEFAULT 0 CHECK (availability_refunds BETWEEN 0 AND 2)`
+    }),
   }),
 })

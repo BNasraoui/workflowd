@@ -182,7 +182,7 @@ for (const kind of ["review", "fix"] as const) {
             const before = probes
             hung = failure !== "healthy"
             yield* Deferred.succeed(release, undefined)
-            yield* TestClock.adjust("16 seconds")
+            yield* TestClock.adjust("11 seconds")
             const outage = failure === "timeout" || failure === "transport" || failure === "abort"
             expect(yield* Fiber.join(worker)).toBe(outage ? "retry" : "failed")
             expect(probes - before).toBe(failure === "output" ? 0 : 1)

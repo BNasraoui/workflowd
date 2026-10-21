@@ -396,10 +396,18 @@ selection must repeat on two consecutive checks before it is misconfigured;
 with `reason: "timeout"`; timeouts are logged at most once per minute while
 unchanged. Checks continue after success (every 30 seconds), and failures back
 off 2, 4, 8, 16, then 30 seconds. Recovery resets the failure delay. The monitor
-logs `available` only when the status changes. A job that reports an OpenCode
-timeout or transport error starts a check at once. If the check closes the gate,
-the job is queued again and its attempt count is restored. Other failures use
-the normal attempt limit. Review and fix claims pause separately, without
+logs `available` only when the status changes. A retryable session timeout or
+transport operation starts a check at once. Concurrent callers share one check;
+a caller uses the stored result if the gate is already closed. A status change
+wakes the schedule. After a worker closes the gate, the next check starts in two
+seconds. If the check closes the gate, the job is queued again and its attempt
+count is restored. Each job can receive at most two refunds. The refund count
+is stored in the database. After two refunds, failures use the normal attempt
+limit. Decode errors do not receive refunds.
+Shutdown during an immediate check keeps the attempt counted, as for other work in progress.
+Workflowd sets the job to `failed` if session cleanup needs an operator.
+The session still needs operator cleanup.
+Review and fix claims pause separately, without
 consuming queued attempts or pausing expired-session cleanup and disabled-fix
 retirement. A hung reviewer needs an operator restart; workflowd does not restart
 it. Inspect `opencode2-reviewer.service` journals before an authorized restart.

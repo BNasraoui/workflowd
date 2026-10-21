@@ -326,7 +326,7 @@ test("keeps replacement work fenced after session cleanup reaches its attempt li
       execution_state: "session_ready",
       cleanup_disposition: "operator_required",
       cleanup_last_error: "OpenCode unavailable",
-      job_state: "leased",
+      job_state: "failed",
     },
   ])
 })

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Clock, Effect, Logger } from "effect"
+import { Clock, Effect, Fiber, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { OpenCodeAutomationError } from "../src/opencode"
 import { OpenCodeAvailabilityError } from "../src/opencode/adapter"
@@ -226,5 +226,65 @@ test("available is logged once per change in each lane", async () => {
       }),
     ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
     logs,
+  )
+})
+
+test.each([1, 29])(
+  "a worker close at %s seconds wakes the schedule for a check after 2 seconds",
+  async (closedAt) => {
+    const times: number[] = []
+    let ready = true
+    await run(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const monitor = yield* startReviewAvailability(
+            Effect.gen(function* () {
+              times.push(yield* Clock.currentTimeMillis)
+              if (!ready) return yield* Effect.fail(missing())
+            }),
+          )
+          yield* TestClock.adjust(closedAt * 1000)
+          ready = false
+          yield* monitor.recheck
+          ready = true
+          yield* TestClock.adjust("2 seconds")
+          expect(times).toEqual([0, closedAt * 1000, (closedAt + 2) * 1000])
+          expect(yield* monitor.health).toEqual({ status: "available" })
+        }),
+      ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
+    )
+  },
+)
+
+test("concurrent worker checks share one read and a closed gate skips reads", async () => {
+  let reads = 0
+  let hung = false
+  await run(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const monitor = yield* startReviewAvailability(
+          Effect.suspend(() => {
+            reads++
+            return hung ? Effect.never : Effect.void
+          }),
+        )
+        yield* TestClock.adjust(0)
+        hung = true
+        const callers = yield* Effect.all(
+          Array.from({ length: 8 }, () => monitor.recheck),
+          {
+            concurrency: "unbounded",
+          },
+        ).pipe(Effect.forkScoped)
+        yield* TestClock.adjust("10 seconds")
+        expect(reads).toBe(2)
+        const results = yield* Fiber.join(callers)
+        expect(results).toEqual(
+          Array.from({ length: 8 }, () => ({ status: "unreachable", reason: "timeout" })),
+        )
+        yield* monitor.recheck
+        expect(reads).toBe(2)
+      }),
+    ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
   )
 })

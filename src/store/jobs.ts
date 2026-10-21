@@ -460,6 +460,7 @@ export function makeJobOperations(
         const timestamp = input.failedAt.toISOString()
         const executions = yield* sql<{
           readonly cleanup_disposition: "operator_required" | null
+          readonly job_id: number
         }>`
           UPDATE agent_executions AS execution
           SET
@@ -486,25 +487,37 @@ export function makeJobOperations(
           AND execution.state = 'session_ready'
           AND execution.cleanup_lease_owner = ${input.workerId}
           AND execution.cleanup_lease_until > ${timestamp}
-          RETURNING cleanup_disposition
+          RETURNING cleanup_disposition, job_id
         `
         const execution = executions[0]
         if (execution === undefined) return "stale" as const
-        return execution.cleanup_disposition === "operator_required"
-          ? ("operator_required" as const)
-          : ("pending" as const)
+        if (execution.cleanup_disposition !== "operator_required") return "pending" as const
+        yield* sql`
+          UPDATE jobs
+          SET state = 'failed', lease_owner = NULL, lease_until = NULL,
+            last_error = ${`Agent session cleanup needs an operator: ${input.error}`.slice(0, 8_192)},
+            updated_at = ${timestamp}
+          WHERE id = ${execution.job_id}
+          AND state IN ('ready', 'leased', 'retry_scheduled')
+        `
+        return "operator_required" as const
       }).pipe(sql.withTransaction),
     rescheduleJob: (input) =>
       Effect.gen(function* () {
+        let refunded = false
         if (input.refundAttempt === true) {
-          yield* sql`
-            UPDATE jobs SET attempts = attempts - 1
+          const rows = yield* sql<{ readonly id: number }>`
+            UPDATE jobs SET attempts = attempts - 1,
+              availability_refunds = availability_refunds + 1
             WHERE id = ${input.jobId}
             AND state = 'leased'
             AND lease_owner = ${input.workerId}
             AND lease_until > ${input.failedAt.toISOString()}
             AND attempts > 0
+            AND availability_refunds < 2
+            RETURNING id
           `
+          refunded = rows.length !== 0
         }
         const disposition = yield* queue.reschedule({ ...input, id: input.jobId })
         if (
@@ -521,7 +534,7 @@ export function makeJobOperations(
           WHERE job_id = ${input.jobId}
           AND attempt = ${input.execution.attempt}
           AND lease_token = ${input.execution.leaseToken}
-          AND attempt = (SELECT attempts + ${input.refundAttempt === true ? 1 : 0} FROM jobs WHERE id = ${input.jobId})
+          AND attempt = (SELECT attempts + ${refunded ? 1 : 0} FROM jobs WHERE id = ${input.jobId})
           AND state IN ('launch_intent', 'session_ready')
         `
         return disposition

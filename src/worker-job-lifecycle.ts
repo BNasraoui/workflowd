@@ -94,8 +94,16 @@ export function reviewerMayBeHung<E>(cause: Cause.Cause<E>): boolean {
   const failure = Option.getOrUndefined(Cause.findErrorOption(cause))
   if (!(failure instanceof AgentHarnessError || failure instanceof OpenCodeAutomationError))
     return false
-  return /timed?\s*out|timeout|transport|fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|socket|connection (?:closed|refused|reset)/i.test(
-    failure.cause.message,
+  return (
+    failure.retryable &&
+    [
+      "create session",
+      "prompt session",
+      "run structured agent session",
+      "wait for structured session",
+      "list session messages",
+      "generate structured output",
+    ].includes(failure.operation)
   )
 }
 

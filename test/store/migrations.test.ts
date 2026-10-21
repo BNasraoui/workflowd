@@ -33,6 +33,30 @@ const runWithDatabase = <A, E>(effect: Effect.Effect<A, E, StoreServices>) =>
 const rejected = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.result, Effect.map(Result.isFailure))
 
+test("migration 38 preserves jobs and starts their durable refund count at zero", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient
+      yield* runStoreMigrationsThrough0029
+      yield* seedSchema
+      const before = yield* sql`SELECT id, state, attempts FROM jobs ORDER BY id`
+      yield* runStoreMigrations
+      expect(yield* sql`SELECT id, state, attempts FROM jobs ORDER BY id`).toEqual(before)
+      expect(yield* sql`SELECT availability_refunds FROM jobs ORDER BY id`).toEqual([
+        { availability_refunds: 0 },
+        { availability_refunds: 0 },
+      ])
+      yield* sql`UPDATE jobs SET availability_refunds = 2 WHERE id = 1`
+      yield* runStoreMigrations
+      expect(yield* sql`SELECT availability_refunds FROM jobs WHERE id = 1`).toEqual([
+        { availability_refunds: 2 },
+      ])
+      expect(yield* rejected(sql`UPDATE jobs SET availability_refunds = -1`)).toBe(true)
+      expect(yield* rejected(sql`UPDATE jobs SET availability_refunds = 3`)).toBe(true)
+    }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+  )
+})
+
 test("migration 32 retains uncertain creation for an acquisition already in flight", async () => {
   const {
     sandboxMigration,
@@ -229,6 +253,7 @@ describe("strict initial store schema", () => {
       { migration_id: 35, name: "agent_run_idempotency_key" },
       { migration_id: 36, name: "automatic_review_trust" },
       { migration_id: 37, name: "resident_inbox_delay" },
+      { migration_id: 38, name: "job_availability_refunds" },
     ])
     expect(result.tables).toHaveLength(36)
     expect(result.tables.every((table) => table.strict === 1)).toBe(true)

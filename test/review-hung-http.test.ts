@@ -88,7 +88,6 @@ test("hung HTTP transport closes the claim path and recovery keeps the first att
             availableJobKinds: monitors.availableJobKinds,
           }),
         ).toBe("idle")
-        expect(monitors.review).not.toHaveProperty("whenAvailable")
         recovered = true
         yield* TestClock.adjust("2 seconds")
         expect(yield* monitors.review.health).toEqual({ status: "available" })

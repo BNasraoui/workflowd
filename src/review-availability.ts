@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, Logger, Ref, Schedule, Semaphore } from "effect"
+import { Cause, Clock, Effect, Latch, Logger, Ref, Schedule } from "effect"
 import type { OpenCodeAutomationError } from "./opencode"
 import { OpenCodeAvailabilityError } from "./opencode/adapter"
 import { WorkSignal } from "./work-signal"
@@ -19,7 +19,7 @@ export const startReviewAvailability = (
     const state = yield* Ref.make<ReviewAvailability>({
       status: check === undefined ? "disabled" : "unavailable",
     })
-    const lock = yield* Semaphore.make(1)
+    const changed = yield* Latch.make()
     let recheck = Ref.get(state)
     if (check !== undefined) {
       let retryDelay = 2_000
@@ -49,10 +49,11 @@ export const startReviewAvailability = (
           () => Effect.succeed({ status: "unreachable", reason: "defect" } as const),
         ),
       )
-      recheck = Effect.gen(function* () {
+      const performCheck = Effect.gen(function* () {
         const next: ReviewAvailability = yield* observe
         if (next.reason !== "missing_selection") previousMissing = undefined
         const previous = yield* Ref.getAndSet(state, next)
+        if (previous.status !== next.status) yield* changed.open
         if (next.status === "available" || previous.status === "available") retryDelay = 2_000
         const now = yield* Clock.currentTimeMillis
         const signature = JSON.stringify(next)
@@ -82,20 +83,30 @@ export const startReviewAvailability = (
         if (next.status === "available" && previous.status !== "available")
           yield* signals.wake("job")
         return next
-      }).pipe(Semaphore.withPermits(lock, 1))
-      yield* recheck.pipe(
+      })
+      // Keep only the running read. Later checks must observe the server again.
+      const sharedCheck = yield* Effect.cachedWithTTL(performCheck, 0)
+      recheck = Ref.get(state).pipe(
+        Effect.flatMap((current) =>
+          current.status === "available" ? sharedCheck : Effect.succeed(current),
+        ),
+      )
+      const waitForNextCheck: Effect.Effect<void> = Effect.suspend(() =>
+        Effect.gen(function* () {
+          yield* changed.close
+          const current = yield* Ref.get(state)
+          const delay = current.status === "available" ? 30_000 : retryDelay
+          if (current.status !== "available") retryDelay = Math.min(retryDelay * 2, 30_000)
+          const statusChanged = yield* Effect.raceFirst(
+            Effect.sleep(delay).pipe(Effect.as(false)),
+            changed.await.pipe(Effect.as(true)),
+          )
+          if (statusChanged) yield* waitForNextCheck
+        }),
+      )
+      yield* sharedCheck.pipe(
         Effect.repeat(
-          Schedule.spaced("2 seconds").pipe(
-            Schedule.setInputType<ReviewAvailability>(),
-            Schedule.modifyDelay(({ input }) =>
-              Effect.sync(() => {
-                if (input.status === "available") return 30_000
-                const delay = retryDelay
-                retryDelay = Math.min(retryDelay * 2, 30_000)
-                return delay
-              }),
-            ),
-          ),
+          Schedule.forever.pipe(Schedule.modifyDelay(() => waitForNextCheck.pipe(Effect.as(0)))),
         ),
         Effect.forkScoped,
       )
