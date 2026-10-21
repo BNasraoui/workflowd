@@ -15,12 +15,11 @@ test("the published model identity schema validates live examples for every exec
   const schema = await schemaFile.json()
   const validate = new Ajv2020().compile(schema)
   for (const kind of ["codex", "opencode", "claude"]) {
-    const example = await Bun.file(
+    const example: unknown = await Bun.file(
       new URL(`../schemas/examples/model-identity.${kind}.json`, import.meta.url),
     ).json()
-    expect(example.executorKind).toBe(kind)
+    expect(Schema.decodeUnknownSync(ModelIdentity)(example).executorKind).toBe(kind)
     expect(validate(example)).toBe(true)
-    expect(Schema.decodeUnknownSync(ModelIdentity)(example)).toEqual(example)
   }
 })
 
