@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import Ajv2020 from "ajv/dist/2020"
 import { Schema } from "effect"
-import { ModelIdentity } from "../src/execution-selection"
+import { ModelIdentity, modelIdentityFromRun } from "../src/execution-selection"
 import { modelIdentitySchemaJson } from "../scripts/generate-model-identity-schema"
 
 const schemaFile = Bun.file(new URL("../schemas/model-identity.schema.json", import.meta.url))
@@ -41,4 +41,53 @@ test("identity fields are required, nullable IDs stay nullable, and non-identity
   expect(validate({ ...identity, executorKind: "unknown" })).toBe(false)
   expect(validate({ ...identity, provider: 123 })).toBe(false)
   expect(validate({ ...identity, host: "mint" })).toBe(false)
+})
+
+test("legacy runs retain only the known executor kind and native model", async () => {
+  const legacy: unknown = await Bun.file(
+    new URL("../schemas/examples/model-identity.legacy.json", import.meta.url),
+  ).json()
+  expect(new Ajv2020().compile(await schemaFile.json())(legacy)).toBe(true)
+  expect(Schema.decodeUnknownSync(ModelIdentity)(legacy).executor).toBeNull()
+  for (const executorKind of ["codex", "claude", "opencode"] as const) {
+    const run = {
+      executorKind,
+      modelId: "gpt-6-sol",
+      providerId: "codex-cli",
+      resolvedSelection: null,
+    }
+    expect(modelIdentityFromRun(run)).toEqual({
+      executor: null,
+      executorKind,
+      provider: null,
+      model: "gpt-6-sol",
+      selectionModel: null,
+    })
+  }
+})
+
+test("a resolved selection is authoritative, including unknown fields and catalog IDs", () => {
+  const run = {
+    executorKind: "codex" as const,
+    providerId: "codex-cli",
+    modelId: "legacy-model",
+    resolvedSelection: {
+      host: "mint",
+      executor: "codex:local",
+      executorKind: "codex" as const,
+      provider: null,
+      model: null,
+      selectionModel: "catalog-model",
+      thinking: {},
+      availability: "unknown" as const,
+      evidence: "advertised" as const,
+    },
+  }
+  expect(modelIdentityFromRun(run)).toEqual({
+    executor: "codex:local",
+    executorKind: "codex",
+    provider: null,
+    model: null,
+    selectionModel: "catalog-model",
+  })
 })

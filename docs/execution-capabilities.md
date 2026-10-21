@@ -65,33 +65,89 @@ direct launch implementation.
 [`schemas/model-identity.schema.json`](../schemas/model-identity.schema.json) is
 workflowd's cross-repo contract for model identity (JSON Schema draft 2020-12).
 It is generated from `ModelIdentity`, which derives its five fields from
-`ResolvedSelection` in `src/execution-selection.ts`; regenerate it with
-`bun run schema:model-identity`. The committed file is checked against the generated
-output by `test/model-identity-schema.test.ts`.
+`ResolvedSelection` in `src/execution-selection.ts`, allowing an unknown executor
+for legacy runs. Regenerate it with `bun run schema:model-identity`.
 
-`kernel_agent_runs.resolved_selection` stores the identity alongside host, thinking,
-availability and evidence. Consumers should parse that column and project
-`executor`, `executorKind`, `provider`, `model` and `selectionModel` before validating
-against the schema. Compare the full five-field identity, preserving nulls; comparing
-only `model`, or only `executor/model`, can merge distinct providers of
-`glm-5.3-flash`. `model` is the native model ID; `selectionModel` is the catalog
-selection ID and can differ. `provider` is null when an executor uses its own
-credentials without exposing a provider, such as the Claude CLI; it can also be
-unknown for other executors. Null does not imply a particular provider.
+When `kernel_agent_runs.resolved_selection` exists, consumers must parse it and
+project only `executor`, `executorKind`, `provider`, `model` and `selectionModel`.
+The selection is authoritative, including null fields: **do not read `provider_id`
+when a selection exists**, or fall back to `model_id` for a null selection model.
+`provider_id` can contain a harness ID such as `codex-cli` or `claude-cli`, rather
+than the selection's provider. `model` is the native model ID; `selectionModel` is
+the catalog selection ID and can differ. `thinking` is a run setting and `host` is
+a placement, so neither is part of the model identity.
+
+### Legacy rows
+
+For a null `resolved_selection`, project the following identity. This rule is
+language independent; `modelIdentityFromRun` in `src/execution-selection.ts`
+implements it for decoded runs (`executorKind`, `modelId`, `resolvedSelection`).
+
+| Identity field | Legacy source / value |
+| --- | --- |
+| `executorKind` | `executor_kind` |
+| `model` | `model_id` |
+| `executor` | `null` (executor instance unknown) |
+| `provider` | `null` (provider unknown; ignore `provider_id`) |
+| `selectionModel` | `null` (catalog ID unknown; do not copy `model_id`) |
+
+Read-only inspection on 2026-10-21 found 440 legacy rows: 338 Codex, 76 OpenCode
+and 26 Claude, dated 2026-08-30 through 2026-10-04. Their harness/provider markers
+do not establish a full selection. In particular, selected Codex rows with
+`provider_id = "codex-cli"` include both `provider: "openai"` and `provider: null`,
+so no unconditional `codex-cli` → `openai` mapping is published. This projection
+does not backfill the database or infer historical executor instances.
+
+For example, live legacy run
+`agent-run-3f7bfebc20555af3aa67845415c69acdef0cb20597f4f8ab954d0079fc7a7fd3`
+has `executor_kind = "codex"`, `provider_id = "codex-cli"`, `model_id = "gpt-6-sol"`
+and `resolved_selection = NULL`. Its identity is committed as
+[`model-identity.legacy.json`](../schemas/examples/model-identity.legacy.json):
+
+```json
+{
+  "executor": null,
+  "executorKind": "codex",
+  "provider": null,
+  "model": "gpt-6-sol",
+  "selectionModel": null
+}
+```
+
+### Comparing identities with unknown fields
+
+Compare all five fields, distinguishing three outcomes:
+
+- **Different:** any field has two known, unequal values. Two known providers of
+  `glm-5.3-flash` remain distinct even when executor and model match.
+- **Same:** every field is known and equal.
+- **Indeterminate:** no known values conflict, but at least one field is null on
+  either side. A null means unknown, including when both sides are null; it is
+  neither a different provider nor proof of equality.
+
+For `codex:local / gpt-6-astra`, inspection found 251 rows with provider `openai`
+and four with provider null (explicit null requests, evidence `advertised`). These
+are indeterminate relative to each other, not two confirmed providers. Preserve
+unknowns in an unresolved accounting bucket; do not count that bucket as a distinct
+provider or merge it into a known provider. Unknown compatibility is not an
+equivalence relation: it cannot safely drive transitive grouping or deduplication.
+
+### Consuming the schema
 
 Consumers such as the Python trust-graph repo should fetch the committed schema
 from a pinned workflowd commit (the same path as its stable `$id`, replacing `main`
 with the commit SHA), then validate the projected JSON with a draft 2020-12 validator.
-The schema requires all five fields and rejects extra properties. It preserves
-existing nullable model/provider/selection IDs; validation does not establish actual
-provider access, resolve unknown IDs or retroactively fill missing selections in old
-runs. This change does not alter how workflowd resolves or persists selections.
+The schema requires all five fields and rejects extra properties. `ModelIdentity`
+is the schema source; Effect decoders must use `onExcessProperty: "error"` for the
+same strictness. Validation does not establish actual provider access or resolve
+unknown IDs. `ResolvedSelection` and its persistence contract remain unchanged.
 
-[`schemas/examples/`](../schemas/examples/) contains one identity per executor kind
-(`codex`, `opencode`, `claude`), copied on 2026-10-21 from the newest matching
-`kernel_agent_runs.resolved_selection` in the live database opened read-only.
-Only the five identity fields were copied. Tests validate these committed snapshots
-against the published schema without requiring database access.
+[`schemas/examples/`](../schemas/examples/) contains one selected identity per
+executor kind (`codex`, `opencode`, `claude`) and the legacy example above, copied
+on 2026-10-21 from the live database opened read-only. The OpenCode example is the
+newest matching `zai-coding-plan / glm-5.3-flash` selection (2026-10-20); Codex and
+Claude use their newest matching selections at capture time. Only the five identity
+fields were copied or projected. Tests validate the snapshots without DB access.
 
 ## Freshness and failure
 

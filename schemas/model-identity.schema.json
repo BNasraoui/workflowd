@@ -4,8 +4,8 @@
   "type": "object",
   "properties": {
     "executor": {
-      "type": "string",
-      "description": "Executor instance identifier, such as codex:local or opencode:<serverId>."
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
+      "description": "Executor instance identifier, such as codex:local or opencode:<serverId>; null when unknown for a legacy run."
     },
     "executorKind": {
       "type": "string",
@@ -14,7 +14,7 @@
     },
     "provider": {
       "anyOf": [{ "type": "string" }, { "type": "null" }],
-      "description": "Observed provider ID; null when the executor uses its own credentials without exposing a provider, such as the Claude CLI."
+      "description": "Observed provider ID; null when unknown, including legacy runs and executors that do not expose a provider. Null does not identify a different provider."
     },
     "model": {
       "anyOf": [{ "type": "string" }, { "type": "null" }],

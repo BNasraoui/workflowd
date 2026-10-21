@@ -1,0 +1,7 @@
+{
+  "executor": null,
+  "executorKind": "codex",
+  "provider": null,
+  "model": "gpt-6-sol",
+  "selectionModel": null
+}
