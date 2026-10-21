@@ -25,13 +25,7 @@
       "description": "Catalog selection ID used to select the model; may differ from the native model ID; null when unknown."
     }
   },
-  "required": [
-    "executor",
-    "executorKind",
-    "provider",
-    "model",
-    "selectionModel"
-  ],
+  "required": ["executor", "executorKind", "provider", "model", "selectionModel"],
   "additionalProperties": false,
   "description": "Cross-repository model identity for a workflowd agent run."
 }
