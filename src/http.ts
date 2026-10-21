@@ -59,6 +59,7 @@ type DogfoodBinding = Pick<DogfoodStorePort, "sessions"> & {
 
 export type WebhookHandlerOptions = {
   readonly reviewAutomation?: Effect.Effect<ReviewAvailability>
+  readonly fixAutomation?: Effect.Effect<ReviewAvailability>
   readonly installationGuard?: typeof InstallationGuard.Service
   readonly checkAgentGitIdentity?: (event: string, payload: unknown) => Effect.Effect<void, Error>
   readonly prAutomationEnabled?: boolean
@@ -85,12 +86,16 @@ function healthResponse(options: WebhookHandlerOptions) {
     const installationGuard = yield* options.installationGuard?.health() ??
       Effect.succeed(undefined)
     const reviewAutomation = yield* options.reviewAutomation ?? Effect.succeed(undefined)
-    const reviewDegraded =
-      reviewAutomation !== undefined && !["available", "disabled"].includes(reviewAutomation.status)
+    const fixAutomation = yield* options.fixAutomation ?? Effect.succeed(undefined)
+    const reviewDegraded = [reviewAutomation, fixAutomation].some(
+      (automation) =>
+        automation !== undefined && !["available", "disabled"].includes(automation.status),
+    )
     return Response.json({
       status: reviewDegraded ? "degraded" : (installationGuard?.status ?? "ok"),
       ...(installationGuard === undefined ? {} : { installationGuard }),
       ...(reviewAutomation === undefined ? {} : { reviewAutomation }),
+      ...(fixAutomation === undefined ? {} : { fixAutomation }),
     })
   })
 }

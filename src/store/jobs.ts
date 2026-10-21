@@ -1,3 +1,4 @@
+import { claimExpiredAgentSession } from "./expired-agent-session"
 import type { SqlClient } from "effect/unstable/sql/SqlClient"
 import { SqlError, UnknownError } from "effect/unstable/sql/SqlError"
 import { Effect, Schema } from "effect"
@@ -6,7 +7,7 @@ import { AgentLaunchIntentSchema } from "../agent-harness"
 import { FixResult } from "../domain/fix-result"
 import { ReviewResult } from "../domain/review-result"
 import type { Work } from "../domain/work"
-import { decodeAgentSessionReferenceRow, decodeJobRow } from "./codecs"
+import { decodeJobRow } from "./codecs"
 import type { WorkflowStorePort } from "./contracts"
 import { makeCurrentnessPolicy } from "./currentness"
 import { SqlLeaseQueue } from "./lease"
@@ -232,66 +233,9 @@ export function makeJobOperations(
         AND json_extract(candidate.fix_result_json, '$.commitSha') = ${input.commitSha}
         AND candidate.controller_signing_fingerprint = ${input.controllerSigningFingerprint}
       `.pipe(Effect.map((rows) => rows[0]?.expected_head_sha ?? null)),
-    claimExpiredAgentSession: (input) =>
-      Effect.gen(function* () {
-        const claimedAt = input.now.toISOString()
-        const claimedUntil = new Date(input.now.getTime() + input.leaseDurationMs).toISOString()
-        while (true) {
-          const rows = yield* sql<{
-            readonly session_reference_id: string
-            readonly session_reference_json: string
-          }>`
-            UPDATE agent_executions
-            SET
-              cleanup_lease_owner = ${input.workerId},
-              cleanup_lease_until = ${claimedUntil},
-              cleanup_attempts = cleanup_attempts + 1,
-              updated_at = ${claimedAt}
-            WHERE session_reference_id = (
-              SELECT execution.session_reference_id
-              FROM agent_executions AS execution
-              JOIN jobs AS candidate ON candidate.id = execution.job_id
-              WHERE execution.state = 'session_ready'
-              AND execution.cleanup_disposition IS NULL
-              AND (
-                execution.cleanup_lease_until IS NULL
-                OR execution.cleanup_lease_until <= ${claimedAt}
-              )
-              AND (
-                candidate.state <> 'leased'
-                OR candidate.lease_until <= ${claimedAt}
-              )
-              ORDER BY COALESCE(candidate.lease_until, execution.updated_at) ASC, candidate.id ASC
-              LIMIT 1
-            )
-            RETURNING session_reference_id, session_reference_json
-          `
-          const row = rows[0]
-          if (row === undefined) return null
-          const decoded = yield* Effect.result(decodeAgentSessionReferenceRow(row))
-          const mismatch =
-            decoded._tag === "Success" &&
-            decoded.success.sessionReference.sessionReferenceId !== row.session_reference_id
-          if (decoded._tag === "Success" && !mismatch) return decoded.success.sessionReference
-
-          const message =
-            decoded._tag === "Failure"
-              ? decoded.failure.message
-              : `Stored SessionReference identity ${decoded.success.sessionReference.sessionReferenceId} does not match ${row.session_reference_id}`
-          yield* sql`
-            UPDATE agent_executions
-            SET cleanup_disposition = 'data_error',
-              cleanup_last_error = ${message.slice(0, 8_192)},
-              cleanup_lease_owner = NULL,
-              cleanup_lease_until = NULL,
-              updated_at = ${claimedAt}
-            WHERE session_reference_id = ${row.session_reference_id}
-            AND state = 'session_ready'
-            AND cleanup_lease_owner = ${input.workerId}
-          `
-        }
-      }).pipe(sql.withTransaction),
-    claimNextJob: (input) => queue.claim(input),
+    claimExpiredAgentSession: claimExpiredAgentSession(sql),
+    claimNextJob: (input) =>
+      queue.claim(input, currentness.jobClaimCandidate(input.now.toISOString(), input.kinds)),
     isJobCurrent: (jobId, workerId, now) =>
       sql<{ readonly current: number }>`
         SELECT 1 AS current

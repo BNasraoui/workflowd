@@ -356,3 +356,16 @@ test.each([false, true])(
   },
   12_000,
 )
+
+test("a non-empty catalog registering models before the requested agent stays retryable", async () => {
+  const automation = new OpenCodeAutomationAdapter(
+    harnessFor(catalogClient(["general"], [{ providerID: "openai", id: "gpt-5.6-sol" }])),
+    harnessDefinitions,
+  )
+  const result = await Effect.runPromise(
+    automation
+      .validateAvailability({ fixWorkEnabled: false })
+      .pipe(Effect.result, Effect.provide(Logger.layer([]))),
+  )
+  expect(result).toMatchObject({ _tag: "Failure", failure: { retryable: true } })
+})

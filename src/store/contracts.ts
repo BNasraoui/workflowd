@@ -50,7 +50,7 @@ export type WorkflowStorePort = {
     input: RescheduleReconciliationInput,
   ) => Effect.Effect<"retry" | "failed" | "stale", SqlError>
   readonly claimNextJob: (
-    input: LeaseClaim,
+    input: LeaseClaim & { readonly kinds?: ReadonlyArray<"review" | "fix"> },
   ) => Effect.Effect<Work | null, SqlError | StoreDataError>
   readonly claimExpiredAgentSession: (
     input: LeaseClaim,

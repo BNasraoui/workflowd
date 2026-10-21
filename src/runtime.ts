@@ -9,7 +9,7 @@ import { routeCi } from "./ci/http"
 import { Data, Effect, FiberSet, Option, PubSub } from "effect"
 import type { AppConfig } from "./config"
 import { withAvailabilityDeadline } from "./availability-validation"
-import { startReviewAvailability } from "./review-availability"
+import { startPullRequestAvailability } from "./pr-availability"
 import { normalizeError } from "./errors"
 import { routeRequest, type WebhookHandlerOptions } from "./http"
 import { runKernelJobIteration } from "./kernel/job-runner"
@@ -294,12 +294,10 @@ export function startHookService(
     })
     if (missingService !== null) return yield* Effect.die(new Error(missingService))
 
-    const reviewAvailability = yield* startReviewAvailability(
-      config.mode === "execution"
-        ? undefined
-        : Option.getOrThrow(automation).validateAvailability({
-            fixWorkEnabled: config.fixWork.enabled,
-          }),
+    const availability = yield* startPullRequestAvailability(
+      Option.getOrUndefined(automation),
+      config.mode !== "execution",
+      config.fixWork.enabled,
     )
 
     if (config.mode !== "execution") {
@@ -331,19 +329,18 @@ export function startHookService(
             "job",
             observed(
               "job",
-              reviewAvailability.whenAvailable(
-                runJobIteration({
-                  workerId,
-                  leaseDurationMs: config.worker.jobLeaseDurationMs,
-                  maxAttempts: 3,
-                  timeoutMs: config.worker.jobTimeoutMs,
-                  cancellationPollIntervalMs: config.worker.pollIntervalMs,
-                  agentBranchPrefixes: config.worker.agentBranchPrefixes,
-                  trustedAgentUsers: config.worker.trustedAgentUsers,
-                  fixWorkEnabled: config.fixWork.enabled,
-                  now: () => new Date(),
-                }),
-              ),
+              runJobIteration({
+                availableJobKinds: availability.availableJobKinds,
+                workerId,
+                leaseDurationMs: config.worker.jobLeaseDurationMs,
+                maxAttempts: 3,
+                timeoutMs: config.worker.jobTimeoutMs,
+                cancellationPollIntervalMs: config.worker.pollIntervalMs,
+                agentBranchPrefixes: config.worker.agentBranchPrefixes,
+                trustedAgentUsers: config.worker.trustedAgentUsers,
+                fixWorkEnabled: config.fixWork.enabled,
+                now: () => new Date(),
+              }),
             ),
           )
         }
@@ -519,7 +516,8 @@ export function startHookService(
           return yield* routeRequest(request, {
             ...options,
             prAutomationEnabled: config.mode !== "execution",
-            reviewAutomation: reviewAvailability.health,
+            reviewAutomation: availability.review.health,
+            fixAutomation: availability.fix.health,
             prRepositories: config.github?.prRepositories ?? [],
             ...(checkAgentGitIdentity !== undefined ? { checkAgentGitIdentity } : {}),
             installationIds,

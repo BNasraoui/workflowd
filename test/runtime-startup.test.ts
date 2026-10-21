@@ -498,6 +498,7 @@ describe("runHookService startup", () => {
         body: {
           status: "degraded",
           reviewAutomation: { status: "available" },
+          fixAutomation: { status: "disabled" },
           installationGuard: {
             lastSuccessfulReconciliationAt: null,
             undecodableInstallations: 0,

@@ -67,34 +67,45 @@ proposal: `workflowd-7vhr` (trigger, restart action, cooldown and risks).
 
 ## Behavior, verification, and limits
 
-Review availability now runs in a daemon-scoped background fiber. Each attempt
-is capped at 10 seconds; failed attempts back off 2, 4, 8, 16, then 30 seconds,
-without an overall startup deadline. The listener, kernel dispatch workers,
-health, and other services start immediately. PR review/fix job claims remain
-paused until validation succeeds, then the job lane is woken. Accepted work
-remains in the stores while paused. Existing publication and command workers
-continue operating.
+Review and fix availability run in separate daemon-scoped background fibers.
+Each read is capped at 10 seconds. Failed checks use capped exponential delays:
+2, 4, 8, 16, then 30 seconds. Successful checks continue every 30 seconds; a
+later failure closes that lane's gate again. There is no fatal startup deadline.
+The listener, kernel workers, health and dispatch services start immediately.
+Claims filter review/fix job kinds before acquiring a lease, so paused work
+keeps its attempts. A missing fixer does not block reviews. Expired-session
+cleanup and disabled-fix retirement continue during outages. Existing command
+and publication workers also continue.
 
-`GET /health` includes `reviewAutomation.status`: `unavailable`, `misconfigured`,
-`available`, or `disabled` for execution-only mode. Unavailable/misconfigured
-review automation makes overall health degraded while the endpoint stays HTTP
-200 for liveness. A non-empty catalog missing the configured agent/model is a
-hard configuration error in health and error logs, rather than a fatal process
-exit. Checks continue so an operator can correct configuration without restarting
-the daemon. Readiness checking ends after its first success; later per-job
-OpenCode failures retain the existing handling. Permanently empty catalogs stay
-unavailable because they cannot reliably distinguish cold plugins from absent
-configuration.
+`GET /health` exposes `reviewAutomation` and `fixAutomation`, each with status
+`unavailable`, `unreachable`, `misconfigured`, `available`, or `disabled`.
+A hung read becomes `unreachable` with `reason: "timeout"`; empty catalogs
+remain `unavailable`. A non-empty catalog missing a configured selection must
+return the **same** missing selections on two consecutive checks before
+`misconfigured` is reported. The `missing` list names the agent or model.
+This classification is local to background monitoring; shared validation
+callers keep their retry behavior during catalog registration.
 
-State transitions log once. Adapter diagnostics retain safe endpoint,
-catalog counts, and requested-selection presence, suppressing identical failed
-snapshots until the state changes or a successful validation resets them. No
-nested request causes or credential-bearing URLs are added to health/logs.
+Unavailable, unreachable or misconfigured automation degrades the health body,
+while HTTP 200 remains a liveness signal. `curl --fail` alone cannot verify
+readiness. After deploys check `reviewAutomation.status == "available"` (or
+`disabled` in execution mode), the fix status when enabled, and overall `status`;
+the README includes a `jq -e` example.
 
-Regression tests use a loopback fake OpenCode HTTP server, the real SDK and
-adapter, daemon HTTP routes, in-memory stores, and Effect's virtual clock.
-Catalogs stay empty beyond 30 seconds, health remains reachable, a dispatch
-accepted during warmup completes, and queued review work is gated until ready.
-A catalog that fills without the required reviewer reports misconfiguration
-and continues serving. Existing bounded QRSPI checks remain unchanged. No live
-OpenCode or GitHub services are used by these tests.
+The loop owns diagnostic suppression: state changes and at most one unchanged
+warning per minute are logged. Timeouts explicitly name the need for an
+operator restart. Defects are caught, safely logged and retried; interruption
+still stops the scoped fiber. Shared adapter calls retain every safe endpoint
+and catalog diagnostic, including later QRSPI failures. Nested request causes
+and credential-bearing URLs are excluded from background health/logs.
+
+Regression tests use scripted in-memory catalogs with Effect's virtual clock
+for empty catalogs, capped backoff, selection confirmation, recovery, defects,
+and failure after success. A separate loopback server accepts HTTP catalog
+requests and never replies; an explicit acceptance handshake precedes virtual
+time advancement, exercising the real SDK timeout path without a socket race.
+Daemon route tests retain accepted dispatches during warmup. Store/worker tests
+verify separate claims, untouched attempts, cleanup and disabled-fix retirement.
+The unused blocking startup helper and its tests were removed; relevant
+availability cases now exercise the continuous background path. No live
+OpenCode or GitHub services are needed for these tests.

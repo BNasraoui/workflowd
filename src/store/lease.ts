@@ -33,7 +33,7 @@ export class SqlLeaseQueue<Value> {
     private readonly sql: SqlClient,
     private readonly config: LeaseQueueConfig<Value>,
   ) {}
-  claim(input: LeaseClaim): Effect.Effect<Value | null, SqlError> {
+  claim(input: LeaseClaim, claimableId?: Fragment): Effect.Effect<Value | null, SqlError> {
     const { claimedAt, leaseUntil } = durableLeasePolicy.claim(input)
     const { table } = this.config
     return Effect.gen({ self: this }, function* () {
@@ -62,7 +62,7 @@ export class SqlLeaseQueue<Value> {
             lease_until = ${leaseUntil},
             last_error = NULL,
             updated_at = ${claimedAt}
-          WHERE id = (${this.config.claimableId(claimedAt)})
+          WHERE id = (${claimableId ?? this.config.claimableId(claimedAt)})
           RETURNING ${this.config.returning}
         `
         const row = rows[0]

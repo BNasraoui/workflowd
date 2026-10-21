@@ -43,6 +43,7 @@ export type RunPullRequestAutomationInput = typeof RunPullRequestAutomationInput
 export type ValidateAutomationAvailabilityInput = {
   readonly directory?: string
   readonly fixWorkEnabled: boolean
+  readonly kind?: AutomationKind
 }
 
 export class OpenCodeAutomationError extends Data.TaggedError("OpenCodeAutomationError")<{
@@ -166,9 +167,12 @@ export class OpenCodeAutomationAdapter implements AutomationPort {
   ): Effect.Effect<void, OpenCodeAutomationError> =>
     this.harness
       .validateAvailability({
-        selections: input.fixWorkEnabled
-          ? [this.definitions.review, this.definitions.fix]
-          : [this.definitions.review],
+        selections:
+          input.kind === "fix"
+            ? [this.definitions.fix]
+            : input.kind === "review" || !input.fixWorkEnabled
+              ? [this.definitions.review]
+              : [this.definitions.review, this.definitions.fix],
         ...(input.directory === undefined ? {} : { directory: input.directory }),
       })
       .pipe(Effect.mapError(toAutomationError))
