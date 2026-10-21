@@ -44,8 +44,7 @@ const runFixPath = (
         autoFix: mode === "automatic" && fixWorkEnabled,
       })
 
-      let disposition:
-        "automatic" | "review" | "fix" | "status" | "noop" | "disabled" | "denied" | "stale" =
+      let disposition: "automatic" | Effect.Success<ReturnType<typeof store.executeCommand>> =
         "automatic"
       if (mode === "manual") {
         yield* store.ingestCommand(

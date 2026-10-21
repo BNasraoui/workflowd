@@ -674,18 +674,11 @@ export class OpenCodeAgentHarness implements AgentHarnessPort {
   ): Effect.Effect<A, AgentHarnessError> {
     return Effect.mapError(effect, (cause) => {
       if (cause instanceof StructuredSessionError) {
-        const invalidOutput =
-          cause.operation === "decode structured session output" ||
-          cause.message.includes("decode structured session output") ||
-          cause.cause.message.includes("decode structured session output")
-        return this.error(
-          invalidOutput ? "decode structured session output" : cause.operation,
-          cause.cause,
-          invalidOutput ? retryable : true,
-        )
+        const invalidOutput = cause.operation === "decode structured session output"
+        return this.error(cause.operation, cause.cause, invalidOutput ? retryable : true)
       }
       if (cause instanceof OpenCodeAdapterError) {
-        return this.error(operation, cause.cause, retryable)
+        return this.error(operation, cause.cause, true)
       }
       return this.error(operation, cause, retryable)
     })

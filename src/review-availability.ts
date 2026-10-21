@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, Latch, Logger, Ref, Schedule } from "effect"
+import { Cause, Clock, Effect, Fiber, Latch, Logger, Ref, Schedule, Semaphore } from "effect"
 import type { OpenCodeAutomationError } from "./opencode"
 import { OpenCodeAvailabilityError } from "./opencode/adapter"
 import { WorkSignal } from "./work-signal"
@@ -84,8 +84,21 @@ export const startReviewAvailability = (
           yield* signals.wake("job")
         return next
       })
-      // Keep only the running read. Later checks must observe the server again.
-      const sharedCheck = yield* Effect.cachedWithTTL(performCheck, 0)
+      const scope = yield* Effect.scope
+      const readLock = yield* Semaphore.make(1)
+      let running: Fiber.Fiber<ReviewAvailability> | undefined
+      const sharedCheck = Effect.uninterruptibleMask((restore) =>
+        readLock
+          .withPermits(1)(
+            Effect.gen(function* () {
+              // The monitor owns the read. Each caller owns only its wait.
+              if (running === undefined || running.pollUnsafe() !== undefined)
+                running = yield* performCheck.pipe(Effect.forkIn(scope))
+              return running
+            }),
+          )
+          .pipe(Effect.flatMap((fiber) => restore(Fiber.join(fiber)))),
+      )
       recheck = Ref.get(state).pipe(
         Effect.flatMap((current) =>
           current.status === "available" ? sharedCheck : Effect.succeed(current),
@@ -105,6 +118,7 @@ export const startReviewAvailability = (
         }),
       )
       yield* sharedCheck.pipe(
+        Effect.exit,
         Effect.repeat(
           Schedule.forever.pipe(Schedule.modifyDelay(() => waitForNextCheck.pipe(Effect.as(0)))),
         ),

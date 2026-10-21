@@ -132,7 +132,14 @@ export type WorkflowStorePort = {
   readonly executeCommand: (
     input: ExecuteCommandInput,
   ) => Effect.Effect<
-    "review" | "fix" | "status" | "noop" | "disabled" | "denied" | "stale",
+    | "review"
+    | "fix"
+    | "status"
+    | "noop"
+    | "disabled"
+    | "denied"
+    | "stale"
+    | `operator_required: ${string}`,
     SqlError | StoreDataError
   >
   readonly rescheduleCommand: (

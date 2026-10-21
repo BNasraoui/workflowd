@@ -288,3 +288,47 @@ test("concurrent worker checks share one read and a closed gate skips reads", as
     ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
   )
 })
+
+test("interrupting the first caller keeps the shared read and background checks alive", async () => {
+  const times: number[] = []
+  await run(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const monitor = yield* startReviewAvailability(
+          Effect.gen(function* () {
+            times.push(yield* Clock.currentTimeMillis)
+            if (times.length === 2) return yield* Effect.never
+          }),
+        )
+        yield* TestClock.adjust("29 seconds")
+        const first = yield* monitor.recheck.pipe(Effect.forkScoped)
+        yield* TestClock.adjust(0)
+        const second = yield* monitor.recheck.pipe(Effect.forkScoped)
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.interrupt(first)
+        yield* TestClock.adjust("9 seconds")
+        expect(yield* Fiber.join(second)).toEqual({ status: "unreachable", reason: "timeout" })
+        expect(yield* monitor.health).toEqual({ status: "unreachable", reason: "timeout" })
+        yield* TestClock.adjust("111 seconds")
+        expect(times).toEqual([0, 29000, 41000, 71000, 101000, 131000])
+        expect(yield* monitor.health).toEqual({ status: "available" })
+      }),
+    ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
+  )
+})
+
+test("a check that interrupts itself does not stop the background loop", async () => {
+  let reads = 0
+  await run(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const monitor = yield* startReviewAvailability(
+          Effect.suspend(() => (++reads === 1 ? Effect.interrupt : Effect.void)),
+        )
+        yield* TestClock.adjust("2 seconds")
+        expect(reads).toBe(2)
+        expect(yield* monitor.health).toEqual({ status: "available" })
+      }),
+    ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
+  )
+})

@@ -3,7 +3,13 @@ import { SqlClient } from "effect/unstable/sql"
 import { Effect, Schema } from "effect"
 import { type AgentLaunchIntent, SessionReference } from "../../src/agent-harness"
 import { WorkflowStore } from "../../src/store/contracts"
-import { decodePullRequestEvent, makeStoreLayer, samplePullRequestEvent } from "./harness"
+import {
+  changesRequestedReview,
+  decodePullRequestEvent,
+  makeStoreLayer,
+  sampleCommandEvent,
+  samplePullRequestEvent,
+} from "./harness"
 
 const makeExecution = (
   work: {
@@ -1010,3 +1016,185 @@ test("supersedes the session and rejects output from an older generation", async
   expect(result.executions).toEqual([{ state: "superseded" }])
   expect(result.publications).toEqual([])
 })
+
+test.each([true, false])(
+  "fix command preserves the refund cap with operator session: %s",
+  async (operatorRequired) => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* WorkflowStore
+        const sql = yield* SqlClient.SqlClient
+        const at = (seconds: number) =>
+          new Date(Date.parse("2026-07-20T12:00:00.000Z") + seconds * 1000)
+        yield* store.ingestPullRequest(
+          {
+            deliveryId: "fix-requeue-pr",
+            event: "pull_request",
+            action: "opened",
+            payload: "{}",
+            receivedAt: at(0),
+          },
+          samplePullRequestEvent,
+        )
+        const review = yield* store.claimNextJob({
+          workerId: "reviewer",
+          now: at(1),
+          leaseDurationMs: 60_000,
+        })
+        if (review === null) throw new Error("expected review")
+        yield* store.completeReviewJob({
+          jobId: review.id,
+          workerId: "reviewer",
+          completedAt: at(2),
+          review: changesRequestedReview,
+          autoFix: true,
+        })
+        const publication = yield* store.claimNextPublication({
+          workerId: "publisher",
+          now: at(3),
+          leaseDurationMs: 60_000,
+        })
+        if (publication === null) throw new Error("expected publication")
+        yield* store.completePublication({
+          publicationId: publication.id,
+          workerId: "publisher",
+          completedAt: at(4),
+          outcome: "published",
+        })
+        for (const second of [5, 7]) {
+          const work = yield* store.claimNextJob({
+            workerId: "fixer",
+            now: at(second),
+            leaseDurationMs: 60_000,
+          })
+          if (work === null) throw new Error("expected fix")
+          expect(
+            yield* store.rescheduleJob({
+              jobId: work.id,
+              workerId: "fixer",
+              failedAt: at(second + 1),
+              runAt: at(second + 1),
+              error: "reviewer unavailable",
+              maxAttempts: 3,
+              refundAttempt: true,
+            }),
+          ).toBe("retry")
+        }
+        const work = yield* store.claimNextJob({
+          workerId: "fixer",
+          now: at(9),
+          leaseDurationMs: 1_000,
+        })
+        if (work === null) throw new Error("expected fix")
+        const execution = makeExecution(
+          work,
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222",
+          at(9).toISOString(),
+        )
+        if (operatorRequired) {
+          yield* store.recordAgentLaunchIntent({
+            jobId: work.id,
+            workerId: "fixer",
+            recordedAt: at(9),
+            intent: execution.intent,
+          })
+          yield* store.recordAgentSessionReference({
+            jobId: work.id,
+            workerId: "fixer",
+            recordedAt: at(9),
+            reference: execution.reference,
+          })
+          for (const second of [10, 11, 12]) {
+            const session = yield* store.claimExpiredAgentSession({
+              workerId: "cleanup",
+              now: at(second),
+              leaseDurationMs: 1_000,
+            })
+            if (session === null) throw new Error("expected cleanup session")
+            expect(
+              yield* store.recordAgentSessionCleanupFailure({
+                sessionReferenceId: session.sessionReferenceId,
+                workerId: "cleanup",
+                failedAt: at(second),
+                error: "abort failed",
+              }),
+            ).toBe(second === 12 ? "operator_required" : "pending")
+          }
+        } else {
+          expect(
+            yield* store.rescheduleJob({
+              jobId: work.id,
+              workerId: "fixer",
+              failedAt: at(9),
+              runAt: at(10),
+              error: "fix failed",
+              maxAttempts: 1,
+            }),
+          ).toBe("failed")
+        }
+        const command = (second: number) =>
+          Effect.gen(function* () {
+            yield* store.ingestCommand(
+              {
+                deliveryId: `fix-command-${second}`,
+                event: "issue_comment",
+                action: "created",
+                payload: "{}",
+                receivedAt: at(second),
+              },
+              sampleCommandEvent("fix", second),
+            )
+            const claimed = yield* store.claimNextCommand({
+              workerId: "commander",
+              now: at(second),
+              leaseDurationMs: 60_000,
+            })
+            if (claimed === null) throw new Error("expected command")
+            return yield* store.executeCommand({
+              commandId: claimed.id,
+              workerId: "commander",
+              authorized: true,
+              fixWorkEnabled: true,
+              completedAt: at(second),
+            })
+          })
+        expect(yield* command(13)).toBe(operatorRequired ? "operator_required: ses_1" : "fix")
+        expect(
+          yield* sql`SELECT state, availability_refunds FROM jobs WHERE id = ${work.id}`,
+        ).toEqual([{ state: operatorRequired ? "failed" : "ready", availability_refunds: 2 }])
+        if (operatorRequired) {
+          expect(
+            yield* store.claimNextJob({
+              workerId: "replacement",
+              now: at(14),
+              leaseDurationMs: 60_000,
+            }),
+          ).toBeNull()
+          yield* store.supersedeAgentSession(execution.reference.sessionReferenceId, at(14))
+          expect(yield* command(15)).toBe("fix")
+        }
+        const replacement = yield* store.claimNextJob({
+          workerId: "replacement",
+          now: at(16),
+          leaseDurationMs: 60_000,
+        })
+        expect(replacement).toMatchObject({ id: work.id, _tag: "FixWork", attempt: 1 })
+        expect(
+          yield* store.rescheduleJob({
+            jobId: work.id,
+            workerId: "replacement",
+            failedAt: at(17),
+            runAt: at(18),
+            error: "reviewer unavailable again",
+            maxAttempts: 1,
+            refundAttempt: true,
+          }),
+        ).toBe("failed")
+        expect(
+          yield* sql`SELECT attempts, availability_refunds FROM jobs WHERE id = ${work.id}`,
+        ).toEqual([{ attempts: 1, availability_refunds: 2 }])
+      }).pipe(Effect.provide(makeStoreLayer())),
+    )
+  },
+)

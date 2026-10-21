@@ -447,8 +447,8 @@ describe("runHookService startup", () => {
               }
             }),
           ).pipe(Effect.forkChild)
-          yield* TestClock.adjust("2 seconds")
           const server = yield* Fiber.join(startup)
+          yield* TestClock.adjust("2 seconds")
           yield* Deferred.await(allWorkersObserved)
           const response = yield* Effect.tryPromise(() =>
             fetch(`http://${server.hostname}:${server.port}/health`),

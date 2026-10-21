@@ -643,6 +643,48 @@ describe("OpenCodeAgentHarness", () => {
     expect(failure.operation).toBe("decode structured session output")
     expect(failure.retryable).toBe(false)
   })
+
+  test.each(["socket timeout", "decode structured session output: socket timeout"])(
+    "keeps transport errors retryable under fail policy: %s",
+    async (message) => {
+      const definition = {
+        ...fixtureDefinition,
+        retryPolicy: { ...fixtureDefinition.retryPolicy, invalidOutput: "fail" as const },
+      }
+      const harness = new OpenCodeAgentHarness(
+        makeAdapter({
+          promptSession: () =>
+            Effect.fail(
+              new OpenCodeAdapterError({ operation: "prompt session", cause: new Error(message) }),
+            ),
+        }),
+        new TrustedAgentHarnessCatalog([definition]),
+        { serverId: "opencode-primary", endpointAlias: "private-opencode", pollIntervalMs: 1 },
+      )
+      const prepared = await Effect.runPromise(
+        harness.prepare(
+          definition,
+          { text: "Check transport failure." },
+          {
+            directory: "/tmp/fixture-worktree",
+            scope: { _tag: "WorkflowScope", workflowId: "fixture-workflow" },
+            operationId: "fixture-transport",
+            operationRevision: 1,
+            attempt: 1,
+            leaseToken: "11111111-1111-4111-8111-111111111111",
+            requestedAt: new Date("2026-07-20T12:00:00.000Z"),
+          },
+        ),
+      )
+      const reference = await Effect.runPromise(harness.createSession(prepared))
+      const failure = await Effect.runPromise(
+        harness.resumeSession(prepared, reference).pipe(Effect.flip),
+      )
+      expect(failure.operation).toBe("prompt session")
+      expect(failure.cause.message).toContain(message)
+      expect(failure.retryable).toBe(true)
+    },
+  )
 })
 describe("TrustedAgentHarnessCatalog descriptor-only lookup", () => {
   test("exposes descriptor-only metadata without internal registration details", () => {
