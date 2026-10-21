@@ -3,7 +3,6 @@ import { Effect, Fiber, Layer, Logger, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../../src/agent-harness"
 import {
-  Automation,
   makeOpenCodeHarnessDefinitions,
   makePullRequestHarnessDefinitions,
   OpenCodeAutomationAdapter,
