@@ -14,7 +14,7 @@ test("the published model identity schema validates live examples for every exec
   expect(await schemaFile.exists()).toBe(true)
   const schema = await schemaFile.json()
   const validate = new Ajv2020().compile(schema)
-  for (const kind of ["codex", "opencode", "claude"]) {
+  for (const kind of ["codex", "opencode", "claude"] as const) {
     const example: unknown = await Bun.file(
       new URL(`../schemas/examples/model-identity.${kind}.json`, import.meta.url),
     ).json()
