@@ -24,12 +24,13 @@
     "skill:sync": "bun scripts/sync-qrspi-skill-reference.mjs",
     "skill:check": "bun scripts/sync-qrspi-skill-reference.mjs --check",
     "schema:model-identity": "bun scripts/generate-model-identity-schema.ts",
+    "schema:model-identity:check": "bun scripts/generate-model-identity-schema.ts --check",
     "audit": "bun audit --audit-level=high",
     "knip": "knip",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage && bun run crap:check"
+    "check": "bun run typecheck && bun run effect:check && bun run skill:check && bun run schema:model-identity:check && bun run knip && bun run lint && bun run format:check && bun run test:coverage && bun run crap:check"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.112",

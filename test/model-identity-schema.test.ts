@@ -2,23 +2,18 @@ import { expect, test } from "bun:test"
 import Ajv2020 from "ajv/dist/2020"
 import { Schema } from "effect"
 import { ModelIdentity, modelIdentityFromRun } from "../src/execution-selection"
-import { modelIdentitySchemaJson } from "../scripts/generate-model-identity-schema"
 
 const schemaFile = Bun.file(new URL("../schemas/model-identity.schema.json", import.meta.url))
-
-test("the committed schema matches the generated Effect schema", async () => {
-  expect(await schemaFile.text()).toBe(modelIdentitySchemaJson)
-})
+const decodeIdentity = Schema.decodeUnknownSync(ModelIdentity, { onExcessProperty: "error" })
 
 test("the published model identity schema validates live examples for every executor kind", async () => {
-  expect(await schemaFile.exists()).toBe(true)
   const schema = await schemaFile.json()
   const validate = new Ajv2020().compile(schema)
   for (const kind of ["codex", "opencode", "claude"] as const) {
     const example: unknown = await Bun.file(
       new URL(`../schemas/examples/model-identity.${kind}.json`, import.meta.url),
     ).json()
-    expect(Schema.decodeUnknownSync(ModelIdentity)(example).executorKind).toBe(kind)
+    expect(decodeIdentity(example).executorKind).toBe(kind)
     expect(validate(example)).toBe(true)
   }
 })
@@ -33,14 +28,21 @@ test("identity fields are required, nullable IDs stay nullable, and non-identity
     selectionModel: null,
   }
   expect(validate(identity)).toBe(true)
+  expect(decodeIdentity(identity)).toEqual(identity)
   for (const field of Object.keys(identity)) {
     const incomplete: Record<string, unknown> = { ...identity }
     delete incomplete[field]
     expect(validate(incomplete)).toBe(false)
+    expect(() => decodeIdentity(incomplete)).toThrow()
   }
-  expect(validate({ ...identity, executorKind: "unknown" })).toBe(false)
-  expect(validate({ ...identity, provider: 123 })).toBe(false)
-  expect(validate({ ...identity, host: "mint" })).toBe(false)
+  for (const invalid of [
+    { ...identity, executorKind: "unknown" },
+    { ...identity, provider: 123 },
+    { ...identity, host: "mint" },
+  ]) {
+    expect(validate(invalid)).toBe(false)
+    expect(() => decodeIdentity(invalid)).toThrow()
+  }
 })
 
 test("legacy runs retain only the known executor kind and native model", async () => {
@@ -48,7 +50,7 @@ test("legacy runs retain only the known executor kind and native model", async (
     new URL("../schemas/examples/model-identity.legacy.json", import.meta.url),
   ).json()
   expect(new Ajv2020().compile(await schemaFile.json())(legacy)).toBe(true)
-  expect(Schema.decodeUnknownSync(ModelIdentity)(legacy).executor).toBeNull()
+  expect(decodeIdentity(legacy).executor).toBeNull()
   for (const executorKind of ["codex", "claude", "opencode"] as const) {
     const run = {
       executorKind,

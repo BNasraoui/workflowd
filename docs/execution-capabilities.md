@@ -66,7 +66,9 @@ direct launch implementation.
 workflowd's cross-repo contract for model identity (JSON Schema draft 2020-12).
 It is generated from `ModelIdentity`, which derives its five fields from
 `ResolvedSelection` in `src/execution-selection.ts`, allowing an unknown executor
-for legacy runs. Regenerate it with `bun run schema:model-identity`.
+for legacy runs. Regenerate it with `bun run schema:model-identity`; verify the
+committed bytes with `bun run schema:model-identity:check` (included in
+`bun run check` and CI). Tests do not import the generator or run Prettier.
 
 When `kernel_agent_runs.resolved_selection` exists, consumers must parse it and
 project only `executor`, `executorKind`, `provider`, `model` and `selectionModel`.
