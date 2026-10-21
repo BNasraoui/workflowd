@@ -1,33 +1,41 @@
-# Empty reviewer catalogs blocked workflowd startup
+# Hung reviewer blocked workflowd startup
 
 Tracking: workflowd-vba1. Host: mint. Times below are AEST, 2026-10-21.
 
 ## Incident and confirmed cause
 
 From 20:19 until 23:04, workflowd accepted no dispatches and its systemd restart
-counter reached 186. The user journal confirms repeated
-`OpenCode startup validation timed out after 30 seconds`, exits with status 1,
-and `Scheduled restart job, restart counter is at 186` at 23:04:35. At 23:04:37
-catalog diagnostics show `agentCount: 0, modelCount: 0`, with `pr-reviewer` and
-`zai-coding-plan/glm-5.3-flash` absent. The daemon finally logged
-`workflowd listening on http://127.0.0.1:8787` at 23:04:39. The incident report
-records 10 agents, the reviewer and GLM model present, and responding health
-about three minutes later; that later catalog observation was supplied by the
-operator rather than re-probed during this investigation.
+counter reached 186. Across the journals from 20:10–23:10, all 183
+`OpenCode startup validation timed out after 30 seconds` errors lack the
+`(operation): cause` suffix. `lastFailure` was undefined: no catalog read
+completed within 30 seconds. There are no `availability check failed` or
+`retrying` lines until 23:04:37. The catalog was not repeatedly empty; the
+reviewer never answered.
 
-The initiating event was an OOM kill, not a catalog configuration edit:
+The reviewer process (PID 1409253) had been running since October 13. Aborts of
+reviewer session `fe521e27` failed from 16:56 ("did not confirm") and timed out
+from 19:31. Catalog reads still answered within two seconds at 16:57; the
+reviewer subsequently became unresponsive while workflowd was running.
 
-- 20:18:34: `opencode2-server.service: Failed with result 'oom-kill'`;
-  systemd reports an 8.0G memory peak and 393.1M swap peak.
-- 20:18:39: server restart scheduled; workflowd is stopped.
-- 20:18:43: `opencode2-server` and workflowd start again.
-- 20:19:55 and subsequent starts: the startup availability deadline fails.
+The primary server's OOM triggered workflowd's first start against this already
+hung reviewer, through its `Requires=` dependency:
 
-`startHookService` awaited review automation availability before acquiring the
-HTTP listener or starting dispatch workers. Catalog reads retried every two
-seconds with a 30-second limit. Empty catalogs remained retryable, but exhausting
-that startup limit exited the entire daemon. The deployed `Restart=always`
-then repeated the failure.
+- 20:18:34: `opencode2-server.service` was OOM-killed (8.0G memory peak,
+  393.1M swap peak).
+- 20:18:39–20:18:43: the server restart stopped and restarted workflowd.
+- Subsequent starts blocked on the unresponsive reviewer and exhausted the
+  startup deadline before acquiring the listener or starting dispatch workers.
+- 23:03:05: the reviewer ignored SIGTERM; after its 90-second stop timeout it
+  was SIGKILLed and restarted at 23:04:35.
+- 23:04:37: the new reviewer produced the **single** `agentCount: 0,
+  modelCount: 0` snapshot, two seconds after starting.
+- 23:04:39: workflowd listened successfully, about four seconds after the
+  reviewer restart.
+
+The blocking startup validation and deployed `Restart=always` turned a hung
+reviewer into a daemon-wide outage. Commit `e10a094` and its cold-catalog
+regression reproduce a different failure mode (prompt empty responses), not
+this hang.
 
 Inspection used `journalctl --user -u workflowd -u opencode2-reviewer
 -u opencode2-server --since "2026-10-21 20:10" --until "2026-10-21 20:25"`,
@@ -53,7 +61,9 @@ requested the reviewer stop. No reviewer dependency removal is warranted by
 this evidence, and no unit change is included. Operators should keep the
 reviewer independent and inspect the primary-server OOM separately. Removal of
 the primary server's hard requirement would be a separate deployment decision;
-this patch addresses the catalog startup failure.
+this patch addresses blocking startup and ongoing reviewer availability. A hung
+reviewer needs an operator restart; workflowd does not restart it. Watchdog
+proposal: `workflowd-7vhr` (trigger, restart action, cooldown and risks).
 
 ## Behavior, verification, and limits
 
