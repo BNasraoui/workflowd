@@ -43,6 +43,53 @@ export const ResolvedSelection = Schema.Struct({
   evidence: Schema.Literals(["advertised", "configured", "runtime"]),
 })
 export type ResolvedSelection = typeof ResolvedSelection.Type
+
+export const ModelIdentity = ResolvedSelection.mapFields((fields) => ({
+  executor: Schema.NullOr(fields.executor).annotate({
+    description:
+      "Executor instance identifier, such as codex:local or opencode:<serverId>; null when unknown for a legacy run.",
+  }),
+  executorKind: fields.executorKind.annotate({
+    description: "Executor implementation used for the run: codex, opencode or claude.",
+  }),
+  provider: fields.provider.annotate({
+    description:
+      "Observed provider ID; null when unknown, including legacy runs and executors that do not expose a provider. Null does not identify a different provider.",
+  }),
+  model: fields.model.annotate({
+    description: "Native model ID used by the executor; null when unknown.",
+  }),
+  selectionModel: fields.selectionModel.annotate({
+    description:
+      "Catalog selection ID used to select the model; may differ from the native model ID; null when unknown.",
+  }),
+})).annotate({ description: "Cross-repository model identity for a workflowd agent run." })
+export type ModelIdentity = typeof ModelIdentity.Type
+
+/** Project a decoded run without interpreting legacy harness IDs as model providers. */
+export function modelIdentityFromRun(run: {
+  readonly executorKind: ResolvedSelection["executorKind"]
+  readonly modelId: string | null
+  readonly resolvedSelection: ResolvedSelection | null
+}): ModelIdentity {
+  const selection = run.resolvedSelection
+  return selection === null
+    ? {
+        executor: null,
+        executorKind: run.executorKind,
+        provider: null,
+        model: run.modelId,
+        selectionModel: null,
+      }
+    : {
+        executor: selection.executor,
+        executorKind: selection.executorKind,
+        provider: selection.provider,
+        model: selection.model,
+        selectionModel: selection.selectionModel,
+      }
+}
+
 export type SelectionRefusal =
   | "unknown_model"
   | "ambiguous_model"

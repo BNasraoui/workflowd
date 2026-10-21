@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/BNasraoui/workflowd/main/schemas/model-identity.schema.json",
+  "type": "object",
+  "properties": {
+    "executor": {
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
+      "description": "Executor instance identifier, such as codex:local or opencode:<serverId>; null when unknown for a legacy run."
+    },
+    "executorKind": {
+      "type": "string",
+      "enum": ["opencode", "codex", "claude"],
+      "description": "Executor implementation used for the run: codex, opencode or claude."
+    },
+    "provider": {
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
+      "description": "Observed provider ID; null when unknown, including legacy runs and executors that do not expose a provider. Null does not identify a different provider."
+    },
+    "model": {
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
+      "description": "Native model ID used by the executor; null when unknown."
+    },
+    "selectionModel": {
+      "anyOf": [{ "type": "string" }, { "type": "null" }],
+      "description": "Catalog selection ID used to select the model; may differ from the native model ID; null when unknown."
+    }
+  },
+  "required": ["executor", "executorKind", "provider", "model", "selectionModel"],
+  "additionalProperties": false,
+  "description": "Cross-repository model identity for a workflowd agent run."
+}

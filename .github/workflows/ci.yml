@@ -27,6 +27,8 @@ jobs:
             command: bun run format:check
           - name: Knip
             command: bun run knip
+          - name: Model identity schema
+            command: bun run schema:model-identity:check
           - name: Dependency audit
             command: bun run audit
           - name: PR workflow policy

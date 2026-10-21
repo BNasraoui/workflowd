@@ -1,0 +1,7 @@
+{
+  "executor": "opencode:opencode-primary",
+  "executorKind": "opencode",
+  "provider": "zai-coding-plan",
+  "model": "glm-5.3-flash",
+  "selectionModel": "glm-5.3-flash"
+}
