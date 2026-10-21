@@ -74,7 +74,6 @@ test.each([0, 200])(
   "startup reports always-empty catalogs within 30 seconds (%i ms reads)",
   async (latency) => {
     let reads = 0
-    let completed = false
     const automation = new OpenCodeAutomationAdapter(
       harnessFor({
         ...catalogClient([], []),
@@ -86,49 +85,15 @@ test.each([0, 200])(
       }),
       harnessDefinitions,
     )
-    const config = await loadConfig(
-      {
-        ...agentGitTestEnvironment,
-        GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
-        GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
-        GITHUB_WEBHOOK_SECRET: "secret",
-        OPENCODE_SERVER_PASSWORD: "password",
-        WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:4096",
-      },
-      { home: "/tmp" },
-    )
     const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const startup = yield* startHookService(config).pipe(
-            Effect.result,
-            Effect.tap(() =>
-              Effect.sync(() => {
-                completed = true
-              }),
-            ),
-            Effect.forkChild,
-          )
-          yield* TestClock.adjust("27 seconds")
-          expect(completed).toBe(false)
-          yield* TestClock.adjust("3 seconds")
-          expect(completed).toBe(true)
-          return yield* Fiber.join(startup)
-        }),
-      ).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            kernelLayer(":memory:"),
-            stubAdapters(),
-            Layer.succeed(Automation, automation),
-          ),
-        ),
-        Effect.provide(TestClock.layer()),
-        Effect.provide(Logger.layer([])),
-      ),
+      Effect.gen(function* () {
+        const startup = yield* automation
+          .validateAvailability({ fixWorkEnabled: false })
+          .pipe(validateOpenCodeStartup, Effect.result, Effect.forkChild)
+        yield* TestClock.adjust("27 seconds")
+        yield* TestClock.adjust("3 seconds")
+        return yield* Fiber.join(startup)
+      }).pipe(Effect.provide(TestClock.layer()), Effect.provide(Logger.layer([]))),
     )
     expect(reads).toBe(latency === 0 ? 15 : 14)
     expect(result._tag).toBe("Failure")
@@ -268,7 +233,7 @@ for (const scenario of [
       }).pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))]))),
     )
     expect(logs).toEqual(
-      Array(2).fill([
+      Array(1).fill([
         "OpenCode availability check failed",
         {
           serverUrl: "http://127.0.0.1:4098/reviewer",

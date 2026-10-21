@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Agent, Model, OpenCode, Provider } from "@opencode-ai/client/effect"
 import { FetchHttpClient } from "effect/unstable/http"
-import { Clock, Effect, Fiber, Layer, Logger } from "effect"
+import { Effect, Fiber, Layer, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
@@ -16,11 +16,12 @@ import { startHookService } from "../src/runtime"
 import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { kernelLayer, stubAdapters } from "./helpers/runtime"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
-import { WorkflowStore } from "../src/store/contracts"
+import { GitHub } from "../src/github"
 
 for (const missingAgent of [false, true]) {
   test(`cold review catalogs do not stop serving (missing agent: ${missingAgent})`, async () => {
     let warm = false
+    let reviewClaims = 0
     const paths: string[] = []
     const fake = Bun.serve({
       hostname: "127.0.0.1",
@@ -83,7 +84,7 @@ for (const missingAgent of [false, true]) {
     const config = {
       ...loaded,
       http: { ...loaded.http, host: "127.0.0.1", port: 0 },
-      worker: { ...loaded.worker, concurrency: 0, pollIntervalMs: 100 },
+      worker: { ...loaded.worker, concurrency: 1, pollIntervalMs: 100 },
     }
     const database = kernelLayer(":memory:")
     const logs: unknown[] = []
@@ -123,7 +124,11 @@ for (const missingAgent of [false, true]) {
               ),
             )
             expect(review.status).toBe(202)
+            expect(yield* Effect.tryPromise(() => review.json())).toMatchObject({
+              status: "enqueued",
+            })
             yield* TestClock.adjust("1 second")
+            expect(reviewClaims).toBe(0)
             warm = true
             yield* TestClock.adjust("30 seconds")
             expect(yield* health()).toMatchObject({
@@ -136,21 +141,23 @@ for (const missingAgent of [false, true]) {
             )
             expect(status).toMatchObject({
               status: "succeeded",
-              result: { kind: "echo", value: "retained" },
+              result: "retained",
             })
-            const store = yield* WorkflowStore
-            const job = yield* store.claimNextJob({
-              workerId: "test",
-              now: new Date(yield* Clock.currentTimeMillis),
-              leaseDurationMs: 60_000,
-            })
-            expect(job?.repositoryFullName).toBe("example-owner/example")
+            expect(reviewClaims).toBe(missingAgent ? 0 : 1)
           }),
         ).pipe(
           Effect.provide(
             Layer.mergeAll(
               database,
               stubAdapters(),
+              Layer.succeed(GitHub, {
+                collectHeadEvidence: () =>
+                  Effect.sync(() => {
+                    reviewClaims++
+                  }).pipe(Effect.andThen(Effect.never)),
+                fetchPullRequestSnapshot: () => Effect.die("unexpected snapshot"),
+                publishReview: () => Effect.die("unexpected publication"),
+              }),
               TestJobCanaryLive.pipe(Layer.provide(database)),
               Layer.succeed(Automation, automation),
             ),

@@ -2,24 +2,20 @@ import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { createHmac } from "node:crypto"
-import { AgentHarness } from "../src/agent-harness"
 import { loadConfig } from "../src/config"
-import { GitHub } from "../src/github"
 import { InstallationGuard } from "../src/installation-guard"
 import { runKernelJobIteration } from "../src/kernel/job-runner"
 import { KernelJobStore } from "../src/kernel/job-store"
 import { TestJobCanary } from "../src/kernel/test-job-canary"
-import { Automation, OpenCodeAutomationError } from "../src/opencode"
+import { OpenCodeAutomationError } from "../src/opencode"
 import {
   WorkflowStart,
   WorkflowStartValidationError,
   closedWorkflowStart,
 } from "../src/qrspi/workflow-start"
 import { RemoteCoordinator } from "../src/remote/coordinator"
-import { runHookService, startHookService } from "../src/runtime"
+import { startHookService } from "../src/runtime"
 import { WorkflowStore } from "../src/store/contracts"
-import { WorkSignalLive } from "../src/work-signal"
-import { Workspace } from "../src/workspace"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { arrangeDelivery } from "./kernel/job-store-harness"
@@ -325,84 +321,52 @@ describe("runHookService startup", () => {
     expect(outcome?.state).toBe("succeeded")
   })
 
-  test("validates OpenCode exactly once before listener or workers activate", async () => {
-    let validations = 0
-    let githubCalls = 0
+  test("keeps serving when review configuration is invalid", async () => {
     const loaded = await loadConfig(
       {
         ...agentGitTestEnvironment,
         GITHUB_APP_ID: "123",
-        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
-        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
         GITHUB_PRIVATE_KEY_PATH: "/tmp/key",
         GITHUB_WEBHOOK_SECRET: "secret",
         OPENCODE_SERVER_PASSWORD: "password",
         WORKFLOWD_REVIEW_OPENCODE_PASSWORD: "review-password",
-        WORKFLOWD_OPENCODE_ATTACH_URL: "https://mint.example-tailnet.ts.net:4096",
+        WORKFLOWD_OPENCODE_ATTACH_URL: "http://127.0.0.1:4096",
+        WORKFLOWD_PR_REPOSITORIES: '[{"repository":"example-owner/example","installationId":91}]',
+        WORKFLOWD_ALLOWED_INSTALLATION_ACCOUNT_IDS: "81005232,319835875",
       },
       { home: "/tmp" },
     )
-    const config = {
-      ...loaded,
-      http: { ...loaded.http, port: 0 },
-    }
-    const TestAdapters = Layer.mergeAll(
-      WorkSignalLive,
-      Layer.succeed(GitHub, {
-        fetchPullRequestSnapshot: () => {
-          githubCalls += 1
-          return Effect.die("must not fetch")
-        },
-        publishReview: () => {
-          githubCalls += 1
-          return Effect.die("must not publish")
-        },
-        collectHeadEvidence: () => Effect.die("must not collect evidence"),
-      }),
-      Layer.succeed(Automation, {
-        validateAvailability: () =>
-          Effect.sync(() => {
-            validations += 1
-          }).pipe(
-            Effect.andThen(
-              Effect.fail(
-                new OpenCodeAutomationError({
-                  operation: "validate OpenCode availability",
-                  cause: new Error("missing fixer agent"),
-                  retryable: false,
-                }),
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const server = yield* startHookService({ ...loaded, http: { ...loaded.http, port: 0 } })
+          yield* TestClock.adjust("1 second")
+          const health = yield* Effect.tryPromise(() =>
+            fetch(`http://${server.hostname}:${server.port}/health`).then((r) => r.json()),
+          )
+          expect(health).toMatchObject({ reviewAutomation: { status: "misconfigured" } })
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.merge(
+            kernelLayer(":memory:"),
+            stubAdapters(
+              automationStub(() =>
+                Effect.fail(
+                  new OpenCodeAutomationError({
+                    operation: "validate OpenCode availability",
+                    cause: new Error("missing fixer agent"),
+                    retryable: false,
+                  }),
+                ),
               ),
             ),
           ),
-        prepareReview: () => Effect.die("must not review"),
-        prepareFix: () => Effect.die("must not fix"),
-      }),
-      Layer.succeed(AgentHarness, {
-        describe: () => Effect.die("must not describe harness"),
-        validateAvailability: () => Effect.die("must not validate harness"),
-        prepare: () => Effect.die("must not prepare harness"),
-        createSession: () => Effect.die("must not create session"),
-        resumeSession: () => Effect.die("must not resume session"),
-        abortSession: () => Effect.void,
-      }),
-      Layer.succeed(Workspace, {
-        prepareReview: () => Effect.die("must not prepare review"),
-        prepareFix: () => Effect.die("must not prepare fix"),
-        publishFix: () => Effect.die("must not publish fix"),
-      }),
-    )
-
-    const exit = await Effect.runPromise(
-      Effect.exit(
-        runHookService(config).pipe(
-          Effect.provide(Layer.merge(kernelLayer(":memory:"), TestAdapters)),
         ),
+        Effect.provide(TestClock.layer()),
+        Effect.provide(Logger.layer([])),
       ),
     )
-
-    expect(exit._tag).toBe("Failure")
-    expect(validations).toBe(1)
-    expect(githubCalls).toBe(0)
   })
 
   test.each([0, 1])("starts after %i unavailable checks", async (failures) => {
@@ -532,6 +496,7 @@ describe("runHookService startup", () => {
         status: 200,
         body: {
           status: "degraded",
+          reviewAutomation: { status: "available" },
           installationGuard: {
             lastSuccessfulReconciliationAt: null,
             undecodableInstallations: 0,

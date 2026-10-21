@@ -203,7 +203,7 @@ const MESSAGE_LOOKUP_LIMIT = 20
 const toError = (cause: unknown): Error =>
   cause instanceof Error ? cause : new Error(String(cause))
 
-class OpenCodeAvailabilityError extends Error {
+export class OpenCodeAvailabilityError extends Error {
   readonly unavailable: ReadonlyArray<string>
 
   constructor(unavailable: ReadonlyArray<string>) {
@@ -288,6 +288,7 @@ function parseStructuredText(text: string): JsonValue {
 }
 
 export class SdkOpenCodeAdapter implements OpenCodeAdapter {
+  private readonly availabilityFailures = new Map<string, string>()
   constructor(
     private readonly client: OpenCodeSdkClient,
     private readonly git?: AgentGitConfig,
@@ -374,6 +375,7 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
 
   readonly validateAvailability: OpenCodeAdapter["validateAvailability"] = (input) => {
     const parameters = input.directory === undefined ? {} : { directory: input.directory }
+    const key = JSON.stringify(input)
     return this.call(
       "validate OpenCode availability",
       Effect.suspend(() => {
@@ -404,8 +406,13 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
               catch: toError,
             }),
           ),
-          Effect.tapError(() =>
-            Effect.logWarning("OpenCode availability check failed", {
+          Effect.tap(() =>
+            Effect.sync(() => {
+              this.availabilityFailures.delete(key)
+            }),
+          ),
+          Effect.tapError(() => {
+            const details = {
               serverUrl: publicServerUrl(this.serverUrl),
               directory: input.directory ?? null,
               agentCount: agents?.length ?? null,
@@ -423,8 +430,12 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
                       model.id === input.model.modelID,
                   ) ?? null,
               },
-            }),
-          ),
+            }
+            const signature = JSON.stringify(details)
+            if (this.availabilityFailures.get(key) === signature) return Effect.void
+            this.availabilityFailures.set(key, signature)
+            return Effect.logWarning("OpenCode availability check failed", details)
+          }),
         )
       }),
     )
