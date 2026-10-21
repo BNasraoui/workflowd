@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect, Fiber, Layer, Logger, Stream } from "effect"
+import { Effect, Fiber, Layer, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../../src/agent-harness"
 import {
@@ -19,39 +19,14 @@ import {
 } from "../../src/qrspi/stage-catalog"
 import { agentGitTestEnvironment } from "../helpers/agent-git-config"
 import { kernelLayer, qrspiDefinition, stubAdapters } from "../helpers/runtime"
-import { validateOpenCodeStartup } from "../../src/startup-validation"
+import { startReviewAvailability } from "../../src/review-availability"
+import { WorkSignalLive } from "../../src/work-signal"
+import { catalogClient } from "../helpers/opencode-catalog"
 import { SdkOpenCodeAdapter, type OpenCodeSdkClient } from "../../src/opencode/adapter"
 
 const requested = {
   agents: ["pr-reviewer"],
   model: { providerID: "zai-coding-plan", modelID: "glm-5.3-flash" },
-}
-
-function catalogClient(
-  agents: ReadonlyArray<string> | undefined,
-  models: ReadonlyArray<{ providerID: string; id: string }> | undefined,
-): OpenCodeSdkClient {
-  return {
-    setSessionEnvironment: () => Effect.void,
-    createSession: () => Effect.succeed({ id: "ses_test" }),
-    promptSession: () => Effect.void,
-    subscribeEvents: () => Stream.empty,
-    activeSessions: () => Effect.succeed([]),
-    sessionOutcome: () => Effect.succeed(undefined),
-    listMessages: () => Effect.succeed([]),
-    interruptSession: () => Effect.succeed(true),
-    generateText: () => Effect.succeed("{}"),
-    listAgents: () =>
-      agents === undefined
-        ? Effect.fail(new Error("agent request failed"))
-        : Effect.succeed(agents),
-    listModels: () =>
-      models === undefined
-        ? Effect.fail(new Error("model request failed"))
-        : Effect.succeed(models),
-    listProviders: () => Effect.succeed([]),
-    sessionTelemetry: () => Effect.succeed(undefined),
-  }
 }
 
 const harnessDefinitions = makeOpenCodeHarnessDefinitions({
@@ -70,7 +45,7 @@ const harnessFor = (client: OpenCodeSdkClient) =>
   )
 
 test.each([0, 200])(
-  "startup reports always-empty catalogs within 30 seconds (%i ms reads)",
+  "background monitor retains always-empty catalogs after 30 seconds (%i ms reads)",
   async (latency) => {
     let reads = 0
     const automation = new OpenCodeAutomationAdapter(
@@ -84,26 +59,22 @@ test.each([0, 200])(
       }),
       harnessDefinitions,
     )
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const startup = yield* automation
-          .validateAvailability({ fixWorkEnabled: false })
-          .pipe(validateOpenCodeStartup, Effect.result, Effect.forkChild)
-        yield* TestClock.adjust("27 seconds")
-        yield* TestClock.adjust("3 seconds")
-        return yield* Fiber.join(startup)
-      }).pipe(Effect.provide(TestClock.layer()), Effect.provide(Logger.layer([]))),
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const monitor = yield* startReviewAvailability(
+            automation.validateAvailability({ fixWorkEnabled: false }),
+          )
+          yield* TestClock.adjust("30 seconds")
+          expect(yield* monitor.health).toMatchObject({ status: "unavailable" })
+          expect(reads).toBe(latency === 0 ? 5 : 4)
+        }),
+      ).pipe(
+        Effect.provide(WorkSignalLive),
+        Effect.provide(TestClock.layer()),
+        Effect.provide(Logger.layer([])),
+      ),
     )
-    expect(reads).toBe(latency === 0 ? 15 : 14)
-    expect(result._tag).toBe("Failure")
-    if (result._tag === "Failure") {
-      expect(result.failure.message).toContain("OpenCode catalogs are empty (0 agents, 0 models)")
-      expect(result.failure.message).toContain("plugins may still be activating")
-      expect(result.failure.message).toContain(
-        "no agents/providers may be configured for this location",
-      )
-      if (latency > 0) expect(result.failure.message).toContain("30 seconds")
-    }
   },
 )
 
@@ -232,7 +203,7 @@ for (const scenario of [
       }).pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))]))),
     )
     expect(logs).toEqual(
-      Array(1).fill([
+      Array(2).fill([
         "OpenCode availability check failed",
         {
           serverUrl: "http://127.0.0.1:4098/reviewer",
@@ -247,7 +218,7 @@ for (const scenario of [
   })
 }
 
-test("startup waits for cold catalogs using the existing bounded retry", async () => {
+test("background monitor recovers from cold catalogs", async () => {
   let reads = 0
   const parameters: unknown[] = []
   const adapter = new SdkOpenCodeAdapter({
@@ -280,27 +251,24 @@ test("startup waits for cold catalogs using the existing bounded retry", async (
   )
   const logs: unknown[] = []
   await Effect.runPromise(
-    Effect.gen(function* () {
-      const startup = yield* automation
-        .validateAvailability({ fixWorkEnabled: false })
-        .pipe(validateOpenCodeStartup, Effect.forkChild)
-      yield* TestClock.adjust("2 seconds")
-      yield* Fiber.join(startup)
-    }).pipe(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const monitor = yield* startReviewAvailability(
+          automation.validateAvailability({ fixWorkEnabled: false }),
+        )
+        yield* TestClock.adjust("2 seconds")
+        expect(yield* monitor.health).toEqual({ status: "available" })
+      }),
+    ).pipe(
+      Effect.provide(WorkSignalLive),
       Effect.provide(TestClock.layer()),
       Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
     ),
   )
   expect(reads).toBe(2)
   expect(parameters).toEqual([{}, {}, {}, {}])
-  expect(logs[0]).toMatchObject([
-    "OpenCode availability check failed",
-    { directory: null, agentCount: 0, modelCount: 0 },
-  ])
-  expect(logs[1]).toEqual([
-    "OpenCode availability check failed; retrying",
-    { operation: "validate OpenCode availability" },
-  ])
+  expect(JSON.stringify(logs)).toContain("Review automation unavailable")
+  expect(JSON.stringify(logs)).toContain("Review automation available")
 })
 
 // Use wall time here: TestClock cannot exercise Bun's socket idle timeout.

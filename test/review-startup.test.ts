@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test"
-import { Agent, Model, OpenCode, Provider } from "@opencode-ai/client/effect"
-import { FetchHttpClient } from "effect/unstable/http"
 import { Effect, Fiber, Layer, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { OpenCodeAgentHarness, TrustedAgentHarnessCatalog } from "../src/agent-harness"
@@ -11,43 +9,18 @@ import {
   makePullRequestHarnessDefinitions,
   OpenCodeAutomationAdapter,
 } from "../src/opencode"
-import { makeOpenCodeSdkClient, SdkOpenCodeAdapter } from "../src/opencode/adapter"
+import { SdkOpenCodeAdapter } from "../src/opencode/adapter"
 import { startHookService } from "../src/runtime"
 import { agentGitTestEnvironment } from "./helpers/agent-git-config"
 import { kernelLayer, stubAdapters } from "./helpers/runtime"
 import { pullRequestPayload, signedRequest } from "./github-webhook"
 import { GitHub } from "../src/github"
+import { catalogClient } from "./helpers/opencode-catalog"
 
 for (const missingAgent of [false, true]) {
   test(`cold review catalogs do not stop serving (missing agent: ${missingAgent})`, async () => {
     let warm = false
     let reviewClaims = 0
-    const paths: string[] = []
-    const fake = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: (request) => {
-        const path = new URL(request.url).pathname
-        paths.push(path)
-        const data = !warm
-          ? []
-          : path === "/api/agent"
-            ? [Agent.Info.default(Agent.ID.make(missingAgent ? "general" : "pr-reviewer"))]
-            : [
-                Model.Info.default(
-                  Provider.ID.make("zai-coding-plan"),
-                  Model.ID.make("glm-5.3-flash"),
-                ),
-              ]
-        return Response.json({
-          data,
-          location: {
-            directory: "/tmp",
-            project: { id: "test", directory: "/tmp", canonical: "/tmp" },
-          },
-        })
-      },
-    })
     const definitions = makePullRequestHarnessDefinitions({
       reviewerAgent: "pr-reviewer",
       fixerAgent: "pr-fixer",
@@ -55,12 +28,16 @@ for (const missingAgent of [false, true]) {
       pollIntervalMs: 1,
       timeoutMs: 1_000,
     })
-    const client = OpenCode.make({ baseUrl: fake.url.toString() }).pipe(
-      Effect.provide(FetchHttpClient.layer),
-    )
+    const client = {
+      ...catalogClient([], []),
+      listAgents: () =>
+        Effect.sync(() => (!warm ? [] : [missingAgent ? "general" : "pr-reviewer"])),
+      listModels: () =>
+        Effect.sync(() => (!warm ? [] : [{ providerID: "zai-coding-plan", id: "glm-5.3-flash" }])),
+    }
     const automation = new OpenCodeAutomationAdapter(
       new OpenCodeAgentHarness(
-        new SdkOpenCodeAdapter(makeOpenCodeSdkClient(client)),
+        new SdkOpenCodeAdapter(client),
         new TrustedAgentHarnessCatalog([definitions.review]),
         { serverId: "test", endpointAlias: "test", pollIntervalMs: 1 },
       ),
@@ -88,92 +65,82 @@ for (const missingAgent of [false, true]) {
     }
     const database = kernelLayer(":memory:")
     const logs: unknown[] = []
-    try {
-      await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const startup = yield* startHookService(config).pipe(Effect.forkChild)
-            yield* TestClock.adjust("31 seconds")
-            const server = yield* Fiber.join(startup)
-            const url = `http://${server.hostname}:${server.port}`
-            const health = () =>
-              Effect.tryPromise(() => fetch(`${url}/health`).then((r) => r.json()))
-            // Advance daemon time beyond the old fatal startup deadline while the fake stays cold.
-            yield* TestClock.adjust("31 seconds")
-            expect(yield* health()).toMatchObject({
-              status: "degraded",
-              reviewAutomation: { status: "unavailable" },
-            })
-            const accepted = yield* Effect.tryPromise(() =>
-              fetch(`${url}/workflows/test-jobs`, {
-                method: "POST",
-                headers: { authorization: "Bearer canary-secret" },
-                body: JSON.stringify({ jobId: "during-warmup", value: "retained" }),
-              }),
-            )
-            expect(accepted.status).toBe(202)
-            const review = yield* Effect.tryPromise(() =>
-              fetch(
-                signedRequest(
-                  "pull_request",
-                  pullRequestPayload("example-owner/example"),
-                  "during-warmup",
-                  "secret",
-                  `${url}/hooks/github`,
-                ),
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const startup = yield* startHookService(config).pipe(Effect.forkChild)
+          yield* TestClock.adjust("31 seconds")
+          const server = yield* Fiber.join(startup)
+          const url = `http://${server.hostname}:${server.port}`
+          const health = () => Effect.tryPromise(() => fetch(`${url}/health`).then((r) => r.json()))
+          // Advance daemon time beyond the old fatal startup deadline while the fake stays cold.
+          yield* TestClock.adjust("31 seconds")
+          expect(yield* health()).toMatchObject({
+            status: "degraded",
+            reviewAutomation: { status: "unavailable" },
+          })
+          const accepted = yield* Effect.tryPromise(() =>
+            fetch(`${url}/workflows/test-jobs`, {
+              method: "POST",
+              headers: { authorization: "Bearer canary-secret" },
+              body: JSON.stringify({ jobId: "during-warmup", value: "retained" }),
+            }),
+          )
+          expect(accepted.status).toBe(202)
+          const review = yield* Effect.tryPromise(() =>
+            fetch(
+              signedRequest(
+                "pull_request",
+                pullRequestPayload("example-owner/example"),
+                "during-warmup",
+                "secret",
+                `${url}/hooks/github`,
               ),
-            )
-            expect(review.status).toBe(202)
-            expect(yield* Effect.tryPromise(() => review.json())).toMatchObject({
-              status: "enqueued",
-            })
-            yield* TestClock.adjust("1 second")
-            expect(reviewClaims).toBe(0)
-            warm = true
-            yield* TestClock.adjust("30 seconds")
-            expect(yield* health()).toMatchObject({
-              reviewAutomation: { status: missingAgent ? "misconfigured" : "available" },
-            })
-            const status = yield* Effect.tryPromise(() =>
-              fetch(`${url}/workflows/test-jobs/during-warmup`, {
-                headers: { authorization: "Bearer canary-secret" },
-              }).then((r) => r.json()),
-            )
-            expect(status).toMatchObject({
-              status: "succeeded",
-              result: "retained",
-            })
-            expect(reviewClaims).toBe(missingAgent ? 0 : 1)
-          }),
-        ).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              database,
-              stubAdapters(),
-              Layer.succeed(GitHub, {
-                collectHeadEvidence: () =>
-                  Effect.sync(() => {
-                    reviewClaims++
-                  }).pipe(Effect.andThen(Effect.never)),
-                fetchPullRequestSnapshot: () => Effect.die("unexpected snapshot"),
-                publishReview: () => Effect.die("unexpected publication"),
-              }),
-              TestJobCanaryLive.pipe(Layer.provide(database)),
-              Layer.succeed(Automation, automation),
             ),
+          )
+          expect(review.status).toBe(202)
+          expect(yield* Effect.tryPromise(() => review.json())).toMatchObject({
+            status: "enqueued",
+          })
+          yield* TestClock.adjust("1 second")
+          expect(reviewClaims).toBe(0)
+          warm = true
+          yield* TestClock.adjust("60 seconds")
+          expect(yield* health()).toMatchObject({
+            reviewAutomation: { status: missingAgent ? "misconfigured" : "available" },
+          })
+          const status = yield* Effect.tryPromise(() =>
+            fetch(`${url}/workflows/test-jobs/during-warmup`, {
+              headers: { authorization: "Bearer canary-secret" },
+            }).then((r) => r.json()),
+          )
+          expect(status).toMatchObject({
+            status: "succeeded",
+            result: "retained",
+          })
+          expect(reviewClaims).toBe(missingAgent ? 0 : 1)
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            database,
+            stubAdapters(),
+            Layer.succeed(GitHub, {
+              collectHeadEvidence: () =>
+                Effect.sync(() => {
+                  reviewClaims++
+                }).pipe(Effect.andThen(Effect.never)),
+              fetchPullRequestSnapshot: () => Effect.die("unexpected snapshot"),
+              publishReview: () => Effect.die("unexpected publication"),
+            }),
+            TestJobCanaryLive.pipe(Layer.provide(database)),
+            Layer.succeed(Automation, automation),
           ),
-          Effect.provide(TestClock.layer()),
-          Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
         ),
-      )
-      expect(paths).toContain("/api/agent")
-      expect(paths).toContain("/api/model")
-      expect(
-        logs.filter((entry) => JSON.stringify(entry).includes("Review automation unavailable")),
-      ).toHaveLength(1)
-      if (missingAgent) expect(JSON.stringify(logs)).toContain("Review automation misconfigured")
-    } finally {
-      await fake.stop(true)
-    }
+        Effect.provide(TestClock.layer()),
+        Effect.provide(Logger.layer([Logger.make(({ message }) => logs.push(message))])),
+      ),
+    )
+    if (missingAgent) expect(JSON.stringify(logs)).toContain("Review automation misconfigured")
   }, 10_000)
 }

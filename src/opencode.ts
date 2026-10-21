@@ -14,8 +14,6 @@ import {
   type ReviewResult,
 } from "./domain/review-result"
 
-import { OpenCodeAvailabilityError } from "./opencode/adapter"
-
 type AutomationKind = "review" | "fix"
 
 export type OpenCodeAutomationConfig = {
@@ -196,7 +194,7 @@ function toAutomationError(error: AgentHarnessError): OpenCodeAutomationError {
   return new OpenCodeAutomationError({
     operation: error.operation,
     cause: error.cause,
-    retryable: error.retryable && !(error.cause instanceof OpenCodeAvailabilityError),
+    retryable: error.retryable,
   })
 }
 

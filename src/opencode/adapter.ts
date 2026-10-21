@@ -288,7 +288,6 @@ function parseStructuredText(text: string): JsonValue {
 }
 
 export class SdkOpenCodeAdapter implements OpenCodeAdapter {
-  private readonly availabilityFailures = new Map<string, string>()
   constructor(
     private readonly client: OpenCodeSdkClient,
     private readonly git?: AgentGitConfig,
@@ -375,7 +374,6 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
 
   readonly validateAvailability: OpenCodeAdapter["validateAvailability"] = (input) => {
     const parameters = input.directory === undefined ? {} : { directory: input.directory }
-    const key = JSON.stringify(input)
     return this.call(
       "validate OpenCode availability",
       Effect.suspend(() => {
@@ -406,11 +404,6 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
               catch: toError,
             }),
           ),
-          Effect.tap(() =>
-            Effect.sync(() => {
-              this.availabilityFailures.delete(key)
-            }),
-          ),
           Effect.tapError(() => {
             const details = {
               serverUrl: publicServerUrl(this.serverUrl),
@@ -431,9 +424,6 @@ export class SdkOpenCodeAdapter implements OpenCodeAdapter {
                   ) ?? null,
               },
             }
-            const signature = JSON.stringify(details)
-            if (this.availabilityFailures.get(key) === signature) return Effect.void
-            this.availabilityFailures.set(key, signature)
             return Effect.logWarning("OpenCode availability check failed", details)
           }),
         )

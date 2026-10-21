@@ -1,3 +1,4 @@
+import { OpenCodeAvailabilityError } from "../src/opencode/adapter"
 import { describe, expect, test } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Logger } from "effect"
 import { TestClock } from "effect/testing"
@@ -340,7 +341,7 @@ describe("runHookService startup", () => {
       Effect.scoped(
         Effect.gen(function* () {
           const server = yield* startHookService({ ...loaded, http: { ...loaded.http, port: 0 } })
-          yield* TestClock.adjust("1 second")
+          yield* TestClock.adjust("2 seconds")
           const health = yield* Effect.tryPromise(() =>
             fetch(`http://${server.hostname}:${server.port}/health`).then((r) => r.json()),
           )
@@ -355,7 +356,7 @@ describe("runHookService startup", () => {
                 Effect.fail(
                   new OpenCodeAutomationError({
                     operation: "validate OpenCode availability",
-                    cause: new Error("missing fixer agent"),
+                    cause: new OpenCodeAvailabilityError(["agent pr-fixer"]),
                     retryable: false,
                   }),
                 ),
