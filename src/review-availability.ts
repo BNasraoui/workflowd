@@ -1,4 +1,4 @@
-import { Cause, Clock, Duration, Effect, Logger, Ref, Schedule } from "effect"
+import { Cause, Clock, Effect, Logger, Ref, Schedule, Semaphore } from "effect"
 import type { OpenCodeAutomationError } from "./opencode"
 import { OpenCodeAvailabilityError } from "./opencode/adapter"
 import { WorkSignal } from "./work-signal"
@@ -9,7 +9,7 @@ export type ReviewAvailability = {
   readonly missing?: ReadonlyArray<string>
 }
 
-/** Checks own no job leases and keep running after recovery. */
+/** Checks stay bounded and keep running after recovery. */
 export const startReviewAvailability = (
   check: Effect.Effect<void, OpenCodeAutomationError> | undefined,
   lane: "review" | "fix" = "review",
@@ -19,7 +19,10 @@ export const startReviewAvailability = (
     const state = yield* Ref.make<ReviewAvailability>({
       status: check === undefined ? "disabled" : "unavailable",
     })
+    const lock = yield* Semaphore.make(1)
+    let recheck = Ref.get(state)
     if (check !== undefined) {
+      let retryDelay = 2_000
       let previousMissing: string | undefined
       let lastLog = ""
       let lastLogAt = -Infinity
@@ -46,13 +49,14 @@ export const startReviewAvailability = (
           () => Effect.succeed({ status: "unreachable", reason: "defect" } as const),
         ),
       )
-      yield* Effect.gen(function* () {
+      recheck = Effect.gen(function* () {
         const next: ReviewAvailability = yield* observe
         if (next.reason !== "missing_selection") previousMissing = undefined
         const previous = yield* Ref.getAndSet(state, next)
+        if (next.status === "available" || previous.status === "available") retryDelay = 2_000
         const now = yield* Clock.currentTimeMillis
         const signature = JSON.stringify(next)
-        if (signature !== lastLog || now - lastLogAt >= 60_000) {
+        if (signature !== lastLog || (next.status !== "available" && now - lastLogAt >= 60_000)) {
           const details = { lane, ...next }
           yield* next.reason === "timeout"
             ? Effect.logWarning(
@@ -78,16 +82,18 @@ export const startReviewAvailability = (
         if (next.status === "available" && previous.status !== "available")
           yield* signals.wake("job")
         return next
-      }).pipe(
+      }).pipe(Semaphore.withPermits(lock, 1))
+      yield* recheck.pipe(
         Effect.repeat(
-          Schedule.exponential("2 seconds").pipe(
+          Schedule.spaced("2 seconds").pipe(
             Schedule.setInputType<ReviewAvailability>(),
-            Schedule.modifyDelay(({ input, duration }) =>
-              Effect.succeed(
-                input.status === "available"
-                  ? 30_000
-                  : Duration.min(duration, Duration.seconds(30)),
-              ),
+            Schedule.modifyDelay(({ input }) =>
+              Effect.sync(() => {
+                if (input.status === "available") return 30_000
+                const delay = retryDelay
+                retryDelay = Math.min(retryDelay * 2, 30_000)
+                return delay
+              }),
             ),
           ),
         ),
@@ -96,11 +102,6 @@ export const startReviewAvailability = (
     }
     return {
       health: Ref.get(state),
-      whenAvailable: <A extends string, E, R>(iteration: Effect.Effect<A, E, R>) =>
-        Ref.get(state).pipe(
-          Effect.flatMap(({ status }): Effect.Effect<A | "idle", E, R> =>
-            status === "available" ? iteration : Effect.succeed("idle" as const),
-          ),
-        ),
+      recheck,
     }
   })

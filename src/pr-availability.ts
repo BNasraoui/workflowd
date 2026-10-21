@@ -28,5 +28,9 @@ export const startPullRequestAvailability = (
       if (!fixWorkEnabled || (yield* fix.health).status === "available") kinds.push("fix")
       return kinds
     })
-    return { review, fix, availableJobKinds }
+    const recheckAvailability = (kind: "review" | "fix") =>
+      (kind === "review" ? review : fix).recheck.pipe(
+        Effect.map(({ status }) => status === "available"),
+      )
+    return { review, fix, availableJobKinds, recheckAvailability }
   })

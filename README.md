@@ -395,7 +395,11 @@ selection must repeat on two consecutive checks before it is misconfigured;
 `missing` names the agent or model. An unanswered 10-second check is unreachable
 with `reason: "timeout"`; timeouts are logged at most once per minute while
 unchanged. Checks continue after success (every 30 seconds), and failures back
-off 2, 4, 8, 16, then 30 seconds. Review and fix claims pause separately, without
+off 2, 4, 8, 16, then 30 seconds. Recovery resets the failure delay. The monitor
+logs `available` only when the status changes. A job that reports an OpenCode
+timeout or transport error starts a check at once. If the check closes the gate,
+the job is queued again and its attempt count is restored. Other failures use
+the normal attempt limit. Review and fix claims pause separately, without
 consuming queued attempts or pausing expired-session cleanup and disabled-fix
 retirement. A hung reviewer needs an operator restart; workflowd does not restart
 it. Inspect `opencode2-reviewer.service` journals before an authorized restart.

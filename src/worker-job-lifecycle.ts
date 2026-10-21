@@ -89,3 +89,22 @@ export function retryableFailure<E>(cause: Cause.Cause<E>): boolean {
     !failure.retryable
   )
 }
+
+export function reviewerMayBeHung<E>(cause: Cause.Cause<E>): boolean {
+  const failure = Option.getOrUndefined(Cause.findErrorOption(cause))
+  if (!(failure instanceof AgentHarnessError || failure instanceof OpenCodeAutomationError))
+    return false
+  return /timed?\s*out|timeout|transport|fetch failed|ECONNRESET|ECONNREFUSED|EPIPE|socket|connection (?:closed|refused|reset)/i.test(
+    failure.cause.message,
+  )
+}
+
+export function leaseFailure<E>(cause: Cause.Cause<E>, attempt: number, now: () => Date) {
+  const failedAt = now()
+  const delay = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 15 * 60_000)
+  return {
+    failedAt,
+    runAt: new Date(failedAt.getTime() + delay),
+    error: Cause.pretty(cause),
+  }
+}

@@ -496,8 +496,23 @@ export function makeJobOperations(
       }).pipe(sql.withTransaction),
     rescheduleJob: (input) =>
       Effect.gen(function* () {
+        if (input.refundAttempt === true) {
+          yield* sql`
+            UPDATE jobs SET attempts = attempts - 1
+            WHERE id = ${input.jobId}
+            AND state = 'leased'
+            AND lease_owner = ${input.workerId}
+            AND lease_until > ${input.failedAt.toISOString()}
+            AND attempts > 0
+          `
+        }
         const disposition = yield* queue.reschedule({ ...input, id: input.jobId })
-        if (disposition === "stale" || input.execution === undefined) return disposition
+        if (
+          disposition === "stale" ||
+          input.execution === undefined ||
+          input.cleanupPending === true
+        )
+          return disposition
         yield* sql`
           UPDATE agent_executions
           SET
@@ -506,7 +521,7 @@ export function makeJobOperations(
           WHERE job_id = ${input.jobId}
           AND attempt = ${input.execution.attempt}
           AND lease_token = ${input.execution.leaseToken}
-          AND attempt = (SELECT attempts FROM jobs WHERE id = ${input.jobId})
+          AND attempt = (SELECT attempts + ${input.refundAttempt === true ? 1 : 0} FROM jobs WHERE id = ${input.jobId})
           AND state IN ('launch_intent', 'session_ready')
         `
         return disposition

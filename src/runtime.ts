@@ -331,6 +331,7 @@ export function startHookService(
               "job",
               runJobIteration({
                 availableJobKinds: availability.availableJobKinds,
+                recheckAvailability: availability.recheckAvailability,
                 workerId,
                 leaseDurationMs: config.worker.jobLeaseDurationMs,
                 maxAttempts: 3,

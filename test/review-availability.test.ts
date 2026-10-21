@@ -97,11 +97,10 @@ test("periodic checks close an available gate again and recover", async () => {
           Effect.suspend(() => (ready ? Effect.void : Effect.never)),
         )
         yield* TestClock.adjust(0)
-        expect(yield* monitor.whenAvailable(Effect.succeed("claimed"))).toBe("claimed")
+        expect(yield* monitor.health).toEqual({ status: "available" })
         ready = false
         yield* TestClock.adjust("40 seconds")
         expect(yield* monitor.health).toMatchObject({ status: "unreachable", reason: "timeout" })
-        expect(yield* monitor.whenAvailable(Effect.succeed("claimed"))).toBe("idle")
         ready = true
         yield* TestClock.adjust("30 seconds")
         expect(yield* monitor.health).toEqual({ status: "available" })
@@ -179,4 +178,53 @@ test("background diagnostics omit nested causes and credential-bearing URLs", as
   expect(JSON.stringify(logs)).not.toContain("secret")
   expect(JSON.stringify(logs)).not.toContain("private")
   expect(logs.length).toBeLessThanOrEqual(2)
+})
+
+test("failure backoff starts at 2 seconds after five minutes available", async () => {
+  let ready = true
+  const times: number[] = []
+  await run(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const monitor = yield* startReviewAvailability(
+          Effect.gen(function* () {
+            times.push(yield* Clock.currentTimeMillis)
+            if (!ready) return yield* Effect.fail(missing())
+          }),
+        )
+        yield* TestClock.adjust("5 minutes")
+        expect(yield* monitor.health).toEqual({ status: "available" })
+        ready = false
+        times.length = 0
+        yield* TestClock.adjust("90 seconds")
+        expect(times).toEqual([330000, 332000, 336000, 344000, 360000, 390000])
+      }),
+    ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
+  )
+})
+
+test("available is logged once per change in each lane", async () => {
+  let ready = true
+  const logs: unknown[] = []
+  await run(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const check = Effect.suspend(() => (ready ? Effect.void : Effect.fail(missing())))
+        yield* startReviewAvailability(check, "review")
+        yield* startReviewAvailability(check, "fix")
+        yield* TestClock.adjust("5 minutes")
+        expect(
+          logs.filter((entry) => JSON.stringify(entry).includes("automation available")),
+        ).toHaveLength(2)
+        ready = false
+        yield* TestClock.adjust("30 seconds")
+        ready = true
+        yield* TestClock.adjust("30 seconds")
+        expect(
+          logs.filter((entry) => JSON.stringify(entry).includes("automation available")),
+        ).toHaveLength(4)
+      }),
+    ).pipe(Effect.provide(WorkSignalLive), Effect.provide(TestClock.layer())),
+    logs,
+  )
 })

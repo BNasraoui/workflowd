@@ -100,6 +100,8 @@ export type CompletePublicationInput = {
 }
 
 export type RescheduleJobInput = {
+  readonly refundAttempt?: boolean
+  readonly cleanupPending?: boolean
   readonly jobId: number
   readonly workerId: string
   readonly failedAt: Date

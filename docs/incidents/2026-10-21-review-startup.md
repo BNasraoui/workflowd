@@ -20,8 +20,9 @@ reviewer subsequently became unresponsive while workflowd was running.
 The primary server's OOM triggered workflowd's first start against this already
 hung reviewer, through its `Requires=` dependency:
 
-- 20:18:34: `opencode2-server.service` was OOM-killed (8.0G memory peak,
+- 20:17:48: the OOM killer killed `opencode2-server.service` (8.0G memory peak,
   393.1M swap peak).
+- 20:18:34: systemd sent SIGKILL to the unit after its stop timeout.
 - 20:18:39–20:18:43: the server restart stopped and restarted workflowd.
 - Subsequent starts blocked on the unresponsive reviewer and exhausted the
   startup deadline before acquiring the listener or starting dispatch workers.
@@ -70,7 +71,12 @@ proposal: `workflowd-7vhr` (trigger, restart action, cooldown and risks).
 Review and fix availability run in separate daemon-scoped background fibers.
 Each read is capped at 10 seconds. Failed checks use capped exponential delays:
 2, 4, 8, 16, then 30 seconds. Successful checks continue every 30 seconds; a
-later failure closes that lane's gate again. There is no fatal startup deadline.
+later failure closes that lane's gate again. Recovery resets the failure delay.
+If a job in flight reports an OpenCode timeout or transport error, the worker
+checks that lane at once. If the check closes the gate, the job is queued again
+and its attempt count is restored. Other failures use the normal attempt limit.
+If session abort fails, the session must be cleaned up before another claim.
+There is no fatal startup deadline.
 The listener, kernel workers, health and dispatch services start immediately.
 Claims filter review/fix job kinds before acquiring a lease, so paused work
 keeps its attempts. A missing fixer does not block reviews. Expired-session
@@ -92,18 +98,20 @@ readiness. After deploys check `reviewAutomation.status == "available"` (or
 `disabled` in execution mode), the fix status when enabled, and overall `status`;
 the README includes a `jq -e` example.
 
-The loop owns diagnostic suppression: state changes and at most one unchanged
-warning per minute are logged. Timeouts explicitly name the need for an
-operator restart. Defects are caught, safely logged and retried; interruption
-still stops the scoped fiber. Shared adapter calls retain every safe endpoint
+The loop logs `available` only when the status changes. It logs other changes
+and at most one warning per minute when the status does not change. Timeout
+warnings state that an operator restart is needed. Defects are caught, safely
+logged and retried. Interruption still stops the scoped fiber. Shared adapter calls retain every safe endpoint
 and catalog diagnostic, including later QRSPI failures. Nested request causes
 and credential-bearing URLs are excluded from background health/logs.
 
 Regression tests use scripted in-memory catalogs with Effect's virtual clock
 for empty catalogs, capped backoff, selection confirmation, recovery, defects,
-and failure after success. A separate loopback server accepts HTTP catalog
-requests and never replies; an explicit acceptance handshake precedes virtual
-time advancement, exercising the real SDK timeout path without a socket race.
+and failure after success. The HTTP test uses the SDK with an Effect HTTP
+transport that never replies. A Deferred confirms that the request started
+before virtual time advances. The test checks the worker claim path and keeps
+the first attempt after recovery. It does not use an OS socket. Tests for jobs
+in flight cover timeouts, transport errors, failed aborts and the last attempt.
 Daemon route tests retain accepted dispatches during warmup. Store/worker tests
 verify separate claims, untouched attempts, cleanup and disabled-fix retirement.
 The unused blocking startup helper and its tests were removed; relevant

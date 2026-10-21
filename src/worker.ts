@@ -3,6 +3,8 @@ import {
   cleanupExpiredAgentSessions,
   interruptOnCancellation,
   retryableFailure,
+  reviewerMayBeHung,
+  leaseFailure,
 } from "./worker-job-lifecycle"
 import { Cause, Data, Effect, Exit, Option } from "effect"
 import { AgentHarness } from "./agent-harness"
@@ -18,15 +20,6 @@ import { WorkspaceError } from "./workspace/errors"
 class EvidencePending extends Data.TaggedError("EvidencePending")<{
   readonly reason: string
 }> {}
-function leaseFailure<E>(cause: Cause.Cause<E>, attempt: number, now: () => Date) {
-  const failedAt = now()
-  const delay = Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 15 * 60_000)
-  return {
-    failedAt,
-    runAt: new Date(failedAt.getTime() + delay),
-    error: Cause.pretty(cause),
-  }
-}
 
 function processReviewWork(
   work: ReviewWork,
@@ -337,6 +330,7 @@ type JobIterationOptions = {
   readonly trustedAgentUsers: ReadonlyArray<string>
   readonly fixWorkEnabled: boolean
   readonly now: () => Date
+  readonly recheckAvailability?: (kind: "review" | "fix") => Effect.Effect<boolean>
   readonly availableJobKinds?: Effect.Effect<ReadonlyArray<"review" | "fix">>
 }
 function jobOperation(
@@ -409,9 +403,15 @@ export function runJobIteration(options: JobIterationOptions) {
       ),
     )
     if (Exit.isSuccess(exit)) return exit.value
-    if (agentAbortFailed) return "cleanup_pending" as const
 
+    const refundAttempt =
+      reviewerMayBeHung(exit.cause) && options.recheckAvailability !== undefined
+        ? !(yield* options.recheckAvailability(work._tag === "ReviewWork" ? "review" : "fix"))
+        : false
+    if (agentAbortFailed && !refundAttempt) return "cleanup_pending" as const
     return yield* store.rescheduleJob({
+      cleanupPending: agentAbortFailed,
+      refundAttempt,
       jobId: work.id,
       workerId: options.workerId,
       ...leaseFailure(exit.cause, work.attempt, options.now),
