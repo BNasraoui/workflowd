@@ -81,7 +81,7 @@ agent runs and dispatches already in flight keep their original settings.
 | --- | --- | --- |
 | `WORKFLOWD_AGENT_RUN_REPOSITORIES` | Reload | New dispatches use the new repository paths and allow-list immediately. Removed aliases are refused. |
 | `WORKFLOWD_AGENT_RUN_ROUTES`, `WORKFLOWD_AGENT_RUN_CODEX_ROUTES`, `WORKFLOWD_AGENT_RUN_CLAUDE_ROUTES` | Reload | New dispatches resolve aliases against the new lists. Existing accepted choices stay recorded. |
-| Agent-run enablement/token, binaries, unit prefix, agent, Claude hosts, timeouts, polling, stall window and retries | Restart | Executors, authentication, custody and watchdogs hold startup settings. |
+| Agent-run enablement/token, binaries, unit prefix, agent, Claude hosts, timeouts, polling, stall window, retries and worktree retention | Restart | Executors, authentication, custody, watchdogs and the worktree janitor hold startup settings. |
 | Sandbox repository policies | Restart | Sandbox clients, leases and routing are built at startup. Repository edits must still fit the pinned policies. |
 | HTTP host, port and webhook size limit | Restart | The listener and ingress limits are already acquired. |
 | Database, state/cache/workspace paths, local repository roots, diff limit and Git identity/signing key | Restart | Stores, workspace services and subprocess adapters hold these settings. |

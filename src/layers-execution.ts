@@ -7,6 +7,7 @@ import { localDiscoverySources } from "./execution/local"
 import { AgentRunIngressLive } from "./kernel/agent-run-ingress"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWorktrees, agentRunWorktrees } from "./kernel/agent-run-worktrees"
+import { agentRunWorktreeJanitorLayer } from "./kernel/agent-run-worktree-janitor"
 import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
 import { CodexCli, makeCodexCli } from "./kernel/codex-session"
 import { DogfoodStoreLive } from "./kernel/dogfood-store"
@@ -100,11 +101,14 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
   const runs =
     config.agentRuns === undefined
       ? Layer.empty
-      : AgentRunIngressLive({
-          ...config.agentRuns,
-          identity,
-          worktreeRoot: config.workspace.worktreeRoot,
-        }).pipe(
+      : Layer.merge(
+          AgentRunIngressLive({
+            ...config.agentRuns,
+            identity,
+            worktreeRoot: config.workspace.worktreeRoot,
+          }),
+          agentRunWorktreeJanitorLayer(config, config.agentRuns),
+        ).pipe(
           Layer.provideMerge(store),
           Layer.provideMerge(codex),
           Layer.provideMerge(claude),

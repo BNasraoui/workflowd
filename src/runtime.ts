@@ -20,6 +20,7 @@ import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
+import { AgentRunWorktreeJanitor } from "./kernel/agent-run-worktree-janitor"
 import { DogfoodStore } from "./kernel/dogfood-store"
 import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
@@ -196,6 +197,7 @@ export function workDownstreamLanes(lane: WorkLane): ReadonlyArray<WorkLane> {
       return ["kernel-job"]
     case "agent-run":
       return ["agent-completion"]
+    case "agent-run-cleanup":
     case "kernel-job":
     case "session-resume":
       return []
@@ -277,6 +279,7 @@ export function startHookService(
         new Error("ExecutionDiscovery is required when capability discovery is configured"),
       )
     const agentRunWatchdog = yield* Effect.serviceOption(AgentRunWatchdog)
+    const worktreeJanitor = yield* Effect.serviceOption(AgentRunWorktreeJanitor)
     const sandbox = yield* Effect.serviceOption(SandboxDispatch)
     const dogfood = yield* Effect.serviceOption(DogfoodStore)
     const claudeResumeWorker = yield* Effect.serviceOption(ClaudeResumeWorker)
@@ -402,6 +405,14 @@ export function startHookService(
         60_000,
         "agent-run",
         observed("agent-run", agentRunWatchdog.value.iteration),
+      )
+    }
+    if (Option.isSome(worktreeJanitor)) {
+      yield* superviseWorker(
+        "Agent-run worktree janitor",
+        5 * 60_000,
+        "agent-run-cleanup",
+        worktreeJanitor.value.iteration,
       )
     }
     if (Option.isSome(sandbox)) {

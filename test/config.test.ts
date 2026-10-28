@@ -89,7 +89,25 @@ describe("loadConfig", () => {
       verifyPollIntervalMs: 2_000,
       progressWindowMs: 20 * 60_000,
       maxAttempts: 3,
+      worktreeRetentionMs: 2 * 24 * 60 * 60_000,
     })
+  })
+
+  test("configures agent-run worktree retention", async () => {
+    const base = {
+      ...requiredEnvironment,
+      WORKFLOWD_AGENT_RUN_TOKEN: "agent-run-secret",
+      WORKFLOWD_AGENT_RUN_ROUTES: "implement=zai-coding-plan/glm-5.3-flash",
+      WORKFLOWD_AGENT_RUN_REPOSITORIES: "workflowd=/home/test/repos/workflowd",
+    }
+    const config = await loadConfig({
+      ...base,
+      WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS: "3600000",
+    })
+    expect(config.agentRuns?.worktreeRetentionMs).toBe(3_600_000)
+    await expect(
+      loadConfig({ ...base, WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS: "0" }),
+    ).rejects.toThrow("WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS must be a positive integer")
   })
 
   test("configures an isolated Codex unit namespace", async () => {

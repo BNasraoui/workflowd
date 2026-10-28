@@ -229,6 +229,20 @@ What the runner owns, in order:
    exit. The watchdog deliberately never observes a verified codex run; a
    daemon crash mid-run leaves the run row `verified` and the worktree in
    place for manual inspection (codex session resume is a deferred slice).
+6. **Worktree retention.** Once a run is terminal (`completed`, `cancelled`,
+   `failed` or `operator_required`) and
+   `WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS` (default two days) has passed
+   since it ended, the daemon's worktree janitor removes the run's worktree
+   with `git worktree remove` (never forced) and prunes the repository's
+   worktree records. The run's branch stays. The work is a durable kernel
+   cleanup request, so runs that ended while the daemon was down are caught
+   up after a restart. A worktree with uncommitted or untracked changes, a
+   locked worktree, or anything that is not a linked worktree of the
+   configured repository under `<worktree root>/agent-runs/` is kept; the
+   janitor logs one warning and `list_agent_runs` shows `worktree: "retained"`
+   with the reason in `worktree_detail`. Delete or commit the changes and
+   remove such a worktree by hand. The janitor is off when workspaces are
+   created through the agent host (`WORKFLOWD_AGENT_HOST_SOCKET`).
 
 With `parent_session_id` + `resume_prompt`, the runner also registers the
 parent's custody (idempotently) and an agent wait in the same dispatch, so
@@ -479,7 +493,8 @@ enables it, the routes and repositories are then required):
 - `WORKFLOWD_AGENT_RUN_VERIFY_TIMEOUT_MS` (120000),
   `WORKFLOWD_AGENT_RUN_VERIFY_POLL_MS` (2000),
   `WORKFLOWD_AGENT_RUN_PROGRESS_WINDOW_MS` (1200000),
-  `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS` (3).
+  `WORKFLOWD_AGENT_RUN_MAX_ATTEMPTS` (3),
+  `WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS` (172800000, two days).
 
 ```http
 POST /workflows/agent-runs

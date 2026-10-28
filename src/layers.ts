@@ -11,6 +11,7 @@ import { AgentHandoffStore, AgentHandoffStoreLive } from "./kernel/agent-handoff
 import { AgentRunIngressLive, AgentRunProvider } from "./kernel/agent-run-ingress"
 import { AgentRunStoreLive } from "./kernel/agent-run-store"
 import { AgentRunWatchdogLive } from "./kernel/agent-run-watchdog"
+import { agentRunWorktreeJanitorLayer } from "./kernel/agent-run-worktree-janitor"
 import { AgentRunWorktrees, agentRunWorktrees } from "./kernel/agent-run-worktrees"
 import { AgentWaitIngressLive } from "./kernel/agent-wait-ingress"
 import { ClaudeDispatchCli, makeClaudeDispatchCli } from "./kernel/claude-dispatch"
@@ -374,7 +375,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
-      : Layer.merge(
+      : Layer.mergeAll(
           AgentRunIngressLive({
             routes: config.agentRuns.routes,
             codexRoutes: config.agentRuns.codexRoutes,
@@ -400,6 +401,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             unsupervisedExecutorKinds: ["codex", "claude"],
             now: () => new Date(),
           }),
+          agentRunWorktreeJanitorLayer(config, config.agentRuns),
         ).pipe(
           Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
