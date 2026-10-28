@@ -42,7 +42,9 @@ const REFUSED_OUTPUT = {
     error: { type: "string" as const, description: "The daemon's refusal category." },
     mailbox_id: {
       type: "string" as const,
-      description: "Mailbox for a child that spawned before refusal.",
+      description:
+        "Mailbox for a child that spawned before refusal, or for an ended run " +
+        "whose worktree was removed after retention.",
     },
   },
   required: ["status", "reason"],

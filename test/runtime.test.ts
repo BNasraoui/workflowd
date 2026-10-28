@@ -231,6 +231,32 @@ test("superviseWorker retains fallback polling after an idle iteration", async (
   expect(observed).toBe(2)
 })
 
+test("superviseWorker pauses after an iteration that found work", async () => {
+  const started: Array<number> = []
+  const gap = await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const second = yield* Deferred.make<void>()
+        yield* superviseWorker(
+          "Test worker",
+          60_000,
+          "agent-run-cleanup",
+          Effect.sync(() => {
+            started.push(Date.now())
+            if (started.length === 2) Effect.runSync(Deferred.succeed(second, undefined))
+            return "worked" as const
+          }),
+          50,
+        )
+        yield* Deferred.await(second)
+        return started[1]! - started[0]!
+      }).pipe(Effect.provide(WorkSignalLive)),
+    ),
+  )
+
+  expect(gap).toBeGreaterThanOrEqual(45)
+})
+
 test("local resume supervision performs a startup scan and uses its signal lane", async () => {
   let attempts = 0
   const scanned = await Effect.runPromise(Deferred.make<void>())

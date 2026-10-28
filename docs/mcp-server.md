@@ -229,20 +229,44 @@ What the runner owns, in order:
    exit. The watchdog deliberately never observes a verified codex run; a
    daemon crash mid-run leaves the run row `verified` and the worktree in
    place for manual inspection (codex session resume is a deferred slice).
-6. **Worktree retention.** Once a run is terminal (`completed`, `cancelled`,
-   `failed` or `operator_required`) and
+6. **Worktree retention.** Once a run has ended with its process confirmed
+   stopped (`completed`, `cancelled` or `failed`) and
    `WORKFLOWD_AGENT_RUN_WORKTREE_RETENTION_MS` (default two days) has passed
-   since it ended, the daemon's worktree janitor removes the run's worktree
-   with `git worktree remove` (never forced) and prunes the repository's
-   worktree records. The run's branch stays. The work is a durable kernel
-   cleanup request, so runs that ended while the daemon was down are caught
-   up after a restart. A worktree with uncommitted or untracked changes, a
-   locked worktree, or anything that is not a linked worktree of the
-   configured repository under `<worktree root>/agent-runs/` is kept; the
-   janitor logs one warning and `list_agent_runs` shows `worktree: "retained"`
-   with the reason in `worktree_detail`. Delete or commit the changes and
-   remove such a worktree by hand. The janitor is off when workspaces are
-   created through the agent host (`WORKFLOWD_AGENT_HOST_SOCKET`).
+   since the latest change to the run, its sessions or its working resource,
+   the daemon's worktree janitor removes the run's worktree with
+   `git worktree remove` (never forced) and prunes the repository's worktree
+   records. The run's branch stays. An `operator_required` run keeps its
+   worktree, because its process may still be alive; so does a run whose
+   session is the parent of an open `wait_for_agent`.
+   - **What is deleted.** `git worktree remove` refuses a worktree with
+     uncommitted or untracked changes, and the janitor checks for them first,
+     so those are kept. Ignored files are not kept: build output such as
+     `target/` or `node_modules/`, and an ignored `.env`, are deleted with the
+     worktree. Commit or move anything ignored you want to keep before the
+     retention ends.
+   - **What is kept.** A worktree with uncommitted or untracked changes, a
+     locked worktree, a run path that is a symbolic link, and anything that is
+     not a linked worktree of the configured repository at
+     `<worktree root>/agent-runs/<id>`. The janitor logs a warning and
+     `list_agent_runs` shows `worktree: "retained"` with the reason in
+     `worktree_detail`. It checks a retained worktree again every six hours,
+     so after an operator commits or discards the changes (or unlocks it) the
+     worktree is removed and `list_agent_runs` shows `removed`.
+   - **Pace.** Each iteration requests and executes at most 20 cleanups, then
+     the worker pauses one minute before the next batch, so a backlog (for
+     example on the first deploy) drains in bounded batches instead of
+     running Git back to back. Without a backlog the janitor polls every five
+     minutes.
+   - **Durability.** The work is a durable kernel cleanup request, so runs
+     that ended while the daemon was down are caught up after a restart, and
+     an expired lease is reclaimed.
+   - **Late waits.** After the worktree is removed the run's sessions are no
+     longer resumable. A later `wait_for_agent` on such a session is refused
+     with reason `worktree_removed_after_retention`, naming the run and its
+     caller mailbox; read the result with `read_agent_mailbox` or find the run
+     with `list_agent_runs`.
+   - The janitor is off when workspaces are created through the agent host
+     (`WORKFLOWD_AGENT_HOST_SOCKET`).
 
 With `parent_session_id` + `resume_prompt`, the runner also registers the
 parent's custody (idempotently) and an agent wait in the same dispatch, so

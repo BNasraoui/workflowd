@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect, Layer, Logger } from "effect"
+import { SqlClient } from "effect/unstable/sql"
 import { agentRunIdentifiers, type AgentRunProviderPort } from "../../src/kernel/agent-run-ingress"
 import { AgentRunStore } from "../../src/kernel/agent-run-store"
 import {
@@ -10,6 +11,7 @@ import {
   AgentRunWorktreeJanitorLive,
 } from "../../src/kernel/agent-run-worktree-janitor"
 import { gitAgentRunWorktrees } from "../../src/kernel/agent-run-worktrees"
+import { AgentWaitCustodyError, AgentWaitIngress } from "../../src/kernel/agent-wait-ingress"
 import { KernelJobStoreLive } from "../../src/kernel/job-store"
 import { KernelSessionStore } from "../../src/kernel/session-store"
 import { McpQueries, McpQueriesLive } from "../../src/mcp/queries"
@@ -54,6 +56,7 @@ const testLayer = (
   worktreeRoot: string,
   now: () => Date,
   filename = ":memory:",
+  batchSize = 20,
 ) =>
   Layer.merge(
     AgentRunWorktreeJanitorLive({
@@ -61,6 +64,7 @@ const testLayer = (
       worktreeRoot,
       repositories,
       retentionMs: RETENTION_MS,
+      batchSize,
       now,
     }),
     McpQueriesLive.pipe(Layer.provide(KernelJobStoreLive)),
@@ -81,7 +85,11 @@ const withRepository = async <A>(
   run: (context: {
     readonly root: string
     readonly repository: string
-    readonly layer: (now: () => Date, filename?: string) => ReturnType<typeof testLayer>
+    readonly layer: (
+      now: () => Date,
+      filename?: string,
+      batchSize?: number,
+    ) => ReturnType<typeof testLayer>
   }) => Promise<A>,
 ) => {
   const root = await mkdtemp(join(tmpdir(), "agent-run-janitor-"))
@@ -95,8 +103,8 @@ const withRepository = async <A>(
     await git(repository, "commit", "--allow-empty", "-m", "seed")
     await git(repository, "push", "-u", "origin", "main")
     const repositories = [{ name: "fixture", directory: repository }]
-    const layer = (now: () => Date, filename?: string) =>
-      testLayer(repositories, join(root, "worktrees"), now, filename)
+    const layer = (now: () => Date, filename?: string, batchSize?: number) =>
+      testLayer(repositories, join(root, "worktrees"), now, filename, batchSize)
     return await run({ root, repository, layer })
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -114,7 +122,13 @@ const dispatch = (prompt: string) =>
       parentSessionId: null,
       resumePrompt: null,
     }).short
-    return { runId: receipt.runId, directory: run!.directory, branch: `agent-run/${short}` }
+    return {
+      runId: receipt.runId,
+      sessionId: run!.sessionId!,
+      mailboxId: receipt.mailboxId,
+      directory: run!.directory,
+      branch: `agent-run/${short}`,
+    }
   })
 
 /** Runs janitor iterations until it reports no more work. */
@@ -236,7 +250,7 @@ describe("agent-run worktree janitor", () => {
             createdAt: at,
           })
           yield* sessions.requestCleanup({
-            cleanupId: "main-checkout-cleanup",
+            cleanupId: "agent-run-worktree-main-checkout",
             resourceId: "main-checkout",
             owningHostId: "mint",
             reason: "misdirected",
@@ -275,6 +289,383 @@ describe("agent-run worktree janitor", () => {
           expect(yield* Effect.promise(() => exists(run.directory))).toBe(false)
           expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "removed", detail: null })
         }).pipe(Effect.provide(layer(() => afterRetention, database))),
+      )
+    }))
+
+  test("keeps the worktree of an operator_required run, whose process may still be alive", () =>
+    withRepository(async ({ layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("custody lost")
+          yield* (yield* AgentRunStore).operatorRequired({
+            runId: run.runId,
+            now: at,
+            diagnostic: "codex_recovery_failed",
+          })
+          yield* drain
+          expect(yield* Effect.promise(() => exists(run.directory))).toBe(true)
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "present", detail: null })
+        }).pipe(Effect.provide(layer(() => new Date(at.getTime() + 10 * RETENTION_MS)))),
+      )
+    }))
+
+  test("refuses a run path that is a symlink to another linked worktree", () =>
+    withRepository(async ({ repository, layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          const planted = yield* dispatch("path replaced by a symlink")
+          const target = yield* dispatch("still working elsewhere")
+          yield* store.complete({ runId: planted.runId, now: at })
+          yield* Effect.promise(async () => {
+            await git(repository, "worktree", "remove", planted.directory)
+            await symlink(target.directory, planted.directory)
+          })
+
+          yield* drain
+
+          expect(yield* Effect.promise(() => exists(target.directory))).toBe(true)
+          expect(
+            yield* Effect.promise(() => git(repository, "worktree", "list", "--porcelain")),
+          ).toContain(target.directory)
+          expect(yield* worktreeOf(planted.runId)).toEqual({
+            worktree: "retained",
+            detail: "directory is a symbolic link",
+          })
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("refuses directories that are not a linked worktree of the repository", () =>
+    withRepository(async ({ root, repository, layer }) => {
+      const other = join(root, "other")
+      await git(root, "init", "--initial-branch=main", other)
+      await git(
+        other,
+        "-c",
+        "user.email=t@example.invalid",
+        "-c",
+        "user.name=T",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "seed",
+      )
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* AgentRunStore
+          const clone = yield* dispatch("replaced by a full clone")
+          const foreign = yield* dispatch("replaced by another repository's worktree")
+          const nested = yield* dispatch("replaced by a plain directory")
+          for (const run of [clone, foreign, nested])
+            yield* store.complete({ runId: run.runId, now: at })
+          yield* Effect.promise(async () => {
+            for (const run of [clone, foreign, nested])
+              await git(repository, "worktree", "remove", run.directory)
+            await git(root, "clone", "--quiet", repository, clone.directory)
+            await git(other, "worktree", "add", "--quiet", foreign.directory)
+            await mkdir(nested.directory)
+            await writeFile(join(nested.directory, "notes.txt"), "keep me\n")
+            // The agent-runs directory itself is a repository, so the plain
+            // directory resolves to a work tree whose top level is its parent.
+            await git(join(root, "worktrees", "agent-runs"), "init", "--quiet")
+          })
+
+          yield* drain
+
+          for (const run of [clone, foreign, nested])
+            expect(yield* Effect.promise(() => exists(run.directory))).toBe(true)
+          expect(yield* Effect.promise(() => exists(join(nested.directory, "notes.txt")))).toBe(
+            true,
+          )
+          expect(yield* worktreeOf(clone.runId)).toEqual({
+            worktree: "retained",
+            detail: "directory is a main checkout, not a linked worktree",
+          })
+          expect(yield* worktreeOf(foreign.runId)).toEqual({
+            worktree: "retained",
+            detail: "worktree belongs to a different repository",
+          })
+          expect(yield* worktreeOf(nested.runId)).toEqual({
+            worktree: "retained",
+            detail: "directory is not the top of a Git worktree",
+          })
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("marks a worktree that is already gone as missing", () =>
+    withRepository(async ({ repository, layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("removed by hand")
+          yield* (yield* AgentRunStore).cancel({ runId: run.runId, now: at })
+          yield* Effect.promise(() => rm(run.directory, { recursive: true, force: true }))
+
+          yield* drain
+
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "missing", detail: null })
+          expect(
+            yield* Effect.promise(() => git(repository, "worktree", "list", "--porcelain")),
+          ).not.toContain(run.directory)
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("reclaims a lease left by a crash after removal without removing twice", () =>
+    withRepository(async ({ repository, layer }) => {
+      let now = afterRetention
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* KernelSessionStore
+          const run = yield* dispatch("interrupted cleanup")
+          yield* (yield* AgentRunStore).complete({ runId: run.runId, now: at })
+          const resource = (yield* (yield* AgentRunStore).read(run.runId))!.resourceId!
+          // A previous daemon requested and claimed the cleanup, removed the
+          // worktree, and crashed before recording the outcome.
+          yield* sessions.requestCleanup({
+            cleanupId: `agent-run-worktree-${run.runId}`,
+            resourceId: resource,
+            owningHostId: "mint",
+            reason: "retention elapsed",
+            maxAttempts: 3,
+            runAt: now,
+            createdAt: now,
+          })
+          const crashed = yield* sessions.claimCleanup({
+            owningHostId: "mint",
+            workerId: "crashed-worker",
+            now,
+            leaseDurationMs: 5 * 60_000,
+            cleanupIdPrefix: "agent-run-worktree-",
+          })
+          expect(crashed?.attempt).toBe(1)
+          yield* Effect.promise(() => git(repository, "worktree", "remove", run.directory))
+
+          yield* drain
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "removing", detail: null })
+
+          now = new Date(afterRetention.getTime() + 5 * 60_000 + 1)
+          yield* drain
+
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "missing", detail: null })
+          const sql = yield* SqlClient.SqlClient
+          const attempts = yield* sql<{ readonly attempt: number; readonly state: string }>`
+            SELECT attempt, state FROM kernel_cleanup_attempts
+            WHERE cleanup_id = ${`agent-run-worktree-${run.runId}`} ORDER BY attempt`
+          expect(attempts).toEqual([
+            { attempt: 1, state: "leased" },
+            { attempt: 2, state: "missing" },
+          ])
+        }).pipe(Effect.provide(layer(() => now))),
+      )
+    }))
+
+  test("leaves cleanup requests that are not agent-run worktrees unclaimed", () =>
+    withRepository(async ({ root, layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* KernelSessionStore
+          yield* sessions.registerResource({
+            resourceId: "other-workspace",
+            owningHostId: "mint",
+            absolutePath: join(root, "workspaces", "other"),
+            kind: "workspace",
+            createdAt: at,
+          })
+          yield* sessions.requestCleanup({
+            cleanupId: "workspace-cleanup-other",
+            resourceId: "other-workspace",
+            owningHostId: "mint",
+            reason: "another cleanup worker owns this",
+            maxAttempts: 1,
+            runAt: at,
+            createdAt: at,
+          })
+          yield* drain
+          expect((yield* sessions.readResource("other-workspace"))?.state).toBe("cleanup_required")
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("checks a retained worktree again later and removes it once an operator fixed it", () =>
+    withRepository(async ({ layer }) => {
+      let now = afterRetention
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("fixed by an operator")
+          yield* (yield* AgentRunStore).complete({ runId: run.runId, now: at })
+          yield* Effect.promise(() => writeFile(join(run.directory, "notes.txt"), "keep me\n"))
+          yield* drain
+          expect((yield* worktreeOf(run.runId)).worktree).toBe("retained")
+
+          yield* Effect.promise(() => rm(join(run.directory, "notes.txt")))
+          now = new Date(afterRetention.getTime() + 60 * 60_000)
+          yield* drain
+          expect((yield* worktreeOf(run.runId)).worktree).toBe("retained")
+
+          now = new Date(afterRetention.getTime() + 6 * 60 * 60_000)
+          yield* drain
+          expect(yield* Effect.promise(() => exists(run.directory))).toBe(false)
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "removed", detail: null })
+        }).pipe(Effect.provide(layer(() => now))),
+      )
+    }))
+
+  test("times retention from the latest change to the run's session", () =>
+    withRepository(async ({ layer }) => {
+      let now = afterRetention
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("woken after it ended")
+          yield* (yield* AgentRunStore).complete({ runId: run.runId, now: at })
+          // A wake of the session after the run ended moves the session, not the run.
+          const woken = new Date(at.getTime() + RETENTION_MS / 2)
+          const sql = yield* SqlClient.SqlClient
+          yield* sql`UPDATE kernel_sessions SET updated_at = ${woken.toISOString()}
+            WHERE session_id = ${run.sessionId}`
+
+          yield* drain
+          expect(yield* Effect.promise(() => exists(run.directory))).toBe(true)
+
+          now = new Date(woken.getTime() + RETENTION_MS + 1)
+          yield* drain
+          expect(yield* Effect.promise(() => exists(run.directory))).toBe(false)
+        }).pipe(Effect.provide(layer(() => now))),
+      )
+    }))
+
+  test("keeps the worktree of a session that is the parent of an open wait_for_agent", () =>
+    withRepository(async ({ layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const parent = yield* dispatch("waits for its child")
+          const child = yield* dispatch("still running child")
+          yield* (yield* AgentRunStore).complete({ runId: parent.runId, now: at })
+          yield* (yield* AgentWaitIngress).register(
+            {
+              parentSessionId: parent.sessionId,
+              childSessionId: child.sessionId,
+              resumePrompt: "Continue once the child is done.",
+            },
+            at,
+          )
+
+          yield* drain
+
+          expect(yield* Effect.promise(() => exists(parent.directory))).toBe(true)
+          expect(yield* worktreeOf(parent.runId)).toEqual({ worktree: "present", detail: null })
+        }).pipe(Effect.provide(layer(() => new Date(at.getTime() + 10 * RETENTION_MS)))),
+      )
+    }))
+
+  test("refuses a late wait_for_agent on a cleaned session with its own reason", () =>
+    withRepository(async ({ layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const ended = yield* dispatch("ended long ago")
+          const caller = yield* dispatch("asks too late")
+          yield* (yield* AgentRunStore).complete({ runId: ended.runId, now: at })
+          yield* drain
+          expect((yield* worktreeOf(ended.runId)).worktree).toBe("removed")
+
+          const error = yield* (yield* AgentWaitIngress)
+            .register(
+              {
+                parentSessionId: caller.sessionId,
+                childSessionId: ended.sessionId,
+                resumePrompt: "Continue with the child's result.",
+              },
+              afterRetention,
+            )
+            .pipe(Effect.flip)
+          if (!(error instanceof AgentWaitCustodyError)) throw error
+          const custody = error
+          expect(custody.reason).toBe("worktree_removed_after_retention")
+          expect(custody.observed).toBe(ended.runId)
+          expect(custody.mailboxId).toBe(ended.mailboxId)
+          expect(custody.explanation).toContain("removed after the worktree retention period")
+          expect(custody.explanation).toContain(ended.mailboxId)
+          expect(custody.explanation).toContain("list_agent_runs")
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("bounds the work of one iteration to its batch size", () =>
+    withRepository(async ({ layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const runs = [
+            yield* dispatch("first of a backlog"),
+            yield* dispatch("second of a backlog"),
+            yield* dispatch("third of a backlog"),
+          ]
+          for (const run of runs)
+            yield* (yield* AgentRunStore).complete({ runId: run.runId, now: at })
+          const janitor = yield* AgentRunWorktreeJanitor
+
+          expect(yield* janitor.iteration).toBe("worked")
+          const present = async () =>
+            (await Promise.all(runs.map((run) => exists(run.directory)))).filter(Boolean).length
+          expect(yield* Effect.promise(present)).toBe(1)
+
+          expect(yield* janitor.iteration).toBe("worked")
+          expect(yield* Effect.promise(present)).toBe(0)
+          expect(yield* janitor.iteration).toBe("idle")
+        }).pipe(Effect.provide(layer(() => afterRetention, undefined, 2))),
+      )
+    }))
+
+  test("deletes ignored files with the worktree", () =>
+    withRepository(async ({ repository, layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("left build output")
+          yield* (yield* AgentRunStore).complete({ runId: run.runId, now: at })
+          yield* Effect.promise(async () => {
+            await writeFile(join(run.directory, ".gitignore"), "target/\n")
+            await git(run.directory, "add", ".gitignore")
+            await git(
+              run.directory,
+              "-c",
+              "user.email=t@example.invalid",
+              "-c",
+              "user.name=T",
+              "commit",
+              "-m",
+              "ignore target",
+            )
+            await mkdir(join(run.directory, "target"))
+            await writeFile(join(run.directory, "target", "build.out"), "artifact\n")
+          })
+
+          yield* drain
+
+          expect(yield* Effect.promise(() => exists(run.directory))).toBe(false)
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "removed", detail: null })
+          expect(
+            yield* Effect.promise(() => git(repository, "branch", "--list", run.branch)),
+          ).toContain(run.branch)
+        }).pipe(Effect.provide(layer(() => afterRetention))),
+      )
+    }))
+
+  test("lists a run once when another host holds a resource at the same path", () =>
+    withRepository(async ({ layer }) => {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const run = yield* dispatch("shared path")
+          yield* (yield* KernelSessionStore).registerResource({
+            resourceId: "other-host-worktree",
+            owningHostId: "other-host",
+            absolutePath: run.directory,
+            kind: "worktree",
+            createdAt: at,
+          })
+          const runs = yield* (yield* McpQueries).listAgentRuns({ limit: 100 })
+          expect(runs.filter((candidate) => candidate.run_id === run.runId)).toHaveLength(1)
+          expect(yield* worktreeOf(run.runId)).toEqual({ worktree: "present", detail: null })
+        }).pipe(Effect.provide(layer(() => at))),
       )
     }))
 })

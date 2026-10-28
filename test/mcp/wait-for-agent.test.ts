@@ -224,6 +224,38 @@ describe("wait_for_agent", () => {
     expect(validation.valid).toBe(true)
   })
 
+  test("relays a removed worktree refusal with the ended run's mailbox", async () => {
+    const detail =
+      "child session child-stable belonged to agent run run-1, which ended; its worktree was removed"
+    const result = await run(
+      callTool(
+        "wait_for_agent",
+        args,
+        daemon(() =>
+          json(
+            {
+              error: "custody",
+              reason: "worktree_removed_after_retention",
+              detail,
+              mailboxId: "agent-mailbox-run-1",
+            },
+            409,
+          ),
+        ),
+      ),
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.structuredContent).toEqual({
+      status: "refused",
+      reason: "worktree_removed_after_retention",
+      detail,
+      error: "custody",
+      mailbox_id: "agent-mailbox-run-1",
+    })
+    expect(clientValidator("wait_for_agent")(result.structuredContent).valid).toBe(true)
+  })
+
   test("relays idempotency conflicts as a structured refusal", async () => {
     const result = await run(
       callTool(

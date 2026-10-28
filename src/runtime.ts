@@ -20,7 +20,10 @@ import { TestJobCanary, type TestJobSubmission } from "./kernel/test-job-canary"
 import { AgentWaitIngress } from "./kernel/agent-wait-ingress"
 import { AgentRunIngress } from "./kernel/agent-run-ingress"
 import { AgentRunWatchdog } from "./kernel/agent-run-watchdog"
-import { AgentRunWorktreeJanitor } from "./kernel/agent-run-worktree-janitor"
+import {
+  AGENT_RUN_WORKTREE_BATCH_PAUSE_MS,
+  AgentRunWorktreeJanitor,
+} from "./kernel/agent-run-worktree-janitor"
 import { DogfoodStore } from "./kernel/dogfood-store"
 import { ClaudeResumeWorker } from "./kernel/claude-resume-worker"
 import { RemoteCoordinator } from "./remote/coordinator"
@@ -60,6 +63,8 @@ export function superviseWorker<A extends string, E, R>(
   pollIntervalMs: number,
   lane: WorkLane,
   iteration: Effect.Effect<A, E, R>,
+  /** Pause after an iteration that found work, before the next one starts. */
+  pauseAfterWorkMs = 0,
 ) {
   return Effect.gen(function* () {
     const signals = yield* WorkSignal
@@ -70,7 +75,9 @@ export function superviseWorker<A extends string, E, R>(
         Effect.flatMap((result) =>
           result === "idle"
             ? Effect.race(PubSub.take(subscription), Effect.sleep(pollIntervalMs))
-            : Effect.forEach(downstream, signals.wake, { discard: true }),
+            : Effect.forEach(downstream, signals.wake, { discard: true }).pipe(
+                Effect.andThen(pauseAfterWorkMs > 0 ? Effect.sleep(pauseAfterWorkMs) : Effect.void),
+              ),
         ),
         Effect.catchCause((cause) =>
           Effect.logError(`${name} iteration failed`, cause).pipe(
@@ -413,6 +420,7 @@ export function startHookService(
         5 * 60_000,
         "agent-run-cleanup",
         worktreeJanitor.value.iteration,
+        AGENT_RUN_WORKTREE_BATCH_PAUSE_MS,
       )
     }
     if (Option.isSome(sandbox)) {

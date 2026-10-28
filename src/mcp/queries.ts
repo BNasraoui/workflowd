@@ -193,8 +193,10 @@ const make = Effect.gen(function* () {
           THEN json_extract(resource.cleanup_error, '$.detail')
           ELSE resource.cleanup_error END AS worktree_detail
         FROM kernel_agent_runs AS run
+        LEFT JOIN kernel_sessions AS session ON session.session_id = run.session_id
         LEFT JOIN kernel_working_resources AS resource
-          ON resource.absolute_path = run.directory AND resource.kind = 'worktree'
+          ON resource.owning_host_id = session.owning_host_id
+          AND resource.absolute_path = run.directory AND resource.kind = 'worktree'
         WHERE (${input.status ?? null} IS NULL OR run.state = ${input.status ?? null})
           AND (${input.repository ?? null} IS NULL OR run.repository = ${input.repository ?? null})
         ORDER BY run.created_at DESC, run.run_id DESC LIMIT ${limit}`

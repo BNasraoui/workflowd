@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
-import { realpath } from "node:fs/promises"
+import { lstat, realpath } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
 import { startAgentHost, readAgentHostOutput } from "../agent-host/client"
 import { normalizeError } from "../errors"
 import type { AgentGitConfig } from "../agent-git/config"
@@ -181,9 +182,10 @@ const isLocked = (list: string, directories: ReadonlyArray<string>) =>
 /**
  * Removes a finished run's linked worktree without force, then prunes the
  * repository's worktree records. The directory must be a linked worktree of
- * `repository`, never its main checkout; a locked worktree or one with
- * uncommitted or untracked changes is retained with the reason. The run's
- * branch is left alone.
+ * `repository`, never its main checkout, and must not be or resolve through
+ * a symbolic link; a locked worktree or one with uncommitted or untracked
+ * changes is retained with the reason. Ignored files (build output such as
+ * `target/`) are deleted with the worktree. The run's branch is left alone.
  */
 export const removeAgentRunWorktree = (input: {
   readonly repository: string
@@ -194,10 +196,25 @@ export const removeAgentRunWorktree = (input: {
       "worktree",
       "prune",
     ])
-    if (!(yield* pathExists(input.directory))) {
+    const entry = yield* Effect.promise(() =>
+      lstat(input.directory).then(
+        (stats) => (stats.isSymbolicLink() ? ("symlink" as const) : ("present" as const)),
+        () => "missing" as const,
+      ),
+    )
+    if (entry === "missing") {
       yield* prune
       return { outcome: "missing" } as const
     }
+    // `git worktree remove` follows a symlink and removes its target, which
+    // may be another run's worktree.
+    if (entry === "symlink") return retained("directory is a symbolic link")
+    const expected = join(
+      yield* filesystemEffect("resolve agent-run worktree root", () =>
+        realpath(dirname(input.directory)),
+      ),
+      basename(input.directory),
+    )
     const repositoryCommonDir = yield* remoteCommand(
       "locate agent-run repository",
       input.repository,
@@ -215,6 +232,7 @@ export const removeAgentRunWorktree = (input: {
     const directory = yield* filesystemEffect("resolve agent-run worktree", () =>
       realpath(input.directory),
     )
+    if (directory !== expected) return retained("directory resolves outside the agent-run root")
     if (topLevel !== directory) return retained("directory is not the top of a Git worktree")
     if (gitDir === commonDir) return retained("directory is a main checkout, not a linked worktree")
     if (commonDir !== repositoryCommonDir)
