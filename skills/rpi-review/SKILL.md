@@ -53,7 +53,9 @@ major findings; otherwise `Verdict: changes requested`.
 1. Re-read the findings, then `gh gist create --desc "RPI review <id>" /tmp/rpi/<id>/review.md`
    (secret). It can exit non-zero after printing the URL; check the output for a gist URL
    before you retry. With
-   `.provenance/`, record it as a Source on `rpi/<id>` as research did.
+   `.provenance/`, record it as a Source on `rpi/<id>` as research did. A commit message
+   has no `Co-Authored-By`, "Generated with", or other model or tool attribution line.
+   Commit only the `.provenance/` changes and push.
 2. `bd note <id> "review: <gist url>"`
 3. `bd set-state <id> rpi=review --reason "<verdict>"`, then `bd dolt push`.
 4. Your final message starts with the gist URL on its own line, then the verdict and the

@@ -22,6 +22,9 @@ approves. Without it, stop and say the plan is not approved. Then run
 
 ## Steps
 
+A commit message has no `Co-Authored-By`, "Generated with", or other model or tool
+attribution line. A PR body or comment has none either.
+
 For each phase, in order:
 
 1. Change only the files the phase lists. Follow the repository's own instructions

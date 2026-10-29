@@ -70,8 +70,9 @@ and its verification method. Then make one Topic decision:
 
 Small changes under existing Rules need no Topic. Record new Rules only as proposals
 (`--status review`) and new Topics and Questions on `rpi/<id>`; record the plan gist as a
-Source (as research did) and cite it from each record you create. Commit the `.provenance/`
-changes and push.
+Source (as research did) and cite it from each record you create. A commit message has no
+`Co-Authored-By`, "Generated with", or other model or tool attribution line. A PR body or
+comment has none either. Commit the `.provenance/` changes and push.
 
 ## Document
 

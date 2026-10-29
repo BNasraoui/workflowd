@@ -75,6 +75,9 @@ Testing: <tests, harnesses, and how to run them>
 
 ## Publish
 
+A commit message has no `Co-Authored-By`, "Generated with", or other model or tool
+attribution line. A PR body or comment has none either.
+
 1. Re-read `/tmp/rpi/<id>/research.md` and fix it before publishing. Then
    `gh gist create --desc "RPI research <id>" /tmp/rpi/<id>/research.md` (secret by
    default). It can exit non-zero after printing the URL; check the output for a gist URL
