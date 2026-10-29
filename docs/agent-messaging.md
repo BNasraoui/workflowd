@@ -101,6 +101,8 @@ committed to SQLite. Restart and a lost HTTP response do not create another ID.
 | `stale_binding` | An unsent message's pinned binding was replaced; it was not redirected |
 | `uncertain` | An operation may have been accepted; custody is retained and no blind resend is allowed |
 
+The status record's `relayIntent` is this database's persisted relay send intent;
+it is not proof of a native invocation or of activity on another host.
 None of these states means task completion. Subscription `consumed` means its
 message was durably accepted, not delivered or completed. Cancelling a consumed
 subscription cannot retract an accepted message. Completion normalization and

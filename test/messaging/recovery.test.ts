@@ -57,7 +57,7 @@ test("lost relay acknowledgement is queried across daemon restart without repeat
     expect(await delivered(daemon, message.id)).toMatchObject({
       message,
       delivery: "delivered",
-      started: true,
+      relayIntent: true,
     })
     expect(agent.received).toHaveLength(1)
   } finally {

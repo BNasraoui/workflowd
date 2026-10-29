@@ -25,7 +25,7 @@ const decode = (row: unknown) =>
       target: value.target_json,
       originHost: value.origin_host,
       delivery: value.delivery,
-      started: value.started === 1,
+      relayIntent: value.started === 1,
       acceptedAt: value.accepted_at,
     })),
   )

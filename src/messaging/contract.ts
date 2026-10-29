@@ -44,7 +44,7 @@ export const MessageRecord = Schema.Struct({
   target: AgentRecipient,
   originHost: Schema.String,
   delivery: DeliveryState,
-  started: Schema.Boolean,
+  relayIntent: Schema.Boolean,
   acceptedAt: Schema.String,
 })
 export type MessageRecord = typeof MessageRecord.Type

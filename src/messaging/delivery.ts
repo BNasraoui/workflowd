@@ -25,9 +25,16 @@ export const makeMessageDelivery = (hostId: string) =>
         if (!["pending", "queued", "uncertain"].includes(record.delivery)) return
         if (record.target.hostId !== hostId) return
         const inboxId = `message:${record.message.id}`
+        let nativeStarted = false
         if (record.delivery === "queued" || record.delivery === "uncertain") {
-          if ((yield* inbox.deliveryState(inboxId)) === "delivered") {
+          const nativeState = yield* inbox.deliveryState(inboxId)
+          nativeStarted = nativeState === "sending"
+          if (nativeState === "delivered") {
             yield* messages.update(record.message.id, "delivered")
+            return
+          }
+          if (nativeState === "operator_required") {
+            yield* messages.update(record.message.id, "uncertain")
             return
           }
         }
@@ -45,7 +52,9 @@ export const makeMessageDelivery = (hostId: string) =>
         ) {
           yield* messages.update(
             record.message.id,
-            record.started || record.delivery === "uncertain" ? "uncertain" : "stale_binding",
+            record.relayIntent || nativeStarted || record.delivery === "uncertain"
+              ? "uncertain"
+              : "stale_binding",
           )
           return
         }

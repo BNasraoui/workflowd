@@ -166,3 +166,76 @@ test("a rebound external endpoint cannot receive a message accepted for its prev
       expect(agent.received).toEqual([])
     }).pipe(Effect.scoped, Effect.provide(managedStores())),
   ))
+
+test("uncertain native custody propagates to the general receipt even after endpoint proof disappears", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const directory = yield* DirectoryStore
+      const inbox = yield* makeResidentStore
+      const messages = yield* makeMessageStore
+      const now = new Date()
+      yield* directory.bindLocalHost("host-a")
+      yield* seedManaged("uncertain", now, "local://fixture", "codex")
+      yield* inbox.attach("uncertain", "ses_uncertain", "/fixture/uncertain", null)
+      yield* directory.observeManaged(
+        "uncertain",
+        { nativeSessionId: "ses_uncertain", directory: "/fixture/uncertain" },
+        now,
+      )
+      const target = (yield* directory.managed(now, 90000))[0]!
+      const message = {
+        id: crypto.randomUUID(),
+        sender: "host:host-a",
+        recipient: target.recipientId,
+        correlation: "c",
+        replyTo: null,
+        payload: { type: "note", version: 1, data: "hello" },
+      }
+      yield* messages.accept(message, target, "host-a")
+      const delivery = yield* makeMessageDelivery("host-a")
+      yield* delivery.pass()
+      yield* inbox.uncertain(`message:${message.id}`, "ses_uncertain")
+      yield* directory.unavailableManaged("uncertain", "ses_uncertain")
+      yield* delivery.pass()
+      yield* delivery.pass()
+      expect((yield* messages.read(message.id))?.delivery).toBe("uncertain")
+      expect(yield* inbox.deliveryState(`message:${message.id}`)).toBe("operator_required")
+    }).pipe(Effect.provide(managedStores())),
+  ))
+
+test("a native sending intent remains uncertain when its endpoint is rebound", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const directory = yield* DirectoryStore
+      const inbox = yield* makeResidentStore
+      const messages = yield* makeMessageStore
+      const sql = yield* SqlClient.SqlClient
+      const now = new Date()
+      yield* directory.bindLocalHost("host-a")
+      yield* seedManaged("sending", now, "local://fixture", "codex")
+      yield* inbox.attach("sending", "ses_sending", "/fixture/sending", null)
+      yield* directory.observeManaged(
+        "sending",
+        { nativeSessionId: "ses_sending", directory: "/fixture/sending" },
+        now,
+      )
+      const target = (yield* directory.managed(now, 90000))[0]!
+      const message = {
+        id: crypto.randomUUID(),
+        sender: "host:host-a",
+        recipient: target.recipientId,
+        correlation: "c",
+        replyTo: null,
+        payload: { type: "note", version: 1, data: "hello" },
+      }
+      yield* messages.accept(message, target, "host-a")
+      const delivery = yield* makeMessageDelivery("host-a")
+      yield* delivery.pass()
+      expect(yield* inbox.sending(`message:${message.id}`)).toBe(true)
+      yield* sql`UPDATE kernel_agent_runs SET native_session_id='replacement' WHERE run_id='sending'`
+      yield* delivery.pass()
+      yield* delivery.pass()
+      expect((yield* messages.read(message.id))?.delivery).toBe("uncertain")
+      expect(yield* inbox.deliveryState(`message:${message.id}`)).toBe("sending")
+    }).pipe(Effect.provide(managedStores())),
+  ))
