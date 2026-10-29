@@ -89,6 +89,8 @@ Testing: <tests, harnesses, and how to run them>
 3. If `.provenance/` exists, record the questions and research gists as Sources on
    `rpi/<id>`: `provenance sources create --id <id>-rpi-questions --name "RPI questions for <id>" --source-type project_artifact --url <revision url>`,
    then the same for research. Commit only the `.provenance/` changes and push.
+   A commit message has no `Co-Authored-By`, "Generated with", or other model or tool
+   attribution line. A PR body or comment has none either.
 4. Record both URLs, one per line with
    `bd update <id> --append-notes $'research: <gist url>\npr: <pr url>' --json >/dev/null 2>&1`.
    Check only the exit code.
