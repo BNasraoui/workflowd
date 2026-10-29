@@ -21,25 +21,20 @@ import { SdkOpenCodeAdapter, makeOpenCodeSdkClient } from "../../src/opencode/ad
 import { AgentRunProvider } from "../../src/kernel/agent-run-ingress"
 import { runManagedDirectoryObservation } from "../../src/directory/managed-observations"
 
+const docker = async (...args: string[]) => {
+  const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (status !== 0) throw new Error(`docker ${args.join(" ")} failed: ${stderr}`)
+  return stdout.trim()
+}
+
 test("two-host directory uses authenticated NATS observations and installed Codex discovery without leaking source secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "ccw3-directory-"))
-  const nats = Bun.spawn(
-    [
-      "nats-server",
-      "-js",
-      "--auth",
-      "isolated-fixture-token",
-      "-a",
-      "127.0.0.1",
-      "-p",
-      "-1",
-      "-sd",
-      join(root, "nats"),
-    ],
-    { stderr: "pipe", stdout: "ignore" },
-  )
-  const reader = nats.stderr.getReader()
-  let logs = ""
+  const container = `workflowd-directory-${crypto.randomUUID()}`
   let daemon: Awaited<ReturnType<typeof startDirectoryDaemon>> | undefined
   let runner: ReturnType<typeof Bun.spawn> | undefined
   let runnerLogs: Promise<string> | undefined
@@ -47,16 +42,29 @@ test("two-host directory uses authenticated NATS observations and installed Code
   const relays: Bun.Server<undefined>[] = []
   let passed = false
   try {
-    const port = await Effect.runPromise(
+    await docker(
+      "run",
+      "-d",
+      "--name",
+      container,
+      "-p",
+      "127.0.0.1::4222",
+      "nats:2.11.8-alpine",
+      "-js",
+      "--auth",
+      "isolated-fixture-token",
+    )
+    const address = await docker("port", container, "4222/tcp")
+    const port = address.split(":").at(-1)!
+    await Effect.runPromise(
       Effect.tryPromise(async () => {
-        while (true) {
-          const chunk = await reader.read()
-          if (chunk.done) throw new Error("NATS exited")
-          logs += new TextDecoder().decode(chunk.value)
-          const match = /Listening for client connections on 127\.0\.0\.1:(\d+)/.exec(logs)
-          if (match) return match[1]!
-        }
-      }).pipe(Effect.timeout("5 seconds")),
+        const connection = await connect({
+          servers: `nats://127.0.0.1:${port}`,
+          token: "isolated-fixture-token",
+          timeout: 100,
+        })
+        await connection.drain()
+      }).pipe(Effect.retry({ schedule: Schedule.spaced("25 millis"), times: 80 })),
     )
     const key = join(root, "host-b.key")
     await writeFile(key, "isolated-host-b-credential-".repeat(3), { mode: 0o600 })
@@ -397,7 +405,7 @@ test("two-host directory uses authenticated NATS observations and installed Code
       ),
     ).toBe(true)
     // A real transport partition must expire the persisted observation without a new request succeeding.
-    nats.kill("SIGSTOP")
+    await docker("pause", container)
     await Effect.runPromise(
       Effect.tryPromise(async () => {
         observed = Schema.decodeUnknownSync(DirectorySnapshot)(
@@ -417,7 +425,7 @@ test("two-host directory uses authenticated NATS observations and installed Code
         .filter((agent) => agent.hostId === "host-b")
         .every((agent) => !agent.deliverable),
     ).toBe(true)
-    nats.kill("SIGCONT")
+    await docker("unpause", container)
     runner?.kill()
     await runner?.exited
     await runnerLogs
@@ -467,16 +475,14 @@ test("two-host directory uses authenticated NATS observations and installed Code
     )
     passed = true
   } finally {
-    nats.kill("SIGCONT")
+    await docker("unpause", container).catch(() => undefined)
     await daemon?.stop()
     await hostB?.stop()
     for (const relay of relays) await relay.stop(true)
     runner?.kill()
     await runner?.exited
     if (!passed && runnerLogs !== undefined) console.log(await runnerLogs)
-    nats.kill()
-    await nats.exited
-    await reader.cancel()
+    await docker("rm", "-f", container)
     await rm(root, { recursive: true, force: true })
   }
 }, 20_000)
