@@ -13,7 +13,7 @@ jobs:
   pr-policy:
     name: CodeQL PR policy
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     permissions: {}
     steps:
@@ -22,7 +22,7 @@ jobs:
   analyze:
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')
     name: CodeQL (JavaScript/TypeScript)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read

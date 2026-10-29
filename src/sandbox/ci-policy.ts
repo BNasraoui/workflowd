@@ -72,7 +72,7 @@ function assertJob(value: Schema.Json, workflows: Record<string, string>) {
     job.services !== undefined
   )
     throw new Error("PR job may not attach secrets, environments, containers or reusable workflows")
-  if (job["runs-on"] !== "ubuntu-latest")
+  if (job["runs-on"] !== "ubuntu-24.04")
     throw new Error("PR jobs require disposable GitHub runners")
   const serialized = JSON.stringify(job).replace(/\\[nrt]/g, " ")
   if (
