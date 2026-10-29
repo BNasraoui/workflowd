@@ -6,7 +6,7 @@ import { loadRemoteNatsAuth } from "./auth"
 import type { RemoteNatsAuth } from "./auth"
 import { parseNatsServers } from "./nats-url"
 import { loadDirectoryRunnerConfig, type DirectoryRunnerConfig } from "../directory/config"
-import { messagingEnabled } from "../messaging/config"
+import { loadMessagingConfig } from "../messaging/config"
 
 export type RemoteProcessConfig = {
   readonly messagingEnabled?: boolean
@@ -46,9 +46,7 @@ export async function loadRemoteProcessConfig(
   const servers = parseNatsServers(rawServers)
   const home = options.home ?? homedir()
   const directory = await loadDirectoryRunnerConfig(env, options.readFile)
-  const enableMessaging = messagingEnabled(env)
-  if (enableMessaging && directory === undefined)
-    throw new Error("Messaging runner requires directory host enrollment")
+  const messaging = loadMessagingConfig(env, directory !== undefined)
   const claudeDirectories = (env.WORKFLOWD_RUNNER_CLAUDE_DIRS ?? "")
     .split(":")
     .map((entry) => entry.trim())
@@ -62,7 +60,7 @@ export async function loadRemoteProcessConfig(
   }
   const agentGit = loadAgentGitConfig(env, claudeDirectories.length > 0)
   return {
-    ...(enableMessaging ? { messagingEnabled: true } : {}),
+    ...messaging,
     ...(directory === undefined ? {} : { directory }),
     ...(agentGit === undefined ? {} : { agentGit }),
     servers,

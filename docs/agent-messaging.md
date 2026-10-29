@@ -159,9 +159,11 @@ and receipt envelopes on `workflowd.v1.commands.messages-<host>`, using durable
 consumer `messages-<host>`. Each envelope is HMAC signed with the existing enrolled
 peer proof key, covering both host identities and its complete content. A receipt
 also binds the immutable message and target digest. Subject access and claimed
-host/session labels alone are insufficient authority. Opted-in enrolled peers
-attest accepted sender authority and can request delivery to locally registered
-recipients; local endpoint proof and native custody still govern admission.
+host/session labels alone are insufficient authority. An enrolled runner can attest its own host/managed sender namespace and external
+owners bound to that host. A runner cannot label a new message as another host's
+sender. Only the runner's configured coordinator can forward other verified
+senders. Exact persisted acceptance remains authoritative for receipt replay;
+local endpoint proof and native custody still govern admission.
 
 Plan subject publish/consume/ack grants separately during rollout. No broker,
 credential, service or production configuration is changed here. A runner shares

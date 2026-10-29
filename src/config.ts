@@ -1,4 +1,4 @@
-import { messagingEnabled } from "./messaging/config"
+import { loadMessagingConfig } from "./messaging/config"
 import { requireAgentHostSocket } from "./agent-host/config"
 import { loadAgentGitConfig, type AgentGitConfig } from "./agent-git/config"
 import { loadPrRepositories, type PrRepositories } from "./pr-automation-config"
@@ -795,14 +795,12 @@ export async function loadConfig(
   })
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
   const directoryRemote = await loadDirectoryRemoteConfig(env, hostId, read)
-  const enableMessaging = messagingEnabled(env)
-  if (enableMessaging && executionCapabilities === undefined)
-    throw new Error("Messaging requires the execution discovery credential")
+  const messaging = loadMessagingConfig(env, executionCapabilities !== undefined)
   if (directoryRemote !== undefined && executionCapabilities === undefined)
     throw new Error("Directory peers require authenticated execution discovery")
 
   return {
-    ...(enableMessaging ? { messagingEnabled: true } : {}),
+    ...messaging,
     ...(directoryRemote === undefined ? {} : { directoryRemote }),
     ...gitIdentity,
     ...(credentialSocket === undefined ? {} : { credentialSocket }),

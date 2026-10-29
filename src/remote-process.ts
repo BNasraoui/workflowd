@@ -68,12 +68,16 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
       !config.messagingEnabled || config.directory === undefined
         ? Layer.empty
         : Layer.merge(
-            MessageRemoteLive(config.hostId, [
-              {
-                hostId: config.directory.coordinatorHostId,
-                credential: config.directory.credential,
-              },
-            ]),
+            MessageRemoteLive(
+              config.hostId,
+              [
+                {
+                  hostId: config.directory.coordinatorHostId,
+                  credential: config.directory.credential,
+                },
+              ],
+              config.directory.coordinatorHostId,
+            ),
             MessageDeliveryLive(config.hostId),
           ).pipe(
             Layer.provide(DirectoryStoreLive),

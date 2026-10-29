@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 import { Effect, Layer, Redacted, Schedule, Schema } from "effect"
+import { SqlClient } from "effect/unstable/sql"
 import { RemoteTransport } from "../remote/transport"
 import { RemoteHostId, MAX_REMOTE_MESSAGE_BYTES } from "../remote/contract"
 import type { DirectoryPeer } from "../directory/config"
@@ -50,9 +51,14 @@ const authentic = (credential: Redacted.Redacted<string>, message: typeof Envelo
 
 /** SQLite owns the outbox. JetStream acknowledgement only releases a transport
  * delivery, while an authenticated receipt advances application delivery state. */
-export const makeMessageRemote = (hostId: string, peers: ReadonlyArray<DirectoryPeer>) =>
+export const makeMessageRemote = (
+  hostId: string,
+  peers: ReadonlyArray<DirectoryPeer>,
+  coordinatorHostId?: string,
+) =>
   Effect.gen(function* () {
     const transport = yield* RemoteTransport
+    const sql = yield* SqlClient.SqlClient
     const store = yield* makeMessageStore
     const local = yield* makeMessageDelivery(hostId)
     const receive = transport.takeAgentMessages
@@ -79,6 +85,16 @@ export const makeMessageRemote = (hostId: string, peers: ReadonlyArray<Directory
       }
       yield* publish({ ...document, signature: directoryMac(peer.credential, document) })
     })
+    const ownsSender = Effect.fn("Messaging.ownsSender")(function* (frame: typeof Deliver.Type) {
+      if (frame.fromHost === coordinatorHostId) return true
+      const sender = frame.message.sender
+      if (sender === `host:${frame.fromHost}` || sender.startsWith(`managed:${frame.fromHost}:`))
+        return true
+      if (!sender.startsWith("external:")) return false
+      const owners =
+        yield* sql`SELECT 1 FROM directory_owner_bindings WHERE recipient_id=${sender} AND host_id=${frame.fromHost}`
+      return owners.length === 1
+    })
     const handle = Effect.fn("Messaging.receiveFrame")(
       function* (bytes: Uint8Array) {
         if (bytes.byteLength > MAX_REMOTE_MESSAGE_BYTES) return
@@ -97,6 +113,9 @@ export const makeMessageRemote = (hostId: string, peers: ReadonlyArray<Directory
             frame.target.recipientId !== frame.message.recipient
           )
             return
+          // Persisted acceptance is historical authority for exact replay. New
+          // submissions need sender ownership, not only a valid transport HMAC.
+          if ((yield* store.read(frame.message.id)) === null && !(yield* ownsSender(frame))) return
           yield* store.accept(frame.message, frame.target, frame.fromHost)
           const accepted = yield* store.read(frame.message.id)
           if (accepted === null) return
@@ -154,10 +173,14 @@ export const makeMessageRemote = (hostId: string, peers: ReadonlyArray<Directory
     return { handle, send, take }
   })
 
-export const MessageRemoteLive = (hostId: string, peers: ReadonlyArray<DirectoryPeer>) =>
+export const MessageRemoteLive = (
+  hostId: string,
+  peers: ReadonlyArray<DirectoryPeer>,
+  coordinatorHostId?: string,
+) =>
   Layer.effectDiscard(
     Effect.gen(function* () {
-      const remote = yield* makeMessageRemote(hostId, peers)
+      const remote = yield* makeMessageRemote(hostId, peers, coordinatorHostId)
       yield* remote.send().pipe(
         Effect.catch(() =>
           Effect.logWarning("Message outbox transport unavailable; durable messages retained"),
