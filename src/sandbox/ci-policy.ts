@@ -6,6 +6,8 @@ const ObjectValue = Schema.Record(Schema.String, Schema.Json)
 const object = (value: unknown) => Schema.decodeUnknownSync(ObjectValue)(value)
 const mainOnly =
   "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')"
+/** The only runner label PR jobs may use: a disposable GitHub-hosted image. */
+export const prRunnerLabel = "ubuntu-24.04"
 const setupBun = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
 const setupNode = "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
 // Reviewed in full: anonymous checkout, credential-free pinned Nix installation,
@@ -72,8 +74,8 @@ function assertJob(value: Schema.Json, workflows: Record<string, string>) {
     job.services !== undefined
   )
     throw new Error("PR job may not attach secrets, environments, containers or reusable workflows")
-  if (job["runs-on"] !== "ubuntu-24.04")
-    throw new Error("PR jobs require disposable GitHub runners")
+  if (job["runs-on"] !== prRunnerLabel)
+    throw new Error(`PR jobs must run on the ${prRunnerLabel} GitHub-hosted runner`)
   const serialized = JSON.stringify(job).replace(/\\[nrt]/g, " ")
   if (
     /toJSON\s*\(\s*(?:github|secrets)\b|secrets\s*(?:\.|\[)|github\s*(?:\.\s*token|\[)|ACTIONS_(?:ID_TOKEN|RUNTIME)|GITHUB_TOKEN|workflow_run|pull_request_target/i.test(

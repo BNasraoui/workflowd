@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises"
 import {
   assertUnprivilegedPrWorkflows,
   assertProtectedPublishAction,
+  prRunnerLabel,
 } from "../../src/sandbox/ci-policy"
 
 async function workflows(): Promise<Record<string, string>> {
@@ -53,7 +54,7 @@ jobs:
 
 for (const [before, after] of [
   ["permissions: {}", "permissions: { contents: read }"],
-  ["runs-on: ubuntu-24.04", "runs-on: self-hosted"],
+  [`runs-on: ${prRunnerLabel}`, "runs-on: self-hosted"],
   ["git -c credential.helper=", "git -c credential.helper=store"],
   ["github.event.pull_request.head.sha || github.sha", "github.head_ref"],
   ["env -u GITHUB_TOKEN -u INPUT_GITHUB_ACCESS_TOKEN", "env"],
@@ -95,7 +96,6 @@ for (const [label, before, after] of [
   ["ambient token grant", "permissions: {}", "permissions: { id-token: write }"],
   ["target trigger", "  pull_request:", "  pull_request_target:"],
   ["privileged downstream", "  pull_request:", "  workflow_run:"],
-  ["self-hosted runner", "runs-on: ubuntu-24.04", "runs-on: self-hosted"],
   ["environment secrets", "    steps:", "    environment: production\n    steps:"],
   [
     "reusable inherited secrets",
@@ -144,6 +144,17 @@ for (const [label, before, after] of [
   })
 }
 
+for (const runner of ["self-hosted", "ubuntu-latest"])
+  test(`CI guard rejects PR jobs on ${runner} runners`, async () => {
+    const files = await workflows()
+    const source = files["ci.yml"]!
+    files["ci.yml"] = source.replace(`runs-on: ${prRunnerLabel}`, `runs-on: ${runner}`)
+    expect(files["ci.yml"]).not.toBe(source)
+    expect(() => assertUnprivilegedPrWorkflows(files)).toThrow(
+      `PR jobs must run on the ${prRunnerLabel} GitHub-hosted runner`,
+    )
+  })
+
 for (const [label, extra] of [
   ["environment", "environment: agent-publish"],
   ["secret expression", "env: { CANARY: '${{ secrets.PUBLISH_PROBE_CANARY }}' }"],
@@ -157,7 +168,7 @@ for (const [label, extra] of [
 permissions: {}
 jobs:
   other:
-    runs-on: ubuntu-24.04
+    runs-on: ${prRunnerLabel}
     ${extra}
     steps: [{ run: 'true' }]
 `
