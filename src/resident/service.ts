@@ -50,6 +50,8 @@ import {
 } from "./process"
 import { randomUUID } from "node:crypto"
 import { deliverResident } from "./delivery"
+import { AgentMessaging } from "../messaging/service"
+import { AgentMessage } from "../messaging/contract"
 import type { ResidentConfig } from "./config"
 import { ExecutionSelectionError } from "../execution-selection"
 import { DirectoryStore } from "../directory/store"
@@ -142,6 +144,7 @@ export const ResidentCodexLive = (
       const store = yield* makeResidentStore
       const subscriptions = yield* makeSubscriptions
       const runs = yield* AgentRunStore
+      const messaging = yield* Effect.serviceOption(AgentMessaging)
       const ci = yield* CiService
       const sql = yield* SqlClient.SqlClient
       const directory = yield* Effect.serviceOption(DirectoryStore)
@@ -707,14 +710,15 @@ export const ResidentCodexLive = (
             yield* finish(message.thread_id, true)
             continue
           }
-          let mode: "queue" | "start" = "queue"
+          let mode: "queue" | "start" | "auto" = "queue"
           if (message.id.startsWith("restart:")) {
             const history = yield* Effect.tryPromise(() =>
               request("thread/read", { threadId: message.thread_id, includeTurns: true }),
             ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(History)))
             if (!history.thread.turns.some((turn) => turn.status === "inProgress")) mode = "start"
           }
-          yield* store.sending(message.id)
+          if (!(yield* store.sending(message.id)) && message.state === "prepared") continue
+          if (message.id.startsWith("message:")) mode = "auto"
           const outcome = yield* deliverResident(
             (method, params) => {
               const decoded = Schema.decodeUnknownSync(
@@ -981,12 +985,18 @@ export const ResidentCodexLive = (
 
       const route: ResidentPort["route"] = (request, peerPid) =>
         Effect.gen(function* () {
-          if (new URL(request.url).pathname !== "/subscriptions") return undefined
+          const path = new URL(request.url).pathname
+          if (path !== "/subscriptions" && path !== "/messages") return undefined
           if (request.method !== "POST") return new Response(null, { status: 405 })
           if (peerPid === undefined) return new Response(null, { status: 403 })
           const input = yield* Effect.tryPromise(() => request.json()).pipe(
             Effect.flatMap((value) =>
-              Schema.decodeUnknownEffect(Subscribe)(value, { onExcessProperty: "error" }),
+              Schema.decodeUnknownEffect(
+                Schema.Union([
+                  Subscribe,
+                  Schema.Struct({ runId: Schema.NonEmptyString, message: AgentMessage }),
+                ]),
+              )(value, { onExcessProperty: "error" }),
             ),
           )
           if (!peers.allows(input.runId, peerPid)) return new Response(null, { status: 403 })
@@ -997,6 +1007,16 @@ export const ResidentCodexLive = (
             !(yield* hasCustody(run.nativeSessionId))
           )
             return new Response(null, { status: 403 })
+          if ("message" in input) {
+            if (path !== "/messages" || Option.isNone(messaging))
+              return new Response(null, { status: 503 })
+            const receipt = yield* messaging.value.send(
+              { message: input.message },
+              { runId: run.runId },
+            )
+            return Response.json(receipt, { status: 202 })
+          }
+          if (path !== "/subscriptions") return new Response(null, { status: 400 })
           const selector = input.selector
           if (selector.kind === "ci") {
             const repository = ciConfig.repositories.find(

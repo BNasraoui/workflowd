@@ -10,6 +10,7 @@ import {
 import { Migrator, SqlClient } from "effect/unstable/sql"
 import { Effect } from "effect"
 import { agentDirectory } from "./0038-agent-directory"
+import { agentMessages } from "./0039-agent-messages"
 import { MAX_AGENT_LAUNCH_INTENT_BYTES, MAX_AGENT_OUTPUT_BYTES } from "../agent-payload"
 
 const initialSchema = Effect.gen(function* () {
@@ -1497,5 +1498,6 @@ export const runStoreMigrations = Migrator.make({})({
       yield* sql`ALTER TABLE resident_inbox ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0`
     }),
     "0038_agent_directory": agentDirectory,
+    "0039_agent_messages": agentMessages,
   }),
 })

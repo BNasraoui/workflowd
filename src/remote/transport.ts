@@ -71,6 +71,10 @@ export type RemoteTransportPort = {
     hostId: string,
     expiresMs?: number,
   ) => Effect.Effect<ReadonlyArray<RemoteDelivery>, RemoteTransportError>
+  readonly takeAgentMessages?: (
+    hostId: string,
+    expiresMs?: number,
+  ) => Effect.Effect<ReadonlyArray<RemoteDelivery>, RemoteTransportError>
 }
 
 export const RemoteTransport = Context.Service<RemoteTransportPort>(
@@ -337,6 +341,14 @@ const make = (config: RemoteTransportConfig) =>
           COMMAND_STREAM,
           `directory-${hostId}`,
           commandSubject(`directory-${hostId}`),
+          expiresMs,
+          100,
+        ),
+      takeAgentMessages: (hostId, expiresMs = 1000) =>
+        collect(
+          COMMAND_STREAM,
+          `messages-${hostId}`,
+          commandSubject(`messages-${hostId}`),
           expiresMs,
           100,
         ),

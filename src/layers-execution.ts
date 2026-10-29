@@ -1,3 +1,4 @@
+import { makeMessagingLayer } from "./messaging/layers"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/unstable/sql"
 import { dirname, join } from "node:path"
@@ -102,6 +103,11 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
   const directoryObservations = makeDirectoryRemoteLayer(config).pipe(
     Layer.provide(directoryStores),
   )
+  const messaging = makeMessagingLayer(config).pipe(
+    Layer.provide(directory),
+    Layer.provide(directoryStores),
+    Layer.provide(kernel),
+  )
   const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel), Layer.provideMerge(directory))
   const identity = {
     owningHostId: config.worker.hostId,
@@ -144,6 +150,7 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
     discovery,
     directory,
     directoryObservations,
+    messaging,
     runs,
     Layer.succeed(WorkflowStart, {
       preflight: Effect.void,

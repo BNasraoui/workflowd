@@ -13,6 +13,8 @@ import { DirectoryResponderLive } from "./directory/responder"
 import { DirectoryStoreLive } from "./directory/store"
 import { RunnerDiscoveryLive } from "./directory/runner-discovery"
 import { WorkflowStoreLive } from "./store"
+import { MessageRemoteLive } from "./messaging/remote"
+import { MessageDeliveryLive } from "./messaging/delivery"
 
 type RemoteRunnerProcessOptions = {
   readonly env?: Record<string, string | undefined>
@@ -62,8 +64,24 @@ export const runRemoteRunnerProcess = (options: RemoteRunnerProcessOptions = {})
             Layer.provide(transport),
             Layer.provide(database),
           )
+    const messaging =
+      !config.messagingEnabled || config.directory === undefined
+        ? Layer.empty
+        : Layer.merge(
+            MessageRemoteLive(config.hostId, [
+              {
+                hostId: config.directory.coordinatorHostId,
+                credential: config.directory.credential,
+              },
+            ]),
+            MessageDeliveryLive(config.hostId),
+          ).pipe(
+            Layer.provide(DirectoryStoreLive),
+            Layer.provide(WorkflowStoreLive.pipe(Layer.provideMerge(database))),
+            Layer.provide(transport),
+          )
     return yield* runRemoteRunnerLoop(config.hostId).pipe(
-      Effect.provide(Layer.mergeAll(runner, transport, directory)),
+      Effect.provide(Layer.mergeAll(runner, transport, directory, messaging)),
     )
   })
   ;(options.runMain ?? BunRuntime.runMain)(

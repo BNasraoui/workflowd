@@ -12,7 +12,11 @@ export const registrationDocument = ({
   ...document
 }: ExternalRegistration) => document
 
-const verifies = (publicKey: string, document: JsonValue, signature: string) => {
+export const verifiesOwnerSignature = (
+  publicKey: string,
+  document: JsonValue,
+  signature: string,
+) => {
   const bytes = Buffer.from(publicKey, "base64")
   const key = createPublicKey({ key: bytes, type: "spki", format: "der" })
   return (
@@ -30,7 +34,7 @@ export const verifyRegistration = Effect.fn("Directory.verifyRegistration")(func
   const valid = yield* Effect.try({
     try: () =>
       input.hostId === hostId &&
-      verifies(input.publicKey, registrationDocument(input), input.signature),
+      verifiesOwnerSignature(input.publicKey, registrationDocument(input), input.signature),
     catch: () => new DirectoryError({ reason: "ownership_conflict" }),
   })
   if (!valid) return yield* Effect.fail(new DirectoryError({ reason: "ownership_conflict" }))
@@ -82,7 +86,7 @@ export const verifyExternalEndpoint = Effect.fn("Directory.verifyExternalEndpoin
     { onExcessProperty: "error" },
   ).pipe(Effect.mapError(() => new DirectoryError({ reason: "endpoint_unverified" })))
   const valid = yield* Effect.try({
-    try: () => verifies(input.publicKey, challenge, decoded.signature),
+    try: () => verifiesOwnerSignature(input.publicKey, challenge, decoded.signature),
     catch: () => new DirectoryError({ reason: "endpoint_unverified" }),
   })
   if (!valid) return yield* Effect.fail(new DirectoryError({ reason: "endpoint_unverified" }))

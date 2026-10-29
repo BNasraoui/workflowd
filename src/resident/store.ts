@@ -155,9 +155,34 @@ export const makeResidentStore = Effect.gen(function* () {
       ? ("pending" as const)
       : yield* Schema.decodeUnknownEffect(Inbox.fields.state)(rows[0]?.state)
   })
-  const sending = Effect.fn("Resident.sending")(function* (id: string) {
-    yield* sql`UPDATE resident_inbox SET state = 'sending' WHERE id = ${id} AND state = 'prepared'`
-  })
+  const sending = Effect.fn("Resident.sending")(
+    function* (id: string) {
+      if (id.startsWith("message:")) {
+        const current = yield* sql`SELECT 1 FROM agent_messages m
+        JOIN directory_managed d ON d.recipient_id=json_extract(m.target_json,'$.recipientId')
+        JOIN resident_inbox i ON i.id=${id}
+        WHERE m.id=${id.slice("message:".length)} AND m.delivery='queued'
+          AND d.host_id=json_extract(m.target_json,'$.hostId')
+          AND d.binding_version=json_extract(m.target_json,'$.bindingVersion')
+          AND d.verified_native_session_id=i.thread_id
+          AND i.thread_id=json_extract(m.target_json,'$.endpoint.nativeSessionId')
+          AND d.endpoint_expires_at > ${new Date().toISOString()}`
+        if (current.length !== 1) {
+          const rebound =
+            yield* sql`SELECT 1 FROM agent_messages m LEFT JOIN directory_managed d ON d.recipient_id=json_extract(m.target_json,'$.recipientId')
+            WHERE m.id=${id.slice("message:".length)} AND (d.recipient_id IS NULL OR d.host_id<>json_extract(m.target_json,'$.hostId') OR d.binding_version<>json_extract(m.target_json,'$.bindingVersion'))`
+          if (rebound.length === 0) return false
+          yield* sql`UPDATE resident_inbox SET state='operator_required' WHERE id=${id} AND state='prepared'`
+          yield* sql`UPDATE agent_messages SET delivery='stale_binding' WHERE id=${id.slice("message:".length)} AND delivery='queued' AND EXISTS (SELECT 1 FROM resident_inbox WHERE id=${id} AND state='operator_required')`
+          return false
+        }
+      }
+      const rows =
+        yield* sql`UPDATE resident_inbox SET state = 'sending' WHERE id = ${id} AND state = 'prepared' RETURNING id`
+      return rows.length === 1
+    },
+    (effect) => effect.pipe(sql.withTransaction),
+  )
   const delivered = Effect.fn("Resident.delivered")(function* (id: string) {
     yield* sql`UPDATE resident_inbox SET state = 'delivered' WHERE id = ${id}`
   })
