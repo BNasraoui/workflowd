@@ -270,6 +270,7 @@ export function makeOpenCodeSdkClient(
                 }
               }
               return {
+                sessionID: String(session.id),
                 directory: session.location.directory,
                 outputTokens,
                 updatedAtMs: toEpochMillis(session.time.updated) ?? 0,

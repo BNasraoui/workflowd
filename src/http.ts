@@ -33,6 +33,7 @@ import type { WorkflowStartError } from "./qrspi/workflow-start"
 import type { WorkflowStorePort } from "./store/contracts"
 import { handleGitHubWebhook } from "./webhook-handler"
 import type { WorkSignalPort } from "./work-signal"
+import { routeDirectory, type DirectoryHttpBinding } from "./directory/http"
 export { handleGitHubWebhook } from "./webhook-handler"
 
 type QrspiIngress = {
@@ -72,6 +73,7 @@ export type WebhookHandlerOptions = {
   readonly agentWaits?: AgentWaitIngressBinding
   readonly agentRuns?: AgentRunIngressBinding
   readonly dogfood?: DogfoodBinding
+  readonly directory?: DirectoryHttpBinding
   readonly executionCapabilities?: {
     readonly token: string
     readonly list: () => Effect.Effect<ExecutionCapabilities, Error>
@@ -91,6 +93,16 @@ function healthResponse(guard: WebhookHandlerOptions["installationGuard"]) {
 }
 
 export function routeRequest(
+  request: Request,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
+  return (
+    routeDirectory(request, options.directory, options.maxBodyBytes) ??
+    routeApplicationRequest(request, options)
+  )
+}
+
+function routeApplicationRequest(
   request: Request,
   options: WebhookHandlerOptions,
 ): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {

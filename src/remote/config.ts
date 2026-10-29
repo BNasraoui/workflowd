@@ -5,8 +5,10 @@ import { join } from "node:path"
 import { loadRemoteNatsAuth } from "./auth"
 import type { RemoteNatsAuth } from "./auth"
 import { parseNatsServers } from "./nats-url"
+import { loadDirectoryRunnerConfig, type DirectoryRunnerConfig } from "../directory/config"
 
 export type RemoteProcessConfig = {
+  readonly directory?: DirectoryRunnerConfig
   readonly agentGit?: AgentGitConfig
   readonly servers: ReadonlyArray<string>
   readonly auth: RemoteNatsAuth
@@ -41,6 +43,7 @@ export async function loadRemoteProcessConfig(
   if (rawServers === undefined) throw new Error("WORKFLOWD_NATS_SERVERS is required")
   const servers = parseNatsServers(rawServers)
   const home = options.home ?? homedir()
+  const directory = await loadDirectoryRunnerConfig(env, options.readFile)
   const claudeDirectories = (env.WORKFLOWD_RUNNER_CLAUDE_DIRS ?? "")
     .split(":")
     .map((entry) => entry.trim())
@@ -54,6 +57,7 @@ export async function loadRemoteProcessConfig(
   }
   const agentGit = loadAgentGitConfig(env, claudeDirectories.length > 0)
   return {
+    ...(directory === undefined ? {} : { directory }),
     ...(agentGit === undefined ? {} : { agentGit }),
     servers,
     auth,

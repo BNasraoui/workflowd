@@ -1,6 +1,8 @@
 # Local execution capability discovery
 
 Bead `workflowd-ccw.1` adds an authenticated catalog independent of dispatch route aliases.
+The [agent directory](agent-directory.md) advertises these same adapter observations
+per runner host alongside stable recipients and endpoint verification/expiry.
 `GET /execution-capabilities` and MCP `list_execution_capabilities({})` return the same
 contract. Discovery reads the enabled local adapters; it does not launch inference.
 

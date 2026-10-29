@@ -9,6 +9,7 @@ import {
   type ResidentConfig,
 } from "./resident/config"
 import { loadWorkerIdentityConfig, type WorkerIdentityConfig } from "./worker-identity/config"
+import { loadDirectoryRemoteConfig, type DirectoryRemoteConfig } from "./directory/config"
 import { loadCiConfig, type CiConfig } from "./ci/config"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -131,6 +132,7 @@ export interface AgentRunConfig {
 }
 
 interface SharedAppConfig {
+  readonly directoryRemote?: DirectoryRemoteConfig
   readonly agentGit?: AgentGitConfig
   readonly credentialSocket?: string
   readonly executionCapabilities?: ExecutionCapabilitiesConfig
@@ -790,8 +792,12 @@ export async function loadConfig(
     codexEnabled: agentRuns !== undefined || residentCodex !== undefined,
   })
   const remoteCoordinator = await loadRemoteCoordinatorConfig(env, read, hostId)
+  const directoryRemote = await loadDirectoryRemoteConfig(env, hostId, read)
+  if (directoryRemote !== undefined && executionCapabilities === undefined)
+    throw new Error("Directory peers require authenticated execution discovery")
 
   return {
+    ...(directoryRemote === undefined ? {} : { directoryRemote }),
     ...gitIdentity,
     ...(credentialSocket === undefined ? {} : { credentialSocket }),
     ...(workerIdentity === undefined ? {} : { workerIdentity }),

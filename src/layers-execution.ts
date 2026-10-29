@@ -17,6 +17,9 @@ import { KernelSessionStoreLive } from "./kernel/session-store"
 import { WorkflowStart, WorkflowStartUnauthorized } from "./qrspi/workflow-start"
 import { WorkflowStoreLive } from "./store"
 import { WorkSignalLive } from "./work-signal"
+import { makeDirectoryLayer, makeDirectoryRemoteLayer } from "./directory/layers"
+import { DirectoryStoreLive } from "./directory/store"
+import { DirectoryRemoteStoreLive } from "./directory/remote-store"
 
 export function makeDiscoveryLayer(
   config: AppConfig,
@@ -63,7 +66,6 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
     DogfoodStoreLive,
     Layer.effect(SqlClient.SqlClient, SqlClient.SqlClient),
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
-  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel))
   const signals = WorkSignalLive
   const codex = Layer.succeed(
     CodexCli,
@@ -90,6 +92,17 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
           }),
         )
   const discovery = makeDiscoveryLayer(config)
+  const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
+    Layer.provide(kernel),
+  )
+  const directory = makeDirectoryLayer(config).pipe(
+    Layer.provideMerge(directoryStores),
+    Layer.provide(discovery),
+  )
+  const directoryObservations = makeDirectoryRemoteLayer(config).pipe(
+    Layer.provide(directoryStores),
+  )
+  const store = AgentRunStoreLive.pipe(Layer.provideMerge(kernel), Layer.provideMerge(directory))
   const identity = {
     owningHostId: config.worker.hostId,
     providerId: "native-local",
@@ -129,6 +142,8 @@ export function makeExecutionOnlyLayer(config: AppConfig) {
     store,
     signals,
     discovery,
+    directory,
+    directoryObservations,
     runs,
     Layer.succeed(WorkflowStart, {
       preflight: Effect.void,

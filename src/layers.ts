@@ -72,6 +72,24 @@ import { GitWorkspaceAdapter, Workspace } from "./workspace"
 import { makeGitHubLayer } from "./github/layer"
 import { makeDiscoveryLayer, makeExecutionOnlyLayer } from "./layers-execution"
 import { makeOpenCodeComposition } from "./layers-opencode"
+import { makeDirectoryLayer, makeDirectoryRemoteLayer } from "./directory/layers"
+import { DirectoryStoreLive } from "./directory/store"
+import { DirectoryRemoteStoreLive } from "./directory/remote-store"
+import { ManagedDirectoryObservationsLive } from "./directory/managed-observations"
+
+function makeManagedDirectoryObservationLayer(
+  config: Extract<AppConfig, { readonly mode?: "automation" }>,
+) {
+  return config.executionCapabilities === undefined
+    ? Layer.empty
+    : ManagedDirectoryObservationsLive({
+        hostId: config.worker.hostId,
+        endpointIdentity: config.openCode.baseUrl,
+        refreshMs: config.directoryRemote?.refreshMs ?? 30_000,
+        leaseMs: config.directoryRemote?.leaseMs ?? 90_000,
+        now: () => new Date(),
+      })
+}
 
 const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "automation" }>) => {
   const {
@@ -109,6 +127,16 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
   ).pipe(Layer.provideMerge(WorkflowStoreLive))
   const agentHandoffStoreLayer = AgentHandoffStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))
   const storeLayer = Layer.merge(kernelStoreLayer, agentHandoffStoreLayer)
+  const directoryStores = Layer.merge(DirectoryStoreLive, DirectoryRemoteStoreLive).pipe(
+    Layer.provide(kernelStoreLayer),
+  )
+  const directoryLayer = makeDirectoryLayer(config).pipe(
+    Layer.provideMerge(directoryStores),
+    Layer.provide(executionDiscoveryLayer),
+  )
+  const directoryObservations = makeDirectoryRemoteLayer(config).pipe(
+    Layer.provide(directoryStores),
+  )
   const providerLayer = Layer.merge(
     Layer.succeed(OpenCodeResumeProvider, resumeProvider),
     Layer.succeed(OpenCodeCompletionProvider, resumeProvider),
@@ -208,6 +236,8 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             credentialSocket: config.credentialSocket,
             git: config.agentGit,
             progressWindowMs: config.agentRuns?.progressWindowMs,
+            directoryRefreshMs: config.directoryRemote?.refreshMs ?? 30_000,
+            directoryLeaseMs: config.directoryRemote?.leaseMs ?? 90_000,
             unitPrefix:
               config.agentRuns?.codexUnitPrefix === undefined
                 ? "workflowd-resident-"
@@ -218,6 +248,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         ).pipe(
           Layer.provide(ciLive),
           Layer.provide(workerIdentityLayer),
+          Layer.provide(directoryLayer),
           Layer.provide(AgentRunStoreLive.pipe(Layer.provide(storeLayer))),
           Layer.provide(storeLayer),
         )
@@ -372,6 +403,10 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             return yield* routeSandboxProvider(openCodeAdapter, sandbox.value)
           }),
         ).pipe(Layer.provideMerge(sandboxLayer), Layer.provideMerge(kernelStoreLayer))
+  const managedDirectoryObservations = makeManagedDirectoryObservationLayer(config).pipe(
+    Layer.provide(directoryStores),
+    Layer.provide(sandboxProviderLayer),
+  )
   const agentRunLayer =
     config.agentRuns === undefined
       ? Layer.empty
@@ -396,6 +431,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
             // A run stuck before verification for ten verify windows was
             // abandoned by its dispatching request; the watchdog fails it.
             staleAfterMs: config.agentRuns.verifyTimeoutMs * 10,
+            directoryLeaseMs: config.directoryRemote?.leaseMs ?? 90_000,
             // Codex runs complete inline in the dispatching request; their
             // verified rows are invisible to the watchdog.
             unsupervisedExecutorKinds: ["codex", "claude"],
@@ -403,6 +439,7 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
           }),
           agentRunWorktreeJanitorLayer(config, config.agentRuns),
         ).pipe(
+          Layer.provideMerge(directoryLayer),
           Layer.provideMerge(AgentRunStoreLive.pipe(Layer.provideMerge(kernelStoreLayer))),
           Layer.provideMerge(agentWaitIngressLayer),
           Layer.provideMerge(sandboxProviderLayer),
@@ -519,6 +556,9 @@ const makeAutomationLayer = (config: Extract<AppConfig, { readonly mode?: "autom
         )
   return Layer.mergeAll(
     executionDiscoveryLayer,
+    directoryLayer,
+    directoryObservations,
+    managedDirectoryObservations,
     ciLayer,
     residentLayer,
     workerIdentityLayer,

@@ -41,6 +41,7 @@ import {
 import { WorkflowStart, toWorkflowStartValidationError } from "./qrspi/workflow-start"
 import { WorkSignal, type WorkLane } from "./work-signal"
 import { ExecutionDiscovery } from "./execution-capabilities"
+import { AgentDirectory } from "./directory/service"
 
 export type HookHttpConfig = {
   readonly host: string
@@ -281,6 +282,7 @@ export function startHookService(
     const agentWaits = yield* Effect.serviceOption(AgentWaitIngress)
     const agentRuns = yield* Effect.serviceOption(AgentRunIngress)
     const executionDiscovery = yield* Effect.serviceOption(ExecutionDiscovery)
+    const directory = yield* Effect.serviceOption(AgentDirectory)
     if (config.executionCapabilities !== undefined && Option.isNone(executionDiscovery))
       return yield* Effect.die(
         new Error("ExecutionDiscovery is required when capability discovery is configured"),
@@ -594,6 +596,15 @@ export function startHookService(
                   executionCapabilities: {
                     token: config.executionCapabilities.token,
                     list: Option.getOrThrow(executionDiscovery).list,
+                  },
+                }),
+            ...(config.executionCapabilities === undefined || Option.isNone(directory)
+              ? {}
+              : {
+                  directory: {
+                    token: config.executionCapabilities.token,
+                    inventory: directory.value.inventory,
+                    register: directory.value.register,
                   },
                 }),
             ...(config.dogfood === undefined

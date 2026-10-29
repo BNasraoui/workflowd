@@ -114,6 +114,8 @@ type OpenCodeAvailabilityInput = {
  * compare successive observations of `outputTokens`.
  */
 export type OpenCodeSessionTelemetry = {
+  /** Missing identity from a legacy provider is not native binding proof. */
+  readonly sessionID?: string
   readonly directory: string
   readonly outputTokens: number
   readonly updatedAtMs: number
