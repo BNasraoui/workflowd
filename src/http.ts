@@ -96,9 +96,17 @@ export function routeRequest(
   request: Request,
   options: WebhookHandlerOptions,
 ): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
+  return (
+    routeDirectory(request, options.directory, options.maxBodyBytes) ??
+    routeApplicationRequest(request, options)
+  )
+}
+
+function routeApplicationRequest(
+  request: Request,
+  options: WebhookHandlerOptions,
+): Effect.Effect<Response, never, WorkflowStorePort | WorkSignalPort> {
   const { pathname } = new URL(request.url)
-  const directory = routeDirectory(request, options.directory, options.maxBodyBytes)
-  if (directory !== undefined) return directory
   if (
     pathname === "/execution-capabilities" &&
     request.method === "GET" &&
