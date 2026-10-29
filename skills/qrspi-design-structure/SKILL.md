@@ -10,7 +10,8 @@ Read the bundled
 before applying this checklist. It is the complete, locally available normative contract
 for this installed skill version and prevails if this operational checklist ever differs;
 do not resolve behavior from a network URL or mutable branch.
-Repository maintainers generate that reference from the canonical
+A commit message has no `Co-Authored-By`, "Generated with", or other model or tool
+attribution line. Repository maintainers generate that reference from the canonical
 `docs/qrspi-contract.md` with `bun run skill:sync` and MUST commit it and review this
 checklist with every contract change. `bun run skill:check` rejects reference drift and
 records the exact source SHA-256 in the bundle. Do not restate or weaken those rules in an

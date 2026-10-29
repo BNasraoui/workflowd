@@ -22,6 +22,9 @@ approves. Without it, stop and say the plan is not approved. Then run
 
 ## Steps
 
+A commit message has no `Co-Authored-By`, "Generated with", or other model or tool
+attribution line. A PR body or comment has none either.
+
 For each phase, in order:
 
 1. Change only the files the phase lists. Follow the repository's own instructions
@@ -34,8 +37,7 @@ For each phase, in order:
 4. Commit with a message naming the phase, then push to `rpi/<id>`. The draft PR is the
    bead's `pr:` note; if there is none, open a draft PR with
    `--base <default branch> --head rpi/<id>` before you wait on CI. Never wait on CI for a
-   commit that has no PR. A commit message has no `Co-Authored-By`, "Generated with", or
-   other model or tool attribution line. A PR body or comment has none either.
+   commit that has no PR.
 
 ## Graph (only with .provenance/)
 
